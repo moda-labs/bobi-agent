@@ -2,7 +2,7 @@
 
 Interact with external services (email, calendar, CRM, etc.) via the `venn` CLI.
 Venn holds OAuth tokens for connected services — you never handle auth directly.
-`VENN_API_KEY` comes from `.bobi/.env`.
+`VENN_API_KEY` comes from `run/.env`.
 
 ## List connected services
 

@@ -63,7 +63,7 @@ be wrong or slower without this?* If not, leave it out.
 2. Reconcile: refresh/evict facts; add genuinely new decisions; carry existing
    decisions forward unless explicitly reversed.
 3. **Rewrite the file in full** with the `Write` tool to
-   `.bobi/state/policy.md` — a complete new document. **Never append.** The
+   `<run>/state/policy.md` — a complete new document. **Never append.** The
    whole point is that this file does not grow without bound.
 4. Stay under the **24,000-character** hard cap. Compress toward the
    information-theoretic minimum:

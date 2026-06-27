@@ -77,20 +77,23 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
 
   parse_output_file="$(mktemp)"
   if parse_formula "$formula" >"$parse_output_file" 2>&1; then
-    mapfile -t parsed <"$parse_output_file"
-    rm -f "$parse_output_file"
-
-    root_url="${parsed[0]}"
-    bottle_tags=("${parsed[@]:1}")
-
-    for bottle_tag in "${bottle_tags[@]}"; do
-      bottle_url="${root_url}/bobi-${VERSION}.${bottle_tag}.bottle.tar.gz"
-      echo "Checking ${bottle_url}"
-      if [ "${BOBI_HOMEBREW_SKIP_HEAD:-}" = "1" ]; then
-        continue
+    root_url=""
+    line_no=0
+    while IFS= read -r parsed_line; do
+      if [ "$line_no" -eq 0 ]; then
+        root_url="$parsed_line"
+      else
+        bottle_url="${root_url}/bobi-${VERSION}.${parsed_line}.bottle.tar.gz"
+        echo "Checking ${bottle_url}"
+        if [ "${BOBI_HOMEBREW_SKIP_HEAD:-}" = "1" ]; then
+          line_no=$((line_no + 1))
+          continue
+        fi
+        curl --retry 3 --retry-delay 2 --retry-all-errors -IfS "$bottle_url" >/dev/null
       fi
-      curl --retry 3 --retry-delay 2 --retry-all-errors -IfS "$bottle_url" >/dev/null
-    done
+      line_no=$((line_no + 1))
+    done <"$parse_output_file"
+    rm -f "$parse_output_file"
 
     exit 0
   else

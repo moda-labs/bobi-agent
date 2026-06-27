@@ -22,8 +22,9 @@ def _configured_brain_kind(root: Path, env: dict[str, str] | None = None) -> str
     """Return the team's configured brain kind from the installation root."""
     try:
         import yaml
+        from bobi import paths
         raw = yaml.safe_load(
-            (root / ".bobi" / "agent.yaml").read_text()
+            paths.agent_yaml_path(root).read_text()
         ) or {}
     except Exception:
         return ""
@@ -38,10 +39,11 @@ def _configured_brain_kind(root: Path, env: dict[str, str] | None = None) -> str
 
 
 def _load_dotenv_into(env: dict[str, str], root: Path) -> None:
-    """Merge ``.bobi/.env`` into *env* without overriding parent values."""
+    """Merge the runtime ``.env`` into *env* without overriding parent values."""
     try:
+        from bobi import paths
         from bobi.config import parse_env_file
-        values = parse_env_file(root / ".bobi" / ".env")
+        values = parse_env_file(paths.env_path(root))
     except Exception:
         return
     for key, value in values.items():
@@ -92,7 +94,7 @@ def child_agent_env(root: Path, base: dict[str, str] | None = None) -> dict[str,
     - inherit the parent runtime environment so tool configuration and ambient
       credentials (``OPENAI_API_KEY``, ``VENN_API_KEY``, ``GH_TOKEN``, etc.)
       follow child agents;
-    - merge the installed team's ``.bobi/.env`` for credentials captured
+    - merge the installed team's runtime ``.env`` for credentials captured
       during setup, without overriding explicit parent process values;
     - normalize ``PATH`` through :func:`agent_spawn_env`, keeping MCP preflight
       and runtime tool lookup identical;

@@ -6,6 +6,7 @@ import asyncio
 import pytest
 import yaml
 
+from bobi import paths
 from bobi.setup import actions, authoring
 from bobi.setup.authoring import (
     build_adhoc_yaml,
@@ -17,6 +18,13 @@ from bobi.setup.authoring import (
     slug,
 )
 from bobi.setup.state import SetupState
+
+
+@pytest.fixture(autouse=True)
+def _isolated_bobi_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("BOBI_HOME", str(home))
 
 
 def _run(coro):
@@ -168,7 +176,7 @@ class TestAuthorPour:
         events = _run(_collect(authoring.author_pack(
             s, tmp_path, stream_fn=self._fake_stream())))
 
-        pack = tmp_path / "agents" / "triage-bot"
+        pack = paths.agent_source_dir("triage-bot")
         assert (pack / "agent.yaml").exists()
         assert (pack / "roles" / "triage-lead" / "ROLE.md").exists()
         # passes the real validator
@@ -181,27 +189,26 @@ class TestAuthorPour:
         assert starts == ends
         assert "agent.md" in starts
 
-    def test_create_lands_in_named_subfolder_under_the_base(self, tmp_path):
-        # Create's location is a BASE; the team lands at <base>/<name> so every
-        # team gets its own folder (no collision between two creates).
+    def test_create_respects_explicit_source_dir(self, tmp_path):
+        # Create's location is the exact source directory. Relative paths are
+        # anchored at BOBI_HOME because setup is machine-scoped, not cwd-scoped.
         s = _spec_state()                 # team_name="triage-bot", mode=create
-        s.source_dir = "bobi"            # the base the user chose
+        s.source_dir = "sources/triage-bot"
         _run(_collect(authoring.author_pack(
             s, tmp_path, stream_fn=self._fake_stream())))
-        assert (tmp_path / "bobi" / "triage-bot" / "agent.yaml").is_file()
-        # the concrete path is persisted (idempotent — not re-appended)
-        assert s.source_dir == "bobi/triage-bot"
+        pack = paths.home_dir() / "sources" / "triage-bot"
+        assert (pack / "agent.yaml").is_file()
+        # the concrete path is persisted exactly.
+        assert s.source_dir == str(pack)
         s.team_name = "triage-bot"
-        assert actions.team_source_dir(tmp_path, s) == tmp_path / "bobi" / "triage-bot"
+        assert actions.team_source_dir(tmp_path, s) == pack
 
-    def test_create_refuses_to_overwrite_an_existing_library_team(self, tmp_path):
-        # Two creates auto-named the same slug must not clobber each other —
-        # the second blocks instead of silently overwriting the first's source.
-        existing = tmp_path / "bobi" / "triage-bot"
+    def test_create_refuses_to_overwrite_an_existing_canonical_source(self, tmp_path):
+        # A fresh create must not clobber an existing canonical source tree.
+        existing = paths.agent_source_dir("triage-bot")
         existing.mkdir(parents=True)
         (existing / "agent.yaml").write_text("agent: the-original\n")
         s = _spec_state()                 # team_name="triage-bot", mode=create
-        s.source_dir = "bobi"        # the base — not yet claimed
         with pytest.raises(actions.ActionError, match="already exists"):
             _run(_collect(authoring.author_pack(
                 s, tmp_path, stream_fn=self._fake_stream())))
@@ -210,12 +217,13 @@ class TestAuthorPour:
 
     def test_create_reauthors_its_own_claimed_folder(self, tmp_path):
         # Re-running build once the team is claimed (source_dir already points at
-        # <base>/<slug>) is fine — not a collision with a different team.
-        existing = tmp_path / "bobi" / "triage-bot"
+        # the exact source directory) is fine — not a collision with a
+        # different team.
+        existing = paths.home_dir() / "sources" / "triage-bot"
         existing.mkdir(parents=True)
         (existing / "agent.yaml").write_text("agent: triage-bot\n")
         s = _spec_state()
-        s.source_dir = "bobi/triage-bot"   # already ours
+        s.source_dir = str(existing)   # already ours
         _run(_collect(authoring.author_pack(
             s, tmp_path, stream_fn=self._fake_stream())))
         assert (existing / "agent.yaml").is_file()   # re-authored, no error
@@ -228,7 +236,7 @@ class TestAuthorPour:
         from bobi.setup import open_mode
         from bobi.setup.llm import LLMError
 
-        src = tmp_path / "bobi-agents" / "myteam"
+        src = tmp_path / "sources" / "myteam"
         (src / "roles" / "lead").mkdir(parents=True)
         (src / "agent.yaml").write_text("agent: myteam\nentry_point: lead\n")
         original_md = "# myteam\n\nORIGINAL BASE PROMPT — do not lose me.\n"
@@ -257,7 +265,7 @@ class TestAuthorPour:
         s = SetupState(team_name="t")
         s.spec.goal = "Do a thing."
         _run(_collect(authoring.author_pack(s, tmp_path, stream_fn=fenced)))
-        agent_md = (tmp_path / "agents" / "t" / "agent.md").read_text()
+        agent_md = (paths.agent_source_dir("t") / "agent.md").read_text()
         assert agent_md.startswith("# Title")
         assert "```" not in agent_md
 
@@ -288,7 +296,7 @@ class TestAuthorPour:
         s = SetupState(team_name="t")
         s.spec.goal = "Do a thing."
         _run(_collect(authoring.author_pack(s, tmp_path, stream_fn=empty)))
-        agent_md = (tmp_path / "agents" / "t" / "agent.md").read_text()
+        agent_md = (paths.agent_source_dir("t") / "agent.md").read_text()
         assert agent_md.strip()  # non-empty stub, not a blank file
 
 
@@ -497,15 +505,15 @@ class TestAuthorOpenModeNonLossy:
         (src / "tools" / "github.md").write_text("custom tool guide\n")
         return src
 
-    def _open_state(self, name="legacy"):
-        s = SetupState(team_name=name, mode="open", source_dir=f"bobi/{name}")
+    def _open_state(self, source, name="legacy"):
+        s = SetupState(team_name=name, mode="open", source_dir=str(source))
         s.spec.goal = "Watch the repo."
         s.spec.roles = [{"name": "lead", "responsibility": "classify"}]
         return s
 
     def test_preserves_unmodeled_files_and_uses_edit_prompt(self, tmp_path):
-        self._existing_team(tmp_path)
-        s = self._open_state()
+        src = self._existing_team(tmp_path)
+        s = self._open_state(src)
         prompts = []
 
         async def fake(*, system_prompt, user_prompt, model, cwd):
@@ -521,8 +529,8 @@ class TestAuthorOpenModeNonLossy:
         assert any("specifics A, B, C" in up for _, up in prompts)
 
     def test_blank_edit_keeps_the_original_file(self, tmp_path):
-        self._existing_team(tmp_path)
-        s = self._open_state()
+        src = self._existing_team(tmp_path)
+        s = self._open_state(src)
 
         async def blank(*, system_prompt, user_prompt, model, cwd):
             return

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import httpx
 import pytest
 
+from bobi import paths
 from bobi import http as pooled
 
 from bobi.workflow.schema import (
@@ -226,10 +227,9 @@ class TestExecuteNotifyStep:
     @patch("bobi.workflow.orchestrator._emit_lifecycle_event")
     def test_skips_when_no_token(self, mock_emit, mock_post, tmp_path, monkeypatch):
         # Config without slack token
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir(parents=True)
-        (config_dir / "agent.yaml").write_text("entry_point: manager\n")
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text("entry_point: manager\n")
+        paths.bind_root(tmp_path)
 
         step = StepDef(name="notify_start", notify="slack", message="Hello")
         ctx = self._make_ctx()
@@ -269,16 +269,16 @@ class TestExecuteNotifyStep:
         )
 
     def _setup_config(self, tmp_path, monkeypatch):
-        config_dir = tmp_path / ".bobi"
+        config_dir = paths.package_dir(tmp_path)
         config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "agent.yaml").write_text(
+        paths.agent_yaml_path(tmp_path).write_text(
             "entry_point: manager\n"
             "services:\n"
             "  - name: slack\n"
             "    credentials:\n"
             "      bot_token: 'xoxb-test'\n"
         )
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        paths.bind_root(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -352,8 +352,8 @@ class TestNotifyStepInWorkflow:
 
     def test_notify_step_executed_not_sent_to_llm(self, tmp_path, monkeypatch):
         """Notify steps call _execute_notify_step and do not query the LLM."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
-        (tmp_path / ".bobi" / "sessions").mkdir(parents=True)
+        paths.bind_root(tmp_path)
+        paths.sessions_dir(tmp_path)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="notify_start", notify="slack",
@@ -370,9 +370,9 @@ class TestNotifyStepInWorkflow:
 
     def test_workflow_with_notify_at_both_ends(self, tmp_path, monkeypatch):
         """Workflow with notify at start and end completes successfully."""
-        monkeypatch.setattr("bobi.paths._root", tmp_path / "_repo")
-        sessions = tmp_path / "_repo" / ".bobi" / "sessions"
-        sessions.mkdir(parents=True)
+        root = tmp_path / "_repo"
+        paths.bind_root(root)
+        sessions = paths.sessions_dir(root)
 
         original_init = FakeClient.__init__
 

@@ -58,7 +58,7 @@ def health(base_url: str, timeout: float = 2) -> dict | None:
 
     Returns the parsed health payload when the server reports ok, else None.
     The single definition of "what counts as healthy" — used by ensure_running,
-    `bobi stop`, `bobi event-server status`, and doctor.
+    `bobi agent <name> stop`, `bobi agent <name> event-server status`, and doctor.
     """
     from bobi import http as pooled
 

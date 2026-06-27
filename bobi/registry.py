@@ -1,13 +1,4 @@
-"""Agent team registry — fetch, cache, and version-check agent teams.
-
-Packs are fetched from a GitHub repo (default: moda-labs/moda-agents) and
-cached at <project>/.bobi/agents/<name>/. A .meta.json file tracks the
-installed version and fetch timestamp.
-
-Resolution order (handled by callers in cli.py / resolver.py):
-  1. <project>/agents/<name>            — project-level (checked in)
-  2. <project>/.bobi/agents/<name> — local agents (overrides + cached)
-"""
+"""Bobi Agent package registry — fetch, cache, and version-check packages."""
 
 from __future__ import annotations
 
@@ -59,7 +50,9 @@ def _asset_url(repo: str, name: str, version: str | None) -> str:
 
 
 def _cache_dir(project_path: Path) -> Path:
-    return paths.agents_dir(project_path)
+    d = paths.agent_cache_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def cache_path(project_path: Path, name: str) -> Path:
@@ -77,10 +70,13 @@ def cached_version(project_path: Path, name: str) -> str | None:
 
 def _all_registries(project_path: Path) -> list[str]:
     """Get all configured registries (default + user-added)."""
+    user_registries = []
+    cfg_path = paths.ensure_global_config()
     try:
-        from bobi.config import Config
-        cfg = Config.load(project_path)
-        user_registries = cfg.registries or []
+        raw = yaml.safe_load(cfg_path.read_text()) or {}
+        registries = raw.get("registries", [])
+        if isinstance(registries, list):
+            user_registries = [str(r) for r in registries if str(r).strip()]
     except Exception:
         user_registries = []
     seen = set()
@@ -201,18 +197,15 @@ def fetch(project_path: Path, name: str, *, version: str | None = None,
     """Download an agent team from GitHub and install it to the project cache.
 
     Resolution (#440 Phase 2):
-      - `version` given → download **only** the immutable per-team asset
-        `…/teams-latest/<name>-<version>.tar.gz`. A 404 is a **hard error**
-        (a pin must resolve to exactly that pin — never a silent fallback).
+      - `version` given → download the immutable per-team asset
+        `…/teams-latest/<name>-<version>.tar.gz`.
       - `version` None → resolve the team's latest version from the registry
         and fetch that per-team asset (rolling `<name>.tar.gz` for a
-        version-less team, D-5). A 404 here logs a warning and falls back to
-        the whole-repo `tarball/main` path, so a repo that hasn't published
-        assets yet still installs.
+        version-less team, D-5).
 
-    `version` is keyword-only and defaults to None, so existing callers are
-    unaffected (the only change at version=None is "per-team asset instead of
-    the repo tarball, with the repo tarball as a logged fallback")."""
+    A missing asset is a hard error. Remote installs never fall back to a repo
+    tarball or alternate layout.
+    """
     pinned = version is not None
     if not repo:
         repo = _repo_for(project_path, name)
@@ -232,16 +225,10 @@ def fetch(project_path: Path, name: str, *, version: str | None = None,
     except httpx.HTTPStatusError as e:
         if e.response.status_code != 404:
             raise RuntimeError(f"Failed to fetch '{name}' from {asset_url}: {e}") from e
-        if pinned:
-            raise RuntimeError(
-                f"Agent team '{name}@{version}' has no published asset at "
-                f"{asset_url}. A pinned version must exist — it is never "
-                "resolved to 'latest' or the repo tarball."
-            ) from e
-        log.warning(
-            "No release asset for '%s' at %s; falling back to the repo tarball "
-            "at main.", name, asset_url)
-    return _fetch_repo_tarball(project_path, name, repo)
+        label = f"{name}@{version}" if pinned else name
+        raise RuntimeError(
+            f"Agent team '{label}' has no published asset at {asset_url}."
+        ) from e
 
 
 def _fetch_asset(project_path: Path, repo: str, name: str,
@@ -259,64 +246,6 @@ def _fetch_asset(project_path: Path, repo: str, name: str,
     tar = tarfile.open(fileobj=BytesIO(resp.content), mode="r:gz")
     dest, _ = _install_team_tar(project_path, tar, source=url,
                                 source_meta=f"asset:{url}", name=name)
-    return dest
-
-
-def _fetch_repo_tarball(project_path: Path, name: str, repo: str) -> Path:
-    """Install a team from the whole-repo `tarball/main` (the legacy / fallback
-    path). Downloads the entire repo at main and extracts one `agents/<name>/`."""
-    url = f"https://api.github.com/repos/{repo}/tarball/main"
-    log.info(f"Fetching agent team '{name}' from {repo}")
-
-    try:
-        resp = _urlopen(url, timeout=30)
-        tarball = BytesIO(resp.content)
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            raise RuntimeError(f"Agent repo '{repo}' not found on GitHub") from e
-        raise RuntimeError(f"Failed to fetch from GitHub: {e}") from e
-    except Exception as e:
-        raise RuntimeError(f"Failed to fetch from GitHub: {e}") from e
-
-    cache = _cache_dir(project_path)
-    with tarfile.open(fileobj=tarball, mode="r:gz") as tar:
-        prefix = None
-        pack_prefix = None
-        pack_members = []
-        for member in tar.getmembers():
-            parts = member.name.split("/")
-            if prefix is None:
-                prefix = parts[0]
-            if len(parts) >= 3 and parts[1] == "agents" and parts[2] == name:
-                pack_members.append(member)
-                if pack_prefix is None:
-                    pack_prefix = f"{parts[0]}/agents/{name}"
-            elif len(parts) >= 2 and parts[1] == name and not pack_members:
-                pack_members.append(member)
-                if pack_prefix is None:
-                    pack_prefix = f"{parts[0]}/{name}"
-
-        if not pack_members:
-            raise RuntimeError(
-                f"Agent team '{name}' not found in {repo}. "
-                f"Available packs can be listed with: bobi agents list --remote"
-            )
-
-        dest = cache / name
-        if dest.exists():
-            shutil.rmtree(dest)
-        dest.mkdir(parents=True, exist_ok=True)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            tar.extractall(tmp, members=pack_members)
-            extracted = Path(tmp) / pack_prefix
-            if not extracted.is_dir():
-                raise RuntimeError(f"Extraction failed for '{name}'")
-            shutil.copytree(extracted, dest, dirs_exist_ok=True)
-
-    version = _read_local_version(project_path, name) or "unknown"
-    _write_meta(project_path, name, version, f"github:{repo}")
-    log.info(f"Installed {name} v{version} to {dest}")
     return dest
 
 
@@ -390,7 +319,8 @@ def fetch_from_archive(project_path: Path, archive: Path,
     extraction safety, but the bytes come from the filesystem instead of HTTP.
     This is the seam ssh-push delivery uses — `bobi deploy` builds a local
     team package into a tarball, pushes it onto the instance's volume over
-    `fly ssh`, and the instance runs `bobi install <pushed.tar.gz>`.
+    `fly ssh`, and the instance runs
+    `bobi agents install <pushed.tar.gz> --name "$BOBI_INSTANCE"`.
     """
     archive = Path(archive)
     try:

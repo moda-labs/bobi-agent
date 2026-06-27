@@ -12,8 +12,8 @@ GOAL_MSG = "triage our github issues and route to the right engineer"
 
 
 def _seed_library_team(home, name="legacy-bot"):
-    """Write a minimal valid team source into the ~/bobi-agents library."""
-    src = home / "bobi-agents" / name
+    """Write a minimal valid team source into the BOBI_HOME/agents library."""
+    src = home / "agents" / name / "src"
     (src / "roles" / "lead").mkdir(parents=True)
     (src / "agent.yaml").write_text(
         "agent: " + name + "\nversion: 0.1.0\nentry_point: lead\n"
@@ -110,12 +110,12 @@ def test_finish_builds_to_file_browser(page, bobi_url):
     page.locator("#fd-tree .tnode", has_text="agent.yaml").click()
     expect(page.locator("#fd-code")).to_contain_text("agent:")
     # Finish lands on the completion screen offering two deployment paths —
-    # local (`bobi start`) and cloud (the Fly provisioner) — plus a Done
+    # local (`bobi agent <name> start`) and cloud (the Fly provisioner) — plus a Done
     # button into the team hub (the server stays alive — it's re-entrant now).
     page.click("#fd-finish")
     expect(page.locator(".done-wrap")).to_be_visible(timeout=10_000)
     expect(page.locator(".deploy-opt", has_text="Local")).to_contain_text(
-        "bobi start")
+        "bobi agent")
     expect(page.locator(".deploy-opt", has_text="Cloud")).to_contain_text(
         "provision-instance.sh")
     expect(page.locator("#done-home")).to_be_visible()

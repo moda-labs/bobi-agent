@@ -3,8 +3,8 @@
 `registry.fetch(..., version=…)` resolves a `name@version` to the immutable
 per-team release asset `…/teams-latest/<name>-<version>.tar.gz` and installs it,
 reusing the hardened `_install_team_tar` extraction. The pinned path is the unit
-of reproducible distribution, so its URL shape, token-auth, fallback rules, and
-the `name@version` parse (D-6) are contract, not incidental.
+of reproducible distribution, so its URL shape, token-auth, no-fallback missing
+asset behavior, and the `name@version` parse (D-6) are contract, not incidental.
 """
 
 import io
@@ -41,7 +41,7 @@ def _asset_tarball(name: str = "eng-team", version: str | None = "1.1.0") -> byt
 
 
 def _repo_tarball(name: str = "eng-team", version: str = "1.1.0") -> bytes:
-    """A whole-repo GitHub tarball: `<prefix>/agents/<name>/…` (fallback path)."""
+    """A whole-repo GitHub tarball used only to assert it is not fetched."""
     buf = BytesIO()
     prefix = "moda-labs-bobi-deadbee"
     body = f"agent: {name}\nversion: '{version}'\nentry_point: manager\n".encode()
@@ -154,23 +154,21 @@ def test_fetch_latest_resolves_registry_version_to_versioned_asset(project, monk
     assert not any("tarball/main" in u for u in urls)
 
 
-def test_unpinned_falls_back_to_repo_tarball_when_asset_404(project, monkeypatch, caplog):
-    """An absent asset (unpinned) logs a warning and falls back to tarball/main."""
+def test_unpinned_asset_404_is_hard_error(project, monkeypatch):
+    """An absent latest asset is a hard error; no repo tarball fallback."""
+    calls = []
     _router(monkeypatch, {
         "agents/registry.yaml": (200, yaml.dump(
             {"agents": {"eng-team": {"version": "1.1.0"}}}).encode()),
         "agents/eng-team/agent.yaml": (200, b"version: '1.1.0'\nagent: eng-team\n"),
-        # No teams-latest asset → 404 → fallback.
         "tarball/main": (200, _repo_tarball()),
-    })
+    }, capture=calls)
 
-    import logging
-    with caplog.at_level(logging.WARNING):
-        dest = registry.fetch(project, "eng-team")
-
-    assert (dest / "agent.yaml").is_file()
-    assert any("fall" in r.message.lower() or "fallback" in r.message.lower()
-               for r in caplog.records)
+    with pytest.raises(RuntimeError, match="no published asset"):
+        registry.fetch(project, "eng-team")
+    urls = [u for u, _ in calls]
+    assert any("teams-latest/eng-team-1.1.0.tar.gz" in u for u in urls)
+    assert not any("tarball/main" in u for u in urls)
 
 
 def test_pinned_404_is_a_hard_error_never_falls_back(project, monkeypatch):

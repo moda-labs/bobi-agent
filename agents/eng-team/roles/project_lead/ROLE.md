@@ -47,7 +47,7 @@ When you need a decision that's above your scope (cross-repo dependency,
 product direction, security policy):
 
 ```bash
-bobi ask "I need guidance on <question> for <project>"
+bobi agent <agent> ask "I need guidance on <question> for <project>"
 ```
 
 ## Decision framework

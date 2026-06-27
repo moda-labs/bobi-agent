@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from bobi import paths
 from bobi.spend_governor import (
     DEFAULT_CAP,
     WINDOW_SECONDS,
@@ -22,12 +23,13 @@ from bobi.spend_governor import (
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    """A minimal project directory with a .bobi/state/ tree."""
-    bobi_dir = tmp_path / ".bobi"
-    bobi_dir.mkdir()
-    (bobi_dir / "agent.yaml").write_text("entry_point: x\n")
-    monkeypatch.setattr("bobi.paths._root", tmp_path)
-    return tmp_path
+    """A minimal runtime root with package/agent.yaml and state/."""
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text("entry_point: x\n")
+    paths.state_dir(tmp_path)
+    paths.bind_root(tmp_path)
+    yield tmp_path
+    paths.bind_root(None)
 
 
 class TestStateIO:
@@ -161,7 +163,7 @@ class TestEmitAlert:
 
 class TestConfigIntegration:
     def test_spend_cap_parsed_from_yaml(self, tmp_path):
-        config_dir = tmp_path / ".bobi"
+        config_dir = paths.package_dir(tmp_path)
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text("entry_point: x\nspend_cap: 25\n")
         from bobi.config import Config
@@ -169,7 +171,7 @@ class TestConfigIntegration:
         assert cfg.spend_cap == 25
 
     def test_spend_cap_defaults_to_zero(self, tmp_path):
-        config_dir = tmp_path / ".bobi"
+        config_dir = paths.package_dir(tmp_path)
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text("entry_point: x\n")
         from bobi.config import Config
@@ -182,9 +184,12 @@ class TestLaunchAgentGovernor:
 
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
-        (tmp_path / ".bobi").mkdir(parents=True, exist_ok=True)
-        (tmp_path / ".bobi" / "agent.yaml").write_text("entry_point: x\n")
+        paths.bind_root(None)
+        paths.package_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.agent_yaml_path(tmp_path).write_text("entry_point: x\n")
+        paths.bind_root(tmp_path)
+        yield
+        paths.bind_root(None)
 
     @patch("bobi.subagent.check_requires", return_value=[])
     @patch("bobi.subagent.get_registry")
@@ -229,7 +234,7 @@ class TestLaunchAgentGovernor:
     def test_respects_custom_cap(self, mock_launch, mock_reg, mock_check, tmp_path):
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
         # Set a low custom cap
-        (tmp_path / ".bobi" / "agent.yaml").write_text(
+        paths.agent_yaml_path(tmp_path).write_text(
             "entry_point: x\nspend_cap: 2\n")
         # Seed 2 invocations
         state_file = _state_path(tmp_path)

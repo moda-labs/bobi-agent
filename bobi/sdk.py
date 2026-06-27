@@ -4,12 +4,11 @@ Every session (manager or agent) is tracked here. Sessions persist
 across restarts via state.json files in per-session directories.
 Each session wraps a ClaudeSDKClient with connect/resume/query/disconnect.
 
-All state lives under <installation_root>/.bobi/sessions/. There is
-exactly one .bobi/ per installation, holding both config and state;
-every process binds it explicitly — the manager when it starts, children
-via the `root` their spawner passes in the args blob. Nothing resolves
-state paths from cwd: that was the old multi-root model, where agents
-launched into repo checkouts scattered .bobi/ dirs across them.
+All session state lives under a selected Bobi Agent runtime root:
+``<BOBI_HOME>/agents/<name>/run/state/sessions/``. Every process binds
+that root explicitly — the manager through ``bobi agent <name> start``,
+children via the ``root`` their spawner passes in the args blob. Nothing
+resolves runtime identity from cwd.
 """
 
 from __future__ import annotations
@@ -150,11 +149,11 @@ def _pid_file_alive(pid_path: Path) -> bool:
 
 
 def find_runtime_root(start: Path | None = None) -> Path | None:
-    """Walk up from *start* to find the nearest .bobi/ with a live manager.
+    """Walk up from *start* to find the nearest live runtime root.
 
     This is a liveness DETECTOR (used by the nested-start guard), not
     config resolution — config resolution is paths.resolve_root(). Returns
-    the directory containing the live .bobi/, or None if no ancestor
+    the directory containing the live manager pid, or None if no ancestor
     has one. The search starts at *start* (defaulting to the bound root)
     and stops at the filesystem root.
     """
@@ -177,9 +176,7 @@ def _sessions_dir() -> Path:
 
     The root is bound explicitly in every process (manager at start,
     children via the spawn args' `root`), so sessions always share one
-    registry without probing the filesystem. The old walk-up to a live
-    manager.pid existed because children bound their cwd as root and had
-    to escape repo checkouts at read time.
+    registry without probing the filesystem.
     """
     return paths.sessions_dir()
 
@@ -250,7 +247,7 @@ class SessionEntry:
 class SessionRegistry:
     """Directory-per-session registry.
 
-    Each session gets a directory at <project>/.bobi/sessions/<name>/
+    Each session gets a directory at <run>/state/sessions/<name>/
     containing state.json, handoff-<step>.yaml files, and log.jsonl.
     Active sessions have a live pid; completed ones remain for history.
     """

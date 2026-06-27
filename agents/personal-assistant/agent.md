@@ -76,14 +76,15 @@ on others, making a purchase. Raise or lower that line per principal.
 ## Setup
 
 ```bash
-bobi install agents/personal-assistant        # copies the pack into
-                                                    # .bobi/, seeds
-                                                    # workspace/, prompts for env vars
-bobi start                                     # runs the installed assistant
+bobi agents install agents/personal-assistant --name personal-assistant
+                                             # copies the pack into run/package/,
+                                             # seeds run/workspace/,
+                                             # prompts for env vars
+bobi agent personal-assistant start          # runs the installed assistant
 ```
 
 `install` prompts for the `${VAR}`s declared in `agent.yaml` and writes them
-to `.bobi/.env`: `SLACK_BOT_TOKEN` (the chat surface) and `VENN_API_KEY`
+to `run/.env`: `SLACK_BOT_TOKEN` (the chat surface) and `VENN_API_KEY`
 (email / calendar / tasks via Venn).
 
 Then, before starting:

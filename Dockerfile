@@ -24,7 +24,7 @@
 #   * No Node.js. The `claude` CLI is the native standalone binary (no npm).
 #   * fastembed model baked into the image at build (cold-start speed; immutable).
 #   * Pinned `claude` CLI; auto-updater disabled so the image version is frozen.
-#   * `bobi start --foreground` as the entrypoint (C2); no tini — Fly's
+#   * `bobi agent <name> start --foreground` as the entrypoint (C2); no tini — Fly's
 #     init is PID 1 (tini-on-Fly is a known boot-failure trigger).
 #
 # Build:
@@ -147,9 +147,9 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:/home/bobi/.local/bin:${PATH}" \
     HF_HOME=/opt/bobi/models \
     DISABLE_AUTOUPDATER=1 \
+    HOME=/home/bobi \
     DATA_DIR=/data \
-    BOBI_PROJECT=/data/project \
-    BOBI_HOME=/home/bobi
+    BOBI_HOME=/data/.bobi
 # NB: HOME is the IMAGE home (above), NOT the volume — baked team tools
 # (~/.claude/skills, ~/dev/gstack) are read in place. Claude's durable state
 # (creds + transcripts) is redirected to the volume at runtime via
@@ -243,12 +243,13 @@ COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY docker/healthcheck.sh /usr/local/bin/healthcheck.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/healthcheck.sh
 
-# Persistent state: project root + $HOME both live on this volume (§2).
+# Persistent state lives on this volume. Bobi runtime state defaults to
+# /data/.bobi; Claude/Codex durable auth state uses /data/claude and /data/codex.
 VOLUME ["/data"]
 # WORKDIR must NOT be under /data: a volume mounted there shadows the
 # build-time dir, so the container's cwd ceases to exist at runtime and the
 # platform init (e.g. Fly Machines) fails to spawn the entrypoint with ENOENT.
-# The entrypoint cd's into ${BOBI_PROJECT} itself after creating it.
+# The entrypoint binds BOBI_ROOT to the selected agent run directory.
 WORKDIR /
 
 # Liveness: read the manager's health port from the volume and probe /health.
@@ -257,6 +258,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
     CMD ["/usr/local/bin/healthcheck.sh"]
 
 # The entrypoint is PID 1 (under Fly's injected init): it does root-only volume
-# setup, then `exec gosu`s to the bobi user running `bobi start
-# --foreground`, so SIGTERM reaches the manager directly for graceful shutdown.
+# setup, then `exec gosu`s to the bobi user running the selected agent under
+# `bobi supervise`, so SIGTERM reaches the manager for graceful shutdown.
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

@@ -488,8 +488,23 @@ def run_phase_blocking(
 
 
 def _resolve_project_name(cwd: str) -> str:
-    """Resolve a project name for session naming from the directory name."""
-    return Path(cwd).name or cwd
+    """Resolve a project name for session naming.
+
+    Runtime-scoped CLI launches run from ``<agent>/run``; naming those sessions
+    after the literal directory would collapse every machine-scoped launch to
+    ``run``. Use the selected Bobi Agent name for the bound runtime root, while
+    preserving ordinary repo-directory names for agents launched against a
+    specific checkout.
+    """
+    path = Path(cwd).resolve()
+    try:
+        from bobi import paths
+        root = paths.bobi_root().resolve()
+        if path == root:
+            return paths.agent_name_for_root(root)
+    except Exception:
+        pass
+    return path.name or cwd
 
 
 def _load_policy_prompt() -> str:
@@ -1070,6 +1085,15 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
             f"after {attempts} attempts: {last_err}"
         ) from last_err
 
+    def _local_port(url: str) -> int | None:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return None
+        if parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+            return None
+        return parsed.port or (443 if parsed.scheme == "https" else 80)
+
     if not es_url:
         es_port = 8080
         es_url = f"http://localhost:{es_port}"
@@ -1079,6 +1103,51 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         elif result == "connected":
             log.info("Connected to existing local event server on port %d", es_port)
         es_deployment, es_key = _register_with_retry(es_url)
+    elif (es_port := _local_port(es_url)) is not None:
+        result = ensure_running(es_port, project_path=project_path)
+        if result == "started":
+            log.info("Configured local event server started on port %d", es_port)
+        elif result == "connected":
+            log.info("Connected to configured local event server on port %d", es_port)
+        if not (es_deployment and es_key):
+            es_deployment, es_key = _register_with_retry(es_url)
+        elif not bubble_state_path(project_path).exists():
+            log.info("Saved deployment but no bubble.json — pre-bubble upgrade, re-registering")
+            cursor_path.unlink(missing_ok=True)
+            es_deployment, es_key = _register_with_retry(es_url)
+        else:
+            try:
+                _bubble = ensure_bubble(es_url, project_path)
+                if has_external:
+                    try:
+                        register_slack_workspaces(
+                            es_url, cfg,
+                            bubble_id=_bubble["bubble_id"],
+                            bubble_key=_bubble["bubble_key"],
+                        )
+                    except Exception as e:
+                        log.info("Signed Slack registration unavailable (%s) — unsigned", e)
+                        register_slack_workspaces(es_url, cfg)
+                authorized = authorize_resources(
+                    es_url, cfg, subscribe,
+                    _bubble["bubble_id"], _bubble["bubble_key"],
+                    filter_unauthorized=False,
+                )
+                from bobi import http as pooled
+                resp = pooled.put(
+                    f"{es_url}/deployments/{es_deployment}/subscriptions",
+                    json={"replace": authorized},
+                    headers={
+                        "Authorization": f"Bearer {es_key}",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=10.0,
+                )
+                resp.raise_for_status()
+            except Exception as e:
+                log.warning("Subscription sync failed, re-registering: %s", e)
+                cursor_path.unlink(missing_ok=True)
+                es_deployment, es_key = _register_with_retry(es_url)
     elif not (es_deployment and es_key):
         # No saved deployment for this session — register fresh rather
         # than PUT to a guaranteed-400 empty deployment URL.
@@ -1228,13 +1297,13 @@ def _run_agent_entry(args: dict) -> None:
         )
     bind_root(Path(args["root"]))
     project_root = bobi_root()
-    # The root must be a real installation: state/sessions writes below
-    # would otherwise mkdir a fresh scattered .bobi at a bogus path.
+    # The root must be a real runtime: state/sessions writes below would
+    # otherwise mkdir a fresh state tree at a bogus path.
     from bobi.paths import agent_yaml_path
     if not agent_yaml_path().is_file():
         raise RuntimeError(
             f"spawn args root {project_root} is not a Bobi installation "
-            f"(no .bobi/agent.yaml) — refusing to run with an unverified "
+            f"(no package/agent.yaml) — refusing to run with an unverified "
             f"identity."
         )
     from bobi.brain import BRAIN_ENV
@@ -1535,7 +1604,7 @@ def list_agents() -> list[dict[str, Any]]:
         return result  # registry may not be initialized yet
     for entry in registry.list_active():
         if entry.role == "manager":
-            continue  # managers are shown separately in `bobi status`
+            continue  # managers are shown separately in `bobi agent <name> status`
         result.append({
             "run_key": entry.run_key or entry.name,
             "phase": entry.phase,

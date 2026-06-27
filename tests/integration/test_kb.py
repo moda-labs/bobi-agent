@@ -118,7 +118,7 @@ class TestKBLifecycle:
         assert "list-beta" in result.stdout
 
     def test_list_empty(self, cli_run, bobi_env):
-        kb_dir = bobi_env.project_path / ".bobi" / "kb"
+        kb_dir = bobi_env.state_dir / "kb"
         had_files = list(kb_dir.glob("list-*")) if kb_dir.exists() else []
         result = cli_run("kb", "list")
         assert result.returncode == 0

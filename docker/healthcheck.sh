@@ -6,8 +6,21 @@
 # (both execute inside the machine, where localhost is reachable).
 set -euo pipefail
 
-PROJECT_DIR="${BOBI_PROJECT:-/data/project}"
-PORT_FILE="${PROJECT_DIR}/.bobi/state/manager-health.port"
+if [ -n "${BOBI_ROOT:-}" ]; then
+  RUN_ROOT="${BOBI_ROOT}"
+else
+  : "${BOBI_HOME:?health: BOBI_HOME is required}"
+  if [ -n "${BOBI_AGENT:-}" ]; then
+    AGENT_NAME="${BOBI_AGENT}"
+  elif [ -n "${BOBI_INSTANCE:-}" ]; then
+    AGENT_NAME="${BOBI_INSTANCE}"
+  else
+    echo "health: no Bobi Agent selected; set BOBI_INSTANCE, BOBI_AGENT, or BOBI_ROOT"
+    exit 1
+  fi
+  RUN_ROOT="${BOBI_HOME}/agents/${AGENT_NAME}/run"
+fi
+PORT_FILE="${RUN_ROOT}/state/manager-health.port"
 
 [ -f "${PORT_FILE}" ] || { echo "health: no port file at ${PORT_FILE}"; exit 1; }
 

@@ -1,4 +1,4 @@
-"""Resolve agent prompts: base + agent team role + tools + project override."""
+"""Resolve agent prompts: base + installed package role + tools."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 
 
 def _resolve_role_prompt(role: str, project: Path | None) -> str | None:
-    """Find the role prompt at <project>/.bobi/roles/{role}/ROLE.md."""
+    """Find the role prompt at <run>/package/roles/{role}/ROLE.md."""
     if project:
         installed = paths.roles_dir(project) / role / "ROLE.md"
         if installed.exists():
@@ -22,7 +22,7 @@ def _resolve_role_prompt(role: str, project: Path | None) -> str | None:
 
 
 def _resolve_tools(project: Path | None) -> str:
-    """Load all tool markdown files from the installed .bobi/tools/.
+    """Load all tool markdown files from <run>/package/tools/.
 
     Tools are service interaction guides (e.g. gmail.md, jira.md) that
     describe how to interact with external services.
@@ -57,7 +57,7 @@ def _first_line(path: Path) -> str:
 
 
 def _resolve_context_index(project: Path | None) -> str:
-    """Index the installed .bobi/context/ files.
+    """Index the installed <run>/package/context/ files.
 
     Context files are pack-shipped reference content agents read on
     demand. Only the index goes into the prompt — never the contents.
@@ -84,17 +84,16 @@ def _resolve_context_index(project: Path | None) -> str:
 
 
 def _resolve_workspace_note(project: Path | None) -> str:
-    """Point agents at the project workspace/ directory if it exists.
-
-    workspace/ holds user-owned domain files and agent work products.
-    What belongs there is defined by role prompts, not the framework.
-    """
-    if not project or not (project / "workspace").is_dir():
+    """Point agents at the selected runtime workspace/ directory if it exists."""
+    if not project:
+        return ""
+    workspace = paths.workspace_dir(project)
+    if not workspace.is_dir():
         return ""
     return (
         "## Workspace\n\n"
-        "`workspace/` at the project root holds domain files and your "
-        "work products. Your role prompt defines what lives there."
+        f"`{workspace}` holds domain files and work products. Your role "
+        "prompt defines what lives there."
     )
 
 
@@ -108,8 +107,8 @@ def resolve_agent_prompt(
 
     Assembly order:
       1. Base framework prompt
-      2. Role prompt (folder or flat, project override or pack)
-      3. Tools (service interaction guides from pack + project)
+      2. Role prompt from the installed package
+      3. Tools from the installed package
       4. Context file index + workspace note
       5. Interactive/non-interactive notice
     """
@@ -130,15 +129,20 @@ def resolve_agent_prompt(
         if section:
             parts.append(section)
 
+    try:
+        slot_name = paths.agent_name_for_root(project)
+    except Exception:
+        slot_name = agent_name or "<agent>"
+    ask_cmd = f'bobi agent {slot_name} ask "question"'
     if interactive:
         parts.append(
-            "You can use `bobi ask \"question\"` to ask for guidance "
+            f"You can use `{ask_cmd}` to ask for guidance "
             "on ambiguous decisions."
         )
     else:
         parts.append(
             "You are running in non-interactive mode. Make your best judgment "
-            "on all decisions — do not use `bobi ask`."
+            f"on all decisions — do not use `{ask_cmd}`."
         )
 
     return "\n\n".join(parts)
@@ -161,8 +165,13 @@ def build_startup_prompt(
     # longer selects a per-session journal.
     policy_section = _load_policy_section(project)
 
+    try:
+        slot_name = paths.agent_name_for_root(project)
+    except Exception:
+        slot_name = agent_name or project.name
+
     parts = [
-        f"You are a bobi {role} for {project.name}. "
+        f"You are a bobi {role} for {slot_name}. "
         f"Act directly using your tools.\n\n{prompt}",
     ]
     if policy_section:
@@ -186,7 +195,7 @@ def list_workflows(project_path: Path | str, agent_name: str | None = None) -> s
     """List available workflows as a formatted string for agent prompts.
 
     Delegates to WorkflowDispatcher so agents see the same menu (same
-    tiers, dedup, and priority) as `bobi workflows list`.
+    tiers, dedup, and priority) as `bobi agent <name> workflows list`.
     """
     try:
         from bobi.workflow.triggers import WorkflowDispatcher
@@ -256,7 +265,7 @@ def discover_roles(
     project_path: Path | str | None = None,
     agent_name: str | None = None,
 ) -> list[dict]:
-    """List available agent roles from installed .bobi/roles/."""
+    """List available agent roles from <run>/package/roles/."""
     roles: dict[str, dict] = {}
 
     if project_path:
@@ -279,7 +288,7 @@ def format_role_list(roles: list[dict]) -> str:
         return "No roles found."
     lines = ["Available roles:\n"]
     for r in roles:
-        source = "project" if r["source"] == "project" else "built-in"
+        source = "installed"
         lines.append(f"  {r['name']:20s} [{source:8s}]  {r['description']}")
     return "\n".join(lines)
 
@@ -289,7 +298,7 @@ def validate_role(
     project_path: Path | str | None = None,
     agent_name: str | None = None,
 ) -> bool:
-    """Check whether a role exists in the installed .bobi/roles/."""
+    """Check whether a role exists in <run>/package/roles/."""
     if project_path:
         project = Path(project_path)
         installed_roles = paths.roles_dir(project)

@@ -5,25 +5,41 @@
 # Runs as root (PID 1, under Fly's injected init — no tini; see Dockerfile) only
 # long enough to prepare the mounted volume, then drops to the non-root
 # `bobi` user and exec's the manager. Because the final step is
-# `exec gosu ... bobi start --foreground`, SIGTERM is forwarded straight to
-# the manager, which shuts sessions down gracefully (C2).
+# `exec gosu ... bobi supervise -- --foreground`, SIGTERM is forwarded to the
+# selected agent manager, which shuts sessions down gracefully (C2).
 #
-# First-boot install (empty volume -> `bobi install`) lives here for now so
+# First-boot install (empty volume -> `bobi agents install`) lives here for now so
 # the image is independently testable; #339 (C9) hardens the idempotency and
 # edge cases of this path.
 set -euo pipefail
 
 APP_USER="bobi"
 DATA_DIR="${DATA_DIR:-/data}"
-PROJECT_DIR="${BOBI_PROJECT:-${DATA_DIR}/project}"
+log() { echo "[entrypoint] $*"; }
+fatal() { echo "[entrypoint] FATAL: $*" >&2; exit 1; }
 # $HOME stays on the IMAGE (/home/bobi) — that's where baked team tools
 # (~/.claude/skills, ~/dev/gstack) live, read in place, never copied. Only
 # Claude's DURABLE state (credentials + transcripts + session history) is
 # redirected onto the volume via CLAUDE_CONFIG_DIR, the supported override.
 # Splitting the two this way (vs. seeding tools onto a volume HOME) keeps build
 # HOME == runtime HOME, so the image's `verify: requires` proves the live paths.
-export HOME="${BOBI_HOME:-/home/bobi}"
+export HOME="${HOME:-/home/bobi}"
+[ -n "${BOBI_HOME:-}" ] || fatal "BOBI_HOME is required. The image sets BOBI_HOME=/data/.bobi."
+export BOBI_HOME
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-${DATA_DIR}/claude}"
+
+if [ -n "${BOBI_AGENT:-}" ]; then
+  AGENT_NAME="${BOBI_AGENT}"
+elif [ -n "${BOBI_INSTANCE:-}" ]; then
+  AGENT_NAME="${BOBI_INSTANCE}"
+elif [ -n "${BOBI_ROOT:-}" ] && [ "$(basename "${BOBI_ROOT}")" = "run" ]; then
+  AGENT_NAME="$(basename "$(dirname "${BOBI_ROOT}")")"
+else
+  fatal "No Bobi Agent selected. Set BOBI_INSTANCE, BOBI_AGENT, or BOBI_ROOT."
+fi
+RUN_ROOT="${BOBI_ROOT:-${BOBI_HOME}/agents/${AGENT_NAME}/run}"
+export BOBI_ROOT="${RUN_ROOT}"
+PACKAGE_DIR="${RUN_ROOT}/package"
 
 # The agent brain (#485). Decides the provider API key (api_key/subscription),
 # the durable OAuth credential dir on the volume, and the credential file the
@@ -71,16 +87,16 @@ validate_auth_mode() {
 
 resolve_configured_brain() {
   [ -z "${BOBI_BRAIN:-}" ] || return 0
-  [ -f "${PROJECT_DIR}/.bobi/agent.yaml" ] || return 0
+  [ -f "${PACKAGE_DIR}/agent.yaml" ] || return 0
 
   local configured
-  if configured="$(PROJECT_DIR="${PROJECT_DIR}" python - <<'PY' 2>/dev/null
+  if configured="$(BOBI_ROOT="${RUN_ROOT}" python - <<'PY' 2>/dev/null
 import os
 from pathlib import Path
 
 from bobi.config import Config
 
-print(Config.load(Path(os.environ["PROJECT_DIR"])).brain_kind or "", end="")
+print(Config.load(Path(os.environ["BOBI_ROOT"])).brain_kind or "", end="")
 PY
   )" && [ -n "${configured}" ]; then
     ENTRYPOINT_BRAIN="${configured}"
@@ -89,9 +105,6 @@ PY
 
 resolve_configured_brain
 configure_brain_paths
-
-log() { echo "[entrypoint] $*"; }
-fatal() { echo "[entrypoint] FATAL: $*" >&2; exit 1; }
 
 materialize_codex_api_key_auth() {
   local cred_dir="$1"
@@ -128,16 +141,17 @@ PY
 
 AUTH_VALIDATED=0
 if [ -n "${BOBI_BRAIN:-}" ] \
-   || [ -f "${PROJECT_DIR}/.bobi/agent.yaml" ] \
+   || [ -f "${PACKAGE_DIR}/agent.yaml" ] \
    || { [ -z "${BOBI_TEAM_URL:-}" ] && [ -z "${BOBI_TEAM:-}" ]; }; then
   validate_auth_mode
   AUTH_VALIDATED=1
 fi
 
 # --- 1. Prepare the volume (root) -------------------------------------------
-# Only the durable dirs live on the volume: the project root and Claude's config
-# dir (CLAUDE_CONFIG_DIR). HOME is on the image and needs no volume prep.
-mkdir -p "${PROJECT_DIR}" "${CLAUDE_CONFIG_DIR}"
+# Only durable state lives on the volume: BOBI_HOME, the selected run root, and
+# Claude's config dir (CLAUDE_CONFIG_DIR). HOME is on the image and needs no
+# volume prep.
+mkdir -p "${BOBI_HOME}" "${RUN_ROOT}" "${RUN_ROOT}/workspace" "${CLAUDE_CONFIG_DIR}"
 
 # Fly/EC2/k8s mount fresh volumes owned by root. Take ownership once so the
 # non-root user can write; a stamp keeps subsequent boots from re-walking a
@@ -147,7 +161,7 @@ if [ ! -e "${DATA_DIR}/.bobi-owned" ]; then
   chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}"
   : > "${DATA_DIR}/.bobi-owned"
 else
-  chown "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${PROJECT_DIR}" "${CLAUDE_CONFIG_DIR}"
+  chown "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${BOBI_HOME}" "${RUN_ROOT}" "${CLAUDE_CONFIG_DIR}"
 fi
 
 # --- 1b. Make ~/.claude coincide with the durable volume config dir (C24) -----
@@ -178,16 +192,16 @@ if [ "$(readlink "${HOME}/.claude" 2>/dev/null)" != "${CLAUDE_CONFIG_DIR}" ]; th
   ln -s "${CLAUDE_CONFIG_DIR}" "${HOME}/.claude"
 fi
 
-cd "${PROJECT_DIR}"
+cd "${RUN_ROOT}"
 
-# Carry HOME (the image home — gosu would otherwise reset it from passwd, which
-# is the same path here, but be explicit) and CLAUDE_CONFIG_DIR (the volume dir
-# holding durable creds/transcripts) into every privilege drop.
+# Carry HOME (the image home), BOBI_HOME/BOBI_ROOT (the durable selected Bobi
+# runtime), and CLAUDE_CONFIG_DIR (the volume dir holding durable
+# creds/transcripts) into every privilege drop.
 as_app() {
   if [ -n "${BOBI_BRAIN:-}" ] || [ "${ENTRYPOINT_BRAIN}" != "claude" ]; then
-    gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "BOBI_BRAIN=${ENTRYPOINT_BRAIN}" "$@"
+    gosu "${APP_USER}" env "HOME=${HOME}" "BOBI_HOME=${BOBI_HOME}" "BOBI_ROOT=${BOBI_ROOT}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "BOBI_BRAIN=${ENTRYPOINT_BRAIN}" "$@"
   else
-    gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "$@"
+    gosu "${APP_USER}" env "HOME=${HOME}" "BOBI_HOME=${BOBI_HOME}" "BOBI_ROOT=${BOBI_ROOT}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "$@"
   fi
 }
 
@@ -199,14 +213,14 @@ as_app() {
 # With NEITHER set on an empty volume the instance enters the "wait for team"
 # state instead of crashing: it was provisioned blank for ssh-push delivery
 # (`bobi deploy` with a local `team:` package — DEPLOY_INTERFACE.md). The
-# operator pushes the team over `fly ssh` (sftp the tarball + `bobi install`),
-# which lands .bobi/agent.yaml on the volume; we poll for it, then start.
+# operator pushes the team over `fly ssh` (sftp the tarball + `bobi agents install`),
+# which lands run/package/agent.yaml on the volume; we poll for it, then start.
 # This is the single-developer "I built it, ship it — no hosting" path, and it
 # keeps PID 1 alive so the Fly machine stays "started" while we wait.
-if [ ! -f "${PROJECT_DIR}/.bobi/agent.yaml" ]; then
+if [ ! -f "${PACKAGE_DIR}/agent.yaml" ]; then
   if [ -n "${BOBI_TEAM_URL:-}" ]; then
     log "First boot: installing team from URL ${BOBI_TEAM_URL} (non-interactive)"
-    as_app bobi install "${BOBI_TEAM_URL}" --non-interactive
+    as_app bobi agents install "${BOBI_TEAM_URL}" --name "${AGENT_NAME}" --non-interactive
   elif [ -n "${BOBI_TEAM:-}" ]; then
     log "First boot: installing team '${BOBI_TEAM}' (non-interactive)"
     # BOBI_TEAM must resolve to something the INSTANCE can see: a path on the
@@ -214,7 +228,7 @@ if [ ! -f "${PROJECT_DIR}/.bobi/agent.yaml" ]; then
     # registry baked into the image, so a bare name won't resolve. Fail LOUD with
     # the actionable alternative instead of letting `set -e` crash-loop the Fly
     # machine on a bare pipefail trace (C9/#339).
-    if ! as_app bobi install "${BOBI_TEAM}" --non-interactive; then
+    if ! as_app bobi agents install "${BOBI_TEAM}" --name "${AGENT_NAME}" --non-interactive; then
       log "ERROR: couldn't install team '${BOBI_TEAM}'. The container has no"
       log "       team registry, so BOBI_TEAM only resolves a path/package the"
       log "       instance can already see. To deliver a PUBLISHED team, set"
@@ -225,9 +239,9 @@ if [ ! -f "${PROJECT_DIR}/.bobi/agent.yaml" ]; then
     fi
   else
     log "No team source and empty volume — blank instance, waiting for an"
-    log "ssh-push team delivery (bobi deploy). Poll for .bobi/agent.yaml..."
+    log "ssh-push team delivery (bobi deploy). Poll for ${PACKAGE_DIR}/agent.yaml..."
     waited=0
-    while [ ! -f "${PROJECT_DIR}/.bobi/agent.yaml" ]; do
+    while [ ! -f "${PACKAGE_DIR}/agent.yaml" ]; do
       sleep 2
       waited=$((waited + 2))
       # Heartbeat every ~2 min so `fly logs` shows the instance is alive, not hung.
@@ -336,17 +350,17 @@ fi
 if [ "${BOBI_AUTH:-api_key}" = "subscription" ] \
    && [ ! -f "${BRAIN_CRED_DIR}/${BRAIN_CRED_FILE}" ]; then
   log "Subscription mode, no ${ENTRYPOINT_BRAIN} credentials on volume — running login bootstrap"
-  as_app bobi login-bootstrap
+  as_app bobi agent "${AGENT_NAME}" login-bootstrap
 fi
 
 # --- 5. Hand off to the manager as the non-root user ------------------------
 # Agent UI on by default IN THE CONTAINER (the manager starts it on the private
-# 6PN; reach it with `bobi ui <deployment>` / `fly proxy`). It's image
+# 6PN; reach it with `bobi agent <name> ui <deployment>` / `fly proxy`). It's image
 # behavior, not a per-instance flag, so existing instances pick it up on their
 # next image swap. Disable with BOBI_UI=0 in the Fly env. The dark instance
 # has no public route, so this exposes nothing — see DESIGN.md "Agent UI".
 export BOBI_UI="${BOBI_UI:-1}"
-log "Starting manager under self-heal watchdog (user=${APP_USER}, project=${PROJECT_DIR}, home=${HOME}, claude_config=${CLAUDE_CONFIG_DIR})"
+log "Starting manager under self-heal watchdog (user=${APP_USER}, agent=${AGENT_NAME}, run=${RUN_ROOT}, home=${HOME}, bobi_home=${BOBI_HOME}, claude_config=${CLAUDE_CONFIG_DIR})"
 # #464: launch the manager under `bobi supervise` instead of directly.
 # The supervisor is the entrypoint process (parent); it spawns the manager as a
 # child, watches the director's progress via the health endpoint, and restarts
@@ -357,7 +371,7 @@ log "Starting manager under self-heal watchdog (user=${APP_USER}, project=${PROJ
 # port file). The forwarded `--foreground` keeps the manager a supervisable
 # child rather than letting it daemonize.
 if [ -n "${BOBI_BRAIN:-}" ] || [ "${ENTRYPOINT_BRAIN}" != "claude" ]; then
-  exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "BOBI_BRAIN=${ENTRYPOINT_BRAIN}" "BOBI_UI=${BOBI_UI}" bobi supervise -- --foreground "$@"
+  exec gosu "${APP_USER}" env "HOME=${HOME}" "BOBI_HOME=${BOBI_HOME}" "BOBI_ROOT=${BOBI_ROOT}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "BOBI_BRAIN=${ENTRYPOINT_BRAIN}" "BOBI_UI=${BOBI_UI}" bobi supervise -- --foreground "$@"
 else
-  exec gosu "${APP_USER}" env "HOME=${HOME}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "BOBI_UI=${BOBI_UI}" bobi supervise -- --foreground "$@"
+  exec gosu "${APP_USER}" env "HOME=${HOME}" "BOBI_HOME=${BOBI_HOME}" "BOBI_ROOT=${BOBI_ROOT}" "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}" "BOBI_UI=${BOBI_UI}" bobi supervise -- --foreground "$@"
 fi

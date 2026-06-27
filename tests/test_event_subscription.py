@@ -13,6 +13,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+from bobi import paths
 from bobi import http as pooled
 from bobi.subagent import _start_event_subscription
 
@@ -23,9 +24,8 @@ REMOTE_URL = "https://events.example.invalid"
 @pytest.fixture
 def project(tmp_path):
     """Project dir with a remote event server configured."""
-    ms = tmp_path / ".bobi"
-    ms.mkdir()
-    (ms / "agent.yaml").write_text(
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text(
         f"agent: test\nentry_point: manager\nevent_server: {REMOTE_URL}\n"
     )
     return tmp_path
@@ -43,7 +43,7 @@ def _stub_bubble():
 def _state_file(project, session="sess"):
     # Deployment state is per-session — sharing one deployment across
     # sessions is the bug that broadcast the user's DMs to every agent.
-    return project / ".bobi" / "state" / "deployments" / f"{session}.json"
+    return paths.state_path(project) / "deployments" / f"{session}.json"
 
 
 @patch("bobi.events.drain.drain_loop")
@@ -308,49 +308,42 @@ def test_fresh_register_resets_session_cursor(mock_register,
 
 
 def _install_root(path):
-    (path / ".bobi").mkdir(parents=True)
-    (path / ".bobi" / "agent.yaml").write_text("name: test-agent\n")
+    paths.package_dir(path).mkdir(parents=True)
+    paths.agent_yaml_path(path).write_text("name: test-agent\n")
 
 
-def test_resolve_root_walks_up_to_bobi(tmp_path):
-    """An agent spawned from a repo checkout inside the project must bind to
-    the real project root, not fork its own config/state/subscriptions."""
+def test_resolve_root_does_not_walk_up_from_cwd(tmp_path):
+    """Runtime identity is selected by BOBI_ROOT or `bobi agent <name>`, not cwd."""
     from bobi.paths import resolve_root
 
     _install_root(tmp_path)
     checkout = tmp_path / "repos" / "some-repo" / "src"
     checkout.mkdir(parents=True)
 
-    assert resolve_root(checkout) == tmp_path
+    with pytest.raises(RuntimeError, match="No Bobi Agent runtime selected"):
+        resolve_root(checkout)
     assert resolve_root(tmp_path) == tmp_path
 
 
-def test_resolve_root_skips_state_only_bobi(tmp_path):
-    """A state-only .bobi/ (sessions/state dropped into a repo checkout
-    by the runtime) must not capture resolution — the walk continues to the
-    installed root above it. Regression: engineer dispatch resolved a repo's
-    state-only dir as project root and died with workflow-not-found."""
+def test_resolve_root_honors_bobi_root_env(tmp_path, monkeypatch):
+    """Child processes inherit BOBI_ROOT, so their working dir is irrelevant."""
     from bobi.paths import resolve_root
 
     _install_root(tmp_path)
     repo = tmp_path / "repos" / "some-repo"
-    (repo / ".bobi" / "sessions").mkdir(parents=True)
-    (repo / ".bobi" / "state").mkdir()
+    repo.mkdir(parents=True)
+    monkeypatch.setenv("BOBI_ROOT", str(tmp_path))
 
     assert resolve_root(repo) == tmp_path
-    assert resolve_root(repo / ".bobi" / "state") == tmp_path
 
 
 def test_resolve_root_raises_without_installation(tmp_path):
-    """No installed root above the start dir is an error, not a guess —
-    resolving to the bare start dir was the fallback that let processes
-    invent roots."""
-    import pytest
+    """No explicit runtime selection is an error, not a guess."""
     from bobi.paths import resolve_root
 
     plain = tmp_path / "plain"
     plain.mkdir()
-    with pytest.raises(RuntimeError, match="no Bobi installation"):
+    with pytest.raises(RuntimeError, match="No Bobi Agent runtime selected"):
         resolve_root(plain)
 
 

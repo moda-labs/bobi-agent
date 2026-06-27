@@ -5,7 +5,7 @@ a direct **capability call** (like `codex` or `venn`): you run the command
 yourself; it is not agent delegation. Use it when a task needs a generated
 image — a hero/illustration for a doc, a mockup, a diagram backdrop, an avatar.
 
-`OPENAI_API_KEY` comes from `.bobi/.env` — never hard-code or log it.
+`OPENAI_API_KEY` comes from `run/.env` — never hard-code or log it.
 
 ## The contract: write a file, then read it
 

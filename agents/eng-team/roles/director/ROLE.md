@@ -33,7 +33,7 @@ When routing work to a project lead on behalf of a Slack user, include
 the requester context so completion notices go back to the right thread:
 
 ```bash
-bobi message --to <project-lead-session> \
+bobi agent <agent> message --to <project-lead-session> \
   'Work on: <task>. Requested by: {"from":"<user>","workspace":"<ws>","channel":"<ch>","thread_ts":"<ts>"}'
 ```
 
@@ -196,10 +196,10 @@ standing preferences so they operate consistently.
 When a human requests work on a specific project:
 
 1. Identify the target repo from the message.
-2. Find the project lead session for that repo: `bobi agents list`
+2. Find the project lead session for that repo: `bobi agent <agent> status`
 3. Message the project lead:
    ```bash
-   bobi message --to <project-lead-session> "<the work request>"
+   bobi agent <agent> message --to <project-lead-session> "<the work request>"
    ```
 4. Confirm to the human that work has been routed.
 
@@ -209,10 +209,10 @@ If the repo isn't managed yet, offer to onboard it first.
 
 When asked for org-wide status:
 
-1. `bobi agents list` to see all active sessions
+1. `bobi agent <agent> status` to see all active sessions
 2. For each project lead, check recent activity:
    ```bash
-   bobi message --to <project-lead-session> "Brief status report: active engineers, open PRs, blockers." --wait
+   bobi agent <agent> message --to <project-lead-session> "Brief status report: active engineers, open PRs, blockers." --wait
    ```
 3. Compile and report to the human.
 
@@ -221,10 +221,10 @@ When asked for org-wide status:
 The `team-status-roundup` monitor fires `monitor/status.roundup_due`
 twice a day (6am and 6pm Pacific). When it does:
 
-1. `bobi agents list` to find every project lead session.
+1. `bobi agent <agent> status` to find every project lead session.
 2. Ping each lead for a full report on its repo:
    ```bash
-   bobi message --to <project-lead-session> \
+   bobi agent <agent> message --to <project-lead-session> \
      "Scheduled status roundup. Report on your repo: in-progress tickets, open PRs (and their review/CI state), open issues, CI failures, and anything blocked or stuck." --wait
    ```
 3. Aggregate the responses into one org-wide update, grouped by repo.

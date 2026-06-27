@@ -38,6 +38,7 @@ def _targz(arcname_to_path: dict[str, Path]) -> bytes:
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     monkeypatch.setattr("bobi.paths._root", tmp_path)
     return tmp_path
 
@@ -159,8 +160,8 @@ def test_http_error_is_wrapped(project, monkeypatch):
 
 
 def test_cli_install_detects_url(project, tmp_path, monkeypatch):
-    """`bobi install <url>` routes to fetch_from_url and installs the team
-    into .bobi/ — the exact path the container entrypoint exercises."""
+    """`bobi agents install <url> --name` routes to fetch_from_url and installs
+    the package into the selected Bobi Agent runtime."""
     from click.testing import CliRunner
 
     from bobi.cli import main
@@ -180,13 +181,15 @@ def test_cli_install_detects_url(project, tmp_path, monkeypatch):
 
     result = CliRunner().invoke(
         main,
-        ["install", "https://example.com/eng-team.tar.gz", "--non-interactive"],
+        ["agents", "install", "https://example.com/eng-team.tar.gz",
+         "--name", "eng", "--non-interactive"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
     assert "URL" in result.output  # took the URL branch, not registry-by-name
-    assert (project / ".bobi" / "agent.yaml").is_file()
-    cfg = (project / ".bobi" / "agent.yaml").read_text()
+    installed = Path(project / "home" / "agents" / "eng" / "run" / "package")
+    assert (installed / "agent.yaml").is_file()
+    cfg = (installed / "agent.yaml").read_text()
     assert "entry_point: manager" in cfg
 
 
@@ -229,7 +232,7 @@ def test_fetch_from_archive_rejects_non_archive(project, tmp_path):
 
 
 def test_install_cli_routes_local_archive(project, tmp_path, monkeypatch):
-    """`bobi install ./team.tar.gz` takes the local-archive branch."""
+    """`bobi agents install ./team.tar.gz --name` takes the local-archive branch."""
     from click.testing import CliRunner
     from bobi.cli import main
 
@@ -241,8 +244,10 @@ def test_install_cli_routes_local_archive(project, tmp_path, monkeypatch):
     monkeypatch.setenv("BOBI_EVENT_SERVER", "https://ev.example.workers.dev")
 
     result = CliRunner().invoke(
-        main, ["install", str(arc), "--non-interactive"], catch_exceptions=False,
+        main,
+        ["agents", "install", str(arc), "--name", "eng", "--non-interactive"],
+        catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
     assert "local archive" in result.output
-    assert (project / ".bobi" / "agent.yaml").is_file()
+    assert (project / "home" / "agents" / "eng" / "run" / "package" / "agent.yaml").is_file()

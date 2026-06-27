@@ -13,6 +13,7 @@ Skips cleanly when Playwright isn't installed (the unit job doesn't need it).
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import threading
@@ -119,16 +120,18 @@ class _Bobi:
 def bobi(tmp_path):
     """Boot the setup server with a fake LLM on a free loopback port; yield a
     _Bobi handle. Torn down after the test."""
-    project = tmp_path / "project"
-    project.mkdir()
+    home = tmp_path / "home"
+    os.environ["BOBI_HOME"] = str(home)
+
+    project = home / "agents" / "setup-e2e" / "run"
+    project.mkdir(parents=True)
     (project / "workspace").mkdir()
     subprocess.run(["git", "init"], cwd=project, capture_output=True)
 
-    # A stand-in home so the ~/bobi-agents library and the folder picker stay
+    # A stand-in BOBI_HOME so the agent-source library and folder picker stay
     # off the real filesystem. A couple of real subfolders give the picker
-    # (now rooted at home) something to browse — dotfiles are hidden.
-    home = tmp_path / "home"
-    (home / "bobi-agents").mkdir(parents=True)
+    # something to browse — dotfiles are hidden.
+    (home / "agents").mkdir(parents=True, exist_ok=True)
     (home / "projects").mkdir()
 
     app = server.build_app(SetupState(), project, nonce=NONCE,

@@ -62,9 +62,9 @@ Write files in this order, explaining each as you go:
 
 ### 4. Finalize
 
-Show the directory tree, explain how to run (`bobi install
-agents/<pack-name>` then `bobi start`), and mention `.bobi/`
-overrides for per-project customization.
+Show the directory tree, explain how to run (`bobi agents install
+agents/<pack-name> --name <agent>` then `bobi agent <agent> start`), and
+mention that installed package files are regenerated from source.
 
 ## File format reference
 
@@ -88,8 +88,8 @@ linear:
   api_key: ${LINEAR_API_KEY}
 ```
 
-Only include services the team actually needs. `bobi install`
-prompts for any `${VAR}` references and writes them to `.bobi/.env`.
+Only include services the team actually needs. `bobi agents install`
+prompts for any `${VAR}` references and writes them to `run/.env`.
 
 ### agent.md
 
@@ -109,8 +109,8 @@ One-paragraph description of what this agent system does.
 
 ## Setup
 
-bobi install agents/pack-name
-bobi start
+bobi agents install agents/pack-name --name my-agent
+bobi agent my-agent start
 ```
 
 ### Role prompts (roles/<name>/ROLE.md)
@@ -248,7 +248,7 @@ evaluates the description and posts an event only if something is found.
 
 Team-shipped reference content — rubrics, methodology, output format
 specs, examples — that agents read on demand. Installed frozen to
-`.bobi/context/`; reinstall restores them and `bobi doctor`
+`run/package/context/`; reinstall restores them and `bobi agent <name> doctor`
 flags hand-edits. Agents see an index (path + first line) in their
 prompt, so make the first line of each file a one-line description.
 
@@ -261,7 +261,7 @@ prompt; context files cost nothing until an agent reads one.
 Seed files for user-owned domain content: the things only the user can
 fill in (positioning, source lists, configuration the team researches
 against) and the directories agents write work products into. Install
-copies `workspace/` to `<project>/workspace/` — each file only if
+copies `workspace/` to `run/workspace/` — each file only if
 absent, so reinstall never overwrites what the user or agents wrote.
 
 Reference these from role prompts by their installed path
@@ -271,9 +271,10 @@ fill in before starting the team.
 ## Built-in CLI tools
 
 Every agent has access to the full `bobi` CLI — messaging
-(`message`, `ask`, `slack-reply`), agent management (`agents launch`,
-`agents list`, `agents cancel`), and observability (`status`, `events`,
-`transcript`). Reference these in role prompts so agents know how to
+(`agent <name> message`, `agent <name> ask`, `slack-reply`), sub-agent
+management (`agent <name> subagents launch`, `list`, `cancel`), and
+observability (`agent <name> status`, `events`, `transcript`). Reference
+these in role prompts so agents know how to
 communicate and delegate.
 
 See [`skills/bobi.md`](../skills/bobi.md) for the complete
@@ -294,11 +295,12 @@ command reference.
    webhook covers (stale items, drift, health checks).
 
 5. **Keep it simple**: Fewer roles and workflows to start. Users add more
-   via `.bobi/` overrides.
+   in the team source and reinstall.
 
 ## Important
 
 - Generate a complete, working team — no placeholders or TODOs.
 - Role prompts should reference `bobi` CLI commands the agent will use.
 - Don't copy engineering-specific content into non-engineering packs.
-- Write files to `agents/<pack-name>/` in the current working directory.
+- Write files to the team source directory, normally
+  `$BOBI_HOME/agents/<name>/src/`.

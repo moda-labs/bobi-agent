@@ -19,6 +19,7 @@ from bobi import registry
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     monkeypatch.setattr("bobi.paths._root", tmp_path)
     return tmp_path
 

@@ -441,7 +441,8 @@ def _flatten_if_chained(project_path: Path, team_dir: Path) -> Path:
     if not has_from:
         return team_dir
     chain = compose.resolve_chain(team_dir, project_path)
-    staged = paths.bobi_dir(project_path) / "build" / f"composed-{team_dir.name}"
+    staged = paths.build_cache_dir() / "composed" / f"composed-{team_dir.name}"
+    staged.parent.mkdir(parents=True, exist_ok=True)
     if staged.exists():
         shutil.rmtree(staged)
     compose.compose(chain, staged)
@@ -765,10 +766,10 @@ def fly_secrets_unset(app: str, keys: list[str]) -> None:
 
 def sync_volume_env(app: str, values: dict[str, str],
                     unset: list[str] | None = None) -> None:
-    """Merge reconciled secrets into the instance volume's .bobi/.env.
+    """Merge reconciled secrets into the instance volume's run/.env.
 
     Fly secrets update the process environment, but the mounted project volume
-    can still hold an older .bobi/.env. Tool shells that lose inherited env
+    can still hold an older run/.env. Tool shells that lose inherited env
     then fall back to stale credentials. Push the resolved values over stdin so
     secret values never appear in argv or logs.
     """
@@ -780,7 +781,9 @@ def sync_volume_env(app: str, values: dict[str, str],
         "from pathlib import Path\n"
         "from bobi.config import parse_env_file, write_env_file\n"
         "payload = json.load(sys.stdin)\n"
-        "path = Path('/data/project/.bobi/.env')\n"
+        "home = Path(os.environ['BOBI_HOME'])\n"
+        "agent = os.environ['BOBI_INSTANCE']\n"
+        "path = home / 'agents' / agent / 'run' / '.env'\n"
         "vals = parse_env_file(path)\n"
         "vals.update(payload.get('set', {}))\n"
         "for key in payload.get('unset', []):\n"
@@ -791,7 +794,7 @@ def sync_volume_env(app: str, values: dict[str, str],
     payload = json.dumps({"set": values, "unset": unset}).encode()
     _run([
         _fly_bin(), "ssh", "console", "-a", app, "-C",
-        "gosu bobi env HOME=/home/bobi "
+        "gosu bobi env HOME=/home/bobi BOBI_HOME=/data/.bobi "
         f"/opt/venv/bin/python -c {shlex.quote(script)}",
     ], input_bytes=payload, secret=True)
 
@@ -891,7 +894,7 @@ def restart_app(app: str) -> None:
 
 def _build_team_tarball(pkg_dir: Path, out_dir: Path) -> Path:
     """Tar a local team package into `<out>/<team>.tar.gz`, extracting to a single
-    `<team>/` dir holding agent.yaml — the shape `bobi install` expects."""
+    `<team>/` dir holding agent.yaml — the shape `bobi agents install` expects."""
     name = pkg_dir.name
     out = out_dir / f"{name}.tar.gz"
     with tarfile.open(out, "w:gz") as t:
@@ -903,9 +906,10 @@ def push_team(app: str, pkg_dir: Path, *, restart: bool) -> None:
     """Push a LOCAL team package onto a running instance over `fly ssh`.
 
     Builds the tarball, streams it onto the volume, and runs
-    `bobi install <tarball> --non-interactive` on the instance (which reads
+    `bobi agents install <tarball> --name "$BOBI_INSTANCE" --non-interactive`
+    on the instance (which reads
     secrets from the Fly-injected env). On a freshly-provisioned blank instance
-    this lands .bobi/agent.yaml on the volume, releasing the entrypoint's
+    this lands run/package/agent.yaml on the volume, releasing the entrypoint's
     wait-for-team loop; on an existing instance pass restart=True to reload.
     """
     fly = _fly_bin()
@@ -924,15 +928,20 @@ def push_team(app: str, pkg_dir: Path, *, restart: bool) -> None:
             input_bytes=b64,
         )
         # Install from the pushed tarball as the volume's owner, matching the
-        # container's runtime env: HOME on the image (/home/bobi), Claude's
-        # durable state on the volume (CLAUDE_CONFIG_DIR=/data/claude). The
-        # project (.bobi/agent.yaml + .env) lands under cwd /data/project on
-        # the volume. --non-interactive => read secrets from the Fly env and fail
-        # loudly on a gap, never hang on a prompt.
+        # container's runtime env: HOME on the image (/home/bobi), Bobi runtime
+        # state at BOBI_HOME (/data/.bobi), Claude's durable state on the volume
+        # (CLAUDE_CONFIG_DIR=/data/claude). --non-interactive => read secrets
+        # from the Fly env and fail loudly on a gap, never hang on a prompt.
+        install_script = (
+            ': "${BOBI_INSTANCE:?BOBI_INSTANCE is required}"; '
+            f"bobi agents install {shlex.quote(remote)} "
+            "--name \"$BOBI_INSTANCE\" --non-interactive"
+        )
         _run([
             fly, "ssh", "console", "-a", app, "-C",
-            "gosu bobi env HOME=/home/bobi CLAUDE_CONFIG_DIR=/data/claude bash -c "
-            f"'cd /data/project && bobi install {remote} --non-interactive'",
+            "gosu bobi env HOME=/home/bobi BOBI_HOME=/data/.bobi "
+            "CLAUDE_CONFIG_DIR=/data/claude bash -lc "
+            f"{shlex.quote(install_script)}",
         ])
     if restart:
         restart_app(app)
@@ -942,10 +951,16 @@ def update_team_url(app: str, url: str) -> None:
     """In-place update for a team-url instance: re-pull the (refreshed) tarball
     with a workspace-safe reinstall, then restart to load the new config."""
     fly = _fly_bin()
+    install_script = (
+        ': "${BOBI_INSTANCE:?BOBI_INSTANCE is required}"; '
+        f"bobi agents install {shlex.quote(url)} "
+        "--name \"$BOBI_INSTANCE\" --non-interactive"
+    )
     _run([
         fly, "ssh", "console", "-a", app, "-C",
-        "gosu bobi env HOME=/home/bobi CLAUDE_CONFIG_DIR=/data/claude bash -c "
-        f"'cd /data/project && bobi install \"{url}\"'",
+        "gosu bobi env HOME=/home/bobi BOBI_HOME=/data/.bobi "
+        "CLAUDE_CONFIG_DIR=/data/claude bash -lc "
+        f"{shlex.quote(install_script)}",
     ])
     restart_app(app)
 

@@ -200,10 +200,12 @@ def test_full_bootstrap_smoke_real_event_through_pty(adapter_event, tmp_path, mo
 
     monkeypatch.setattr(paths, "_root", None, raising=False)
 
-    # Isolated project with a Slack bot_token (run_bootstrap requires it).
-    project = tmp_path / "proj"
-    (project / ".bobi").mkdir(parents=True)
-    (project / ".bobi" / "agent.yaml").write_text(
+    # Isolated runtime root with a Slack bot_token (run_bootstrap requires it).
+    project = tmp_path / "home" / "agents" / "bootstrap" / "run"
+    package = project / "package"
+    package.mkdir(parents=True)
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+    (package / "agent.yaml").write_text(
         "agent: test\n"
         "event_server_url: wss://example\n"
         "services:\n"

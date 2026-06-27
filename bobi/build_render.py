@@ -177,7 +177,7 @@ def render_team_deps_script(cfg: Config) -> str:
 def load_team_config(team_dir: Path) -> Config:
     """Load a team's Config straight from <team_dir>/agent.yaml (source layout).
 
-    Config.load() expects an installed project (.bobi/agent.yaml); a team
+    Config.load() expects an installed package at run/package/agent.yaml; a team
     SOURCE dir holds agent.yaml at its root, so parse it directly.
     """
     agent_yaml = team_dir / "agent.yaml"

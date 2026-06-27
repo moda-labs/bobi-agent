@@ -1,11 +1,11 @@
-"""Monitor registry — merge installed defaults with project overrides.
+"""Monitor registry — merge installed defaults with package overrides.
 
 Monitors resolve exclusively from the installed pack image:
 
-    .bobi/monitors/defaults.yaml  →  .bobi/monitors.yaml / agent.yaml
+    run/package/monitors/defaults.yaml  →  run/package/monitors.yaml / agent.yaml
 
-A project-specific entry with `enabled: false` disables a default monitor.
-A project-specific entry that shares a name with a default monitor overrides it.
+A package entry with `enabled: false` disables a default monitor.
+A package entry that shares a name with a default monitor overrides it.
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ log = logging.getLogger(__name__)
 def _defaults_path(project_path: Path | None = None) -> Path | None:
     """Return the installed monitor defaults path.
 
-    Only reads from .bobi/monitors/defaults.yaml — no framework
-    fallback.  Returns None when no project is detected.
+    Only reads from run/package/monitors/defaults.yaml. Returns None when no
+    runtime is selected.
     """
     if not project_path:
         from bobi.paths import bound_root as get_project_root
@@ -76,7 +76,7 @@ class MonitorRegistry:
         for project_path in project_paths:
             project_key = str(project_path)
             project_sources = [
-                paths.bobi_dir(project_path) / "monitors.yaml",
+                paths.package_dir(project_path) / "monitors.yaml",
                 paths.agent_yaml_path(project_path),
             ]
             for config_path in project_sources:
@@ -122,8 +122,8 @@ class MonitorRegistry:
 
     @staticmethod
     def add_project(monitor: Monitor, project_path: Path) -> None:
-        """Append or replace a monitor in .bobi/monitors.yaml."""
-        monitors_path = paths.bobi_dir(project_path) / "monitors.yaml"
+        """Append or replace a monitor in run/package/monitors.yaml."""
+        monitors_path = paths.package_dir(project_path) / "monitors.yaml"
         monitors_path.parent.mkdir(parents=True, exist_ok=True)
         records = _read_records(monitors_path)
         records = [r for r in records if r.get("name") != monitor.name]
@@ -164,7 +164,7 @@ class MonitorRegistry:
         it instead), or "not-found".
         """
         if project_path is not None:
-            monitors_path = paths.bobi_dir(project_path) / "monitors.yaml"
+            monitors_path = paths.package_dir(project_path) / "monitors.yaml"
             records = _read_records(monitors_path)
             kept = [r for r in records if r.get("name") != name]
             if len(kept) == len(records):

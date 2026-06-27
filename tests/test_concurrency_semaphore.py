@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from bobi import paths
 from bobi.sdk import SessionEntry
 from bobi.concurrency_semaphore import (
     DEFAULT_CAP,
@@ -179,7 +180,7 @@ class TestEmitAlert:
 
 class TestConfigIntegration:
     def test_max_concurrent_parsed_from_yaml(self, tmp_path):
-        config_dir = tmp_path / ".bobi"
+        config_dir = paths.package_dir(tmp_path)
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text(
             "entry_point: x\nmax_concurrent_agents: 4\n")
@@ -188,7 +189,7 @@ class TestConfigIntegration:
         assert cfg.max_concurrent_agents == 4
 
     def test_max_concurrent_defaults_to_zero(self, tmp_path):
-        config_dir = tmp_path / ".bobi"
+        config_dir = paths.package_dir(tmp_path)
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text("entry_point: x\n")
         from bobi.config import Config
@@ -201,9 +202,12 @@ class TestLaunchAgentConcurrency:
 
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
-        (tmp_path / ".bobi").mkdir(parents=True, exist_ok=True)
-        (tmp_path / ".bobi" / "agent.yaml").write_text("entry_point: x\n")
+        paths.bind_root(None)
+        paths.package_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.agent_yaml_path(tmp_path).write_text("entry_point: x\n")
+        paths.bind_root(tmp_path)
+        yield
+        paths.bind_root(None)
 
     @patch("bobi.subagent.check_requires", return_value=[])
     @patch("bobi.subagent.get_registry")
@@ -260,7 +264,7 @@ class TestLaunchAgentConcurrency:
     ):
         """A custom cap from agent.yaml should be used."""
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
-        (tmp_path / ".bobi" / "agent.yaml").write_text(
+        paths.agent_yaml_path(tmp_path).write_text(
             "entry_point: x\nmax_concurrent_agents: 5\n")
         from bobi.subagent import launch_agent
         # cap=5, count=3 → should be allowed (check_concurrency returns True)

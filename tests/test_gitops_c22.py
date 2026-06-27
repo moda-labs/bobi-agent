@@ -124,7 +124,7 @@ def test_entrypoint_waits_for_team_when_blank():
     pushed team instead of crashing (enables ssh-push)."""
     entry = (REPO / "docker" / "docker-entrypoint.sh").read_text()
     assert "waiting for" in entry.lower()
-    assert ".bobi/agent.yaml" in entry
+    assert "run/package/agent.yaml" in entry
     # It must NOT fatal on the no-team branch any more.
     assert "nothing to install" not in entry
 
@@ -379,7 +379,7 @@ def test_release_canary_is_built_from_the_wheel_and_smoked():
     # canary-smoke.sh (cold-boot-robust), invoked from the workflow.
     assert "scripts/canary-smoke.sh" in script
     smoke = CANARY_SMOKE_SH.read_text()
-    assert "bobi ask" in smoke and "CANARY-OK" in smoke
+    assert 'bobi agent \\"\\$BOBI_INSTANCE\\" ask' in smoke and "CANARY-OK" in smoke
     assert "aborting release" in smoke
     # round-trips live config + resolves the built image digest (reused by roll-fleet)
     assert "config save" in script and "-c " in script and " -o " not in script

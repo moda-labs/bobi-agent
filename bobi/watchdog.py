@@ -211,7 +211,12 @@ class Supervisor:
     # --- defaults (real process / real HTTP) -----------------------------
 
     def _default_spawn(self):
-        cmd = [sys.executable, "-m", "bobi.cli", "start", *self.start_args]
+        root = (self.project_root or paths.bobi_root()).resolve()
+        cmd = [
+            sys.executable, "-m", "bobi.cli",
+            "agent", paths.agent_name_for_root(root), "start",
+            *self.start_args,
+        ]
         log.info("watchdog: spawning manager child: %s", " ".join(cmd))
         return subprocess.Popen(cmd)
 

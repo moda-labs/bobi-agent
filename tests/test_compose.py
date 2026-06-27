@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from bobi import compose, registry
+from bobi import compose, paths, registry
 
 
 # --- fixtures ----------------------------------------------------------------
@@ -47,7 +47,8 @@ def _team(root: Path, name: str, agent_yaml: str, *, agent_md: str | None = None
 
 
 @pytest.fixture
-def project(tmp_path: Path) -> Path:
+def project(tmp_path: Path, monkeypatch) -> Path:
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     (tmp_path / "agents").mkdir(parents=True)
     return tmp_path
 
@@ -188,7 +189,7 @@ def test_pinned_lock_pins_latest_ref(project, monkeypatch):
 
 def _compose(project, leaf, dest=None):
     chain = compose.resolve_chain(leaf, project)
-    dest = dest or (project / ".bobi")
+    dest = dest or paths.package_dir(project)
     prov = compose.compose(chain, dest)
     return dest, prov
 
@@ -332,7 +333,7 @@ def test_prune_nothing_warns(project):
     leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
                  'prune:\n  tools: [does-not-exist]\n')
     chain = compose.resolve_chain(leaf, project)
-    prov = compose.compose(chain, project / ".bobi")
+    prov = compose.compose(chain, paths.package_dir(project))
     assert any("does-not-exist" in w for w in prov.warnings)
 
 
@@ -544,7 +545,7 @@ def test_eng_team_core_installs_standalone(tmp_path):
     shutil.copytree(ENG_TEAM_CORE, proj / "agents" / "eng-team")
     chain = compose.resolve_chain(proj / "agents" / "eng-team", proj)
     assert [l.dir.name for l in chain] == ["eng-team"]
-    dest = proj / ".bobi"
+    dest = paths.package_dir(proj)
     compose.compose(chain, dest)
     cfg = yaml.safe_load((dest / "agent.yaml").read_text())
     assert {s["name"] for s in cfg["services"]} == {"github", "slack"}  # no linear
@@ -573,7 +574,7 @@ def test_synthetic_outside_org_overlay_composes(tmp_path):
     _write(acme / "tools" / "jira.md", "jira guide")
     chain = compose.resolve_chain(acme, proj)
     assert [l.dir.name for l in chain] == ["eng-team", "acme-eng-team"]
-    dest = proj / ".bobi"
+    dest = paths.package_dir(proj)
     compose.compose(chain, dest)
     cfg = yaml.safe_load((dest / "agent.yaml").read_text())
     # core services + the overlay's jira; core's generic build accreted the linter.
@@ -601,7 +602,7 @@ def test_reinstall_drops_stale_surface_files(tmp_path, monkeypatch):
                  tools={"a.md": "A", "b.md": "B"})
     monkeypatch.chdir(proj)
     _install_pack(team, proj, local_source=True)
-    dest = proj / ".bobi"
+    dest = paths.package_dir(proj)
     assert {p.name for p in (dest / "tools").iterdir()} == {"a.md", "b.md"}
     # Drop b.md from the source and reinstall — the frozen b.md must go.
     (team / "tools" / "b.md").unlink()
@@ -620,7 +621,7 @@ def test_reinstall_keeps_uncontributed_project_dirs(tmp_path, monkeypatch):
     monkeypatch.chdir(proj)
     _install_pack(team, proj, local_source=True)
     # A project adds its own workflow after install.
-    proj_wf = proj / ".bobi" / "workflows"
+    proj_wf = paths.package_dir(proj) / "workflows"
     proj_wf.mkdir(parents=True, exist_ok=True)
     (proj_wf / "adhoc.yaml").write_text("name: adhoc\nsteps: []\n")
     _install_pack(team, proj, local_source=True)  # reinstall
@@ -640,6 +641,7 @@ def test_install_versioned_from_team_fetches_base_from_registry(tmp_path, monkey
     composes its base from the registry (the base isn't a local sibling)."""
     from bobi.cli import _install_pack
 
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     proj = tmp_path
     (proj / "agents").mkdir()
 
@@ -677,7 +679,7 @@ def test_install_versioned_from_team_fetches_base_from_registry(tmp_path, monkey
     monkeypatch.chdir(proj)
     _install_pack(over, proj, local_source=False)
 
-    dest = proj / ".bobi"
+    dest = paths.package_dir(proj)
     cfg = yaml.safe_load((dest / "agent.yaml").read_text())
     # Composed from the registry-fetched base + the overlay leaf.
     assert {s["name"] for s in cfg["services"]} == {"github", "linear"}

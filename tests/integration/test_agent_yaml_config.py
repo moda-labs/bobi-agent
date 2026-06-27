@@ -18,7 +18,7 @@ class TestAgentYamlConfig:
 
     def test_loads_unified_agent_yaml(self, tmp_path):
         """agent.yaml with entry_point + services + credentials is loaded correctly."""
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             version: "1.0.0"
@@ -54,7 +54,7 @@ class TestAgentYamlConfig:
         monkeypatch.setenv("INTEG_SLACK_TOKEN", "xoxb-from-env-123")
         monkeypatch.setenv("INTEG_VENN_KEY", "venn_env_456")
 
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: manager
@@ -83,7 +83,7 @@ class TestAgentYamlConfig:
 
     def test_venn_services_vs_native(self, tmp_path):
         """Services with registered adapters are native; the rest need Venn."""
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: director
@@ -108,7 +108,7 @@ class TestAgentYamlConfig:
 
     def test_monitors_in_agent_yaml(self, tmp_path):
         """Monitor definitions in agent.yaml are parsed correctly."""
-        config_dir = tmp_path / ".bobi"
+        config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
             entry_point: manager

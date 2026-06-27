@@ -57,6 +57,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -510,7 +511,10 @@ def _rlimit_preexec():  # pragma: no cover - exercised in a child process
     _set(resource.RLIMIT_AS, _RLIMIT_AS)
     _set(resource.RLIMIT_CPU, _RLIMIT_CPU)
     _set(resource.RLIMIT_CORE, 0)
-    if hasattr(resource, "RLIMIT_NPROC"):
+    # On Darwin RLIMIT_NPROC is effectively per-user, so lowering it in the
+    # child can prevent ordinary scripts from forking when the developer already
+    # has many processes. Keep the fork-bomb cap on Linux/container runtimes.
+    if hasattr(resource, "RLIMIT_NPROC") and sys.platform != "darwin":
         _set(resource.RLIMIT_NPROC, _RLIMIT_NPROC)
 
 
@@ -644,7 +648,7 @@ def _install_policy() -> dict:
         from bobi import paths
         import yaml
         root = paths.bound_root() or paths.bobi_root()
-        cfg = paths.bobi_dir(root) / "agent.yaml"
+        cfg = paths.agent_yaml_path(root)
         if not cfg.is_file():
             return {}
         raw = yaml.safe_load(cfg.read_text()) or {}

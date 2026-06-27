@@ -1,6 +1,6 @@
 """Knowledge base storage — SQLite + FTS5 + sqlite-vec per named KB.
 
-Each KB is a separate database at <project_root>/.bobi/kb/<name>.db.
+Each KB is a separate database at <run>/state/kb/<name>.db.
 Uses APSW for SQLite extension loading (sqlite-vec).
 The store accepts an optional embed_fn for vector operations, making it
 independently testable without the embedding sidecar.
@@ -28,7 +28,7 @@ MIN_CHUNK_CHARS = 100
 
 def _kb_dir() -> Path:
     from bobi import paths
-    return paths.bobi_dir() / "kb"
+    return paths.state_dir() / "kb"
 
 
 def _now() -> str:

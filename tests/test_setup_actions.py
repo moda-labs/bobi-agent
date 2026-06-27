@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from bobi import paths
 from bobi.setup import actions
 from bobi.setup.actions import ActionError
 from bobi.setup.state import SetupState, source_tree_hash
@@ -37,13 +38,14 @@ def _write_minimal_pack(pack_dir: Path, entry="manager", with_adhoc=True):
 
 
 @pytest.fixture
-def project(tmp_path):
+def project(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path))
     return tmp_path
 
 
 @pytest.fixture
 def build_state():
-    state = SetupState(team_name="my-team")
+    state = SetupState(team_name="my-team", source_dir="agents/my-team")
     state.spec.goal = "Triage incoming GitHub issues and assign owners."
     return state
 
@@ -280,8 +282,8 @@ class TestInstallTeam:
         payload = actions.install_team(build_state, project)
         assert payload["installed"] == "my-team"
         assert "SLACK_BOT_TOKEN" in payload["missing_credentials"]
-        assert (project / ".bobi" / "agent.yaml").exists()
-        assert (project / ".bobi" / "install-manifest.json").exists()
+        assert paths.agent_yaml_path(project).exists()
+        assert paths.install_manifest_path(project).exists()
         assert build_state.installed is True
         assert SetupState.load(project).installed is True
 

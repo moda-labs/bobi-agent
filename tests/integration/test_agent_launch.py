@@ -26,7 +26,7 @@ class TestAdhocAgentLaunch:
 
         start = time.monotonic()
         result = cli_run(
-            "agents", "launch",
+            "subagents", "launch",
             "-w", "adhoc", "--role", "engineer",
 
             "--task", "Say hello #101",
@@ -42,7 +42,7 @@ class TestAdhocAgentLaunch:
         clean_session("wf-adhoc-test-repo-102")
 
         result = cli_run(
-            "agents", "launch",
+            "subagents", "launch",
             "-w", "adhoc", "--role", "engineer", "--id", "102",
             "--task", "Say 'hello world' and exit. Issue #102",
             timeout=10,
@@ -57,7 +57,7 @@ class TestAdhocAgentLaunch:
             state_path = session_dir / "state.json"
             if state_path.exists():
                 state = json.loads(state_path.read_text())
-                if state.get("status") == "done":
+                if state.get("status") == "completed":
                     completed = True
                     break
             time.sleep(2)
@@ -71,7 +71,7 @@ class TestAdhocAgentLaunch:
         clean_session("wf-adhoc-test-repo-103")
 
         cli_run(
-            "agents", "launch",
+            "subagents", "launch",
             "-w", "adhoc", "--role", "engineer", "--id", "103",
             "--task", "Reply with DONE. Issue #103",
             timeout=10,
@@ -84,12 +84,12 @@ class TestAdhocAgentLaunch:
             state_path = session_dir / "state.json"
             if state_path.exists():
                 state = json.loads(state_path.read_text())
-                if state.get("status") == "done":
+                if state.get("status") == "completed":
                     break
             time.sleep(2)
 
         state = json.loads((session_dir / "state.json").read_text())
-        assert state["status"] == "done"
+        assert state["status"] == "completed"
         assert state["pid"] == 0
         assert state["role"] == "engineer"
 
@@ -106,7 +106,7 @@ class TestMultiStepWorkflowLaunch:
 
         start = time.monotonic()
         result = cli_run(
-            "agents", "launch",
+            "subagents", "launch",
             "-w", "two-step", "--role", "engineer",
 
             "--task", "Run test workflow #201",

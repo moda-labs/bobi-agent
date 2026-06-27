@@ -47,33 +47,33 @@ posted normally (no `--edit`).
 ### Launch agents
 
 ```bash
-bobi agents launch -w <workflow> --role <role> --task "context"
-bobi agents launch -w adhoc --role engineer --wait --task "Investigate X"
+bobi agent <agent> subagents launch -w <workflow> --role <role> --task "context"
+bobi agent <agent> subagents launch -w adhoc --role engineer --wait --task "Investigate X"
 ```
 
 ### Communicate with other agents
 
 ```bash
-bobi ask "your question"       # blocks until a response
-bobi message "status update"   # fire-and-forget
+bobi agent <agent> ask "your question"       # blocks until a response
+bobi agent <agent> message "status update"   # fire-and-forget
 ```
 
-Use `bobi ask` for decisions you're unsure about. Use `bobi message`
+Use `bobi agent <agent> ask` for decisions you're unsure about. Use `bobi agent <agent> message`
 for progress updates and FYIs.
 
 ### Conversation history
 
 ```bash
-bobi transcript search "rate limiting"
-bobi transcript sessions --limit 10
-bobi transcript inspect <session-id-prefix>
+bobi agent <agent> transcript search "rate limiting"
+bobi agent <agent> transcript sessions --limit 10
+bobi agent <agent> transcript inspect <session-id-prefix>
 ```
 
 ### Workflows and roles
 
 ```bash
-bobi workflows list    # see available workflows
-bobi roles list        # see available agent roles
+bobi agent <agent> workflows list    # see available workflows
+bobi agent <agent> roles list        # see available agent roles
 ```
 
 ### Call other models
@@ -127,7 +127,7 @@ re-arguing things the team already knows.
 
 **You do not write it.** It is maintained out-of-band by the `policy-curator`
 monitor, which distills the team's transcripts into `policy.md` on a schedule —
-the single writer. Do not edit `.bobi/state/policy.md` yourself; a working
+the single writer. Do not edit `<run>/state/policy.md` yourself; a working
 agent under load is the worst possible curator.
 
 ### How knowledge becomes durable

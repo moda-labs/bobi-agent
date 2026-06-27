@@ -28,11 +28,12 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     W = 16  # column width for labels
     lines = []
     lines.append(f"bobi v{__version__}")
-    lines.append(f"  {'project':<{W}}{project_path.name} ({project_path})")
+    agent_name = paths.agent_name_for_root(project_path)
+    lines.append(f"  {'slot':<{W}}{agent_name} ({project_path})")
     lines.append(f"  {'pid':<{W}}{pid}")
 
     if cfg.agent:
-        lines.append(f"  {'agent':<{W}}{cfg.agent}")
+        lines.append(f"  {'package':<{W}}{cfg.agent}")
 
     if cfg.event_server_url:
         label = "remote" if not cfg.event_server_url.startswith("http://localhost") else "local"
@@ -67,15 +68,17 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
 
 
 def _detect_project_root(cwd: Path | None = None) -> Path:
-    """Resolve and bind the installation root for this CLI invocation.
+    """Resolve and bind an already-selected runtime root.
 
-    Commands must work identically from anywhere inside the installation
-    tree, so this goes through the one root resolver (the agent.yaml
-    walk-up) and binds what it finds. No installation → raises; commands
-    that need a root fail loudly rather than inventing one.
+    This only honors inherited ``BOBI_ROOT`` or an explicit runtime root. It
+    does not walk cwd; interactive runtime commands should be invoked through
+    ``bobi agent <name> ...`` so the agent group can bind identity once.
     """
+    bound = paths.bound_root()
+    if bound is not None:
+        return bound
     try:
-        root = paths.resolve_root(cwd or Path.cwd())
+        root = paths.resolve_root(cwd)
     except RuntimeError as e:
         raise click.UsageError(str(e))
     paths.bind_root(root)
@@ -95,13 +98,33 @@ def _ensure_root_bound() -> Path:
 
 
 def _try_detect_project_root() -> Path | None:
-    """Best-effort root detection — returns ``None`` instead of raising
-    when no installation is found.  Used by discovery commands that can
-    degrade gracefully (e.g. ``agents browse``, ``workflows list``)."""
+    """Best-effort runtime binding from inherited BOBI_ROOT only."""
     try:
         return _detect_project_root()
     except click.UsageError:
         return None
+
+
+def _bind_agent_runtime(name: str) -> Path:
+    try:
+        root = paths.resolve_root_for_agent(name)
+    except RuntimeError as e:
+        raise click.UsageError(str(e))
+    paths.bind_root(root)
+    _attach_runtime_log(root)
+    return root
+
+
+def _attach_runtime_log(root: Path) -> None:
+    state = _project_state_dir(root)
+    log_path = state / "manager.log"
+    logger = logging.getLogger()
+    if not any(
+        isinstance(h, logging.FileHandler)
+        and getattr(h, "baseFilename", "") == str(log_path)
+        for h in logger.handlers
+    ):
+        logger.addHandler(logging.FileHandler(log_path))
 
 
 
@@ -116,16 +139,18 @@ def main():
         datefmt="%H:%M:%S",
         handlers=[logging.StreamHandler()],
     )
-    # Best-effort at the group level: subcommands like `install` must run
-    # in directories with no installation yet. Commands that need a root
-    # resolve it themselves and raise when there is none.
-    try:
-        project = _detect_project_root()
-    except click.UsageError:
-        return
-    click.echo(f"Running from {project}")
-    state = _project_state_dir(project)
-    logging.getLogger().addHandler(logging.FileHandler(state / "manager.log"))
+    # Top-level commands are machine/repo scoped. Runtime identity is bound by
+    # `bobi agent <name> ...` or inherited BOBI_ROOT in child processes.
+    return
+
+
+@main.group()
+@click.argument("name")
+@click.pass_context
+def agent(ctx, name):
+    """Operate on one installed Bobi Agent runtime."""
+    root = _bind_agent_runtime(name)
+    ctx.obj = {"agent": name, "root": root}
 
 
 def _has_systemd_service() -> bool:
@@ -157,18 +182,17 @@ def _systemctl(action: str) -> bool:
 
 
 def _resolve_agent_pack(name: str, project_path: Path) -> Path | None:
-    """Find an agent team.
-
-    Resolution:
-      1. <project>/agents/{name}
-      2. <project>/.bobi/agents/{name}
-    """
+    """Find a Bobi Agent source/package by name."""
+    source = paths.agent_source_dir(name)
+    if (source / "agent.yaml").is_file():
+        return source
+    cached = paths.agent_cache_dir() / name
+    if (cached / "agent.yaml").is_file():
+        return cached
+    # Repo/deploy authoring still supports local checked-in agent packages.
     visible = project_path / "agents" / name
-    if visible.is_dir():
+    if (visible / "agent.yaml").is_file():
         return visible
-    hidden = paths.agents_dir(project_path) / name
-    if hidden.is_dir():
-        return hidden
     return None
 
 
@@ -176,12 +200,13 @@ def _list_agent_packs(project_path: Path) -> list[tuple[str, str]]:
     """List available agent teams with their source."""
     packs: dict[str, str] = {}
     for agents_dir, label in [
-        (paths.agents_dir(project_path), "cached"),
+        (paths.agent_cache_dir(), "cached"),
+        (paths.agents_root(), "installed"),
         (project_path / "agents", "local"),
     ]:
         if agents_dir.is_dir():
             for d in sorted(agents_dir.iterdir()):
-                if d.is_dir():
+                if (d / "agent.yaml").is_file() or (d / "src" / "agent.yaml").is_file():
                     packs[d.name] = label
     return [(name, source) for name, source in sorted(packs.items())]
 
@@ -219,8 +244,7 @@ def _run_from_config(project_path: Path, cfg: "Config",
     # receives monitor findings regardless of adapter configuration. Current
     # event servers route a posted finding onto both the bare type and the
     # source-qualified "monitor/<type>" topic; monitor_subscription_keys
-    # subscribes to both forms so older deployed servers (bare type only,
-    # pre-#235 contract) still deliver.
+    # subscribes to both forms.
     from bobi.events.subscriptions import monitor_subscription_keys
     from bobi.monitors.registry import MonitorRegistry
     monitor_events = [
@@ -274,7 +298,7 @@ def _run_from_config(project_path: Path, cfg: "Config",
     # mode for liveness probes, useful in daemon mode for doctor checks) ---
     from bobi import manager_health
     health_port = manager_health.start(
-        state_dir, project_path.name,
+        state_dir, paths.agent_name_for_root(project_path),
         manager_session=_manager_session_name(project_path, role),
     )
     log.info("Manager health endpoint on port %d", health_port)
@@ -282,7 +306,7 @@ def _run_from_config(project_path: Path, cfg: "Config",
     # --- Agent UI (opt-in via BOBI_UI) — a daemon-thread web dashboard
     # for chatting with the live team. Binds the Fly 6PN address so an operator
     # reaches it with `fly proxy`; never started unless explicitly enabled, so
-    # plain local `bobi start` opens no extra port. ---
+    # a plain local start opens no extra port. ---
     if os.environ.get("BOBI_UI"):
         try:
             from bobi.agentui import server as agentui_server
@@ -292,7 +316,8 @@ def _run_from_config(project_path: Path, cfg: "Config",
         except Exception as e:  # never let the UI take down the manager
             log.warning("Agent UI failed to start: %s", e)
 
-    log.info(f"Bobi starting for {project_path.name} (role={role})")
+    log.info("Bobi starting for %s (role=%s)",
+             paths.agent_name_for_root(project_path), role)
 
     has_monitors = (
         paths.monitors_dir(project_path).is_dir()
@@ -329,7 +354,7 @@ def _run_from_config(project_path: Path, cfg: "Config",
     except Exception:
         log.debug("Startup reconcile failed", exc_info=True)
 
-    log.info(f"Bobi running for {project_path.name}")
+    log.info("Bobi running for %s", paths.agent_name_for_root(project_path))
     # The manager Session subscribes to inbox/<self> (always-on) plus the
     # discovered external resource + monitor topics. One deployment, one cursor.
     spawn_adhoc(
@@ -348,22 +373,22 @@ def _run_from_config(project_path: Path, cfg: "Config",
 @click.option("--fresh", is_flag=True, help="Wipe session and start clean")
 @click.option("--subscribe", multiple=True, help="Additional subscriptions (e.g. linear:MOD)")
 def start(foreground, fresh, subscribe):
-    """Start a bobi agent.
+    """Start the selected Bobi Agent.
 
-    Reads the installed agent config from .bobi/agent.yaml. If no
-    agent is installed, run `bobi install <path>` first.
+    Reads the installed agent config from run/package/agent.yaml. If no
+    agent is installed, run `bobi agents install <path> --name <name>` first.
 
     Usage:
-        bobi start
-        bobi start --foreground
-        bobi start --subscribe linear:MOD
+        bobi agent eng start
+        bobi agent eng start --foreground
+        bobi agent eng start --subscribe linear:MOD
     """
     from bobi.config import Config
     project_path = _detect_project_root()
 
     cfg = Config.load(project_path)
     if not cfg.agent:
-        click.echo("No agent installed. Run `bobi install <path>` first.", err=True)
+        click.echo("No agent installed. Run `bobi agents install <path> --name <name>` first.", err=True)
         available = _list_agent_packs(project_path)
         if available:
             click.echo("Available packs to install:", err=True)
@@ -404,7 +429,7 @@ def start(foreground, fresh, subscribe):
         try:
             pid = int(pid_path.read_text().strip())
             os.kill(pid, 0)
-            click.echo(f"Already running (pid {pid}). Use `bobi restart`.")
+            click.echo(f"Already running (pid {pid}). Use `bobi agent {paths.agent_name_for_root(project_path)} restart`.")
             return
         except (ProcessLookupError, ValueError):
             pid_path.unlink(missing_ok=True)
@@ -420,7 +445,7 @@ def start(foreground, fresh, subscribe):
             anc_pid = 0
         click.echo(
             f"A manager is already running at {ancestor} (pid {anc_pid}). "
-            f"Sub-agents in {project_path.name} will register with that runtime. "
+            f"Sub-agents in {paths.agent_name_for_root(project_path)} will register with that runtime. "
             f"Stop the ancestor first if you need an independent instance here.",
             err=True,
         )
@@ -448,7 +473,10 @@ def start(foreground, fresh, subscribe):
         local_bin = str(Path.home() / ".local" / "bin")
         env["PATH"] = f"{venv_bin}:{local_bin}:{env.get('PATH', '')}"
         env["PYTHONUNBUFFERED"] = "1"
-        cmd = [sys.executable, "-m", "bobi.cli", "start", "--foreground"]
+        cmd = [
+            sys.executable, "-m", "bobi.cli",
+            "agent", paths.agent_name_for_root(project_path), "start", "--foreground",
+        ]
         if fresh:
             cmd.append("--fresh")
         for s in subscribe:
@@ -467,16 +495,16 @@ def start(foreground, fresh, subscribe):
 def supervise(start_args):
     """Run the manager under the self-heal watchdog (#464).
 
-    Spawns `bobi start <args>` as a child, polls the manager health
+    Spawns `bobi agent <name> start <args>` as a child, polls the manager health
     endpoint, and restarts a wedged director with bounded retry, backoff, loud
     logging and fail-open safety — the one recovery layer below the director
     that `stall-recovery` (director→engineer) structurally cannot provide.
 
     Used as the container entrypoint:
 
-        bobi supervise -- --foreground
+        BOBI_ROOT=<run-root> bobi supervise -- --foreground
 
-    Everything after `--` is forwarded verbatim to `bobi start` (the
+    Everything after `--` is forwarded verbatim to the selected agent's start command (the
     `--foreground` flag is required so the manager stays a supervisable child
     and does not daemonize out from under the supervisor). Tunables are env
     vars (WATCHDOG_*); on restart-budget exhaustion the supervisor exits
@@ -494,7 +522,7 @@ def supervise(start_args):
                      if not isinstance(h, logging.FileHandler)]
 
     log = logging.getLogger(__name__)
-    log.info("watchdog: supervising `bobi start %s`", " ".join(args))
+    log.info("watchdog: supervising selected agent start %s", " ".join(args))
     supervisor = Supervisor(args, WatchdogConfig.from_env(),
                             project_root=project_path)
     raise SystemExit(supervisor.run())
@@ -502,12 +530,12 @@ def supervise(start_args):
 
 def _install_pack(pack_dir: Path, project_path: Path,
                   local_source: bool = True, *, pinned: bool = False) -> None:
-    """Compose the pack's `from:` chain into .bobi/ for runtime use.
+    """Compose the pack's `from:` chain into run/package/ for runtime use.
 
     The installed copy is a frozen runtime image: install regenerates it
     verbatim from the pack source every time, including agent.yaml.
-    Machine- and project-specific variance enters through ${VAR}
-    references resolved from .bobi/.env, never by editing the
+    Machine- and runtime-specific variance enters through ${VAR}
+    references resolved from run/.env, never by editing the
     installed copy.
 
     A team may declare `from: <base-team>`; compose then walks the chain
@@ -520,7 +548,7 @@ def _install_pack(pack_dir: Path, project_path: Path,
 
     from bobi import compose as _compose
 
-    dest = paths.bobi_dir(project_path)
+    dest = paths.package_dir(project_path)
     dest.mkdir(parents=True, exist_ok=True)
 
     locked = _read_compose_lock(dest) if pinned else None
@@ -530,8 +558,8 @@ def _install_pack(pack_dir: Path, project_path: Path,
     # Clear the previously frozen copy of each surface the composed chain
     # contributes, so a re-install drops stale files (e.g. a tool the new chain
     # no longer ships). A surface NO layer contributes is left untouched — the
-    # pre-compose install semantics — so project-added files (e.g. an extra
-    # `.bobi/workflows/*.yaml`) survive a reinstall of the same team.
+    # pre-compose install semantics — so package-added files (e.g. an extra
+    # `package/workflows/*.yaml`) survive a reinstall of the same team.
     contributed = {sub for layer in chain
                    for sub in ["roles", "tools", "workflows", "monitors", "context"]
                    if (layer.dir / sub).is_dir()}
@@ -603,7 +631,7 @@ def _write_compose_lock(dest: Path, chain, prov) -> None:
 
 
 def _seed_workspace(pack_dir: Path, project_path: Path) -> None:
-    """Seed <project>/workspace/ from the pack's workspace/ templates.
+    """Seed <run>/workspace/ from the pack's workspace/ templates.
 
     Workspace files are user-owned domain content (context the user fills
     in, directories agents write into). Unlike the frozen image, each file
@@ -614,7 +642,7 @@ def _seed_workspace(pack_dir: Path, project_path: Path) -> None:
     src = pack_dir / "workspace"
     if not src.is_dir():
         return
-    dest = project_path / "workspace"
+    dest = paths.workspace_dir(project_path)
     for f in sorted(src.rglob("*")):
         rel = f.relative_to(src)
         target = dest / rel
@@ -630,7 +658,7 @@ def _write_install_manifest(dest: Path, pack_dir: Path,
     """Record a hash of every installed file so doctor can flag drift.
 
     Edits to a frozen image are lost on the next install; the manifest
-    lets `bobi doctor` warn before that happens.
+    lets `bobi agent <name> doctor` warn before that happens.
     """
     import hashlib
     import json as _json
@@ -657,7 +685,7 @@ def _write_install_manifest(dest: Path, pack_dir: Path,
 
 
 def _write_install_gitignore(project_path: Path, local_source: bool) -> None:
-    """Write .bobi/.gitignore based on which install path was taken.
+    """Write package/.gitignore based on which install path was taken.
 
     Runtime state is always ignored. When the team source lives in the
     repo (local source of truth), the installed copies are build artifacts
@@ -665,12 +693,11 @@ def _write_install_gitignore(project_path: Path, local_source: bool) -> None:
     of truth, so it stays check-in-able. Install owns this file and
     rewrites it each run so switching paths doesn't leave stale entries.
     """
-    entries = [".env", ".gitignore", "sessions/", "state/", "agents/",
-               "install-manifest.json", "compose-lock.json"]
+    entries = [".gitignore", "install-manifest.json", "compose-lock.json"]
     if local_source:
         entries += ["roles/", "tools/", "workflows/", "monitors/", "context/",
                     "agent.md", "agent.yaml"]
-    gitignore = paths.bobi_dir(project_path) / ".gitignore"
+    gitignore = paths.package_dir(project_path) / ".gitignore"
     gitignore.write_text("\n".join(entries) + "\n")
 
 
@@ -709,6 +736,8 @@ def login_bootstrap(channel, timeout):
 
 @main.command()
 @click.argument("pack")
+@click.option("--name", "slot_name", default=None,
+              help="Installed Bobi Agent slot name (defaults to package name).")
 @click.option("--non-interactive", is_flag=True,
               help="Skip prompts; read secrets from the environment. "
                    "Suitable for container entrypoints and CI.")
@@ -716,8 +745,8 @@ def login_bootstrap(channel, timeout):
               help="Resolve any `from:` base teams registry-only at locked "
                    "versions (ignore local sibling checkouts). For "
                    "reproducible CI/deploy installs.")
-def install(pack, non_interactive, pinned):
-    """Install an agent team into the current project.
+def install(pack, slot_name, non_interactive, pinned):
+    """Install a Bobi Agent into the machine-wide Bobi home.
 
     PACK is a local directory path, a local `.tar.gz` archive, a public
     `.tar.gz` URL, or a name to fetch from a remote registry.
@@ -729,17 +758,14 @@ def install(pack, non_interactive, pinned):
       4. Remote registry lookup by name
 
     Usage:
-        bobi install agents/eng-team
-        bobi install /path/to/my-agent
-        bobi install ./eng-team.tar.gz                     # local archive
-        bobi install https://example.com/eng-team.tar.gz   # public URL
-        bobi install eng-team              # fetches from registry
-        bobi install eng-team --non-interactive
+        bobi agents install agents/eng-team --name eng
+        bobi agents install /path/to/my-agent --name eng
+        bobi agents install ./eng-team.tar.gz --name eng
+        bobi agents install https://example.com/eng-team.tar.gz --name eng
+        bobi agents install eng-team --name eng
+        bobi agents install eng-team --name eng --non-interactive
     """
-    # install targets the current directory literally — never walk up to
-    # an enclosing project, or nesting a new project inside an existing
-    # one would silently install into the parent.
-    project_path = Path.cwd().resolve()
+    project_path = paths.home_dir()
 
     pack_str = str(pack)
     if pack_str.startswith(("http://", "https://")):
@@ -788,14 +814,15 @@ def install(pack, non_interactive, pinned):
             click.echo(f"Failed to fetch '{pack}': {e}", err=True)
             raise SystemExit(1)
 
-    # Local source of truth: the team source lives in the repo (outside
-    # .bobi/), so the installed copies are gitignored build artifacts.
-    # Downloaded/external: the installed copy is the source of truth.
-    dot_moda = paths.bobi_dir(project_path)
-    local_source = (
-        pack_dir.is_relative_to(project_path)
-        and not pack_dir.is_relative_to(dot_moda)
-    )
+    agent_name = slot_name or pack_dir.name
+    project_path = paths.agent_run_root(agent_name)
+    project_path.mkdir(parents=True, exist_ok=True)
+    paths.package_dir(project_path).mkdir(parents=True, exist_ok=True)
+    paths.workspace_dir(project_path).mkdir(parents=True, exist_ok=True)
+
+    # Local source of truth: the team source is user-authored and the installed
+    # package is a generated build artifact.
+    local_source = not pack_dir.is_relative_to(paths.agent_cache_dir())
 
     try:
         _install_pack(pack_dir, project_path, local_source, pinned=pinned)
@@ -807,10 +834,9 @@ def install(pack, non_interactive, pinned):
         raise
     _write_install_gitignore(project_path, local_source)
 
-    agent_name = pack_dir.name
-    click.echo(f"Installed '{agent_name}' into .bobi/")
+    click.echo(f"Installed Bobi Agent '{agent_name}' into {project_path}")
 
-    installed = paths.bobi_dir(project_path)
+    installed = paths.package_dir(project_path)
     parts = []
     for subdir in ["roles", "tools", "workflows", "monitors", "context"]:
         d = installed / subdir
@@ -823,12 +849,12 @@ def install(pack, non_interactive, pinned):
     if parts:
         click.echo("\n".join(parts))
 
-    # Collect required env vars and write .bobi/.env
+    # Collect required env vars and write run/.env
     from bobi.config import (find_required_env_vars, parse_env_file,
                                   write_env_file)
     env_vars = find_required_env_vars(project_path)
     if env_vars:
-        env_file = installed / ".env"
+        env_file = paths.env_path(project_path)
         existing = parse_env_file(env_file)
 
         click.echo()
@@ -851,7 +877,7 @@ def install(pack, non_interactive, pinned):
                     "Error: required secrets missing from the environment: "
                     + ", ".join(required_missing)
                     + ". Set them (e.g. `fly secrets set`) and re-run "
-                    "`bobi install --non-interactive`.",
+                    "`bobi agents install --non-interactive`.",
                     err=True)
                 raise SystemExit(1)
             if optional_missing:
@@ -870,18 +896,18 @@ def install(pack, non_interactive, pinned):
                     existing[var] = value
 
             write_env_file(env_file, existing)
-            click.echo(f"Credentials saved to .bobi/.env")
+            click.echo(f"Credentials saved to {env_file}")
 
     if local_source:
         try:
             src_display = pack_dir.relative_to(project_path)
         except ValueError:
             src_display = pack_dir
-        click.echo(f"\nSource of truth: {src_display}/ — edit there and reinstall to change the team.")
+        click.echo(f"\nSource of truth: {src_display}/ — edit there and reinstall to change the Bobi Agent.")
     else:
-        click.echo("\nSource of truth: .bobi/ — edit in place and check in to customize.")
+        click.echo(f"\nSource of truth: {pack_dir}/")
 
-    click.echo(f"Run `bobi start` to launch.")
+    click.echo(f"Run `bobi agent {agent_name} start` to launch.")
 
 
 @main.command()
@@ -1060,10 +1086,11 @@ def destroy(name, fleet, yes):
 
 
 @main.command()
+@click.argument("name", required=False)
 @click.option("--model", default=None,
               help="Model for the setup session (alias or full ID).")
 @click.option("--resume", is_flag=True, help="Resume an interrupted setup.")
-def setup(model, resume):
+def setup(name, model, resume):
     """Interactively design, build, and install an agent team.
 
     Opens a local web UI (on 127.0.0.1) that goes from an idea to a
@@ -1072,10 +1099,10 @@ def setup(model, resume):
     review and install. Interrupt anytime — `--resume` picks up where you
     left off.
     """
-    # Like install, setup targets the current directory literally — it
-    # CREATES the installation root, so it never walks up to an
-    # enclosing project.
-    project_path = Path.cwd().resolve()
+    agent_name = name or "new-agent"
+    project_path = paths.agent_run_root(agent_name)
+    project_path.mkdir(parents=True, exist_ok=True)
+    paths.workspace_dir(project_path).mkdir(parents=True, exist_ok=True)
 
     # Setup is often the very first command a new user runs — fail with
     # a pointed message instead of a spawn error deep in the SDK.
@@ -1084,7 +1111,7 @@ def setup(model, resume):
     if not _shutil.which("claude") and not Path(get_cli_path()).exists():
         raise click.UsageError(
             "the Claude Code CLI is required for setup — install it first "
-            "(https://claude.com/claude-code), then re-run `bobi setup`.")
+            "(https://claude.com/claude-code), then re-run `bobi agents setup`.")
 
     if not resume:
         from bobi.setup.state import SetupState
@@ -1094,14 +1121,17 @@ def setup(model, resume):
         if in_progress and not in_progress.finished:
             click.confirm(
                 f"An interrupted setup exists (stage: {in_progress.stage.value}) "
-                "— resume it with `bobi setup --resume`. Start over and "
-                "discard it?", abort=True)
+                "— resume it with `bobi agents setup --resume`. Start over "
+                "and discard it?", abort=True)
 
         name = installed_team_name(project_path)
         if name:
             click.confirm(
                 f"'{name}' is already installed here — setup can replace it. "
                 "Continue?", abort=True)
+        if not in_progress and agent_name:
+            state = SetupState(team_name=agent_name)
+            state.save(project_path)
 
     from bobi.setup import run_setup
     raise SystemExit(run_setup(project_path, model=model, resume=resume))
@@ -1122,9 +1152,9 @@ def ui(name, app, local_port, remote_port, no_browser, check):
     """View and chat with an agent team's agents in a web UI.
 
     \b
-    Local team:   bobi ui
-    Deployed:     bobi ui <deployment>      # tunnels in via `fly proxy`
-                  bobi ui --app moda-eng-team
+    Local agent:  bobi agent eng ui
+    Deployed:     bobi agent eng ui <deployment>      # tunnels in via `fly proxy`
+                  bobi agent eng ui --app my-bobi-eng
 
     Local mode serves a card per active agent on 127.0.0.1 and talks to the
     running team over the event server (so the team must already be started).
@@ -1139,7 +1169,7 @@ def ui(name, app, local_port, remote_port, no_browser, check):
             remote_port=remote_port, open_browser=not no_browser, check=check))
 
     # Local mode: bind the registry + event-server root so the cross-process
-    # `deliver` behind the chat reaches the same team `bobi start` runs.
+    # `deliver` behind the chat reaches the same team start command runs.
     project_path = _detect_project_root()
     from bobi.sdk import set_project_root
     set_project_root(project_path)
@@ -1160,7 +1190,7 @@ def _manager_session_name(project_path: Path, role: str | None = None) -> str:
             role = Config.load(project_path).entry_point or "manager"
         except Exception:
             role = "manager"
-    return f"moda-{role}-{project_path.name}"
+    return f"bobi-{paths.agent_name_for_root(project_path)}-{role}"
 
 
 def _clear_manager_session(project_path: Path) -> None:
@@ -1183,7 +1213,7 @@ def _clear_manager_session(project_path: Path) -> None:
 
 
 def _find_pid_path() -> Path | None:
-    """Find the PID file for the current project's manager."""
+    """Find the PID file for the selected Bobi Agent's manager."""
     project_path = _detect_project_root()
     if project_path:
         p = _project_state_dir(project_path) / "manager.pid"
@@ -1228,7 +1258,7 @@ def _stop_manager_pid(pid_path: Path, force: bool) -> None:
             return
 
     if not force:
-        click.echo("Process didn't exit — try: bobi stop --force")
+        click.echo("Process didn't exit — try: bobi agent <name> stop --force")
     else:
         pid_path.unlink(missing_ok=True)
         click.echo("Killed.")
@@ -1237,11 +1267,11 @@ def _stop_manager_pid(pid_path: Path, force: bool) -> None:
 @main.command()
 @click.option("--force", is_flag=True, help="Send SIGKILL if SIGTERM doesn't work")
 def stop(force):
-    """Stop the bobi instance for the current project.
+    """Stop the selected Bobi Agent.
 
     Usage:
-        bobi stop
-        bobi stop --force
+        bobi agent eng stop
+        bobi agent eng stop --force
     """
     if _has_systemd_service() and not force:
         click.echo("Stopping via systemd...")
@@ -1261,17 +1291,17 @@ def stop(force):
     # Check if the local event server is still running
     from bobi.events.server import health
     if health("http://localhost:8080"):
-        click.echo("Event server is still running. Use `bobi event-server stop` to stop it.")
+        click.echo("Event server is still running. Use `bobi agent <name> event-server stop` to stop it.")
 
 
 @main.command()
 @click.option("--fresh", is_flag=True, help="Wipe manager session and start clean")
 def restart(fresh):
-    """Stop and restart bobi.
+    """Stop and restart the selected Bobi Agent.
 
     Usage:
-        bobi restart
-        bobi restart --fresh   # fresh manager session
+        bobi agent eng restart
+        bobi agent eng restart --fresh   # fresh manager session
     """
     if _has_systemd_service():
         # Resolve before touching systemd so a missing installation fails
@@ -1299,7 +1329,7 @@ def _resolve_address(to: str | None) -> str | None:
     """Resolve a friendly address to a session name.
 
     'manager' or None → finds the coordinator session by the installed
-    pack's entry_point role (falling back to the literal role "manager").
+    package's entry_point role, then the literal role "manager".
     Anything else → used as-is (exact session name).
     """
     from bobi.sdk import get_registry, set_project_root
@@ -1336,9 +1366,9 @@ def message(text, to, wait, timeout):
     """Send a message to any session via its inbox.
 
     Usage:
-        bobi message "what are you working on?"
-        bobi message --to eng-42-implement "try a different approach"
-        bobi message --to manager "status?" --wait
+        bobi agent eng message "what are you working on?"
+        bobi agent eng message --to eng-42-implement "try a different approach"
+        bobi agent eng message --to manager "status?" --wait
     """
     from bobi.inbox import deliver
 
@@ -1371,8 +1401,8 @@ def compact(to):
     moment (it won't interrupt an in-flight turn).
 
     Usage:
-        bobi compact                       # compact the manager
-        bobi compact --to eng-42-implement # compact a specific session
+        bobi agent eng compact                       # compact the manager
+        bobi agent eng compact --to eng-42-implement # compact a specific session
     """
     from bobi.inbox import deliver
     from bobi.session import COMPACT_SENTINEL
@@ -1601,8 +1631,8 @@ def create_slack_bot(app_name, event_server, fmt, output, show_url, open_browser
 
     if not event_server:
         # Resolve from the project config when run inside an install; this
-        # command also works before `bobi install`, so a missing root is
-        # fine — fall back to the bobi cloud below.
+        # command also works before any Bobi Agent is installed, so a missing
+        # root is fine; use the bobi cloud below when no runtime is selected.
         try:
             project_path = _detect_project_root()
         except click.UsageError:
@@ -1655,10 +1685,10 @@ def transcript_show(session, lines, follow):
     """Show the transcript for a session.
 
     Usage:
-        bobi transcript show manager        # manager transcript
-        bobi transcript show eng-70         # engineer transcript
-        bobi transcript show manager -n 50  # last 50 messages
-        bobi transcript show manager -f     # follow mode
+        bobi agent eng transcript show manager        # manager transcript
+        bobi agent eng transcript show eng-70         # engineer transcript
+        bobi agent eng transcript show manager -n 50  # last 50 messages
+        bobi agent eng transcript show manager -f     # follow mode
     """
     transcript_path = _find_transcript(session)
     if not transcript_path:
@@ -1695,7 +1725,7 @@ def _find_transcript(session: str) -> Path | None:
 
     if session == "manager":
         project = _detect_project_root()
-        session = _manager_session_name(project) if project else "moda-manager"
+        session = _manager_session_name(project) if project else "bobi-manager"
 
     # Primary: session dir log
     session_log = SessionRegistry.log_path(session)
@@ -1726,7 +1756,7 @@ def _find_transcript(session: str) -> Path | None:
         [d for d in sessions.iterdir() if d.is_dir() and (d / "state.json").exists()],
         key=lambda d: d.stat().st_mtime, reverse=True,
     )
-    recent_names = [d.name for d in recent_dirs[:10] if not d.name.startswith("moda-mgr")]
+    recent_names = [d.name for d in recent_dirs[:10] if not d.name.startswith("bobi-mgr")]
     if recent_names:
         click.echo(f"Recent: {', '.join(recent_names)}")
     return None
@@ -1818,7 +1848,7 @@ def status():
             pass
 
     if not project_path:
-        click.echo("Not in a bobi-configured project. Run `bobi start` to set one up.")
+        click.echo("No Bobi Agent runtime selected. Use `bobi agents list`, then `bobi agent <name> status`.")
         raise SystemExit(1)
 
     if running:
@@ -1849,9 +1879,9 @@ def doctor(browser, fix):
     Exit 0 if all pass, 1 if any fail.
 
     Usage:
-        bobi doctor
-        bobi doctor --browser
-        bobi doctor --browser --fix
+        bobi agent eng doctor
+        bobi agent eng doctor --browser
+        bobi agent eng doctor --browser --fix
     """
     from .doctor import run_doctor
     from bobi.validate import status_glyph, supports_unicode
@@ -1862,12 +1892,12 @@ def doctor(browser, fix):
     unicode = supports_unicode()
     warn_mark = status_glyph(False, False, unicode=unicode)
 
-    # doctor is advisory and must run anywhere — but never silently: a
-    # green report outside an installation would be a lie.
+    # doctor is advisory and must never silently pass without a selected
+    # runtime: a green report outside an installation would be a lie.
     if paths.bound_root() is None:
-        click.echo(click.style(f"{warn_mark} No Bobi installation found at "
-                               "or above this directory — project-level checks "
-                               "will report 'no project detected'.", fg="yellow"))
+        click.echo(click.style(f"{warn_mark} No Bobi Agent runtime selected — "
+                               "agent-scoped checks will report 'no project "
+                               "detected'.", fg="yellow"))
 
     results = run_doctor()
 
@@ -1909,7 +1939,7 @@ def doctor(browser, fix):
         click.echo()
         _offer_sandbox_fix(browser_mod)
     elif sandbox_failure:
-        click.echo("\nRe-run with `bobi doctor --browser --fix` to apply the sandbox fix.")
+        click.echo("\nRe-run with `bobi agent <name> doctor --browser --fix` to apply the sandbox fix.")
 
     raise SystemExit(1)
 
@@ -1917,7 +1947,7 @@ def doctor(browser, fix):
 def _offer_sandbox_fix(browser_mod) -> None:
     """Explain the Chromium sandbox issue and interactively apply the fix.
 
-    Used by `bobi doctor --fix`. Asks for confirmation before running
+    Used by `bobi agent <name> doctor --fix`. Asks for confirmation before running
     the sudo sysctl change.
     """
     click.echo("Chromium's sandbox is blocked by the AppArmor restriction on")
@@ -1954,27 +1984,38 @@ def _offer_sandbox_fix(browser_mod) -> None:
 
 @main.group()
 def agents():
-    """Agent management — launch, list, inspect, and cancel agents."""
+    """Installed Bobi Agent management."""
     pass
 
 
 @agents.command("list")
 def agents_list():
-    """List active agents from the on-disk registry.
+    """List installed Bobi Agents."""
+    installed = paths.list_agents()
+    if not installed:
+        click.echo("No Bobi Agents installed.")
+        return
+    for name in installed:
+        root = paths.agent_run_root(name)
+        state = "running" if paths.manager_pid_path(root).exists() else "stopped"
+        click.echo(f"  {name:24s} {state:8s} {root}")
 
-    All agents register in the installation root's .bobi/sessions/ —
-    their spawner passes the root down, so one registry covers agents
-    working in any repo checkout.
 
-    Usage:
-        bobi agents list
-    """
+@agent.group("subagents")
+def subagents():
+    """Launch, list, inspect, and cancel sub-agents."""
+    pass
+
+
+@subagents.command("list")
+def subagents_list():
+    """List active sub-agents from the selected Bobi Agent runtime."""
     _ensure_root_bound()
     from bobi.subagent import list_agents as _list_agents
 
     active = _list_agents()
     if not active:
-        click.echo("No active agents.")
+        click.echo("No active sub-agents.")
         return
 
     for a in active:
@@ -1983,21 +2024,17 @@ def agents_list():
         click.echo(f"  {label} — {state} ({a['elapsed_s']}s)")
 
 
-@agents.command("show")
+@subagents.command("show")
 @click.argument("ref")
-def agents_show(ref):
-    """Show details for a specific agent.
-
-    Usage:
-        bobi agents show AGD-12
-    """
+def subagents_show(ref):
+    """Show details for a specific sub-agent."""
     _ensure_root_bound()
     import time as _time
     from bobi.subagent import find_agent
 
     entry = find_agent(ref)
     if not entry:
-        click.echo(f"No agent found for {ref}")
+        click.echo(f"No sub-agent found for {ref}")
         return
 
     click.echo(f"  Session: {entry.name}")
@@ -2015,21 +2052,17 @@ def agents_show(ref):
         click.echo(f"  Task:    {entry.title}")
 
 
-@agents.command("cancel")
+@subagents.command("cancel")
 @click.argument("ref")
-def agents_cancel(ref):
-    """Cancel a running agent.
-
-    Usage:
-        bobi agents cancel AGD-12
-    """
+def subagents_cancel(ref):
+    """Cancel a running sub-agent."""
     _ensure_root_bound()
     from bobi.subagent import cancel_agent
 
     if cancel_agent(ref):
         click.echo(f"Cancelled {ref}")
     else:
-        click.echo(f"No running agent for {ref}")
+        click.echo(f"No running sub-agent for {ref}")
 
 
 
@@ -2150,8 +2183,8 @@ def transcript_index(project):
     messages into a local SQLite database for fast searching.
 
     Usage:
-        bobi transcript index                # index all projects
-        bobi transcript index --project foo  # index only projects matching "foo"
+        bobi agent eng transcript index                # index all projects
+        bobi agent eng transcript index --project foo  # index only projects matching "foo"
     """
     from .history import index as do_index
     click.echo("Indexing conversations...")
@@ -2168,17 +2201,17 @@ def transcript_index(project):
 def transcript_search(query, limit, project):
     """Full-text search across indexed conversation history.
 
-    Searches message content using SQLite FTS. Requires `bobi transcript index`
-    to have been run first.
+    Searches message content using SQLite FTS. Requires
+    `bobi agent <name> transcript index` to have been run first.
 
     Usage:
-        bobi transcript search "error handling"
-        bobi transcript search "deploy" --project bobi --limit 5
+        bobi agent eng transcript search "error handling"
+        bobi agent eng transcript search "deploy" --project bobi --limit 5
     """
     from .history import search as do_search
     results = do_search(query, limit=limit, project=project)
     if not results:
-        click.echo("No results. Run `bobi transcript index` first.")
+        click.echo("No results. Run `bobi agent <name> transcript index` first.")
         return
     for r in results:
         branch = r.get("git_branch") or ""
@@ -2200,13 +2233,13 @@ def transcript_sessions(limit, project):
     each indexed conversation.
 
     Usage:
-        bobi transcript sessions
-        bobi transcript sessions --limit 5 --project bobi
+        bobi agent eng transcript sessions
+        bobi agent eng transcript sessions --limit 5 --project bobi
     """
     from .history import conversations
     convos = conversations(limit=limit, project=project)
     if not convos:
-        click.echo("No conversations indexed. Run `bobi transcript index` first.")
+        click.echo("No conversations indexed. Run `bobi agent <name> transcript index` first.")
         return
     for c in convos:
         branch = c.get("git_branch") or ""
@@ -2220,11 +2253,11 @@ def transcript_inspect(session_id, limit):
     """Show messages from an indexed session.
 
     Accepts a full or partial session ID (prefix match). Use
-    `bobi transcript sessions` to find session IDs.
+    `bobi agent <name> transcript sessions` to find session IDs.
 
     Usage:
-        bobi transcript inspect abc12345
-        bobi transcript inspect abc12345 --limit 10
+        bobi agent eng transcript inspect abc12345
+        bobi agent eng transcript inspect abc12345 --limit 10
     """
     from .history import session_messages, conversations
     convos = conversations(limit=1000)
@@ -2252,7 +2285,7 @@ def workflow_list():
     """List available workflow definitions from the installed pack.
 
     Usage:
-        bobi workflows list
+        bobi agent eng workflows list
     """
     from .workflow.triggers import WorkflowDispatcher
 
@@ -2271,7 +2304,7 @@ def workflow_status():
     current step, and start time.
 
     Usage:
-        bobi workflows status
+        bobi agent eng workflows status
     """
     _ensure_root_bound()
     from .workflow.state import WorkflowRun
@@ -2300,7 +2333,7 @@ def workflow_resume(run_id, timeout):
     Picks up from the step after the await that suspended it.
 
     Usage:
-        bobi workflows resume abc123
+        bobi agent eng workflows resume abc123
     """
     _ensure_root_bound()
     from .workflow.state import WorkflowRun
@@ -2343,8 +2376,8 @@ def workflow_validate(path):
     and prints the topological execution order if valid.
 
     Usage:
-        bobi workflows validate workflows/deploy.yaml
-        bobi workflows validate myrepo/.bobi/workflows/deploy.yaml
+        bobi agent eng workflows validate workflows/deploy.yaml
+        bobi agent eng workflows validate package/workflows/deploy.yaml
     """
     import re
     from .workflow.schema import load_workflow
@@ -2381,12 +2414,10 @@ def roles():
 def role_list():
     """List available agent roles.
 
-    Scans two tiers (repo overrides built-in):
-      1. Built-in: <bobi>/prompts/agents/
-      2. Repo-local: <repo>/.bobi/agents/
+    Scans the selected Bobi Agent's installed package.
 
     Usage:
-        bobi roles list
+        bobi agent eng roles list
     """
     from .prompts.resolver import discover_roles, format_role_list
 
@@ -2415,7 +2446,7 @@ def monitor_list():
     """Show the merged view of monitors across all tiers, with source.
 
     Usage:
-        bobi monitors list
+        bobi agent eng monitors list
     """
     from .monitors.registry import MonitorRegistry
 
@@ -2472,14 +2503,14 @@ def _script_cache_summary(monitor) -> str:
 @click.option("--check", default="", help="Native check runner (pr_conflicts, stale_prs)")
 @click.option("--url", default=None, help="URL the description references (e.g. deploy health)")
 def monitor_add(name, interval, at_times, tz, days, notify, description, event, check, url):
-    """Add a monitor to the current project.
+    """Add a monitor to the selected Bobi Agent.
 
     Usage:
-        bobi monitors add "PR conflict check" --interval 15m \\
+        bobi agent eng monitors add "PR conflict check" --interval 15m \\
             --description "Check open PRs for merge conflicts"
-        bobi monitors add deploy-health --interval 5m \\
+        bobi agent eng monitors add deploy-health --interval 5m \\
             --url https://example.com
-        bobi monitors add weekly-prep-doc \\
+        bobi agent eng monitors add weekly-prep-doc \\
             --at 21:00 --days sun --tz America/Los_Angeles --notify \\
             --event monitor/prep.weekly_due \\
             --description "Generate my prep doc for the upcoming week"
@@ -2491,7 +2522,7 @@ def monitor_add(name, interval, at_times, tz, days, notify, description, event, 
 
     project_path = _detect_project_root()
     if not project_path:
-        click.echo("Not inside a bobi project.", err=True)
+        click.echo("No Bobi Agent runtime selected.", err=True)
         raise SystemExit(1)
 
     at_list = list(at_times)
@@ -2530,7 +2561,7 @@ def monitor_add(name, interval, at_times, tz, days, notify, description, event, 
     )
 
     MonitorRegistry.add_project(m, project_path)
-    click.echo(f"Added monitor '{slug}' to {project_path}/.bobi/monitors.yaml")
+    click.echo(f"Added monitor '{slug}' to {paths.package_dir(project_path) / 'monitors.yaml'}")
     if at_list:
         schedule = f"at={','.join(at_list)}"
         if day_list:
@@ -2549,13 +2580,13 @@ def monitor_pause(name):
     """Disable a monitor (writes enabled: false).
 
     Usage:
-        bobi monitors pause stale-pr-check
+        bobi agent eng monitors pause stale-pr-check
     """
     from .monitors.registry import MonitorRegistry
 
     project_path = _detect_project_root()
     if MonitorRegistry.pause(name, project_path):
-        where = f"{project_path}/.bobi/monitors.yaml" if project_path else ".bobi/monitors.yaml"
+        where = str(paths.package_dir(project_path) / "monitors.yaml") if project_path else "package/monitors.yaml"
         click.echo(f"Paused monitor '{name}' (enabled: false in {where})")
     else:
         click.echo(f"No monitor named '{name}' found.", err=True)
@@ -2565,12 +2596,12 @@ def monitor_pause(name):
 @monitors.command("remove")
 @click.argument("name")
 def monitor_remove(name):
-    """Remove a monitor from the current project.
+    """Remove a monitor from the selected Bobi Agent.
 
     Built-in defaults can't be deleted — pause them instead.
 
     Usage:
-        bobi monitors remove deploy-health
+        bobi agent eng monitors remove deploy-health
     """
     from .monitors.registry import MonitorRegistry
 
@@ -2580,7 +2611,7 @@ def monitor_remove(name):
         click.echo(f"Removed monitor '{name}'.")
     elif result == "default-only":
         click.echo(f"'{name}' is a built-in default and can't be removed. "
-                   f"Use `bobi monitors pause {name}` to disable it.", err=True)
+                   f"Use `bobi agent <agent> monitors pause {name}` to disable it.", err=True)
         raise SystemExit(1)
     else:
         click.echo(f"No monitor named '{name}' found in a writable tier.", err=True)
@@ -2603,7 +2634,7 @@ def monitor_recache(name):
     """Invalidate a script_cache monitor's cached script (forces regeneration).
 
     Usage:
-        bobi monitors recache unread-emails
+        bobi agent eng monitors recache unread-emails
     """
     from .monitors.script_cache_checks import recache
 
@@ -2625,7 +2656,7 @@ def monitor_approve_script(name):
     """Promote a script_cache monitor's pending script to active (review mode).
 
     Usage:
-        bobi monitors approve-script unread-emails
+        bobi agent eng monitors approve-script unread-emails
     """
     from .monitors.script_cache_checks import approve_pending
 
@@ -2736,9 +2767,9 @@ def event_server_status():
 main.add_command(event_server_cmd)
 
 
-@agents.command("launch")
+@subagents.command("launch")
 @click.option("--workflow", "-w", required=True, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
-@click.option("--role", required=True, help="Agent role (see 'bobi roles list')")
+@click.option("--role", required=True, help="Agent role (see 'bobi agent <name> roles list')")
 @click.option("--id", "run_key", default=None, help="Explicit run key for correlation (e.g. issue number)")
 @click.option("--task", default=None, help="Task description / context for the agent")
 @click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
@@ -2753,17 +2784,15 @@ main.add_command(event_server_cmd)
               help="Keep the agent alive after initial task, accepting inbox messages")
 @click.option("--subscribe", multiple=True,
               help="Subscribe to event topics (e.g. moda-labs/bobi-agent, slack:T123)")
-def agents_launch(workflow, role, run_key, task, timeout, wait, post_event, requested_by, non_interactive, persistent, subscribe):
-    """Launch an agent with a workflow and role.
+def subagents_launch(workflow, role, run_key, task, timeout, wait, post_event, requested_by, non_interactive, persistent, subscribe):
+    """Launch a sub-agent with a workflow and role.
 
-    Every agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
-    Use 'bobi roles list' to see available roles.
+    Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
+    Use 'bobi agent <name> roles list' to see available roles.
 
     Examples:
-        bobi agents launch -w issue-lifecycle --role engineer --id 42 --task "Fix moda-labs/bobi-agent#42"
-        bobi agents launch -w adhoc --role engineer --task "Why is CI failing?"
-        bobi agents launch -w adhoc --role engineer --task "Be a team lead" --persistent
-        bobi agents launch -w adhoc --role manager --subscribe moda-labs/bobi-agent --persistent
+        bobi agent eng subagents launch -w issue-lifecycle --role engineer --id 42 --task "Fix moda-labs/bobi-agent#42"
+        bobi agent eng subagents launch -w adhoc --role engineer --task "Why is CI failing?"
     """
     if subscribe:
         persistent = True
@@ -2883,10 +2912,7 @@ def agents_update(name):
     from bobi.registry import (fetch, list_cached, check_update,
                                     split_team_ref, _read_local_version)
 
-    project_path = _detect_project_root()
-    if not project_path:
-        click.echo("No project detected. Run from a project directory.", err=True)
-        raise SystemExit(1)
+    project_path = paths.home_dir()
 
     if name:
         pkg_name, version = split_team_ref(name)  # D-6: split on the last `@`
@@ -2941,16 +2967,10 @@ def agents_add_registry(repo):
     Usage:
         bobi agents add-registry myorg/my-agents
     """
-    from bobi.config import _project_config_path, _load_yaml
     import yaml as _yaml
 
-    project_path = _detect_project_root()
-    if not project_path:
-        click.echo("No project detected. Run from a project directory.", err=True)
-        raise SystemExit(1)
-
-    config_path = _project_config_path(project_path)
-    raw = _load_yaml(config_path) if config_path.exists() else {}
+    config_path = paths.ensure_global_config()
+    raw = _yaml.safe_load(config_path.read_text()) or {}
     registries = raw.get("registries", [])
 
     if repo in registries:
@@ -2972,16 +2992,10 @@ def agents_remove_registry(repo):
     Usage:
         bobi agents remove-registry myorg/my-agents
     """
-    from bobi.config import _project_config_path, _load_yaml
     import yaml as _yaml
 
-    project_path = _detect_project_root()
-    if not project_path:
-        click.echo("No project detected. Run from a project directory.", err=True)
-        raise SystemExit(1)
-
-    config_path = _project_config_path(project_path)
-    raw = _load_yaml(config_path) if config_path.exists() else {}
+    config_path = paths.ensure_global_config()
+    raw = _yaml.safe_load(config_path.read_text()) or {}
     registries = raw.get("registries", [])
 
     if repo not in registries:
@@ -3006,7 +3020,7 @@ def agents_browse():
     """
     from bobi.registry import list_remote, list_cached, DEFAULT_REPO
 
-    project_path = _try_detect_project_root()
+    project_path = paths.home_dir()
     remote = list_remote(project_path)
     if not remote:
         click.echo("Could not fetch remote registry.", err=True)
@@ -3244,6 +3258,29 @@ def costs(group_by):
         return
 
     click.echo(format_costs(summary, group_by=group_by))
+
+
+for _cmd_name in [
+    "start", "stop", "restart", "status", "ui", "message", "ask", "compact",
+    "events", "costs", "doctor", "login-bootstrap",
+]:
+    if _cmd_name in main.commands:
+        agent.add_command(main.commands[_cmd_name])
+
+for _group_name in ["transcript", "workflows", "roles", "monitors", "kb", "event-server"]:
+    if _group_name in main.commands:
+        agent.add_command(main.commands[_group_name])
+
+for _cmd_name in ["install", "setup"]:
+    if _cmd_name in main.commands:
+        agents.add_command(main.commands[_cmd_name])
+
+for _old_top_level in [
+    "start", "stop", "restart", "status", "ui", "message", "ask", "compact",
+    "events", "costs", "doctor", "transcript", "workflows", "roles", "monitors", "kb",
+    "event-server", "login-bootstrap", "install", "setup",
+]:
+    main.commands.pop(_old_top_level, None)
 
 
 if __name__ == "__main__":

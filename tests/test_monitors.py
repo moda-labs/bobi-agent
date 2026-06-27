@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from bobi import paths
 from bobi.monitors.schema import Monitor, parse_at, parse_days, parse_interval
 from bobi.monitors import registry as registry_mod
 from bobi.monitors.registry import MonitorRegistry
@@ -160,7 +161,7 @@ def _write(path: Path, monitors: list[dict]):
 class TestRegistryMerge:
     def test_project_specific_monitor_scoped(self, tmp_path):
         project = tmp_path / "jobtack"
-        _write(project / ".bobi" / "monitors.yaml", [
+        _write(paths.package_dir(project) / "monitors.yaml", [
             {"name": "deploy-health", "interval": "5m", "url": "https://j"},
         ])
         reg = MonitorRegistry.load(project_path=project)
@@ -171,7 +172,7 @@ class TestRegistryMerge:
 
     def test_project_opt_out_of_default(self, tmp_path):
         project = tmp_path / "jobtack"
-        _write(project / ".bobi" / "monitors.yaml", [{"name": "stale-pr-check", "enabled": False}])
+        _write(paths.package_dir(project) / "monitors.yaml", [{"name": "stale-pr-check", "enabled": False}])
         reg = MonitorRegistry.load(project_path=project)
         stale = [m for m in reg.effective_monitors() if m.name == "stale-pr-check"]
         for s in stale:
@@ -179,7 +180,7 @@ class TestRegistryMerge:
 
     def test_project_override_of_default(self, tmp_path):
         project = tmp_path / "jobtack"
-        _write(project / ".bobi" / "monitors.yaml", [{"name": "pr-conflict-check", "interval": "5m"}])
+        _write(paths.package_dir(project) / "monitors.yaml", [{"name": "pr-conflict-check", "interval": "5m"}])
         reg = MonitorRegistry.load(project_path=project)
         glob = reg.globals.get("pr-conflict-check")
         if glob:
@@ -192,12 +193,12 @@ class TestRegistryMerge:
 
 class TestDefaultsPath:
     def test_returns_installed_path_only(self, tmp_path):
-        """_defaults_path must only return .bobi/monitors/defaults.yaml —
+        """_defaults_path must only return package/monitors/defaults.yaml —
         no framework fallback, no get_project_root fallback."""
         project = tmp_path / "proj"
         project.mkdir()
         result = registry_mod._defaults_path(project)
-        assert result == project / ".bobi" / "monitors" / "defaults.yaml"
+        assert result == paths.monitors_dir(project) / "defaults.yaml"
 
     def test_returns_none_without_project(self):
         """_defaults_path returns None when no project path is available."""
@@ -205,12 +206,12 @@ class TestDefaultsPath:
         # Without monkeypatching get_project_root, this may return None or a
         # real path — but it must never return a framework source path.
         if result is not None:
-            assert ".bobi" in str(result)
+            assert "package" in str(result)
 
     def test_loads_defaults_from_installed_pack(self, tmp_path):
-        """Registry loads defaults from .bobi/monitors/defaults.yaml."""
+        """Registry loads defaults from package/monitors/defaults.yaml."""
         project = tmp_path / "proj"
-        _write(project / ".bobi" / "monitors" / "defaults.yaml", [
+        _write(paths.monitors_dir(project) / "defaults.yaml", [
             {"name": "my-check", "interval": "10m", "check": "pr_conflicts"},
         ])
         reg = MonitorRegistry.load(project_path=project)
@@ -239,7 +240,7 @@ class TestInstallFrameworkCuratorDefault:
 
         _install_pack(pack, project)
 
-        defaults = project / ".bobi" / "monitors" / "defaults.yaml"
+        defaults = paths.monitors_dir(project) / "defaults.yaml"
         assert defaults.exists()
         raw = yaml.safe_load(defaults.read_text())
         names = [m["name"] for m in raw["monitors"]]
@@ -266,7 +267,7 @@ class TestInstallFrameworkCuratorDefault:
 
         _install_pack(pack, project)
 
-        defaults = project / ".bobi" / "monitors" / "defaults.yaml"
+        defaults = paths.monitors_dir(project) / "defaults.yaml"
         assert defaults.exists()
         raw = yaml.safe_load(defaults.read_text())
         names = [m["name"] for m in raw["monitors"]]
@@ -282,7 +283,7 @@ class TestRegistryWrites:
         repo = tmp_path / "r"
         repo.mkdir()
         MonitorRegistry.add_project(Monitor(name="dh", extra={"url": "u"}), repo)
-        monitors_path = repo / ".bobi" / "monitors.yaml"
+        monitors_path = paths.package_dir(repo) / "monitors.yaml"
         assert monitors_path.exists()
         raw = yaml.safe_load(monitors_path.read_text())
         assert raw["monitors"][0]["name"] == "dh"
@@ -714,14 +715,14 @@ class TestDefaultSpawnCheckEntryPoint:
 
         # Minimal project: entry_point set, no defaults.role
         project = tmp_path / "proj"
-        (project / ".bobi" / "state").mkdir(parents=True)
-        (project / ".bobi" / "agent.yaml").write_text(
+        paths.state_dir(project)
+        paths.package_dir(project).mkdir(parents=True)
+        paths.agent_yaml_path(project).write_text(
             "agent: test-pack\nentry_point: support_manager\n"
         )
 
         monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
-        from bobi import paths as paths_mod
-        monkeypatch.setattr(paths_mod, "_root", project)
+        paths.bind_root(project)
 
         captured_cmds = []
 
@@ -757,15 +758,15 @@ class TestDefaultSpawnCheckEntryPoint:
         import bobi.sdk as sdk_mod
 
         project = tmp_path / "proj"
-        (project / ".bobi" / "state").mkdir(parents=True)
-        (project / ".bobi" / "agent.yaml").write_text(
+        paths.state_dir(project)
+        paths.package_dir(project).mkdir(parents=True)
+        paths.agent_yaml_path(project).write_text(
             "agent: test-pack\nentry_point: monitor_role\n"
             "defaults:\n  role: adhoc_role\n"
         )
 
         monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
-        from bobi import paths as paths_mod
-        monkeypatch.setattr(paths_mod, "_root", project)
+        paths.bind_root(project)
 
         captured_cmds = []
 

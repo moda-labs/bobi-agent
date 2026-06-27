@@ -3,9 +3,10 @@
 Living overview of all open GitHub issues — what tracks they belong to, what's
 blocked vs. ready, and which one-offs are ready to hand to the `bobi` bot.
 
-**Keep this current.** When an issue is opened, closed, assigned, unblocked, or
-moves tracks, update it here in the same session. This file is the single place
-to get the lay of the land without re-reading every issue.
+**Keep this current and lightweight.** When an issue is opened, closed,
+assigned, unblocked, or moves tracks, update it here in the same session. This
+file is the single place to get the lay of the land without re-reading every
+issue, so prefer compact state summaries over ticket-level detail.
 
 - **Last reviewed:** 2026-06-26 (**17 open issues, 0 open PRs** — reconciled against live GitHub after the bobi rename PR merged. Active clusters: **Unified agent dashboard** (#525 design + #526/#527/#528/#529 prep), **runtime/fleet bugs** (#518/#520), **brain/runtime portability** (#485/#484/#481), **Tool library** (#515 with #428/#398 ready), **User accounts** (#239), **Containerization** (#395), **Chat SDK** (#190), and release protocol compatibility (#427). Since the prior review, #479/#489/#496/#498/#507/#513/#519/#521/#530 closed; #526-#529 remain dashboard-independent prep tickets.)
 - **Prev reviewed:** 2026-06-26 (**28 open issues** — filed the **Unified agent dashboard** track: design record **#525** (merge `bobi setup` + `bobi ui` into one dashboard → onboarding → monitor app) plus four **do-now prep carve-outs** that are good regardless of the dashboard and shrink the eventual merge PR: **#526** canonical `~/.bobi/agents/<team>/` directory layout, **#527** shared web-server harness, **#528** consolidated design tokens, **#529** service-core extraction (CLI + web as thin adapters). The frontend-framework decision (vanilla vs lightweight framework) gates the *merge*, not the prep. New track added to "Tracks at a glance".)
@@ -196,7 +197,7 @@ decision** (stay vanilla vs a lightweight component framework) — not yet ticke
 | Issue | Role | What | Depends on / Status |
 |---|---|---|---|
 | #525 | Design | Unified dashboard decision record: merge, MVP cut (Dashboard + Onboarding-with-launch-and-return + Agents-&-Chat), screen inventory, distribution strategy | 🟡 **OPEN — awaiting approval.** No impl until approved. |
-| #526 | Prep | Canonical `~/.bobi/{config.yaml,sources/,agents/<team>/{.bobi,workspace}}` layout; `--team` selector; sources configurable, runtime fixed; path-only global config | 🟢 **OPEN — do-now.** Independent. Restores `paths.py` single-chokepoint (consolidates the `~/bobi-agents` literal in `setup/webui/server.py`). |
+| #526 | Prep | Canonical `$BOBI_HOME/agents/<name>/{src,run/{package,state,workspace}}` layout; `BOBI_HOME` env-only override; `bobi agents` + `bobi agent <name>` CLI split; no fallback/backcompat path shims | 🟡 **IN PROGRESS — branch `feat/526-bobi-agent-runtime`.** Independent. Broad `paths.py`/CLI/runtime cutover. |
 | #527 | Prep | Shared local web-server harness (`webui_common`): bind/secret/host-guard/static-serving/browser-open + 6PN container mode; both servers adopt it | 🟢 **OPEN — do-now.** Independent; framework-agnostic (serves a static dir). Pairs with #528. |
 | #528 | Prep | Consolidate design-system tokens into one `tokens.css` from DESIGN.md (the two app.css have **drifted** — two ambers, two papers) | 🟢 **OPEN — do-now.** Pairs with #527. Survives any framework choice (CSS custom props). |
 | #529 | Prep | Service-core extraction: CLI + web as thin adapters over one engine; `launch_team()` the first brick (unblocks `/api/launch`) | 🟢 **OPEN — do-now.** Composes with #526. Pulls domain logic out of Click command bodies in `cli.py`. |
@@ -226,7 +227,7 @@ unresolved design decision, verifiable without infra/credentials the bot lacks.*
 |---|---|---|
 | #527 | Shared web-server harness (`webui_common`) | Bounded refactor; clear acceptance + unit tests in-issue. Pairs with #528. Verify both UIs launch unchanged. |
 | #528 | Consolidate design tokens → `tokens.css` | Bounded; pairs with #527 (shared static path). Reconcile drift to DESIGN.md values. |
-| #526 | Canonical `~/.bobi/` directory layout + `--team` | Bounded but touches `paths.py` (the path chokepoint) broadly; back-compat (cwd walk-up) is spelled out. Good first dashboard-prep brick. |
+| #526 | Bobi Agent runtime layout + scoped CLI | In progress on `feat/526-bobi-agent-runtime`; strict cutover, no cwd walk-up or backwards compatibility shims. |
 | #529 | Service-core extraction (`launch_team`, …) | Bounded; **acceptance wants an integration test driving a real session** (dogfood) for the launch path. |
 | #428 | Tool library `kind: skill` spoke | `status:todo`; implementation is scoped by the issue body and #515. |
 | #398 | Tool library `kind: mcp` spoke | `status:todo`; implementation is scoped by the issue body and #515. |

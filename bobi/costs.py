@@ -69,7 +69,7 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
     """Aggregate costs across all session state files.
 
     Args:
-        sessions_dir: Path to .bobi/sessions/
+        sessions_dir: Path to <run>/state/sessions/
         group_by: One of "provider", "model", "session", "role"
     """
     summary = CostSummary()

@@ -11,6 +11,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 import yaml
 
+from bobi import paths
 from bobi.events.subscriptions import discover_subscriptions
 from bobi.events.drain import drain_loop, DRAIN_INTERVAL
 from bobi.events.client import format_event_for_manager, event_queue
@@ -24,9 +25,8 @@ from bobi.events.client import format_event_for_manager, event_queue
 class TestBuildSubscriptions:
 
     def test_reads_agent_yaml(self, tmp_path):
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir()
-        (config_dir / "agent.yaml").write_text(
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(
             "subscribe:\n  - github:org/repo\n  - slack:T123\n  - linear:MOD\n"
         )
         subs = discover_subscriptions(tmp_path)
@@ -136,9 +136,8 @@ class TestCanonicalImports:
         assert callable(register)
 
     def test_discover_subscriptions_direct(self, tmp_path):
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir()
-        (config_dir / "agent.yaml").write_text("subscribe:\n  - slack:T999\n")
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text("subscribe:\n  - slack:T999\n")
 
         from bobi.events.subscriptions import discover_subscriptions
         subs = discover_subscriptions(tmp_path)
@@ -166,7 +165,7 @@ class TestPromptResolver:
 
     def test_resolve_agent_prompt_includes_project_override(self, bobi_install):
         mi = bobi_install
-        role_dir = mi.repo_path / ".bobi" / "roles" / "director"
+        role_dir = paths.roles_dir(mi.repo_path) / "director"
         role_dir.mkdir(parents=True, exist_ok=True)
         (role_dir / "ROLE.md").write_text("Custom policy: always review PRs.")
         from bobi.prompts.resolver import resolve_agent_prompt
@@ -214,9 +213,8 @@ class TestAgentConfig:
 
     def test_config_load_from_default_path(self, tmp_path):
         from bobi.config import Config
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir()
-        (config_dir / "agent.yaml").write_text(dedent("""
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(dedent("""
             agent: test-agent
             entry_point: manager
             services:
@@ -236,9 +234,8 @@ class TestAgentConfig:
 
     def test_config_load_empty_file(self, tmp_path):
         from bobi.config import Config
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir()
-        (config_dir / "agent.yaml").write_text("")
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text("")
         cfg = Config.load(tmp_path)
         assert cfg.agent == ""
 
@@ -249,24 +246,17 @@ class TestAgentConfig:
 
 
 class TestSubscribeFlag:
-    @pytest.fixture(autouse=True)
-    def bound_root(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("bobi.paths._root", tmp_path)
-
-
-    def test_subscribe_implies_persistent(self):
+    def test_subscribe_implies_persistent(self, bobi_install):
         from click.testing import CliRunner
         from bobi.cli import main
 
         with patch("bobi.subagent.launch_agent") as mock_launch, \
-             patch("bobi.cli._detect_project_root") as mock_root, \
              patch("bobi.prompts.resolver.validate_role", return_value=True):
-            mock_root.return_value = Path("/tmp/project")
             mock_launch.return_value = "test-session"
 
             runner = CliRunner()
             result = runner.invoke(main, [
-                "agents", "launch",
+                "agent", bobi_install.agent_name, "subagents", "launch",
                 "-w", "adhoc",
                 "--role", "manager",
                 "--task", "watch events",
@@ -278,19 +268,17 @@ class TestSubscribeFlag:
             assert call_kwargs["persistent"] is True
             assert "moda-labs/bobi" in call_kwargs["subscribe"]
 
-    def test_subscribe_multiple_topics(self):
+    def test_subscribe_multiple_topics(self, bobi_install):
         from click.testing import CliRunner
         from bobi.cli import main
 
         with patch("bobi.subagent.launch_agent") as mock_launch, \
-             patch("bobi.cli._detect_project_root") as mock_root, \
              patch("bobi.prompts.resolver.validate_role", return_value=True):
-            mock_root.return_value = Path("/tmp/project")
             mock_launch.return_value = "test-session"
 
             runner = CliRunner()
             result = runner.invoke(main, [
-                "agents", "launch",
+                "agent", bobi_install.agent_name, "subagents", "launch",
                 "-w", "adhoc",
                 "--role", "manager",
                 "--task", "watch",
@@ -302,7 +290,7 @@ class TestSubscribeFlag:
             call_kwargs = mock_launch.call_args[1]
             assert call_kwargs["subscribe"] == ["org/repo", "slack:T123"]
 
-    def test_launch_agent_passes_subscribe_to_args(self):
+    def test_launch_agent_passes_subscribe_to_args(self, bobi_install):
         from bobi.subagent import launch_agent
 
         with patch("bobi.subagent._launch_detached", return_value=12345) as mock_det, \
@@ -312,7 +300,7 @@ class TestSubscribeFlag:
 
             launch_agent(
                 task="test",
-                cwd="/tmp",
+                cwd=str(bobi_install.repo_path),
                 workflow_name="adhoc",
                 subscribe=["org/repo", "slack:T123"],
             )

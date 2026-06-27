@@ -39,7 +39,7 @@ def inbox_event_server(bobi_env):
     port = _free_port()
     url = f"http://localhost:{port}"
 
-    agent_yaml = bobi_env.project_path / ".bobi" / "agent.yaml"
+    agent_yaml = bobi_env.package_dir / "agent.yaml"
     original = agent_yaml.read_text()
     data = yaml.safe_load(original)
     data["event_server_url"] = url
@@ -260,7 +260,7 @@ def fast_eviction_event_server(bobi_env):
     port = _free_port()
     url = f"http://localhost:{port}"
 
-    agent_yaml = bobi_env.project_path / ".bobi" / "agent.yaml"
+    agent_yaml = bobi_env.package_dir / "agent.yaml"
     original = agent_yaml.read_text()
     data = yaml.safe_load(original)
     data["event_server_url"] = url

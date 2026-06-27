@@ -7,6 +7,7 @@ from queue import SimpleQueue
 
 from bobi.events.client import format_event_for_manager
 from bobi.inbox import register_local_inbox, unregister_local_inbox
+from bobi import paths
 
 
 class _CaptureInbox:
@@ -143,9 +144,8 @@ class TestDrainLoop:
 class TestBuildSubscriptions:
 
     def test_reads_from_agent_yaml(self, tmp_path):
-        config_dir = tmp_path / ".bobi"
-        config_dir.mkdir()
-        (config_dir / "agent.yaml").write_text(
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(
             "subscribe:\n  - github:org/repo\n  - slack:T123\n"
         )
         from bobi.events.subscriptions import discover_subscriptions

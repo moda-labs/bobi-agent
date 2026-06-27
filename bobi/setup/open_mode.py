@@ -48,8 +48,7 @@ def list_teams_in(scan_dir: Path) -> list[dict]:
     agent.yaml. The directory itself may be a team (the create default writes
     the team straight into its own folder) or a container of team folders, so
     both are checked. Paths are returned absolute, since a team source can live
-    anywhere the user points the scan at (the `~/bobi-agents` library by
-    default, a project repo, wherever). Best-effort — a missing or unreadable
+    anywhere the user points the scan at. Best-effort — a missing or unreadable
     directory simply yields nothing."""
     teams: list[dict] = []
     seen: set[str] = set()
@@ -75,12 +74,13 @@ def list_teams_in(scan_dir: Path) -> list[dict]:
     for d in children:                    # …or it may contain team folders
         if d.is_dir():
             _add(d)
+            _add(d / "src")               # canonical Bobi Agent slot shape
     return teams
 
 
 def _bundled_templates_dir() -> Path | None:
     """The repo's `agents/` dir, when running from a source checkout — a dev
-    convenience so `bobi setup` lists local teams without the registry.
+    convenience so `bobi agents setup` lists local teams without the registry.
 
     Agent teams are NOT bundled into the wheel (they're versioned registry
     packages, #440/#446), so a real install has no local templates dir and this

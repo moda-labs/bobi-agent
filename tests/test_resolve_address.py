@@ -13,16 +13,19 @@ from dataclasses import asdict
 
 import pytest
 
+from bobi import paths
 from bobi.sdk import SessionEntry, set_project_root
 
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    (tmp_path / ".bobi" / "sessions").mkdir(parents=True)
-    (tmp_path / ".bobi" / "agent.yaml").write_text(
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.sessions_dir(tmp_path)
+    paths.agent_yaml_path(tmp_path).write_text(
         "agent: market-research\nentry_point: research_manager\nservices: []\n"
     )
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(paths, "_root", None)
     set_project_root(tmp_path)
     import bobi.sdk as sdk
     sdk._registry = None
@@ -32,7 +35,7 @@ def project(tmp_path, monkeypatch):
 
 
 def _register(project, name, role):
-    session_dir = project / ".bobi" / "sessions" / name
+    session_dir = paths.sessions_dir(project) / name
     session_dir.mkdir(parents=True)
     entry = SessionEntry(
         name=name, session_id="sess-x", role=role, run_key="",
@@ -50,7 +53,7 @@ def test_resolves_entry_point_role(project):
 
 def test_literal_manager_role_still_resolves(project):
     from bobi.cli import _resolve_address
-    (project / ".bobi" / "agent.yaml").write_text(
+    paths.agent_yaml_path(project).write_text(
         "agent: eng\nentry_point: manager\nservices: []\n")
     _register(project, "moda-manager-proj", "manager")
     assert _resolve_address("manager") == "moda-manager-proj"

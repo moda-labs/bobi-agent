@@ -1,4 +1,4 @@
-"""`bobi ui <deployment>` — tunnel to a deployed team's in-container UI.
+"""`bobi agent <name> ui <deployment>` — tunnel to a deployed team's in-container UI.
 
 A Fly instance is dark (no public ingress); its agent UI binds the private 6PN
 address inside the container. This helper does, in one command, what an operator
@@ -11,6 +11,7 @@ token that rotated on the last restart just works.
 from __future__ import annotations
 
 import json
+import shlex
 import socket
 import subprocess
 import sys
@@ -19,7 +20,6 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-REMOTE_PROJECT = "/data/project"          # BOBI_PROJECT inside the container
 DEFAULT_REMOTE_PORT = 8080
 
 
@@ -41,22 +41,38 @@ def resolve_app(name: str | None, app: str | None,
     return load_deploy_config(project_path or Path.cwd(), name).app_name
 
 
-def _ssh_cat(app: str, remote_path: str) -> str:
-    """Read a file off the machine via `fly ssh console -C cat`. '' on failure."""
+def _ssh_bash(app: str, script: str) -> str:
+    """Run a small read-only shell script via `fly ssh console`. '' on failure."""
     proc = subprocess.run(
-        [_fly(), "ssh", "console", "-a", app, "-C", f"cat {remote_path}"],
+        [_fly(), "ssh", "console", "-a", app, "-C",
+         f"bash -lc {shlex.quote(script)}"],
         capture_output=True, text=True,
     )
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
-def fetch_token(app: str, remote_project: str = REMOTE_PROJECT) -> str:
-    return _ssh_cat(app, f"{remote_project}/.bobi/state/ui.token")
+def _remote_state_file(app: str, filename: str, *,
+                       agent: str | None = None) -> str:
+    agent_part = (
+        f"agent={shlex.quote(agent)}; "
+        if agent
+        else ': "${BOBI_INSTANCE:?BOBI_INSTANCE is required}"; agent="${BOBI_INSTANCE}"; '
+    )
+    script = (
+        agent_part
+        + f'home="${{BOBI_HOME:?BOBI_HOME is required}}"; '
+        + f'cat "$home/agents/$agent/run/state/{filename}"'
+    )
+    return _ssh_bash(app, script)
 
 
-def fetch_remote_port(app: str, remote_project: str = REMOTE_PROJECT,
+def fetch_token(app: str, *, agent: str | None = None) -> str:
+    return _remote_state_file(app, "ui.token", agent=agent)
+
+
+def fetch_remote_port(app: str, *, agent: str | None = None,
                       default: int = DEFAULT_REMOTE_PORT) -> int:
-    raw = _ssh_cat(app, f"{remote_project}/.bobi/state/ui.port")
+    raw = _remote_state_file(app, "ui.port", agent=agent)
     try:
         return int(raw)
     except (TypeError, ValueError):
@@ -106,8 +122,7 @@ def _check(local_port: int, token: str) -> int:
 
 def run(name: str | None = None, *, app: str | None = None,
         local_port: int | None = None, remote_port: int | None = None,
-        open_browser: bool = True, check: bool = False,
-        remote_project: str = REMOTE_PROJECT) -> int:
+        open_browser: bool = True, check: bool = False) -> int:
     """Resolve → fetch token/port → `fly proxy` → open browser (or, with
     ``check``, probe /api/agents once and exit)."""
     from bobi import deploy
@@ -118,8 +133,8 @@ def run(name: str | None = None, *, app: str | None = None,
               file=sys.stderr)
         return 1
 
-    rport = remote_port or fetch_remote_port(target, remote_project)
-    token = fetch_token(target, remote_project)
+    rport = remote_port or fetch_remote_port(target, agent=name)
+    token = fetch_token(target, agent=name)
     if not token:
         print(f"Couldn't read the UI token from '{target}'. The agent UI may not "
               "be enabled there — redeploy with BOBI_UI=1 (provisioned "

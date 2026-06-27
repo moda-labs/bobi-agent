@@ -1,12 +1,8 @@
-"""Per-project configuration from agent.yaml.
+"""Runtime configuration from a Bobi Agent package.
 
-All config is scoped to a project directory — no global ~/.bobi/.
-Service credentials, event server URLs, and registry lists live alongside
-the project they belong to.
-
-agent.yaml is the single config file for an agent team. It defines the
-agent's roles, services, monitors, and credentials. Secrets use ${ENV_VAR}
-references resolved from the environment at load time.
+Each selected Bobi Agent runtime has ``run/package/agent.yaml`` plus
+``run/.env``. Machine-wide ``<home>/config.yaml`` is deliberately limited to
+path/source defaults and is not parsed here.
 """
 
 import logging
@@ -49,15 +45,15 @@ def write_env_file(path: Path, values: dict[str, str]) -> None:
 
 
 def load_dotenv(project_path: Path) -> None:
-    """Load .bobi/.env into os.environ (existing vars take precedence)."""
+    """Load the selected runtime's .env into os.environ."""
     from bobi import paths
-    for key, value in parse_env_file(paths.bobi_dir(project_path) / ".env").items():
+    for key, value in parse_env_file(paths.env_path(project_path)).items():
         if key not in os.environ:
             os.environ[key] = value
 
 
 def find_required_env_vars(project_path: Path) -> list[str]:
-    """Scan .bobi/agent.yaml for ${VAR} references and return var names."""
+    """Scan package/agent.yaml for ${VAR} references and return var names."""
     from bobi import paths
     agent_yaml = paths.agent_yaml_path(project_path)
     if not agent_yaml.exists():
@@ -244,7 +240,7 @@ class Config:
 
     @classmethod
     def load(cls, project_path: Path) -> "Config":
-        """Load config from .bobi/agent.yaml, resolving .env first."""
+        """Load config from package/agent.yaml, resolving .env first."""
         load_dotenv(project_path)
         agent_yaml = _project_config_path(project_path)
         if not agent_yaml.exists():
@@ -474,5 +470,4 @@ def save_bubble_state(project_path: Path, bubble_id: str, bubble_key: str) -> No
 def clear_bubble_state(project_path: Path) -> None:
     """Drop the bubble credential — a subsequent start mints a fresh bubble."""
     bubble_state_path(project_path).unlink(missing_ok=True)
-
 

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import yaml
 
+from bobi import paths
 from bobi.cli import _install_pack
 from bobi.config import Config
 
@@ -59,7 +60,7 @@ class TestInstall:
 
     def test_install_succeeds(self, tmp_path):
         _install_pack(PACK_DIR, tmp_path)
-        installed = tmp_path / ".bobi" / "agent.yaml"
+        installed = paths.agent_yaml_path(tmp_path)
         assert installed.exists()
         cfg = yaml.safe_load(installed.read_text())
         assert cfg["agent"] == "dogfood-content-review"
@@ -67,20 +68,20 @@ class TestInstall:
 
     def test_install_copies_all_roles(self, tmp_path):
         _install_pack(PACK_DIR, tmp_path)
-        roles_dir = tmp_path / ".bobi" / "roles"
+        roles_dir = paths.roles_dir(tmp_path)
         for role in ["manager", "researcher", "editor", "fact_checker"]:
             assert (roles_dir / role / "ROLE.md").exists()
 
     def test_install_copies_workflows(self, tmp_path):
         _install_pack(PACK_DIR, tmp_path)
-        wf_dir = tmp_path / ".bobi" / "workflows"
+        wf_dir = paths.workflows_dir(tmp_path)
         assert (wf_dir / "content-lifecycle.yaml").exists()
         assert (wf_dir / "smoke-test.yaml").exists()
 
     def test_install_seeds_workspace(self, tmp_path):
         _install_pack(PACK_DIR, tmp_path)
-        assert (tmp_path / "workspace" / "guides" / "getting-started.md").exists()
-        assert (tmp_path / "workspace" / "runbooks" / "incident-response.md").exists()
+        assert (paths.workspace_dir(tmp_path) / "guides" / "getting-started.md").exists()
+        assert (paths.workspace_dir(tmp_path) / "runbooks" / "incident-response.md").exists()
 
     def test_config_loads_after_install(self, tmp_path):
         _install_pack(PACK_DIR, tmp_path)
@@ -165,7 +166,7 @@ class TestContentDirs:
 
     def test_content_dirs_exist_after_install(self, tmp_path):
         _install_pack(PACK_DIR, tmp_path)
-        cfg = yaml.safe_load((tmp_path / ".bobi" / "agent.yaml").read_text())
+        cfg = yaml.safe_load(paths.agent_yaml_path(tmp_path).read_text())
         dirs = cfg["context"]["content_dirs"]
         for d in dirs.split():
             assert (tmp_path / d).is_dir(), f"{d} should exist after install"

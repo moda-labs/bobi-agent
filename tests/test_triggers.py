@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from bobi import paths
 from bobi.workflow.triggers import WorkflowDispatcher
 from bobi.workflow.schema import Workflow, StepDef, load_workflow
 
@@ -198,7 +199,7 @@ class TestLoadFrom:
 
 
 class TestNoFrameworkFallback:
-    """Verify workflows resolve only from .bobi/, not from the framework package."""
+    """Verify workflows resolve only from the installed package, not framework files."""
 
     def test_no_bundled_workflow_yamls_in_package(self):
         """The bobi/workflow/ directory must not contain any YAML files.
@@ -222,8 +223,8 @@ class TestNoFrameworkFallback:
             dispatcher.load_all_workflows(project_path=None)
 
     def test_load_all_uses_only_installed_pack(self, tmp_path):
-        """Workflows load exclusively from .bobi/workflows/."""
-        wf_dir = tmp_path / ".bobi" / "workflows"
+        """Workflows load exclusively from run/package/workflows/."""
+        wf_dir = paths.workflows_dir(tmp_path)
         wf_dir.mkdir(parents=True)
         _make_workflow_yaml(wf_dir / "my-wf.yaml", "my-workflow",
                            "When something custom happens.")

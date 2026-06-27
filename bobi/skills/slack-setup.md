@@ -50,7 +50,8 @@ Plus `chat:write` (post replies), `files:read`/`files:write` (attachments), and
 
 > Slack verifies the event **Request URL** with a `url_verification` challenge
 > the moment you create or reinstall the app, so your event server must be
-> reachable then. For local dev, start it first: `bobi event-server start`.
+> reachable then. For local dev, start it first:
+> `bobi agent <name> event-server start`.
 
 ## 3. Add the token to bobi
 
@@ -136,7 +137,7 @@ workspace-b:
 
 | Problem | Fix |
 |---------|-----|
-| Slack rejects the Request URL on create | Event server unreachable — start it (`bobi event-server start`) and reinstall the app |
+| Slack rejects the Request URL on create | Event server unreachable — start it (`bobi agent <name> event-server start`) and reinstall the app |
 | Bot receives nothing | Event subscriptions disabled, or the bot isn't in the channel — reinstall from the manifest and `/invite` it |
 | Bot can't post to a channel | `/invite @your-bot` in that channel |
 | `not_authed` error | Token expired or wrong — reinstall and copy a fresh `xoxb-` token |

@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from bobi import paths
+
 
 class TestAgentSpawnEnv:
     def test_prepends_local_bin_under_stripped_path(self, monkeypatch):
@@ -91,7 +93,7 @@ class TestChildAgentEnv:
         from bobi.env import child_agent_env
 
         root = tmp_path / "install"
-        config_dir = root / ".bobi"
+        config_dir = paths.package_dir(root)
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text(
             "agent: eng-team\nbrain:\n  kind: codex\n"
@@ -110,7 +112,7 @@ class TestChildAgentEnv:
         from bobi.env import child_agent_env
 
         root = tmp_path / "install"
-        config_dir = root / ".bobi"
+        config_dir = paths.package_dir(root)
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text("agent: eng-team\n")
         monkeypatch.setenv("BOBI_BRAIN", "codex")
@@ -123,12 +125,12 @@ class TestChildAgentEnv:
         from bobi.env import child_agent_env
 
         root = tmp_path / "install"
-        config_dir = root / ".bobi"
+        config_dir = paths.package_dir(root)
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text(
             "agent: eng-team\nbrain:\n  kind: ${TEAM_BRAIN}\n"
         )
-        (config_dir / ".env").write_text("TEAM_BRAIN=codex\n")
+        paths.env_path(root).write_text("TEAM_BRAIN=codex\n")
         monkeypatch.delenv("TEAM_BRAIN", raising=False)
 
         env = child_agent_env(root)
@@ -140,7 +142,7 @@ class TestChildAgentEnv:
         from bobi.env import child_agent_env
 
         root = tmp_path / "install"
-        (root / ".bobi").mkdir(parents=True)
+        paths.package_dir(root).mkdir(parents=True)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
         monkeypatch.setenv("VENN_API_KEY", "venn-key")
         monkeypatch.setenv("GH_TOKEN", "gh-token")
@@ -157,9 +159,9 @@ class TestChildAgentEnv:
         from bobi.env import child_agent_env
 
         root = tmp_path / "install"
-        config_dir = root / ".bobi"
+        config_dir = paths.package_dir(root)
         config_dir.mkdir(parents=True)
-        (config_dir / ".env").write_text(
+        paths.env_path(root).write_text(
             "OPENAI_API_KEY=from-file\n"
             "VENN_API_KEY=from-file\n"
         )
@@ -176,7 +178,7 @@ class TestChildAgentEnv:
         from bobi.env import agent_spawn_env, child_agent_env
 
         root = tmp_path / "install"
-        (root / ".bobi").mkdir(parents=True)
+        paths.package_dir(root).mkdir(parents=True)
         monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
         spawn_env = agent_spawn_env()

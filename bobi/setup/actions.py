@@ -14,7 +14,7 @@ implementations.
 
 Secrets never enter any model transcript: `save_credential` prompts the
 user directly (masked) via the injected `prompt_fn` and writes
-`.bobi/.env`; only a masked echo is returned.
+`run/.env`; only a masked echo is returned.
 """
 
 from __future__ import annotations
@@ -42,8 +42,8 @@ PACK_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
 # reaches the LLM, the rolling summary, or the persisted transcript.
 # (SECRET_SHAPES above is prefix-only, for scanning generated files; this is
 # whole-token so we can strip the value, not just flag a prefix.) Credentials
-# belong in Connect (→ .env), never in the conversation — so this errs toward
-# redaction; a redacted long hash in a design chat costs nothing.
+# belong in Connect (→ run/.env), never in the conversation — so this errs
+# toward redaction; a redacted long hash in a design chat costs nothing.
 REDACTION_PLACEHOLDER = "[redacted]"
 
 _SECRET_TOKEN = re.compile(
@@ -67,7 +67,7 @@ _SECRET_TOKEN = re.compile(
 
 # `password: hunter2`, `API_KEY=shortish` — redact the value, which shape
 # detection alone (short secrets) would miss. Requires a ':' or '=' so prose
-# like "keep the secret safe" is left alone.
+# like "keep the credential safe" is left alone.
 _SECRET_KV = re.compile(
     r"(?i)\b(password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token"
     r"|auth[_-]?token|client[_-]?secret|bot[_-]?token)\b(\s*[:=]\s*)(\S+)"
@@ -122,7 +122,7 @@ def mask(value: str) -> str:
 # --- env helpers ----------------------------------------------------------
 
 def env_path(project: Path) -> Path:
-    return paths.bobi_dir(project) / ".env"
+    return paths.env_path(project)
 
 
 def read_env(project: Path) -> dict[str, str]:
@@ -138,33 +138,27 @@ def write_env(project: Path, values: dict[str, str]) -> None:
 def venn_key(project: Path) -> str:
     # Same precedence as runtime resolution (config.load_dotenv): an
     # exported environment variable wins over .env, so setup verifies the
-    # key `bobi start` will actually use.
+    # key `bobi agent <name> start` will actually use.
     return os.environ.get("VENN_API_KEY") or read_env(project).get("VENN_API_KEY", "")
 
 
 # --- team / source resolution --------------------------------------------
 
 def team_source_dir(project: Path, state: SetupState) -> Path:
-    """Where the team source lives: the user-chosen location when set, else the
-    legacy agents/<team_name>. Relative locations resolve against the project.
+    """Where the team source lives.
 
-    In **create** mode the chosen location is the *base* folder (e.g. `bobi/`);
-    the team lives in a named subfolder `<base>/<team_name>` so every team gets
-    its own folder (consistent with modify/registry). The append is idempotent —
-    once the concrete path is persisted (its last component is the team name),
-    it isn't appended again. Open/registry locations are already the team folder.
+    ``source_dir`` is an exact source directory. Relative paths are anchored at
+    ``BOBI_HOME`` because setup is machine-scoped, not cwd-scoped. When unset,
+    the canonical source is ``<BOBI_HOME>/agents/<name>/src``.
     """
     if state.source_dir:
         p = Path(state.source_dir)
-        if (state.mode == "create" and state.team_name
-                and p.name != state.team_name):
-            p = p / state.team_name
-        return p if p.is_absolute() else project / p
-    return project / "agents" / state.team_name
+        return p if p.is_absolute() else paths.home_dir() / p
+    return paths.agent_source_dir(state.team_name)
 
 
 def installed_team_name(project: Path) -> str | None:
-    """Name of the team installed in .bobi/, or None."""
+    """Name of the team installed in run/package/, or None."""
     agent_yaml = paths.agent_yaml_path(project)
     if not agent_yaml.exists():
         return None
@@ -176,7 +170,7 @@ def installed_team_name(project: Path) -> str | None:
 
 
 def resolve_or_fetch(name: str, project: Path) -> Path | None:
-    """Resolve a team locally, falling back to a registry fetch."""
+    """Resolve a team locally, then fetch it from a registry if needed."""
     from bobi.cli import _resolve_agent_pack
     pack_dir = _resolve_agent_pack(name, project)
     if pack_dir:
@@ -191,7 +185,7 @@ def resolve_or_fetch(name: str, project: Path) -> Path | None:
 def save_credential(state: SetupState, project: Path, var_name: str,
                     service: str, instructions: str,
                     prompt_fn: Callable[[str, str, str], str]) -> dict:
-    """Collect one credential via `prompt_fn`, write it to .env, refresh
+    """Collect one credential via `prompt_fn`, write it to run/.env, refresh
     the process environment, and record it on the state. The value never
     leaves this function — only a masked echo is returned.
 
@@ -346,7 +340,7 @@ def validate_team(state: SetupState, project: Path) -> dict:
 # --- install / preflight --------------------------------------------------
 
 def install_team(state: SetupState, project: Path) -> dict:
-    """Install the selected/generated team into .bobi/ (the frozen
+    """Install the selected/generated team into run/package/ (the frozen
     runtime image). Returns {"installed", "image", "missing_credentials"}.
     Raises ActionError if the source is missing or its validation is stale.
     """
@@ -368,9 +362,8 @@ def install_team(state: SetupState, project: Path) -> dict:
                               "last passed — run validate_team again before "
                               "installing")
 
-    dot_moda = paths.bobi_dir(project)
-    local_source = (pack_dir.is_relative_to(project)
-                    and not pack_dir.is_relative_to(dot_moda))
+    package = paths.package_dir(project)
+    local_source = not pack_dir.is_relative_to(paths.agent_cache_dir())
     _install_pack(pack_dir, project, local_source)
     _write_install_gitignore(project, local_source)
 
@@ -383,13 +376,13 @@ def install_team(state: SetupState, project: Path) -> dict:
                if v not in env and v not in os.environ]
     return {
         "installed": state.team_name,
-        "image": str(dot_moda),
+        "image": str(package),
         "missing_credentials": missing,
     }
 
 
 def run_preflight(project: Path):
-    """Run the same preflight checks `bobi start` runs. Returns the
+    """Run the same preflight checks `bobi agent <name> start` runs. Returns the
     validate_config result (has `.ok` and `.format()`).
 
     NOTE: validate_config's MCP probe calls asyncio.run(), which raises

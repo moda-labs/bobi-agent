@@ -24,7 +24,7 @@ house team with `from: eng-team` and an overlay that binds your toolchain.
 
 ```bash
 cd ~/dev                          # parent of all repos
-bobi start eng-team
+bobi agent eng-team start
 ```
 
 Then onboard repos via Slack:

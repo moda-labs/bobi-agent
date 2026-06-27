@@ -85,17 +85,42 @@ def _post_json(url: str, data: dict, headers: dict | None = None) -> dict:
         return json.loads(resp.read())
 
 
+def _node_major() -> int:
+    try:
+        proc = subprocess.run(
+            ["node", "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return 0
+    raw = proc.stdout.strip().lstrip("v")
+    try:
+        return int(raw.split(".", 1)[0])
+    except (ValueError, IndexError):
+        return 0
+
+
 @pytest.fixture
 def iso_project(tmp_path):
     """Isolated project root with its own local event server."""
     from bobi.events.server import ensure_running, health
 
-    project = tmp_path / "iso-project"
-    (project / ".bobi" / "state").mkdir(parents=True)
+    if _node_major() < 20:
+        pytest.skip("local event server requires Node.js 20+")
+
+    home = tmp_path / "home"
+    project = home / "agents" / "iso-test" / "run"
+    package = project / "package"
+    state = project / "state"
+    package.mkdir(parents=True)
+    state.mkdir(parents=True)
 
     port = _free_port()
     base_url = f"http://localhost:{port}"
-    (project / ".bobi" / "agent.yaml").write_text(
+    (package / "agent.yaml").write_text(
         f"agent: iso-test\nentry_point: manager\nevent_server: {base_url}\n"
     )
 
@@ -114,7 +139,7 @@ def iso_project(tmp_path):
 
     yield project, base_url
 
-    pid_file = project / ".bobi" / "state" / "event-server.pid"
+    pid_file = state / "event-server.pid"
     if pid_file.exists():
         try:
             os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
@@ -138,6 +163,7 @@ def session_proc(tmp_path):
             env={
                 **os.environ,
                 "PYTHONPATH": str(PACKAGE_ROOT),
+                "BOBI_HOME": str(project.parents[2]),
                 "BOBI_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET,
             },
         )

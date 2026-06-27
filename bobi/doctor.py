@@ -1,11 +1,10 @@
-"""System health checks — manager, event server, projects, workflows."""
+"""System health checks — manager, event server, package, workflows."""
 
 from __future__ import annotations
 
 import logging
 import shutil
 from dataclasses import dataclass
-from pathlib import Path
 
 from bobi.paths import bound_root
 
@@ -20,7 +19,7 @@ class CheckResult:
     hint: str = ""
     # Only meaningful when ok is False: a required failure is a real problem;
     # a non-required failure is a warning (e.g. an optional service that's
-    # unconfigured but doesn't block `bobi start`). Defaults True so all
+    # unconfigured but doesn't block start). Defaults True so all
     # existing health checks keep counting as hard failures.
     required: bool = True
     # Set when the failure is specifically the AppArmor userns sandbox block,
@@ -36,7 +35,7 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_claude_cli())
     results.append(_check_claude_auth())
     results.append(_check_local_config())
-    results.append(_check_single_root())
+    results.append(_check_runtime_layout())
     results.append(_check_install_integrity())
     results.extend(_check_package_requires())
     results.extend(_check_services())
@@ -84,10 +83,10 @@ def _check_claude_auth() -> CheckResult:
 
 
 def _check_install_integrity() -> CheckResult:
-    """Flag edits to the installed .bobi/ image.
+    """Flag edits to the installed run/package image.
 
-    The installed copy is frozen — regenerated verbatim by `bobi
-    install` — so hand-edits are silently lost on the next install.
+    The installed copy is frozen — regenerated verbatim by
+    `bobi agents install` — so hand-edits are silently lost on the next install.
     Compare on-disk files against the hashes recorded at install time.
     """
     import hashlib
@@ -95,19 +94,19 @@ def _check_install_integrity() -> CheckResult:
 
     root = bound_root()
     if not root:
-        return CheckResult("Installed team", ok=True, detail="no project")
+        return CheckResult("Installed team", ok=True, detail="no runtime selected")
     from bobi import paths
-    dest = paths.bobi_dir(root)
+    dest = paths.package_dir(root)
     manifest_path = dest / "install-manifest.json"
     if not manifest_path.exists():
         return CheckResult("Installed team", ok=True,
-                           detail="no install manifest (pre-0.12 install)")
+                           detail="no install manifest")
     try:
         manifest = json.loads(manifest_path.read_text())
     except (json.JSONDecodeError, OSError):
         return CheckResult("Installed team", ok=False,
                            detail="unreadable install manifest",
-                           hint="Re-run `bobi install`")
+                           hint="Re-run `bobi agents install ... --name <agent>`")
     if not manifest.get("frozen", True):
         return CheckResult("Installed team", ok=True,
                            detail=f"{manifest.get('agent', '?')} (downloaded — editable)")
@@ -123,8 +122,8 @@ def _check_install_integrity() -> CheckResult:
         return CheckResult(
             "Installed team", ok=False,
             detail=f"{len(drifted)} file(s) differ from installed pack: {shown}",
-            hint="Edits to .bobi/ are lost on reinstall — edit the "
-                 "pack source and re-run `bobi install`")
+            hint="Edits to run/package/ are lost on reinstall — edit the "
+                 "source and re-run `bobi agents install ... --name <agent>`")
     return CheckResult("Installed team", ok=True,
                        detail=f"{manifest.get('agent', '?')} (frozen, clean)")
 
@@ -161,67 +160,43 @@ def _check_local_config() -> CheckResult:
     from bobi.config import _project_config_path
     root = bound_root()
     if not root:
-        return CheckResult("Project config", ok=False,
-                           detail="no project detected",
-                           hint="Run from a project directory with .bobi/")
+        return CheckResult("Package config", ok=False,
+                           detail="no runtime selected",
+                           hint="Select a Bobi Agent with `bobi agent <name> doctor`")
     config_path = _project_config_path(root)
     if config_path.exists():
-        return CheckResult("Project config", ok=True, detail=str(config_path))
-    return CheckResult("Project config", ok=False,
+        return CheckResult("Package config", ok=True, detail=str(config_path))
+    return CheckResult("Package config", ok=False,
                        detail=f"missing {config_path}",
-                       hint="Create .bobi/agent.yaml with entry_point, services, and credentials")
+                       hint="Install a package with `bobi agents install ... --name <agent>`")
 
 
-def _check_single_root() -> CheckResult:
-    """Exactly one .bobi/ per installation — flag strays below it.
-
-    Stray .bobi/ dirs in repo checkouts under the root are leftovers
-    from the old cwd-as-root resolution. They hold orphaned state at best;
-    at worst one contains an agent.yaml and captures project-root
-    resolution for anything launched from that subtree.
-    """
+def _check_runtime_layout() -> CheckResult:
+    """Validate the selected runtime root uses the canonical layout."""
     root = bound_root()
     if not root:
-        return CheckResult("Single .bobi root", ok=True,
-                           detail="no project root bound")
-    import os
-    state_only, installs = [], []
-    for dirpath, dirnames, _files in os.walk(root):
-        cur = Path(dirpath)
-        if cur == root:
-            # The root's own .bobi (worktrees, sessions, ...) is the
-            # installation, not a stray; heavy trees aren't worth walking.
-            dirnames[:] = [d for d in dirnames
-                           if d not in (".bobi", ".git", "node_modules")]
-            continue
-        dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules")]
-        if ".bobi" in dirnames:
-            rel = str(cur.relative_to(root))
-            if (cur / ".bobi" / "agent.yaml").is_file():
-                installs.append(rel)
-            else:
-                state_only.append(rel)
-            dirnames.remove(".bobi")
-    if not state_only and not installs:
-        return CheckResult("Single .bobi root", ok=True,
-                           detail="no stray .bobi dirs below root")
-    parts, hints = [], []
-    if installs:
-        parts.append("nested installs (agent.yaml — these CAPTURE root "
-                      "resolution for anything below them): "
-                      + ", ".join(sorted(installs)))
-        hints.append("Nested installs may be deliberate (`bobi install` "
-                     "in a subdir) — if not, they are hijack vectors; remove "
-                     "the marker or the dir.")
-    if state_only:
-        parts.append("state-only strays: " + ", ".join(sorted(state_only)))
-        hints.append("State-only dirs are leftovers from cwd-bound agents — "
-                     "they may hold live cursors/sessions from before the "
-                     "upgrade; tar them up before removing.")
-    return CheckResult(
-        "Single .bobi root", ok=False,
-        detail="; ".join(parts),
-        hint=" ".join(hints))
+        return CheckResult("Runtime layout", ok=False,
+                           detail="no Bobi Agent runtime selected",
+                           hint="Run `bobi agent <name> doctor`")
+    from bobi import paths
+    expected = {
+        "package/agent.yaml": paths.agent_yaml_path(root),
+        "state/": paths.state_path(root),
+        "workspace/": paths.workspace_dir(root),
+    }
+    missing = [label for label, path in expected.items()
+               if not (path.is_dir() if label.endswith("/") else path.is_file())]
+    if missing:
+        return CheckResult(
+            "Runtime layout", ok=False,
+            detail=f"{root} missing {', '.join(missing)}",
+            hint="Reinstall with `bobi agents install <source> --name <agent>`")
+    try:
+        slot = paths.agent_name_for_root(root)
+    except Exception:
+        slot = root.name
+    return CheckResult("Runtime layout", ok=True,
+                       detail=f"{slot}: {root}")
 
 
 def _check_services() -> list[CheckResult]:
@@ -244,8 +219,8 @@ def _check_services() -> list[CheckResult]:
 def _check_workflows() -> CheckResult:
     if bound_root() is None:
         return CheckResult("Workflows", ok=False,
-                           detail="no project detected",
-                           hint="Run from inside a Bobi installation")
+                           detail="no runtime selected",
+                           hint="Run `bobi agent <name> doctor`")
     try:
         from bobi.workflow.triggers import WorkflowDispatcher
         d = WorkflowDispatcher()
@@ -254,7 +229,7 @@ def _check_workflows() -> CheckResult:
         if not names:
             return CheckResult("Workflows", ok=False,
                                detail="none found",
-                               hint="Add workflows to .bobi/workflows/")
+                               hint="Add workflows to the agent package source and reinstall")
         return CheckResult("Workflows", ok=True,
                            detail=f"{len(names)} loaded: {', '.join(names)}")
     except Exception as e:
@@ -271,7 +246,7 @@ def _check_bubble_auth() -> CheckResult:
     """
     root = bound_root()
     if not root:
-        return CheckResult("Bubble auth", ok=True, detail="no project detected")
+        return CheckResult("Bubble auth", ok=True, detail="no runtime selected")
 
     from bobi.config import Config, load_bubble_state
 
@@ -305,7 +280,7 @@ def _check_bubble_auth() -> CheckResult:
                 "Bubble auth", ok=False,
                 detail="no bubble credential but event server appears running",
                 hint="The agent would mint a fresh/orphan bubble on next "
-                     "registration — run `bobi restart` to re-establish")
+                     "registration — run `bobi agent <name> restart` to re-establish")
         return CheckResult("Bubble auth", ok=True,
                            detail="no bubble yet (instance not started)")
 
@@ -313,8 +288,8 @@ def _check_bubble_auth() -> CheckResult:
         return CheckResult(
             "Bubble auth", ok=False,
             detail=f"bubble_id {bubble_id} present but bubble_key missing",
-            hint="The bubble credential is incomplete — run `bobi restart` "
-                 "to re-mint")
+            hint="The bubble credential is incomplete — run "
+                 "`bobi agent <name> restart` to re-mint")
 
     return CheckResult("Bubble auth", ok=True,
                        detail=f"bubble {bubble_id[:20]}… key present")
@@ -346,13 +321,13 @@ def _check_event_server() -> CheckResult:
         return CheckResult("Event server", ok=True, detail=url)
     return CheckResult("Event server", ok=False,
                        detail="not running",
-                       hint="`bobi event-server start` or `bobi start` will auto-launch")
+                       hint="`bobi agent <name> event-server start` or `bobi agent <name> start` will auto-launch")
 
 
 def _check_recent_events() -> CheckResult:
     root = bound_root()
     if not root:
-        return CheckResult("Recent events", ok=False, detail="no project detected")
+        return CheckResult("Recent events", ok=False, detail="no runtime selected")
     from bobi import paths
     state_dir = paths.state_path(root)
     event_files = list(state_dir.glob("events-*.jsonl"))
@@ -374,7 +349,7 @@ def _check_policy() -> CheckResult:
     from bobi.memory import MAX_POLICY_CHARS
     root = bound_root()
     if not root:
-        return CheckResult("Team policy", ok=True, detail="no project detected")
+        return CheckResult("Team policy", ok=True, detail="no runtime selected")
     from bobi import paths
     policy = paths.policy_path(root)
     if not policy.is_file():
