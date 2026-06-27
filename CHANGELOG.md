@@ -1,31 +1,61 @@
 # Changelog
 
-## 0.35.0 — 2026-06-25
+## 0.35.0 — 2026-06-27
 
-Setup onboarding cleanup for release (MOD-221): make the agent harness visible
-and give clear local-vs-cloud deployment guidance.
+Breaking Bobi cutover release: the framework is now published and operated as
+`bobi`, and installed runtimes are named Bobi Agents under one machine-scoped
+home directory.
+
+### Breaking Changes
+- **Renamed Modastack to Bobi (#524, #535, #537).** The Python package,
+  console command, imports, environment variables, docs, skills, tests, and
+  release automation now use `bobi`/`BOBI_*` names. This release intentionally
+  does not carry backwards-compatibility aliases for the old Modastack package
+  or command names.
+- **Moved runtimes to named Bobi Agents (#538).** Runtime operations no longer
+  bind implicitly to the current working directory. `BOBI_HOME` is the single
+  low-level home root, defaults to `~/.bobi`, and is configurable only by
+  environment variable. Each installed agent lives under
+  `$BOBI_HOME/agents/<name>/` with source in `src/`, generated package files in
+  `run/package/`, mutable state in `run/state/`, workspace files in
+  `run/workspace/`, and credentials in `run/.env`.
+- **Rebuilt the CLI around install-scoped and agent-scoped commands (#538).**
+  Installation/package management lives under `bobi agents ...`; runtime
+  operations live under `bobi agent <name> ...`; child executions are now
+  `bobi agent <name> subagents ...`. The old CWD-scoped command shape was
+  removed.
 
 ### Added
-- **Harness status on the welcome screen.** Shows which agent runs your team
-  (Claude Code + model) and whether it's authenticated, with a copyable
-  `claude auth login` command and a Re-check button when it isn't. A new
-  `bobi/setup/harness.py` detects the CLI and auth (env key, on-disk
-  creds, or the macOS keychain) behind a `GET /api/harness` endpoint.
-- **Local vs cloud finalization.** The "All set" screen now presents two
-  explicit deployment paths — local (`bobi start`) and cloud (the Fly
-  provisioner + `docs/CONTAINER.md`) — replacing the placeholder cloud link.
+- **Setup harness status and local/cloud finalization (#514).** The setup UI
+  now shows which harness runs the team, whether it is authenticated, and gives
+  explicit local (`bobi agent <name> start`) and cloud deployment paths.
+- **Machine-wide Bobi Agent docs and skills (#538).** README, packaged skill
+  guides, setup instructions, and integration tests now describe the `src/` and
+  `run/` model, environment-only `BOBI_HOME`, and named-agent command flow.
 
 ### Changed
-- **`/api/message` harness backstop.** An un-installed CLI now blocks with a
-  clear install message; a failed turn on an un-authed harness surfaces an
-  actionable login hint instead of a cryptic transport error. Error strings
-  are redacted before reaching the SSE stream and history.
-- **Full-width scroll** on the create and finished screens (the content no
-  longer scrolls inside a narrow left column).
+- **Release and downstream repos now target Bobi (#539).** Release automation
+  dispatches to the renamed Homebrew tap (`moda-labs/homebrew-bobi-agent`) and
+  Moda team package repo (`moda-labs/moda-agents`), with the PyPI/Homebrew
+  package name set to `bobi`.
+- **Setup error handling is more direct (#514).** `/api/message` now blocks on
+  an uninstalled CLI with a clear install message, surfaces actionable auth
+  hints for unauthenticated harnesses, and redacts setup errors before they
+  reach the SSE stream or history.
+
+### Fixed
+- **Monitor breaker keys are finding-specific (#523).** One breaker no longer
+  suppresses unrelated findings from the same monitor.
+- **Codex API key auth is materialized for child executions (#522).** Codex
+  brain launches receive the expected API-key auth material instead of relying
+  on ambient process state.
 
 ### Removed
-- **"Start it for me" button + `/api/run-start`.** Users run `bobi start`
-  in their own terminal.
+- **Legacy Modastack compatibility paths and command names (#524, #535, #537,
+  #538).** The release is a clean cutover to Bobi naming and the named runtime
+  model.
+- **Setup's "Start it for me" path (#514).** Users start installed agents from
+  their terminal with the named-agent CLI.
 
 ## 0.34.12 — 2026-06-25
 
