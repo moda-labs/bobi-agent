@@ -13,7 +13,7 @@
 #
 # This repo's fleet is `ci` — the release pipeline's SELF-GATE canary ONLY. The
 # production agent teams (eng-team) moved to their own repo, moda-labs/
-# moda-agent-teams, which owns the `moda` fleet. Two repos, one Fly org, two
+# moda-agents, which owns the `moda` fleet. Two repos, one Fly org, two
 # fleets that never cross-enumerate (fleet_list confirms by the exact
 # BOBI_FLEET stamp, so even a name-prefix overlap is safe).
 fleet: ci

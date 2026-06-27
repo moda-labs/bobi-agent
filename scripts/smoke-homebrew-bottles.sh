@@ -4,7 +4,7 @@ set -euo pipefail
 VERSION="${1:?usage: smoke-homebrew-bottles.sh <version>}"
 MAX_ATTEMPTS="${BOBI_HOMEBREW_SMOKE_ATTEMPTS:-60}"
 SLEEP_SECONDS="${BOBI_HOMEBREW_SMOKE_SLEEP:-30}"
-EXPECTED_ROOT_URL="https://github.com/moda-labs/homebrew-bobi/releases/download/bobi-${VERSION}"
+EXPECTED_ROOT_URL="https://github.com/moda-labs/homebrew-bobi-agent/releases/download/bobi-${VERSION}"
 
 fetch_formula() {
   if [ -n "${BOBI_HOMEBREW_FORMULA_FILE:-}" ]; then
@@ -12,7 +12,7 @@ fetch_formula() {
     return
   fi
 
-  gh api repos/moda-labs/homebrew-bobi/contents/Formula/bobi.rb --jq .content | base64 -d
+  gh api repos/moda-labs/homebrew-bobi-agent/contents/Formula/bobi.rb --jq .content | base64 -d
 }
 
 parse_formula() {

@@ -144,7 +144,7 @@ agents/                           # Agent teams (portable agent definitions)
     └── monitors/                 # Background checks
         └── defaults.yaml
                                   # Moda's house team = `from: eng-team` +
-                                  # overlay, in the private moda-agent-teams repo.
+                                  # overlay, in the private moda-agents repo.
 
 $BOBI_HOME/                       # Defaults to ~/.bobi; env-var configurable
 ├── config.yaml                   # Machine-level registry/config
@@ -186,7 +186,7 @@ workflows, monitors, agent.yaml) **deep-merge by key** (`build` deps accrete,
 runtime resolver reads only the frozen output. `install --pinned` resolves
 registry-only at locked versions for reproducible CI/deploy. The pristine
 `agents/eng-team/` is the public base; Moda's house team is
-`from: eng-team` + an overlay in the private `moda-agent-teams` repo.
+`from: eng-team` + an overlay in the private `moda-agents` repo.
 
 **Role prompts** are read by the runtime resolver from the frozen
 `$BOBI_HOME/agents/<agent>/run/package/roles/<role>/ROLE.md` — which is compose

@@ -53,7 +53,7 @@ So a tool-library entry is **a bundle of those three surfaces**, and `tool_libra
 **Out of scope** (note, don't build)
 - `kind: mcp` (#398) and `kind: skill` (#428) — schema-forward only: the `kind` field is parsed, and the **expander dispatch table** (§4.2, D-5) is the seam they plug into. This PR registers only `cli`; an entry of any other kind raises a `ComposeError` naming the unsupported kind + its owning issue. The spokes are *additive* (register an expander; #398 also adds an `mcp_servers` merge branch) — they do not edit `expand()`.
 - **aichat is NOT migrated** — it is universal framework infra, already baked into the base `Dockerfile` and documented in `prompts/base.md` for every agent. It stays in base; the catalog is for genuinely opt-in, per-team tools.
-- Flipping the teams to `tool_library:` refs — that is the **migration**, sequenced as follow-up PRs (§7), and the `moda-eng-team` half lands in the private `moda-agent-teams` repo.
+- Flipping the teams to `tool_library:` refs — that is the **migration**, sequenced as follow-up PRs (§7), and the `moda-eng-team` half lands in the private `moda-agents` repo.
 - Any runtime / `subagent.py` change. Agents still shell out to the bare CLI; no MCP indirection is reintroduced.
 
 ---
@@ -93,7 +93,7 @@ Entries carry **whatever build surface the tool needs** — not just `npm`. The 
 | OpenAI image CLI | `openai` | `openai==2.43.0` | `apt: [python3-venv]` + `run_root:` pip into an isolated venv + symlink onto PATH |
 | Venn CLI | `venn` | `venn-cli==0.2.0` | `apt: [python3-venv]` + `run_root:` venv install + symlink |
 
-> Pins are **last-stable as of authoring** and deliberately bumpable later — a stale pin is fine; the value is single-source. All three resolve from **public** registries (npm/PyPI), so the first PR needs nothing from the private `moda-agent-teams` overlay.
+> Pins are **last-stable as of authoring** and deliberately bumpable later — a stale pin is fine; the value is single-source. All three resolve from **public** registries (npm/PyPI), so the first PR needs nothing from the private `moda-agents` overlay.
 
 The pin appears once per entry — but still in two *fields* (`requires.fix` and `build`) **within the single entry file**. A test (§6) asserts the entry's `requires.fix` install ref and its `build` pin agree, so the one remaining co-location is guarded rather than scattered across teams.
 
@@ -208,7 +208,7 @@ Per CLAUDE.md (**production pattern ⇒ test gap**): tests-first, each failing o
 7. `/review`; unit + integration; **no** `VERSION`/`CHANGELOG.md`/`pyproject.toml` version bump (release-time only).
 8. **Follow-ups (separate tickets/PRs):**
    - This repo: flip `personal-assistant` (and `support-manager`) from inline venn `requires`/`build` to `tool_library: [venn]`. Zero-rework — the §6 regression bar proves it.
-   - `moda-agent-teams` (private): flip `moda-eng-team` overlay's codex `requires`/`build` to `tool_library: [codex]`.
+   - `moda-agents` (private): flip `moda-eng-team` overlay's codex `requires`/`build` to `tool_library: [codex]`.
    - **gstack** lands as the canonical `kind: skill` entry under **#428**.
    - #428/#398 consume this catalog shape for `kind: skill` / `kind: mcp`.
 

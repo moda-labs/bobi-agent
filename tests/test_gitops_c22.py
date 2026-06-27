@@ -475,7 +475,7 @@ def test_homebrew_smoke_accepts_valid_bottle_formula(tmp_path):
 class Bobi < Formula
   url "https://files.pythonhosted.org/packages/bobi-0.33.0.tar.gz"
   bottle do
-    root_url "https://github.com/moda-labs/homebrew-bobi/releases/download/bobi-0.33.0"
+    root_url "https://github.com/moda-labs/homebrew-bobi-agent/releases/download/bobi-0.33.0"
     sha256 cellar: :any_skip_relocation, arm64_sequoia: "aaaaaaaa"
     sha256 cellar: :any_skip_relocation, arm64_sonoma: "bbbbbbbb"
   end
@@ -492,7 +492,7 @@ def test_homebrew_smoke_rejects_current_version_malformed_root_url(tmp_path):
 class Bobi < Formula
   url "https://files.pythonhosted.org/packages/bobi-0.33.0.tar.gz"
   bottle do
-    root_url "https://github.com/moda-labs/homebrew-bobi/releases/download/bobi-0.33.0.arm64_sequoia.bottle.tar"
+    root_url "https://github.com/moda-labs/homebrew-bobi-agent/releases/download/bobi-0.33.0.arm64_sequoia.bottle.tar"
     sha256 cellar: :any_skip_relocation, arm64_sequoia: "aaaaaaaa"
   end
 end
