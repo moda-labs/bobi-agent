@@ -246,8 +246,8 @@ def test_welcome_leads_to_intro_with_custom_and_starts_editor(page, bobi_url):
     expect(page.locator(".uni-panel .up-title")).to_have_text("Your team")
 
 
-def test_change_location_picker_updates_fyi(page, bobi_url):
-    page.goto(bobi_url)
+def test_change_location_picker_updates_fyi(page, bobi):
+    page.goto(bobi.url)
     page.click("#welcome-go")
     expect(page.locator("#loc-path")).to_be_visible()
     page.click("#loc-change")
@@ -255,13 +255,14 @@ def test_change_location_picker_updates_fyi(page, bobi_url):
     # Opens in the (empty) library; step up to home, which has real folders.
     # Drilling into one updates the FYI line with that folder's absolute path.
     page.click(".pnode.up")
-    target = page.locator(".pnode:not(.up)").first
+    expect(page.locator("#pick-path")).to_have_text(str(bobi.home))
+    target_path = str(bobi.home / "projects")
+    target = page.locator(".pnode", has_text="projects")
     expect(target).to_be_visible()
-    name = target.inner_text().replace("📁", "").strip()
     target.click()
     page.click("#pick-use")
     expect(page.locator(".picker")).to_have_count(0)
-    expect(page.locator("#loc-path")).to_contain_text(name)
+    expect(page.locator("#loc-path")).to_have_text(target_path)
 
 
 def test_escape_closes_popup(page, bobi_url):
