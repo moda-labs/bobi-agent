@@ -4,10 +4,11 @@
 [![PyPI](https://img.shields.io/pypi/v/bobi)](https://pypi.org/project/bobi/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Bobi is a lightweight library for building and running purposeful agents** —
-proactive agents that don't just answer when you message them, but subscribe to
-the outside world (GitHub PRs, Slack messages, ticket updates, incoming email, any
-webhook) and act on their own when something changes.
+**Bobi is a lightweight library for building and running purposeful multi-agent
+systems** — proactive agents that don't just answer when you message them, but
+subscribe to the outside world (GitHub PRs, Slack messages, ticket updates,
+incoming email, any webhook) and act on their own when something changes. Agents
+coordinate, delegate, and spawn sub-agents to get real work done.
 
 Every agent runs on [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 or [OpenAI Codex](https://developers.openai.com/codex/cli/), so it all runs on the
