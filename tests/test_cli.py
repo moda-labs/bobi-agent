@@ -25,14 +25,16 @@ def test_top_level_help_is_machine_scoped():
     assert result.exit_code == 0
     assert "agent" in result.output
     assert "agents" in result.output
-    for removed in [" start", " stop", " status", " workflows", " monitors", " setup"]:
+    assert "setup" in result.output
+    for removed in [" start", " stop", " status", " workflows", " monitors"]:
         assert removed not in result.output
 
 
 def test_agents_help_lists_machine_commands():
     result = CliRunner().invoke(main, ["agents", "--help"])
     assert result.exit_code == 0
-    for cmd in ["install", "setup", "list", "browse", "add-registry"]:
+    assert "setup" not in result.output
+    for cmd in ["install", "list", "browse", "add-registry"]:
         assert cmd in result.output
 
 
