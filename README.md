@@ -4,47 +4,40 @@
 [![PyPI](https://img.shields.io/pypi/v/bobi)](https://pypi.org/project/bobi/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Bobi builds and runs purposeful multi-agent teams.** Describe the team you
-want — a multi-repo engineering org, a personal assistant, a customer-support
-desk, a sales-automation crew, or something nobody has built yet — and Bobi
-assembles the roles, wires up the work, and keeps the team running.
-
-What sets a Bobi team apart from a chatbot is that it's **proactive**. Agents
-don't only answer when you message them; they subscribe to the outside world —
-GitHub PRs, Slack messages, ticket updates, incoming email, any webhook — and act
-autonomously when something changes.
+**Bobi is a lightweight library for building and running purposeful multi-agent
+teams** — proactive teams that don't just answer when you message them, but
+subscribe to the outside world (GitHub PRs, Slack messages, ticket updates,
+incoming email, any webhook) and act on their own when something changes.
 
 Every agent runs on [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-or [OpenAI Codex](https://developers.openai.com/codex/cli/) as its reasoning
-engine, so a whole team runs on the flat-rate subscription you already pay for —
-no per-token API bills (API keys work too).
+or [OpenAI Codex](https://developers.openai.com/codex/cli/), so a whole team runs
+on the flat-rate subscription you already pay for — no per-token API bills (API
+keys work too).
 
 ## What you can build
 
-The framework has no built-in idea of what a "team" is for — you define it. A few
-shapes it takes:
+You define what a team is for; the framework has no opinion. A few shapes it
+takes:
 
 - **Engineering org** — triage issues, open PRs through a required review-and-CI
-  workflow, and watch for merge conflicts and stale PRs across repos. This is the
-  bundled [`eng-team`](agents/eng-team/) reference team.
-- **Personal assistant** — watch your inbox and calendar, draft replies, and ping
-  you only when something needs a decision.
-- **Customer support** — triage incoming tickets, answer from a knowledge base,
-  and escalate the ones it can't close.
+  workflow, and watch for merge conflicts and stale PRs across repos. Bundled as
+  the [`eng-team`](agents/eng-team/) reference team.
+- **Personal assistant** — watch your inbox and calendar, draft replies, and
+  surface only what needs a decision.
+- **Customer support** — triage tickets, answer from a knowledge base, and
+  escalate what it can't close.
 - **Sales automation** — enrich inbound leads, keep the CRM current, and follow up
-  on a schedule.
-
-…and anything else you can describe. You provide the roles and the work; Bobi
-provides the runtime.
+  on schedule.
 
 ## Installation
 
 ### What you need
 
-- Python 3.11+
-- Git
-- Node.js + npm
+- Python 3.11+, Git, Node.js + npm
 - [`uv`](https://astral.sh/uv/) (or `pipx`)
+
+You don't clone this repo to run Bobi — it's a published package. Install the CLI
+and go.
 
 ### 1) Set up an agent runtime
 
@@ -56,37 +49,28 @@ npm install -g @anthropic-ai/claude-code
 claude
 ```
 
-Follow the prompts to log in with your Anthropic account (Pro, Max, or API key).
-To use Codex instead, install and authenticate the `codex` CLI and set
-`brain: {kind: codex}` in your team's `agent.yaml`.
+Log in with your Anthropic account (Pro, Max, or API key). To use Codex, install
+and authenticate the `codex` CLI and set `brain: {kind: codex}` in your team's
+`agent.yaml`.
 
 ### 2) Install Bobi
 
-Once your runtime is set up, paste this into your Claude Code session:
+```bash
+uv tool install bobi          # or: brew install moda-labs/bobi-agent/bobi
+```
+
+Or, from a Claude Code session:
 
 ```plaintext
 Install bobi using https://raw.githubusercontent.com/moda-labs/bobi-agent/main/scripts/install.sh
-```
-
-Or install manually:
-
-```bash
-uv tool install bobi
-```
-
-On macOS you can also use Homebrew:
-
-```bash
-brew install moda-labs/bobi-agent/bobi
 ```
 
 See [scripts/install.sh](scripts/install.sh) for what the installer does.
 
 ## Quick Start
 
-Install a pre-built team and start talking to it. `eng-team` is the reference team
-that ships with Bobi — install it to see a full team, or build your own for any
-domain (below).
+`eng-team` is the reference team that ships with Bobi — install it to see a full
+team, or build your own for any domain (below).
 
 ```bash
 # Install the reference engineering team and start it
@@ -128,18 +112,17 @@ Step-by-step guides: **[Slack setup](skills/slack-setup.md)** ·
 
 ## Under the hood
 
-Every team gets the same infrastructure, regardless of domain:
-
-- **Runtime-agnostic brains.** Each agent is a Claude Code or OpenAI Codex
-  session. The framework is provider-agnostic — choose per team with
-  `brain: {kind: claude|codex}`.
+- **It's a CLI all the way down.** `bobi` launches agents from your terminal — and
+  each agent launches *its own* sub-agents through the same CLI. A manager spawns
+  project leads, a project lead spawns task agents, every level using the same
+  commands. That recursion is the entire execution model.
 - **No topology opinions.** Bobi ships no org chart. Roles, relationships, and
   who-subscribes-to-what are defined entirely by the agent team.
 - **Built-in event server.** A topic-based pub/sub bus (run locally or on your own
   Cloudflare account) ingests webhooks from GitHub, Slack, Linear, and anything
   else, then fans them out to the agents subscribed to each topic.
-- **Inter-agent communication.** Agents message each other and hand off work. A
-  manager can `ask` (blocking) or `message` (fire-and-forget) any running agent.
+- **Runtime-agnostic brains.** Each agent is a Claude Code or OpenAI Codex
+  session; choose per team with `brain: {kind: claude|codex}`.
 - **Deterministic workflows.** YAML DAGs force multi-step work through a fixed
   recipe with role routing — code review before merge, CI before PRs — instead of
   trusting the model to remember.
