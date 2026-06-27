@@ -5,12 +5,12 @@ Turns DEPLOYMENT.md §7.2 B into one command: emit a standalone
 `fly`/`gh` commands to wire the secrets — derived from each team's *declared*
 `${VAR}` set, so the list is always right.
 
-The generated workflow is the **standalone** form of the framework's
-`.github/workflows/deploy-agent-teams.yml`: it installs `bobi` from PyPI
-(the engine's binary mode ships the deploy assets, so a team repo needs no
+The generated workflow is the **standalone** fleet-repo form of
+`.github/workflows/deploy-agent-teams.yml.example`: it installs `bobi` from
+PyPI (the engine's binary mode ships the deploy assets, so a team repo needs no
 framework checkout), and its orphans job enumerates the fleet inline instead of
-calling `scripts/fleet.sh`. The version is pinned at scaffold time to the
-bobi that generated it.
+calling `scripts/fleet.sh`. The version is pinned at scaffold time to the bobi
+that generated it.
 """
 
 from __future__ import annotations
@@ -22,7 +22,8 @@ from pathlib import Path
 # Workflow template. `__BOBI_VERSION__` is substituted at scaffold time. We
 # use a sentinel token (not str.format / f-string) so the file's `${{ … }}`
 # GitHub expressions and `${…}` shell vars survive verbatim. Keep this in sync
-# with .github/workflows/deploy-agent-teams.yml (the standalone / PyPI form).
+# with .github/workflows/deploy-agent-teams.yml.example and the fleet-repo
+# deployment model.
 WORKFLOW_TEMPLATE = r'''name: Deploy agent teams
 
 # Reconcile deployments/<name>.yaml to live Fly instances. Standalone

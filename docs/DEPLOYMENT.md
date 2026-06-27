@@ -19,8 +19,11 @@ Pieces:
 - `scripts/provision-instance.sh` + `scripts/destroy-instance.sh` — stand up / tear down one instance
 - `scripts/fleet.sh` — fleet enumeration helper
 - `scripts/build-team-tarballs.sh` — package teams into `.tar.gz`
-- `.github/workflows/release.yml` — the single gated release pipeline: build + roll fleet images, then deploy teams
-- `.github/workflows/deploy-agent-teams.yml` — reconcile `deployments/*` (called by `release.yml`; standalone on a `deploy-*` tag)
+- `.github/workflows/release.yml` — the single gated framework release pipeline:
+  build + smoke `ci-canary`, then publish the proven wheel
+- `.github/workflows/deploy-agent-teams.yml.example` — example generic
+  `deployments/*` reconciler for fleet-owning repos; `bobi deploy-init`
+  generates the standalone version
 - `.github/workflows/team-packages.yml` — publishes team tarballs (for `team-url` delivery)
 
 ---
@@ -378,15 +381,10 @@ publish a GitHub Release   ─▶ release.yml  (the single gated pipeline)
    │                                 build canary image FROM the wheel + `ask`
    │                                 it -> assert CANARY-OK end-to-end
    │                                 ├──────────────┐
-   │                              publish        roll-fleet  (parallel; both need canary)
-   │                              same wheel      reuse canary digest (generic);
-   │                              -> PyPI (+      team-flavored rebuild own image
-   │                              event-server,   from the wheel + TEAM_DEPS
-   │                              Homebrew)            │
-   │                                              deploy-teams   (packages/secrets last)
-   │                                                └─ uses: deploy-agent-teams.yml
+   │                              publish
+   │                              same wheel -> PyPI + Homebrew
    │
-push a `deploy-*` tag / dispatch ─▶ deploy-agent-teams.yml   (standalone, NO image roll)
+fleet repo deploy tag / dispatch ─▶ deploy-agent-teams.yml   (standalone, NO framework release)
           plan   : list ACTIVE deployments/<name>.yaml (defaults excluded) + tenant
           deploy : matrix over {name,tenant}, environment=<tenant>
                    └─ toJSON(secrets) | filter <TEAM>__ -> env-file -> `bobi deploy <name>`
@@ -394,31 +392,31 @@ push a `deploy-*` tag / dispatch ─▶ deploy-agent-teams.yml   (standalone, NO
 ```
 
 **A release is the deploy gate** — an edit pushed to `main` does NOT auto-deploy;
-you cut a release (or push a `deploy-*` tag) to ship. **One functional gate guards
-everything**: `release.yml` builds the wheel once, builds the canary *from that
-wheel* and smokes it (`CANARY-OK`), and only then — in parallel — publishes the
-same wheel to PyPI and rolls the fleet, finally reconciling each deployment's
-package content + secrets (`deploy-teams`). Publish is gated on the **canary**, not
-the fleet roll, so a flaky non-canary instance can't block an already-proven
-publish. A team-definition or secret edit that needs **no** image rebuild ships on
-its own via a `deploy-*` tag, which runs `deploy-agent-teams.yml` standalone. Either
-way the reconcile **business logic lives in `bobi deploy`**, not the YAML — the
-Action only orchestrates: list
-the active deployments, hand each its secrets, loop the primitive. That is why the
-same engine runs from a laptop, this Action, Terraform, or a SaaS plane — see §7.2
-B (*Bring your own repo*).
+you cut a release to ship the framework. **One functional gate guards the
+framework artifact**: `release.yml` builds the wheel once, builds `ci-canary`
+*from that wheel* and smokes it (`CANARY-OK`), and only then publishes the same
+wheel to PyPI and Homebrew. Production agent rollout is owned by fleet repos
+such as `moda-agents`; they bump their pinned `bobi` version and run their own
+deploy workflow.
 
-### deploy-agent-teams.yml — the reconcile
-Invoked by **`release.yml` via `workflow_call`** (its final step, after the image
-roll — `secrets: inherit` forwards the Fly token + per-tenant Environment secrets,
-and `ref` pins it to the released commit), or run standalone by a **`deploy-*` tag
-push** (an image-free team/secret update — also how the GitOps path is e2e'd from a
-branch, since tag pushes run from the tagged commit) or **`workflow_dispatch`**
-(optional `only:` to scope to one deployment). Jobs:
+A team-definition or secret edit in a fleet repo can ship without a framework
+release via that repo's `deploy-agent-teams.yml`. The reconcile **business logic
+lives in `bobi deploy`**, not the YAML — the Action only orchestrates: list the
+active deployments, hand each its secrets, loop the primitive. That is why the
+same engine runs from a laptop, a fleet Action, Terraform, or a SaaS plane — see
+§7.2 B (*Bring your own repo*).
+
+### deploy-agent-teams.yml — fleet repo reconcile
+The framework repo keeps `.github/workflows/deploy-agent-teams.yml.example` as
+reference material only; it is not an active workflow here. Fleet-owning repos
+use `bobi deploy-init` or copy/adapt the example as an active
+`.github/workflows/deploy-agent-teams.yml`. Run standalone by a **`deploy-*` tag
+push** (team/secret update) or **`workflow_dispatch`** (optional `only:` to scope
+to one deployment). Jobs:
 - **plan**: list every **active** `deployments/<name>.yaml` (`defaults.yaml`
   excluded; an inactive deployment is a non-`.yaml` like `<name>.yaml.example`).
-  No git-diff — a release reconciles the whole set, and `bobi deploy` is
-  idempotent. Gates the rest on `secrets.FLY_API_TOKEN` being set.
+  No git-diff; `bobi deploy` is idempotent. Gates the rest on
+  `secrets.FLY_API_TOKEN` being set.
 - **deploy** (matrix over the active `{name, tenant}`, `environment: <tenant>`):
   install the CLI, filter this deployment's per-key `<TEAM>__<KEY>` secrets out of
   `toJSON(secrets)` → env-file, then `bobi deploy <name> --env-file …`. One
@@ -448,28 +446,22 @@ when a deployment uses `team-url:`; pure ssh-push (`team:`) deployments ignore i
 
 ### release.yml — the release pipeline
 Triggered by **`release: published`**. One gated pipeline; the canary, running the
-exact wheel we publish, is the single functional gate for both PyPI and the fleet:
+exact wheel we publish, is the single functional gate for PyPI/Homebrew:
 - **subscription-login-smoke** — gate the release on a verified subscription-login
   bootstrap (a hermetic mock-code smoke; #388).
 - **build-wheel** — `python -m build` the wheel/sdist **once** and upload it, so the
-  canary, the fleet, and PyPI all run the identical artifact. A fail-fast
+  canary and PyPI run the identical artifact. A fail-fast
   `pip install dist/*.whl && bobi --version` rejects an obviously-broken wheel
   before the expensive canary build.
 - **build-canary** — deploy the canary from an image built **from that wheel**
   (`--build-arg BOBI_BUILD=wheel`, the artifact staged into `dist/`), then a
-  functional `ask` asserts `CANARY-OK` end-to-end. **This is the gate.** It resolves
-  and outputs the built image digest for `roll-fleet` to reuse.
-- **publish** — `needs: build-canary` (the canary, **not** the fleet roll). Uploads
-  the **same** wheel to PyPI via trusted publishing (`environment: pypi`), then
-  `deploy-event-server` + `update-homebrew`.
-- **roll-fleet** — `needs: build-canary`, in parallel with publish. Generic
-  instances reuse the canary's image digest (build-once-deploy-many); a team-flavored
-  app rebuilds its **own** image from the wheel + its TEAM_DEPS hook. Each app keeps
-  its volume/sessions/env/secrets (round-trip live config, swap image only). Per-app
-  failures are isolated and reported; re-run to retry (idempotent; C7 guards skew).
-- **deploy-teams** — `needs: roll-fleet`, then **calls `deploy-agent-teams.yml`** to
-  reconcile each deployment's package content + secrets onto the rolled image. Image
-  always lands before the package/secret reconcile.
+  functional `ask` asserts `CANARY-OK` end-to-end. **This is the gate.**
+- **publish** — `needs: build-canary`. Uploads the **same** wheel to PyPI via
+  trusted publishing (`environment: pypi`).
+- **update-homebrew** — `needs: publish`. Bumps the tap and smokes bottle URLs.
+
+Production fleet rollout is deliberately outside this workflow. Fleet repos bump
+their pinned `bobi` version and run their own deployment reconcile.
 
 > **PyPI trusted publishing.** The publish step must run in the top-level workflow
 > the trusted-publisher config names (PyPI rejects a reusable workflow with
@@ -563,14 +555,10 @@ tag) and the Action deploys every active deployment.
 > overwrite). The manual steps below are what it automates.
 
 Wire your repo once (or let `deploy-init` do 1–2 and print 3–4):
-1. Copy `.github/workflows/deploy-agent-teams.yml` + `deployments/`; set `fleet:`
-   + `event_server:` in `defaults.yaml`. Two one-line adaptations for a repo with
-   **no bobi source** (the recommended shape — see *Bring your own repo*
-   below): `pip install -e .` → `pip install "bobi==<pin>"` (track a
-   *published* framework version), and have the `orphans` job enumerate the fleet
-   inline (`fly apps list` + the `BOBI_FLEET` stamp) since `scripts/fleet.sh`
-   isn't present. Do **not** copy `release.yml` — that's the framework's own
-   wheel-publish pipeline; you adopt new framework versions by bumping the pin.
+1. Generate `.github/workflows/deploy-agent-teams.yml` + `deployments/`; set
+   `fleet:` + `event_server:` in `defaults.yaml`. Do **not** copy `release.yml`
+   — that's the framework's own wheel-publish pipeline; you adopt new framework
+   versions by bumping the pin in the generated workflow.
 2. `deployments/<team>.yaml` with `team:` (local package → **ssh-push**) **or**
    `team-url:` (published `.tar.gz` → **HTTPS-fetch**). Both work in CI: an
    **org-scoped** Fly token (`fly tokens create org`) *can* `fly ssh`, so ssh-push
@@ -707,8 +695,8 @@ The deploy refactor adds the **ssh-push** path, **verified live on Fly**
 > "a machine ID must be specified" outside a TTY. `deploy` resolves IDs via
 > `fly machine list --json` and restarts each by ID.
 
-The **team-url** path is verified live two ways:
-- **CI / GitOps:** a `deploy-canary-1` tag fired `deploy-agent-teams.yml` from the branch
+The **team-url** path has been verified live two ways:
+- **Historical CI / GitOps check:** a `deploy-canary-1` tag fired `deploy-agent-teams.yml` from the branch
   → `bobi deploy canary` → provisioned `moda-canary` (1 GB/1 vCPU) via team-url;
   manager healthy, `BOBI_INSTANCE` stamped.
 - **Binary-only (no repo):** from a directory with no bobi checkout,

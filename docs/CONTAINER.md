@@ -210,11 +210,11 @@ secrets) and is the seam a token broker later fills. Team Environments must have
   resolve a `url:`-sourced pack) then `fly machine restart`. The volume's
   `agent.yaml` and workspace edits survive.
 - **Release** → publish a GitHub Release. `release.yml` builds the wheel once,
-  builds the canary image **from that wheel** and smokes it (`CANARY-OK`), and only
-  then — gated on the canary — publishes the same wheel to PyPI and rolls the fleet:
-  generic apps reuse the canary's image digest (`fly config save` + `fly deploy
-  --image`), team-flavored apps rebuild their own image from the wheel. Each app's
-  volume/sessions/env is preserved; per-app failures are isolated; re-run to retry.
+  builds the `ci-canary` image **from that wheel** and smokes it (`CANARY-OK`),
+  and only then — gated on the canary — publishes the same wheel to PyPI and
+  Homebrew. Production fleet rollout is owned by fleet repos such as
+  `moda-agents`, which bump their pinned `bobi` version and run their own
+  `deploy-agent-teams.yml`.
 
 - **Delete a team** → nothing automatic. Run `scripts/destroy-instance.sh --app
   <fleet>-<team>` by hand (it removes the volume — back up first).

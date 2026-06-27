@@ -3,7 +3,7 @@ name: Release
 # The single gated release pipeline, on a published GitHub Release (C22 / #342;
 # docs/design/CONTAINERIZED_INSTANCES.md §10). ONE functional gate — a canary
 # running the EXACT wheel we're about to ship — guards BOTH irreversible actions
-# (PyPI publish + the fleet roll). Build once, prove once, then ship everywhere:
+# (PyPI publish + Homebrew). Build once, prove once, then publish:
 #
 #   1. subscription-login-smoke  gate the release on a verified login path (#388).
 #   2. build-wheel               `python -m build` the wheel/sdist ONCE; upload it.
@@ -12,23 +12,15 @@ name: Release
 #                                wheel (BOBI_BUILD=wheel) and SMOKE it — a
 #                                functional `ask` proving the agent answers
 #                                CANARY-OK end-to-end. THIS is the gate.
-#   5a. publish                  needs build-canary → upload the SAME wheel to PyPI
-#                                (+ Homebrew). Gated on the canary,
-#                                NOT the fleet roll — a flaky fleet app can't block
-#                                an already-proven publish.
-#   5b. roll-fleet               needs build-canary → reuse the canary's image
-#                                digest for generic instances; a TEAM-FLAVORED app
-#                                (a `build:` spec, C24 #368) rebuilds its OWN image
-#                                from the wheel + its TEAM_DEPS hook.
-#   6. deploy-teams              needs roll-fleet + update-homebrew → reconcile
-#                                each deployment's package CONTENT + SECRETS onto
-#                                the rolled image after the Homebrew bottle smoke.
+#   5. publish                   needs build-canary → upload the SAME wheel to PyPI
+#                                and update/smoke Homebrew.
 #
 # Why the canary is built from the WHEEL, not source: it then proves the exact
 # artifact we publish actually boots and answers — catching wheel/sdist packaging
 # bugs (missing entry point / package_data) a source rebuild never would. Each app
 # keeps its volume/sessions/env/secrets: we round-trip the live config with `fly
-# config save` and only swap the image, so C9 idempotency makes the restart safe.
+# config save` and only swap the canary image, so C9 idempotency makes the restart
+# safe. Production fleet rollout is owned by fleet repos such as moda-agents.
 #
 # Why publish lives here (not a reusable workflow): PyPI trusted publishing rejects
 # a reusable workflow (`invalid-publisher`) — the OIDC publish step must run in the
@@ -36,9 +28,7 @@ name: Release
 # configured for THIS workflow (release.yml), environment `pypi`.
 #
 # Required configuration:
-#   deployments/defaults.yaml `fleet:`   fleet namespace (enumerated by the
-#                                         BOBI_FLEET stamp). Single source of
-#                                         fleet truth, shared with deploy-agent-teams.
+#   deployments/defaults.yaml `fleet:`   fleet namespace for the ci-canary app.
 #   secrets.FLY_API_TOKEN                 Fly deploy token (org-scoped) for flyctl.
 #   PyPI trusted publisher for release.yml + environment `pypi` (OIDC; no token).
 #   secrets.CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID   event-server deploy.
@@ -53,7 +43,7 @@ on:
         description: "Git ref/tag to build and roll out (default: this branch)"
         required: false
 
-# One release rollout at a time across the whole fleet.
+# One release at a time.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -146,17 +136,13 @@ jobs:
           path: dist/
 
   # --------------------------------------------------------------------------
-  # THE GATE: deploy the canary from an image built FROM the just-built wheel, then
+  # THE GATE: deploy ci-canary from an image built FROM the just-built wheel, then
   # a functional `ask` proves it answers CANARY-OK end-to-end through the PROD event
-  # server. Outputs the built generic image digest (reused by roll-fleet). A broken
-  # wheel/image fails here and blocks BOTH publish and the fleet roll.
+  # server. A broken wheel/image fails here and blocks PyPI/Homebrew publish.
   build-canary:
     name: Build canary from the wheel + smoke
     needs: [subscription-login-smoke, build-wheel, deploy-event-server]
     runs-on: ubuntu-latest
-    outputs:
-      image: ${{ steps.canary.outputs.image }}
-      generic_src: ${{ steps.canary.outputs.generic_src }}
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
@@ -172,12 +158,11 @@ jobs:
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
-      # render-team-deps.py decides which fleet apps are team-flavored (so they
-      # can't be the generic image source). Installing bobi provides it.
+      # Needed for `bobi ui --check`.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install bobi (for the team-deps renderer)
+      - name: Install bobi
         run: pip install -e .
 
       - name: Build the canary image from the wheel + smoke it
@@ -186,7 +171,7 @@ jobs:
           set -euo pipefail
           if [ -z "${FLY_API_TOKEN:-}" ]; then
             echo "::notice::FLY_API_TOKEN unset — fleet not wired; skipping the canary gate."
-            echo "image=" >> "$GITHUB_OUTPUT"; echo "generic_src=" >> "$GITHUB_OUTPUT"; exit 0
+            exit 0
           fi
           # `fly` is the current binary name; some flyctl installs only expose
           # `flyctl`. Detect either (same pattern as deploy.py / fleet.sh).
@@ -196,35 +181,17 @@ jobs:
                             deployments/defaults.yaml | head -n1)"
           [ -n "${FLEET_PREFIX:-}" ] || { echo "::error::no fleet set in deployments/defaults.yaml"; exit 1; }
 
-          mapfile -t apps < <(scripts/fleet.sh list "$FLEET_PREFIX")
-          if [ "${#apps[@]}" -eq 0 ]; then
-            echo "::notice::Fleet '$FLEET_PREFIX' has no instances — no canary to gate on."
-            echo "image=" >> "$GITHUB_OUTPUT"; echo "generic_src=" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-
-          # Pick the generic image source — the canary, preferred (it's the smoke
-          # target). Team-flavored apps rebuild their own image, so they can't be it.
-          team_deps_for() { python scripts/render-team-deps.py "${1#"${FLEET_PREFIX}"-}"; }
           canary="${FLEET_PREFIX}-canary"
-          generic_src=""
-          for cand in "$canary" "${apps[@]}"; do
-            printf '%s\n' "${apps[@]}" | grep -qx "$cand" || continue
-            [ -n "$(team_deps_for "$cand")" ] && continue   # team-flavored — not a generic source
-            generic_src="$cand"; break
-          done
-          if [ -z "$generic_src" ]; then
-            echo "::warning::no generic/canary instance in the fleet — cannot run the wheel canary gate."
-            echo "image=" >> "$GITHUB_OUTPUT"; echo "generic_src=" >> "$GITHUB_OUTPUT"; exit 0
-          fi
+          "$FLY" status -a "$canary" >/dev/null
 
           # Build + deploy the generic image FROM THE WHEEL (dist/ is in the build
           # context; builder-wheel installs it). Round-trip live config; swap image.
-          echo "::group::build + deploy $generic_src (generic base, from the wheel)"
-          cfg="$(mktemp -t "fly-$generic_src-XXXX.toml")"
-          "$FLY" config save -a "$generic_src" -c "$cfg" --yes
+          echo "::group::build + deploy $canary (generic base, from the wheel)"
+          cfg="$(mktemp -t "fly-$canary-XXXX.toml")"
+          "$FLY" config save -a "$canary" -c "$cfg" --yes
           "$FLY" deploy "$PWD" --config "$cfg" --dockerfile "$PWD/Dockerfile" \
             --build-arg BOBI_BUILD=wheel \
-            --depot=false --ha=false --wait-timeout 10m --remote-only -a "$generic_src"
+            --depot=false --ha=false --wait-timeout 10m --remote-only -a "$canary"
           rm -f "$cfg"
           echo "::endgroup::"
 
@@ -234,35 +201,19 @@ jobs:
           # manager HEALTHCHECK (up BEFORE the session is ready) and the canary
           # auto-suspends, so canary-smoke.sh starts the machine and polls the
           # ask with a generous budget that covers a cold first boot.
-          if [ "$generic_src" = "$canary" ]; then
-            echo "::group::smoke $canary (functional ask)"
-            FLY="$FLY" scripts/canary-smoke.sh "$canary"
-            echo "::endgroup::"
-            # Agent-UI reachability gate: tunnel in exactly as `bobi ui
-            # <deployment>` does for an operator — resolve the app, read the UI
-            # token off the machine, `fly proxy`, GET /api/agents — and assert it
-            # answers. Proves the in-container UI is on, the 6PN bind works, the
-            # token is readable, and the proxy reaches it. `--check` is bounded
-            # (it never blocks) and `timeout` is a belt-and-suspenders cap so a
-            # stuck tunnel can't hang the release.
-            echo "::group::smoke $canary (agent UI reachable)"
-            timeout 150 bobi ui --app "$canary" --check
-            echo "::endgroup::"
-          else
-            echo "::warning::generic source is $generic_src (no '$canary' in the fleet) — published/rolled without a functional smoke."
-          fi
-
-          # `fly image show --json` exposes Repository + Digest (Ref/Reference come
-          # back null), so construct the immutable pull reference ourselves.
-          image="$("$FLY" image show -a "$generic_src" --json | jq -r '
-            (.[0] // .) as $i
-            | if ($i.Repository and $i.Digest)
-              then "registry.fly.io/\($i.Repository)@\($i.Digest)"
-              else empty end')"
-          [ -n "$image" ] || { echo "::error::could not resolve built image for $generic_src"; exit 1; }
-          echo "Generic release image (from the wheel): $image"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "generic_src=$generic_src" >> "$GITHUB_OUTPUT"
+          echo "::group::smoke $canary (functional ask)"
+          FLY="$FLY" scripts/canary-smoke.sh "$canary"
+          echo "::endgroup::"
+          # Agent-UI reachability gate: tunnel in exactly as `bobi ui
+          # <deployment>` does for an operator — resolve the app, read the UI
+          # token off the machine, `fly proxy`, GET /api/agents — and assert it
+          # answers. Proves the in-container UI is on, the 6PN bind works, the
+          # token is readable, and the proxy reaches it. `--check` is bounded
+          # (it never blocks) and `timeout` is a belt-and-suspenders cap so a
+          # stuck tunnel can't hang the release.
+          echo "::group::smoke $canary (agent UI reachable)"
+          timeout 150 bobi ui --app "$canary" --check
+          echo "::endgroup::"
 
   # --------------------------------------------------------------------------
   # Publish the SAME wheel the canary proved — gated on build-canary, NOT the fleet
@@ -283,107 +234,6 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-
-  # --------------------------------------------------------------------------
-  # Roll the rest of the fleet — gated on the canary, in parallel with publish.
-  # Generic instances reuse the canary's image digest (build once, deploy many);
-  # a team-flavored instance rebuilds its OWN image from the wheel + its TEAM_DEPS.
-  roll-fleet:
-    name: Roll the fleet
-    needs: build-canary
-    runs-on: ubuntu-latest
-    env:
-      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      IMAGE: ${{ needs.build-canary.outputs.image }}
-      GENERIC_SRC: ${{ needs.build-canary.outputs.generic_src }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
-
-      - name: Stage the prebuilt wheel into the build context
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install bobi (for the team-deps renderer)
-        run: pip install -e .
-
-      - name: Roll the remaining fleet apps
-        run: |
-          set -euo pipefail
-          if [ -z "${FLY_API_TOKEN:-}" ]; then
-            echo "::notice::FLY_API_TOKEN unset — fleet not wired, skipping."; exit 0
-          fi
-          FLY="$(command -v fly || command -v flyctl)" \
-            || { echo "::error::neither 'fly' nor 'flyctl' found on PATH"; exit 1; }
-          FLEET_PREFIX="$(sed -nE 's#^fleet:[[:space:]]*([^[:space:]#]+).*#\1#p' \
-                            deployments/defaults.yaml | head -n1)"
-          [ -n "${FLEET_PREFIX:-}" ] || { echo "::error::no fleet set in deployments/defaults.yaml"; exit 1; }
-
-          mapfile -t apps < <(scripts/fleet.sh list "$FLEET_PREFIX")
-          if [ "${#apps[@]}" -eq 0 ]; then
-            echo "Fleet '$FLEET_PREFIX' has no instances — nothing to roll."; exit 0
-          fi
-          echo "Fleet ($FLEET_PREFIX): ${apps[*]}  (generic source already done: ${GENERIC_SRC:-none})"
-
-          # redeploy APP [IMAGE] [TEAM_DEPS] — round-trip the app's live config
-          # (env/[[mounts]]/[[vm]], no [build] key — we deploy via --dockerfile)
-          # and deploy. Three modes:
-          #   IMAGE set      → reuse that exact ref (the canary's wheel image; built once).
-          #   TEAM_DEPS set  → rebuild the team's OWN image from the wheel + its deps hook.
-          #   neither        → build the plain generic image from the wheel.
-          redeploy() {
-            local app="$1" image="${2:-}" team_deps="${3:-}" cfg
-            cfg="$(mktemp -t "fly-$app-XXXX.toml")"
-            "$FLY" config save -a "$app" -c "$cfg" --yes
-            if [ -n "$image" ]; then
-              "$FLY" deploy --config "$cfg" --image "$image" \
-                --ha=false --wait-timeout 10m -a "$app"
-            elif [ -n "$team_deps" ]; then
-              "$FLY" deploy "$PWD" --config "$cfg" --dockerfile "$PWD/Dockerfile" \
-                --build-arg BOBI_BUILD=wheel --build-arg "TEAM_DEPS=$team_deps" \
-                --depot=false --ha=false --wait-timeout 10m --remote-only -a "$app"
-            else
-              "$FLY" deploy "$PWD" --config "$cfg" --dockerfile "$PWD/Dockerfile" \
-                --build-arg BOBI_BUILD=wheel \
-                --depot=false --ha=false --wait-timeout 10m --remote-only -a "$app"
-            fi
-            rm -f "$cfg"
-          }
-          team_deps_for() { python scripts/render-team-deps.py "${1#"${FLEET_PREFIX}"-}"; }
-
-          fails=()
-          for app in "${apps[@]}"; do
-            [ -n "${GENERIC_SRC:-}" ] && [ "$app" = "$GENERIC_SRC" ] && continue
-            td="$(team_deps_for "$app")"
-            echo "::group::deploy $app"
-            if [ -n "$td" ]; then
-              # team-flavored: rebuild its OWN image (its baked tools) on the new wheel.
-              if redeploy "$app" "" "$td"; then echo "ok (team image): $app"
-              else echo "::error::rollout failed for $app"; fails+=("$app"); fi
-            elif [ -n "${IMAGE:-}" ]; then
-              if redeploy "$app" "$IMAGE"; then echo "ok: $app"
-              else echo "::error::rollout failed for $app"; fails+=("$app"); fi
-            else
-              if redeploy "$app"; then echo "ok (generic build): $app"
-              else echo "::error::rollout failed for $app"; fails+=("$app"); fi
-            fi
-            echo "::endgroup::"
-          done
-
-          if [ "${#fails[@]}" -gt 0 ]; then
-            echo "::error::Fleet rollout incomplete — failed: ${fails[*]}"
-            echo "Re-run this workflow to retry (deploys are idempotent)."
-            exit 1
-          fi
-          echo "Fleet rolled (${#apps[@]} instance(s); generic image: ${IMAGE:-none}; team-flavored instances rebuilt their own)."
 
   # --------------------------------------------------------------------------
   # Deploy the Cloudflare event server before the canary. The canary proves the
@@ -450,19 +300,3 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: scripts/smoke-homebrew-bottles.sh "${{ steps.version.outputs.version }}"
-
-  # --------------------------------------------------------------------------
-  # Reconcile each deployment's package CONTENT + SECRETS onto the freshly-rolled
-  # image — the FINAL release step. Image FIRST (roll-fleet), packages/secrets
-  # SECOND. Reuses the standalone team-deploy workflow as a called step, so the
-  # same `bobi deploy` reconcile runs from a release and from a `deploy-*`
-  # tag. `secrets: inherit` forwards FLY_API_TOKEN + the per-tenant Environment
-  # secrets; `ref` pins the reconcile to the released commit.
-  deploy-teams:
-    name: Deploy team packages + secrets
-    needs: [roll-fleet, update-homebrew]
-    uses: ./.github/workflows/deploy-agent-teams.yml
-    secrets: inherit
-    with:
-      ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
-      rebuild: true
