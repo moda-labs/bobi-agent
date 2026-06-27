@@ -165,6 +165,38 @@ Bobi has a small surface area to learn:
   `run/package/`, mutable state in `run/state/`, your files in `run/workspace/`,
   and credentials in `run/.env`.
 
+## Deployment
+
+A proactive agent is only as available as the machine it runs on. Locally, your
+team works when your laptop is open; in the cloud, it works **24/7** — reacting to
+a PR at 2am or a support ticket on the weekend without you in the loop. That
+always-on shift is the real productivity unlock, and Bobi makes it one command.
+
+`bobi deploy` packages your agent into an immutable container image and runs it as
+an always-on instance on a cloud VM — no Dockerfile to write, no server to
+configure.
+
+```bash
+bobi deploy eng-team
+```
+
+The command provisions the machine, ships the image, and starts the agent; run it
+again and it updates the instance in place. Behind it:
+
+- **Immutable image.** The framework, a pinned agent runtime, and the embedding
+  model are baked into one image — the image is the unit of update.
+- **Durable state.** Credentials and session transcripts live on a mounted volume,
+  so they survive image updates and the agent resumes where it left off.
+- **Self-managing.** A machine restart policy plus a supervision watchdog keep the
+  agent alive without babysitting.
+- **GitOps for fleets.** `bobi deploy-init` scaffolds a GitHub Action that
+  reconciles `deployments/*.yaml` against running instances on every release — git
+  is the desired state, `bobi deploy` closes the gap, one instance at a time.
+
+Currently targets [Fly](https://fly.io) Machines, and works from the installed CLI
+alone — no framework checkout. Full runbook: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md);
+image details: [docs/CONTAINER.md](docs/CONTAINER.md).
+
 ## Security
 
 Bobi's event server is a direct front door to a model's prompt: every event it
