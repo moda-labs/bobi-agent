@@ -76,13 +76,13 @@ It supersedes older setup UI design assumptions elsewhere in the repo.
 
 ## Release Rules
 
-Feature PRs must not bump versions or edit `CHANGELOG.md`. Leave `VERSION`, the
+Feature PRs must not bump the version or edit `CHANGELOG.md`. Leave `VERSION`, the
 `version` field in `pyproject.toml`, and `CHANGELOG.md` untouched unless the
 task is explicitly a release.
 
 Write PR descriptions with enough detail to support a later release changelog:
 what changed, why, and the ticket id.
 
-Release work happens only when cutting a release: bump versions, write the
-changelog entry, and publish the GitHub Release that triggers the release
+Release work happens only at release time: bump versions, write the
+`CHANGELOG.md` entry, and publish the GitHub Release that triggers the release
 workflow. Follow `docs/RELEASE_RUNBOOK.md` for the full process.
