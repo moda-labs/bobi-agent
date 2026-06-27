@@ -14,7 +14,7 @@ Build, a fresh validation to Install, an install to finish.
 
 State is checkpointed under the selected Bobi Agent's run/state directory
 after every change so an interrupted setup resumes with
-`bobi agents setup --resume`.
+`bobi setup --resume`.
 
 v1 is the **create** spine. Open mode (editing an existing pack) reuses
 these same stages and is deferred to M2 — `mode` carries the seam.

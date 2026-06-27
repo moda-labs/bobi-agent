@@ -1,4 +1,4 @@
-/* bobi agents setup — the front-end. Vanilla, no build, offline.
+/* bobi setup — the front-end. Vanilla, no build, offline.
    ONE screen: an objective-guided conversation (left) while the team
    materializes as cards (right). The LLM serves the conversation (SSE) and the
    Build pour (SSE). Secrets are captured in dedicated on-demand components,
@@ -45,7 +45,7 @@
   // (Ctrl-C, closed terminal, crash) the UI must say so and stop pretending to
   // be live — every action would silently fail otherwise. A heartbeat plus
   // fetch-failure detection flips a blocking overlay; it clears itself if the
-  // server comes back (e.g. `bobi agents setup <name> --resume`).
+  // server comes back (e.g. `bobi setup <name> --resume`).
   let _finished = false;        // set when the user intentionally finishes
   let _disconnected = false;
   function markDisconnected() {
@@ -58,8 +58,8 @@
     ov.innerHTML = `<div class="disc-panel">
       <div class="disc-dot"></div>
       <h2>Setup server disconnected</h2>
-      <p>The local <code>bobi agents setup</code> server stopped — closed, interrupted, or crashed. Nothing here works until it's back.</p>
-      <div class="disc-cmd"><span class="pr">$</span> bobi agents setup &lt;name&gt; --resume</div>
+      <p>The local <code>bobi setup</code> server stopped — closed, interrupted, or crashed. Nothing here works until it's back.</p>
+      <div class="disc-cmd"><span class="pr">$</span> bobi setup &lt;name&gt; --resume</div>
       <p class="disc-sub">Run that in your terminal — this page reconnects on its own. Your progress is saved.</p></div>`;
     document.body.appendChild(ov);
   }

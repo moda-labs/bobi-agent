@@ -80,7 +80,7 @@ def list_teams_in(scan_dir: Path) -> list[dict]:
 
 def _bundled_templates_dir() -> Path | None:
     """The repo's `agents/` dir, when running from a source checkout — a dev
-    convenience so `bobi agents setup` lists local teams without the registry.
+    convenience so `bobi setup` lists local teams without the registry.
 
     Agent teams are NOT bundled into the wheel (they're versioned registry
     packages, #440/#446), so a real install has no local templates dir and this

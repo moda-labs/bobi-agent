@@ -1,4 +1,4 @@
-"""The `bobi agents setup` web server — FastAPI on 127.0.0.1, foreground.
+"""The `bobi setup` web server — FastAPI on 127.0.0.1, foreground.
 
 Design (from the implementation handoff):
 - **Deterministic routes are sync `def`** — FastAPI runs them in a thread
@@ -1126,7 +1126,7 @@ def serve(project: Path, *, model: str | None = None,
     if resume:
         state = SetupState.load(project)
         if state is None or state.finished:
-            print("No setup in progress to resume — run `bobi agents setup <name>`.")
+            print("No setup in progress to resume — run `bobi setup <name>`.")
             return 1
     if state is None:
         SetupState.clear(project)
@@ -1150,7 +1150,7 @@ def serve(project: Path, *, model: str | None = None,
 
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
-    print(f"\n  bobi agents setup is running at {url}\n  (Ctrl-C to stop)\n")
+    print(f"\n  bobi setup is running at {url}\n  (Ctrl-C to stop)\n")
 
     try:
         server.run(sockets=[sock])

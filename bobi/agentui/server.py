@@ -10,7 +10,7 @@ Two run modes share one FastAPI app (only the bind + token source differ):
 
 - **local** (`bobi agent <name> ui`): binds ``127.0.0.1:0`` in the foreground, mints a
   per-launch token, opens a browser. The operator's machine is the trust
-  boundary, exactly like `bobi agents setup`.
+  boundary, exactly like `bobi setup`.
 - **container** (:func:`start_in_thread`, started by the manager when
   ``BOBI_UI`` is set): binds the Fly private 6PN address (``::``) in a
   daemon thread so an operator reaches it with ``fly proxy 8080:8080 -a <app>``.

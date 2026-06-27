@@ -220,12 +220,12 @@ class TestSetupCommand:
         self._home(tmp_path, monkeypatch)
         monkeypatch.setattr("shutil.which", lambda name: None)
         monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/nonexistent/claude")
-        result = CliRunner().invoke(main, ["agents", "setup", "alpha"])
+        result = CliRunner().invoke(main, ["setup", "alpha"])
         assert result.exit_code != 0
         assert "Claude Code CLI" in result.output
 
     def test_help(self):
-        result = CliRunner().invoke(main, ["agents", "setup", "--help"])
+        result = CliRunner().invoke(main, ["setup", "--help"])
         assert result.exit_code == 0
         assert "--resume" in result.output
 
@@ -240,7 +240,7 @@ class TestSetupCommand:
 
         monkeypatch.setattr("bobi.setup.run_setup", fake_run_setup)
         result = CliRunner().invoke(
-            main, ["agents", "setup", "alpha", "--model", "sonnet"])
+            main, ["setup", "alpha", "--model", "sonnet"])
         assert result.exit_code == 0, result.output
         assert seen["project"] == paths.agent_run_root("alpha")
         assert seen["model"] == "sonnet"
@@ -258,7 +258,7 @@ class TestSetupCommand:
         paths.state_dir(project)
         SetupState(stage=Stage.DESIGN, team_name="alpha").save(project)
 
-        declined = CliRunner().invoke(main, ["agents", "setup", "alpha"], input="n\n")
+        declined = CliRunner().invoke(main, ["setup", "alpha"], input="n\n")
         assert declined.exit_code != 0
         assert "--resume" in declined.output
         assert "ran" not in called
@@ -274,10 +274,10 @@ class TestSetupCommand:
         package.mkdir(parents=True)
         (package / "agent.yaml").write_text("agent: alpha\n")
 
-        declined = CliRunner().invoke(main, ["agents", "setup", "alpha"], input="n\n")
+        declined = CliRunner().invoke(main, ["setup", "alpha"], input="n\n")
         assert declined.exit_code != 0
         assert "ran" not in called
-        accepted = CliRunner().invoke(main, ["agents", "setup", "alpha"], input="y\n")
+        accepted = CliRunner().invoke(main, ["setup", "alpha"], input="y\n")
         assert accepted.exit_code == 0, accepted.output
         assert called.get("ran") is True
 
@@ -285,7 +285,7 @@ class TestSetupCommand:
         self._home(tmp_path, monkeypatch)
         monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
         monkeypatch.setattr("bobi.setup.run_setup", lambda *a, **k: 0)
-        result = CliRunner().invoke(main, ["agents", "setup", "alpha", "--resume"])
+        result = CliRunner().invoke(main, ["setup", "alpha", "--resume"])
         assert result.exit_code == 0, result.output
 
 

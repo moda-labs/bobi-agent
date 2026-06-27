@@ -36,7 +36,7 @@ bobi agent eng ask "what's the status?"
 ## Machine Commands
 
 ```bash
-bobi agents setup <name>              # design/build/install a Bobi Agent
+bobi setup <name>                     # design/build/install a Bobi Agent
 bobi agents install <source> --name <name>
 bobi agents list
 bobi agents browse
@@ -103,7 +103,7 @@ source.
 
 ```bash
 # Create a new Bobi Agent interactively
-bobi agents setup support
+bobi setup support
 
 # Install a checked-out team source
 bobi agents install ~/agent-teams/support --name support

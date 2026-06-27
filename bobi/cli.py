@@ -1111,7 +1111,7 @@ def setup(name, model, resume):
     if not _shutil.which("claude") and not Path(get_cli_path()).exists():
         raise click.UsageError(
             "the Claude Code CLI is required for setup — install it first "
-            "(https://claude.com/claude-code), then re-run `bobi agents setup`.")
+            "(https://claude.com/claude-code), then re-run `bobi setup`.")
 
     if not resume:
         from bobi.setup.state import SetupState
@@ -1121,7 +1121,7 @@ def setup(name, model, resume):
         if in_progress and not in_progress.finished:
             click.confirm(
                 f"An interrupted setup exists (stage: {in_progress.stage.value}) "
-                "— resume it with `bobi agents setup --resume`. Start over "
+                "— resume it with `bobi setup --resume`. Start over "
                 "and discard it?", abort=True)
 
         name = installed_team_name(project_path)
@@ -3271,14 +3271,14 @@ for _group_name in ["transcript", "workflows", "roles", "monitors", "kb", "event
     if _group_name in main.commands:
         agent.add_command(main.commands[_group_name])
 
-for _cmd_name in ["install", "setup"]:
+for _cmd_name in ["install"]:
     if _cmd_name in main.commands:
         agents.add_command(main.commands[_cmd_name])
 
 for _old_top_level in [
     "start", "stop", "restart", "status", "ui", "message", "ask", "compact",
     "events", "costs", "doctor", "transcript", "workflows", "roles", "monitors", "kb",
-    "event-server", "login-bootstrap", "install", "setup",
+    "event-server", "login-bootstrap", "install",
 ]:
     main.commands.pop(_old_top_level, None)
 
