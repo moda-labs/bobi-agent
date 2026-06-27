@@ -411,7 +411,7 @@ def test_release_targets_only_the_ci_canary():
     assert "scripts/fleet.sh list" not in script
     assert "render-team-deps.py" not in script
     assert "scripts/canary-smoke.sh" in script
-    assert "bobi ui --app \"$canary\" --check" in script
+    assert "bobi agent canary ui --app \"$canary\" --check" in script
     # load-bearing flags from the provisioner (one-volume + zstd boot bug)
     assert "--ha=false" in script
     assert "--depot=false" in script
