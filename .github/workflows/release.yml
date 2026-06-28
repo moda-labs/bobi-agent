@@ -1,7 +1,7 @@
 name: Release
 
 # The single gated release pipeline, on a published GitHub Release (C22 / #342;
-# docs/design/CONTAINERIZED_INSTANCES.md §10). ONE functional gate — a canary
+# docs/CONTAINERIZED_DEPLOYMENT.md §6). ONE functional gate - a canary
 # running the EXACT wheel we're about to ship — guards BOTH irreversible actions
 # (PyPI publish + Homebrew). Build once, prove once, then publish:
 #

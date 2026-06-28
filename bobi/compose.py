@@ -14,8 +14,7 @@ directory with no `from:`. Nothing downstream (runtime resolver, container
 build) ever learns about layers — the output is one flat team, exactly as a
 hand-written monolithic team would be.
 
-See `docs/specs/team-from-resolution.md` (#446) and
-`docs/specs/team-compose-merge.md` (#451).
+See issues #446 (resolution) and #451 (compose merge).
 """
 
 from __future__ import annotations

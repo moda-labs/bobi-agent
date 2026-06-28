@@ -52,8 +52,9 @@ def _resolve_cli_path() -> str:
     """Locate the ``claude`` CLI, container-safe.
 
     Prefer ``PATH`` — the only thing that works in the Linux container image,
-    where the pinned CLI is installed on ``PATH`` (CONTAINERIZED_INSTANCES.md
-    C8). When it isn't found, fall back to the Homebrew location *only* on
+    where the pinned CLI is installed on ``PATH``
+    (docs/CONTAINERIZED_DEPLOYMENT.md, The image). When it isn't found, fall
+    back to the Homebrew location *only* on
     macOS dev machines; on every other platform fall back to the bare name so
     exec still resolves it via ``PATH`` at spawn time rather than a
     macOS-specific absolute path that doesn't exist in the container.

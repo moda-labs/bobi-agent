@@ -1,5 +1,5 @@
 """C22 GitOps deploy/update automation (#342), refactored onto the
-`bobi deploy` primitive (DEPLOY_INTERFACE.md).
+`bobi deploy` primitive (docs/CONTAINERIZED_DEPLOYMENT.md).
 
 Covers the fleet-state primitive (`scripts/fleet.sh`), the provisioner's
 identity stamps + ssh-push blank mode, and the structural invariants of the two
