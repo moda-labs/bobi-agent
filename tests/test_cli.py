@@ -160,7 +160,7 @@ class TestSubagents:
         assert result.exit_code == 0, result.output
 
     def test_passes_requested_by(self, bobi_install):
-        req = '{"from":"Alice","channel":"C1"}'
+        req = '{"requester":"Alice","source":{"kind":"test"},"ids":[1,2]}'
         with patch("bobi.subagent.launch_agent", return_value="wf-adhoc-1") as mock:
             result = CliRunner().invoke(main, [
                 "agent", TEST_AGENT_NAME, "subagents", "launch",
@@ -168,7 +168,12 @@ class TestSubagents:
                 "--task", "Fix #1", "--requested-by", req,
             ])
         assert result.exit_code == 0, result.output
-        assert mock.call_args[1]["requested_by"] == {"from": "Alice", "channel": "C1"}
+        assert mock.call_args[1]["task"] == "Fix #1"
+        assert mock.call_args[1]["requested_by"] == {
+            "requester": "Alice",
+            "source": {"kind": "test"},
+            "ids": [1, 2],
+        }
 
 
 class TestEventsCommand:

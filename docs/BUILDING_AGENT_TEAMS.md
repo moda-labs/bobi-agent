@@ -378,9 +378,9 @@ handle, and watch `run/state/manager.log`.
 
 ## Reference implementations
 
-- `agents/eng-team` (bobi repo) — multi-repo org: director entry
-  point, project leads, engineers; github + slack with tool-agnostic seams
+- `agents/eng-team` (bobi repo) - multi-repo org: director entry
+  point plus async engineer workers; github + slack with tool-agnostic seams
   (Moda's house team derives from it via `from: eng-team`).
-- `agents/dogfood-content-review` (bobi repo) — single-repo content
+- `agents/dogfood-content-review` (bobi repo) - single-repo content
   pipeline: manager entry point, researcher/editor/fact-checker roles,
   github + email via Venn, command monitor for inbound email.

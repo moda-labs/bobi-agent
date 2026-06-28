@@ -1,0 +1,16 @@
+name: merge-conflict
+trigger: When a monitor detects that an open pull request has merge conflicts.
+description: >
+  Resolve pull request merge conflicts by merging the base branch, fixing
+  conflicts, verifying the build and tests, and pushing the updated branch.
+
+steps:
+  - name: resolve
+    agent: engineer
+    prompt: |
+      Follow the Merge Conflict Phase instructions in your role prompt.
+      Resolve the merge conflicts described in the task, verify build/tests,
+      commit the resolution, and push.
+    handoff:
+      required: [status]
+    timeout: 1800
