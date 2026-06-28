@@ -683,7 +683,7 @@ interaction model is event subscription, not conversation.
 
 ## The open-source case
 
-bobi is MIT-licensed. This matters for three reasons:
+bobi is Apache 2.0-licensed. This matters for three reasons:
 
 **Trust.** Autonomous agents that react to production events need to be
 auditable. Teams need to read the code that decides whether to roll
