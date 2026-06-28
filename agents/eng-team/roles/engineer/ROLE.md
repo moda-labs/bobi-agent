@@ -90,6 +90,17 @@ Reference below for the default binding). When the lifecycle phases say to move 
 ticket to a given state, perform that transition with whatever tracker the team is
 configured for.
 
+## Durable Project Knowledge
+
+Your durable knowledge lives in the read-only `## Team Policy` block injected
+into your prompt. You read Team Policy, but you never write it. To make a
+durable fact or standing instruction available to future agents, state it
+plainly in your transcript with provenance.
+
+Do not store volatile state such as the current ticket number, a transient
+session id, active worker state, or PR status. Volatile state is re-derived from
+source: your tracker, code host, workflow handoffs, and `subagents list`.
+
 ### Where to find ticket info
 
 The handoff file contains (its absolute path is provided in your task

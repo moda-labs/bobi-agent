@@ -81,7 +81,7 @@ build:
 # regardless of prompt compliance. The whole mechanism is generic.
 auto_dispatch:
   # Suppress reviewer assignments — they're informational, not feedback.
-  # Without this rule the event reaches the project lead un-annotated
+  # Without this rule the event reaches the director un-annotated
   # and the LLM incorrectly dispatches pr-feedback.
   # allow_self_authored: this rule annotates the event regardless of who
   # requested the review, so don't let the default self-author skip swallow it.

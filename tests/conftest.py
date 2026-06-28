@@ -117,8 +117,7 @@ TEST_AGENT_NAME = "test-agent"
 
 def _install_test_agent(config_dir: Path) -> None:
     """Create installed package state in run/package/."""
-    for subdir in ["roles/director", "roles/project_lead", "roles/engineer",
-                    "workflows", "monitors"]:
+    for subdir in ["roles/director", "roles/engineer", "workflows", "monitors"]:
         (config_dir / subdir).mkdir(parents=True, exist_ok=True)
 
     (config_dir / "agent.md").write_text("# Test Agent\nMinimal agent for testing.")
@@ -126,10 +125,6 @@ def _install_test_agent(config_dir: Path) -> None:
     (config_dir / "roles" / "director" / "ROLE.md").write_text(
         "# Engineering Director\n\n"
         "You are a director of engineering managing multiple software projects."
-    )
-    (config_dir / "roles" / "project_lead" / "ROLE.md").write_text(
-        "# Project Lead\n\n"
-        "You are a project lead managing a single software project."
     )
     (config_dir / "roles" / "engineer" / "ROLE.md").write_text(
         "# Engineer Agent\n\n"

@@ -24,10 +24,9 @@ monitors:
 
   - name: team-status-roundup
     description: >
-      Twice-daily status roundup. The director pings every project lead
-      for a full report on their repo — in-progress tickets, open PRs,
-      open issues, CI failures, blockers — aggregates the responses, and
-      reports the org-wide picture to the human on Slack.
+      Twice-daily status roundup. The director reads active worker sessions,
+      workflow handoffs, tracker state, open PRs, CI failures, blockers, and
+      monitor findings, then reports the org-wide picture to the human on Slack.
     at: ["06:00", "18:00"]
     tz: America/Los_Angeles
     event: monitor/status.roundup_due

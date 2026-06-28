@@ -186,9 +186,9 @@ Full walkthrough: **[Slack setup](skills/slack-setup.md)**.
 ## Under the hood
 
 - **It's a CLI all the way down.** `bobi` launches agents from your terminal - and
-  each agent launches *its own* sub-agents through the same CLI. A manager spawns
-  project leads, a project lead spawns task agents, every level using the same
-  commands. That recursion is the entire execution model.
+  each agent launches *its own* sub-agents through the same CLI. A director can
+  spawn async workers, and those workers can launch bounded helpers when a
+  workflow calls for it. That recursion is the execution model.
 - **No topology opinions.** Bobi ships no org chart. Roles, relationships, and
   who-subscribes-to-what are defined entirely by the agent.
 - **Built-in event server.** A topic-based pub/sub bus (run locally or on your own

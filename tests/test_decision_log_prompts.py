@@ -4,14 +4,14 @@ Issue #175: the director derived 'what I manage' from session records,
 which resurrected stale launch records on restart, so durable knowledge
 became a prompt-level concept.
 
-#456/#460: the framework base contract is now the **team-policy** model — a
-curator-maintained, read-only ``policy.md`` injected as ``## Team Policy`` —
+#456/#460: the framework base contract is now the **team-policy** model - a
+curator-maintained, read-only ``policy.md`` injected as ``## Team Policy`` -
 replacing the old agent-maintained decision log (the bloat source behind the
 rotation wedge). Durable knowledge is made persistent by stating it plainly in
 the transcript (the ``policy-curator`` distills it); agents never self-maintain
 a per-session log. Volatile operational state (live leads, in-flight tickets)
 is re-derived from source (GitHub/Linear/``agents list``), not stored. The
-eng-team director/project-lead role prompts have been migrated to this model;
+eng-team director and engineer role prompts have been migrated to this model;
 the contracts below assert the policy-model behavior.
 """
 
@@ -20,7 +20,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_PROMPT = REPO_ROOT / "bobi" / "prompts" / "base.md"
 DIRECTOR_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "director" / "ROLE.md"
-LEAD_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "project_lead" / "ROLE.md"
+ENGINEER_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "engineer" / "ROLE.md"
 
 
 class TestBasePolicyContract:
@@ -67,7 +67,7 @@ class TestBasePolicyContract:
 
 
 class TestDirectorManagedFromSource:
-    """The director must derive 'what I manage' from live source, not a log."""
+    """The director must derive routing/status from live source, not a log."""
 
     def setup_method(self):
         self.text = DIRECTOR_PROMPT.read_text()
@@ -83,9 +83,9 @@ class TestDirectorManagedFromSource:
             "Director prompt must not reference INDEX.md under the policy model"
         )
 
-    def test_managed_derived_from_subscriptions(self):
-        assert "subscription" in self.lower and "github:" in self.lower, (
-            "Director prompt must derive managed repos from its GitHub subscriptions"
+    def test_managed_derived_from_configuration(self):
+        assert "managed repos" in self.lower and "agent.yaml" in self.lower, (
+            "Director prompt must derive managed repos from package/configuration"
         )
 
     def test_reads_team_policy_block(self):
@@ -99,36 +99,41 @@ class TestDirectorManagedFromSource:
         )
 
 
-class TestDirectorStartupReconciliation:
-    """On startup the director reconciles subscriptions against live agents."""
+class TestDirectorStatusModel:
+    """Without project leads, status comes from durable/live sources."""
 
     def setup_method(self):
         self.text = DIRECTOR_PROMPT.read_text()
         self.lower = self.text.lower()
 
-    def test_has_reconciliation_section(self):
-        assert "startup reconciliation" in self.lower, (
-            "Director prompt must have a startup reconciliation section"
+    def test_has_status_model_section(self):
+        assert "status model" in self.lower, (
+            "Director prompt must have a status model section"
         )
 
-    def test_derives_from_subscriptions(self):
-        assert "subscription" in self.lower, (
-            "Director prompt must derive managed repos from configured subscriptions on startup"
+    def test_reads_active_worker_sessions(self):
+        assert "active worker sessions" in self.lower, (
+            "Director prompt must synthesize status from active worker sessions"
         )
 
     def test_checks_live_agents(self):
         assert "bobi agent <agent> subagents list" in self.lower, (
-            "Director prompt must check live agents during reconciliation"
+            "Director prompt must check live subagents for status"
         )
 
-    def test_relaunches_missing_leads(self):
-        assert "relaunch" in self.lower, (
-            "Director prompt must relaunch leads missing from live agents"
+    def test_reads_workflow_handoffs(self):
+        assert "workflow handoffs" in self.lower, (
+            "Director prompt must synthesize status from workflow handoffs"
         )
 
-    def test_cancels_stale_leads(self):
-        assert "cancel" in self.lower and "stale" in self.lower, (
-            "Director prompt must cancel stale leads not corresponding to a managed repo"
+    def test_does_not_launch_retired_role(self):
+        assert "--role project_lead" not in self.lower, (
+            "Director prompt must not launch the retired persistent role"
+        )
+
+    def test_has_legacy_cleanup_path(self):
+        assert "legacy session cleanup" in self.lower and "project_lead" in self.lower, (
+            "Director prompt must document cleanup for stale upgraded sessions"
         )
 
     def test_never_replays_old_sessions(self):
@@ -137,47 +142,44 @@ class TestDirectorStartupReconciliation:
         )
 
 
-class TestDirectorOnboardingProvenance:
-    """Onboarding launches a lead and surfaces provenance in the transcript."""
+class TestDirectorDispatchContract:
+    """Director launches async worker workflows with complete context."""
 
     def setup_method(self):
         self.text = DIRECTOR_PROMPT.read_text()
         self.lower = self.text.lower()
 
-    def test_launches_a_lead(self):
-        assert "launch a project lead" in self.lower, (
-            "Onboarding must launch a project lead"
+    def test_launches_engineer_workers(self):
+        assert "--role engineer" in self.lower, (
+            "Director must launch engineer workers"
         )
 
-    def test_no_decision_log_write_step(self):
-        assert "write to the decision log" not in self.lower, (
-            "Onboarding must not write to a decision log under the policy model"
+    def test_no_project_lead_dispatch(self):
+        assert "--role project_lead" not in self.lower, (
+            "Director must not dispatch persistent project leads"
         )
 
-    def test_subscription_is_durable_routing_record(self):
-        assert "subscription" in self.lower, (
-            "Onboarding must treat the lead's subscription as the durable routing record"
+    def test_dispatch_includes_source_reference(self):
+        assert "source event type" in self.lower and "requester" in self.lower, (
+            "Worker launch contract must include source event and requester context"
         )
 
-    def test_surfaces_provenance_in_transcript(self):
-        # Provenance is stated plainly in the transcript for the curator,
-        # not written to any file.
-        assert "transcript" in self.lower and "user_id" in self.lower, (
-            "Onboarding must state provenance (who, when) plainly in the transcript"
-        )
+    def test_routes_common_event_classes(self):
+        for workflow in [
+            "issue-lifecycle",
+            "pr-feedback",
+            "pr-closed",
+            "merge-conflict",
+            "build-failure",
+            "adhoc",
+        ]:
+            assert workflow in self.lower, (
+                f"Director prompt must route {workflow} events"
+            )
 
-    def test_offboarding_cancels_lead_no_log(self):
-        offboard_pos = self.lower.find("offboarding")
-        assert offboard_pos != -1, "Director prompt must have an offboarding section"
-        offboard_text = self.lower[offboard_pos:offboard_pos + 600]
-        assert "cancel" in offboard_text, (
-            "Offboarding must cancel the lead"
-        )
-        assert "decision log" not in offboard_text, (
-            "Offboarding must not update a decision log under the policy model"
-        )
-        assert "transcript" in offboard_text, (
-            "Offboarding must note the offboard plainly in the transcript for provenance"
+    def test_does_not_perform_repo_work_inline(self):
+        assert "do not edit repo files directly" in self.lower, (
+            "Director must preserve the async-only repo-work boundary"
         )
 
 
@@ -192,8 +194,8 @@ class TestDirectorListFromLiveSource:
         listing_pos = self.lower.find("listing managed repos")
         assert listing_pos != -1, "Director prompt must have a listing section"
         listing_text = self.lower[listing_pos:listing_pos + 800]
-        assert "subscription" in listing_text, (
-            "Listing must answer from the director's configured subscriptions"
+        assert "managed repos" in listing_text, (
+            "Listing must answer from configured managed repos"
         )
         assert "decision log" not in listing_text and "index.md" not in listing_text, (
             "Listing must not read from a decision log under the policy model"
@@ -204,7 +206,7 @@ class TestDirectorListFromLiveSource:
         assert listing_pos != -1
         listing_text = self.lower[listing_pos:listing_pos + 800]
         assert "bobi agent <agent> subagents list" in listing_text, (
-            "Listing must annotate live status from subagents list"
+            "Listing must annotate live worker status from subagents list"
         )
 
 
@@ -248,39 +250,39 @@ class TestDirectorHumanPreferences:
         )
 
 
-class TestProjectLeadDurableKnowledge:
-    """Project lead's durable knowledge is the read-only Team Policy, not a log."""
+class TestEngineerDurableKnowledge:
+    """Engineer durable knowledge is the read-only Team Policy, not a log."""
 
     def setup_method(self):
-        self.text = LEAD_PROMPT.read_text()
+        self.text = ENGINEER_PROMPT.read_text()
         self.lower = self.text.lower()
 
     def test_no_decision_log(self):
         assert "decision log" not in self.lower, (
-            "Project lead prompt must not reference a decision log under the policy model"
+            "Engineer prompt must not reference a decision log under the policy model"
         )
 
     def test_no_index_md(self):
         assert "index.md" not in self.lower, (
-            "Project lead prompt must not reference INDEX.md under the policy model"
+            "Engineer prompt must not reference INDEX.md under the policy model"
         )
 
     def test_reads_team_policy_block(self):
         assert "team policy" in self.lower, (
-            "Project lead prompt must reference the read-only Team Policy block"
+            "Engineer prompt must reference the read-only Team Policy block"
         )
 
     def test_durability_via_transcript(self):
         assert "transcript" in self.lower, (
-            "Project lead must make knowledge durable by stating it in the transcript"
+            "Engineer must make knowledge durable by stating it in the transcript"
         )
 
     def test_records_standing_instructions(self):
         assert "standing instruction" in self.lower, (
-            "Project lead prompt must mention surfacing standing instructions"
+            "Engineer prompt must mention surfacing standing instructions"
         )
 
     def test_volatile_state_rederived(self):
         assert "re-derived" in self.lower or "rederived" in self.lower, (
-            "Project lead must not store volatile state — it is re-derived from source"
+            "Engineer must not store volatile state - it is re-derived from source"
         )

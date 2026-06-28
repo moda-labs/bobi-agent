@@ -550,8 +550,9 @@ def test_eng_team_core_installs_standalone(tmp_path):
     cfg = yaml.safe_load((dest / "agent.yaml").read_text())
     assert {s["name"] for s in cfg["services"]} == {"github", "slack"}  # no linear
     assert {r["name"] for r in cfg["requires"]} == {"gh"}               # no gstack/codex
-    for role in ("director", "engineer", "project_lead"):
+    for role in ("director", "engineer"):
         assert (dest / "roles" / role / "ROLE.md").exists()
+    assert not (dest / "roles" / "project_lead").exists()
     # Tool-agnostic: core names no house tool in its engineer role.
     eng = (dest / "roles" / "engineer" / "ROLE.md").read_text().lower()
     assert "/review" not in eng and "linear" not in eng
