@@ -13,7 +13,7 @@ credentials on the volume. Two flow shapes, picked per brain:
   token endpoint until the human authorizes; nothing is pasted back.
 
 Refresh-token rotation makes this a once-per-machine ceremony
-(CONTAINERIZED_INSTANCES.md §6.1); the manual fallback is ``fly ssh console`` +
+(docs/CONTAINERIZED_DEPLOYMENT.md); the manual fallback is ``fly ssh console`` +
 the brain's login command. The live round-trip needs a real Worker + Slack and
 is exercised in the deployed environment; the mechanism here is unit-tested with
 the pty, the Slack post, and the event source faked — see

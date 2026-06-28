@@ -18,10 +18,10 @@
   const slugify = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
 
   const GENERATING = new Set(["build", "review", "install"]);
-  // The cloud-deploy runbook shipped in-repo (the Fly provisioner + container
-  // contract). Points at the GitHub blob so the finalization screen's link
+  // The cloud-deploy runbook shipped in-repo (the image, Fly provisioner, and
+  // GitOps). Points at the GitHub blob so the finalization screen's link
   // works without a docs site.
-  const DOCS_CLOUD_URL = "https://github.com/moda-labs/bobi-agent/blob/main/docs/CONTAINER.md";
+  const DOCS_CLOUD_URL = "https://github.com/moda-labs/bobi-agent/blob/main/docs/CONTAINERIZED_DEPLOYMENT.md";
   const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4"><path d="M5 12l5 5L19 7"/></svg>';
   const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7"/></svg>';
   const HELP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.2a2.8 2.8 0 0 1 5.4 1c0 1.9-2.7 2.5-2.7 2.5"/><circle cx="12" cy="16.7" r="0.6" fill="currentColor" stroke="none"/></svg>';

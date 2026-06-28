@@ -13,7 +13,11 @@ Bobi is an event-driven AI agent framework.
 - `skills/create-agent.md`: agent team authoring guidance.
 - `skills/slack-setup.md`: Slack integration setup.
 - `skills/linear-setup.md`: Linear integration setup.
-- `docs/ticketing_policy.md`: Linear/GitHub ticketing conventions.
+- `docs/EVENT_SERVER.md`: event-server architecture, topics, and security model.
+- `docs/MONITORS.md`: monitor scheduler and the `script_cache` token-saving runner.
+- `docs/WORKFLOW_ENGINE.md`: workflow state machine, step types, suspend/resume.
+- `docs/SECURITY.md`: overall security model (trust, credentials, prompt-injection).
+- `docs/TICKETING_POLICY.md`: Linear/GitHub ticketing conventions.
 - `docs/RELEASE_RUNBOOK.md`: release process and checklist.
 - `DESIGN.md`: source of truth for `bobi setup` web UI visual and UX decisions.
 
@@ -28,6 +32,36 @@ Bobi is an event-driven AI agent framework.
 - Credentials belong in runtime `.env` files or environment variables. Never
   commit secrets.
 
+## Coding Standards
+
+### Code
+
+- Prefer quality, simplicity, robustness, scalability, and long-term maintainability.
+- Keep a single code path for doing any one thing.
+- Review code for simplicity.
+- If something looks off, fix it along the way, even if it is unrelated to the current task.
+
+### Bug fixes
+
+- A CI failure or production bug means there is an integration test gap.
+- Reproduce the bug first, as closely aligned to real usage as possible.
+- Write a failing test that reproduces the problem, then write the fix.
+
+### Testing
+
+- When developing a new feature, unit tests are important, but end-to-end integration tests better prove the feature functions correctly.
+- Write integration tests that mimic the actual user experience as much as possible.
+- When working on tests, review the current set of tests and ensure coverage is complete but non-redundant.
+
+### Markdown and writing
+
+- Prefer concise wording over long descriptions.
+- Never use the em dash. Use a regular dash instead.
+
+### Commits
+
+- Never auto-add your agent name as co-author in commit messages.
+
 ## Development Setup
 
 ```bash
@@ -38,6 +72,8 @@ pip install -e ".[dev]"
 
 ## Worktree Policy
 
+- Before creating a new worktree, fetch the latest `main` (or the intended base
+  branch) and branch the worktree from it, never from a stale local base.
 - Use `worktrees/<branch-or-task-name>/` under the repo root for task-specific
   worktrees.
 - Keep only active worktrees in `worktrees/`; remove stale directories after
@@ -55,9 +91,6 @@ pytest tests/                              # full suite, includes integration te
 Integration tests drive real Claude Code sessions. Run them before pushing when
 the change touches runtime behavior, session orchestration, workflows, monitors,
 or event delivery.
-
-CI failure or production bug means there is an integration test gap. Add a
-failing integration test that reproduces the problem before fixing the behavior.
 
 ## Design System
 

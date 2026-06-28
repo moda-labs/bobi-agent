@@ -1,6 +1,6 @@
 """Scaffold bring-your-own-repo CI deploy automation (`bobi deploy-init`).
 
-Turns DEPLOYMENT.md §7.2 B into one command: emit a standalone
+Turns CONTAINERIZED_DEPLOYMENT.md §7.2 B into one command: emit a standalone
 `deploy-agent-teams.yml` + a `deployments/` skeleton, then print the exact
 `fly`/`gh` commands to wire the secrets — derived from each team's *declared*
 `${VAR}` set, so the list is always right.

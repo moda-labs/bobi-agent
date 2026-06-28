@@ -1,5 +1,5 @@
 """The `bobi deploy` / `bobi destroy` engine — the one-instance
-deployment primitive (DEPLOY_INTERFACE.md).
+deployment primitive (docs/CONTAINERIZED_DEPLOYMENT.md).
 
 Layering (applied recursively so the engine stays operator-agnostic):
 

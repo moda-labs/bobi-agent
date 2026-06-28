@@ -9,7 +9,7 @@ name: Deploy agent teams
 # `deployments/*.yaml` reconciliation.
 
 # Reconcile deployments/<name>.yaml to live Fly instances in a fleet-owning repo
-# (C22 / #342; docs/design/DEPLOY_INTERFACE.md).
+# (C22 / #342; docs/CONTAINERIZED_DEPLOYMENT.md).
 #
 # WHEN it runs:
 #   workflow_call        -> optional reusable hook if a fleet repo has its own
@@ -33,7 +33,7 @@ name: Deploy agent teams
 # deployments (provision the new, update the rest) — no git-diff needed. Nothing
 # GitHub-specific reaches into the engine, so the same `bobi deploy` runs from
 # a laptop, this Action, Terraform, or a SaaS plane. To wire your own repo, copy
-# this file; see docs/DEPLOYMENT.md (bring-your-own-repo runbook).
+# this file; see docs/CONTAINERIZED_DEPLOYMENT.md (bring-your-own-repo runbook).
 #
 #   active deployment   = deployments/<name>.yaml (defaults.yaml excluded).
 #   inactive            = anything else (e.g. <name>.yaml.example) — never deployed.

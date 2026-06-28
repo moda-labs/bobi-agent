@@ -1,6 +1,6 @@
 """Integration tests for the bobi instance image (containerized-8 / #338).
 
-These verify the C8 image contract from CONTAINERIZED_INSTANCES.md §5/§6.1/§10:
+These verify the image contract from docs/CONTAINERIZED_DEPLOYMENT.md §2 (The image):
 non-root agent, no Node, native `claude` CLI on PATH, fastembed model baked in,
 and the entrypoint's auth-mode guards. They build the image once per session.
 
