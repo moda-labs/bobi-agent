@@ -127,7 +127,7 @@ Prefer to design your own agent from scratch? Run the interactive wizard:
 bobi setup            # go from an idea to a runnable agent, interactively
 ```
 
-Or use your coding assistant to help you build one with the `create-agent` skill —
+Or use your coding assistant to help you build one with the `create-agent` skill -
 paste this into your Claude Code or Codex session:
 
 ```plaintext
@@ -158,20 +158,24 @@ In my bobi agent's agent.yaml, set the brain to Codex by adding:
 (To switch back to Claude Code, remove the brain block - Claude Code is the default.)
 ```
 
-### Connect integrations (optional)
+### Credentials (optional)
 
 Out of the box an agent runs locally and handles whatever you hand it. To let it
-react to the outside world - a Slack mention, a Linear ticket, a GitHub PR - it
-needs two things:
+act on outside services - opening a GitHub PR, updating a Linear ticket, posting
+to Slack - it needs credentials for them. `bobi agents install` prompts for any
+secrets the agent's `agent.yaml` references and writes them to `run/.env` (never
+commit this file); you can also supply them as environment variables.
 
-- **Credentials.** `bobi agents install` prompts for any secrets the agent's
-  `agent.yaml` references and writes them to `run/.env` (never commit this file).
-- **A reachable event server.** You don't start it yourself - `bobi agent <name>
-  start` launches a local one automatically. To receive webhooks from the public
-  internet (Slack, GitHub, Linear), point the agent at a deployed event server:
-  the shared Bobi cloud Worker by default, or your own Cloudflare Worker.
+You don't run the event server yourself - `bobi agent <name> start` launches a
+local one automatically. To receive webhooks from the public internet (Slack,
+GitHub, Linear), point the agent at a deployed event server: the shared Bobi
+cloud Worker by default, or your own Cloudflare Worker.
 
-For Slack, generate the app in one command:
+### Talk to your agent from Slack (optional)
+
+By default you talk to an agent from the terminal (`bobi agent <name> ask`). To
+message it from Slack instead - and have it reply and react there - generate a
+Slack app and point it at your agent:
 
 ```bash
 bobi create-slack-bot --app-name "Bobi"
