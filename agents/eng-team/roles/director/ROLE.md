@@ -95,11 +95,13 @@ bobi agent <agent> subagents launch \
   --task "<source reference and concise instructions>"
 ```
 
-For Slack-requested work, pass requester context when the CLI supports it:
+For Slack-requested work, pass requester context as structured metadata so
+completion lifecycle events can route back to the original thread:
 
 ```bash
 bobi agent <agent> subagents launch -w adhoc --role engineer \
-  --task "Investigate <request>. Source event type: slack/slack.mention. Repo: <owner/repo>. Requested by <user_id> in <workspace>/<channel>/<thread_ts>."
+  --task "Investigate <request>. Source event type: slack/slack.mention. Repo: <owner/repo>." \
+  --requested-by '{"from":"<user_id>","workspace":"<workspace>","channel":"<channel>","thread_ts":"<thread_ts>"}'
 ```
 
 ## Event Routing

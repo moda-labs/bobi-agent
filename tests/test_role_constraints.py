@@ -9,6 +9,7 @@ These tests catch regressions if someone reintroduces a persistent project
 lead layer or loosens the director's async-only boundary.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -130,6 +131,20 @@ class TestDirectorDelegation:
         text = self.text.lower()
         assert "auto-dispatched" in text and "do not launch another worker" in text, (
             "Director prompt must avoid duplicate workers for auto-dispatched events"
+        )
+
+    def test_slack_dispatch_uses_structured_requester_metadata(self):
+        start = self.text.index("For Slack-requested work")
+        end = self.text.index("## Event Routing")
+        section = self.text[start:end]
+        task = re.search(r'--task "([^"]+)"', section, re.MULTILINE)
+
+        assert "--requested-by" in section and "thread_ts" in section, (
+            "Slack-requested worker launches must preserve structured requester metadata"
+        )
+        assert task is not None
+        assert "requested by" not in task.group(1).lower(), (
+            "Slack requester routing must not be embedded in the task text"
         )
 
 
