@@ -42,22 +42,43 @@ and go.
 
 ### 1) Set up an agent runtime
 
-Bobi runs each agent on **Claude Code** (default) or **OpenAI Codex**. For Claude
-Code:
+Bobi runs each agent on **Claude Code** (default) or **OpenAI Codex**. You need
+at least one installed and authenticated — skip this if you already have one set
+up.
+
+**Claude Code** — if you don't have it yet:
 
 ```bash
 npm install -g @anthropic-ai/claude-code
 claude
 ```
 
-Log in with your Anthropic account (Pro, Max, or API key). To use Codex, install
-and authenticate the `codex` CLI and set `brain: {kind: codex}` in your agent's
-`agent.yaml`.
+Log in with your Anthropic account (Pro, Max, or API key). See the
+[Claude Code docs](https://docs.anthropic.com/en/docs/claude-code) for details.
+
+**OpenAI Codex** — if you don't have it yet:
+
+```bash
+npm install -g @openai/codex
+codex
+```
+
+Log in with your ChatGPT plan or an OpenAI API key. See the
+[Codex CLI docs](https://developers.openai.com/codex/cli/) for details. You'll
+select Codex per agent with `brain: {kind: codex}` once you create one (below).
 
 ### 2) Install Bobi
 
+With [uv](https://docs.astral.sh/uv/):
+
 ```bash
-uv tool install bobi          # or: brew install moda-labs/bobi-agent/bobi
+uv tool install bobi
+```
+
+Or with [Homebrew](https://brew.sh/):
+
+```bash
+brew install moda-labs/bobi-agent/bobi
 ```
 
 Or, from a Claude Code session:
@@ -94,6 +115,30 @@ bobi setup            # go from an idea to a runnable agent, interactively
 
 ```plaintext
 Read https://raw.githubusercontent.com/moda-labs/bobi-agent/main/skills/create-agent.md and help me build a bobi agent
+```
+
+### Choose the runtime (optional)
+
+Every agent runs on **Claude Code by default** — you don't need to configure
+anything. To run an agent on **OpenAI Codex** instead, add a `brain` block near
+the top of its `agent.yaml`:
+
+```yaml
+brain:
+  kind: codex          # omit the block entirely for Claude Code (the default)
+```
+
+Make sure the matching CLI is installed and authenticated (see
+[Set up an agent runtime](#1-set-up-an-agent-runtime) above).
+
+Don't want to edit YAML by hand? Paste this into your Claude Code or Codex
+session:
+
+```plaintext
+In my bobi agent's agent.yaml, set the brain to Codex by adding:
+  brain:
+    kind: codex
+(To switch back to Claude Code, remove the brain block — Claude Code is the default.)
 ```
 
 ### Add integrations (optional)
