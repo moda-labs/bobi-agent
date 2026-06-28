@@ -8,7 +8,7 @@ and re-cache (self-healing).
 
 This caches a script an LLM *wrote*, so a cron now runs machine-generated code
 unattended with the manager's secret env. The security model is the load-bearing
-part of this module — see ``docs/design/SCRIPT_CACHE.md`` §3. Defense in depth:
+part of this module - see ``docs/MONITORS.md``. Defense in depth:
 
   1. Generation constraints (prompt-level) — ``_build_generation_description``.
   2. Static validation gate (the control) — ``validate_script``.

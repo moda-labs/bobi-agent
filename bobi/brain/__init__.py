@@ -4,7 +4,7 @@ The framework drives every agent through a *brain*: a client that connects,
 takes queries, and streams back messages. Today the only brain is Claude Code
 (``claude-agent-sdk``). This package is the seam that lets a team pick a
 different agentic CLI (Codex, Gemini, Grok) without the runtime hardcoding any
-one vendor SDK — see ``docs/specs/pluggable-brain.md``.
+one vendor SDK - see issue #485.
 
 ``base`` defines the provider-agnostic contract (the ``BrainSession`` /
 ``BrainFactory`` protocols + normalized stream messages); per-brain adapters

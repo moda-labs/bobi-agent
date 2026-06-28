@@ -1,5 +1,5 @@
 # deployments/defaults.yaml — shared operator VALUES, applied under every
-# deployments/<name>.yaml (DEPLOY_INTERFACE.md).
+# deployments/<name>.yaml (docs/CONTAINERIZED_DEPLOYMENT.md).
 #
 # This is NOT a list of what to deploy — the deploy list is the set of
 # deployments/*.yaml files. It only factors out values common to the fleet so

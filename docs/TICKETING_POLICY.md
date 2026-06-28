@@ -37,8 +37,9 @@ Use this structure consistently in both systems:
 
 1. **Sync cadence**
    - Before starting work, confirm open states in both systems.
-   - Update `docs/TICKET_STATE.md` in-session whenever issue state changes,
-     assignments, blockers, or track moves.
+   - Keep GitHub the source of truth: update issue state, labels
+     (`status:*`, readiness), assignees, and sub-issue links in-session as work
+     changes — don't maintain a separate mirror.
 
 2. **Linear → GitHub mapping**
    - Every active non-duplicate Linear ticket should map to:
@@ -87,13 +88,14 @@ Reconciliation is considered healthy when:
 - All active Linear epics have a visible GitHub implementation owner.
 - All active GitHub implementation issues have a Linear tracking context.
 - Active queues are free of obvious duplicates and stale off-scope work.
-- `docs/TICKET_STATE.md` is updated with review date and open-count changes.
+- GitHub issue state, labels, and sub-issue links reflect reality (state is the
+  source of truth — no separate overview doc to keep in sync).
 
 ## Pause / deferred work
 
 If reconciliation is paused (for example, missing approver):
 
-- Record a checkpoint in `docs/TICKET_STATE.md` with a snapshot, mapping, and open
-  ambiguities.
+- Record a checkpoint as a comment on the relevant epic/tracking GitHub issue
+  with a snapshot, mapping, and open ambiguities.
 - Avoid destructive state changes until alignment is restored.
 - Resume directly from the checkpoint.

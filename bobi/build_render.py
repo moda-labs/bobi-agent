@@ -7,7 +7,7 @@ moves) — we render the spec to a single shell script (`team-deps.sh`) and the
 ONE Dockerfile runs it as a stable layer BELOW the volatile framework-wheel copy
 (via the `TEAM_DEPS` build-arg hook). A code-only framework release then rebuilds
 only the wheel layer; the team's tools stay cached. See
-docs/design/CUSTOM_AGENT_DEPS.md §"three clocks" / §layering.
+docs/CONTAINERIZED_DEPLOYMENT.md §2.6 (Team-flavored images).
 
 The script:
   * `apt` / `npm` install system-wide as **root** (npm globals land in

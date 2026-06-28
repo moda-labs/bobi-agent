@@ -7,8 +7,8 @@ it up) deploys; deleting it surfaces the orphaned Fly app for a human-gated
 portable package) from **where/how an operator runs it** (here) — one team can
 back many deployments (`acme-eng`, `staging-eng`, …).
 
-See `docs/design/DEPLOY_INTERFACE.md` for the full design and
-`docs/DEPLOYMENT.md` for the runbook (including the bring-your-own-repo setup).
+See `docs/CONTAINERIZED_DEPLOYMENT.md` for the runbook (including the
+bring-your-own-repo setup).
 
 ## Schema
 

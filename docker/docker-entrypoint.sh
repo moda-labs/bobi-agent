@@ -212,7 +212,7 @@ as_app() {
 #
 # With NEITHER set on an empty volume the instance enters the "wait for team"
 # state instead of crashing: it was provisioned blank for ssh-push delivery
-# (`bobi deploy` with a local `team:` package — DEPLOY_INTERFACE.md). The
+# (`bobi deploy` with a local `team:` package - docs/CONTAINERIZED_DEPLOYMENT.md). The
 # operator pushes the team over `fly ssh` (sftp the tarball + `bobi agents install`),
 # which lands run/package/agent.yaml on the volume; we poll for it, then start.
 # This is the single-developer "I built it, ship it — no hosting" path, and it
@@ -234,7 +234,7 @@ if [ ! -f "${PACKAGE_DIR}/agent.yaml" ]; then
       log "       instance can already see. To deliver a PUBLISHED team, set"
       log "       BOBI_TEAM_URL=<https .tar.gz> instead; to deliver a LOCAL"
       log "       package, use 'bobi deploy <name>' (ssh-push, no team source"
-      log "       on the instance). See DEPLOYMENT.md / DEPLOY_INTERFACE.md."
+      log "       on the instance). See docs/CONTAINERIZED_DEPLOYMENT.md."
       exit 1
     fi
   else

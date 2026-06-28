@@ -1,7 +1,7 @@
 name: Team images
 
 # Verify that every team with a `build:` spec produces a working team-flavored
-# image (C24 team-flavored images; docs/design/CUSTOM_AGENT_DEPS.md). A team that
+# image (team-flavored images; docs/CONTAINERIZED_DEPLOYMENT.md §2.6). A team that
 # declares `build:` needs its host tools (node, codex, gstack, …) baked in — the
 # generic base ships none, and a dark container has no TTY to install them. CI
 # renders the team-deps hook (bobi.build_render) and builds the ONE

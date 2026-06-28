@@ -5,7 +5,7 @@
 # A bobi instance is: one container image + one persistent volume (mounted at
 # /data, with BOBI_HOME=/data/.bobi) + a set of env vars + an outbound WSS
 # connection to one event-server deployment. Nothing reaches in; it reaches out only.
-# See docs/design/CONTAINERIZED_INSTANCES.md §2 (the instance contract).
+# See docs/CONTAINERIZED_DEPLOYMENT.md §2 (The image) for the instance contract.
 #
 # This script creates the Fly app, the volume, the secrets, and the machine, then
 # deploys the C8 image (Dockerfile at repo root). It is idempotent: re-running

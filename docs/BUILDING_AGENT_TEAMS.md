@@ -1,9 +1,72 @@
 # Building Agent Teams
 
-A focused guide for authoring a bobi agent team. Written for the
-agent (or human) doing the authoring. For the product vision around
-interactive onboarding, see AGENT_TEAM_ONBOARDING.md — this document is
-the durable reference for what a team *is*.
+The definitive guide for authoring a bobi agent team. Written for the
+agent (or human) doing the authoring: how to design the team, what each
+part of the package is, and how to validate it.
+
+## Designing your team
+
+Before writing files, settle what the team is. A few questions frame
+everything else:
+
+1. **What does this agent do?** One sentence describing the domain
+   ("manage the engineering SDLC", "run sales outreach", "monitor support
+   tickets"). This frames everything that follows.
+2. **What distinct jobs does it involve?** Each job a human would wear a
+   different hat for is a candidate role - a coder, a reviewer, a QA; or a
+   company researcher, a voice tracker, a PMF analyst. Each role gets its
+   own prompt and responsibilities.
+3. **What services does it read from and write to?** email, github,
+   linear, salesforce, calendar, notion, and so on. This is the connection
+   list (see [Connecting services](#connecting-services)).
+4. **How do you interact with it?** A chat surface (`slack`, `telegram`,
+   or `none`). Interaction is the human channel; autonomy comes from
+   monitors and event triggers, not from chat.
+5. **What should it do on a schedule?** Recurring proactive work - a
+   Monday-morning digest, a nightly health check - becomes monitors or
+   scheduled jobs.
+6. **What events should it react to?** For each service, the specific
+   trigger condition: a PR opening, a VIP-domain email, a ticket moved to
+   "To Do". This is the difference between an agent that watches your inbox
+   and one that only acts when told.
+7. **(Optional) What needs a human gate?** High-stakes steps where a
+   person must sign off become workflow `await` steps - e.g. outreach copy
+   approved in Slack before it sends, a deploy approved before it promotes.
+
+### Start with fewer roles
+
+Bias toward the smallest team that covers the distinct jobs, and let it
+grow into more roles as real needs surface.
+
+- **Prefer one role doing more over many narrow roles.** A single capable
+  role with a clear prompt is easier to operate, debug, and reason about
+  than a fan-out of specialists. Many domains start best as one role.
+- **You don't need a role per task.** The entry-point role spawns
+  sub-agents on demand for bounded work (`bobi agent <name> subagents
+  launch`), so transient or one-off jobs never need their own standing
+  role. Define roles for durable, recurring responsibilities, not
+  individual tasks.
+- **Add a role when a real need recurs.** Split out a new role once a
+  distinct responsibility shows up often enough that a dedicated prompt and
+  its own context clearly help - not preemptively. Growing a team is
+  cheaper than coordinating one that was over-divided up front.
+
+A team can be a single role, and should scale to a
+director-plus-leads-plus-engineers org only when the work genuinely
+demands it.
+
+### Worked examples
+
+Same problem space, very different sizes - pick the smallest shape that
+does the job:
+
+- **Engineering SDLC** (multi-role org): a **director** (triages incoming
+  work, assigns it), **project leads** (coordinate within a project), and
+  **engineers** (execute tasks). GitHub + Linear, Slack chat, director as
+  entry point. Reacts to PRs, issue assignments, and status changes.
+- **Deploy monitor** (single role): one agent watches deploy events, runs
+  smoke tests on an interval, and posts alerts to a Slack channel. No
+  back-and-forth chat, fully autonomous.
 
 ## Team layout
 
@@ -78,6 +141,29 @@ the framework — they are advisory config your roles read from the
 installed agent.yaml. Use them to give the manager judgment guidance
 (trigger labels, review policy, style), and document them in the role
 prompts that consume them.
+
+## Connecting services
+
+Every service the team uses connects through one of three mechanisms:
+
+- **Native** (`github`, `slack`, `linear`) - built-in webhook
+  integrations. GitHub auto-detects from the git remote and acts via the
+  `gh` CLI; Slack uses `${SLACK_BOT_TOKEN}`; Linear uses
+  `${LINEAR_API_KEY}`. Paste the key when `bobi agents install` prompts.
+- **OAuth via Venn** (`gmail`, `salesforce`, `calendar`, `notion`, `jira`,
+  ...) - anything that needs OAuth. Venn holds pre-registered OAuth apps
+  for 50+ services behind a single API key, which sidesteps headless token
+  acquisition (no browser on the box, no per-provider OAuth app to
+  register). The user connects services once at venn.ai, then agents read
+  and write with the `venn` CLI and poll with `venn exec` in monitors.
+  Paste `${VENN_API_KEY}`.
+- **Custom MCP servers** - internal or bespoke tools, declared under
+  `mcp_servers:` (`http`/`sse`/`stdio`). They wire into the agent session
+  through the SDK, so the agent gets their tools automatically. Preflight
+  probes each server and lists its tools.
+
+Prefer native where it exists, Venn for OAuth SaaS, and MCP for anything
+custom.
 
 ## Roles
 

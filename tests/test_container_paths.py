@@ -2,7 +2,7 @@
 
 A bobi instance runs in a Linux container with a volume-mounted ``$HOME``
 and the pinned ``claude`` CLI on ``PATH`` (see
-``docs/design/CONTAINERIZED_INSTANCES.md`` C1/C8). Two things must hold:
+``docs/CONTAINERIZED_DEPLOYMENT.md`` The image). Two things must hold:
 
 1. The ``claude`` CLI is resolved from ``PATH``; the only absolute fallback is
    a macOS dev-machine convenience, never used on Linux.
