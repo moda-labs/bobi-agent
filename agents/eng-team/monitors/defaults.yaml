@@ -4,7 +4,7 @@
 # Override or disable in your repo's run/package/monitors.yaml.
 monitors:
   - name: pr-conflict-check
-    description: Check open PRs across all registered repos for merge conflicts
+    description: Check open PRs across all registered repos for merge conflicts or dirty merge state
     interval: 15m
     event: monitor/pr.conflict_detected
     check: pr_conflicts
@@ -38,4 +38,3 @@ monitors:
   # bobi/monitors/framework_defaults.yaml, opt-out via `prune:`. Removing it
   # here is byte-neutral for the composed set (the framework seeds an identical
   # record); a test asserts that. Re-adding it here would be redundant.
-
