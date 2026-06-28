@@ -1,4 +1,4 @@
-"""Role prompts must enforce delegation and responsiveness constraints.
+"""EngTeam role prompts must enforce delegation and responsiveness constraints.
 
 The eng-team package is a two-layer org: a persistent director dispatches
 async engineer workers. The director must never allow hands-on repo work
@@ -9,16 +9,16 @@ These tests catch regressions if someone reintroduces a persistent project
 lead layer or loosens the director's async-only boundary.
 """
 
+import json
 import re
 from pathlib import Path
 
 import pytest
 import yaml
 
-# The pristine, in-repo reference team. These constraints are generic (they
-# apply to any eng org), so they're validated against eng-team. The Moda
-# house bindings (codex as the adversarial reviewer, Linear) live in the private
-# moda-eng-team overlay and are validated there.
+# The pristine, in-repo EngTeam package. Tests in this file intentionally cover
+# EngTeam's shipped role shape and prompt contracts. General framework behavior
+# such as CLI requester metadata parsing lives in isolated test-agent fixtures.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENG_TEAM = REPO_ROOT / "agents" / "eng-team"
 DIRECTOR_PROMPT = ENG_TEAM / "roles" / "director" / "ROLE.md"
@@ -133,15 +133,31 @@ class TestDirectorDelegation:
             "Director prompt must avoid duplicate workers for auto-dispatched events"
         )
 
-    def test_slack_dispatch_uses_structured_requester_metadata(self):
+    def test_slack_dispatch_documents_structured_requester_metadata(self):
+        """This is an EngTeam prompt contract, not CLI parsing coverage.
+
+        General `--requested-by` JSON forwarding is tested against the isolated
+        test-agent fixture in test_cli.py. This assertion keeps the shipped
+        EngTeam director example aligned with that framework capability.
+        """
         start = self.text.index("For Slack-requested work")
         end = self.text.index("## Event Routing")
         section = self.text[start:end]
         task = re.search(r'--task "([^"]+)"', section, re.MULTILINE)
 
-        assert "--requested-by" in section and "thread_ts" in section, (
+        requester_arg = re.search(r"--requested-by '([^']+)'", section, re.MULTILINE)
+
+        assert "pass requester context as structured metadata" in section.lower()
+        assert "route back to the original thread" in section.lower()
+        assert requester_arg is not None, (
             "Slack-requested worker launches must preserve structured requester metadata"
         )
+        assert json.loads(requester_arg.group(1)) == {
+            "from": "<user_id>",
+            "workspace": "<workspace>",
+            "channel": "<channel>",
+            "thread_ts": "<thread_ts>",
+        }
         assert task is not None
         assert "requested by" not in task.group(1).lower(), (
             "Slack requester routing must not be embedded in the task text"
