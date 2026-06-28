@@ -100,6 +100,47 @@ class TestCleanupWorktree:
         # Should succeed — prune handles the stale entry, branch gets deleted
         assert result["status"] == "cleaned"
 
+    def test_preserves_target_checkout_on_head_branch(self, git_repo, tmp_path):
+        """The repo_root checkout itself is never removed, even when it is on
+        the closed PR branch.
+
+        This protects editable installs where _editable_impl_bobi.pth points at
+        the canonical checkout and pr-closed cleanup is asked to operate there.
+        """
+        from bobi.workflow.cleanup import cleanup_worktree
+
+        checkout = tmp_path / "editable-checkout"
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "agent/editable", str(checkout)],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+
+        result = cleanup_worktree(str(checkout), "agent/editable")
+
+        assert result["status"] == "cleaned"
+        assert result["paths_removed"] == []
+        assert result["protected_paths"] == [str(checkout)]
+        assert checkout.exists()
+
+        current_branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=checkout,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert current_branch.stdout.strip() == "agent/editable"
+
+        branches = subprocess.run(
+            ["git", "branch", "--list", "agent/editable"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+        )
+        assert "agent/editable" in branches.stdout
+
 
 # ---------------------------------------------------------------------------
 # Native action step — schema parsing

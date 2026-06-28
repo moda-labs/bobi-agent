@@ -43,9 +43,14 @@ def cleanup_worktree(repo_root: str, head_branch: str) -> dict:
         return {"status": "not_found"}
 
     removed: list[str] = []
+    protected: list[str] = []
     errors: list[str] = []
 
     for wt_path in worktree_paths:
+        if _is_target_checkout(str(root), wt_path):
+            log.warning("Skipping cleanup for target checkout: %s", wt_path)
+            protected.append(wt_path)
+            continue
         ok = _remove_worktree(str(root), wt_path)
         if ok:
             removed.append(wt_path)
@@ -53,9 +58,12 @@ def cleanup_worktree(repo_root: str, head_branch: str) -> dict:
             errors.append(f"Failed to remove {wt_path}")
 
     _prune(str(root))
-    _delete_branch(str(root), head_branch)
+    if not protected:
+        _delete_branch(str(root), head_branch)
 
     result: dict = {"status": "cleaned", "paths_removed": removed, "branch": head_branch}
+    if protected:
+        result["protected_paths"] = protected
     if errors:
         result["errors"] = errors
     return result
@@ -90,6 +98,14 @@ def _find_worktrees_for_branch(repo_root: str, branch: str) -> list[str]:
             current_path = ""
 
     return paths
+
+
+def _is_target_checkout(repo_root: str, worktree_path: str) -> bool:
+    """Return True when a matching worktree is the checkout being cleaned from."""
+    try:
+        return Path(worktree_path).resolve() == Path(repo_root).resolve()
+    except OSError:
+        return False
 
 
 def _remove_worktree(repo_root: str, worktree_path: str) -> bool:
