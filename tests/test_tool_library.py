@@ -1,6 +1,6 @@
 """Tests for the reusable tool library (#416) — `kind: cli` + catalog/resolver.
 
-Covers the §6 verification plan of `docs/specs/416-tool-library.md`:
+Covers the verification plan of the tool library (#416):
   * pin de-dup across `from:` layers (the headline — proves three-place drift is
     gone),
   * expansion basics, local-wins guide, explicit-wins requires,

@@ -1,13 +1,10 @@
-# Deployment — how it actually works (Fly build + GitOps)
+# Deployment (image + Fly + GitOps)
 
-How a bobi agent team becomes a running, self-managing instance on Fly,
-and the hard-won nuances that make it work. This is the **operational** companion
-to the design docs: `docs/design/CONTAINERIZED_INSTANCES.md` is *why/what*,
-`docs/design/DEPLOY_INTERFACE.md` is the *deploy-primitive design*, and this is
-*how it works today + the gotchas*. Current as of the `bobi deploy`
-primitive + binary-only deploy, **merged to main 2026-06-19** (PR #365). Next:
-layered-deps (C24 #368) → eng-team on Fly → EC2 decommission
-(`HANDOFF-layered-deps-eng-team-fly.md`).
+How a bobi agent team becomes a running, self-managing instance on Fly, and the
+hard-won nuances that make it work. This is the end-to-end operational runbook:
+the image, building and running it, the `bobi deploy` primitive, the Fly
+provisioner, fleet identity, secrets, and GitOps. The why/what of containerized
+instances, and the remaining scale-to-zero design, is tracked in issue #395.
 
 Pieces:
 
@@ -56,34 +53,148 @@ instances share **one image**; identity lives entirely in the volume + env.
 
 ---
 
-## 2. The image (Fly build)
+## 2. The image
 
-`Dockerfile` at the repo root, two-stage:
-- **builder**: build the `bobi` wheel; install into a venv.
-- **runtime**: slim Debian + the venv, the native pinned `claude` CLI (no Node),
-  `git`/`curl`/`gosu`, the fastembed embedding model **baked at build time**, and
-  `docker-entrypoint.sh`. Runs as non-root uid 10001 (`bobi`).
+The instance image packages the framework, a pinned native `claude` CLI, and the
+embedding model into one immutable image. Tenant identity lives entirely in the
+mounted volume and env vars (the full instance contract is tracked in issue #395).
+The image is built **for Fly**, so several choices below are Fly-driven; the same
+image also runs under plain `docker run` for a local contract test.
 
-First boot (the entrypoint): create the volume layout, install the team
-(`BOBI_TEAM_URL` or `BOBI_TEAM`), then `exec gosu` to the `bobi`
-user running `bobi agent <name> start --foreground` (PID 1). The instance **self-mints its
-event-bus bubble and self-registers every session** (#240) — the provisioner never
+### What's in it
+
+| Property | Why |
+|---|---|
+| `python:3.11-slim` base | small, matches `requires-python` |
+| Non-root `bobi` user (uid 10001) | Claude Code refuses `bypassPermissions` as root unless `IS_SANDBOX=1`; we drop privileges with `gosu` instead |
+| Native `claude` CLI (no Node) | the local Node event server is never run in deployed instances; the CLI is the standalone binary |
+| `DISABLE_AUTOUPDATER=1` | freeze the CLI at the built version (the image is the unit of update) |
+| fastembed model baked at `HF_HOME=/opt/bobi/models` | cold-start speed; no first-run download |
+| `gosu` (privilege drop); no `tini` | Fly injects its own PID-1 init (reaps zombies, forwards signals); tini-on-Fly is a known boot-failure trigger. For other runtimes, use `docker run --init` |
+| `bobi agent <name> start --foreground` entrypoint | container mode |
+
+The agent's `$HOME` stays on the **image** (`/home/bobi`), so baked team tools
+(`~/dev/gstack`, skills) are read in place. Claude's durable state is redirected to
+the **volume** via `CLAUDE_CONFIG_DIR=/data/claude`, and the entrypoint points the
+whole `~/.claude` at it, so `~/.claude/.credentials.json` and `~/.claude/projects/`
+(session transcripts, required for resume) persist across image updates while
+remaining reachable at their usual `~/.claude` paths.
+
+### Build
+
+`Dockerfile` at the repo root, two-stage: **builder** builds the `bobi` wheel into
+a venv; **runtime** is slim Debian + the venv, the native pinned `claude` CLI (no
+Node), `git`/`curl`/`gosu`, the baked fastembed model, and `docker-entrypoint.sh`.
+Runs as non-root uid 10001.
+
+```bash
+# default: 'stable' channel of the claude CLI
+docker build -t bobi:dev .
+
+# reproducible production build: pin an exact claude CLI version
+docker build -t bobi:dev --build-arg CLAUDE_VERSION=2.1.89 .
+```
+
+Build args: `CLAUDE_VERSION` (default `stable`), `BOBI_UID` (default `10001`).
+
+### Run it with Docker (local contract test)
+
+The image needs a volume at `/data`, an auth mode, the team to install, the
+event-server URL, and the service tokens the team uses. `docker run` is the local
+contract test; Fly provisioning (below) sets the same env + secrets.
+
+**api_key mode (fleet default):**
+
+```bash
+docker run --rm -v bobi-a:/data \
+  -e BOBI_AUTH=api_key \
+  -e BOBI_TEAM=eng-team \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e BOBI_EVENT_SERVER=https://your-worker.example.workers.dev \
+  -e SLACK_BOT_TOKEN=xoxb-... \
+  -e GITHUB_TOKEN=ghp_... \
+  bobi:dev
+```
+
+**subscription mode (internal dogfood only):** uses OAuth credentials on the
+volume (`/data/claude/.credentials.json`) instead of an API key.
+**`ANTHROPIC_API_KEY` must be unset** - it silently outranks subscription auth and
+bills the API; the image refuses to start if both are set.
+
+```bash
+docker run --rm -v bobi-a:/data \
+  -e BOBI_AUTH=subscription \
+  -e BOBI_TEAM=eng-team \
+  -e BOBI_EVENT_SERVER=https://your-worker.example.workers.dev \
+  -e BOBI_LOGIN_CHANNEL=C0PRIVATE \
+  -e SLACK_BOT_TOKEN=xoxb-... \
+  bobi:dev
+```
+
+**First-boot login is automated.** When the volume has no credentials, the
+entrypoint runs `bobi agent <name> login-bootstrap` before starting the manager:
+it drives `claude auth login --claudeai` under a pty, posts the OAuth URL to the
+private Slack channel `BOBI_LOGIN_CHANNEL`, and waits for you to paste the auth
+code back in that channel (it arrives as a normal Slack->Worker->deployment
+event). The channel **must be private**: the code is single-use but grants login
+to whoever pastes it first. Refresh-token rotation makes this a once-per-machine
+ceremony. Manual fallback if the event bus isn't wired yet:
+
+```bash
+docker run --rm -it -v bobi-a:/data \
+  -e CLAUDE_CONFIG_DIR=/data/claude --entrypoint claude bobi:dev auth login --claudeai
+```
+
+Never copy a `.credentials.json` between machines; shared refresh chains
+invalidate each other.
+
+### First boot (the entrypoint)
+
+The entrypoint creates the volume layout, installs the team (`BOBI_TEAM_URL` or
+`BOBI_TEAM`), then `exec gosu`es to the `bobi` user running
+`bobi agent <name> start --foreground` (PID 1). The instance **self-mints its
+event-bus bubble and self-registers every session** - the provisioner never
 touches `deployment_id`/`api_key`.
 
 With **neither** team var set on an empty volume the entrypoint enters a
-**wait-for-team** state: it polls for `run/package/agent.yaml` instead of crashing.
-That is the ssh-push hook — the instance boots blank and holds while
-`bobi deploy` pushes a local team onto the volume (next section); the moment
-the team lands, it proceeds to start. (This is the C9-adjacent first-boot change.)
+**wait-for-team** state: it polls for `run/package/agent.yaml` instead of
+crashing. That is the ssh-push hook - the instance boots blank and holds while
+`bobi deploy` pushes a local team onto the volume (next section); the moment the
+team lands, it proceeds to start.
 
-### Fly build gotchas (each one cost real debugging — do not regress)
+### Environment variables
+
+| Var | Required | Meaning |
+|---|---|---|
+| `BOBI_AUTH` | no (default `api_key`) | `api_key` or `subscription` |
+| `BOBI_TEAM` | on first boot* | team to install into an empty volume, by bundled/registry name |
+| `BOBI_TEAM_URL` | on first boot* | public `.tar.gz` URL of one team package, fetched at first boot; takes precedence over `BOBI_TEAM`. *Set exactly one of `BOBI_TEAM` / `BOBI_TEAM_URL`.* |
+| `ANTHROPIC_API_KEY` | api_key mode | **must be absent** in subscription mode |
+| `BOBI_LOGIN_CHANNEL` | subscription mode | private Slack channel ID for the first-boot login bootstrap |
+| `BOBI_EVENT_SERVER` | yes | the Worker URL (`https://`) the team config references via `${BOBI_EVENT_SERVER}`; the client derives `wss://` from it |
+| `BOBI_FLEET` | no (default: app-name prefix) | operator/fleet namespace stamp; the authoritative fleet-membership key the GitOps automation enumerates by. The app name is only a discovery hint |
+| `SLACK_BOT_TOKEN`, `GITHUB_TOKEN`, `LINEAR_API_KEY`, ... | per team | service tokens (`${VAR}` refs in `agent.yaml`) |
+| `DATA_DIR` / `BOBI_PROJECT` / `BOBI_HOME` | no | layout overrides (default `/data`, `/data/project`, `/home/bobi`). `BOBI_HOME` is the IMAGE home - baked tools live there |
+| `CLAUDE_CONFIG_DIR` | no (default `/data/claude`) | Claude's durable config dir on the volume (creds, transcripts, settings); the entrypoint links `~/.claude` to it |
+
+### Health
+
+The manager exposes `GET /health` on a localhost port written to
+`/data/project/run/state/manager-health.port`. The image `HEALTHCHECK` (and Fly
+script checks) read that file and probe the endpoint:
+
+```bash
+docker inspect -f '{{.State.Health.Status}}' <container>
+```
+
+### Fly build gotchas (each one cost real debugging - do not regress)
 
 1. **`WORKDIR` must NOT be under the volume mount.** The volume mounts at `/data`
    and **shadows** anything beneath it, so `WORKDIR /data/project` makes the
    container's cwd not exist at runtime → Fly's init can't `exec` *any* binary
    (your entrypoint *and* Fly's own `hallpass`) → `No such file or directory (os
    error 2)`, crash-loop to max-restart 10. Fix: **`WORKDIR /`**; the entrypoint
-   `cd`s into `${BOBI_PROJECT}` itself. *This was THE on-Fly boot bug.*
+   `cd`s into `${BOBI_PROJECT}` itself.
 2. **No `tini`.** Fly Machines inject their own PID-1 init; shipping `tini` is a
    documented Fly boot-failure trigger. Keep it out of the ENTRYPOINT and apt.
    (For non-Fly runtimes, use `docker run --init`.)
@@ -109,8 +220,8 @@ the team lands, it proceeds to start. (This is the C9-adjacent first-boot change
 9. **Concurrent `fly deploy --remote-only` builds race on the org's single shared
    remote builder** (`failed to parse daemon host "unix:///var/run/docker.sock":
    missing hostname`). One build grabs the builder; the other dies. **Serialize
-   provisions** (or, post-C24, deploy prebuilt images by ref so the builder leaves
-   the path entirely). Found in the C22 live e2e.
+   provisions** (or deploy a prebuilt `image:` ref, §2.6, so the builder leaves
+   the path entirely).
 
 ---
 
@@ -159,7 +270,7 @@ secrets.
 
 ---
 
-## 2.6. Team-flavored images — baked host tools (C24)
+## 2.6. Team-flavored images — baked host tools
 
 Some teams need **host tools** in the container, not just prompts. `eng-team`
 declares `requires: [gstack, codex]`; the generic image ships neither (no Node),
@@ -282,7 +393,7 @@ operator namespace, stamped `BOBI_FLEET=<prefix>` in each app's `[env]`.
 
 ---
 
-## 5. Secrets model (#385)
+## 5. Secrets model
 
 **Fly secrets are the runtime store; `agent.yaml` is the schema; the env-file is
 ephemeral transport.** The four roles:
@@ -336,35 +447,6 @@ Notes:
 - Fleet/tenant config lives in **`deployments/defaults.yaml`** (`fleet:`, `tenant:`,
   `event_server:`, sizing), not repo variables. The only repo secret is
   `secrets.FLY_API_TOKEN` (`fly tokens create deploy`); absent it, the workflows no-op.
-
-### 5.1. Migrating an Environment from the old blob (runbook)
-
-Pre-#385 Environments held a single opaque `BOBI_ENV` blob. To migrate one
-deployment to per-key (non-destructive — do this *before* deleting the blob):
-
-```bash
-ENV=modalabs                 # the tenant Environment
-TEAM=ENG_TEAM                # deployment name, slug-normalized (eng-team → ENG_TEAM)
-APP=moda-eng-team            # the live Fly app (source of current values)
-
-# Add per-key secrets, sourced from the live Fly app (values never printed):
-for k in SLACK_BOT_TOKEN LINEAR_API_KEY OPENAI_API_KEY GH_TOKEN SLACK_CHANNELS; do
-  v=$(fly ssh console -a "$APP" -C "printenv $k" | tr -d '\r\n')
-  [ -n "$v" ] && printf '%s' "$v" | gh secret set "${TEAM}__${k}" --env "$ENV" -R <owner>/<repo>
-done
-```
-
-The per-key secrets and the old `BOBI_ENV` blob **coexist safely** — the
-pre-#385 workflow reads the blob, the new one reads per-key. **At cutover** (after
-the per-key workflow has merged and a deploy is verified green), delete the blob:
-
-```bash
-gh secret delete BOBI_ENV --env "$ENV" -R <owner>/<repo>
-```
-
-A subscription team (e.g. eng-team) has **no** `ANTHROPIC_API_KEY` — don't migrate
-one; the reconcile prunes a stray live key. An old per-deployment Environment (e.g.
-`eng-team`) becomes vestigial once its keys live in the tenant Environment.
 
 ---
 
@@ -470,7 +552,7 @@ their pinned `bobi` version and run their own deployment reconcile.
 > `pypi`. (If you migrate from a prior `publish-pypi.yml` publisher, update it
 > **before** the next release or the upload fails.)
 
-> **flyctl gotchas (found in the C22 e2e):**
+> **flyctl gotchas:**
 > - `fly config save` writes via **`-c <path>`**, not `-o` (which it rejects).
 > - `fly image show -a <app> --json` returns `Ref`/`Reference`/`FullImageRef` as
 >   **null** — construct the pull ref yourself:
@@ -623,12 +705,12 @@ Both GitOps workflows also accept `workflow_dispatch` for manual re-runs.
   succeeded but the push didn't land `run/package/agent.yaml`; check `fly logs` and
   re-run `bobi deploy <name>` (idempotent — it re-pushes).
 - *Instance boots but agents won't dispatch* → a team with a `requires:` gate whose
-  tools aren't in the image (e.g. eng-team's gstack/codex). That's the C24 gap —
-  see `docs/design/CUSTOM_AGENT_DEPS.md`.
+  tools aren't in the image (e.g. eng-team's gstack/codex). Declare the tools in
+  the team's `build:` block (§2.6).
 
 ---
 
-## 7.3. Many teams on one workspace / org — event routing (#341)
+## 7.3. Many teams on one workspace / org — event routing
 
 Several team instances can share **one Slack workspace + one GitHub org** without
 triaging each other's events. Routing is **targeted, not broadcast-and-filter**:
@@ -666,61 +748,26 @@ bubble/account) is #239 (auth-v2), part of the multitenant phase, not this.
 
 ---
 
-## 8. What's verified
+## 8. Testing
 
-C10 + C22 were verified **live on Fly**, then torn down:
-- Single instance: empty volume → image build → boot → first-boot team install from
-  URL → healthy manager → `bobi agent <name> ask` self-registers on the real Worker →
-  `pong`. (The `team-url` delivery path, unchanged by the deploy refactor except
-  the added `BOBI_INSTANCE` stamp.)
-- Two-instance fleet (C22): provision both, `fleet.sh list`/`classify` against real
-  Fly state, changed-team update (`install <url>` + restart — role content updated,
-  workspace file preserved), release rollout (cross-app image pull, config
-  preserved, `pong`).
+Image contract + live round-trip: `tests/integration/test_container_image.py`
+(non-root, no Node, baked model, auth guards; the live `ask` is skipped unless
+`ANTHROPIC_API_KEY` is set). Manual acceptance smoke:
 
-The deploy refactor adds the **ssh-push** path, **verified live on Fly**
-(`bobi deploy sshe2e --team smoke-team`, then torn down):
-- Blank provision (app + 15 GB volume + staged secret); `fly deploy` returns on the
-  blank machine reaching **started** — it does *not* hang on the image healthcheck.
-- `BOBI_INSTANCE` confirmed in the live `[env]` (next to `BOBI_FLEET`).
-- base64 push over `fly ssh` → `bobi agents install /data/…tar.gz --non-interactive`
-  (secrets read from the Fly-injected env — confirmed available in the ssh session)
-  → the wait-for-team entrypoint detects the team and starts the manager (`status`
-  shows it running).
-- In-place re-deploy: re-push → workspace-safe reinstall (a role marker propagated)
-  → `fly machine restart <id>` → manager back up.
-- `bobi destroy sshe2e --yes` removes the app + volume.
+```bash
+docker run -d --name smoke -v "$(mktemp -d):/data" \
+  -e BOBI_AUTH=api_key -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e BOBI_TEAM=eng-team -e BOBI_EVENT_SERVER=https://... \
+  bobi:dev
+# wait for healthy, then:
+docker exec smoke bobi agent <name> ask "Reply with: pong"
+```
 
-> **flyctl gotcha (found in this e2e):** `fly machine restart -a <app>` errors
-> "a machine ID must be specified" outside a TTY. `deploy` resolves IDs via
-> `fly machine list --json` and restarts each by ID.
-
-The **team-url** path has been verified live two ways:
-- **Historical CI / GitOps check:** a `deploy-canary-1` tag fired `deploy-agent-teams.yml` from the branch
-  → `bobi deploy canary` → provisioned `moda-canary` (1 GB/1 vCPU) via team-url;
-  manager healthy, `BOBI_INSTANCE` stamped.
-- **Binary-only (no repo):** from a directory with no bobi checkout,
-  `bobi deploy` resolved the bundled wheel assets ("binary mode"), built the
-  image from PyPI (`BOBI_BUILD=pypi`, version-pinned), and provisioned
-  `bintest-bsmoke` — incl. the **re-provision-on-failure** fork (a half-built app
-  with no started machine re-provisions instead of erroring "no started VMs").
-
-> **Release gate (found in the binary e2e):** the PyPI image pins the *installed*
-> bobi version, so the instance runs **published** code while the entrypoint
-> ships with the *operator's* version. Deploying from an unreleased dev checkout
-> (entrypoint ahead of the pinned published package — e.g. an entrypoint that calls
-> `install --non-interactive` before that option was published) crash-loops the
-> instance. **Release these changes before binary-mode deploy boots cleanly**; a
-> released `uv tool install bobi` is always self-consistent.
-
-> **Lean image (found in the binary e2e):** install the kb deps the code uses
-> (fastembed) **explicitly**, not via the `[kb]` extra — some published releases
-> stale-list `sentence-transformers` there, pulling torch + ~2 GB of CUDA the dark
-> CPU instance never uses (and blowing the build). Fixed in the Dockerfile +
-> pyproject; the published `[kb]` should be re-released lean too.
-<!-- e2e-status: ssh-push + canary(team-url) + binary-mode verified 2026-06-19 -->
-
-Smoke target: `tests/fixtures/smoke-team` (zero-secret; only needs
+Smoke target: `tests/fixtures/smoke-team` (zero-secret; needs only
 `BOBI_EVENT_SERVER` + an Anthropic key for the `ask` round-trip).
-Structural/unit coverage: `tests/test_gitops_c22.py`. Both workflows pass
+Structural/unit coverage: `tests/test_gitops_c22.py`. Both GitOps workflows pass
 `actionlint` (+ shellcheck on run blocks).
+
+> flyctl gotcha: `fly machine restart -a <app>` errors "a machine ID must be
+> specified" outside a TTY; `bobi deploy` resolves IDs via
+> `fly machine list --json` and restarts each by ID.

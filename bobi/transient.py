@@ -7,7 +7,7 @@ spawn/executor path, ``subagent.py``). Before this module each path carried its
 own copy of the status set and the sniff heuristic; they could drift. #444
 introduced the canonical set as a ``Session`` method coupled to instance state —
 this lifts the pure parts here so the spawn/workflow path can reuse them without
-importing the persistent-session class. See docs/specs/mds-65-*.md §4.3.
+importing the persistent-session class.
 """
 
 from __future__ import annotations

@@ -1,11 +1,10 @@
 """Tests for `from:` team inheritance compose (#446 resolution + #451 merge).
 
-Covers the acceptance criteria of both specs:
-  docs/specs/team-from-resolution.md  — resolution order, fail-fast, --pinned,
-                                         cycle/depth, path refs, publish guard.
-  docs/specs/team-compose-merge.md    — prose concat + replace, structured
-                                         deep-merge, build accrete, prune,
-                                         determinism, provenance, workspace.
+Covers the acceptance criteria of both:
+  #446 (resolution) - resolution order, fail-fast, --pinned, cycle/depth,
+                      path refs, publish guard.
+  #451 (compose merge) - prose concat + replace, structured deep-merge,
+                         build accrete, prune, determinism, provenance, workspace.
 """
 
 from __future__ import annotations

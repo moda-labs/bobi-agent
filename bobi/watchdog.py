@@ -22,8 +22,7 @@ and a director wedged mid-turn. The discriminator is the session status:
 An ``idle``/``stopped``/``done`` director is never restarted for inactivity, so
 the watchdog never false-kills a quiet-but-healthy team.
 
-See ``docs/specs/464-manager-self-heal-watchdog.md`` for the full design and the
-open-decision resolutions (D1–D8).
+See issue #464 for the full design and the open-decision resolutions.
 """
 
 from __future__ import annotations
