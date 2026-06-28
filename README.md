@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/moda-labs/bobi-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/moda-labs/bobi-agent/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/bobi)](https://pypi.org/project/bobi/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 **Bobi is a lightweight library for building and deploying proactive agents** -
 agents that don't just do work when you talk to them, but respond to real-world
@@ -121,12 +121,14 @@ bobi agent eng-team ask "What can I help with right now?"
 bobi agent eng-team subagents launch --role engineer --task "Fix the login bug"
 ```
 
-Prefer to design your own agent from scratch? Run the interactive wizard, or have
-your chat assistant walk you through it:
+Prefer to design your own agent from scratch? Run the interactive wizard:
 
 ```bash
 bobi setup            # go from an idea to a runnable agent, interactively
 ```
+
+Or use your coding assistant to help you build one with the `create-agent` skill -
+paste this into your Claude Code or Codex session:
 
 ```plaintext
 Read https://raw.githubusercontent.com/moda-labs/bobi-agent/main/skills/create-agent.md and help me build a bobi agent
@@ -156,27 +158,30 @@ In my bobi agent's agent.yaml, set the brain to Codex by adding:
 (To switch back to Claude Code, remove the brain block - Claude Code is the default.)
 ```
 
-### Connect integrations (optional)
+### Credentials (optional)
 
 Out of the box an agent runs locally and handles whatever you hand it. To let it
-react to the outside world - a Slack mention, a Linear ticket, a GitHub PR - it
-needs two things:
+act on outside services - opening a GitHub PR, updating a Linear ticket, posting
+to Slack - it needs credentials for them. `bobi agents install` prompts for any
+secrets the agent's `agent.yaml` references and writes them to `run/.env` (never
+commit this file); you can also supply them as environment variables.
 
-- **Credentials.** `bobi agents install` prompts for any secrets the agent's
-  `agent.yaml` references and writes them to `run/.env` (never commit this file).
-- **A reachable event server.** You don't start it yourself - `bobi agent <name>
-  start` launches a local one automatically. To receive webhooks from the public
-  internet (Slack, GitHub, Linear), point the agent at a deployed event server:
-  the shared Bobi cloud Worker by default, or your own Cloudflare Worker.
+You don't run the event server yourself - `bobi agent <name> start` launches a
+local one automatically. To receive webhooks from the public internet (Slack,
+GitHub, Linear), point the agent at a deployed event server: the shared Bobi
+cloud Worker by default, or your own Cloudflare Worker.
 
-For Slack, generate the app in one command:
+### Talk to your agent from Slack (optional)
+
+By default you talk to an agent from the terminal (`bobi agent <name> ask`). To
+message it from Slack instead - and have it reply and react there - generate a
+Slack app and point it at your agent:
 
 ```bash
 bobi create-slack-bot --app-name "Bobi"
 ```
 
-Step-by-step guides: **[Slack setup](skills/slack-setup.md)** ·
-**[Linear setup](skills/linear-setup.md)**.
+Full walkthrough: **[Slack setup](skills/slack-setup.md)**.
 
 ## Under the hood
 
@@ -323,4 +328,4 @@ pytest tests/ --ignore=tests/integration/
 
 ## License
 
-MIT
+[Apache License 2.0](LICENSE).
