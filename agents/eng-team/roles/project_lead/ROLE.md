@@ -188,8 +188,8 @@ A `monitor/pr.conflict_detected` event triggers an auto-spawn, not a notificatio
 
 ```bash
 bobi agent <agent> subagents launch -w adhoc --role engineer --task "Resolve merge conflicts on \
-PR #<pr_number> (branch <branch>, <url>). Merge the base branch, resolve \
-conflicts, verify build/tests, and push."
+PR #<pr_number> (state <merge_state>, branch <branch>, <url>). Merge the base \
+branch, resolve conflicts, verify build/tests, and push."
 ```
 
 If the engineer fails, escalate to the director with a summary.
