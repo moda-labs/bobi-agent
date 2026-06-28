@@ -231,6 +231,11 @@ class Config:
         """The configured brain kind, or "" for the framework default."""
         return str((self.brain or {}).get("kind", "") or "")
 
+    @property
+    def brain_model(self) -> str:
+        """The configured brain model override, or "" for the provider default."""
+        return str((self.brain or {}).get("model", "") or "")
+
     def credential(self, service: str, key: str) -> str:
         """Look up a credential value for a named service."""
         for svc in self.services:
@@ -470,4 +475,3 @@ def save_bubble_state(project_path: Path, bubble_id: str, bubble_key: str) -> No
 def clear_bubble_state(project_path: Path) -> None:
     """Drop the bubble credential — a subsequent start mints a fresh bubble."""
     bubble_state_path(project_path).unlink(missing_ok=True)
-

@@ -291,15 +291,16 @@ top-level block:
 ```yaml
 brain:
   kind: codex        # claude (default) | codex | …
-  model: gpt-5-codex # optional override (parsed; threading deferred)
+  model: gpt-5-codex # optional team-wide model override
 ```
 
-`Config` parses `brain` + exposes `brain_kind`. At the agent process entry
-(`cli._run_from_config`) `set_process_brain(cfg.brain_kind)` exports
-`BOBI_BRAIN`, which `get_brain()` reads (precedence: explicit arg →
-`BOBI_BRAIN` → `claude`) — so the choice propagates to in-process and
-subprocess agents with zero churn at the call sites, exactly like
-`BOBI_AUTH`. An unknown kind fails loud at session construction.
+`Config` parses `brain` + exposes `brain_kind` and `brain_model`. At the agent
+process entry (`cli._run_from_config`), `set_process_brain(...)` exports
+`BOBI_BRAIN` and `BOBI_BRAIN_MODEL`, which the brain factory/adapters read — so
+the choice propagates to in-process and subprocess agents with zero churn at the
+call sites, exactly like `BOBI_AUTH`. An unknown kind fails loud at session
+construction. Workflow prompt steps can also declare `model: ...`; that explicit
+step model wins over the team-wide default.
 
 **Codex subscription auth on a headless box. ✅ FEASIBLE + bootstrap core
 landed.** Verified empirically: `codex login --device-auth` prints a fixed

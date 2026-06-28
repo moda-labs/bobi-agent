@@ -7,6 +7,8 @@ deferred-tool translation the call sites rely on.
 """
 
 import os
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -21,6 +23,12 @@ from bobi.brain import (
     get_brain,
 )
 from bobi.brain.claude import _ClaudeSession, _result_to_turn
+
+
+@pytest.fixture(autouse=True)
+def default_brain_env(monkeypatch):
+    monkeypatch.delenv("BOBI_BRAIN", raising=False)
+    monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
 
 
 # --- registry / selector ---------------------------------------------------
@@ -53,23 +61,46 @@ def test_get_brain_resolves_from_env(monkeypatch):
 
 
 def test_set_process_brain():
-    from bobi.brain import BRAIN_ENV, set_process_brain
+    from bobi.brain import BRAIN_ENV, BRAIN_MODEL_ENV, set_process_brain
 
     # set_process_brain mutates os.environ directly (so it propagates to child
     # processes), so monkeypatch can't track it — save/restore explicitly.
     saved = os.environ.pop(BRAIN_ENV, None)
+    saved_model = os.environ.pop(BRAIN_MODEL_ENV, None)
     try:
         set_process_brain("")          # empty → no-op (keep framework default)
         assert BRAIN_ENV not in os.environ
-        set_process_brain("codex")     # sets it
+        assert BRAIN_MODEL_ENV not in os.environ
+        set_process_brain("", "sonnet")  # model-only config tunes default Claude
+        assert BRAIN_ENV not in os.environ
+        assert os.environ[BRAIN_MODEL_ENV] == "sonnet"
+        os.environ.pop(BRAIN_MODEL_ENV)
+        set_process_brain("codex", "gpt-5-codex")     # sets it
         assert os.environ[BRAIN_ENV] == "codex"
-        set_process_brain("claude")    # an already-set env is NOT overridden
+        assert os.environ[BRAIN_MODEL_ENV] == "gpt-5-codex"
+        set_process_brain("claude", "opus")  # already-set env is NOT overridden
         assert os.environ[BRAIN_ENV] == "codex"
+        assert os.environ[BRAIN_MODEL_ENV] == "gpt-5-codex"
+        os.environ.pop(BRAIN_ENV)
+        os.environ.pop(BRAIN_MODEL_ENV)
+        os.environ[BRAIN_ENV] = "claude"
+        set_process_brain("codex", "gpt-5-codex")  # operator brain override wins
+        assert os.environ[BRAIN_ENV] == "claude"
+        assert BRAIN_MODEL_ENV not in os.environ
+        os.environ.pop(BRAIN_ENV)
+        os.environ[BRAIN_ENV] = "codex"
+        set_process_brain("", "sonnet")  # model-only default does not cross brains
+        assert os.environ[BRAIN_ENV] == "codex"
+        assert BRAIN_MODEL_ENV not in os.environ
     finally:
         if saved is None:
             os.environ.pop(BRAIN_ENV, None)
         else:
             os.environ[BRAIN_ENV] = saved
+        if saved_model is None:
+            os.environ.pop(BRAIN_MODEL_ENV, None)
+        else:
+            os.environ[BRAIN_MODEL_ENV] = saved_model
 
 
 def test_config_parses_brain(tmp_path):
@@ -84,9 +115,52 @@ def test_config_parses_brain(tmp_path):
     cfg = Config.load(tmp_path)
     assert cfg.brain == {"kind": "codex", "model": "gpt-5-codex"}
     assert cfg.brain_kind == "codex"
+    assert cfg.brain_model == "gpt-5-codex"
     # Absent brain → empty + the framework default downstream.
     paths.agent_yaml_path(tmp_path).write_text("agent: t\n")
     assert Config.load(tmp_path).brain_kind == ""
+    assert Config.load(tmp_path).brain_model == ""
+
+
+def test_claude_brain_uses_env_model_default(monkeypatch):
+    from bobi.brain import BRAIN_MODEL_ENV
+
+    captured = {}
+
+    def _options(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setenv(BRAIN_MODEL_ENV, "haiku")
+    with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+        ClaudeSDKClient=MagicMock(),
+        ClaudeAgentOptions=_options,
+    )}):
+        ClaudeBrain().make_session(cwd="/tmp", system_prompt=None)
+
+    assert captured["model"] == "haiku"
+
+
+def test_claude_brain_explicit_model_overrides_env(monkeypatch):
+    from bobi.brain import BRAIN_MODEL_ENV
+
+    captured = {}
+
+    def _options(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setenv(BRAIN_MODEL_ENV, "haiku")
+    with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+        ClaudeSDKClient=MagicMock(),
+        ClaudeAgentOptions=_options,
+    )}):
+        ClaudeBrain().make_session(
+            cwd="/tmp", system_prompt=None,
+            options={"model": "sonnet"},
+        )
+
+    assert captured["model"] == "sonnet"
 
 
 # --- ResultMessage → TurnResult normalization ------------------------------

@@ -20,6 +20,18 @@ _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
 def _configured_brain_kind(root: Path, env: dict[str, str] | None = None) -> str:
     """Return the team's configured brain kind from the installation root."""
+    return _configured_brain_value(root, "kind", env)
+
+
+def _configured_brain_model(root: Path, env: dict[str, str] | None = None) -> str:
+    """Return the team's configured brain model from the installation root."""
+    return _configured_brain_value(root, "model", env)
+
+
+def _configured_brain_value(
+    root: Path, key: str, env: dict[str, str] | None = None,
+) -> str:
+    """Return one interpolated ``brain`` value from the installation root."""
     try:
         import yaml
         from bobi import paths
@@ -31,11 +43,11 @@ def _configured_brain_kind(root: Path, env: dict[str, str] | None = None) -> str
     brain = raw.get("brain", {})
     if not isinstance(brain, dict):
         return ""
-    kind = str(brain.get("kind", "") or "")
-    if not kind:
+    value = str(brain.get(key, "") or "")
+    if not value:
         return ""
     lookup = os.environ if env is None else env
-    return _ENV_VAR_RE.sub(lambda m: lookup.get(m.group(1), ""), kind)
+    return _ENV_VAR_RE.sub(lambda m: lookup.get(m.group(1), ""), value)
 
 
 def _load_dotenv_into(env: dict[str, str], root: Path) -> None:
@@ -111,11 +123,17 @@ def child_agent_env(root: Path, base: dict[str, str] | None = None) -> dict[str,
     _load_dotenv_into(env, resolved_root)
     env["BOBI_ROOT"] = str(resolved_root)
 
-    from bobi.brain import BRAIN_ENV
+    from bobi.brain import BRAIN_ENV, BRAIN_MODEL_ENV
 
     brain_kind = _configured_brain_kind(resolved_root, env)
     if brain_kind:
         env[BRAIN_ENV] = brain_kind
     else:
         env.pop(BRAIN_ENV, None)
+
+    brain_model = _configured_brain_model(resolved_root, env)
+    if brain_model:
+        env[BRAIN_MODEL_ENV] = brain_model
+    else:
+        env.pop(BRAIN_MODEL_ENV, None)
     return env

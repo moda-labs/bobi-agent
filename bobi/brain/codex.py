@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
@@ -219,11 +220,15 @@ class CodexBrain:
         options: dict | None = None,
     ) -> BrainSession:
         opts = options or {}
+        model = str(opts.get("model", "") or "")
+        if not model:
+            from bobi.brain import BRAIN_MODEL_ENV
+            model = os.environ.get(BRAIN_MODEL_ENV, "")
         return _CodexSession(
             cwd=cwd or ".",
             instructions=_instructions(system_prompt),
             resume=resume,
             # Claude-specific options (skills/hooks/permission_mode/max_turns)
             # don't apply to Codex; only a model override is honored.
-            model=str(opts.get("model", "") or ""),
+            model=model,
         )

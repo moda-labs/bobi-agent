@@ -43,9 +43,10 @@ DEFAULT_BRAIN = "claude"
 # child agents get a stricter root-bound value from ``child_agent_env()`` so a
 # stale ambient value from another installation cannot leak across sessions.
 BRAIN_ENV = "BOBI_BRAIN"
+BRAIN_MODEL_ENV = "BOBI_BRAIN_MODEL"
 
 
-def set_process_brain(kind: str | None) -> None:
+def set_process_brain(kind: str | None, model: str | None = None) -> None:
     """Record the team's brain kind for the current process.
 
     A no-op for an empty/None kind (keeps the framework default). At top-level
@@ -55,8 +56,16 @@ def set_process_brain(kind: str | None) -> None:
     ``bobi.env.child_agent_env()`` rewrites the child's value from the
     verified installation root.
     """
-    if kind and not os.environ.get(BRAIN_ENV):
+    existing_kind = os.environ.get(BRAIN_ENV, "")
+    if kind and not existing_kind:
         os.environ[BRAIN_ENV] = kind
+        existing_kind = kind
+    model_matches_active_brain = (
+        (kind and existing_kind == kind)
+        or (not kind and existing_kind in ("", DEFAULT_BRAIN))
+    )
+    if model and model_matches_active_brain and not os.environ.get(BRAIN_MODEL_ENV):
+        os.environ[BRAIN_MODEL_ENV] = model
 
 
 def get_brain(kind: str | None = None) -> BrainFactory:
@@ -92,6 +101,7 @@ __all__ = [
     "TurnResult",
     "DEFAULT_BRAIN",
     "BRAIN_ENV",
+    "BRAIN_MODEL_ENV",
     "get_brain",
     "set_process_brain",
 ]

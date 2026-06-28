@@ -14,6 +14,7 @@ monkeypatch ``claude_agent_sdk.ClaudeSDKClient`` continue to take effect.
 
 from __future__ import annotations
 
+import os
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
@@ -153,6 +154,11 @@ class ClaudeBrain:
         from bobi.sdk import get_cli_path
 
         extra = dict(options or {})
+        if not extra.get("model"):
+            from bobi.brain import BRAIN_MODEL_ENV
+            model = os.environ.get(BRAIN_MODEL_ENV, "")
+            if model:
+                extra["model"] = model
         # Defaults every call site shared; an explicit value in ``options`` wins.
         extra.setdefault("permission_mode", "bypassPermissions")
         kwargs = dict(cwd=cwd, cli_path=get_cli_path(), resume=resume, **extra)
@@ -190,6 +196,9 @@ class ClaudeBrain:
         from bobi.sdk import get_cli_path
 
         extra = dict(options or {})
+        if not model:
+            from bobi.brain import BRAIN_MODEL_ENV
+            model = os.environ.get(BRAIN_MODEL_ENV, "")
         extra.setdefault("permission_mode", "bypassPermissions")
         extra.setdefault("include_partial_messages", True)
         opts = ClaudeAgentOptions(
