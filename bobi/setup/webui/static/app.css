@@ -1,20 +1,6 @@
 /* bobi setup — ported from docs/design/bobbi-setup-flow.html (design source
    of truth). Warm light chrome + a single dark CRT slab; mono-accented;
    system fonts only; static space-retro. Do not deviate without approval. */
-:root {
-  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, "Cascadia Mono", "Segoe UI Mono", Consolas, "Liberation Mono", monospace;
-  /* paper neutrals (bobi paper #FAF7EE / ink #221C15 family) */
-  --bg:#F3EFE4; --surface:#FBF9F2; --raised:#FFFEF9; --text:#221C15; --muted:#84725B; --faint:#A89E90;
-  --border:#E6DFD1; --border-strong:#D8CEBD;
-  /* dark CRT slab — warm void, no violet undertone */
-  --slab-bg:#181310; --slab-surface:#1F1813; --slab-text:#ECE4DA; --slab-muted:#9A8C82; --slab-border:#2A2018;
-  --syn-key:#E0A06A; --syn-str:#CBBA8B; --syn-punc:#7E776B; --syn-com:#6E6354;
-  /* clay accent — single accent for the whole UI */
-  --accent:#C0632E; --accent-2:#D67B55; --slab-accent:#E0843F; --accent-soft:rgba(192,99,46,.11); --accent-ring:rgba(192,99,46,.30);
-  --radius:12px; --radius-sm:7px;
-  --ok:#177B52; --err:#B5462B;
-}
 *{box-sizing:border-box;} html,body{height:100%;}
 body{ margin:0; background:radial-gradient(1200px 600px at 80% -10%, #FAF7F0 0%, var(--bg) 55%); color:var(--text); font-family:var(--font-sans); -webkit-font-smoothing:antialiased; font-size:15px; line-height:1.5; }
 html[data-retro="on"] body{ background:radial-gradient(1200px 600px at 80% -10%, #FAF7F0 0%, var(--bg) 55%), repeating-linear-gradient(90deg, rgba(120,100,70,.045) 0 1px, transparent 1px 24px), repeating-linear-gradient(0deg, rgba(120,100,70,.045) 0 1px, transparent 1px 24px); }

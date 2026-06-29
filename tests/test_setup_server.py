@@ -3,6 +3,7 @@ deterministic + streaming endpoints. Driven by Starlette's TestClient with
 an injected fake LLM source: no network, no CLI."""
 
 import json
+import re
 
 import pytest
 import yaml
@@ -101,6 +102,29 @@ class TestSecurity:
         assert r.status_code == 200
         assert NONCE in r.text
         assert "{{NONCE}}" not in r.text
+
+    def test_page_loads_shared_tokens_before_app_css(self, project):
+        app = server.build_app(SetupState(), project, nonce=NONCE)
+        c = _testclient(app)
+        html = c.get("/").text
+        assert '<link rel="stylesheet" href="/static/tokens.css" />' in html
+        assert html.index("/static/tokens.css") < html.index("/static/app.css")
+
+    def test_static_serves_shared_tokens(self, project):
+        app = server.build_app(SetupState(), project, nonce=NONCE)
+        c = _testclient(app)
+        r = c.get("/static/tokens.css")
+        assert r.status_code == 200
+        assert "text/css" in r.headers["content-type"]
+        assert "--bg: #F4F1EA;" in r.text
+        assert "--accent: #C8612B;" in r.text
+
+    def test_app_css_does_not_define_design_tokens(self, project):
+        app = server.build_app(SetupState(), project, nonce=NONCE)
+        c = _testclient(app)
+        css = c.get("/static/app.css").text
+        declarations = set(re.findall(r"(?m)^\s*(--[\w-]+)\s*:", css))
+        assert not {"--bg", "--surface", "--accent", "--slab-bg"} & declarations
 
     def test_foreign_host_rejected(self, project):
         app = server.build_app(SetupState(), project, nonce=NONCE)

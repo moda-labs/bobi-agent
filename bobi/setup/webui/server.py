@@ -33,6 +33,7 @@ from fastapi.responses import (FileResponse, JSONResponse, Response,
 
 from bobi import paths
 from bobi.setup.state import STAGE_ORDER, SetupState, Stage
+from bobi.webui_common import resolve_static_asset
 
 STATIC_DIR = Path(__file__).parent / "static"
 NONCE_HEADER = "x-bobi-nonce"
@@ -132,8 +133,8 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     # static assets (css/js) — no nonce needed, same-origin only
     @app.get("/static/{name}")
     def static_asset(name: str) -> Response:
-        target = (STATIC_DIR / name).resolve()
-        if not target.is_file() or STATIC_DIR.resolve() not in target.parents:
+        target = resolve_static_asset(STATIC_DIR, name)
+        if target is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         types = {".css": "text/css", ".js": "text/javascript",
                  ".svg": "image/svg+xml"}
