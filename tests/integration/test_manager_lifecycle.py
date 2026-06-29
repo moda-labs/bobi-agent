@@ -19,6 +19,18 @@ pytestmark = pytest.mark.claude
 @requires_claude
 @pytest.mark.timeout(120)
 class TestManagerStartStop:
+    def test_launch_team_service_starts_manager(self, bobi_env):
+        from bobi.service import launch_team, stop_team
+
+        pid_file = bobi_env.state_dir / "manager.pid"
+        try:
+            entry = launch_team(bobi_env.project_path, wait_timeout=60)
+            assert entry.name == f"bobi-{bobi_env.agent_name}-manager"
+            assert entry.status in ("starting", "running", "idle")
+            assert pid_file.exists(), "PID file not created after service launch"
+        finally:
+            stop_team(bobi_env.project_path)
+            _wait_for_exit_file(pid_file)
 
     def test_start_creates_pid_file(self, bobi_env, cli_run):
         result = cli_run("start", timeout=15)
