@@ -133,10 +133,12 @@ bobi agent <name> ui
 
 For `bobi agent <name> ui`, use an agent that is already installed in the local
 `$BOBI_HOME`. Open the printed localhost URL, exercise the changed flow, and
-capture any screenshots from that local browser session. For PRs that require
-local UI QA, treat missing local prerequisites, browser launch failures, or
-failing e2e coverage as QA blockers and report the exact missing prerequisite.
-Treat a missing hosted preview as expected for these local-only UIs.
+capture any screenshots from that local browser session. For every PR that
+touches these frontend surfaces, attach the local QA screenshots to the PR with
+concise context. For PRs that require local UI QA, treat missing local
+prerequisites, browser launch failures, or failing e2e coverage as QA blockers
+and report the exact missing prerequisite. Treat a missing hosted preview as
+expected for these local-only UIs.
 
 ## Design System
 
