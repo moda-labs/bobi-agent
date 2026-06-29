@@ -92,6 +92,52 @@ Integration tests drive real Claude Code sessions. Run them before pushing when
 the change touches runtime behavior, session orchestration, workflows, monitors,
 or event delivery.
 
+## Local Web UI QA
+
+The `bobi setup` UI and `bobi agent <name> ui` are local-only vanilla web UIs.
+They do not have a hosted preview deployment in normal PRs. Do not block QA only
+because a Vercel, Netlify, or other public preview URL is missing for changes
+limited to these local surfaces.
+
+For changes under `bobi/setup/webui/`, `bobi/agentui/`, `bobi/webui_common/`,
+or other code that changes local UI routes, static mounting, nonce/token checks,
+or Host-guard behavior, run the local Playwright e2e suite instead:
+
+```bash
+pytest tests/e2e/test_setup_ui.py tests/e2e/test_agent_ui.py
+```
+
+These tests boot the real FastAPI apps on loopback with fake deterministic
+backends, then drive Chromium through the same nonce, token, and Host-guard paths
+used by the CLI-launched UIs. If the diff is confined to `bobi/setup/webui/`,
+run `tests/e2e/test_setup_ui.py`. If the diff is confined to `bobi/agentui/`,
+run `tests/e2e/test_agent_ui.py`. For shared paths such as `bobi/webui_common/`
+or cross-cutting server/security changes, run both files.
+
+If Playwright is unavailable in the environment, install the dev dependencies and
+Chromium before retrying:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+python -m playwright install chromium
+```
+
+Use manual loopback smoke testing when behavior is not covered by the e2e tests:
+
+```bash
+bobi setup
+bobi agent <name> ui
+```
+
+For `bobi agent <name> ui`, use an agent that is already installed in the local
+`$BOBI_HOME`. Open the printed localhost URL, exercise the changed flow, and
+capture any screenshots from that local browser session. For PRs that require
+local UI QA, treat missing local prerequisites, browser launch failures, or
+failing e2e coverage as QA blockers and report the exact missing prerequisite.
+Treat a missing hosted preview as expected for these local-only UIs.
+
 ## Design System
 
 Before any visual or UX decision on the `bobi setup` web UI, read `DESIGN.md`.
