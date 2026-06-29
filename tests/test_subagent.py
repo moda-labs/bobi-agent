@@ -297,6 +297,8 @@ class TestLaunchAgent:
         spawning process's job, so tests bind explicitly."""
         _write_agent_yaml(tmp_path)
         paths.bind_root(tmp_path)
+        yield
+        paths.bind_root(None)
 
     @patch("bobi.subagent.check_requires", return_value=[])
     @patch("bobi.subagent.get_registry")
@@ -424,7 +426,7 @@ class TestLaunchAgent:
         """An unbound spawning process is a bug — no resolution from cwd,
         no guessing. It raises before anything is registered or launched."""
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
-        monkeypatch.setattr("bobi.paths._root", None)
+        paths.bind_root(None)
         repo = tmp_path / "repos" / "jobtack"
         repo.mkdir(parents=True)
 
@@ -432,6 +434,95 @@ class TestLaunchAgent:
         with pytest.raises(RuntimeError, match="not bound"):
             launch_agent(task="Fix #1", cwd=str(repo), workflow_name="adhoc")
         mock_launch.assert_not_called()
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent._launch_detached", return_value=1234)
+    @patch("bobi.sdk.compute_manifest_hash", return_value="hash")
+    @patch("bobi.subagent._check_spend_governor")
+    def test_admission_rotation_and_register_happen_under_launch_lock(
+        self, mock_spend, mock_hash, mock_launch, mock_check, tmp_path
+    ):
+        """The stale-count race is closed by one critical section around launch admission."""
+        from bobi.subagent import launch_agent
+
+        class TrackingLock:
+            def __init__(self):
+                self.held = False
+
+            def __enter__(self):
+                self.held = True
+
+            def __exit__(self, exc_type, exc, tb):
+                self.held = False
+
+        class Registry:
+            def __init__(self, lock):
+                self.lock = lock
+
+            def get(self, name):
+                assert self.lock.held
+                return None
+
+            def register(self, entry):
+                assert self.lock.held
+
+            def update(self, name, **kwargs):
+                assert not self.lock.held
+
+        lock = TrackingLock()
+        registry = Registry(lock)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "entry_point: x\n"
+            "max_concurrent_agents: 4\n"
+            "launch_admission:\n"
+            "  enabled: true\n"
+            "  max_starting_agents: 1\n"
+        )
+
+        def assert_locked(*args, **kwargs):
+            assert lock.held
+
+        with patch("bobi.subagent.get_registry", return_value=registry), \
+             patch("bobi.subagent._LAUNCH_ADMISSION_LOCK", lock), \
+             patch("bobi.sdk.check_image_rotation",
+                   side_effect=assert_locked) as mock_rotation, \
+             patch("bobi.launch_admission.wait_for_launch_admission",
+                   side_effect=assert_locked) as mock_admission:
+            launch_agent(
+                task="Fix #1",
+                cwd=str(tmp_path),
+                workflow_name="adhoc",
+                run_key="a",
+            )
+
+        mock_admission.assert_called_once()
+        mock_rotation.assert_called_once()
+        assert mock_launch.call_count == 1
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent._launch_detached", side_effect=OSError("no python"))
+    @patch("bobi.subagent._check_spend_governor")
+    def test_marks_registered_session_crashed_when_detached_launch_fails(
+        self, mock_spend, mock_launch, mock_check, tmp_path
+    ):
+        from bobi.sdk import TERMINAL_CRASHED
+        from bobi.subagent import launch_agent
+
+        registry = MagicMock(get=MagicMock(return_value=None))
+
+        with patch("bobi.subagent.get_registry", return_value=registry):
+            with pytest.raises(OSError, match="no python"):
+                launch_agent(
+                    task="Fix #1",
+                    cwd=str(tmp_path),
+                    workflow_name="adhoc",
+                    run_key="spawn-fails",
+                )
+
+        registered = registry.register.call_args.args[0]
+        registry.mark_terminal.assert_called_once()
+        assert registry.mark_terminal.call_args.args[0] == registered.name
+        assert registry.mark_terminal.call_args.args[1] == TERMINAL_CRASHED
 
 
 class TestRunAgentEntryRootBinding:
