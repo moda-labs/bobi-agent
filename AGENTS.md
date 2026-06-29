@@ -19,7 +19,7 @@ Bobi is an event-driven AI agent framework.
 - `docs/SECURITY.md`: overall security model (trust, credentials, prompt-injection).
 - `docs/TICKETING_POLICY.md`: Linear/GitHub ticketing conventions.
 - `docs/RELEASE_RUNBOOK.md`: release process and checklist.
-- `FRONTEND_QA.md`: local frontend QA guidance for Bobi's vanilla web UIs.
+- `docs/FRONTEND_QA.md`: local frontend QA guidance for Bobi's vanilla web UIs.
 - `DESIGN.md`: source of truth for `bobi setup` web UI visual and UX decisions.
 
 ## First Principles
@@ -95,7 +95,7 @@ or event delivery.
 
 ## Frontend QA
 
-For any frontend change, read `FRONTEND_QA.md` before deciding how to test it.
+For any frontend change, read `docs/FRONTEND_QA.md` before deciding how to test it.
 
 ## Design System
 
