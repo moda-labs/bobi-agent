@@ -50,6 +50,13 @@ export interface BreakerVerdict {
 	justTripped: boolean;
 }
 
+const AGENT_LIFECYCLE_EVENTS = new Set([
+	"agent/session.completed",
+	"agent/session.failed",
+	"session.completed",
+	"session.failed",
+]);
+
 // ---------------------------------------------------------------------------
 // Conversation key extraction
 // ---------------------------------------------------------------------------
@@ -62,9 +69,13 @@ export interface BreakerVerdict {
 export function isExemptFromBreaker(event: NormalizedEvent): boolean {
 	const t = event.type;
 	if (t.startsWith("inbox/") || t.startsWith("reply/")) return true;
+	if (event.source === "agent" && AGENT_LIFECYCLE_EVENTS.has(t)) return true;
 	// Also check topics — events published on inbox/* or reply/* topics
 	// (via createTopicEvent) carry those as their routing keys.
 	if (event.topics?.some((topic) => topic.startsWith("inbox/") || topic.startsWith("reply/"))) {
+		return true;
+	}
+	if (event.source === "agent" && event.topics?.some((topic) => AGENT_LIFECYCLE_EVENTS.has(topic))) {
 		return true;
 	}
 	return false;
