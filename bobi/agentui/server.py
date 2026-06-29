@@ -36,6 +36,8 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
+from bobi.webui_common import resolve_static_asset
+
 STATIC_DIR = Path(__file__).parent / "static"
 TOKEN_HEADER = "x-bobi-ui-token"
 _ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
@@ -254,8 +256,8 @@ def build_app(project: Path, *, token: str, registry_fn=None, deliver_fn=None,
 
     @app.get("/static/{name}")
     def static_asset(name: str) -> Response:
-        target = (STATIC_DIR / name).resolve()
-        if not target.is_file() or STATIC_DIR.resolve() not in target.parents:
+        target = resolve_static_asset(STATIC_DIR, name)
+        if target is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         types = {".css": "text/css", ".js": "text/javascript",
                  ".svg": "image/svg+xml"}

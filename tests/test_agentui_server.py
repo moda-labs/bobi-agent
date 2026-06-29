@@ -3,6 +3,7 @@ cards, and the blocking chat endpoint. Driven by Starlette's TestClient with
 injected `registry_fn`/`deliver_fn`: no live team, no event server."""
 
 import inspect
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -58,6 +59,27 @@ class TestSecurity:
         assert r.status_code == 200
         assert TOKEN in r.text
         assert "{{TOKEN}}" not in r.text
+
+    def test_page_loads_shared_tokens_before_app_css(self, project):
+        app = server.build_app(project, token=TOKEN, registry_fn=_registry())
+        c = _testclient(app)
+        html = c.get("/").text
+        assert '<link rel="stylesheet" href="/static/tokens.css">' in html
+        assert html.index("/static/tokens.css") < html.index("/static/app.css")
+
+    def test_static_serves_shared_tokens(self, project):
+        c = _client(project)
+        r = c.get("/static/tokens.css")
+        assert r.status_code == 200
+        assert "text/css" in r.headers["content-type"]
+        assert "--bg: #F4F1EA;" in r.text
+        assert "--accent: #C8612B;" in r.text
+
+    def test_app_css_does_not_define_design_tokens(self, project):
+        c = _client(project)
+        css = c.get("/static/app.css").text
+        declarations = set(re.findall(r"(?m)^\s*(--[\w-]+)\s*:", css))
+        assert not {"--bg", "--surface", "--accent", "--slab-bg"} & declarations
 
     def test_ping_is_guarded(self, project):
         app = server.build_app(project, token=TOKEN, registry_fn=_registry())
