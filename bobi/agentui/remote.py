@@ -107,7 +107,7 @@ def _wait_for_port(port: int, timeout: float = 20.0) -> bool:
 def _get_agents(local_port: int, token: str) -> dict:
     req = urllib.request.Request(
         f"http://127.0.0.1:{local_port}/api/agents",
-        headers={"x-bobi-ui-token": token})
+        headers={"x-bobi-webui-token": token, "x-bobi-ui-token": token})
     with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read().decode())
 
