@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 def test_launch_team_spawns_detached_manager_and_returns_entry(bobi_install, monkeypatch):
     from bobi import paths
+    from bobi.config import save_bubble_state, save_deployment_state
     from bobi.sdk import SessionEntry, get_registry
     from bobi.service import launch_team
 
@@ -26,6 +27,10 @@ def test_launch_team_spawns_detached_manager_and_returns_entry(bobi_install, mon
             pid=pid,
             status="running",
         ))
+        save_bubble_state(bobi_install.repo_path, "bubble-id", "bubble-key")
+        save_deployment_state(
+            bobi_install.repo_path, manager_name, "deployment-id", "api-key"
+        )
         return SimpleNamespace(pid=pid)
 
     monkeypatch.setattr("subprocess.Popen", fake_popen)
@@ -45,6 +50,42 @@ def test_launch_team_spawns_detached_manager_and_returns_entry(bobi_install, mon
     assert spawned["cwd"] == str(bobi_install.repo_path)
     assert spawned["start_new_session"] is True
     assert spawned["env"]["PYTHONUNBUFFERED"] == "1"
+
+
+def test_launch_team_waits_for_manager_transport(bobi_install, monkeypatch):
+    from bobi.sdk import SessionEntry, get_registry
+    from bobi.service import TransportReadyTimeout, launch_team
+
+    manager_name = "bobi-test-agent-director"
+
+    def fake_popen(cmd, stdout=None, stderr=None, cwd=None, env=None,
+                   start_new_session=False):
+        get_registry().register(SessionEntry(
+            name=manager_name,
+            role="director",
+            cwd=str(bobi_install.repo_path),
+            pid=os.getpid(),
+            status="running",
+        ))
+        return SimpleNamespace(
+            pid=os.getpid(),
+            poll=lambda: None,
+            terminate=lambda: None,
+            wait=lambda timeout=None: None,
+        )
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "bobi.validate.validate_config",
+        lambda project: SimpleNamespace(ok=True, checks=[]),
+    )
+
+    try:
+        launch_team(bobi_install.repo_path, wait_timeout=0.01)
+    except TransportReadyTimeout as exc:
+        assert exc.manager_name == manager_name
+    else:
+        raise AssertionError("launch_team returned before transport registration")
 
 
 def test_spawn_team_returns_without_waiting_for_registration(bobi_install, monkeypatch):

@@ -57,6 +57,15 @@ class LaunchTimeout(ServiceError):
         self.timeout = timeout
 
 
+class TransportReadyTimeout(ServiceError):
+    def __init__(self, manager_name: str, timeout: float) -> None:
+        super().__init__(
+            f"manager session '{manager_name}' transport did not register within {timeout:g}s"
+        )
+        self.manager_name = manager_name
+        self.timeout = timeout
+
+
 class MessageDeliveryError(ServiceError):
     def __init__(self, message: str) -> None:
         super().__init__(message)
@@ -273,6 +282,28 @@ def _wait_for_manager_entry(
     raise LaunchTimeout(manager_name, timeout)
 
 
+def _wait_for_manager_transport(
+    project_path: Path,
+    manager_name: str,
+    timeout: float,
+) -> None:
+    from bobi.config import load_bubble_state, load_deployment_state
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        bubble = load_bubble_state(project_path)
+        deployment = load_deployment_state(project_path, manager_name)
+        if (
+            bubble.get("bubble_id")
+            and bubble.get("bubble_key")
+            and deployment.get("deployment_id")
+            and deployment.get("api_key")
+        ):
+            return
+        time.sleep(0.1)
+    raise TransportReadyTimeout(manager_name, timeout)
+
+
 def spawn_team(
     project_path: Path,
     *,
@@ -354,11 +385,16 @@ def start_team(
     project_path = _bind(project_path)
     cfg = _load_config_or_raise(project_path)
     role = cfg.entry_point or "manager"
+    manager_name = manager_session_name(project_path, role)
+    deadline = time.monotonic() + wait_timeout
     try:
+        remaining = max(0.0, deadline - time.monotonic())
         entry = _wait_for_manager_entry(
-            project_path, manager_session_name(project_path, role), wait_timeout
+            project_path, manager_name, remaining
         )
-    except LaunchTimeout:
+        remaining = max(0.0, deadline - time.monotonic())
+        _wait_for_manager_transport(project_path, manager_name, remaining)
+    except (LaunchTimeout, TransportReadyTimeout):
         proc = spawned.process
         if proc is not None and proc.poll() is None:
             proc.terminate()
@@ -539,7 +575,10 @@ def run_manager_from_config(
     except Exception:
         log.debug("Startup reconcile failed", exc_info=True)
 
-    log.info("Bobi running for %s", paths.agent_name_for_root(project_path))
+    log.info(
+        "Bobi launching manager session for %s",
+        paths.agent_name_for_root(project_path),
+    )
     spawn_adhoc(
         cwd=str(project_path),
         task=task,

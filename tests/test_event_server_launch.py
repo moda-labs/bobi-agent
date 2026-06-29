@@ -39,6 +39,44 @@ def test_npm_failure_surfaces_stderr(tmp_path, monkeypatch, caplog):
         es.ensure_running(8080, project_path=tmp_path)
 
 
+def test_existing_node_modules_without_esbuild_uses_npm_exec(tmp_path, monkeypatch):
+    es_dir = tmp_path / "event-server"
+    (es_dir / "node_modules").mkdir(parents=True)
+    (es_dir / "src").mkdir()
+    (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
+    (es_dir / "package.json").write_text("{}")
+    paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    health_calls = {"count": 0}
+
+    def fake_health(*args, **kwargs):
+        health_calls["count"] += 1
+        if health_calls["count"] == 1:
+            return None
+        return {"status": "ok"}
+
+    class FakePopen:
+        pid = 12345
+
+    monkeypatch.setattr(es.subprocess, "run", fake_run)
+    monkeypatch.setattr(es.subprocess, "Popen", lambda *a, **k: FakePopen())
+    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
+    monkeypatch.setattr(es, "health", fake_health)
+
+    result = es.ensure_running(8080, project_path=tmp_path)
+
+    assert result == "started"
+    assert calls[0][:6] == [
+        "npm", "exec", "--yes", "--cache", str(es_dir / ".npm-cache"), "--package"
+    ]
+
+
 # ── Remote-URL guard (containerized-6) ──────────────────────────────
 
 

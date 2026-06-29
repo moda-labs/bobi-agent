@@ -38,7 +38,7 @@ class TestEndToEndEventFlow:
         while time.monotonic() < deadline:
             if pid_file.exists() and log_file.exists():
                 new_content = log_file.read_text()[log_pos:]
-                if "drain loop active" in new_content or "Bobi running" in new_content:
+                if "Drain loop active" in new_content:
                     ready = True
                     break
             time.sleep(1)

@@ -82,7 +82,7 @@ class TestManagerStartStop:
             pid_file.unlink(missing_ok=True)
 
     def test_stop_removes_pid_file(self, bobi_env, cli_run):
-        cli_run("start", timeout=15)
+        cli_run("start", timeout=45)
 
         pid_file = bobi_env.state_dir / "manager.pid"
         deadline = time.monotonic() + 10
@@ -113,7 +113,7 @@ class TestManagerStartStop:
         assert "not running" in result.stdout.lower()
 
     def test_start_rejects_double_start(self, bobi_env, cli_run):
-        cli_run("start", timeout=15)
+        cli_run("start", timeout=45)
 
         pid_file = bobi_env.state_dir / "manager.pid"
         deadline = time.monotonic() + 10
@@ -130,7 +130,7 @@ class TestManagerStartStop:
         _wait_for_exit_file(pid_file)
 
     def test_status_shows_running_after_start(self, bobi_env, cli_run):
-        cli_run("start", timeout=15)
+        cli_run("start", timeout=45)
 
         pid_file = bobi_env.state_dir / "manager.pid"
         deadline = time.monotonic() + 10
@@ -146,7 +146,7 @@ class TestManagerStartStop:
         _wait_for_exit_file(pid_file)
 
     def test_restart_swaps_pid(self, bobi_env, cli_run):
-        cli_run("start", timeout=15)
+        cli_run("start", timeout=45)
 
         pid_file = bobi_env.state_dir / "manager.pid"
         deadline = time.monotonic() + 10
@@ -190,14 +190,14 @@ class TestManagerMessaging:
         # Record log position before start so we only check new output
         log_pos = log_file.stat().st_size if log_file.exists() else 0
 
-        cli_run("start", timeout=15)
+        cli_run("start", timeout=45)
 
         deadline = time.monotonic() + 60
         ready = False
         while time.monotonic() < deadline:
             if pid_file.exists() and log_file.exists():
                 new_content = log_file.read_text()[log_pos:]
-                if "drain loop active" in new_content or "Bobi running" in new_content:
+                if "Drain loop active" in new_content:
                     ready = True
                     break
             time.sleep(1)
