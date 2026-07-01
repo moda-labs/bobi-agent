@@ -36,6 +36,8 @@ InputHandler = Callable[[str, dict[str, Any]], str]
 
 log = logging.getLogger(__name__)
 
+_LAUNCH_ADMISSION_LOCK = threading.Lock()
+
 PHASE_TIMEOUT = {
     "pickup": 1800,
     "triage": 1800,
@@ -180,6 +182,26 @@ def _emit_session_finished(
     terminal = TERMINAL_COMPLETED if result.success else TERMINAL_FAILED
     _persist_terminal(registry, name, terminal, error=result.error,
                       session_id=result.session_id or "", phase=result.phase)
+
+    try:
+        from bobi.launch_admission import (
+            INIT_FAILURE,
+            INIT_SUCCESS,
+            classify_init_failure,
+            record_init_health,
+        )
+        from bobi.config import Config
+        from bobi.paths import bobi_root
+        root = bobi_root()
+        keep_seconds = Config.load(root).launch_admission.get(
+            "init_failure_window_seconds", 600
+        )
+        if result.success:
+            record_init_health(root, INIT_SUCCESS, keep_seconds=keep_seconds)
+        elif classify_init_failure(result.error or ""):
+            record_init_health(root, INIT_FAILURE, keep_seconds=keep_seconds)
+    except Exception:
+        log.debug("Failed to record launch init health", exc_info=True)
 
     if result.success:
         summary = _summarize_output(result.final_text)
@@ -765,6 +787,14 @@ def _check_concurrency_semaphore(root: Path, timeout: float = 120) -> None:
         # A misconfigured 0/negative cap would queue every launch until it
         # times out; fall back to the default rather than wedging all dispatch.
         cap = DEFAULT_CAP
+    if cfg.launch_admission.get("enabled"):
+        from bobi.launch_admission import (
+            policy_from_config,
+            wait_for_launch_admission,
+        )
+        policy = policy_from_config(cap, cfg.launch_admission)
+        wait_for_launch_admission(root, policy, timeout)
+        return
     allowed, count = check_concurrency(cap)
     if allowed:
         return
@@ -839,12 +869,6 @@ def launch_agent(
         session_name = make_session_name(workflow_name, project, run_key)
 
     registry = get_registry()
-    existing = registry.get(session_name)
-    if existing and existing.status in ("starting", "running", "idle"):
-        raise RuntimeError(
-            f"A run is already active: {session_name} (status={existing.status}). "
-            f"Cancel it first or wait for it to complete."
-        )
 
     # The installation root travels with the spawn explicitly. cwd is the
     # agent's WORKING dir (often a repo checkout) and must not double as
@@ -869,9 +893,6 @@ def launch_agent(
     # Preflight: spend governor — cap agent invocations per rolling hour
     _check_spend_governor(root)
 
-    # Preflight: concurrency semaphore — queue if too many agents running
-    _check_concurrency_semaphore(root)
-
     args_json = json.dumps({
         "task": task,
         "cwd": cwd,
@@ -892,28 +913,54 @@ def launch_agent(
         "_run_agent_entry(json.loads(sys.argv[1]))"
     )
 
-    # Auto-rotate when the installed image has changed since the last run.
-    from bobi.sdk import check_image_rotation, compute_manifest_hash
-    check_image_rotation(session_name, root)
+    with _LAUNCH_ADMISSION_LOCK:
+        existing = registry.get(session_name)
+        if existing and existing.status in ("starting", "running", "idle"):
+            raise RuntimeError(
+                f"A run is already active: {session_name} "
+                f"(status={existing.status}). Cancel it first or wait for it "
+                "to complete."
+            )
 
-    # Register first so the session dir exists for the log file
-    registry.register(SessionEntry(
-        name=session_name, session_id="", role=role,
-        run_key=run_key, title=task[:80], phase=workflow_name,
-        project=project, cwd=cwd, status="starting",
-        requested_by=requested_by or {},
-        image_hash=compute_manifest_hash(root),
-        # Persist the declared timeout so the dead-man reconciler knows this
-        # run's deadline (MDS-65 §4.6).
-        timeout=timeout,
-    ))
+        # Preflight: concurrency semaphore — queue if too many agents running
+        _check_concurrency_semaphore(root)
+
+        # Auto-rotate when the installed image has changed since the last run.
+        from bobi.sdk import check_image_rotation, compute_manifest_hash
+        check_image_rotation(session_name, root)
+
+        # Register first so the session dir exists for the log file. This write
+        # stays in the same critical section as admission so parallel dispatch
+        # threads cannot all pass on the same stale active/starting count.
+        registry.register(SessionEntry(
+            name=session_name, session_id="", role=role,
+            run_key=run_key, title=task[:80], phase=workflow_name,
+            project=project, cwd=cwd, status="starting",
+            requested_by=requested_by or {},
+            image_hash=compute_manifest_hash(root),
+            # Persist the declared timeout so the dead-man reconciler knows this
+            # run's deadline (MDS-65 §4.6).
+            timeout=timeout,
+        ))
 
     log_file = SessionRegistry.log_path(session_name)
     # child_agent_env() is the single parent-to-child propagation contract:
     # identity, brain selection, tool PATH, and credential material all flow
     # through one helper instead of one-off launch-site patches.
     child_env = child_agent_env(root)
-    pid = _launch_detached(script, [args_json], log_file, env=child_env)
+    try:
+        pid = _launch_detached(script, [args_json], log_file, env=child_env)
+    except Exception as exc:
+        try:
+            registry.mark_terminal(
+                session_name,
+                TERMINAL_CRASHED,
+                error=f"failed to launch detached agent process: {exc}",
+            )
+        except Exception:
+            log.warning("Failed to mark launch failure for %s", session_name,
+                        exc_info=True)
+        raise
     registry.update(session_name, pid=pid)
 
     # Record the invocation for the spend governor's rolling window.

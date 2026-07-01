@@ -53,6 +53,9 @@ def _gh_pr_list(repo: Path, fields: list[str]) -> list[dict]:
         log.warning(f"gh pr list failed in {repo}: {e}")
         return []
     if out.returncode != 0:
+        if "mergeStateStatus" in fields and "Unknown JSON field" in out.stderr:
+            fallback_fields = [field for field in fields if field != "mergeStateStatus"]
+            return _gh_pr_list(repo, fallback_fields)
         log.warning(f"gh pr list failed in {repo}: {out.stderr.strip()}")
         return []
     try:
@@ -62,12 +65,21 @@ def _gh_pr_list(repo: Path, fields: list[str]) -> list[dict]:
 
 
 def pr_conflicts(monitor, projects: list[Path]) -> list[Condition]:
-    """Open PRs whose mergeable status is CONFLICTING."""
+    """Open PRs whose merge status needs conflict-fix attention."""
     conditions: list[Condition] = []
     for project in projects:
         slug = _repo_slug(project)
-        for pr in _gh_pr_list(project, ["number", "title", "url", "mergeable", "headRefName"]):
-            if pr.get("mergeable") != "CONFLICTING":
+        for pr in _gh_pr_list(
+            project,
+            ["number", "title", "url", "mergeable", "mergeStateStatus", "headRefName"],
+        ):
+            merge_state_status = pr.get("mergeStateStatus")
+            mergeable = pr.get("mergeable")
+            if merge_state_status in {"CONFLICTING", "DIRTY"}:
+                merge_state = merge_state_status
+            elif mergeable == "CONFLICTING":
+                merge_state = mergeable
+            else:
                 continue
             num = pr.get("number")
             conditions.append(Condition(
@@ -78,6 +90,7 @@ def pr_conflicts(monitor, projects: list[Path]) -> list[Condition]:
                     "title": pr.get("title", ""),
                     "branch": pr.get("headRefName", ""),
                     "url": pr.get("url", ""),
+                    "merge_state": merge_state,
                 },
             ))
     return conditions

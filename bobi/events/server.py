@@ -53,6 +53,39 @@ def _needs_build(es_dir: Path) -> bool:
     return dist.stat().st_mtime < src_mtime
 
 
+def _needs_install(es_dir: Path) -> bool:
+    """Whether local event-server runtime dependencies are missing."""
+    return not (es_dir / "node_modules").exists()
+
+
+def _esbuild_package(es_dir: Path) -> str:
+    try:
+        package = json.loads((es_dir / "package.json").read_text())
+    except (json.JSONDecodeError, OSError):
+        return "esbuild"
+    version = package.get("devDependencies", {}).get("esbuild", "")
+    return f"esbuild@{version}" if version else "esbuild"
+
+
+def _build_local(es_dir: Path) -> None:
+    esbuild_bin = es_dir / "node_modules" / ".bin" / "esbuild"
+    if esbuild_bin.exists():
+        _run_npm(["npm", "run", "build:local"], es_dir)
+        return
+    _run_npm([
+        "npm", "exec", "--yes",
+        "--cache", str(es_dir / ".npm-cache"),
+        "--package", _esbuild_package(es_dir),
+        "--",
+        "esbuild", "src/local.ts",
+        "--bundle",
+        "--platform=node",
+        "--target=node20",
+        "--outfile=dist/local.js",
+        "--packages=external",
+    ], es_dir)
+
+
 def health(base_url: str, timeout: float = 2) -> dict | None:
     """Probe an event server's /health endpoint.
 
@@ -144,13 +177,13 @@ def ensure_running(port: int, webhook_secret: str = "",
 
     es_dir = _find_event_server_dir()
 
-    if not (es_dir / "node_modules").exists():
+    if _needs_install(es_dir):
         log.info("Installing event server dependencies...")
-        _run_npm(["npm", "install", "--no-audit", "--no-fund"], es_dir)
+        _run_npm(["npm", "install", "--omit=dev", "--no-audit", "--no-fund"], es_dir)
 
     if _needs_build(es_dir):
         log.info("Building local event server...")
-        _run_npm(["npm", "run", "build:local"], es_dir)
+        _build_local(es_dir)
 
     from bobi import paths
     state = paths.state_dir(project_path)

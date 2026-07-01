@@ -5,7 +5,7 @@
    never in the chat. Build/Done reuse the generating + done views. */
 (() => {
   const NONCE = document.querySelector('meta[name="bobi-nonce"]').content;
-  const H = { "x-bobi-nonce": NONCE };
+  const H = { "x-bobi-webui-token": NONCE };
   const $ = (sel, el = document) => el.querySelector(sel);
   // Escapes for both element text AND double/single-quoted attribute contexts
   // (role/service names are user- and LLM-authored and flow into value="…" /
@@ -110,20 +110,31 @@
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
+    const dispatch = (raw) => {
+      const ev = parseSSE(raw);
+      if (handlers[ev.event]) handlers[ev.event](ev.data);
+    };
+    const pump = () => {
+      let i;
+      while ((i = buf.indexOf("\n\n")) !== -1) {
+        dispatch(buf.slice(0, i));
+        buf = buf.slice(i + 2);
+      }
+    };
     for (;;) {
       let chunk;
       try { chunk = await reader.read(); }
       catch (e) { markDisconnected(); throw e; }  // stream cut = server gone
       const { value, done } = chunk;
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let i;
-      while ((i = buf.indexOf("\n\n")) !== -1) {
-        const ev = parseSSE(buf.slice(0, i));
-        buf = buf.slice(i + 2);
-        if (handlers[ev.event]) handlers[ev.event](ev.data);
+      if (done) {
+        buf += dec.decode();
+        pump();
+        break;
       }
+      buf += dec.decode(value, { stream: true });
+      pump();
     }
+    if (buf.trim()) dispatch(buf);
   }
 
   // --- navigation --------------------------------------------------------

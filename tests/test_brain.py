@@ -302,3 +302,148 @@ def test_claude_session_satisfies_brain_session_protocol():
     sess = _claude_session_over([])
     assert isinstance(sess, BrainSession)
     assert sess.provider == "anthropic"
+
+
+@pytest.mark.asyncio
+async def test_claude_connect_retries_initialize_timeout(monkeypatch):
+    """Startup initialize timeouts are transient under CPU/IO contention."""
+    clients = []
+
+    class _ConnectClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnected = False
+            clients.append(self)
+
+        async def connect(self):
+            if len(clients) == 1:
+                raise Exception("Control request timeout: initialize")
+
+        async def disconnect(self):
+            self.disconnected = True
+
+    monkeypatch.setattr("claude_agent_sdk.ClaudeSDKClient", _ConnectClient)
+    monkeypatch.setenv("BOBI_CLAUDE_CONNECT_ATTEMPTS", "2")
+    monkeypatch.setenv("BOBI_CLAUDE_CONNECT_BACKOFF_SECONDS", "0")
+
+    sess = _ClaudeSession(options=object())
+    await sess.connect()
+
+    assert len(clients) == 2
+    assert clients[0].disconnected is True
+    assert sess._client is clients[1]
+
+
+@pytest.mark.asyncio
+async def test_claude_connect_does_not_retry_non_initialize_error(monkeypatch):
+    clients = []
+
+    class _ConnectClient:
+        def __init__(self, options):
+            clients.append(self)
+
+        async def connect(self):
+            raise RuntimeError("auth failed")
+
+        async def disconnect(self):
+            pass
+
+    monkeypatch.setattr("claude_agent_sdk.ClaudeSDKClient", _ConnectClient)
+    monkeypatch.setenv("BOBI_CLAUDE_CONNECT_ATTEMPTS", "3")
+    monkeypatch.setenv("BOBI_CLAUDE_CONNECT_BACKOFF_SECONDS", "0")
+
+    sess = _ClaudeSession(options=object())
+    with pytest.raises(RuntimeError, match="auth failed"):
+        await sess.connect()
+
+    assert len(clients) == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_connect_sets_default_initialize_timeout(monkeypatch):
+    class _ConnectClient:
+        def __init__(self, options):
+            pass
+
+        async def connect(self):
+            pass
+
+    monkeypatch.setattr("claude_agent_sdk.ClaudeSDKClient", _ConnectClient)
+    monkeypatch.delenv("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", raising=False)
+    monkeypatch.delenv("BOBI_CLAUDE_INITIALIZE_TIMEOUT_MS", raising=False)
+
+    sess = _ClaudeSession(options=object())
+    await sess.connect()
+
+    assert os.environ["CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"] == "180000"
+
+
+@pytest.mark.asyncio
+async def test_claude_connect_preserves_explicit_initialize_timeout(monkeypatch):
+    class _ConnectClient:
+        def __init__(self, options):
+            pass
+
+        async def connect(self):
+            pass
+
+    monkeypatch.setattr("claude_agent_sdk.ClaudeSDKClient", _ConnectClient)
+    monkeypatch.setenv("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", "240000")
+    monkeypatch.setenv("BOBI_CLAUDE_INITIALIZE_TIMEOUT_MS", "180000")
+
+    sess = _ClaudeSession(options=object())
+    await sess.connect()
+
+    assert os.environ["CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"] == "240000"
+
+
+@pytest.mark.asyncio
+async def test_claude_stream_once_sets_default_initialize_timeout(monkeypatch):
+    async def _query(*, prompt, options):
+        assert os.environ["CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"] == "180000"
+        yield _result(result="ok")
+
+    monkeypatch.setattr("claude_agent_sdk.query", _query)
+    monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.delenv("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", raising=False)
+    monkeypatch.delenv("BOBI_CLAUDE_INITIALIZE_TIMEOUT_MS", raising=False)
+
+    out = []
+    async for msg in ClaudeBrain().stream_once(
+        system_prompt="sys",
+        user_prompt="hello",
+        cwd="/tmp",
+    ):
+        out.append(msg)
+
+    assert isinstance(out[-1], TurnResult)
+
+
+@pytest.mark.asyncio
+async def test_claude_stream_once_retries_initialize_timeout_before_output(
+    monkeypatch,
+):
+    calls = 0
+
+    async def _query(*, prompt, options):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise Exception("Control request timeout: initialize")
+        yield _result(result="ok")
+
+    monkeypatch.setattr("claude_agent_sdk.query", _query)
+    monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.setenv("BOBI_CLAUDE_CONNECT_ATTEMPTS", "2")
+    monkeypatch.setenv("BOBI_CLAUDE_CONNECT_BACKOFF_SECONDS", "0")
+
+    out = []
+    async for msg in ClaudeBrain().stream_once(
+        system_prompt="sys",
+        user_prompt="hello",
+        cwd="/tmp",
+    ):
+        out.append(msg)
+
+    assert calls == 2
+    assert isinstance(out[-1], TurnResult)

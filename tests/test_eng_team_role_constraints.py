@@ -1,60 +1,94 @@
-"""Role prompts must enforce delegation and responsiveness constraints.
+"""EngTeam role prompts must enforce delegation and responsiveness constraints.
 
-The project lead prompt must never allow hands-on work (reading files,
-running tests, writing code, creating PRs). Issue #149: a lead entered
-a debugging loop and became unresponsive to inbox messages for 120s+.
+The eng-team package is a two-layer org: a persistent director dispatches
+async engineer workers. The director must never allow hands-on repo work
+(reading files, running tests, writing code, creating PRs), because that work
+belongs in worker workflows.
 
-These tests catch regressions — if someone loosens the prompt back to
-"a single quick read-only command is fine", the test fails.
+These tests catch regressions if someone reintroduces a persistent project
+lead layer or loosens the director's async-only boundary.
 """
 
+import json
+import re
 from pathlib import Path
 
 import pytest
 import yaml
 
-# The pristine, in-repo reference team. These constraints are generic (they
-# apply to any eng org), so they're validated against eng-team. The Moda
-# house bindings (codex as the adversarial reviewer, Linear) live in the private
-# moda-eng-team overlay and are validated there.
+# The pristine, in-repo EngTeam package. Tests in this file intentionally cover
+# EngTeam's shipped role shape and prompt contracts. General framework behavior
+# such as CLI requester metadata parsing lives in isolated test-agent fixtures.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENG_TEAM = REPO_ROOT / "agents" / "eng-team"
-LEAD_PROMPT = ENG_TEAM / "roles" / "project_lead" / "ROLE.md"
+DIRECTOR_PROMPT = ENG_TEAM / "roles" / "director" / "ROLE.md"
 ENGINEER_PROMPT = ENG_TEAM / "roles" / "engineer" / "ROLE.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 ISSUE_LIFECYCLE = ENG_TEAM / "workflows" / "issue-lifecycle.yaml"
 AGENT_YAML = ENG_TEAM / "agent.yaml"
 
 
-class TestProjectLeadDelegation:
+class TestTwoLayerPackageShape:
+
+    def test_project_lead_role_removed(self):
+        assert not (ENG_TEAM / "roles" / "project_lead").exists(), (
+            "eng-team must not ship a persistent project_lead role"
+        )
+
+    def test_only_director_and_engineer_roles_ship(self):
+        roles = sorted(p.name for p in (ENG_TEAM / "roles").iterdir() if p.is_dir())
+        assert roles == ["director", "engineer"], (
+            "eng-team must be director plus async engineer workers"
+        )
+
+    def test_two_layer_context_files_ship(self):
+        expected = {
+            "engineer.md",
+            "github.md",
+            "linear.md",
+            "prep-doc.md",
+            "slack.md",
+        }
+        found = {p.name for p in (ENG_TEAM / "context").glob("*.md")}
+        assert expected <= found, (
+            "eng-team must ship reusable context for director and worker routing"
+        )
+
+    def test_package_readme_exists(self):
+        assert (ENG_TEAM / "README.md").is_file(), (
+            "eng-team must document the two-layer package layout"
+        )
+
+
+class TestDirectorDelegation:
 
     @pytest.fixture(autouse=True)
     def _load_prompt(self):
-        self.text = LEAD_PROMPT.read_text()
+        self.text = DIRECTOR_PROMPT.read_text()
 
     def test_forbids_hands_on_work(self):
         assert "never do hands-on work" in self.text.lower(), (
-            "Project lead prompt must explicitly forbid hands-on work"
+            "Director prompt must explicitly forbid hands-on work"
         )
 
     def test_forbids_reading_source_files(self):
         assert "read source files" in self.text.lower(), (
-            "Project lead prompt must mention not reading source files"
+            "Director prompt must mention not reading source files"
         )
 
     def test_forbids_running_tests(self):
         assert "run tests" in self.text.lower(), (
-            "Project lead prompt must mention not running tests"
+            "Director prompt must mention not running tests"
         )
 
     def test_forbids_writing_code(self):
         assert "write code" in self.text.lower(), (
-            "Project lead prompt must mention not writing code"
+            "Director prompt must mention not writing code"
         )
 
     def test_forbids_creating_prs(self):
-        assert "create prs" in self.text.lower(), (
-            "Project lead prompt must mention not creating PRs"
+        assert "open prs" in self.text.lower() or "create prs" in self.text.lower(), (
+            "Director prompt must mention not opening/creating PRs"
         )
 
     def test_no_quick_command_loophole(self):
@@ -64,26 +98,73 @@ class TestProjectLeadDelegation:
         must not contain language that permits running commands directly.
         """
         assert "read-only command is fine" not in self.text.lower(), (
-            "Project lead prompt must not contain the 'quick command' loophole"
+            "Director prompt must not contain the 'quick command' loophole"
         )
 
     def test_warns_about_debugging_loops(self):
         assert "debugging loop" in self.text.lower(), (
-            "Project lead prompt must warn about the debugging loop anti-pattern"
+            "Director prompt must warn about the debugging loop anti-pattern"
         )
 
     def test_requires_few_seconds_responsiveness(self):
         assert "few seconds" in self.text.lower(), (
-            "Project lead prompt must set max blocking time to 'a few seconds'"
+            "Director prompt must set max blocking time to 'a few seconds'"
         )
 
     def test_delegates_investigations(self):
         assert "delegate investigations" in self.text.lower(), (
-            "Project lead prompt must require delegating investigations"
+            "Director prompt must require delegating investigations"
+        )
+
+    def test_does_not_launch_project_lead_role(self):
+        assert "--role project_lead" not in self.text.lower(), (
+            "Director prompt must not launch the retired persistent role"
+        )
+
+    def test_cleans_up_legacy_project_lead_sessions(self):
+        text = self.text.lower()
+        assert "legacy session cleanup" in text and "project_lead" in text, (
+            "Director prompt must tell upgrades to cancel legacy sessions"
+        )
+
+    def test_honors_auto_dispatched_annotations(self):
+        text = self.text.lower()
+        assert "auto-dispatched" in text and "do not launch another worker" in text, (
+            "Director prompt must avoid duplicate workers for auto-dispatched events"
+        )
+
+    def test_slack_dispatch_documents_structured_requester_metadata(self):
+        """This is an EngTeam prompt contract, not CLI parsing coverage.
+
+        General `--requested-by` JSON forwarding is tested against the isolated
+        test-agent fixture in test_cli.py. This assertion keeps the shipped
+        EngTeam director example aligned with that framework capability.
+        """
+        start = self.text.index("For Slack-requested work")
+        end = self.text.index("## Event Routing")
+        section = self.text[start:end]
+        task = re.search(r'--task "([^"]+)"', section, re.MULTILINE)
+
+        requester_arg = re.search(r"--requested-by '([^']+)'", section, re.MULTILINE)
+
+        assert "pass requester context as structured metadata" in section.lower()
+        assert "route back to the original thread" in section.lower()
+        assert requester_arg is not None, (
+            "Slack-requested worker launches must preserve structured requester metadata"
+        )
+        assert json.loads(requester_arg.group(1)) == {
+            "from": "<user_id>",
+            "workspace": "<workspace>",
+            "channel": "<channel>",
+            "thread_ts": "<thread_ts>",
+        }
+        assert task is not None
+        assert "requested by" not in task.group(1).lower(), (
+            "Slack requester routing must not be embedded in the task text"
         )
 
 
-class TestProjectLeadStandingInstructions:
+class TestDirectorStandingInstructions:
     """Standing operational instructions must be encoded in the role prompt.
 
     These instructions were learned from Jun 12-18 operations and must
@@ -92,11 +173,11 @@ class TestProjectLeadStandingInstructions:
 
     @pytest.fixture(autouse=True)
     def _load_prompt(self):
-        self.text = LEAD_PROMPT.read_text()
+        self.text = DIRECTOR_PROMPT.read_text()
 
     def test_auto_fix_ci_failures(self):
         assert "auto-fix ci failures" in self.text.lower(), (
-            "Project lead prompt must instruct auto-dispatching on CI failures"
+            "Director prompt must instruct auto-dispatching on CI failures"
         )
 
     def test_ci_failures_escalate_only_if_unfixable(self):
@@ -116,7 +197,7 @@ class TestProjectLeadStandingInstructions:
 
     def test_auto_pickup_agent_labeled_issues(self):
         assert "auto-pickup agent-labeled issues" in self.text.lower(), (
-            "Project lead prompt must instruct auto-pickup of agent-labeled issues"
+            "Director prompt must instruct auto-pickup of agent-labeled issues"
         )
 
     def test_agent_label_no_assignment_needed(self):
@@ -126,7 +207,7 @@ class TestProjectLeadStandingInstructions:
 
     def test_answer_all_questions(self):
         assert "answer all questions" in self.text.lower(), (
-            "Project lead prompt must require answering all questions"
+            "Director prompt must require answering all questions"
         )
 
     def test_answer_questions_on_closed_prs(self):
@@ -136,7 +217,7 @@ class TestProjectLeadStandingInstructions:
 
     def test_summarize_before_dispatching(self):
         assert "summarize before dispatching" in self.text.lower(), (
-            "Project lead prompt must require summarizing before dispatching"
+            "Director prompt must require summarizing before dispatching"
         )
 
     def test_pr_branches_off_main(self):
@@ -146,7 +227,7 @@ class TestProjectLeadStandingInstructions:
 
     def test_ticket_as_task_dispatch(self):
         assert "pass the ticket reference as the" in self.text.lower(), (
-            "Project lead prompt must enforce ticket-as-task dispatch format"
+            "Director prompt must enforce ticket-as-task dispatch format"
         )
 
     def test_merge_conflict_auto_dispatch(self):
@@ -159,12 +240,12 @@ class TestReleaseTimeOnlyVersionConvention:
     """Feature PRs must never bump the version or edit the changelog.
 
     Issue #325: version bumps and CHANGELOG.md entries are a release-time
-    concern only — bobi's own contributor convention, documented in
+    concern only - bobi's own contributor convention, documented in
     CLAUDE.md. These tests fail if the documented convention regresses.
 
     The *engineer-prompt* side of this guard (telling the engineer to revert
     `/ship`'s version/changelog bump) is Moda house policy and lives in the
-    private moda-eng-team overlay engineer role — it is validated there, not
+    private moda-eng-team overlay engineer role - it is validated there, not
     against the pristine eng-team.
     """
 
@@ -185,7 +266,7 @@ class TestAdversarialReviewStep:
     """eng-team must wire a tool-agnostic adversarial-review seam.
 
     A `plan_review` step in issue-lifecycle runs the engineer's *adversarial
-    review gate* (a generic seam — the overlay binds it to a concrete tool like
+    review gate* (a generic seam - the overlay binds it to a concrete tool like
     Codex) on the just-written spec and captures the critique in the handoff for
     the human approval gate. These tests fail if the generic step or its seam
     wording regresses. The concrete Codex binding + tools/codex.md guide live in

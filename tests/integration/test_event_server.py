@@ -1157,13 +1157,19 @@ class TestBindAddress:
     @staticmethod
     def _start_server(bobi_env, port: int, extra_env: dict | None = None):
         """Start an event server with explicit env control, return (proc, log_path)."""
-        from bobi.events.server import _find_event_server_dir, _needs_build, _run_npm
+        from bobi.events.server import (
+            _build_local,
+            _find_event_server_dir,
+            _needs_build,
+            _needs_install,
+            _run_npm,
+        )
 
         es_dir = _find_event_server_dir()
-        if not (es_dir / "node_modules").exists():
-            _run_npm(["npm", "install", "--no-audit", "--no-fund"], es_dir)
+        if _needs_install(es_dir):
+            _run_npm(["npm", "install", "--omit=dev", "--no-audit", "--no-fund"], es_dir)
         if _needs_build(es_dir):
-            _run_npm(["npm", "run", "build:local"], es_dir)
+            _build_local(es_dir)
 
         log_path = bobi_env.state_dir / f"event-server-bind-{port}.log"
 

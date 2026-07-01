@@ -18,17 +18,21 @@ manual ``compact`` trigger, and the bounded/recoverable reconnect.
 """
 
 import asyncio
+import json
 
 import pytest
 
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
 from bobi.brain import AssistantText, BrainCost, BrainSession, TurnResult
+from bobi.brain.claude import DEFAULT_INITIALIZE_TIMEOUT_MS
 from bobi.inbox import Message
 from bobi.session import (
     COMPACT_SENTINEL,
+    ROTATION_RECONNECT_TIMEOUT,
     Session,
     _context_fill_tokens,
+    _rotation_error_message,
 )
 
 
@@ -52,6 +56,14 @@ class _FakeClient:
     async def receive_response(self):
         for m in self._messages:
             yield m
+
+
+class _ConnectOnlyClient:
+    async def connect(self, prompt=None):
+        pass
+
+    async def disconnect(self):
+        pass
 
 
 def _assistant(usage: dict | None) -> AssistantMessage:
@@ -127,6 +139,77 @@ def test_context_fill_sums_cache_fields():
     assert _context_fill_tokens({}) == 0
     # Missing/None individual fields are treated as zero, not an error.
     assert _context_fill_tokens({"input_tokens": 10, "cache_read_input_tokens": None}) == 10
+
+
+def test_rotation_error_message_never_empty_for_timeout():
+    """asyncio.TimeoutError stringifies to "", but logs/events need a cause."""
+    message = _rotation_error_message(asyncio.TimeoutError())
+
+    assert message
+    assert "TimeoutError" in message
+    assert "timed out" in message
+
+
+def test_rotation_error_message_handles_broken_exception_str():
+    """Diagnostic formatting must not let broken SDK exceptions break recovery."""
+
+    class BrokenStrError(Exception):
+        def __str__(self):
+            raise RuntimeError("stringification failed")
+
+    message = _rotation_error_message(BrokenStrError())
+
+    assert message
+    assert "BrokenStrError" in message
+
+
+@pytest.mark.asyncio
+async def test_rotation_failure_records_nonempty_timeout_cause(
+    bobi_install, monkeypatch
+):
+    """Exhausted reconnect retries must emit diagnosable failure details."""
+    monkeypatch.setattr("bobi.session.ROTATION_RECONNECT_TIMEOUT", 0.01)
+    monkeypatch.setattr("bobi.session.ROTATION_RECONNECT_BACKOFF", 0)
+    events = []
+    monkeypatch.setattr(
+        "bobi.events.client._log_event",
+        lambda event, session_id="": events.append(event),
+    )
+
+    s = Session(name="test-rot-timeout", cwd=str(bobi_install.repo_path))
+    attempts = {"count": 0}
+
+    async def timeout_reconnect():
+        attempts["count"] += 1
+        raise asyncio.TimeoutError()
+
+    s._attempt_reconnect = timeout_reconnect
+    s._make_brain_session = lambda resume=None: _ConnectOnlyClient()
+
+    await s._rotate()
+
+    assert attempts["count"] == 3
+    failed_events = [
+        event for event in events if event["type"] == "session.rotation_failed"
+    ]
+    assert failed_events
+    payload = failed_events[0]["payload"]
+    assert payload["attempts"] == 3
+    assert payload["error"]
+    assert "TimeoutError" in payload["error"]
+    assert len(payload["attempt_errors"]) == 3
+    assert [item["attempt"] for item in payload["attempt_errors"]] == [1, 2, 3]
+    assert all(item["error"] for item in payload["attempt_errors"])
+
+    log_path = bobi_install.sessions_dir / "test-rot-timeout" / "log.jsonl"
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    failure = next(record for record in records if record["event"] == "rotation_failed")
+    assert failure["error"]
+    assert failure["attempt_errors"] == payload["attempt_errors"]
+
+
+def test_rotation_reconnect_timeout_exceeds_claude_initialize_default():
+    assert ROTATION_RECONNECT_TIMEOUT * 1000 > DEFAULT_INITIALIZE_TIMEOUT_MS
 
 
 @pytest.mark.asyncio
@@ -265,6 +348,7 @@ class _HangingClient:
     never yields a ResultMessage — the exact 2026-06-24 wedge shape. The fresh
     ``claude`` subprocess connects but the first turn blocks forever."""
 
+    provider = "anthropic"
     instances = 0
 
     def __init__(self, options=None):
@@ -274,6 +358,9 @@ class _HangingClient:
 
     async def connect(self):
         self.connected = True
+
+    async def query(self, text):
+        pass
 
     async def disconnect(self):
         self.disconnected = True
@@ -290,18 +377,26 @@ class _ErrorTurnClient:
     carrying an API error (e.g. 529 Overloaded) — the #443 *arrives-with-error*
     shape, distinct from the never-yields hang."""
 
+    provider = "anthropic"
+
     def __init__(self, options=None):
         self.connected = False
 
     async def connect(self):
         self.connected = True
 
+    async def query(self, text):
+        pass
+
     async def disconnect(self):
         pass
 
     async def receive_response(self):
-        yield _result({"input_tokens": 1, "cache_read_input_tokens": 10},
-                      is_error=True, api_error_status=529)
+        yield _b_result(
+            {"input_tokens": 1, "cache_read_input_tokens": 10},
+            is_error=True,
+            api_error_status=529,
+        )
 
 
 @pytest.mark.asyncio
@@ -314,11 +409,9 @@ async def test_rotation_reconnect_bounds_and_recovers_on_never_yields(
     then RECOVERS into an addressable connected client — never a silent park,
     never the terminal "error" state that would deafen the session (#443).
     """
-    import claude_agent_sdk
     from bobi import session as session_mod
 
     _HangingClient.instances = 0
-    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", _HangingClient)
     # Tiny bounds so the test runs in a fraction of a second.
     monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_TIMEOUT", 0.05)
     monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_BACKOFF", 0.0)
@@ -327,6 +420,7 @@ async def test_rotation_reconnect_bounds_and_recovers_on_never_yields(
     s = Session(name="test-reconnect-hang", cwd=str(bobi_install.repo_path))
     s._input_ready = asyncio.Event()
     s._client = None  # nothing to disconnect
+    s._make_brain_session = lambda resume=None: _HangingClient()
 
     # Must return (bounded) rather than block forever.
     await asyncio.wait_for(s._rotate(), timeout=5.0)
@@ -348,16 +442,15 @@ async def test_rotation_reconnect_clears_error_on_arrives_with_529(
     via the #443 path and return the session to ready — NOT the terminal
     "error" state. This is the *arrives-with-error* shape; step 1's timeout
     covers the *never-arrives* shape (the test above)."""
-    import claude_agent_sdk
     from bobi import session as session_mod
 
-    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", _ErrorTurnClient)
     monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_TIMEOUT", 2.0)
     monkeypatch.setattr(session_mod, "ROTATION_MAX_RECONNECT_ATTEMPTS", 2)
 
     s = Session(name="test-reconnect-529", cwd=str(bobi_install.repo_path))
     s._input_ready = asyncio.Event()
     s._client = None
+    s._make_brain_session = lambda resume=None: _ErrorTurnClient()
 
     await asyncio.wait_for(s._rotate(), timeout=5.0)
 
@@ -382,6 +475,7 @@ class _ConnectHangsClient:
     the session must surface *terminally* (loud raise + "error" state) within
     the timeout budget rather than hang forever."""
 
+    provider = "anthropic"
     instances = 0
 
     def __init__(self, options=None):
@@ -394,6 +488,9 @@ class _ConnectHangsClient:
         # is the only thing that can unstick this; without it _rotate() blocks
         # forever and the run loop never returns to inbox.recv.
         await asyncio.Event().wait()
+
+    async def query(self, text):
+        pass
 
     async def disconnect(self):
         self.disconnected = True
@@ -418,11 +515,14 @@ async def test_rotation_reconnect_bounds_hung_connect_and_surfaces_terminally(
     succeed → terminal-but-bounded). Both are bounded by the same
     ``asyncio.wait_for``; removing it hangs this test forever.
     """
-    import claude_agent_sdk
     from bobi import session as session_mod
 
     _ConnectHangsClient.instances = 0
-    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", _ConnectHangsClient)
+    events = []
+    monkeypatch.setattr(
+        "bobi.events.client._log_event",
+        lambda event, session_id="": events.append(event),
+    )
     # Tiny bounds so the whole attempt → backoff → recovery budget is a fraction
     # of a second, well inside the 5s outer guard below.
     monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_TIMEOUT", 0.05)
@@ -432,6 +532,7 @@ async def test_rotation_reconnect_bounds_hung_connect_and_surfaces_terminally(
     s = Session(name="test-connect-hang", cwd=str(bobi_install.repo_path))
     s._input_ready = asyncio.Event()
     s._client = None  # nothing to disconnect
+    s._make_brain_session = lambda resume=None: _ConnectHangsClient()
 
     # Bounded: _rotate() must RAISE (terminal) well within the outer guard
     # rather than block forever. The outer wait_for(5.0) is the regression
@@ -448,3 +549,20 @@ async def test_rotation_reconnect_bounds_hung_connect_and_surfaces_terminally(
     # 2 bounded reconnect attempts + 1 final recovery client = 3 built; proves
     # the loop didn't hang on the first connect().
     assert _ConnectHangsClient.instances == 3
+
+    failed_events = [
+        event for event in events if event["type"] == "session.rotation_failed"
+    ]
+    assert failed_events
+    terminal_payload = failed_events[-1]["payload"]
+    assert terminal_payload["final_recovery_error"]
+    assert "TimeoutError" in terminal_payload["final_recovery_error"]
+
+    log_path = bobi_install.sessions_dir / "test-connect-hang" / "log.jsonl"
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    terminal_failure = [
+        record for record in records
+        if record["event"] == "rotation_failed" and record.get("final_recovery_error")
+    ]
+    assert terminal_failure
+    assert "TimeoutError" in terminal_failure[-1]["final_recovery_error"]

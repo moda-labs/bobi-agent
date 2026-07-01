@@ -81,6 +81,14 @@ def _load_yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text()) or {}
 
 
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def _project_config_path(project_path: Path) -> Path:
     from bobi import paths
     return paths.agent_yaml_path(project_path)
@@ -222,6 +230,15 @@ class Config:
     build: "BuildSpec | None" = None  # C24 team image build spec; None = generic base
     spend_cap: int = 0  # max agent invocations per rolling hour; 0 = use default
     max_concurrent_agents: int = 0  # max simultaneous subagents; 0 = use default (2)
+    launch_admission: dict = field(default_factory=lambda: {
+        "enabled": False,
+        "max_starting_agents": 1,
+        "load_per_cpu_soft_limit": 1.5,
+        "load_per_cpu_hard_limit": 2.0,
+        "min_memory_available_mb": 512,
+        "init_failure_window_seconds": 600,
+        "init_failure_backoff_threshold": 2,
+    })
     # Which agent "brain" drives this team's agents (#485). `{kind: claude|codex|
     # …, model: <optional override>}`. Empty = the framework default (claude).
     brain: dict = field(default_factory=dict)
@@ -321,8 +338,35 @@ class Config:
             build=build,
             spend_cap=int(raw.get("spend_cap", 0)),
             max_concurrent_agents=int(raw.get("max_concurrent_agents", 0)),
+            launch_admission=cls._parse_launch_admission(raw.get("launch_admission", {})),
             brain=raw.get("brain", {}) if isinstance(raw.get("brain"), dict) else {},
         )
+
+    @staticmethod
+    def _parse_launch_admission(raw: object) -> dict:
+        defaults = {
+            "enabled": False,
+            "max_starting_agents": 1,
+            "load_per_cpu_soft_limit": 1.5,
+            "load_per_cpu_hard_limit": 2.0,
+            "min_memory_available_mb": 512,
+            "init_failure_window_seconds": 600,
+            "init_failure_backoff_threshold": 2,
+        }
+        if not isinstance(raw, dict):
+            return defaults
+        cfg = {**defaults, **raw}
+        soft = max(0.1, float(cfg.get("load_per_cpu_soft_limit", 1.5)))
+        hard = max(soft, float(cfg.get("load_per_cpu_hard_limit", 2.0)))
+        return {
+            "enabled": _as_bool(cfg.get("enabled", False)),
+            "max_starting_agents": max(1, int(cfg.get("max_starting_agents", 1))),
+            "load_per_cpu_soft_limit": soft,
+            "load_per_cpu_hard_limit": hard,
+            "min_memory_available_mb": max(0, int(cfg.get("min_memory_available_mb", 512))),
+            "init_failure_window_seconds": max(1, int(cfg.get("init_failure_window_seconds", 600))),
+            "init_failure_backoff_threshold": max(1, int(cfg.get("init_failure_backoff_threshold", 2))),
+        }
 
     @staticmethod
     def _parse_build(build_raw, agent_yaml_path: Path) -> "BuildSpec | None":
