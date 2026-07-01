@@ -1,4 +1,4 @@
-version: "1.1.2"
+version: "1.1.3"
 
 entry_point: director
 chat: slack
@@ -42,21 +42,21 @@ requires:
 
 # Container build (C24 team-flavored images): bake the host tools the `requires`
 # gate above demands into a per-team image, so a dark Fly instance can actually
-# dispatch (the bare base ships no Node, and a container has no TTY to run
-# `requires.fix` interactively). CI renders this to a Docker hook layer that sits
-# BELOW the framework wheel — a code-only release rebuilds only the wheel, not
-# these tools (bobi/build_render.py). `apt`/`npm` install as root; `run`
-# steps install as the bobi user into the IMAGE home. `verify: requires`
-# re-runs the checks above at build, failing CI if a tool is missing.
+# dispatch (a container has no TTY to run `requires.fix` interactively). CI
+# renders this to a Docker hook layer that sits BELOW the framework wheel — a
+# code-only release rebuilds only the wheel, not these tools
+# (bobi/build_render.py). `apt` installs as root; `verify: requires` re-runs the
+# checks above at build, failing CI if a tool is missing.
 #
-# Core ships only the generic eng base (nodejs/npm/jq + the GitHub CLI). nodejs/
-# npm are here so an overlay's `npm:` deps compose on top via list-merge. apt
-# (nodejs/jq) isn't pinned: exact Debian versions get pruned from the mirror
-# (breaking rebuilds); it tracks the pinned base image's Debian trixie instead.
+# Core bakes only `jq` (+ the GitHub CLI below); the base image already ships
+# git, claude, and codex (the Codex CLI is a Node-free static binary, #428/#573),
+# so no nodejs/npm is needed here. apt versions aren't pinned: exact Debian
+# versions get pruned from the mirror (breaking rebuilds), so this tracks the
+# pinned base image's Debian instead. An overlay that genuinely needs an npm/node
+# toolchain declares nodejs/npm in its OWN `build.apt` (list-merged on top),
+# rather than every eng-derived team carrying Node it never uses.
 build:
-  # jq pairs with gh for JSON wrangling; nodejs/npm are the base an overlay's
-  # npm toolchain (codex/bun/etc.) composes onto.
-  apt: [nodejs, npm, jq]
+  apt: [jq]  # pairs with gh for JSON wrangling
   run_root:
     # The GitHub CLI (`gh`) isn't in Debian apt — add its official repo. `gh` is
     # the core eng workflow's primary GitHub interface; it auths via GH_TOKEN.

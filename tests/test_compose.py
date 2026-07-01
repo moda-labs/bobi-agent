@@ -561,7 +561,9 @@ def test_eng_team_core_installs_standalone(tmp_path):
 def test_synthetic_outside_org_overlay_composes(tmp_path):
     """A third org reuses eng-team without forking: `from: eng-team`
     + a thin overlay (no gstack, a Jira-flavored tracker note, Go house style).
-    Proves cross-org reuse is append-only (#452 §6)."""
+    Proves cross-org reuse is append-only (#452 §6). The overlay brings its OWN
+    node toolchain for its npm linter — core eng-team bakes only jq (+ gh), since
+    codex is a Node-free static binary in the base image (#428)."""
     proj = tmp_path
     (proj / "agents").mkdir()
     shutil.copytree(ENG_TEAM_CORE, proj / "agents" / "eng-team")
@@ -569,7 +571,7 @@ def test_synthetic_outside_org_overlay_composes(tmp_path):
     _write(acme / "agent.yaml",
            f'from: eng-team@{ENG_TEAM_CORE_VERSION}\nversion: "0.1.0"\n'
            'services:\n  - {name: jira, required: true}\n'
-           'build:\n  npm: [some-linter]\n')
+           'build:\n  apt: [nodejs, npm]\n  npm: [some-linter]\n')
     _write(acme / "roles" / "engineer" / "ROLE.md",
            "## Acme house bindings\nUse Jira for tracking; Go/Rust house style.")
     _write(acme / "tools" / "jira.md", "jira guide")
@@ -578,9 +580,10 @@ def test_synthetic_outside_org_overlay_composes(tmp_path):
     dest = paths.package_dir(proj)
     compose.compose(chain, dest)
     cfg = yaml.safe_load((dest / "agent.yaml").read_text())
-    # core services + the overlay's jira; core's generic build accreted the linter.
+    # core services + the overlay's jira; build accretes base-first (core jq, then
+    # the overlay's own node toolchain) and the overlay's npm linter.
     assert {s["name"] for s in cfg["services"]} == {"github", "slack", "jira"}
-    assert cfg["build"]["apt"] == ["nodejs", "npm", "jq"]      # inherited from core
+    assert cfg["build"]["apt"] == ["jq", "nodejs", "npm"]      # core jq + overlay node
     assert cfg["build"]["npm"] == ["some-linter"]             # overlay delta
     assert "from" not in cfg
     # engineer role = core craft + acme house bindings appended.

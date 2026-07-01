@@ -91,6 +91,12 @@ linear:
 Only include services the team actually needs. `bobi agents install`
 prompts for any `${VAR}` references and writes them to `run/.env`.
 
+To give the team host tools, skills, or MCP servers, declare them under
+`tool_library:` (a named catalog entry like `- venn`, or an inline dependency
+with a required `success:`). See `docs/TOOL_LIBRARY.md` for the two ways to
+declare a dependency (pinned `install:` vs guide-only) and how catalog entries
+let you pull a tool in by name.
+
 ### agent.md
 
 ```markdown
