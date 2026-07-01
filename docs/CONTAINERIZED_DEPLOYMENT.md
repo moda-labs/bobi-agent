@@ -70,7 +70,7 @@ image also runs under plain `docker run` for a local contract test.
 | Non-root `bobi` user (uid 10001) | Claude Code refuses `bypassPermissions` as root unless `IS_SANDBOX=1`; we drop privileges with `gosu` instead |
 | Native `claude` CLI (no Node) | the local Node event server is never run in deployed instances; the CLI is the standalone binary |
 | `DISABLE_AUTOUPDATER=1` | freeze the CLI at the built version (the image is the unit of update) |
-| fastembed model baked at `HF_HOME=/opt/bobi/models` | cold-start speed; no first-run download |
+| fastembed model baked at `FASTEMBED_CACHE_PATH=/opt/bobi/models/fastembed` | cold-start speed; no first-run download |
 | `gosu` (privilege drop); no `tini` | Fly injects its own PID-1 init (reaps zombies, forwards signals); tini-on-Fly is a known boot-failure trigger. For other runtimes, use `docker run --init` |
 | `bobi agent <name> start --foreground` entrypoint | container mode |
 

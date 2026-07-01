@@ -110,10 +110,30 @@ def test_no_node_runtime(image: str):
 @requires_docker
 @pytest.mark.timeout(120)
 def test_fastembed_model_baked(image: str):
-    """The embedding model is pre-downloaded into the image at HF_HOME."""
+    """The embedding model is pre-downloaded into fastembed's runtime cache."""
+    code = """
+import os
+from pathlib import Path
+from fastembed import TextEmbedding
+
+cache = Path(os.environ["FASTEMBED_CACHE_PATH"])
+models_root = Path("/opt/bobi/models")
+assert cache == models_root / "fastembed"
+assert any(cache.iterdir())
+assert {path.name for path in models_root.iterdir()} == {"fastembed"}
+
+model = TextEmbedding(
+    model_name="sentence-transformers/all-MiniLM-L6-v2",
+    cache_dir=str(cache),
+)
+list(model.embed(["cache smoke"]))
+assert {path.name for path in models_root.iterdir()} == {"fastembed"}
+print("BAKED")
+"""
     proc = _run(
-        "docker", "run", "--rm", "--entrypoint", "sh", image,
-        "-c", "test -n \"$(ls -A /opt/bobi/models 2>/dev/null)\" && echo BAKED || echo EMPTY",
+        "docker", "run", "--rm", "--network", "none",
+        "--entrypoint", "/opt/venv/bin/python", image,
+        "-c", code,
     )
     assert "BAKED" in proc.stdout, proc.stdout + proc.stderr
 

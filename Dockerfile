@@ -233,9 +233,10 @@ RUN arch="$(dpkg --print-architecture)" \
 # Baked fastembed embedding model (cold-start speed; immutable). For the
 # fastembed version baked here, runtime lookup uses FASTEMBED_CACHE_PATH rather
 # than HF_HOME, so model-baker writes the model directly to the same path used at
-# runtime. The first build after changing this path re-downloads the model; later
-# builds reuse Docker cache unless the model-baker stage inputs change. This is
-# intended to keep one baked model copy, not duplicate it.
+# runtime. Changing this paired build/runtime cache path re-runs model baking and
+# invalidates the runtime layers after the model COPY; ordinary later code-only
+# rebuilds should not re-download the model. The image intentionally carries the
+# baked cache under /opt/bobi/models/fastembed so runtime lookup uses that copy.
 COPY --from=model-baker /opt/bobi/models /opt/bobi/models
 
 # --- team-deps hook (C24 team-flavored images) ---------------------#
