@@ -18,6 +18,7 @@ manual ``compact`` trigger, and the bounded/recoverable reconnect.
 """
 
 import asyncio
+import json
 
 import pytest
 
@@ -29,6 +30,7 @@ from bobi.session import (
     COMPACT_SENTINEL,
     Session,
     _context_fill_tokens,
+    _rotation_error_message,
 )
 
 
@@ -52,6 +54,14 @@ class _FakeClient:
     async def receive_response(self):
         for m in self._messages:
             yield m
+
+
+class _ConnectOnlyClient:
+    async def connect(self, prompt=None):
+        pass
+
+    async def disconnect(self):
+        pass
 
 
 def _assistant(usage: dict | None) -> AssistantMessage:
@@ -127,6 +137,73 @@ def test_context_fill_sums_cache_fields():
     assert _context_fill_tokens({}) == 0
     # Missing/None individual fields are treated as zero, not an error.
     assert _context_fill_tokens({"input_tokens": 10, "cache_read_input_tokens": None}) == 10
+
+
+def test_rotation_error_message_never_empty_for_timeout():
+    """asyncio.TimeoutError stringifies to "", but logs/events need a cause."""
+    message = _rotation_error_message(asyncio.TimeoutError())
+
+    assert message
+    assert "TimeoutError" in message
+    assert "timed out" in message
+
+
+def test_rotation_error_message_handles_broken_exception_str():
+    """Diagnostic formatting must not let broken SDK exceptions break recovery."""
+
+    class BrokenStrError(Exception):
+        def __str__(self):
+            raise RuntimeError("stringification failed")
+
+    message = _rotation_error_message(BrokenStrError())
+
+    assert message
+    assert "BrokenStrError" in message
+
+
+@pytest.mark.asyncio
+async def test_rotation_failure_records_nonempty_timeout_cause(
+    bobi_install, monkeypatch
+):
+    """Exhausted reconnect retries must emit diagnosable failure details."""
+    monkeypatch.setattr("bobi.session.ROTATION_RECONNECT_TIMEOUT", 0.01)
+    monkeypatch.setattr("bobi.session.ROTATION_RECONNECT_BACKOFF", 0)
+    events = []
+    monkeypatch.setattr(
+        "bobi.events.client._log_event",
+        lambda event, session_id="": events.append(event),
+    )
+
+    s = Session(name="test-rot-timeout", cwd=str(bobi_install.repo_path))
+    attempts = {"count": 0}
+
+    async def timeout_reconnect():
+        attempts["count"] += 1
+        raise asyncio.TimeoutError()
+
+    s._attempt_reconnect = timeout_reconnect
+    s._make_brain_session = lambda resume=None: _ConnectOnlyClient()
+
+    await s._rotate()
+
+    assert attempts["count"] == 3
+    failed_events = [
+        event for event in events if event["type"] == "session.rotation_failed"
+    ]
+    assert failed_events
+    payload = failed_events[0]["payload"]
+    assert payload["attempts"] == 3
+    assert payload["error"]
+    assert "TimeoutError" in payload["error"]
+    assert len(payload["attempt_errors"]) == 3
+    assert [item["attempt"] for item in payload["attempt_errors"]] == [1, 2, 3]
+    assert all(item["error"] for item in payload["attempt_errors"])
+
+    log_path = bobi_install.sessions_dir / "test-rot-timeout" / "log.jsonl"
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    failure = next(record for record in records if record["event"] == "rotation_failed")
+    assert failure["error"]
+    assert failure["attempt_errors"] == payload["attempt_errors"]
 
 
 @pytest.mark.asyncio

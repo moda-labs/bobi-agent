@@ -72,6 +72,42 @@ def _context_fill_tokens(usage: dict | None) -> int:
         + (usage.get("cache_creation_input_tokens") or 0)
     )
 
+
+def _rotation_error_message(err: BaseException | None) -> str:
+    """Return a non-empty, diagnosable rotation failure string.
+
+    ``asyncio.TimeoutError`` commonly has no message, so ``str(err)`` is empty.
+    Rotation failure records are operational breadcrumbs; they must name the
+    failure class even when the exception object carries no text.
+    """
+    if err is None:
+        return "unknown rotation reconnect failure"
+
+    err_type = type(err).__name__
+    try:
+        text = str(err).strip()
+    except Exception:
+        text = ""
+    if text:
+        message = f"{err_type}: {text}"
+    elif isinstance(err, asyncio.TimeoutError):
+        message = (
+            f"{err_type}: rotation reconnect timed out after "
+            f"{ROTATION_RECONNECT_TIMEOUT:.0f}s"
+        )
+    else:
+        message = f"{err_type}: no error message provided"
+
+    cause = err.__cause__ or err.__context__
+    if cause is not None and cause is not err:
+        try:
+            cause_text = str(cause).strip()
+        except Exception:
+            cause_text = ""
+        cause_text = cause_text or "no error message provided"
+        message = f"{message}; caused by {type(cause).__name__}: {cause_text}"
+    return message
+
 # Background event-subscription retry cadence (#409). When the initial
 # registration handshake with the event server times out, the session boots
 # anyway and a daemon thread keeps retrying with capped exponential backoff —
@@ -278,6 +314,7 @@ class Session:
 
         # Bounded, recoverable reconnect.
         last_err: BaseException | None = None
+        attempt_errors: list[dict] = []
         reconnected = False
         for attempt in range(1, ROTATION_MAX_RECONNECT_ATTEMPTS + 1):
             try:
@@ -286,6 +323,10 @@ class Session:
                 break
             except asyncio.TimeoutError as e:
                 last_err = e
+                attempt_errors.append({
+                    "attempt": attempt,
+                    "error": _rotation_error_message(e),
+                })
                 log.error(
                     "Rotation reconnect for '%s' timed out after %.0fs "
                     "(attempt %d/%d)",
@@ -294,9 +335,14 @@ class Session:
                 )
             except Exception as e:
                 last_err = e
+                attempt_errors.append({
+                    "attempt": attempt,
+                    "error": _rotation_error_message(e),
+                })
                 log.error(
                     "Rotation reconnect for '%s' failed (attempt %d/%d): %s",
-                    self.name, attempt, ROTATION_MAX_RECONNECT_ATTEMPTS, e,
+                    self.name, attempt, ROTATION_MAX_RECONNECT_ATTEMPTS,
+                    _rotation_error_message(e),
                 )
             if attempt < ROTATION_MAX_RECONNECT_ATTEMPTS:
                 await asyncio.sleep(ROTATION_RECONNECT_BACKOFF * attempt)
@@ -304,7 +350,7 @@ class Session:
         if not reconnected:
             # Exhausted — recover into an addressable state (or surface
             # terminally if even that fails). Raises on terminal failure.
-            await self._recover_rotation_failure(last_err)
+            await self._recover_rotation_failure(last_err, attempt_errors)
 
         self._rotate_pending = False
         reason = self._rotate_reason
@@ -342,7 +388,11 @@ class Session:
         registry.update(self.name, status="idle", rotation_count=self._rotation_count)
         log.info("Session '%s' rotated successfully (count=%d)", self.name, self._rotation_count)
 
-    async def _recover_rotation_failure(self, err: BaseException | None) -> None:
+    async def _recover_rotation_failure(
+        self,
+        err: BaseException | None,
+        attempt_errors: list[dict] | None = None,
+    ) -> None:
         """Recover after the bounded reconnect exhausted its attempts (#456 #3).
 
         Fails loudly (log.error + a session.rotation_failed activity/event) and
@@ -353,15 +403,24 @@ class Session:
         this final fresh connect fails does the session surface terminally —
         loudly, never a silent hang.
         """
+        error_message = _rotation_error_message(err)
+        attempt_errors = attempt_errors or [
+            {"attempt": ROTATION_MAX_RECONNECT_ATTEMPTS, "error": error_message}
+        ]
+
         log.error(
             "Rotation reconnect exhausted for '%s' after %d attempts: %s — "
             "attempting fresh-connect recovery",
-            self.name, ROTATION_MAX_RECONNECT_ATTEMPTS, err,
+            self.name, ROTATION_MAX_RECONNECT_ATTEMPTS, error_message,
         )
         try:
             log_activity(
                 "rotation_failed",
-                {"attempts": ROTATION_MAX_RECONNECT_ATTEMPTS, "error": str(err)},
+                {
+                    "attempts": ROTATION_MAX_RECONNECT_ATTEMPTS,
+                    "error": error_message,
+                    "attempt_errors": attempt_errors,
+                },
                 session=self.name,
             )
             from bobi.events.client import _log_event
@@ -372,7 +431,8 @@ class Session:
                     "payload": {
                         "session": self.name,
                         "attempts": ROTATION_MAX_RECONNECT_ATTEMPTS,
-                        "error": str(err),
+                        "error": error_message,
+                        "attempt_errors": attempt_errors,
                     },
                 },
                 session_id=self.name,
