@@ -230,10 +230,12 @@ RUN arch="$(dpkg --print-architecture)" \
     && chmod +x /usr/local/bin/codex \
     && codex --version
 
-# Baked fastembed embedding model (cold-start speed; immutable). HF_HOME points
-# here at both build and run, so it's a cache hit at runtime. Copied from
-# model-baker, whose only cache key is the fastembed version — so an ordinary
-# code change never re-downloads the model.
+# Baked fastembed embedding model (cold-start speed; immutable). For the
+# fastembed version baked here, runtime lookup uses FASTEMBED_CACHE_PATH rather
+# than HF_HOME, so model-baker writes the model directly to the same path used at
+# runtime. The first build after changing this path re-downloads the model; later
+# builds reuse Docker cache unless the model-baker stage inputs change. This is
+# intended to keep one baked model copy, not duplicate it.
 COPY --from=model-baker /opt/bobi/models /opt/bobi/models
 
 # --- team-deps hook (C24 team-flavored images) ---------------------#
