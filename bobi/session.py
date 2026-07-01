@@ -450,9 +450,38 @@ class Session:
             )
         except BaseException as e2:
             await self._safe_disconnect(client)
+            final_error_message = _rotation_error_message(e2)
+            try:
+                log_activity(
+                    "rotation_failed",
+                    {
+                        "attempts": ROTATION_MAX_RECONNECT_ATTEMPTS,
+                        "error": error_message,
+                        "attempt_errors": attempt_errors,
+                        "final_recovery_error": final_error_message,
+                    },
+                    session=self.name,
+                )
+                from bobi.events.client import _log_event
+                _log_event(
+                    {
+                        "type": "session.rotation_failed",
+                        "source": "bobi",
+                        "payload": {
+                            "session": self.name,
+                            "attempts": ROTATION_MAX_RECONNECT_ATTEMPTS,
+                            "error": error_message,
+                            "attempt_errors": attempt_errors,
+                            "final_recovery_error": final_error_message,
+                        },
+                    },
+                    session_id=self.name,
+                )
+            except Exception:
+                pass
             log.error(
                 "Final rotation recovery failed for '%s': %s — surfacing terminally",
-                self.name, e2,
+                self.name, final_error_message,
             )
             self._client = None
             self._set_state("error")

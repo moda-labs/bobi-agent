@@ -500,6 +500,11 @@ async def test_rotation_reconnect_bounds_hung_connect_and_surfaces_terminally(
 
     _ConnectHangsClient.instances = 0
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", _ConnectHangsClient)
+    events = []
+    monkeypatch.setattr(
+        "bobi.events.client._log_event",
+        lambda event, session_id="": events.append(event),
+    )
     # Tiny bounds so the whole attempt → backoff → recovery budget is a fraction
     # of a second, well inside the 5s outer guard below.
     monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_TIMEOUT", 0.05)
@@ -525,3 +530,20 @@ async def test_rotation_reconnect_bounds_hung_connect_and_surfaces_terminally(
     # 2 bounded reconnect attempts + 1 final recovery client = 3 built; proves
     # the loop didn't hang on the first connect().
     assert _ConnectHangsClient.instances == 3
+
+    failed_events = [
+        event for event in events if event["type"] == "session.rotation_failed"
+    ]
+    assert failed_events
+    terminal_payload = failed_events[-1]["payload"]
+    assert terminal_payload["final_recovery_error"]
+    assert "TimeoutError" in terminal_payload["final_recovery_error"]
+
+    log_path = bobi_install.sessions_dir / "test-connect-hang" / "log.jsonl"
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    terminal_failure = [
+        record for record in records
+        if record["event"] == "rotation_failed" and record.get("final_recovery_error")
+    ]
+    assert terminal_failure
+    assert "TimeoutError" in terminal_failure[-1]["final_recovery_error"]
