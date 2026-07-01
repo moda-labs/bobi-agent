@@ -40,6 +40,25 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _isolate_environ():
+    """No test may leak an os.environ mutation into the next.
+
+    Several code paths write os.environ directly and by design — e.g.
+    ``actions.save_credential`` does ``os.environ[var] = value`` so a live setup
+    process can use a just-saved secret immediately. ``monkeypatch`` cannot undo
+    a write the app makes on its own, so a leaked ``SLACK_BOT_TOKEN`` /
+    ``LINEAR_API_KEY`` / ``BOBI_ROOT`` silently changes a later test's
+    build/author/missing-credentials behavior (an order-dependent flake under
+    pytest-randomly). Snapshot the environment before every test and restore it
+    after. Defined first so it wraps every other fixture and the test body.
+    """
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True)
 def _clear_leaked_event_loop(request):
     """Prevent a leaked running event loop from poisoning async tests.
 
