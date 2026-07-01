@@ -24,9 +24,11 @@ import pytest
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
 from bobi.brain import AssistantText, BrainCost, BrainSession, TurnResult
+from bobi.brain.claude import DEFAULT_INITIALIZE_TIMEOUT_MS
 from bobi.inbox import Message
 from bobi.session import (
     COMPACT_SENTINEL,
+    ROTATION_RECONNECT_TIMEOUT,
     Session,
     _context_fill_tokens,
 )
@@ -127,6 +129,10 @@ def test_context_fill_sums_cache_fields():
     assert _context_fill_tokens({}) == 0
     # Missing/None individual fields are treated as zero, not an error.
     assert _context_fill_tokens({"input_tokens": 10, "cache_read_input_tokens": None}) == 10
+
+
+def test_rotation_reconnect_timeout_exceeds_claude_initialize_default():
+    assert ROTATION_RECONNECT_TIMEOUT * 1000 > DEFAULT_INITIALIZE_TIMEOUT_MS
 
 
 @pytest.mark.asyncio
