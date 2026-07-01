@@ -172,6 +172,25 @@ def resolve_dependencies(merged_yaml: dict) -> list[Dependency]:
     return deps
 
 
+def resolve_team_dependencies(team_dir: Path, project_path: Path) -> list[Dependency]:
+    """Resolve a team's full declared dependency set (from-chain + inline).
+
+    The bootstrap harness (#428 Stage 2) needs the same dependency list the
+    deploy image bakes: the `from:` chain merged, `tool_library:` unioned across
+    layers, before `expand()` consumes the key. Reuses compose's own chain
+    resolution + agent.yaml merge (the single merge path) so the harness sees
+    exactly what `bobi deploy` composes — a team declaring `tool_library: [venn]`
+    two layers up is resolved, not missed.
+    """
+    # Local import: compose imports this module's merge helpers, so a module-level
+    # import would cycle (mirrors build_render.load_composed_team_config).
+    from bobi.compose import Provenance, _compose_agent_yaml, resolve_chain
+
+    chain = resolve_chain(team_dir, project_path)
+    merged_yaml = _compose_agent_yaml(chain, Provenance())
+    return resolve_dependencies(merged_yaml)
+
+
 def _expand_dependency(dep: Dependency, merged_yaml: dict, dest: Path) -> None:
     """Splice one dependency's surfaces into the merged agent.yaml + tools/.
 
