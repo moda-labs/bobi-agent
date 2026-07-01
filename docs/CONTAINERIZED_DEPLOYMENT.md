@@ -17,7 +17,8 @@ Pieces:
 - `scripts/fleet.sh` — fleet enumeration helper
 - `scripts/build-team-tarballs.sh` — package teams into `.tar.gz`
 - `.github/workflows/release.yml` — the single gated framework release pipeline:
-  build + smoke `ci-canary`, then publish the proven wheel
+  build + smoke both brain canaries (`ci-canary` Claude + `ci-codex-smoke` Codex),
+  then publish the proven wheel
 - `.github/workflows/deploy-agent-teams.yml.example` — example generic
   `deployments/*` reconciler for fleet-owning repos; `bobi deploy-init`
   generates the standalone version
@@ -460,8 +461,9 @@ publish a GitHub Release   ─▶ release.yml  (the single gated pipeline)
    │                                 python -m build -> upload the wheel/sdist
    │                                 │
    │                              build-canary               (THE gate)
-   │                                 build canary image FROM the wheel + `ask`
-   │                                 it -> assert CANARY-OK end-to-end
+   │                                 for each brain canary (ci-canary Claude,
+   │                                 ci-codex-smoke Codex): build image FROM the
+   │                                 wheel + `ask` it -> assert CANARY-OK e2e
    │                                 ├──────────────┐
    │                              publish
    │                              same wheel -> PyPI + Homebrew
@@ -475,9 +477,12 @@ fleet repo deploy tag / dispatch ─▶ deploy-agent-teams.yml   (standalone, NO
 
 **A release is the deploy gate** — an edit pushed to `main` does NOT auto-deploy;
 you cut a release to ship the framework. **One functional gate guards the
-framework artifact**: `release.yml` builds the wheel once, builds `ci-canary`
-*from that wheel* and smokes it (`CANARY-OK`), and only then publishes the same
-wheel to PyPI and Homebrew. Production agent rollout is owned by fleet repos
+framework artifact**: `release.yml` builds the wheel once, builds both brain
+canaries (`ci-canary` Claude + `ci-codex-smoke` Codex) *from that wheel* and
+smokes each (`CANARY-OK`), and only then publishes the same wheel to PyPI and
+Homebrew. Codex is a hard gate at parity with Claude (#428); its instance is
+`bootstrap`-tolerant in `release.yml` (warn+skip until first provisioned, then a
+hard gate). Production agent rollout is owned by fleet repos
 such as `moda-agents`; they bump their pinned `bobi` version and run their own
 deploy workflow.
 
@@ -514,12 +519,13 @@ to one deployment). Jobs:
 > 'moda-eng-team' in place (ssh-push)`), pushing the team definition to the volume
 > and reloading. **`team-url` (HTTPS-fetch)** is the alternative when you'd rather
 > not give CI ssh, or to first-boot a dark instance with no SSH at all
-> (`team-packages.yml` publishes the tarballs). `deployments/canary.yaml` (the
-> always-on pipeline canary) exercises the `team-url` path via the published
-> `smoke-team.tar.gz`.
+> (`team-packages.yml` publishes the tarballs). The two always-on pipeline
+> canaries exercise the `team-url` path: `deployments/canary.yaml` (Claude,
+> app ci-canary) via `claude-smoke.tar.gz` and `deployments/codex-smoke.yaml`
+> (Codex, app ci-codex-smoke) via `codex-smoke.tar.gz`.
 
 ### team-packages.yml (only for `team-url` delivery)
-On push to main (path-filtered to `agents/**` + the smoke fixture), builds each
+On push to main (path-filtered to `agents/**` + the smoke fixtures), builds each
 team into `<team>.tar.gz` and **publishes to a rolling `teams-latest` GitHub
 Release** → stable public URL
 `https://github.com/<owner>/<repo>/releases/download/teams-latest/<team>.tar.gz`.
@@ -535,9 +541,10 @@ exact wheel we publish, is the single functional gate for PyPI/Homebrew:
   canary and PyPI run the identical artifact. A fail-fast
   `pip install dist/*.whl && bobi --version` rejects an obviously-broken wheel
   before the expensive canary build.
-- **build-canary** — deploy the canary from an image built **from that wheel**
-  (`--build-arg BOBI_BUILD=wheel`, the artifact staged into `dist/`), then a
-  functional `ask` asserts `CANARY-OK` end-to-end. **This is the gate.**
+- **build-canary** — for each brain canary (`ci-canary` Claude, `ci-codex-smoke`
+  Codex), deploy from an image built **from that wheel** (`--build-arg
+  BOBI_BUILD=wheel`, the artifact staged into `dist/`), then a functional `ask`
+  asserts `CANARY-OK` end-to-end. **This is the gate** - both brains at parity.
 - **publish** — `needs: build-canary`. Uploads the **same** wheel to PyPI via
   trusted publishing (`environment: pypi`).
 - **update-homebrew** — `needs: publish`. Bumps the tap and smokes bottle URLs.
@@ -763,8 +770,9 @@ docker run -d --name smoke -v "$(mktemp -d):/data" \
 docker exec smoke bobi agent <name> ask "Reply with: pong"
 ```
 
-Smoke target: `tests/fixtures/smoke-team` (zero-secret; needs only
-`BOBI_EVENT_SERVER` + an Anthropic key for the `ask` round-trip).
+Smoke targets: `tests/fixtures/claude-smoke` and `tests/fixtures/codex-smoke`
+(zero-secret; each needs only `BOBI_EVENT_SERVER` + its brain's key for the `ask`
+round-trip - an Anthropic key for Claude, an OpenAI key for Codex).
 Structural/unit coverage: `tests/test_gitops_c22.py`. Both GitOps workflows pass
 `actionlint` (+ shellcheck on run blocks).
 

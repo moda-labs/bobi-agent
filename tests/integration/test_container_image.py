@@ -265,7 +265,7 @@ def test_unresolvable_team_fails_loudly(image: str, tmp_path: Path):
         _run("docker", "rm", "-f", name)
 
 
-SMOKE_TEAM = REPO_ROOT / "tests" / "fixtures" / "smoke-team"
+SMOKE_TEAM = REPO_ROOT / "tests" / "fixtures" / "claude-smoke"
 
 
 @requires_docker
@@ -283,7 +283,7 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
     Spins up an EPHEMERAL event server (the real Worker code via `wrangler dev`,
     bound to 0.0.0.0) so CI never touches a production deployment — the
     container reaches it via host.docker.internal and mints its own bubble.
-    Installs the dependency-free smoke-team fixture so preflight needs no
+    Installs the dependency-free claude-smoke fixture so preflight needs no
     service secrets.
     """
     import time
@@ -319,7 +319,7 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
             "docker", "run", "-d", "--name", name,
             "--network", "host",
             "-e", "BOBI_AUTH=api_key",
-            "-e", "BOBI_AGENT=smoke",
+            "-e", "BOBI_AGENT=claude-smoke",
             "-e", f"ANTHROPIC_API_KEY={os.environ['ANTHROPIC_API_KEY']}",
             "-e", f"BOBI_EVENT_SERVER={container_es_url}",
             "-e", "BOBI_TEAM=/mnt/team",
@@ -348,8 +348,8 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
         # Run as the bobi user from the selected runtime root.
         ask = _run(
             "docker", "exec", "-u", "bobi",
-            "-w", "/data/.bobi/agents/smoke/run", name,
-            "bobi", "agent", "smoke", "ask", "Reply with the single word: pong",
+            "-w", "/data/.bobi/agents/claude-smoke/run", name,
+            "bobi", "agent", "claude-smoke", "ask", "Reply with the single word: pong",
             timeout=180,
         )
         if ask.returncode != 0 or "pong" not in ask.stdout.lower():
