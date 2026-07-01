@@ -29,18 +29,22 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
-from bobi.webui_common import resolve_static_asset
+from bobi.webui_common.launcher import serve_container, serve_local
+from bobi.webui_common.security import (
+    LEGACY_SETUP_TOKEN_HEADER,
+    WEBUI_TOKEN_HEADER,
+    install_security,
+)
+from bobi.webui_common.static import mount_static, serve_index
 
 STATIC_DIR = Path(__file__).parent / "static"
 TOKEN_HEADER = "x-bobi-ui-token"
-_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 DEFAULT_CHAT_TIMEOUT = 300
 CHAT_HISTORY_LIMIT = 200
 
@@ -232,38 +236,15 @@ def build_app(project: Path, *, token: str, registry_fn=None, deliver_fn=None,
 
     mgr = manager_name if manager_name is not None else _resolve_manager_name(project)
 
-    # --- security: loopback Host guard + token on /api -----------------
-    @app.middleware("http")
-    async def _guard(request: Request, call_next):
-        host = (request.headers.get("host") or "").rsplit(":", 1)[0]
-        if host and host not in _ALLOWED_HOSTS:
-            return JSONResponse({"error": "host not allowed"}, status_code=403)
-        if request.url.path.startswith("/api"):
-            if request.headers.get(TOKEN_HEADER) != token:
-                return JSONResponse({"error": "bad or missing token"},
-                                    status_code=403)
-        return await call_next(request)
-
-    # --- page ----------------------------------------------------------
-    @app.get("/")
-    def index() -> Response:
-        html = (STATIC_DIR / "index.html").read_text()
-        # The page bootstraps the token from a meta tag the JS reads back and
-        # echoes as a header on every /api call.
-        html = html.replace("{{TOKEN}}", token)
-        return Response(html, media_type="text/html",
-                        headers={"Cache-Control": "no-store, max-age=0"})
-
-    @app.get("/static/{name}")
-    def static_asset(name: str) -> Response:
-        target = resolve_static_asset(STATIC_DIR, name)
-        if target is None:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        types = {".css": "text/css", ".js": "text/javascript",
-                 ".svg": "image/svg+xml"}
-        return FileResponse(
-            target, media_type=types.get(target.suffix, "text/plain"),
-            headers={"Cache-Control": "no-store, max-age=0"})
+    install_security(
+        app,
+        secret=token,
+        header_name=WEBUI_TOKEN_HEADER,
+        legacy_header_names=(TOKEN_HEADER, LEGACY_SETUP_TOKEN_HEADER),
+        error_message="bad or missing token",
+    )
+    serve_index(app, STATIC_DIR / "index.html", {"{{TOKEN}}": token})
+    mount_static(app, STATIC_DIR)
 
     # --- liveness ------------------------------------------------------
     @app.get("/api/ping")
@@ -336,38 +317,21 @@ def serve(project: Path, *, mode: str = "local", open_browser: bool = True,
           chat_timeout: int = DEFAULT_CHAT_TIMEOUT) -> int:
     """Run the UI in the foreground (the `bobi agent <name> ui` command). Binds
     ``127.0.0.1:0``, mints a per-launch token, hands the socket to uvicorn."""
-    import secrets
-    import threading
-    import webbrowser
-
-    import uvicorn
     from bobi import paths
 
-    token = secrets.token_urlsafe(24)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    url = f"http://127.0.0.1:{port}/?n={token}"
-
-    app = build_app(project, token=token, chat_timeout=chat_timeout)
-    server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
-
-    if open_browser:
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:
         agent_name = paths.agent_name_for_root(project)
     except Exception:
         agent_name = "<name>"
-    print(f"\n  bobi agent {agent_name} ui is running at {url}\n  (Ctrl-C to stop)\n")
-
-    try:
-        server.run(sockets=[sock])
-    except KeyboardInterrupt:
-        pass
-    finally:
-        sock.close()
-    return 0
+    return serve_local(
+        lambda token: build_app(project, token=token,
+                                chat_timeout=chat_timeout),
+        open_browser=open_browser,
+        label=f"bobi agent {agent_name} ui",
+        announce=lambda url:
+            f"\n  bobi agent {agent_name} ui is running at {url}\n"
+            "  (Ctrl-C to stop)\n",
+    )
 
 
 def start_in_thread(project: Path, *, state_dir: Path,
@@ -380,37 +344,8 @@ def start_in_thread(project: Path, *, state_dir: Path,
     IMPORTANT: binds ``::`` (or ``$BOBI_UI_HOST``) — NOT ``127.0.0.1``,
     which `fly proxy` (reaching the machine over private IPv6) can't reach.
     """
-    import os
-    import secrets
-    import threading
-
-    import uvicorn
-
-    host = os.environ.get("BOBI_UI_HOST", "::")
-    port = int(os.environ.get("BOBI_UI_PORT", "8080"))
-
-    token = os.environ.get("BOBI_UI_TOKEN", "")
-    if not token:
-        token = secrets.token_urlsafe(24)
-        tok_file = state_dir / "ui.token"
-        tok_file.write_text(token)
-        try:
-            os.chmod(tok_file, 0o600)
-        except OSError:
-            pass
-
-    family = socket.AF_INET6 if ":" in host else socket.AF_INET
-    sock = socket.socket(family, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((host, port))
-    bound_port = sock.getsockname()[1]
-    (state_dir / "ui.port").write_text(str(bound_port))
-
-    app = build_app(project, token=token, chat_timeout=chat_timeout)
-    server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
-
-    # uvicorn skips signal-handler install off the main thread, so a daemon
-    # thread is safe — the manager owns SIGTERM and stops with the process.
-    threading.Thread(target=lambda: server.run(sockets=[sock]),
-                     daemon=True, name="agent-ui").start()
-    return bound_port
+    return serve_container(
+        lambda token: build_app(project, token=token,
+                                chat_timeout=chat_timeout),
+        state_dir=state_dir,
+    )
