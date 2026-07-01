@@ -62,9 +62,9 @@ def test_composed_loader_bakes_tool_library_cli(tmp_path):
     assert "/opt/venn-cli" in script     # the isolated venv install
 
 
-def test_composed_loader_bakes_codex_cli_for_codex_brain(tmp_path):
-    """A Codex-brained team gets the Codex CLI baked even without an explicit
-    `tool_library: [codex]` declaration."""
+def test_codex_brain_bakes_nothing(tmp_path):
+    """A Codex-brained team bakes nothing: the Codex CLI ships in the base image
+    (#428), so `brain: codex` no longer implies a codex dependency/build."""
     team = tmp_path / "agents" / "codex-team"
     team.mkdir(parents=True)
     (team / "agent.yaml").write_text(dedent("""
@@ -73,13 +73,8 @@ def test_composed_loader_bakes_codex_cli_for_codex_brain(tmp_path):
           kind: codex
     """))
     assert load_team_config(team).build is None
-
-    cfg = build_render.load_composed_team_config(team, tmp_path)
-    assert cfg.build is not None
-    script = render_team_deps_script(cfg)
-    assert "apt-get install -y --no-install-recommends nodejs npm" in script
-    assert "npm install -g @openai/codex@0.142.0" in script
-    assert any(r.name == "codex" for r in cfg.requires)
+    # Composed, too: no implied codex build to render.
+    assert build_render.load_composed_team_config(team, tmp_path).build is None
 
 
 def test_cli_renders_composed_build_for_standalone_tool_library(tmp_path):
@@ -105,27 +100,6 @@ def test_cli_renders_composed_build_for_standalone_tool_library(tmp_path):
     script = out.read_text()
     assert "venn-cli==0.2.0" in script      # catalog pin, baked via expansion
     assert "/opt/venn-cli" in script
-
-
-def test_cli_bakes_codex_for_bare_codex_brain(tmp_path):
-    """A `brain: codex` team with no explicit tool_library/build bakes the Codex
-    CLI + its requires gate through the CLI - the codex-smoke gate's contract."""
-    team = tmp_path / "agents" / "codex-smoke"
-    team.mkdir(parents=True)
-    (team / "agent.yaml").write_text(dedent("""
-        agent: codex-smoke
-        brain:
-          kind: codex
-        build:
-          verify: requires
-    """))
-    assert build_render._main([str(team), "--check"]) == 0
-    out = tmp_path / "codex.sh"
-    assert build_render._main([str(team), "--out", str(out)]) == 0
-    script = out.read_text()
-    assert "npm install -g @openai/codex@0.142.0" in script
-    assert "== verify requires ==" in script
-    assert "BOBI_VERIFY_PHASE=build" in script
 
 
 def test_renders_apt_npm_run_verify(tmp_path):

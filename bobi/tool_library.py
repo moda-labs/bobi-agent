@@ -143,13 +143,14 @@ def load_entry(name: str) -> Dependency:
 def resolve_dependencies(merged_yaml: dict) -> list[Dependency]:
     """Resolve `merged_yaml`'s declared dependencies into Dependency objects.
 
-    Each `tool_library:` item is a string (catalog ref) or an inline mapping. The
-    brain-implied `codex` entry is appended (see `_dependency_items`). De-duped by
-    name, first occurrence wins — so an explicit declaration beats the implied
-    one, and a repeat across `from:` layers collapses."""
+    Each `tool_library:` item is a string (catalog ref) or an inline mapping.
+    De-duped by name, first occurrence wins — so a repeat across `from:` layers
+    collapses. NB: `brain: codex` no longer implies a codex dependency — the Codex
+    CLI ships in the base image (#428), so a codex-brained team bakes nothing
+    extra."""
     deps: list[Dependency] = []
     seen: set[str] = set()
-    for item in _dependency_items(merged_yaml):
+    for item in (merged_yaml.get("tool_library") or []):
         if isinstance(item, str):
             dep = load_entry(item)
         elif isinstance(item, dict):
@@ -252,40 +253,3 @@ def dependency_list_hash(deps: list[Dependency]) -> str:
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
-
-
-def _dependency_items(merged_yaml: dict) -> list:
-    """Return the declared `tool_library:` items plus brain-implied entries.
-
-    `brain.kind: codex` needs the Codex CLI available for auth bootstrap and turn
-    execution, so it is equivalent to an implicit `tool_library: [codex]`. An
-    explicit `codex` (string ref or inline mapping named codex) suppresses the
-    implicit add and de-dupes through the same path. If a team has already
-    declared its own Codex check/build, treat that as the local override and do
-    not add the implicit catalog ref.
-    """
-    items = list(merged_yaml.get("tool_library") or [])
-    brain = merged_yaml.get("brain") or {}
-    kind = str(brain.get("kind", "") or "") if isinstance(brain, dict) else ""
-    has_codex = any(
-        (isinstance(it, str) and it == "codex")
-        or (isinstance(it, dict) and it.get("name") == "codex")
-        for it in items
-    )
-    if kind == "codex" and not has_codex and not _has_codex_override(merged_yaml):
-        items.append("codex")
-    return items
-
-
-def _has_codex_override(merged_yaml: dict) -> bool:
-    requires = merged_yaml.get("requires") or []
-    if any(isinstance(r, dict) and r.get("name") == "codex" for r in requires):
-        return True
-    build = merged_yaml.get("build") or {}
-    if not isinstance(build, dict):
-        return False
-    values = []
-    for key in ("npm", "run_root", "run"):
-        raw = build.get(key) or []
-        values.extend(raw if isinstance(raw, list) else [raw])
-    return any("codex" in str(v) for v in values)

@@ -14,8 +14,6 @@ on:
       - "docker/**"
       - "pyproject.toml"
       - "tests/integration/test_container_image.py"
-      # the codex round-trip bakes + boots this team (its own image layer)
-      - "agents/codex-smoke/**"
       - ".github/workflows/container.yml"
   pull_request:
     branches: [main]

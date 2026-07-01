@@ -106,63 +106,29 @@ def test_tool_library_key_consumed(project):
     assert "tool_library" not in cfg
 
 
-def test_codex_brain_implicitly_expands_codex_tool(project):
-    """A Codex-brained team should bake the Codex CLI without an explicit
-    `tool_library: [codex]` opt-in."""
+def test_codex_brain_does_not_bake_codex(project):
+    """The Codex CLI ships in the base image (#428), so a `brain: codex` team
+    bakes NOTHING extra - no implied codex dependency, no build. (This reverses
+    the old #416 brain-implied expansion, now obsolete.)"""
     leaf = _team(project, "solo",
                  'version: "1.0.0"\nentry_point: director\n'
                  'brain:\n  kind: codex\n')
-    dest = _compose(project, leaf)[0]
-    cfg = _agent_yaml(dest)
+    cfg = _agent_yaml(_compose(project, leaf)[0])
 
-    assert any(r["name"] == "codex" for r in cfg["requires"])
-    assert cfg["build"]["apt"] == ["nodejs", "npm"]
-    assert CODEX_PIN in cfg["build"]["npm"]
+    assert not any(
+        r.get("name") == "codex" for r in (cfg.get("requires") or []))
+    assert "build" not in cfg or CODEX_PIN not in (cfg["build"].get("npm") or [])
     assert "tool_library" not in cfg
-    guide = (tool_library.CATALOG_DIR / "codex" / "guide.md").read_text()
-    assert (dest / "tools" / "codex.md").read_text() == guide
 
 
-def test_codex_brain_dedupes_explicit_codex_tool(project):
+def test_explicit_codex_tool_still_bakes(project):
+    """An explicit `tool_library: [codex]` still works (e.g. to pin a specific
+    codex version different from the base image's) - only the brain-IMPLIED
+    auto-add was removed."""
     leaf = _team(project, "solo",
                  'version: "1.0.0"\nentry_point: director\n'
-                 'brain:\n  kind: codex\n'
                  'tool_library: [codex]\n')
     cfg = _agent_yaml(_compose(project, leaf)[0])
-
-    assert cfg["build"]["npm"].count(CODEX_PIN) == 1
-    codex_reqs = [r for r in cfg["requires"] if r["name"] == "codex"]
-    assert len(codex_reqs) == 1
-
-
-def test_codex_brain_preserves_explicit_codex_build_override(project):
-    leaf = _team(project, "solo",
-                 'version: "1.0.0"\nentry_point: director\n'
-                 'brain:\n  kind: codex\n'
-                 'requires:\n'
-                 '  - name: codex\n'
-                 '    why: "team custom codex install"\n'
-                 '    check: "command -v codex-custom"\n'
-                 'build:\n'
-                 '  npm: ["@openai/codex@9.9.9"]\n')
-    cfg = _agent_yaml(_compose(project, leaf)[0])
-
-    assert cfg["build"]["npm"] == ["@openai/codex@9.9.9"]
-    codex_reqs = [r for r in cfg["requires"] if r["name"] == "codex"]
-    assert len(codex_reqs) == 1
-    assert codex_reqs[0]["check"] == "command -v codex-custom"
-
-
-def test_codex_brain_overlay_expands_codex_tool(project):
-    _team(project, "core",
-          'version: "1.0.0"\nentry_point: director\n'
-          'brain:\n  kind: claude\n')
-    leaf = _team(project, "moda",
-                 'from: core\nversion: "2.0.0"\n'
-                 'brain:\n  kind: codex\n')
-    cfg = _agent_yaml(_compose(project, leaf)[0])
-
-    assert cfg["brain"]["kind"] == "codex"
     assert any(r["name"] == "codex" for r in cfg["requires"])
     assert CODEX_PIN in cfg["build"]["npm"]
 
