@@ -310,16 +310,21 @@ def materialize(dep: Dependency, *, agent_runner: AgentRunner,
 
 def preflight(dep: Dependency, *, brains: list[str], shell_runner: ShellRunner,
               base_env: dict | None = None,
-              timeout: float = PREFLIGHT_TIMEOUT) -> list[PreflightResult]:
-    """Verify `dep.success` in the build tier, once per target brain.
+              timeout: float = PREFLIGHT_TIMEOUT,
+              phase: str = "build") -> list[PreflightResult]:
+    """Verify `dep.success` in a given verify tier, once per target brain.
 
-    Runs with ``BOBI_VERIFY_PHASE=build`` (the weak/no-auth form that gates the
-    snapshot — OQ2) and ``BOBI_BRAIN`` set per brain, because a `success`
-    contract can branch on the active brain. A dependency is satisfied only when
-    every brain passes.
+    Runs with ``BOBI_VERIFY_PHASE=<phase>`` and ``BOBI_BRAIN`` set per brain,
+    because a `success` contract can branch on the active brain. A dependency is
+    satisfied only when every brain passes.
+
+    ``phase`` defaults to ``build`` — the weak/no-auth form that gates the
+    snapshot (OQ2) on the container cold path. Local materialization (#428 Stage
+    5) passes ``phase="runtime"`` so a contract that gates on the phase (the
+    migrated ``codex`` entry) verifies against a real, credentialed check.
     """
     env_base = dict(os.environ if base_env is None else base_env)
-    env_base["BOBI_VERIFY_PHASE"] = "build"
+    env_base["BOBI_VERIFY_PHASE"] = phase
     from bobi.brain import BRAIN_ENV
 
     results: list[PreflightResult] = []

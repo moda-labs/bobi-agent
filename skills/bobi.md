@@ -38,6 +38,7 @@ bobi agent eng ask "what's the status?"
 ```bash
 bobi setup <name>                     # design/build/install a Bobi Agent
 bobi agents install <source> --name <name>
+bobi agents install <source> --name <name> --with-deps  # + install declared deps locally
 bobi agents list
 bobi agents browse
 bobi agents update <name>

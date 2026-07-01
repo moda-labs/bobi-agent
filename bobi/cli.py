@@ -593,6 +593,102 @@ def _install_pack(pack_dir: Path, project_path: Path,
     _write_install_manifest(dest, pack_dir, local_source)
 
 
+def _materialize_local_deps(pack_dir: Path, project_path: Path, *,
+                            non_interactive: bool) -> None:
+    """Drive the local brain to install the team's declared deps (#428 Stage 5).
+
+    The `--with-deps` post-compose pass: resolve the team's full dependency set,
+    verify what's already satisfied (idempotent skip), preview a plan, confirm,
+    then materialize the rest on THIS host under the team's brain. `host:`
+    capabilities are surfaced as a guided fix, never attempted, and sudo is only
+    used behind an explicit confirm. Partial failure is non-fatal — doctor and
+    the dispatch preflight still gate — so this never raises into install.
+    """
+    from bobi import local_deps
+    from bobi.brain import DEFAULT_BRAIN
+    from bobi.build_render import _workspace_root
+    from bobi.config import Config
+    from bobi.env import child_agent_env
+    from bobi.host_caps import host_caps_for_deps
+    from bobi.tool_library import resolve_team_dependencies
+
+    click.echo()
+    try:
+        deps = resolve_team_dependencies(pack_dir, _workspace_root(pack_dir))
+    except Exception as e:  # noqa: BLE001 — a dep-resolution failure is non-fatal
+        click.echo(f"Could not resolve dependencies (--with-deps skipped): {e}",
+                   err=True)
+        return
+    if not deps:
+        click.echo("--with-deps: this team declares no dependencies.")
+        return
+
+    # The team's declared brain drives the install, else the local default.
+    try:
+        brain = Config.load(project_path).brain_kind() or DEFAULT_BRAIN
+    except Exception:
+        brain = DEFAULT_BRAIN
+
+    # Bind the installed runtime so the brain session + `success` checks resolve
+    # this team's paths and credentials (its run/.env).
+    paths.bind_root(project_path)
+    base_env = child_agent_env(project_path)
+
+    plan = local_deps.plan_dependencies(deps, brain=brain, base_env=base_env)
+    unmet_caps = [c for c in host_caps_for_deps(deps) if c.satisfied() is False]
+
+    click.echo(f"Dependency check (brain: {brain}):")
+    for dp in plan.satisfied:
+        click.echo(f"  [ok]   {dp.dep.name} — already satisfied, skipping")
+    for dp in plan.todo:
+        sudo = " (may need sudo)" if dp.needs_sudo else ""
+        click.echo(f"  [todo] {dp.dep.name} — will materialize{sudo}")
+    for dp in plan.unmaterializable:
+        click.echo(f"  [warn] {dp.dep.name} — unsatisfied but has no install/"
+                   f"guide to materialize from; fix manually")
+    for cap in unmet_caps:
+        click.echo(f"  [host] {cap.spec} — host capability, provision manually: "
+                   f"`{cap.fix_command()}`")
+
+    if not plan.todo:
+        click.echo("Nothing to install.")
+        return
+
+    if not non_interactive and not click.confirm(
+            f"\nInstall {len(plan.todo)} dependency(ies) on this machine?",
+            default=True):
+        click.echo("Skipped dependency materialization.")
+        return
+
+    allow_sudo = False
+    if plan.needs_sudo:
+        if non_interactive:
+            click.echo("Some steps may need sudo; skipping sudo "
+                       "(non-interactive). Re-run interactively to allow it.")
+        else:
+            allow_sudo = click.confirm(
+                "Some steps may require sudo (system packages). Allow sudo?",
+                default=False)
+
+    results = local_deps.install_dependencies(
+        plan.todo, brain=brain, allow_sudo=allow_sudo, base_env=base_env)
+
+    click.echo("\nDependency materialization:")
+    for r in results:
+        glyph = "ok" if r.ok else "FAIL"
+        click.echo(f"  [{glyph}] {r.dep}"
+                   + (f" — {r.detail}" if r.detail and not r.ok else ""))
+        for cmd in r.transcript:
+            click.echo(f"         ran: {cmd}")
+    failed = [r.dep for r in results if not r.ok]
+    if failed:
+        slot = paths.agent_name_for_root(project_path)
+        click.echo(f"\n{len(failed)} dependency(ies) not satisfied: "
+                   f"{', '.join(failed)}. The team still installed; fix these "
+                   f"and re-run `bobi agents install ... --with-deps`, or "
+                   f"`bobi agent {slot} doctor`.", err=True)
+
+
 def _read_yaml(path: Path) -> dict:
     import yaml as _yaml
     if not path.exists():
@@ -751,7 +847,14 @@ def login_bootstrap(channel, timeout):
               help="Resolve any `from:` base teams registry-only at locked "
                    "versions (ignore local sibling checkouts). For "
                    "reproducible CI/deploy installs.")
-def install(pack, slot_name, non_interactive, pinned):
+@click.option("--with-deps", "with_deps", is_flag=True,
+              help="After composing, drive the local brain to install the "
+                   "team's declared dependencies on THIS machine (#428): each "
+                   "dependency's `success` is verified, already-satisfied ones "
+                   "are skipped, and nothing runs sudo without an explicit "
+                   "confirm. Mutates the host — previews a plan and confirms "
+                   "first.")
+def install(pack, slot_name, non_interactive, pinned, with_deps):
     """Install a Bobi Agent into the machine-wide Bobi home.
 
     PACK is a local directory path, a local `.tar.gz` archive, a public
@@ -903,6 +1006,10 @@ def install(pack, slot_name, non_interactive, pinned):
 
             write_env_file(env_file, existing)
             click.echo(f"Credentials saved to {env_file}")
+
+    if with_deps:
+        _materialize_local_deps(pack_dir, project_path,
+                                non_interactive=non_interactive)
 
     if local_source:
         try:
