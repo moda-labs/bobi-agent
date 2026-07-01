@@ -161,6 +161,72 @@ def test_agent_yaml_missing_env_var_becomes_empty(tmp_path):
     assert cfg.venn_api_key == ""
 
 
+def test_launch_admission_config_defaults_disabled(tmp_path):
+    _write_agent_yaml(tmp_path, """
+        entry_point: manager
+    """)
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.launch_admission["enabled"] is False
+    assert cfg.launch_admission["max_starting_agents"] == 1
+    assert cfg.launch_admission["load_per_cpu_soft_limit"] == 1.5
+    assert cfg.launch_admission["load_per_cpu_hard_limit"] == 2.0
+    assert cfg.launch_admission["min_memory_available_mb"] == 512
+    assert cfg.launch_admission["init_failure_window_seconds"] == 600
+    assert cfg.launch_admission["init_failure_backoff_threshold"] == 2
+
+
+def test_launch_admission_config_parsed_from_yaml(tmp_path):
+    _write_agent_yaml(tmp_path, """
+        entry_point: manager
+        launch_admission:
+          enabled: true
+          max_starting_agents: 2
+          load_per_cpu_soft_limit: 1.25
+          load_per_cpu_hard_limit: 1.75
+          min_memory_available_mb: 1024
+          init_failure_window_seconds: 300
+          init_failure_backoff_threshold: 3
+    """)
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.launch_admission == {
+        "enabled": True,
+        "max_starting_agents": 2,
+        "load_per_cpu_soft_limit": 1.25,
+        "load_per_cpu_hard_limit": 1.75,
+        "min_memory_available_mb": 1024,
+        "init_failure_window_seconds": 300,
+        "init_failure_backoff_threshold": 3,
+    }
+
+
+def test_launch_admission_config_clamps_invalid_values(tmp_path):
+    _write_agent_yaml(tmp_path, """
+        entry_point: manager
+        launch_admission:
+          enabled: "false"
+          max_starting_agents: 0
+          load_per_cpu_soft_limit: -1
+          load_per_cpu_hard_limit: -2
+          min_memory_available_mb: -100
+          init_failure_window_seconds: 0
+          init_failure_backoff_threshold: 0
+    """)
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.launch_admission["enabled"] is False
+    assert cfg.launch_admission["max_starting_agents"] == 1
+    assert cfg.launch_admission["load_per_cpu_soft_limit"] == 0.1
+    assert cfg.launch_admission["load_per_cpu_hard_limit"] == 0.1
+    assert cfg.launch_admission["min_memory_available_mb"] == 0
+    assert cfg.launch_admission["init_failure_window_seconds"] == 1
+    assert cfg.launch_admission["init_failure_backoff_threshold"] == 1
+
+
 def test_agent_yaml_services_as_strings(tmp_path):
     config_dir = tmp_path / "package"
     config_dir.mkdir()

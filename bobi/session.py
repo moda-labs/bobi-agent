@@ -41,9 +41,10 @@ DEFAULT_ROTATION_TOKEN_CAP = 275_000
 # indefinitely with no timeout — the actual 2026-06-23/24 director wedge. We
 # wrap the reconnect in a hard timeout, retry a bounded number of times, then
 # recover into an addressable connected client rather than a silent park. A
-# connect + single ack turn is lighter than the old flush turn, so a smaller
-# timeout suffices; these are tuning numbers, not load-bearing.
-ROTATION_RECONNECT_TIMEOUT = 120.0
+# connect + single ack turn is lighter than the old flush turn, but this must
+# stay above the Claude initialize deadline so the SDK can surface retryable
+# initialize timeouts instead of being preempted by the outer rotation wrapper.
+ROTATION_RECONNECT_TIMEOUT = 240.0
 ROTATION_MAX_RECONNECT_ATTEMPTS = 3
 ROTATION_RECONNECT_BACKOFF = 2.0
 

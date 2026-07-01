@@ -135,6 +135,32 @@ def test_check_reports_reachable(monkeypatch, capsys):
     assert "reachable" in capsys.readouterr().out
 
 
+def test_get_agents_sends_canonical_and_legacy_headers(monkeypatch):
+    seen = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"agents": []}'
+
+    def fake_urlopen(req, timeout=10):
+        seen["headers"] = dict(req.header_items())
+        seen["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr(remote.urllib.request, "urlopen", fake_urlopen)
+
+    assert remote._get_agents(18081, "tok") == {"agents": []}
+    assert seen["headers"]["X-bobi-webui-token"] == "tok"
+    assert seen["headers"]["X-bobi-ui-token"] == "tok"
+    assert seen["timeout"] == 10
+
+
 def test_check_reports_failure(monkeypatch):
     def boom(port, tok):
         raise OSError("connection refused")

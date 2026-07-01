@@ -116,6 +116,30 @@ function makeReplyEvent(): NormalizedEvent {
 	};
 }
 
+function makeAgentLifecycleEvent(
+	type: "session.completed" | "session.failed" = "session.failed",
+	runKey = "adhoc-1",
+	overrides: Partial<NormalizedEvent> = {},
+): NormalizedEvent {
+	return {
+		v: 2,
+		id: crypto.randomUUID(),
+		source: "agent",
+		type,
+		topics: [type, `agent/${type}`],
+		delivery: "bulk",
+		text: `Engineer failed on ${runKey}`,
+		fields: { run_key: runKey, role: "engineer" },
+		timestamp: new Date().toISOString(),
+		payload: {
+			run_key: runKey,
+			role: "engineer",
+			error: "agent process died without reporting a terminal status",
+		},
+		...overrides,
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -145,6 +169,44 @@ describe("circuit-breaker", () => {
 		it("exempts events with inbox/* in topics array", () => {
 			const event = makeSlackEvent({ topics: ["inbox/foo", "slack:T123"] });
 			expect(isExemptFromBreaker(event)).toBe(true);
+		});
+
+		it("exempts agent lifecycle events", () => {
+			expect(isExemptFromBreaker(makeAgentLifecycleEvent("session.failed"))).toBe(true);
+			expect(isExemptFromBreaker(makeAgentLifecycleEvent("session.completed"))).toBe(true);
+		});
+
+		it("exempts source-qualified agent lifecycle type aliases", () => {
+			expect(isExemptFromBreaker(
+				makeAgentLifecycleEvent("session.failed", "adhoc-1", {
+					type: "agent/session.failed",
+					topics: ["agent/session.failed"],
+				}),
+			)).toBe(true);
+			expect(isExemptFromBreaker(
+				makeAgentLifecycleEvent("session.completed", "adhoc-1", {
+					type: "agent/session.completed",
+					topics: ["agent/session.completed"],
+				}),
+			)).toBe(true);
+		});
+
+		it("exempts topic-only agent lifecycle aliases", () => {
+			expect(isExemptFromBreaker(
+				makeAgentLifecycleEvent("session.failed", "adhoc-1", {
+					type: "custom.lifecycle",
+					topics: ["agent/session.failed"],
+				}),
+			)).toBe(true);
+		});
+
+		it("does not exempt non-agent session-like events", () => {
+			expect(isExemptFromBreaker(
+				makeAgentLifecycleEvent("session.failed", "adhoc-1", {
+					source: "custom",
+					topics: ["session.failed", "agent/session.failed"],
+				}),
+			)).toBe(false);
 		});
 	});
 
@@ -487,6 +549,13 @@ describe("circuit-breaker", () => {
 			expect(conversationKey(event)).toBe("other:inbox/engineer");
 			// They are still allowed because the caller skips breaker for exempt events
 			expect(isExemptFromBreaker(event)).toBe(true);
+		});
+
+		it("keeps repeated agent/session.failed events exempt", () => {
+			for (let i = 0; i < BREAKER_THRESHOLD + 3; i++) {
+				const event = makeAgentLifecycleEvent("session.failed", `adhoc-${i}`);
+				expect(isExemptFromBreaker(event)).toBe(true);
+			}
 		});
 	});
 

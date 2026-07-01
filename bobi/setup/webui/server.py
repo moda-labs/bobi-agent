@@ -20,7 +20,6 @@ no CLI. `serve()` is the socket→uvicorn foreground launcher.
 from __future__ import annotations
 
 import json
-import socket
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -28,16 +27,20 @@ from typing import AsyncIterator
 # `from __future__ import annotations`, FastAPI can resolve the string
 # annotations on the route handlers against this module's globals.
 from fastapi import FastAPI, Request
-from fastapi.responses import (FileResponse, JSONResponse, Response,
-                               StreamingResponse)
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from bobi import paths
 from bobi.setup.state import STAGE_ORDER, SetupState, Stage
-from bobi.webui_common import resolve_static_asset
+from bobi.webui_common.launcher import serve_local
+from bobi.webui_common.security import (
+    LEGACY_AGENTUI_TOKEN_HEADER,
+    WEBUI_TOKEN_HEADER,
+    install_security,
+)
+from bobi.webui_common.static import mount_static, serve_index
 
 STATIC_DIR = Path(__file__).parent / "static"
 NONCE_HEADER = "x-bobi-nonce"
-_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 
 
 # --- serialization -------------------------------------------------------
@@ -109,41 +112,15 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         p = p.resolve()
         return p, (p == home or home in p.parents)
 
-    # --- security middleware: Host guard + nonce on /api ---------------
-    @app.middleware("http")
-    async def _guard(request: Request, call_next):
-        host = (request.headers.get("host") or "").rsplit(":", 1)[0]
-        if host and host not in _ALLOWED_HOSTS:
-            return JSONResponse({"error": "host not allowed"}, status_code=403)
-        if request.url.path.startswith("/api"):
-            if request.headers.get(NONCE_HEADER) != nonce:
-                return JSONResponse({"error": "bad or missing nonce"},
-                                    status_code=403)
-        return await call_next(request)
-
-    # --- page ----------------------------------------------------------
-    @app.get("/")
-    def index() -> Response:
-        html = (STATIC_DIR / "index.html").read_text()
-        # The page bootstraps the nonce from a meta tag the JS reads back.
-        html = html.replace("{{NONCE}}", nonce)
-        return Response(html, media_type="text/html",
-                        headers={"Cache-Control": "no-store, max-age=0"})
-
-    # static assets (css/js) — no nonce needed, same-origin only
-    @app.get("/static/{name}")
-    def static_asset(name: str) -> Response:
-        target = resolve_static_asset(STATIC_DIR, name)
-        if target is None:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        types = {".css": "text/css", ".js": "text/javascript",
-                 ".svg": "image/svg+xml"}
-        # The wizard is a short-lived local server whose assets change between
-        # runs (and during development); never let the browser serve a stale
-        # bundle from cache — always revalidate against disk.
-        return FileResponse(
-            target, media_type=types.get(target.suffix, "text/plain"),
-            headers={"Cache-Control": "no-store, max-age=0"})
+    install_security(
+        app,
+        secret=nonce,
+        header_name=WEBUI_TOKEN_HEADER,
+        legacy_header_names=(NONCE_HEADER, LEGACY_AGENTUI_TOKEN_HEADER),
+        error_message="bad or missing nonce",
+    )
+    serve_index(app, STATIC_DIR / "index.html", {"{{NONCE}}": nonce})
+    mount_static(app, STATIC_DIR)
 
     # --- state (deterministic) -----------------------------------------
     @app.get("/api/state")
@@ -1117,12 +1094,6 @@ def serve(project: Path, *, model: str | None = None,
           resume: bool = False, open_browser: bool = True) -> int:
     """Run the setup web UI in the foreground until setup finishes or the
     user interrupts. Binds 127.0.0.1:0, hands the socket to uvicorn."""
-    import secrets
-    import threading
-    import webbrowser
-
-    import uvicorn
-
     state = None
     if resume:
         state = SetupState.load(project)
@@ -1133,34 +1104,17 @@ def serve(project: Path, *, model: str | None = None,
         SetupState.clear(project)
         state = SetupState()
 
-    nonce = secrets.token_urlsafe(24)
-
-    # Bind our own loopback socket first so we know the port before serving.
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    url = f"http://127.0.0.1:{port}/?n={nonce}"
-
     # The server stays alive after Finish (the page transitions to the team
     # hub, a re-entrant editor), so there's no finish-triggered shutdown — it
     # runs until the user interrupts it.
-    app = build_app(state, project, nonce=nonce, model=model)
-    config = uvicorn.Config(app, log_level="warning")
-    server = uvicorn.Server(config)
-
-    if open_browser:
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
-    print(f"\n  bobi setup is running at {url}\n  (Ctrl-C to stop)\n")
-
-    try:
-        server.run(sockets=[sock])
-    except KeyboardInterrupt:
-        pass
-    finally:
-        sock.close()
+    rc = serve_local(
+        lambda nonce: build_app(state, project, nonce=nonce, model=model),
+        open_browser=open_browser,
+        label="bobi setup",
+        announce=lambda url:
+            f"\n  bobi setup is running at {url}\n  (Ctrl-C to stop)\n",
+    )
 
     if state.finished:
         SetupState.clear(project)
-        return 0
-    return 0
+    return rc
