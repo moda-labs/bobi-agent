@@ -84,11 +84,11 @@ jobs:
       - name: Live ask round-trip (Claude + Codex brains)
         # Real API calls against an ephemeral wrangler event server: boots the
         # built image and asserts a blocking `ask` round-trips. Two live tests run
-        # here - Claude (reuses bobi:ci) and Codex (builds its own codex-smoke
-        # image layer on the cached base). Each skips if its provider key is unset,
-        # so this proves "bobi works e2e" for whichever brains have creds.
-        # Bounded by the image path filter, so cost is paid only when the image
-        # (or the codex team) changed.
+        # here - Claude and Codex - both on the SAME base image (bobi:ci): codex
+        # now ships in the base image (#428), so no flavored layer is built. Each
+        # skips if its provider key is unset, so this proves "bobi works e2e" for
+        # whichever brains have creds. Bounded by the image path filter, so cost
+        # is paid only when the image changed.
         if: >-
           github.event_name != 'pull_request' ||
           github.event.pull_request.head.repo.full_name == github.repository ||

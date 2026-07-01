@@ -136,9 +136,15 @@ jobs:
           path: dist/
 
   # --------------------------------------------------------------------------
-  # THE GATE: deploy ci-canary from an image built FROM the just-built wheel, then
-  # a functional `ask` proves it answers CANARY-OK end-to-end through the PROD event
-  # server. A broken wheel/image fails here and blocks PyPI/Homebrew publish.
+  # THE GATE: deploy the brain canaries from an image built FROM the just-built
+  # wheel, then a functional `ask` proves each answers CANARY-OK end-to-end
+  # through the PROD event server. A broken wheel/image fails here and blocks
+  # PyPI/Homebrew publish.
+  #
+  # Both brains are hard gates at parity (#428): ci-canary (Claude) and
+  # ci-codex-smoke (Codex) run through the identical path (same base image, same
+  # wheel) — codex ships in the base image, so no flavored image is needed. If
+  # either can't answer, the release aborts.
   build-canary:
     name: Build canary from the wheel + smoke
     needs: [subscription-login-smoke, build-wheel, deploy-event-server]
@@ -165,7 +171,7 @@ jobs:
       - name: Install bobi
         run: pip install -e .
 
-      - name: Build the canary image from the wheel + smoke it
+      - name: Build the brain canary images from the wheel + smoke them
         id: canary
         run: |
           set -euo pipefail
@@ -177,43 +183,66 @@ jobs:
           # `flyctl`. Detect either (same pattern as deploy.py / fleet.sh).
           FLY="$(command -v fly || command -v flyctl)" \
             || { echo "::error::neither 'fly' nor 'flyctl' found on PATH"; exit 1; }
+          export FLY
           FLEET_PREFIX="$(sed -nE 's#^fleet:[[:space:]]*([^[:space:]#]+).*#\1#p' \
                             deployments/defaults.yaml | head -n1)"
           [ -n "${FLEET_PREFIX:-}" ] || { echo "::error::no fleet set in deployments/defaults.yaml"; exit 1; }
 
-          canary="${FLEET_PREFIX}-canary"
-          "$FLY" status -a "$canary" >/dev/null
+          # The brain canaries, each a hard gate at parity (#428). Fields are
+          # <deployment>:<app>:<policy>, where deployment is the deployments/<name>.yaml
+          # (also the `bobi agent <name> ui` handle) and app is its Fly app.
+          #   required  — must exist; its absence is a misconfiguration that fails.
+          #   bootstrap — may not be provisioned yet; warn+skip until it is, THEN it
+          #               is a hard gate. This is the one-time window after this PR
+          #               merges but before `bobi deploy codex-smoke` (+ the
+          #               CODEX_SMOKE__OPENAI_API_KEY secret) stands ci-codex-smoke up.
+          canaries=(
+            "canary:${FLEET_PREFIX}-canary:required"
+            "codex-smoke:${FLEET_PREFIX}-codex-smoke:bootstrap"
+          )
 
-          # Build + deploy the generic image FROM THE WHEEL (dist/ is in the build
-          # context; builder-wheel installs it). Round-trip live config; swap image.
-          echo "::group::build + deploy $canary (generic base, from the wheel)"
-          cfg="$(mktemp -t "fly-$canary-XXXX.toml")"
-          "$FLY" config save -a "$canary" -c "$cfg" --yes
-          "$FLY" deploy "$PWD" --config "$cfg" --dockerfile "$PWD/Dockerfile" \
-            --build-arg BOBI_BUILD=wheel \
-            --depot=false --ha=false --wait-timeout 10m --remote-only -a "$canary"
-          rm -f "$cfg"
-          echo "::endgroup::"
+          for spec in "${canaries[@]}"; do
+            IFS=: read -r name app policy <<<"$spec"
+            if ! "$FLY" status -a "$app" >/dev/null 2>&1; then
+              if [ "$policy" = required ]; then
+                echo "::error::$app does not exist — the release canary gate cannot run"
+                exit 1
+              fi
+              echo "::warning::$app not provisioned yet — skipping its gate (bootstrap window: run 'bobi deploy codex-smoke' once and set CODEX_SMOKE__OPENAI_API_KEY in the canary Environment; then it is a hard gate)"
+              continue
+            fi
 
-          # Functional canary gate — ask the freshly-built canary and assert it
-          # answers CANARY-OK end-to-end through the PROD event server. A broken
-          # image aborts the whole release here. The deploy only waited for the
-          # manager HEALTHCHECK (up BEFORE the session is ready) and the canary
-          # auto-suspends, so canary-smoke.sh starts the machine and polls the
-          # ask with a generous budget that covers a cold first boot.
-          echo "::group::smoke $canary (functional ask)"
-          FLY="$FLY" scripts/canary-smoke.sh "$canary"
-          echo "::endgroup::"
-          # Agent-UI reachability gate: tunnel in exactly as `bobi agent <name> ui
-          # <deployment>` does for an operator — resolve the app, read the UI
-          # token off the machine, `fly proxy`, GET /api/agents — and assert it
-          # answers. Proves the in-container UI is on, the 6PN bind works, the
-          # token is readable, and the proxy reaches it. `--check` is bounded
-          # (it never blocks) and `timeout` is a belt-and-suspenders cap so a
-          # stuck tunnel can't hang the release.
-          echo "::group::smoke $canary (agent UI reachable)"
-          timeout 150 bobi agent canary ui --app "$canary" --check
-          echo "::endgroup::"
+            # Build + deploy the generic image FROM THE WHEEL (dist/ is in the build
+            # context; builder-wheel installs it). Round-trip live config; swap image.
+            echo "::group::build + deploy $app (generic base, from the wheel)"
+            cfg="$(mktemp -t "fly-$app-XXXX.toml")"
+            "$FLY" config save -a "$app" -c "$cfg" --yes
+            "$FLY" deploy "$PWD" --config "$cfg" --dockerfile "$PWD/Dockerfile" \
+              --build-arg BOBI_BUILD=wheel \
+              --depot=false --ha=false --wait-timeout 10m --remote-only -a "$app"
+            rm -f "$cfg"
+            echo "::endgroup::"
+
+            # Functional canary gate — ask the freshly-built canary and assert it
+            # answers CANARY-OK end-to-end through the PROD event server. A broken
+            # image aborts the whole release here. The deploy only waited for the
+            # manager HEALTHCHECK (up BEFORE the session is ready) and the canary
+            # auto-suspends, so canary-smoke.sh starts the machine and polls the
+            # ask with a generous budget that covers a cold first boot.
+            echo "::group::smoke $app (functional ask)"
+            scripts/canary-smoke.sh "$app"
+            echo "::endgroup::"
+            # Agent-UI reachability gate: tunnel in exactly as `bobi agent <name> ui
+            # <deployment>` does for an operator — resolve the app, read the UI
+            # token off the machine, `fly proxy`, GET /api/agents — and assert it
+            # answers. Proves the in-container UI is on, the 6PN bind works, the
+            # token is readable, and the proxy reaches it. `--check` is bounded
+            # (it never blocks) and `timeout` is a belt-and-suspenders cap so a
+            # stuck tunnel can't hang the release.
+            echo "::group::smoke $app (agent UI reachable)"
+            timeout 150 bobi agent "$name" ui --app "$app" --check
+            echo "::endgroup::"
+          done
 
   # --------------------------------------------------------------------------
   # Publish the SAME wheel the canary proved — gated on build-canary, NOT the fleet

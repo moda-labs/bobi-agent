@@ -403,18 +403,31 @@ def test_release_publish_is_gated_on_the_canary():
     assert any("pypi-publish" in (s.get("uses") or "") for s in _steps(publish))
 
 
-def test_release_targets_only_the_ci_canary():
-    """The framework repo should build/smoke the permanent ci-canary, not scan the
-    whole ci fleet and pick another app."""
+def test_release_targets_only_the_named_brain_canaries():
+    """The framework repo should build/smoke the permanent brain canaries by name,
+    not scan the whole ci fleet and pick arbitrary apps."""
     script = _step_scripts(_jobs(_load(WF_RELEASE))["build-canary"])
     assert '-canary' in script
     assert "scripts/fleet.sh list" not in script
     assert "render-team-deps.py" not in script
     assert "scripts/canary-smoke.sh" in script
-    assert "bobi agent canary ui --app \"$canary\" --check" in script
+    # UI reachability gate, per-canary in the loop (deployment name + its app).
+    assert 'bobi agent "$name" ui --app "$app" --check' in script
     # load-bearing flags from the provisioner (one-volume + zstd boot bug)
     assert "--ha=false" in script
     assert "--depot=false" in script
+
+
+def test_release_smokes_both_brain_canaries_at_parity():
+    """#428: Codex is a hard release gate at parity with Claude. Both canaries are
+    named explicitly and smoked from the same wheel — ci-canary (Claude) is
+    `required`, ci-codex-smoke (Codex) is `bootstrap` (a one-time warn+skip window
+    until it is provisioned, then a hard gate)."""
+    script = _step_scripts(_jobs(_load(WF_RELEASE))["build-canary"])
+    assert "-canary:required" in script          # Claude canary, mandatory
+    assert "-codex-smoke:bootstrap" in script    # Codex canary, gate-once-live
+    # Both go through the ONE build+smoke loop (same wheel, same base image).
+    assert "for spec in" in script
 
 
 def test_release_publishes_to_pypi_only_after_the_canary():
