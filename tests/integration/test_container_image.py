@@ -81,10 +81,25 @@ def test_claude_cli_present_and_native(image: str):
 
 
 @requires_docker
+@pytest.mark.timeout(1900)
+def test_codex_cli_present_and_native(image: str):
+    """The native `codex` binary is on PATH and runnable - the second first-class
+    brain baked alongside `claude`, so a `brain: codex` team (or the per-task
+    brain switch) runs on the generic image at parity with Claude (#428). Taken
+    from the GitHub-release musl binary, NOT npm, so it needs no Node (asserted by
+    test_no_node_runtime)."""
+    proc = _run("docker", "run", "--rm", "--entrypoint", "codex", image, "--version")
+    assert proc.returncode == 0, proc.stderr
+    assert "codex" in (proc.stdout + proc.stderr).lower()
+
+
+@requires_docker
 @pytest.mark.timeout(120)
 def test_no_node_runtime(image: str):
-    """No Node.js in the image — the claude CLI is native and the local event
-    server (Node) is never run in deployed instances (C6)."""
+    """No Node.js in the image — both the claude and codex CLIs are native
+    binaries and the local event server (Node) is never run in deployed
+    instances (C6). Codex ships via npm upstream but we bake the standalone
+    musl binary precisely to keep this invariant."""
     proc = _run(
         "docker", "run", "--rm", "--entrypoint", "sh", image,
         "-c", "command -v node && echo HAS_NODE || echo NO_NODE",
