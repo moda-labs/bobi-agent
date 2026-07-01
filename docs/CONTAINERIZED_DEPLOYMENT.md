@@ -49,16 +49,18 @@ instance. Anything that loops or diffs across instances is orchestration on top.
 
 An **instance** = one Fly app + one persistent volume (mounted at `/data`, holding
 both the project and `$HOME`) + env vars + an **outbound-only** WebSocket to one
-event server (a Cloudflare Worker). Nothing reaches in; it reaches out. All
-instances share **one image**; identity lives entirely in the volume + env.
+event server (a Cloudflare Worker). Nothing reaches in; it reaches out. First KB
+use may also fetch the fastembed model over HTTPS into the mounted volume cache.
+All instances share **one image**; identity lives entirely in the volume + env.
 
 ---
 
 ## 2. The image
 
-The instance image packages the framework, a pinned native `claude` CLI, and the
-embedding model into one immutable image. Tenant identity lives entirely in the
-mounted volume and env vars (the full instance contract is tracked in issue #395).
+The instance image packages the framework and a pinned native `claude` CLI. The
+embedding model downloads on first KB use into the mounted volume. Tenant identity
+lives entirely in the mounted volume and env vars (the full instance contract is
+tracked in issue #395).
 The image is built **for Fly**, so several choices below are Fly-driven; the same
 image also runs under plain `docker run` for a local contract test.
 
@@ -70,7 +72,7 @@ image also runs under plain `docker run` for a local contract test.
 | Non-root `bobi` user (uid 10001) | Claude Code refuses `bypassPermissions` as root unless `IS_SANDBOX=1`; we drop privileges with `gosu` instead |
 | Native `claude` CLI (no Node) | the local Node event server is never run in deployed instances; the CLI is the standalone binary |
 | `DISABLE_AUTOUPDATER=1` | freeze the CLI at the built version (the image is the unit of update) |
-| fastembed model baked at `FASTEMBED_CACHE_PATH=/opt/bobi/models/fastembed` | cold-start speed; no first-run download |
+| `FASTEMBED_CACHE_PATH=/data/.bobi/cache/fastembed` | first KB use downloads the model into durable writable state instead of slowing image builds |
 | `gosu` (privilege drop); no `tini` | Fly injects its own PID-1 init (reaps zombies, forwards signals); tini-on-Fly is a known boot-failure trigger. For other runtimes, use `docker run --init` |
 | `bobi agent <name> start --foreground` entrypoint | container mode |
 
@@ -85,7 +87,8 @@ remaining reachable at their usual `~/.claude` paths.
 
 `Dockerfile` at the repo root, two-stage: **builder** builds the `bobi` wheel into
 a venv; **runtime** is slim Debian + the venv, the native pinned `claude` CLI (no
-Node), `git`/`curl`/`gosu`, the baked fastembed model, and `docker-entrypoint.sh`.
+Node), `git`/`curl`/`gosu`, a volume-backed fastembed cache path, and
+`docker-entrypoint.sh`.
 Runs as non-root uid 10001.
 
 ```bash
@@ -208,8 +211,8 @@ docker inspect -f '{{.State.Health.Status}}' <container>
    generated in a temp dir; a relative `[build] dockerfile` key would resolve
    against *that* dir (no Dockerfile there). So pass `--dockerfile` and never put a
    `[build]` key in the generated config.
-6. **`--wait-timeout 10m`.** First boot installs the team and warms the model past
-   the default 5-minute machine-state wait.
+6. **`--wait-timeout 10m`.** First boot installs the team and can run live auth or
+   startup checks past the default 5-minute machine-state wait.
 7. **`[[mounts]]` array form** in the generated config (canonical).
 8. **`fly ssh` admin lands in `/`**, and runtime identity is explicit. Admin
    commands should set the same home/root environment as the instance and call
@@ -758,8 +761,8 @@ bubble/account) is #239 (auth-v2), part of the multitenant phase, not this.
 ## 8. Testing
 
 Image contract + live round-trip: `tests/integration/test_container_image.py`
-(non-root, no Node, baked model, auth guards; the live `ask` is skipped unless
-`ANTHROPIC_API_KEY` is set). Manual acceptance smoke:
+(non-root, no Node, fastembed cache path, auth guards; the live `ask` is skipped
+unless `ANTHROPIC_API_KEY` is set). Manual acceptance smoke:
 
 ```bash
 docker run -d --name smoke -v "$(mktemp -d):/data" \

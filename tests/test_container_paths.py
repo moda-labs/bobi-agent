@@ -93,10 +93,17 @@ class TestContainerCliPath:
 
 
 class TestContainerFastembedCache:
-    def test_dockerfile_bakes_model_into_fastembed_cache_path(self):
-        """fastembed ignores HF_HOME, so the image must seed the explicit
-        FASTEMBED_CACHE_PATH the KB sidecar uses at runtime."""
+    def test_dockerfile_uses_volume_fastembed_cache_path(self):
+        """fastembed ignores HF_HOME, so first-use downloads must land in a
+        writable persistent cache path."""
         dockerfile = (REPO_ROOT / "Dockerfile").read_text()
-        assert "FASTEMBED_CACHE_PATH=/opt/bobi/models/fastembed" in dockerfile
-        assert 'mkdir -p "${FASTEMBED_CACHE_PATH}"' in dockerfile
-        assert "cache_dir=os.environ['FASTEMBED_CACHE_PATH']" in dockerfile
+        assert "FASTEMBED_CACHE_PATH=/data/.bobi/cache/fastembed" in dockerfile
+        assert "FROM python:3.11-slim AS model-baker" not in dockerfile
+        assert "COPY --from=model-baker" not in dockerfile
+
+    def test_entrypoint_prepares_fastembed_cache_path(self):
+        entrypoint = (REPO_ROOT / "docker" / "docker-entrypoint.sh").read_text()
+        assert '"${FASTEMBED_CACHE_PATH:-${BOBI_HOME}/cache/fastembed}"' in entrypoint
+        assert '"${HF_HOME:-${BOBI_HOME}/cache/huggingface}"' in entrypoint
+        assert "chown \"${APP_USER}:${APP_USER}\" \"${DATA_DIR}\" \"${BOBI_HOME}\" \"${RUN_ROOT}\"" in entrypoint
+        assert '"${FASTEMBED_CACHE_PATH:-${BOBI_HOME}/cache/fastembed}"' in entrypoint

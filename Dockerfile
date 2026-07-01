@@ -5,7 +5,8 @@
 # ONE image, every tenant. Identity lives entirely in the mounted volume
 # (project root + $HOME) and env vars — see docs/design/CONTAINERIZED_INSTANCES.md
 # §2 (the instance contract). Nothing reaches in; the manager reaches out to the
-# event server over WSS only.
+# event server over WSS for control-plane traffic. First KB use may also fetch
+# the fastembed model over HTTPS into the mounted volume cache.
 #
 # ONE Dockerfile, three BUILD modes (BOBI_BUILD build-arg) — the runtime stage
 # is shared, so there's nothing to keep in sync:
@@ -22,7 +23,7 @@
 #   * Runs the agent as a NON-ROOT user. Claude Code refuses bypassPermissions
 #     as root unless IS_SANDBOX=1; we drop privileges to `bobi` first.
 #   * No Node.js. The `claude` CLI is the native standalone binary (no npm).
-#   * fastembed model baked into the image at build (cold-start speed; immutable).
+#   * fastembed cache lives on the mounted volume; first KB use downloads it.
 #   * Pinned `claude` CLI; auto-updater disabled so the image version is frozen.
 #   * `bobi agent <name> start --foreground` as the entrypoint (C2); no tini — Fly's
 #     init is PID 1 (tini-on-Fly is a known boot-failure trigger).
@@ -115,22 +116,6 @@ RUN /opt/venv/bin/pip install --no-cache-dir --no-deps /dist/*.whl
 FROM builder-${BOBI_BUILD} AS builder
 
 #####################################################################
-# model-baker — pre-download the fastembed model. Keyed ONLY on the  #
-# pinned fastembed version, so this (the slowest layer — a multi-     #
-# minute model download) stays cached across every code/framework    #
-# change. Runtime COPYs the baked model in BELOW the volatile venv,   #
-# so a code-only rebuild never re-bakes it. (Install fastembed alone, #
-# never `[kb]` — see builder-source for the torch-bloat rationale.)   #
-#####################################################################
-FROM python:3.11-slim AS model-baker
-ENV HF_HOME=/opt/bobi/models \
-    FASTEMBED_CACHE_PATH=/opt/bobi/models/fastembed
-RUN pip install --no-cache-dir "fastembed>=0.4" \
-    && mkdir -p "${FASTEMBED_CACHE_PATH}" \
-    && python -c "import os; from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2', cache_dir=os.environ['FASTEMBED_CACHE_PATH'])" \
-    && chmod -R a+rX /opt/bobi/models
-
-#####################################################################
 # Runtime — slim image, no build tools, no Node. (Shared by both.)  #
 #####################################################################
 FROM python:3.11-slim AS runtime
@@ -150,8 +135,8 @@ ARG CODEX_VERSION=rust-v0.142.5
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PATH="/opt/venv/bin:/home/bobi/.local/bin:${PATH}" \
-    HF_HOME=/opt/bobi/models \
-    FASTEMBED_CACHE_PATH=/opt/bobi/models/fastembed \
+    HF_HOME=/data/.bobi/cache/huggingface \
+    FASTEMBED_CACHE_PATH=/data/.bobi/cache/fastembed \
     DISABLE_AUTOUPDATER=1 \
     HOME=/home/bobi \
     DATA_DIR=/data \
@@ -182,7 +167,7 @@ RUN apt-get update \
 RUN useradd --create-home --uid ${BOBI_UID} --shell /bin/bash bobi
 
 # Layers are ordered stable → volatile so a code-only rebuild touches only the
-# last (cheap) layers — the model download and `claude` fetch stay cached. See
+# last (cheap) layers — pinned CLI fetches stay cached. See
 # docs/design/CUSTOM_AGENT_DEPS.md §"three clocks" for the ordering rationale.
 
 # --- stable layers (cached across code/framework changes) ----------#
@@ -229,15 +214,6 @@ RUN arch="$(dpkg --print-architecture)" \
     && mv "/usr/local/bin/codex-${target}" /usr/local/bin/codex \
     && chmod +x /usr/local/bin/codex \
     && codex --version
-
-# Baked fastembed embedding model (cold-start speed; immutable). For the
-# fastembed version baked here, runtime lookup uses FASTEMBED_CACHE_PATH rather
-# than HF_HOME, so model-baker writes the model directly to the same path used at
-# runtime. Changing this paired build/runtime cache path re-runs model baking and
-# invalidates the runtime layers after the model COPY; ordinary later code-only
-# rebuilds should not re-download the model. The image intentionally carries the
-# baked cache under /opt/bobi/models/fastembed so runtime lookup uses that copy.
-COPY --from=model-baker /opt/bobi/models /opt/bobi/models
 
 # --- team-deps hook (C24 team-flavored images) ---------------------#
 # A team's baked host tools (node, codex, gstack, …) as ONE stable layer,

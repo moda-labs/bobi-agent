@@ -151,7 +151,9 @@ fi
 # Only durable state lives on the volume: BOBI_HOME, the selected run root, and
 # Claude's config dir (CLAUDE_CONFIG_DIR). HOME is on the image and needs no
 # volume prep.
-mkdir -p "${BOBI_HOME}" "${RUN_ROOT}" "${RUN_ROOT}/workspace" "${CLAUDE_CONFIG_DIR}"
+mkdir -p "${BOBI_HOME}" "${RUN_ROOT}" "${RUN_ROOT}/workspace" "${CLAUDE_CONFIG_DIR}" \
+  "${HF_HOME:-${BOBI_HOME}/cache/huggingface}" \
+  "${FASTEMBED_CACHE_PATH:-${BOBI_HOME}/cache/fastembed}"
 
 # Fly/EC2/k8s mount fresh volumes owned by root. Take ownership once so the
 # non-root user can write; a stamp keeps subsequent boots from re-walking a
@@ -161,7 +163,10 @@ if [ ! -e "${DATA_DIR}/.bobi-owned" ]; then
   chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}"
   : > "${DATA_DIR}/.bobi-owned"
 else
-  chown "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${BOBI_HOME}" "${RUN_ROOT}" "${CLAUDE_CONFIG_DIR}"
+  chown "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${BOBI_HOME}" "${RUN_ROOT}" \
+    "${CLAUDE_CONFIG_DIR}" \
+    "${HF_HOME:-${BOBI_HOME}/cache/huggingface}" \
+    "${FASTEMBED_CACHE_PATH:-${BOBI_HOME}/cache/fastembed}"
 fi
 
 # --- 1b. Make ~/.claude coincide with the durable volume config dir (C24) -----
