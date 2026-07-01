@@ -347,3 +347,135 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
     finally:
         _run("docker", "rm", "-f", name)
         stop_wrangler()
+
+
+CODEX_SMOKE_TEAM = REPO_ROOT / "agents" / "codex-smoke"
+
+
+@pytest.fixture(scope="module")
+def codex_image() -> str:
+    """Build a Codex-brained team image: the base image + the codex-smoke
+    team-deps layer, which bakes the Codex CLI via the composed dependency
+    expansion.
+
+    The base `image` fixture ships only Claude, so a Codex round-trip needs Codex
+    baked - this builds it exactly as team-images.yml / `bobi deploy` would (the
+    renderer composes, #428). Reuses cached base layers, so it adds only the
+    small team-deps layer on top of an already-built base.
+    """
+    from bobi.build_render import (
+        load_composed_team_config,
+        render_team_deps_script,
+    )
+
+    cfg = load_composed_team_config(CODEX_SMOKE_TEAM, REPO_ROOT)
+    script = render_team_deps_script(cfg)
+    deps_dir = REPO_ROOT / "dist" / "team-deps"
+    deps_dir.mkdir(parents=True, exist_ok=True)
+    deps_file = deps_dir / "codex-smoke-pytest.sh"
+    deps_file.write_text(script)
+
+    tag = "bobi-codex-smoke:pytest"
+    try:
+        proc = _run(
+            "docker", "build",
+            "--build-arg", "TEAM_DEPS=dist/team-deps/codex-smoke-pytest.sh",
+            "-t", tag, str(REPO_ROOT),
+            timeout=1800,
+        )
+        if proc.returncode != 0:
+            # A failed build IS a failed `verify: requires` (codex's build-success).
+            pytest.fail(
+                f"codex team image build failed:\n"
+                f"{proc.stdout[-3000:]}\n{proc.stderr[-3000:]}"
+            )
+        yield tag
+    finally:
+        deps_file.unlink(missing_ok=True)
+        _run("docker", "image", "rm", "-f", tag)
+
+
+@requires_docker
+@pytest.mark.live
+@pytest.mark.skipif(
+    not os.environ.get("OPENAI_API_KEY"),
+    reason="live codex round-trip needs a real OPENAI_API_KEY for the Codex call",
+)
+@pytest.mark.timeout(900)
+def test_codex_image_ask_roundtrip(codex_image: str, tmp_path: Path):
+    """Live: bobi works e2e with Codex as the brain - the symmetric analog of the
+    Claude `test_image_ask_roundtrip` (#428).
+
+    A `brain: codex` image boots with BOBI_AUTH=api_key + OPENAI_API_KEY (the
+    entrypoint materializes ~/.codex/auth.json from the key), reaches a healthy
+    manager, and completes one named ask round-trip against the real OpenAI API.
+    Uses the same ephemeral wrangler-dev event server as the Claude round-trip,
+    and the dependency-free codex-smoke team so preflight needs no secrets.
+    """
+    import sys
+    import time
+
+    if sys.platform != "linux":
+        pytest.skip("live round-trip needs Linux (--network host reaches the host)")
+
+    from .test_event_server import _has_wrangler, _start_wrangler_server
+
+    if not _has_wrangler():
+        pytest.skip("wrangler not installed (run `npm ci` in event-server/)")
+
+    base_url, port, stop_wrangler = _start_wrangler_server()
+    container_es_url = f"http://127.0.0.1:{port}"
+
+    vol = tmp_path / "data"
+    vol.mkdir()
+    name = "bobi-codex-acceptance"
+    _run("docker", "rm", "-f", name)
+    try:
+        up = _run(
+            "docker", "run", "-d", "--name", name,
+            "--network", "host",
+            "-e", "BOBI_AUTH=api_key",
+            "-e", "BOBI_AGENT=codex-smoke",
+            "-e", f"OPENAI_API_KEY={os.environ['OPENAI_API_KEY']}",
+            "-e", f"BOBI_EVENT_SERVER={container_es_url}",
+            "-e", "BOBI_TEAM=/mnt/team",
+            "-v", f"{vol}:/data",
+            "-v", f"{CODEX_SMOKE_TEAM}:/mnt/team:ro",
+            codex_image,
+        )
+        assert up.returncode == 0, up.stderr
+
+        # Wait for the container to report healthy (HEALTHCHECK probes /health).
+        deadline = time.time() + 300
+        status = ""
+        while time.time() < deadline:
+            insp = _run(
+                "docker", "inspect", "-f", "{{json .State.Health.Status}}", name
+            )
+            status = insp.stdout.strip().strip('"')
+            if status == "healthy":
+                break
+            if status == "unhealthy":
+                logs = _run("docker", "logs", name)
+                pytest.fail(f"container unhealthy:\n{logs.stdout}\n{logs.stderr}")
+            time.sleep(5)
+        assert status == "healthy", f"never became healthy (last={status!r})"
+
+        # Run as the bobi user from the codex-smoke runtime root.
+        ask = _run(
+            "docker", "exec", "-u", "bobi",
+            "-w", "/data/.bobi/agents/codex-smoke/run", name,
+            "bobi", "agent", "codex-smoke", "ask",
+            "Reply with the single word: pong",
+            timeout=180,
+        )
+        if ask.returncode != 0 or "pong" not in ask.stdout.lower():
+            logs = _run("docker", "logs", name)
+            pytest.fail(
+                f"codex ask failed (rc={ask.returncode})\n"
+                f"STDOUT: {ask.stdout}\nSTDERR: {ask.stderr}\n"
+                f"--- container logs ---\n{logs.stdout}\n{logs.stderr}"
+            )
+    finally:
+        _run("docker", "rm", "-f", name)
+        stop_wrangler()

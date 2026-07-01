@@ -1,20 +1,25 @@
-# Minimal Codex-brained team - the team-images CI gate for "bobi bakes a working
-# Codex brain" (#428). Deliberately dependency-free and deploy-free: it exists
-# ONLY to prove that a `brain: codex` team composes to a build that bakes the
-# Codex CLI and passes its requires gate under BOBI_VERIFY_PHASE=build.
+# Minimal Codex-brained team - the gate for "bobi works e2e with Codex as the
+# brain" (#428). It serves two CI gates from one definition:
+#   1. team-images.yml (no creds): composing this team bakes the Codex CLI and
+#      `verify: requires` re-runs codex's success under BOBI_VERIFY_PHASE=build,
+#      so a broken codex bake fails the build. Codex expands from `brain: codex`
+#      alone - no hand-declared build, no pin duplication.
+#   2. the live round-trip (test_container_image.py, needs OPENAI_API_KEY): boots
+#      this image with BOBI_AUTH=api_key + OPENAI_API_KEY and asserts a Codex
+#      manager answers one ask. The Claude analog is smoke-team.
 #
-# The codex dependency expands from `brain: codex` alone (no explicit
-# `tool_library: [codex]`, no hand-declared build) now that the CI renderer
-# composes like deploy does. `verify: requires` re-runs codex's success as the
-# final build step, so a broken codex bake fails THIS build, not production.
-#
-# No Slack, no services, no deployment example - the ssh-push/subscription
-# delivery concern that the old `codex-test` team conflated is validated
-# separately (#543).
+# Deliberately dependency-free and deploy-free: github is a native service (auth
+# rides on `gh`, no credentials block), so preflight passes with ZERO secrets.
+# The ssh-push/subscription delivery concern the old codex-test conflated is
+# validated separately (#543).
 version: "1.0.0"
 agent: codex-smoke
 entry_point: manager
+event_server: ${BOBI_EVENT_SERVER}
 brain:
   kind: codex
+services:
+  - name: github
+    events: true
 build:
   verify: requires

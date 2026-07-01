@@ -14,6 +14,8 @@ on:
       - "docker/**"
       - "pyproject.toml"
       - "tests/integration/test_container_image.py"
+      # the codex round-trip bakes + boots this team (its own image layer)
+      - "agents/codex-smoke/**"
       - ".github/workflows/container.yml"
   pull_request:
     branches: [main]
@@ -81,11 +83,14 @@ jobs:
         working-directory: event-server
         run: npm ci --no-audit --no-fund
 
-      - name: Live ask round-trip
-        # Real Claude API call against an ephemeral wrangler event server: boots
-        # the actual built image, waits for the manager health endpoint, then
-        # asserts a blocking `ask` round-trips. Bounded by the image path filter,
-        # so cost is paid only when the image changed. Skips if the secret is unset.
+      - name: Live ask round-trip (Claude + Codex brains)
+        # Real API calls against an ephemeral wrangler event server: boots the
+        # built image and asserts a blocking `ask` round-trips. Two live tests run
+        # here - Claude (reuses bobi:ci) and Codex (builds its own codex-smoke
+        # image layer on the cached base). Each skips if its provider key is unset,
+        # so this proves "bobi works e2e" for whichever brains have creds.
+        # Bounded by the image path filter, so cost is paid only when the image
+        # (or the codex team) changed.
         if: >-
           github.event_name != 'pull_request' ||
           github.event.pull_request.head.repo.full_name == github.repository ||
@@ -93,4 +98,5 @@ jobs:
         env:
           BOBI_TEST_IMAGE: bobi:ci
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: pytest tests/integration/test_container_image.py -m "docker and live" -v --timeout=500
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: pytest tests/integration/test_container_image.py -m "docker and live" -v --timeout=900
