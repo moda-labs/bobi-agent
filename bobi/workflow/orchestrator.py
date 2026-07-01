@@ -30,6 +30,9 @@ from bobi.sdk import (
 from bobi.subagent import (
     AgentResult,
     _emit_lifecycle_event,
+    _network_drop_error,
+    _timeout_error,
+    _tool_crash_error,
 )
 from bobi.workflow.schema import Workflow, StepDef
 from bobi.workflow.state import WorkflowRun
@@ -382,28 +385,6 @@ async def _run_workflow_async(
                 first_agent = s.agent
                 break
 
-    # Try resume, fall back to fresh session
-    for attempt in range(2):
-        resume_id = saved_id if attempt == 0 else None
-        client = _make_session(resume_id, agent_name=first_agent)
-        try:
-            initial_prompt = task if not resume_id else None
-            await client.connect(initial_prompt)
-            if resume_id:
-                await client.query(task)
-            await _drain_response(client, session_name, run_key)
-            break
-        except Exception as e:
-            if resume_id and attempt == 0:
-                log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
-                save_session_id(session_name, "")
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-                continue
-            raise
-
     # Terminal-emit outcome (MDS-65 RC#2). The `finally` emits the honest
     # lifecycle event for this session: session.completed on success/suspend,
     # session.failed on any failure path — never session.completed after a
@@ -417,7 +398,34 @@ async def _run_workflow_async(
     # terminal in the registry (the reconciler leaves "waiting" alone).
     suspended = False
 
+    # Try resume, fall back to fresh session
+    for attempt in range(2):
+        resume_id = saved_id if attempt == 0 else None
+        client = _make_session(resume_id, agent_name=first_agent)
+        try:
+            initial_prompt = task if not resume_id else None
+            await client.connect(initial_prompt)
+            if resume_id:
+                await client.query(task)
+            _, drain_error = await _drain_response(client, session_name, run_key)
+            if drain_error:
+                raise RuntimeError(drain_error)
+            break
+        except Exception as e:
+            if resume_id and attempt == 0:
+                log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
+                save_session_id(session_name, "")
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                continue
+            run_failed, failure_error = True, str(e)
+            break
+
     try:
+        if run_failed:
+            return False
 
         registry.update(session_name, status="running",
                         session_id=saved_id or "")
@@ -512,13 +520,15 @@ async def _run_workflow_async(
             log.info(f"Step {step.name}: injecting prompt ({len(prompt)} chars)")
 
             await client.query(prompt)
-            final_text = await _drain_response(client, session_name, run_key)
+            final_text, drain_error = await _drain_response(
+                client, session_name, run_key,
+            )
 
             if final_text is None:
                 failed_step = step.name
-                run_failed, failure_error = True, "connection lost"
+                run_failed, failure_error = True, drain_error
                 _emit_step_failed(run_key, workflow.name, step.name,
-                                  "connection lost")
+                                  drain_error)
                 return False
 
             # Validate handoff
@@ -618,8 +628,10 @@ async def _run_workflow_async(
             pass
 
 
-async def _drain_response(client, session_name: str, run_key: str) -> str | None:
-    """Drain one turn of the agent's response. Returns final text or None."""
+async def _drain_response(
+    client, session_name: str, run_key: str,
+) -> tuple[str | None, str]:
+    """Drain one turn. Returns ``(final_text, error)``."""
     from bobi.brain import AssistantText, TurnResult
 
     final_text = ""
@@ -634,10 +646,18 @@ async def _drain_response(client, session_name: str, run_key: str) -> str | None
                 save_session_id(session_name, msg.session_id)
                 log_activity("stop", {"session_id": msg.session_id},
                              session=session_name)
-                return final_text
+                if msg.is_error:
+                    return None, msg.result_text or "turn failed"
+                return final_text, ""
+    except asyncio.TimeoutError:
+        error = _timeout_error()
+        log.error(f"Drain timeout: {error}")
+        return None, error
     except Exception as e:
-        log.error(f"Drain error: {e}")
-    return None
+        error = _tool_crash_error(e)
+        log.error(f"Drain error: {error}")
+        return None, error
+    return None, _network_drop_error()
 
 
 def _emit_step_failed(run_key, workflow_name, step_name, error):

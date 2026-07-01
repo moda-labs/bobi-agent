@@ -63,6 +63,24 @@ class AgentResult:
     transient: bool = False
 
 
+def _network_drop_error(detail: str = "") -> str:
+    base = "network drop: response stream ended before turn result"
+    return f"{base} ({detail})" if detail else base
+
+
+def _timeout_error(timeout: int | None = None) -> str:
+    if timeout is None:
+        return "subprocess timeout while draining response"
+    return f"subprocess timeout after {timeout}s"
+
+
+def _tool_crash_error(error: BaseException | str) -> str:
+    message = str(error).strip() or error.__class__.__name__
+    if message.startswith("tool crash:"):
+        return message
+    return f"tool crash: {message}"
+
+
 def _build_prompt(phase: str, run_key: str, role: str = "", context: str = "") -> str:
     parts = [f"Phase: {phase}", f"Issue: #{run_key}"]
 
@@ -332,7 +350,7 @@ async def _run_agent_supervised(
                     result_msg = msg
 
             if result_msg is None:
-                result.error = "connection lost (no ResultMessage)"
+                result.error = _network_drop_error("no ResultMessage")
                 _persist_terminal(registry, name, TERMINAL_FAILED,
                                   error=result.error, phase=phase)
                 return result
@@ -377,11 +395,11 @@ async def _run_agent_supervised(
             return result
 
     except asyncio.TimeoutError:
-        result.error = f"timeout after {timeout}s"
+        result.error = _timeout_error(timeout)
         _persist_terminal(registry, name, TERMINAL_FAILED, error=result.error,
                           phase=phase)
     except Exception as e:
-        result.error = str(e)
+        result.error = _tool_crash_error(e)
         # An unhandled executor exception is a crash, not a clean failure.
         _persist_terminal(registry, name, TERMINAL_CRASHED, error=result.error,
                           phase=phase)
