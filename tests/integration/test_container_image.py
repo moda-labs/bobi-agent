@@ -364,50 +364,10 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
         stop_wrangler()
 
 
-CODEX_SMOKE_TEAM = REPO_ROOT / "agents" / "codex-smoke"
-
-
-@pytest.fixture(scope="module")
-def codex_image() -> str:
-    """Build a Codex-brained team image: the base image + the codex-smoke
-    team-deps layer, which bakes the Codex CLI via the composed dependency
-    expansion.
-
-    The base `image` fixture ships only Claude, so a Codex round-trip needs Codex
-    baked - this builds it exactly as team-images.yml / `bobi deploy` would (the
-    renderer composes, #428). Reuses cached base layers, so it adds only the
-    small team-deps layer on top of an already-built base.
-    """
-    from bobi.build_render import (
-        load_composed_team_config,
-        render_team_deps_script,
-    )
-
-    cfg = load_composed_team_config(CODEX_SMOKE_TEAM, REPO_ROOT)
-    script = render_team_deps_script(cfg)
-    deps_dir = REPO_ROOT / "dist" / "team-deps"
-    deps_dir.mkdir(parents=True, exist_ok=True)
-    deps_file = deps_dir / "codex-smoke-pytest.sh"
-    deps_file.write_text(script)
-
-    tag = "bobi-codex-smoke:pytest"
-    try:
-        proc = _run(
-            "docker", "build",
-            "--build-arg", "TEAM_DEPS=dist/team-deps/codex-smoke-pytest.sh",
-            "-t", tag, str(REPO_ROOT),
-            timeout=1800,
-        )
-        if proc.returncode != 0:
-            # A failed build IS a failed `verify: requires` (codex's build-success).
-            pytest.fail(
-                f"codex team image build failed:\n"
-                f"{proc.stdout[-3000:]}\n{proc.stderr[-3000:]}"
-            )
-        yield tag
-    finally:
-        deps_file.unlink(missing_ok=True)
-        _run("docker", "image", "rm", "-f", tag)
+# The Codex analog of SMOKE_TEAM (both dependency-free, github-only). Codex now
+# ships in the base image, so this needs no flavored image - it boots on the same
+# base `image` as the Claude round-trip, just with brain: codex.
+CODEX_SMOKE_TEAM = REPO_ROOT / "tests" / "fixtures" / "codex-smoke"
 
 
 @requires_docker
@@ -416,16 +376,16 @@ def codex_image() -> str:
     not os.environ.get("OPENAI_API_KEY"),
     reason="live codex round-trip needs a real OPENAI_API_KEY for the Codex call",
 )
-@pytest.mark.timeout(900)
-def test_codex_image_ask_roundtrip(codex_image: str, tmp_path: Path):
+@pytest.mark.timeout(600)
+def test_image_codex_ask_roundtrip(image: str, tmp_path: Path):
     """Live: bobi works e2e with Codex as the brain - the symmetric analog of the
     Claude `test_image_ask_roundtrip` (#428).
 
-    A `brain: codex` image boots with BOBI_AUTH=api_key + OPENAI_API_KEY (the
-    entrypoint materializes ~/.codex/auth.json from the key), reaches a healthy
-    manager, and completes one named ask round-trip against the real OpenAI API.
-    Uses the same ephemeral wrangler-dev event server as the Claude round-trip,
-    and the dependency-free codex-smoke team so preflight needs no secrets.
+    Boots the base image (which now bakes the Codex CLI) with BOBI_AUTH=api_key +
+    OPENAI_API_KEY (the entrypoint materializes ~/.codex/auth.json from the key),
+    reaches a healthy manager, and completes one named ask round-trip against the
+    real OpenAI API. Same ephemeral wrangler-dev event server as the Claude
+    round-trip; the dependency-free codex-smoke team needs no secrets.
     """
     import sys
     import time
@@ -456,7 +416,7 @@ def test_codex_image_ask_roundtrip(codex_image: str, tmp_path: Path):
             "-e", "BOBI_TEAM=/mnt/team",
             "-v", f"{vol}:/data",
             "-v", f"{CODEX_SMOKE_TEAM}:/mnt/team:ro",
-            codex_image,
+            image,
         )
         assert up.returncode == 0, up.stderr
 
