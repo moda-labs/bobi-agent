@@ -38,6 +38,7 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_runtime_layout())
     results.append(_check_install_integrity())
     results.extend(_check_package_requires())
+    results.extend(_check_host_caps())
     results.extend(_check_services())
     results.append(_check_workflows())
     results.append(_check_bubble_auth())
@@ -154,6 +155,29 @@ def _check_package_requires() -> list[CheckResult]:
                 detail=entry.why or detail,
                 hint=hint))
     return results
+
+
+def _check_host_caps() -> list[CheckResult]:
+    """Verify host capabilities a dependency declared via `host:` (#428 Stage 3).
+
+    A host capability (a kernel sysctl, a device) is provisioned on the host, not
+    baked into the image — the in-container agent cannot grant it. Doctor reports
+    whether each is satisfied on THIS host; where the knob is absent (older kernel,
+    non-Linux) the capability simply doesn't apply and the check passes.
+    """
+    from bobi.config import Config
+    from bobi.host_caps import parse_host_caps
+
+    root = bound_root()
+    if not root:
+        return []
+    try:
+        cfg = Config.load(root)
+    except Exception:
+        return []
+    if not cfg.host:
+        return []
+    return [cap.check() for cap in parse_host_caps(cfg.host)]
 
 
 def _check_local_config() -> CheckResult:

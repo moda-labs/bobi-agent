@@ -375,6 +375,111 @@ def bootstrap(deps: list[Dependency], *, brains: list[str],
     return BootstrapReport(outcomes=outcomes)
 
 
+class BootstrapError(RuntimeError):
+    """A guide-dependency bootstrap failed its agentic preflight gate.
+
+    Raised by `render_team_deps` so the build/CI caller fails loudly instead of
+    freezing an unverified snapshot. Carries the report for a detailed message.
+    """
+
+    def __init__(self, report: BootstrapReport):
+        self.report = report
+        fails = ", ".join(o.dep for o in report.failures()) or "(none)"
+        super().__init__(
+            f"bootstrap gate failed ({report.summary()}); unsatisfied: {fails}")
+
+
+def _agent_needed(dep: Dependency) -> bool:
+    """A dependency the bootstrap agent must materialize from its guide.
+
+    A pinned `install` is baked deterministically by the existing build layer (via
+    compose → `cfg.build`), so it needs no agent. Only a guide-only dependency
+    (guide, no install) is resolved by an agent into a recipe here."""
+    return not dep.install and bool(dep.guide.strip())
+
+
+def team_has_bake(team_dir: "Path", project_path: "Path | None" = None) -> bool:
+    """True if a team bakes anything into an image — a declarative `build:` OR a
+    guide-only dependency the bootstrap agent must resolve.
+
+    The agent-free gate `build-team-images.sh --check` uses to decide whether to
+    build a team-flavored image. Unlike `build_render --check` (declarative build
+    only), this also catches a team whose ONLY baked content is a guide dependency
+    — which carries no `cfg.build` yet still needs an image layer.
+    """
+    from pathlib import Path
+
+    from bobi.build_render import _workspace_root, load_composed_team_config
+    from bobi.tool_library import resolve_team_dependencies
+
+    team_dir = Path(team_dir)
+    project_path = project_path or _workspace_root(team_dir)
+    spec = load_composed_team_config(team_dir, project_path).build
+    declarative = spec is not None and bool(
+        spec.apt or spec.npm or spec.run_root or spec.run or spec.verify_requires)
+    if declarative:
+        return True
+    deps = resolve_team_dependencies(team_dir, project_path)
+    return any(_agent_needed(d) for d in deps)
+
+
+def render_team_deps(team_dir: "Path", project_path: "Path | None" = None, *,
+                     brains: list[str] | None = None,
+                     agent_runner: AgentRunner | None = None,
+                     shell_runner: ShellRunner | None = None) -> str | None:
+    """Bootstrap a team's guide-only deps and render its team-deps.sh (#428 Stage 3).
+
+    The single seam the image build calls (`build-team-images.sh`, the release
+    rollout). It composes the team, resolves its full declared dependency set,
+    runs the bootstrap agent for any guide-only dependency (the CI cold path),
+    and feeds the resolved recipes back through the ONE renderer
+    (`build_render.render_team_deps_script`) alongside the pinned-install steps
+    compose already merged — no second install code path. The declared-set hash is
+    stamped so a later deploy/boot can detect drift and re-bootstrap.
+
+    Returns None for a generic team (nothing to bake). Raises `BootstrapError` if
+    a guide-dep fails its agentic preflight, so an unverified snapshot is never
+    frozen.
+    """
+    from pathlib import Path
+
+    from bobi.brain import _BRAINS
+    from bobi.build_render import (
+        _workspace_root,
+        load_composed_team_config,
+        render_team_deps_script,
+    )
+    from bobi.tool_library import dependency_list_hash, resolve_team_dependencies
+
+    team_dir = Path(team_dir)
+    project_path = project_path or _workspace_root(team_dir)
+    cfg = load_composed_team_config(team_dir, project_path)
+    deps = resolve_team_dependencies(team_dir, project_path)
+
+    spec = cfg.build
+    declarative = spec is not None and bool(
+        spec.apt or spec.npm or spec.run_root or spec.run or spec.verify_requires)
+    guide_deps = [d for d in deps if _agent_needed(d)]
+    if not declarative and not guide_deps:
+        return None  # generic team — deploys on the shared base image
+
+    extra_recipes: list[dict] = []
+    if guide_deps:
+        brains = brains or sorted(_BRAINS)
+        report = bootstrap(guide_deps, brains=brains, agent_runner=agent_runner,
+                           shell_runner=shell_runner)
+        if not report.ok:
+            raise BootstrapError(report)
+        extra_recipes = [o.materialize.recipe.to_dict() for o in report.outcomes]
+
+    # Only stamp a dep-list hash when the team actually declares dependencies —
+    # a plain inline `build:` team has none, and an empty-set hash is meaningless
+    # noise deploy would ignore anyway (its local hash is "" too).
+    dep_hash = dependency_list_hash(deps) if deps else ""
+    return render_team_deps_script(
+        cfg, extra_recipes=extra_recipes, dep_list_hash=dep_hash)
+
+
 # ---------------------------------------------------------------------------
 # Default runners (real brain + real shell)
 # ---------------------------------------------------------------------------
@@ -397,7 +502,34 @@ def default_shell_runner(command: str, env: dict,
         return 127, "", f"check command failed: {exc}"
 
 
-def default_agent_runner(prompt: str, brain: str, *, cwd: str = ".",
+def _ensure_bootstrap_runtime() -> str:
+    """Bind a throwaway Bobi runtime root so the subagent machinery has one.
+
+    The agent session path (`subagent._run_agent_supervised` → the brain session)
+    resolves session storage / workspace paths from a *bound* runtime root
+    (`paths.bound_root`). A bootstrap has no installed team runtime — it runs on a
+    bare base image — so stand up a minimal canonical layout in a temp dir and
+    bind it once. Returns the runtime's workspace dir (a writable agent cwd).
+    Idempotent: a real spawner-bound root (or an earlier bootstrap dep) wins.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from bobi import paths
+
+    existing = paths.bound_root()
+    if existing is not None:
+        return str(paths.workspace_dir(existing))
+    rt = Path(tempfile.mkdtemp(prefix="bobi-bootstrap-runtime-"))
+    (rt / "package").mkdir(parents=True, exist_ok=True)
+    (rt / "package" / "agent.yaml").write_text("agent: bootstrap\n")
+    (rt / "state").mkdir(exist_ok=True)
+    (rt / "workspace").mkdir(exist_ok=True)
+    paths.bind_root(rt)
+    return str(rt / "workspace")
+
+
+def default_agent_runner(prompt: str, brain: str, *, cwd: str | None = None,
                          timeout: int = BOOTSTRAP_TIMEOUT,
                          max_turns: int = BOOTSTRAP_MAX_TURNS) -> str:
     """Run a bootstrap agent through the supervised subagent loop.
@@ -407,11 +539,17 @@ def default_agent_runner(prompt: str, brain: str, *, cwd: str = ".",
     requested brain. Returns the agent's final text (the recipe verdict is the
     last line); an errored run still returns its text so `materialize` can parse
     an explicit ``{"ok": false}``.
+
+    Binds a throwaway runtime root when none is bound (the bare-base-image case),
+    and runs the agent in that runtime's workspace unless `cwd` is given.
     """
     import asyncio
 
     from bobi.brain import BRAIN_ENV
     from bobi.subagent import _run_agent_supervised
+
+    if cwd is None:
+        cwd = _ensure_bootstrap_runtime()
 
     run_key = f"boot-{hashlib.sha256(prompt.encode()).hexdigest()[:8]}"
     saved = os.environ.get(BRAIN_ENV)
@@ -449,23 +587,71 @@ def _main(argv: list[str] | None = None) -> int:
 
     from bobi.brain import _BRAINS
     from bobi.build_render import _workspace_root
-    from bobi.tool_library import resolve_team_dependencies
+    from bobi.tool_library import (
+        dependency_list_hash,
+        resolve_team_dependencies,
+    )
 
     ap = argparse.ArgumentParser(
         description="Bootstrap a team's declared dependencies on a base image "
-                    "(#428 Stage 2): materialize each and verify its success.")
+                    "(#428): materialize each, verify its success, and (Stage 3) "
+                    "render the resolved team-deps hook for the image build.")
     ap.add_argument("team_dir", type=str, help="team source dir (holds agent.yaml)")
     ap.add_argument(
         "--brains", default=",".join(sorted(_BRAINS)),
         help="comma-separated target brains to verify under "
              "(default: all registered brains)")
     ap.add_argument("--json", action="store_true", help="emit the report as JSON")
+    ap.add_argument(
+        "--check", action="store_true",
+        help="exit 0 if the team bakes anything (declarative build or a "
+             "guide-only dependency), 2 otherwise; no bootstrap, no output")
+    ap.add_argument(
+        "--needs-agent", action="store_true",
+        help="exit 0 if the team has a guide-only dependency the bootstrap agent "
+             "must resolve (so --render must run inside the base image), 2 "
+             "otherwise; no bootstrap, no output")
+    ap.add_argument(
+        "--render", metavar="OUT",
+        help="bootstrap guide-only deps and render the team-deps hook to OUT "
+             "(the image-build seam); exits 0 with no file for a generic team")
+    ap.add_argument(
+        "--print-dep-hash", action="store_true",
+        help="print the declared dependency-set hash (the re-bootstrap key) "
+             "and exit; no bootstrap")
     args = ap.parse_args(argv)
 
     from pathlib import Path
     team_dir = Path(args.team_dir)
+    project_path = _workspace_root(team_dir)
     brains = [b.strip() for b in args.brains.split(",") if b.strip()]
-    deps = resolve_team_dependencies(team_dir, _workspace_root(team_dir))
+
+    # Agent-free modes the image build uses to gate/identify a team before the
+    # (expensive) bootstrap agent runs.
+    if args.check:
+        return 0 if team_has_bake(team_dir, project_path) else 2
+    if args.needs_agent:
+        deps = resolve_team_dependencies(team_dir, project_path)
+        return 0 if any(_agent_needed(d) for d in deps) else 2
+    if args.print_dep_hash:
+        deps = resolve_team_dependencies(team_dir, project_path)
+        print(dependency_list_hash(deps))
+        return 0
+    if args.render:
+        try:
+            script = render_team_deps(team_dir, project_path, brains=brains)
+        except BootstrapError as exc:
+            print(str(exc))
+            return 1
+        if script is None:
+            return 0  # generic team — nothing to bake
+        out = Path(args.render)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(script)
+        out.chmod(0o755)
+        return 0
+
+    deps = resolve_team_dependencies(team_dir, project_path)
     report = bootstrap(deps, brains=brains)
 
     if args.json:

@@ -227,6 +227,12 @@ class Config:
     monitors: list[dict] = field(default_factory=list)
     auto_dispatch: list[dict] = field(default_factory=list)
     requires: list[RequiresEntry] = field(default_factory=list)
+    # Host capabilities a dependency needs but the container can't grant itself
+    # (a kernel sysctl, a device) — #428 Stage 3. Raw `host:` entries
+    # (`{sysctl: key=value}`); parsed into HostCap by bobi.host_caps. Emitted into
+    # the composed agent.yaml from a dependency's `host:` field so deploy/doctor can
+    # surface + verify it. Never materialized into the image (runtime wiring).
+    host: list = field(default_factory=list)
     build: "BuildSpec | None" = None  # C24 team image build spec; None = generic base
     spend_cap: int = 0  # max agent invocations per rolling hour; 0 = use default
     max_concurrent_agents: int = 0  # max simultaneous subagents; 0 = use default (2)
@@ -272,6 +278,9 @@ class Config:
         # expansion, not config interpolation.
         monitors_raw = raw_uninterpolated.get("monitors", [])
         requires_raw = raw_uninterpolated.get("requires", [])
+        # host: entries carry a sysctl `key=value` verbatim — no config
+        # interpolation (mirrors requires/build).
+        host_raw = raw_uninterpolated.get("host", [])
         # build steps are shell commands run at image-build time; preserve them
         # verbatim (they may carry ~ or literal $VAR for the build shell).
         build_raw = raw_uninterpolated.get("build", None)
@@ -330,6 +339,7 @@ class Config:
             monitors=raw.get("monitors", []),
             auto_dispatch=raw.get("auto_dispatch", []),
             requires=requires,
+            host=host_raw if isinstance(host_raw, list) else [],
             build=build,
             spend_cap=int(raw.get("spend_cap", 0)),
             max_concurrent_agents=int(raw.get("max_concurrent_agents", 0)),

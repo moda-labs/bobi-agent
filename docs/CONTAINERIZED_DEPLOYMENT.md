@@ -330,6 +330,41 @@ build only verifies the binary, which needs no auth). Referenced-but-optional
 scoping vars (e.g. `channels: ${SLACK_CHANNELS}`, empty = whole workspace) may be
 declared empty in the env blob without blocking the deploy.
 
+### 2.6.1. Agent-bootstrapped dependencies + snapshot (#428)
+
+A `tool_library:` dependency (the unified model) can declare a loose `guide:` +
+required `success:` instead of pinned `install:` steps. A **guide-only** dep is
+materialized by a **bootstrap agent** at image-build time (in CI, not
+production): the agent reads the guide, installs the dependency with pinned
+versions, and reports the exact steps as a machine-readable recipe. That recipe
+feeds back through the same `build_render` renderer as an inline `build:`, so the
+snapshot is a normal image layer and there is one install code path. Every dep is
+verified against its `success` contract (per brain, build tier) before the layer
+is trusted. See `bobi/dep_bootstrap.py` and issue #428.
+
+- **One seam, agent-free for pinned teams.** `scripts/build-team-images.sh` and
+  the release rollout render each team through `python -m bobi.dep_bootstrap
+  --render`; a team with only pinned installs renders with no agent (a drop-in for
+  the old `build_render` render). A guide-only dep is materialized by the bootstrap
+  agent **inside a fresh base image** (`docker run` the base, so the recipe is
+  faithful to the image, not the CI host), gated on the brain key in the CI env
+  (`BOBI_BOOTSTRAP_BRAINS`, default `claude`). `bobi deploy` never runs the agent
+  (it refuses to source-build a guide-only team and directs you to the CI `image:`).
+  The full path (guide dep → live agent → frozen recipe → working image) is
+  exercised end-to-end by `tests/integration/test_dep_bootstrap_e2e.py` in the
+  container/claude CI suite.
+- **Re-bootstrap detection.** The image stamps the DECLARED dependency-set hash
+  (`/opt/bobi/dep-list.hash`, from `tool_library.dependency_list_hash`) alongside
+  the #379 build-deps stamp. `bobi deploy` reads it over `fly ssh`: a matching set
+  skips re-bootstrap; a changed set (a guide dep, a bumped pin, a `host:`/`mcp:`
+  change) rebuilds in place to re-bootstrap. A warm boot runs no agent.
+- **`host:` capabilities.** A dep can declare a host capability the container
+  cannot grant itself (a kernel sysctl, a device):
+  `host: [{sysctl: kernel.apparmor_restrict_unprivileged_userns=0}]`. It is
+  runtime wiring, never baked: `bobi deploy` surfaces it to the operator and
+  `bobi agent <name> doctor` verifies it on the host (see `bobi/host_caps.py`).
+  gstack's `/browse` sandbox sysctl is one instance of this model.
+
 ---
 
 ## 3. The provisioner (`scripts/provision-instance.sh`)

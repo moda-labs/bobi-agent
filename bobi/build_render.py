@@ -57,6 +57,15 @@ APP_USER = "bobi"
 # reads it over `fly ssh` to detect a `build:` change before taking the silent
 # in-place hot-push path that would never rebuild the image (#379).
 TEAM_DEPS_STAMP = "/opt/bobi/team-deps.hash"
+# The DECLARED dependency-set identity (#428 Stage 3). Sibling of TEAM_DEPS_STAMP,
+# but keyed on the loose declaration (name/success/guide/install/host/mcp — see
+# tool_library.dependency_list_hash), NOT the resolved build. It is the
+# re-bootstrap trigger: a warm boot / deploy whose declared-set hash matches the
+# snapshot skips re-bootstrap; a changed set forces a rebuild + re-bootstrap.
+# Kept separate from TEAM_DEPS_STAMP because a guide-only dep's *resolved* recipe
+# is non-deterministic (two bootstraps can pin different upstreams), so it must
+# not enter the deterministic #379 stamp deploy compares without running an agent.
+DEP_LIST_STAMP = "/opt/bobi/dep-list.hash"
 
 
 def team_deps_hash(spec: BuildSpec) -> str:
@@ -79,24 +88,73 @@ def team_deps_hash(spec: BuildSpec) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
-def render_team_deps_script(cfg: Config) -> str:
+def _merge_recipes_into_spec(spec: BuildSpec, recipes: list[dict]) -> BuildSpec:
+    """Fold agent-resolved recipes (#428 Stage 3) into a copy of `spec`.
+
+    Each recipe mirrors a `build:` block (apt/npm/run_root/run). Guide-only
+    dependencies carry no pinned `install`, so they never reach `cfg.build` at
+    compose; the bootstrap agent resolves them to a recipe, and THIS is where that
+    recipe re-enters the ONE renderer — appended + de-duped exactly like an inline
+    `build:` list, so there is no second install code path. Order: declarative
+    (compose) steps first, resolved recipes after, matching compose's base-first
+    accretion.
+    """
+    from dataclasses import replace
+
+    from bobi.compose import _dedupe
+
+    def _accrete(field: str) -> list[str]:
+        out = list(getattr(spec, field))
+        for r in recipes:
+            out += [str(s) for s in (r.get(field) or [])]
+        return _dedupe(out)
+
+    return replace(
+        spec,
+        apt=_accrete("apt"), npm=_accrete("npm"),
+        run_root=_accrete("run_root"), run=_accrete("run"),
+    )
+
+
+def render_team_deps_script(cfg: Config, *, extra_recipes: list[dict] | None = None,
+                            dep_list_hash: str = "") -> str:
     """Render the `build:` spec to the team-deps.sh hook script.
 
-    Raises ValueError if the team has no declarative build (None, or a pure
-    raw-Dockerfile escape hatch — that path bypasses this renderer).
+    `extra_recipes` are agent-resolved recipes for guide-only dependencies (#428
+    Stage 3): they bake into the script body but NOT into the #379 deps stamp,
+    which stays keyed on the deterministic declarative spec so deploy — which
+    never runs the bootstrap agent — computes the same value. `dep_list_hash`, when
+    given, is stamped into DEP_LIST_STAMP as the re-bootstrap trigger.
+
+    Raises ValueError if the team has nothing to bake (no declarative build and no
+    recipes, or a pure raw-Dockerfile escape hatch — that path bypasses this
+    renderer).
     """
+    recipes = [r for r in (extra_recipes or []) if r]
     spec = cfg.build
     if spec is None:
-        raise ValueError("team has no build: spec to render")
+        # A guide-only team contributes no pinned install, so compose produced no
+        # build spec; the resolved recipes ARE its whole build. Synthesize an empty
+        # spec (re-verifying the team's requires, if any, as the final build step).
+        if not recipes:
+            raise ValueError("team has no build: spec to render")
+        spec = BuildSpec(verify_requires=bool(cfg.requires))
     declarative = bool(spec.apt or spec.npm or spec.run_root or spec.run
                        or spec.verify_requires)
-    if spec.dockerfile and not declarative:
+    if spec.dockerfile and not declarative and not recipes:
         raise ValueError(
             "team uses a raw Dockerfile escape hatch; build it directly, "
             "do not render"
         )
-    if not declarative:
+    if not declarative and not recipes:
         raise ValueError("team has no declarative build: spec to render")
+
+    # The #379 stamp is the DECLARATIVE identity — computed BEFORE folding in the
+    # (non-deterministic) resolved recipes — so it is agent-free and deploy's local
+    # hash matches. Guide-dep drift is caught by dep_list_hash instead.
+    deps_stamp = team_deps_hash(spec)
+    if recipes:
+        spec = _merge_recipes_into_spec(spec, recipes)
 
     lines: list[str] = [
         "#!/usr/bin/env bash",
@@ -110,9 +168,19 @@ def render_team_deps_script(cfg: Config) -> str:
         # `install -d`) keeps no-skills teams free of a seed-dir marker.
         "echo '== stamp team-deps identity (#379) =='",
         "mkdir -p /opt/bobi",
-        f"printf '%s\\n' {shlex.quote(team_deps_hash(spec))} > {TEAM_DEPS_STAMP}",
+        f"printf '%s\\n' {shlex.quote(deps_stamp)} > {TEAM_DEPS_STAMP}",
         "",
     ]
+    if dep_list_hash:
+        # The declared dependency-set identity (#428): deploy/warm-boot compares
+        # this to decide whether to re-bootstrap. Stamped only when the caller
+        # resolved the full dependency set (the build/deploy path), so a bare
+        # `render_team_deps_script(cfg)` stays byte-identical to pre-Stage-3.
+        lines += [
+            "echo '== stamp declared dependency-set identity (#428) =='",
+            f"printf '%s\\n' {shlex.quote(dep_list_hash)} > {DEP_LIST_STAMP}",
+            "",
+        ]
 
     if spec.apt:
         pkgs = " ".join(shlex.quote(p) for p in spec.apt)
