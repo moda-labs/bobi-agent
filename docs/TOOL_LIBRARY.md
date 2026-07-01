@@ -364,6 +364,43 @@ uses.
    `tool_library.dependency_list_hash`); `bobi deploy` compares it over `fly ssh`
    and rebuilds when it drifts.
 
+## Running a team locally (`bobi agents install --with-deps`)
+
+The lifecycle above is the **deploy** story: bootstrap in CI, snapshot, warm-boot
+in production. Locally there is no image - `bobi agents install` only *composes*
+the package, so a locally-run team blocks at the `requires:`/MCP dispatch gate
+until its tools exist on the machine. `--with-deps` closes that gap: the brain
+**already present on the dev machine** installs the declared dependencies the
+same way a human would, driven by the same `guide`/`install`/`success` contract.
+
+```bash
+bobi agents install agents/eng-team --name eng --with-deps
+```
+
+After composing, it:
+
+1. **Resolves** the team's full declared dependency set and **verifies** each
+   `success` in the runtime tier. An already-satisfied dependency is skipped
+   (idempotent - re-runs are cheap and safe).
+2. **Previews a plan**: what will be materialized, what is already satisfied,
+   which steps may need `sudo`, and which `host:` capabilities must be
+   provisioned by hand.
+3. **Confirms**, then drives the team's brain (its declared `brain:`, else the
+   local default) to install each remaining dependency on THIS host. The agent
+   **adapts** container-shaped `install:` recipes to the real host (brew / apt /
+   pipx / a binary into `~/.local/bin`) - the recipe is a version-pin reference,
+   not verbatim commands.
+4. **Re-verifies** each `success` (the source of truth, not the agent's own
+   claim) and prints a transcript of the commands the agent ran.
+
+Because it mutates the developer's real machine, it is confirm-gated and never
+runs `sudo` silently: a step that needs root is surfaced behind an explicit
+"Allow sudo?" prompt, and `host:` capabilities stay a guided fix (like `doctor
+--fix`), never attempted by the agent. Partial failure is non-fatal - doctor and
+the dispatch preflight still gate - so you can fix a straggler and re-run. There
+is no local snapshot; idempotency comes from re-verifying `success`. Without
+`--with-deps`, install is compose-only and unchanged.
+
 ## `host:` capabilities
 
 Some dependencies need a capability the in-container agent cannot grant itself -
@@ -400,6 +437,9 @@ tarball.
   `dependency_list_hash`.
 - `bobi/dep_bootstrap.py` - the bootstrap-agent harness, the `render_team_deps`
   build seam, and the CLI (`python -m bobi.dep_bootstrap <team> --render`).
+- `bobi/local_deps.py` - local materialization (`install --with-deps`): plan /
+  idempotency, the host-adapting install prompt, and re-verify-is-truth. Reuses
+  `dep_bootstrap`'s agent/shell runners and `preflight` (runtime tier).
 - `bobi/build_render.py` - the one renderer that bakes `install`/recipes into the
   Docker hook layer.
 - `bobi/host_caps.py` - the generic `host:` capability model (doctor + deploy).
