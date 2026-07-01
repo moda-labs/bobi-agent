@@ -15,8 +15,8 @@ team-url: https://github.com/moda-labs/bobi-agent/releases/download/teams-latest
 
 # Right-sized to keep an always-on canary cheap (~$6/mo vs ~$25 at the 4gb/2cpu
 # defaults), mirroring the Claude canary. The smoke team uses no knowledge base,
-# so the baked fastembed model never loads into RAM — 1gb is plausible. If it
-# OOMs / crash-loops on memory, bump memory to 2gb and redeploy (idempotent).
+# so the fastembed model never downloads or loads into RAM — 1gb is plausible. If
+# it OOMs / crash-loops on memory, bump memory to 2gb and redeploy (idempotent).
 memory: 1gb
 cpus: 1
 volume_size: 3

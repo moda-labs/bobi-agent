@@ -27,10 +27,9 @@ def _resolve_cache_dir() -> str | None:
     """Where fastembed should cache the ONNX model.
 
     fastembed honors ``FASTEMBED_CACHE_PATH`` but — unlike sentence-transformers
-    /huggingface_hub — ignores ``HF_HOME``. The container image (C8) pre-seeds a
-    model cache at build to avoid a first-embed download; honor either env so a
-    pre-baked cache is actually used. Returns None to fall back to fastembed's
-    default location.
+    /huggingface_hub — ignores ``HF_HOME``. The container image sets an explicit
+    volume-backed cache path so the first KB use downloads into durable writable
+    state. Returns None to fall back to fastembed's default location.
     """
     explicit = os.environ.get("FASTEMBED_CACHE_PATH")
     if explicit:
