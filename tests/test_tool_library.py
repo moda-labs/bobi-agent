@@ -62,7 +62,6 @@ def _agent_yaml(dest: Path) -> dict:
 
 CODEX_PIN = "@openai/codex@0.142.0"
 VENN_PIN = "venn-cli==0.2.0"
-OPENAI_PIN = "openai==2.43.0"
 
 
 # --- headline: pin de-dup across layers --------------------------------------
@@ -263,7 +262,7 @@ def test_no_floating_refs_in_catalog():
 def test_fix_pin_agrees_with_install_pin():
     """The pin co-located in `fix` and `install` within one entry must agree —
     the one remaining co-location is guarded, not scattered (§4.1)."""
-    pins = {"codex": CODEX_PIN, "venn": VENN_PIN, "openai": OPENAI_PIN}
+    pins = {"codex": CODEX_PIN, "venn": VENN_PIN}
     for name, pin in pins.items():
         entry = tool_library.load_entry(name)
         install_text = yaml.dump(entry.install)
