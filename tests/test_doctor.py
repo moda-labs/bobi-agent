@@ -57,6 +57,44 @@ class TestCheckProjectConfig:
         assert "missing" in r.detail
 
 
+# --- Host capabilities (#428 Stage 3) ---
+
+
+class TestCheckHostCaps:
+    def _install(self, tmp_path):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "agent: t\nhost:\n  - sysctl: net.example.knob=0\n")
+
+    def test_no_host_block_no_checks(self, tmp_path):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text("agent: t\n")
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_host_caps
+            assert _check_host_caps() == []
+
+    def test_satisfied_cap_passes(self, tmp_path):
+        self._install(tmp_path)
+        knob = tmp_path / "knob"; knob.write_text("0\n")
+        from bobi.host_caps import HostCap
+        with patch("bobi.doctor.bound_root", return_value=tmp_path), \
+             patch.object(HostCap, "proc_path", property(lambda self: knob)):
+            from bobi.doctor import _check_host_caps
+            results = _check_host_caps()
+        assert len(results) == 1 and results[0].ok
+
+    def test_violated_cap_fails_with_fix(self, tmp_path):
+        self._install(tmp_path)
+        knob = tmp_path / "knob"; knob.write_text("1\n")
+        from bobi.host_caps import HostCap
+        with patch("bobi.doctor.bound_root", return_value=tmp_path), \
+             patch.object(HostCap, "proc_path", property(lambda self: knob)):
+            from bobi.doctor import _check_host_caps
+            results = _check_host_caps()
+        assert len(results) == 1 and not results[0].ok
+        assert "sudo sysctl -w net.example.knob=0" in results[0].hint
+
+
 # --- Runtime layout ---
 
 class TestCheckRuntimeLayout:

@@ -226,9 +226,39 @@ def _expand_dependency(dep: Dependency, merged_yaml: dict, dest: Path) -> None:
             guide_path.parent.mkdir(parents=True, exist_ok=True)
             guide_path.write_text(dep.guide)
 
-    # host/mcp are runtime wiring: rendered to deploy/doctor (host) and to each
-    # brain (mcp) by later stages, and carried in the dependency-list hash. They
-    # are deliberately NOT materialized at compose — a snapshot cannot hold them.
+    # host: runtime wiring surfaced to deploy/doctor (#428 Stage 3). Emitted into
+    # the composed agent.yaml as a top-level `host:` list — accreted, de-duped by
+    # the entry's `key=value` spec, and skipped when the team already declares the
+    # same capability inline (leaf wins). Carried into the frozen config so the
+    # runtime doctor and deploy can verify/provision it. NOT materialized into the
+    # image (a snapshot cannot hold a host capability); it is provisioned per host.
+    if dep.host:
+        def _sysctl_key(entry) -> str | None:
+            # The dedup identity is the sysctl KEY, not the whole key=value: two
+            # entries setting the same knob to different values are a conflict, not
+            # two capabilities, so only one may win (leaf/first). Non-sysctl kinds
+            # have no key to dedup on and pass through untouched.
+            if isinstance(entry, dict) and "sysctl" in entry:
+                return str(entry["sysctl"]).split("=", 1)[0].strip()
+            return None
+
+        existing_host = list(merged_yaml.get("host") or [])
+        seen_keys = {k for k in map(_sysctl_key, existing_host) if k}
+        additions: list = []
+        for entry in dep.host:
+            key = _sysctl_key(entry)
+            if key is None:
+                additions.append(entry)  # unknown kind — keep as-is for Stage-N
+                continue
+            if key in seen_keys:
+                continue  # already set (inline team or an earlier dep) — leaf wins
+            seen_keys.add(key)
+            additions.append(entry)
+        if additions:
+            merged_yaml["host"] = existing_host + additions
+
+    # mcp is runtime wiring rendered per brain by Stage 4; still deliberately NOT
+    # materialized at compose — carried only in the dependency-list hash for now.
 
 
 def expand(merged_yaml: dict, dest: Path) -> None:

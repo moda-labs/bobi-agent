@@ -287,6 +287,119 @@ def _write(p: Path, text: str) -> None:
     p.write_text(text)
 
 
+# --- render_team_deps: the image-build seam (#428 Stage 3) ------------------
+
+
+def _team_at(tmp_path: Path, name: str, body: str) -> Path:
+    d = tmp_path / "agents" / name
+    _write(d / "agent.yaml", body)
+    return d
+
+
+def test_render_team_deps_bakes_guide_recipe_and_stamps_dep_hash(tmp_path: Path):
+    from bobi.build_render import DEP_LIST_STAMP, TEAM_DEPS_STAMP
+    from bobi.tool_library import dependency_list_hash, resolve_team_dependencies
+
+    team = _team_at(tmp_path, "gt",
+                    "agent: gt\ntool_library:\n"
+                    "  - name: gstack\n"
+                    "    guide: 'https://example/gstack#install'\n"
+                    "    success: 'gstack --version'\n")
+    line = ('{"ok": true, "recipe": {"npm": ["gstack@1.2.3"], '
+            '"run": ["gstack init"]}, "notes": "ok"}')
+    script = dep_bootstrap.render_team_deps(
+        team, tmp_path, brains=["claude"],
+        agent_runner=_agent_emitting(line), shell_runner=_shell(0))
+    assert script is not None
+    assert "gstack@1.2.3" in script and "gstack init" in script
+    h = dependency_list_hash(resolve_team_dependencies(team, tmp_path))
+    assert f"{h} > {DEP_LIST_STAMP}" in script
+    assert f"> {TEAM_DEPS_STAMP}" in script
+
+
+def test_render_team_deps_pinned_install_needs_no_agent(tmp_path: Path):
+    # A pinned install bakes via compose's build merge; the agent never runs.
+    calls: list = []
+    team = _team_at(tmp_path, "pt",
+                    "agent: pt\ntool_library:\n"
+                    "  - name: tool\n"
+                    "    success: 'tool --version'\n"
+                    "    install:\n      npm: ['tool@2.0.0']\n")
+    script = dep_bootstrap.render_team_deps(
+        team, tmp_path, brains=["claude", "codex"],
+        agent_runner=_agent_emitting("UNUSED", sink=calls), shell_runner=_shell(0))
+    assert script is not None and "tool@2.0.0" in script
+    assert calls == []  # pinned install → no bootstrap agent
+
+
+def test_render_team_deps_generic_team_returns_none(tmp_path: Path):
+    team = _team_at(tmp_path, "plain", "agent: plain\n")
+    assert dep_bootstrap.render_team_deps(team, tmp_path, brains=["claude"]) is None
+
+
+def test_render_team_deps_failed_gate_raises(tmp_path: Path):
+    team = _team_at(tmp_path, "gt",
+                    "agent: gt\ntool_library:\n"
+                    "  - name: gstack\n    guide: g\n    success: 'gstack --version'\n")
+    line = '{"ok": true, "recipe": {"npm": ["gstack@1.2.3"]}}'
+    with pytest.raises(dep_bootstrap.BootstrapError, match="gstack"):
+        dep_bootstrap.render_team_deps(
+            team, tmp_path, brains=["claude"],
+            agent_runner=_agent_emitting(line), shell_runner=_shell(1))  # preflight fails
+
+
+def test_team_has_bake_covers_guide_declarative_and_generic(tmp_path: Path):
+    guide = _team_at(tmp_path, "g",
+                     "agent: g\ntool_library:\n  - name: x\n    guide: g\n    success: s\n")
+    pinned = _team_at(tmp_path, "p",
+                      "agent: p\nbuild:\n  apt: [git]\n")
+    generic = _team_at(tmp_path, "plain", "agent: plain\n")
+    assert dep_bootstrap.team_has_bake(guide, tmp_path) is True
+    assert dep_bootstrap.team_has_bake(pinned, tmp_path) is True
+    assert dep_bootstrap.team_has_bake(generic, tmp_path) is False
+
+
+# --- CLI (image-build entry points) -----------------------------------------
+
+
+def test_cli_check_matches_team_has_bake(tmp_path: Path):
+    guide = _team_at(tmp_path, "g",
+                     "agent: g\ntool_library:\n  - name: x\n    guide: g\n    success: s\n")
+    generic = _team_at(tmp_path, "plain", "agent: plain\n")
+    assert dep_bootstrap._main([str(guide), "--check"]) == 0
+    assert dep_bootstrap._main([str(generic), "--check"]) == 2
+
+
+def test_cli_needs_agent(tmp_path: Path):
+    # Guide-only dep → needs the agent (exit 0); pinned/declarative → not (exit 2).
+    guide = _team_at(tmp_path, "g",
+                     "agent: g\ntool_library:\n  - name: x\n    guide: g\n    success: s\n")
+    pinned = _team_at(tmp_path, "p",
+                      "agent: p\ntool_library:\n  - name: y\n    success: s\n"
+                      "    install:\n      npm: ['y@1']\n")
+    generic = _team_at(tmp_path, "plain", "agent: plain\n")
+    assert dep_bootstrap._main([str(guide), "--needs-agent"]) == 0
+    assert dep_bootstrap._main([str(pinned), "--needs-agent"]) == 2
+    assert dep_bootstrap._main([str(generic), "--needs-agent"]) == 2
+
+
+def test_cli_print_dep_hash(tmp_path: Path, capsys):
+    from bobi.tool_library import dependency_list_hash, resolve_team_dependencies
+
+    team = _team_at(tmp_path, "g",
+                    "agent: g\ntool_library:\n  - name: x\n    guide: g\n    success: s\n")
+    assert dep_bootstrap._main([str(team), "--print-dep-hash"]) == 0
+    out = capsys.readouterr().out.strip()
+    assert out == dependency_list_hash(resolve_team_dependencies(team, tmp_path))
+
+
+def test_cli_render_writes_generic_team_writes_nothing(tmp_path: Path):
+    generic = _team_at(tmp_path, "plain", "agent: plain\n")
+    out = tmp_path / "out.sh"
+    assert dep_bootstrap._main([str(generic), "--render", str(out)]) == 0
+    assert not out.exists()  # generic team → no script
+
+
 def test_resolve_team_dependencies_merges_from_chain(tmp_path: Path):
     (tmp_path / "agents").mkdir()
     _write(tmp_path / "agents" / "base" / "agent.yaml",

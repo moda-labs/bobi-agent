@@ -14,6 +14,12 @@ on:
       - "docker/**"
       - "pyproject.toml"
       - "tests/integration/test_container_image.py"
+      # #428 Stage 3: the agent-bootstrapped dependency e2e drives these.
+      - "tests/integration/test_dep_bootstrap_e2e.py"
+      - "scripts/build-team-images.sh"
+      - "bobi/dep_bootstrap.py"
+      - "bobi/build_render.py"
+      - "bobi/tool_library.py"
       - ".github/workflows/container.yml"
   pull_request:
     branches: [main]
@@ -98,3 +104,19 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: pytest tests/integration/test_container_image.py -m "docker and live" -v --timeout=900
+
+      # #428 Stage 3 acceptance: an ARBITRARY guide-only dependency is bootstrapped
+      # by a live agent on a fresh base image, its recipe frozen through the one
+      # renderer, and the built image really contains a working tool. Drives the CI
+      # entry point (build-team-images.sh) end to end — a base build + a live agent
+      # + a team build, so it runs only under the same live gate as the round-trip
+      # (image changed / same-repo PR / `ci:live` label / push / nightly).
+      - name: Dependency-bootstrap e2e (guide dep → live agent → working image)
+        if: >-
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository ||
+          contains(github.event.pull_request.labels.*.name, 'ci:live')
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: pytest tests/integration/test_dep_bootstrap_e2e.py -m "docker and claude" -v --timeout=3100

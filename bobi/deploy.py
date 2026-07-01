@@ -1018,11 +1018,26 @@ def _render_team_deps_into_context(project_path: Path, cfg: DeployConfig,
         load_composed_team_config,
         render_team_deps_script,
     )
+    from bobi.tool_library import dependency_list_hash, resolve_team_dependencies
     # Read the COMPOSED build (from: chain + tool_library expansion), not the raw
     # leaf — a team may declare its baked CLI via `tool_library:` with no inline
     # build: (#416). Reading raw would skip the bake and leave the requires gate
     # failing on the box.
     tcfg = load_composed_team_config(team_dir, project_path)
+    deps = resolve_team_dependencies(team_dir, project_path)
+    # A guide-only dependency (guide, no pinned install) must be materialized by a
+    # bootstrap agent at BUILD time (#428 Stage 3); `bobi deploy` never runs that
+    # agent (OQ1: bootstrap in CI). Refuse to source-build such a team instead of
+    # silently shipping the generic image without the dependency — the operator
+    # builds + pushes the image in CI and deploys it via `image:` / `team-url:`.
+    agent_deps = [d for d in deps if not d.install and d.guide.strip()]
+    if agent_deps:
+        raise DeployError(
+            f"team '{cfg.team}' declares guide-only dependencies "
+            f"({', '.join(d.name for d in agent_deps)}) that a bootstrap agent "
+            f"must resolve at build time; `bobi deploy` does not run that agent. "
+            f"Build + push the team image in CI (scripts/build-team-images.sh) "
+            f"and deploy it with `image:` or `team-url:`.")
     spec = tcfg.build
     if spec is None or not (spec.apt or spec.npm or spec.run_root or spec.run
                             or spec.verify_requires):
@@ -1031,7 +1046,12 @@ def _render_team_deps_into_context(project_path: Path, cfg: DeployConfig,
     rel = Path("dist") / "team-deps" / f"{team_dir.name}.sh"
     out = ctx / rel
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render_team_deps_script(tcfg))
+    # Stamp the declared dependency-set hash too (#428): deterministic from the
+    # declaration alone (no agent), so a later deploy can detect a changed set and
+    # rebuild. Guide recipes aren't baked here (guarded above), only pinned ones.
+    # "" for a team with no declared deps (matches _local_dep_list_hash).
+    out.write_text(render_team_deps_script(
+        tcfg, dep_list_hash=dependency_list_hash(deps) if deps else ""))
     log.info("rendered team-deps hook for '%s' → %s", team_dir.name, rel)
     return str(rel)
 
@@ -1065,13 +1085,52 @@ def _running_team_deps_hash(app: str) -> str:
     Empty => no stamp: a generic image, or one built before the #379 guard.
     """
     from bobi.build_render import TEAM_DEPS_STAMP
+    return _read_image_stamp(app, TEAM_DEPS_STAMP)
+
+
+def _read_image_stamp(app: str, stamp_path: str) -> str:
+    """Read a stamp file baked into the running instance's image over `fly ssh`.
+
+    Empty => the file is absent (a generic image, or one built before the stamp
+    existed). Shared by the #379 team-deps stamp and the #428 dep-list stamp.
+    """
     proc = subprocess.run(
-        [_fly_bin(), "ssh", "console", "-a", app, "-C", f"cat {TEAM_DEPS_STAMP}"],
+        [_fly_bin(), "ssh", "console", "-a", app, "-C", f"cat {stamp_path}"],
         capture_output=True, text=True,
     )
     if proc.returncode != 0:
         return ""
     return proc.stdout.strip()
+
+
+def _local_dep_list_hash(project_path: Path, cfg: DeployConfig) -> str:
+    """Declared dependency-set hash of the local team package (#428 Stage 3).
+
+    Keyed on the loose declaration (name/success/guide/install/host/mcp), so it
+    catches a changed dependency set — including a guide-only dep or a `host`/`mcp`
+    change — that `team_deps_hash` (resolved build only) would miss. Empty for a
+    team-url package (not local) or a team declaring no dependencies.
+    """
+    if not cfg.team:
+        return ""
+    try:
+        team_dir = resolve_team_dir(project_path, cfg.team)
+    except DeployError:
+        if cfg.team_version:
+            raise
+        return ""
+    from bobi.tool_library import dependency_list_hash, resolve_team_dependencies
+    deps = resolve_team_dependencies(team_dir, project_path)
+    return dependency_list_hash(deps) if deps else ""
+
+
+def _running_dep_list_hash(app: str) -> str:
+    """Declared dependency-set hash baked into the RUNNING image (#428).
+
+    Empty => no stamp: a generic image, or one built before the Stage-3 stamp.
+    """
+    from bobi.build_render import DEP_LIST_STAMP
+    return _read_image_stamp(app, DEP_LIST_STAMP)
 
 
 def _should_rebuild(project_path: Path, cfg: DeployConfig, app: str,
@@ -1093,6 +1152,22 @@ def _should_rebuild(project_path: Path, cfg: DeployConfig, app: str,
     """
     if forced:
         return True
+
+    # #428: a changed DECLARED dependency set (a guide-only dep, a bumped pin, a
+    # host/mcp change) must re-bootstrap + re-snapshot. Checked first because the
+    # dep-list stamp is a superset of the build-deps stamp — it catches drifts the
+    # resolved-build hash can't see. Deterministic from the declaration, so no
+    # agent runs here.
+    local_deps = _local_dep_list_hash(project_path, cfg)
+    if local_deps:
+        running_deps = _running_dep_list_hash(app)
+        if running_deps and running_deps != local_deps:
+            log.info(
+                "team '%s' dependency set changed (running %s != declared %s) — "
+                "rebuilding the image in place to re-bootstrap (#428).", cfg.team,
+                running_deps, local_deps)
+            return True
+
     local = _local_team_deps_hash(project_path, cfg)
     if not local:
         return False  # generic team — nothing baked to drift, no ssh probe
@@ -1141,6 +1216,34 @@ def reconcile_live_secrets(cfg: DeployConfig, project_path: Path, app: str,
     return (sorted(values), pruned)
 
 
+def _surface_host_caps(project_path: Path, cfg: DeployConfig) -> None:
+    """Warn about host capabilities the team's deps need (#428 Stage 3).
+
+    A `host:` capability (a kernel sysctl, a device) is provisioned on the host,
+    never baked into the image and never attempted by the in-container agent. We
+    can't set it from here (the Fly VM's kernel knobs aren't ours to flip during a
+    deploy), so surface the requirement to the operator. Local teams only — a
+    team-url package isn't visible here to resolve.
+    """
+    if not cfg.team:
+        return
+    # Read the COMPOSED top-level `host:` — the same surface doctor verifies — so a
+    # dependency-emitted OR a hand-written inline capability is both surfaced here
+    # and checked at runtime. Best-effort: a resolution/compose error is not this
+    # notice's job to report (the real deploy step below fails on it), so swallow it.
+    try:
+        team_dir = resolve_team_dir(project_path, cfg.team)
+        from bobi.build_render import load_composed_team_config
+        host = load_composed_team_config(team_dir, project_path).host
+    except Exception as exc:
+        log.debug("skipping host-cap notice for '%s': %s", cfg.team, exc)
+        return
+    from bobi.host_caps import describe_for_deploy, parse_host_caps
+    notice = describe_for_deploy(parse_host_caps(host))
+    if notice:
+        log.warning("%s", notice)
+
+
 def deploy(project_path: Path, name: str, overrides: dict | None = None) -> DeployConfig:
     """Provision OR update ONE instance, idempotently.
 
@@ -1149,6 +1252,7 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
     Returns the resolved config (for the caller to report).
     """
     cfg = load_deploy_config(project_path, name, overrides)
+    _surface_host_caps(project_path, cfg)
     app = cfg.app_name
     # Reconcile secrets against what's LIVE on the app, not against a re-supplied
     # env-file: an existing live secret satisfies the required check, so an update

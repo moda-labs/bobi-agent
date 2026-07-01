@@ -815,6 +815,65 @@ def test_generic_team_skips_deps_probe_entirely(repo, recorder, monkeypatch):
     assert any("incoming-team.tar.gz" in c for c in joined)
 
 
+# --- #428 Stage 3: declared dependency-set drift + guide-dep guard ----------
+
+def _with_pinned_dep(repo):
+    """Give the fixture team a pinned tool_library dep (a dep-set + a build)."""
+    pkg = repo / "agents" / "eng-team" / "agent.yaml"
+    pkg.write_text(pkg.read_text()
+                   + "tool_library:\n  - name: mytool\n    success: 'mytool -v'\n"
+                     "    install:\n      npm: ['mytool@1.0.0']\n")
+
+
+def test_dep_list_drift_rebuilds_in_place(repo, recorder, monkeypatch):
+    """#428: a changed DECLARED dependency set must rebuild (re-bootstrap), even
+    when the resolved build-deps hash still matches the running image."""
+    _running_app(monkeypatch)
+    _with_pinned_dep(repo)
+    from bobi.build_render import load_composed_team_config, team_deps_hash
+    spec = load_composed_team_config(repo / "agents" / "eng-team", repo).build
+    # build-deps stamp MATCHES (no #379 drift); only the dep-set stamp is stale.
+    monkeypatch.setattr(D, "_running_team_deps_hash", lambda app: team_deps_hash(spec))
+    monkeypatch.setattr(D, "_running_dep_list_hash", lambda app: "stale00000000")
+    D.deploy(repo, "eng-team")
+    assert any("provision-instance.sh" in c and "--blank" in c
+               for c in _flat(recorder))  # rebuilt in place
+
+
+def test_dep_list_match_takes_fast_path(repo, recorder, monkeypatch):
+    """Dep-set unchanged and build-deps unchanged → hot-push, no rebuild."""
+    _running_app(monkeypatch)
+    _with_pinned_dep(repo)
+    from bobi.build_render import load_composed_team_config, team_deps_hash
+    from bobi.tool_library import (
+        dependency_list_hash,
+        resolve_team_dependencies,
+    )
+    team = repo / "agents" / "eng-team"
+    spec = load_composed_team_config(team, repo).build
+    monkeypatch.setattr(D, "_running_team_deps_hash", lambda app: team_deps_hash(spec))
+    monkeypatch.setattr(D, "_running_dep_list_hash",
+                        lambda app: dependency_list_hash(
+                            resolve_team_dependencies(team, repo)))
+    D.deploy(repo, "eng-team")
+    joined = _flat(recorder)
+    assert not any("provision-instance.sh" in c for c in joined)  # no rebuild
+    assert any("incoming-team.tar.gz" in c for c in joined)
+
+
+def test_guide_only_dep_deploy_is_refused(repo, monkeypatch):
+    """#428: `bobi deploy` never runs the bootstrap agent, so it must refuse to
+    source-build a team with a guide-only dep instead of silently omitting it."""
+    monkeypatch.setattr(D, "fly_app_exists", lambda app: False)
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    pkg = repo / "agents" / "eng-team" / "agent.yaml"
+    pkg.write_text(pkg.read_text()
+                   + "tool_library:\n  - name: gtool\n    guide: 'g'\n    success: 's'\n")
+    with pytest.raises(D.DeployError, match="gtool.*bootstrap agent|guide-only"):
+        D.deploy(repo, "eng-team")
+
+
 def test_binary_mode_pins_bobi_version_as_build_arg(repo, recorder, monkeypatch, tmp_path):
     """Binary mode builds the PyPI image pinned to the installed version."""
     monkeypatch.setattr(D, "fly_app_exists", lambda app: False)

@@ -68,6 +68,51 @@ push_with_retry() {
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# A team with a guide-only dependency (#428) needs its recipe materialized by the
+# bootstrap agent on a FRESH BASE IMAGE (OQ6), so the recipe is faithful to the
+# image, not to the CI host. We build that base image once and reuse it. Brains to
+# verify under (and the API keys they need) come from BOBI_BOOTSTRAP_BRAINS
+# (default: claude); pass the matching *_API_KEY in the environment.
+BOOTSTRAP_BASE_IMG=""
+_relpath() { python -c 'import os,sys;print(os.path.relpath(os.path.abspath(sys.argv[1]),sys.argv[2]))' "$1" "$2"; }
+
+ensure_bootstrap_base() {
+  [ -n "$BOOTSTRAP_BASE_IMG" ] && return 0
+  BOOTSTRAP_BASE_IMG="bobi-bootstrap-base:${TAG:-dev}"
+  echo "== building base image for in-container dependency bootstrap: ${BOOTSTRAP_BASE_IMG} =="
+  docker build --build-arg "BOBI_BUILD=${BUILD_MODE}" "${EXTRA_BUILD_ARGS[@]}" \
+    -t "${BOOTSTRAP_BASE_IMG}" -f "$REPO_ROOT/Dockerfile" "$REPO_ROOT"
+}
+
+# render_team_deps <team_dir> <out_abs> — render the team-deps hook to <out_abs>.
+# Guide-only deps render inside the base image (live agent); everything else
+# renders host-side with no agent (byte-identical to the pre-#428 render).
+render_team_deps() {
+  local dir="$1" out_abs="$2"
+  if python -m bobi.dep_bootstrap "$dir" --needs-agent 2>/dev/null; then
+    ensure_bootstrap_base
+    local rel_dir out_rel brains
+    rel_dir="$(_relpath "$dir" "$REPO_ROOT")"
+    out_rel="$(_relpath "$out_abs" "$REPO_ROOT")"
+    brains="${BOBI_BOOTSTRAP_BRAINS:-claude}"
+    echo "== bootstrapping guide deps for $(basename "$dir") in ${BOOTSTRAP_BASE_IMG} (brains=${brains}) =="
+    # cwd=/tmp (not /repo) so the IMAGE's installed bobi runs, not the mounted
+    # source; the repo is mounted only for the team source + rendered output.
+    # IS_SANDBOX=1 lets the brain CLI run bypassPermissions as root in this
+    # throwaway build container. The recipe is baked below via a normal build.
+    docker run --rm \
+      -e IS_SANDBOX=1 \
+      ${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY} \
+      ${OPENAI_API_KEY:+-e OPENAI_API_KEY} \
+      -v "$REPO_ROOT:/repo" -w /tmp \
+      --entrypoint python \
+      "$BOOTSTRAP_BASE_IMG" \
+      -m bobi.dep_bootstrap "/repo/${rel_dir}" --render "/repo/${out_rel}" --brains "$brains"
+  else
+    python -m bobi.dep_bootstrap "$dir" --render "$out_abs"
+  fi
+}
+
 declare -a DIRS=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -94,14 +139,20 @@ declare -a EXTRA_BUILD_ARGS=()
 built=0
 for dir in "${DIRS[@]}"; do
   team="$(basename "$dir")"
-  if ! python -m bobi.build_render "$dir" --check 2>/dev/null; then
-    echo "skip ${team}: no build spec — deploys on the generic image"
+  # --check bakes-anything gate (#428): a declarative build OR a guide-only
+  # dependency the bootstrap agent must resolve. Wider than build_render --check
+  # (declarative only), so a guide-only team isn't silently skipped.
+  if ! python -m bobi.dep_bootstrap "$dir" --check 2>/dev/null; then
+    echo "skip ${team}: nothing to bake — deploys on the generic image"
     continue
   fi
   # Render the team-deps hook INTO the build context (repo root) so the
-  # Dockerfile's `COPY ${TEAM_DEPS}` can reach it.
+  # Dockerfile's `COPY ${TEAM_DEPS}` can reach it. A guide-only dep is
+  # materialized by the bootstrap agent ON A FRESH BASE IMAGE (OQ6) — so the
+  # resolved recipe is faithful to the image, not the CI host — then frozen
+  # through the ONE renderer. A declarative-only team renders host-side, no agent.
   deps_rel="dist/team-deps/${team}.sh"
-  python -m bobi.build_render "$dir" --out "$REPO_ROOT/${deps_rel}"
+  render_team_deps "$dir" "$REPO_ROOT/${deps_rel}"
 
   img="${REGISTRY}/bobi-${team}"
   echo "== building ${img}:${TAG} (mode=${BUILD_MODE}) =="

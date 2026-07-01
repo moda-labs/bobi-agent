@@ -242,6 +242,73 @@ def test_render_rejects_pure_dockerfile_escape_hatch(tmp_path):
         render_team_deps_script(cfg)
 
 
+# --- #428 Stage 3: resolved recipes + dep-list stamp ------------------------
+
+
+def test_extra_recipes_bake_through_the_one_renderer(tmp_path):
+    # A guide-only dep's agent-resolved recipe re-enters the SAME renderer as an
+    # inline build:, appended after the declarative steps and de-duped.
+    cfg = _team(tmp_path, """
+        agent: t
+        build:
+          apt: [git]
+          npm: ["pinned@1.0.0"]
+    """)
+    script = render_team_deps_script(cfg, extra_recipes=[
+        {"npm": ["gstack@1.2.3"], "run": ["gstack init"]},
+        {"apt": ["git", "curl"]},  # 'git' de-dupes against the declarative apt
+    ])
+    assert "npm install -g pinned@1.0.0 gstack@1.2.3" in script
+    assert "apt-get install -y --no-install-recommends git curl" in script
+    assert "gstack init" in script
+
+
+def test_extra_recipes_do_not_move_the_379_stamp(tmp_path):
+    # The #379 stamp is the DECLARATIVE identity — a (non-deterministic) resolved
+    # recipe must not churn it, or deploy (which never runs the agent) would never
+    # match the running image.
+    cfg = _team(tmp_path, "agent: t\nbuild:\n  apt: [git]\n")
+    plain = render_team_deps_script(cfg)
+    with_recipe = render_team_deps_script(
+        cfg, extra_recipes=[{"npm": ["resolved@9.9.9"]}])
+    stamp = team_deps_hash(cfg.build)
+    assert f"printf '%s\\n' {stamp} > {build_render.TEAM_DEPS_STAMP}" in plain
+    assert f"printf '%s\\n' {stamp} > {build_render.TEAM_DEPS_STAMP}" in with_recipe
+    assert "resolved@9.9.9" in with_recipe and "resolved@9.9.9" not in plain
+
+
+def test_guide_only_team_renders_from_recipes_alone(tmp_path):
+    # A guide-only team has NO build: spec (no pinned install); the resolved recipe
+    # is its whole build. verify: requires still re-runs the team's checks.
+    cfg = _team(tmp_path, """
+        agent: t
+        requires:
+          - name: gstack
+            check: "gstack --version"
+    """)
+    assert cfg.build is None
+    script = render_team_deps_script(
+        cfg, extra_recipes=[{"npm": ["gstack@1.2.3"]}],
+        dep_list_hash="abc123def456")
+    assert "npm install -g gstack@1.2.3" in script
+    assert "gstack --version" in script  # verify re-run
+    assert f"abc123def456 > {build_render.DEP_LIST_STAMP}" in script
+
+
+def test_dep_list_hash_stamp_is_opt_in(tmp_path):
+    # A bare render (pre-Stage-3 callers) stamps only the #379 hash, byte-for-byte.
+    cfg = _team(tmp_path, "agent: t\nbuild:\n  apt: [git]\n")
+    assert build_render.DEP_LIST_STAMP not in render_team_deps_script(cfg)
+    withhash = render_team_deps_script(cfg, dep_list_hash="deadbeef")
+    assert f"deadbeef > {build_render.DEP_LIST_STAMP}" in withhash
+
+
+def test_render_still_rejects_empty_when_no_recipes(tmp_path):
+    cfg = _team(tmp_path, "agent: t\n")
+    with pytest.raises(ValueError):
+        render_team_deps_script(cfg, extra_recipes=[])
+
+
 def test_main_check_exit_codes(tmp_path):
     (tmp_path / "agent.yaml").write_text("agent: t\nbuild:\n  apt: [git]\n")
     assert build_render._main([str(tmp_path), "--check"]) == 0
