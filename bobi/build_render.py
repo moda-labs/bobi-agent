@@ -210,6 +210,17 @@ def load_composed_team_config(team_dir: Path, project_path: Path) -> Config:
         return Config._parse(dest / "agent.yaml")
 
 
+def _workspace_root(team_dir: Path) -> Path:
+    """The root `resolve_chain` composes a team against.
+
+    A team lives at ``<root>/agents/<name>``, so its ``from:`` refs and catalog
+    resolve under ``<root>``. When a team dir is not under ``agents/`` (ad-hoc or
+    test layouts) its own parent is the root.
+    """
+    parent = team_dir.parent
+    return parent.parent if parent.name == "agents" else parent
+
+
 def _main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -230,7 +241,13 @@ def _main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    cfg = load_team_config(args.team_dir)
+    # Read the COMPOSED config (from: chain + tool_library/dependency expansion),
+    # exactly as `bobi deploy` bakes it — NOT the raw leaf. A team that declares
+    # its CLI via `tool_library:` (or a `brain: codex` that implies the codex
+    # dependency) carries no inline `build:` on the leaf, so a raw read would skip
+    # the bake and the CI verify gate would never exercise it. Composing here makes
+    # the CI build gate and the deploy image agree byte-for-byte. (#428)
+    cfg = load_composed_team_config(args.team_dir, _workspace_root(args.team_dir))
     if args.check:
         return 0 if cfg.build is not None else 2
     if cfg.build is None:

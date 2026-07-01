@@ -1,12 +1,15 @@
-"""Tests for the reusable tool library (#416) — `kind: cli` + catalog/resolver.
+"""Tests for the unified dependency library (#428, was #416) — `tool_library:`
+catalog refs + inline mappings, resolver, and dependency-list hash.
 
-Covers the verification plan of the tool library (#416):
+Covers the verification plan:
   * pin de-dup across `from:` layers (the headline — proves three-place drift is
     gone),
   * expansion basics, local-wins guide, explicit-wins requires,
   * `tool_library` union across layers + key consumed at compose,
-  * unknown entry + unsupported-kind (the `EXPANDERS` seam) errors,
-  * pin lint (no floating refs; `requires.fix` pin agrees with `build` pin),
+  * unknown entry + missing-`success` validation (the required contract),
+  * inline mapping dependencies (declared directly, no catalog entry),
+  * dependency-list hashing/change-detection (mirror of `team_deps_hash`),
+  * pin lint (no floating refs; `fix` pin agrees with `install` pin),
   * the #452-style regression bar: `tool_library: [...]` composes byte-identical
     to the same team with those surfaces hand-written inline.
 """
@@ -221,19 +224,57 @@ def test_unknown_entry_raises_listing_available(project):
     assert "codex" in msg and "venn" in msg
 
 
-def test_unsupported_kind_raises_naming_owner(project, tmp_path, monkeypatch):
-    """An entry whose kind has no registered EXPANDER raises ComposeError naming
-    the kind + owning issue — the seam #398/#428 plug into, NOT a hardcoded
-    `if kind != 'cli'`."""
+def test_catalog_entry_missing_success_rejected(tmp_path, monkeypatch):
+    """`success` is the required contract — a catalog entry without one is
+    rejected with a clear, self-correcting error (no more `kind` axis)."""
     cat = tmp_path / "cat"
-    _write(cat / "futuristic" / "tool.yaml", "kind: mcp\nrequires: []\nbuild: {}\n")
-    _write(cat / "futuristic" / "guide.md", "x")
+    _write(cat / "halfbaked" / "tool.yaml", "install:\n  apt: [foo]\n")
+    _write(cat / "halfbaked" / "guide.md", "x")
     monkeypatch.setattr(tool_library, "CATALOG_DIR", cat)
 
     with pytest.raises(compose.ComposeError) as ei:
-        tool_library.expand({"tool_library": ["futuristic"]}, tmp_path / "dest")
+        tool_library.load_entry("halfbaked")
     msg = str(ei.value)
-    assert "mcp" in msg and "#398" in msg
+    assert "halfbaked" in msg and "success" in msg
+
+
+def test_inline_dependency_missing_success_rejected(project):
+    """An inline `tool_library:` mapping must also carry `success`."""
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'tool_library:\n'
+                 '  - name: gizmo\n'
+                 '    install:\n'
+                 '      apt: [gizmo]\n')
+    with pytest.raises(compose.ComposeError) as ei:
+        _compose(project, leaf)
+    msg = str(ei.value)
+    assert "gizmo" in msg and "success" in msg
+
+
+def test_inline_dependency_expands_like_a_catalog_entry(project):
+    """An inline mapping dependency contributes the same surfaces a catalog entry
+    does: a `requires` check from `success`, a `build` from `install`, and a
+    `tools/<name>.md` from `guide`."""
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'tool_library:\n'
+                 '  - name: gizmo\n'
+                 '    success: "command -v gizmo"\n'
+                 '    why: "Use the gizmo CLI."\n'
+                 '    guide: "Run gizmo --help."\n'
+                 '    install:\n'
+                 '      apt: [gizmo-pkg]\n')
+    dest = _compose(project, leaf)[0]
+    cfg = _agent_yaml(dest)
+
+    gizmo = [r for r in cfg["requires"] if r["name"] == "gizmo"]
+    assert len(gizmo) == 1
+    assert gizmo[0]["check"] == "command -v gizmo"
+    assert gizmo[0]["why"] == "Use the gizmo CLI."
+    assert cfg["build"]["apt"] == ["gizmo-pkg"]
+    assert (dest / "tools" / "gizmo.md").read_text() == "Run gizmo --help."
+    assert "tool_library" not in cfg
 
 
 # --- pin lint (extends the #380 reproducibility convention) -------------------
@@ -253,23 +294,22 @@ def test_no_floating_refs_in_catalog():
             assert tok not in text, f"{name}: floating ref {tok}"
 
 
-def test_requires_fix_pin_agrees_with_build_pin():
-    """The pin co-located in `requires.fix` and `build` within one entry must
-    agree — the one remaining co-location is guarded, not scattered (§4.1)."""
+def test_fix_pin_agrees_with_install_pin():
+    """The pin co-located in `fix` and `install` within one entry must agree —
+    the one remaining co-location is guarded, not scattered (§4.1)."""
     pins = {"codex": CODEX_PIN, "venn": VENN_PIN, "openai": OPENAI_PIN}
     for name, pin in pins.items():
         entry = tool_library.load_entry(name)
-        build_text = yaml.dump(entry.build)
-        assert pin in build_text, f"{name}: pin {pin} missing from build"
-        fix_text = " ".join(r.get("fix", "") for r in entry.requires)
-        assert pin in fix_text, f"{name}: requires.fix pin disagrees with build"
+        install_text = yaml.dump(entry.install)
+        assert pin in install_text, f"{name}: pin {pin} missing from install"
+        assert pin in entry.fix, f"{name}: fix pin disagrees with install"
 
 
 def test_codex_requires_accepts_subscription_auth_without_api_key(tmp_path, monkeypatch):
     """Existing ~/.codex/auth.json is enough; subscription-auth containers must
     not need OPENAI_API_KEY in the environment."""
     entry = tool_library.load_entry("codex")
-    check = entry.requires[0]["check"]
+    check = entry.success
     home = tmp_path / "home"
     bin_dir = tmp_path / "bin"
     log = tmp_path / "codex.log"
@@ -305,7 +345,7 @@ def test_codex_requires_accepts_subscription_auth_without_api_key(tmp_path, monk
 
 def test_codex_requires_subscription_does_not_overwrite_oauth_auth(tmp_path, monkeypatch):
     entry = tool_library.load_entry("codex")
-    check = entry.requires[0]["check"]
+    check = entry.success
     home = tmp_path / "home"
     bin_dir = tmp_path / "bin"
     (home / ".codex").mkdir(parents=True)
@@ -336,7 +376,7 @@ def test_codex_requires_subscription_does_not_overwrite_oauth_auth(tmp_path, mon
 
 def test_codex_requires_subscription_rejects_api_key_auth_file(tmp_path, monkeypatch):
     entry = tool_library.load_entry("codex")
-    check = entry.requires[0]["check"]
+    check = entry.success
     home = tmp_path / "home"
     bin_dir = tmp_path / "bin"
     (home / ".codex").mkdir(parents=True)
@@ -366,7 +406,7 @@ def test_codex_requires_subscription_rejects_api_key_auth_file(tmp_path, monkeyp
 
 def test_codex_requires_subscription_fails_without_oauth_auth(tmp_path, monkeypatch):
     entry = tool_library.load_entry("codex")
-    check = entry.requires[0]["check"]
+    check = entry.success
     home = tmp_path / "home"
     bin_dir = tmp_path / "bin"
     home.mkdir()
@@ -396,7 +436,7 @@ def test_codex_requires_api_key_mode_fails_without_api_key_or_auth(
     monkeypatch,
 ):
     entry = tool_library.load_entry("codex")
-    check = entry.requires[0]["check"]
+    check = entry.success
     home = tmp_path / "home"
     bin_dir = tmp_path / "bin"
     home.mkdir()
@@ -424,7 +464,7 @@ def test_codex_requires_api_key_mode_fails_without_api_key_or_auth(
 
 def test_codex_requires_allows_binary_probe_during_build_verify(tmp_path, monkeypatch):
     entry = tool_library.load_entry("codex")
-    check = entry.requires[0]["check"]
+    check = entry.success
     home = tmp_path / "home"
     bin_dir = tmp_path / "bin"
     log = tmp_path / "codex.log"
@@ -458,11 +498,56 @@ def test_codex_requires_allows_binary_probe_during_build_verify(tmp_path, monkey
 
 def test_codex_requires_fix_preserves_subscription_login_path():
     entry = tool_library.load_entry("codex")
-    fix = entry.requires[0]["fix"]
+    fix = entry.fix
 
     assert '[ "${BOBI_AUTH:-api_key}" != "subscription" ]' in fix
     assert '[ -n "${OPENAI_API_KEY:-}" ]' in fix
     assert "codex auth login" in fix
+
+
+# --- dependency-list hash (re-bootstrap change-detection) --------------------
+
+
+def _dep(name, success="ok", **kw):
+    return tool_library.Dependency(name=name, success=success, **kw)
+
+
+def test_dependency_list_hash_is_stable():
+    """Same declared set → same hash (the warm-boot skip key)."""
+    deps = [_dep("codex", install={"npm": ["@openai/codex@0.142.0"]}),
+            _dep("venn", guide="x")]
+    assert tool_library.dependency_list_hash(deps) == \
+        tool_library.dependency_list_hash(list(deps))
+
+
+def test_dependency_list_hash_is_order_independent():
+    """The set's identity, not its declaration order — reordering must not churn
+    the snapshot key."""
+    a = [_dep("codex"), _dep("venn")]
+    b = [_dep("venn"), _dep("codex")]
+    assert tool_library.dependency_list_hash(a) == \
+        tool_library.dependency_list_hash(b)
+
+
+def test_dependency_list_hash_changes_on_materialization_change():
+    """A change to any field a bootstrap would act on (success/guide/install/
+    host/mcp) changes the hash, so a changed set triggers re-bootstrap."""
+    base = [_dep("codex", install={"npm": ["@openai/codex@0.142.0"]})]
+    assert tool_library.dependency_list_hash(base) != \
+        tool_library.dependency_list_hash(
+            [_dep("codex", install={"npm": ["@openai/codex@0.143.0"]})])
+    assert tool_library.dependency_list_hash(base) != \
+        tool_library.dependency_list_hash([_dep("codex", success="different")])
+    assert tool_library.dependency_list_hash(base) != \
+        tool_library.dependency_list_hash(base + [_dep("venn")])
+
+
+def test_dependency_list_hash_ignores_documentation_fields():
+    """`why`/`fix` are documentation/legacy-doctor hints — they do not change
+    what is materialized, so they must not churn the snapshot key."""
+    assert tool_library.dependency_list_hash([_dep("codex")]) == \
+        tool_library.dependency_list_hash(
+            [_dep("codex", why="a reason", fix="a repair")])
 
 
 # --- #452-style regression bar -----------------------------------------------
