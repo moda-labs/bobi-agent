@@ -17,7 +17,7 @@ optional:
 | `guide` | no | How to materialize / use it (a link or text). Becomes `tools/<name>.md`. |
 | `install` | no | Explicit **pinned** steps (`apt`/`npm`/`run_root`/`run`) - "do exactly this". |
 | `host` | no | A host capability the container cannot grant itself (a kernel sysctl, a device). Runtime wiring, never baked. |
-| `mcp` | no | An MCP server's connection spec, rendered per brain (Stage 4). |
+| `mcp` | no | An MCP server's connection spec (the SDK-native `{name: spec}` shape), rendered into each brain's config and verified by an `initialize` handshake. |
 | `why` / `fix` | no | Documentation + a runtime repair hint carried to the `requires:` doctor surface. |
 
 ## Declaring a dependency on a team
@@ -119,6 +119,43 @@ inline (an explicit team `requires:` / `build:` / `host:` wins).
 - **`tools/<name>.md`** - the guide, unless the team already ships that file.
 - **`host:`** - emitted as a top-level list so deploy surfaces it and doctor
   checks it (see `bobi/host_caps.py`); never materialized into the image.
+- **`mcp_servers:`** - each dependency's `mcp:` spec merged into a top-level
+  `mcp_servers:` dict (leaf-wins per server name), rendered per brain at runtime
+  (see below).
+
+## MCP servers, rendered per brain
+
+An `mcp:` field is an MCP server's connection spec in the SDK-native shape - a
+`{name: spec}` mapping where each spec is `type: stdio` (`command`/`args`/`env`)
+or `type: http|sse` (`url`/`headers`). Compose merges every dependency's `mcp:`
+into the composed `agent.yaml`'s top-level `mcp_servers:`, so a team-brought MCP
+server is declared once (in a catalog entry or inline) and wired into whichever
+brain the team runs on. An explicit team `mcp_servers.<name>` overrides a
+dependency's spec for that name (leaf wins); two dependencies contributing the
+same name resolve first-wins.
+
+Each brain consumes that one `mcp_servers:` differently:
+
+- **Claude** reads it from a per-session option - `subagent.py` splats
+  `cfg.mcp_servers` into the SDK at every agent spawn. The compose-time emission
+  is all Claude needs.
+- **Codex** reads MCP servers from `~/.codex/config.toml` (nothing rides the CLI
+  invocation), so the codex brain renders the effective `mcp_servers` into that
+  file before the first `codex exec` (`bobi/brain/codex_config.py`). Only the
+  bobi-owned `mcp_servers` block is managed; any other config keys survive.
+
+Verification is a real `initialize` handshake, per brain, so a broken server
+fails preflight instead of silently degrading:
+
+- **Claude** is probed through the SDK's `get_mcp_status` (existing path).
+- **Codex** exposes a `get_mcp_status` that runs a direct `initialize` +
+  `tools/list` against each configured server (`bobi/mcp_handshake.py`), keeping
+  `validate._async_probe_mcp` a single loop across brains. A stdio server whose
+  binary isn't installed, or an unreachable URL, is a blocking failure.
+
+A team-brought stdio server may also need its server binary installed - declare
+that with the same `install:` / guide-bootstrap the rest of the dependency model
+uses.
 
 ## Lifecycle and snapshot
 

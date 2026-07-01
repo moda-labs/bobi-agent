@@ -257,8 +257,22 @@ def _expand_dependency(dep: Dependency, merged_yaml: dict, dest: Path) -> None:
         if additions:
             merged_yaml["host"] = existing_host + additions
 
-    # mcp is runtime wiring rendered per brain by Stage 4; still deliberately NOT
-    # materialized at compose — carried only in the dependency-list hash for now.
+    # mcp: an MCP server's connection spec (#428 Stage 4). Emitted into the
+    # composed agent.yaml as a top-level `mcp_servers:` dict (the SDK-native
+    # `{name: spec}` shape). Merged per-server-name, leaf-wins: an explicit team
+    # `mcp_servers.<name>` (already merged as the leaf, last-wins) overrides a
+    # dependency's `mcp:` for that name wholesale — a deliberate override, never
+    # field-merged. Two dependencies contributing the same name → first wins
+    # (mirrors the requires/host escape hatches above). The existing subagent.py
+    # pass-through carries it to Claude unchanged; the codex brain renders it into
+    # `~/.codex/config.toml` at runtime.
+    if dep.mcp:
+        existing_mcp = dict(merged_yaml.get("mcp_servers") or {})
+        for server_name, spec in dep.mcp.items():
+            if server_name in existing_mcp:
+                continue  # team or an earlier dep already declared it — leaf wins
+            existing_mcp[server_name] = spec
+        merged_yaml["mcp_servers"] = existing_mcp
 
 
 def expand(merged_yaml: dict, dest: Path) -> None:

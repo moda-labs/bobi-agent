@@ -171,3 +171,59 @@ async def test_model_override_adds_flag():
     await s.connect("hi")
     await _drain(s)
     assert "-m" in sink[0][0] and "gpt-5-codex" in sink[0][0]
+
+
+# --- MCP config rendering (#428 Stage 4) ------------------------------------
+
+
+def test_make_session_renders_mcp_config_toml(tmp_path, monkeypatch):
+    """A codex session with `mcp_servers` in options renders ~/.codex/config.toml
+    (Codex reads MCP from disk, not the CLI). Uses CODEX_HOME to redirect."""
+    import tomllib
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    CodexBrain().make_session(
+        cwd="/w", system_prompt={"append": "S"},
+        options={"mcp_servers": {
+            "weather": {"type": "stdio", "command": "/opt/weather"},
+        }},
+    )
+    data = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert data["mcp_servers"]["weather"]["command"] == "/opt/weather"
+
+
+def test_make_session_without_mcp_writes_nothing(tmp_path, monkeypatch):
+    """No `mcp_servers` in options → no config.toml touched (no MCP need)."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"}, options={})
+    assert not (tmp_path / "config.toml").exists()
+
+
+def test_make_session_render_failure_propagates(tmp_path, monkeypatch):
+    """A config-render error surfaces rather than silently degrading: a codex team
+    that declares MCP but can't render config.toml would otherwise pass preflight
+    (the probe checks the in-memory spec) and then run MCP-less at runtime."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "bobi.brain.codex_config.write_codex_config",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError, match="disk full"):
+        CodexBrain().make_session(
+            cwd="/w", system_prompt={"append": "S"},
+            options={"mcp_servers": {"x": {"command": "/x"}}})
+
+
+def test_make_session_clears_stale_managed_block(tmp_path, monkeypatch):
+    """A codex team that dropped its MCP deps clears a previously-rendered block
+    (no options.mcp_servers, but a bobi-managed block on disk)."""
+    import tomllib
+    from bobi.brain import codex_config
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    # Prior render leaves a managed block on the durable config.
+    codex_config.write_codex_config({"old": {"command": "/old"}}, home=tmp_path)
+    assert codex_config.MANAGED_BEGIN in (tmp_path / "config.toml").read_text()
+
+    CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"}, options={})
+    data = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert "mcp_servers" not in data
