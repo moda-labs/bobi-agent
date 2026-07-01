@@ -21,48 +21,25 @@ _PACKAGE_DIR = Path(__file__).parent
 
 def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     """Print a startup summary with environment info."""
-    from .config import Config
+    from bobi.service import build_startup_info
 
-    cfg = Config.load(project_path)
+    info = build_startup_info(project_path, pid, log_file)
 
     W = 16  # column width for labels
     lines = []
-    lines.append(f"bobi v{__version__}")
-    agent_name = paths.agent_name_for_root(project_path)
-    lines.append(f"  {'slot':<{W}}{agent_name} ({project_path})")
-    lines.append(f"  {'pid':<{W}}{pid}")
-
-    if cfg.agent:
-        lines.append(f"  {'package':<{W}}{cfg.agent}")
-
-    if cfg.event_server_url:
-        label = "remote" if not cfg.event_server_url.startswith("http://localhost") else "local"
-        lines.append(f"  {'event server':<{W}}{cfg.event_server_url} ({label})")
-    else:
-        lines.append(f"  {'event server':<{W}}localhost:8080 (auto)")
-
-    try:
-        import logging as _lg
-        _lg.getLogger("bobi.workflow").setLevel(_lg.WARNING)
-        from bobi.workflow.triggers import WorkflowDispatcher
-        dispatcher = WorkflowDispatcher()
-        dispatcher.load_all_workflows(project_path, agent_name=cfg.agent)
-        wf_names = sorted(set(wf.name for wf, _ in dispatcher.workflows))
-        if wf_names:
-            lines.append(f"  {'workflows':<{W}}{', '.join(wf_names)}")
-    except Exception:
-        pass
-
-    try:
-        from bobi.monitors.registry import MonitorRegistry
-        registry = MonitorRegistry.load(project_path=project_path)
-        mon_names = sorted(m.name for m in registry.all_monitors())
-        if mon_names:
-            lines.append(f"  {'monitors':<{W}}{', '.join(mon_names)}")
-    except Exception:
-        pass
-
-    lines.append(f"  {'logs':<{W}}{log_file}")
+    lines.append(f"bobi v{info.version}")
+    lines.append(f"  {'slot':<{W}}{info.agent_name} ({info.project_path})")
+    lines.append(f"  {'pid':<{W}}{info.pid}")
+    if info.package:
+        lines.append(f"  {'package':<{W}}{info.package}")
+    lines.append(
+        f"  {'event server':<{W}}{info.event_server_url} ({info.event_server_label})"
+    )
+    if info.workflows:
+        lines.append(f"  {'workflows':<{W}}{', '.join(info.workflows)}")
+    if info.monitors:
+        lines.append(f"  {'monitors':<{W}}{', '.join(info.monitors)}")
+    lines.append(f"  {'logs':<{W}}{info.log_file}")
 
     click.echo("\n".join(lines))
 
@@ -281,6 +258,11 @@ def _run_from_config(project_path: Path, cfg: "Config",
     and SIGTERM triggers a graceful shutdown within the container's grace
     period.
     """
+    from bobi.service import run_manager_from_config
+    return run_manager_from_config(
+        project_path, cfg, extra_subscribe=extra_subscribe, foreground=foreground
+    )
+
     import atexit
     import signal
     import threading
@@ -442,33 +424,63 @@ def start(foreground, fresh, subscribe):
         bobi agent eng start --foreground
         bobi agent eng start --subscribe linear:MOD
     """
-    from bobi.config import Config
+    from bobi.service import (
+        AlreadyRunning,
+        LaunchTimeout,
+        NestedRuntimeError,
+        NoAgentInstalled,
+        PreflightFailed,
+        run_team_foreground,
+        spawn_team,
+    )
+
     project_path = _detect_project_root()
 
-    cfg = Config.load(project_path)
-    if not cfg.agent:
+    click.echo("Running preflight checks...")
+    try:
+        if foreground:
+            root = logging.getLogger()
+            root.handlers = [
+                h for h in root.handlers if not isinstance(h, logging.FileHandler)
+            ]
+            run_team_foreground(project_path, fresh=fresh, subscribe=list(subscribe))
+            return
+        result = spawn_team(project_path, fresh=fresh, subscribe=list(subscribe))
+    except NoAgentInstalled as exc:
         click.echo("No agent installed. Run `bobi agents install <path> --name <name>` first.", err=True)
-        available = _list_agent_packs(project_path)
-        if available:
+        if exc.available:
             click.echo("Available packs to install:", err=True)
-            for name, source in available:
+            for name, source in exc.available:
                 click.echo(f"  {name:20s} [{source}]", err=True)
         raise SystemExit(1)
-
-    extra_subscribe = list(subscribe)
-
-    click.echo("Running preflight checks...")
-    # Run preflight checks in foreground before forking
-    from bobi.validate import validate_config
-    validation = validate_config(project_path)
-    if validation.checks:
+    except PreflightFailed as exc:
+        validation = exc.validation
         click.echo("Preflight:")
         click.echo(validation.format())
-        if not validation.ok:
-            click.echo("\nStartup blocked — fix the issues above.", err=True)
-            raise SystemExit(1)
-        # Proceeding path only: warn about optional services that failed
-        # preflight so a degraded start isn't mistaken for a clean one.
+        click.echo("\nStartup blocked — fix the issues above.", err=True)
+        raise SystemExit(1)
+    except AlreadyRunning as exc:
+        click.echo(
+            f"Already running (pid {exc.pid}). "
+            f"Use `bobi agent {paths.agent_name_for_root(project_path)} restart`."
+        )
+        return
+    except NestedRuntimeError as exc:
+        click.echo(
+            f"A manager is already running at {exc.ancestor} (pid {exc.pid}). "
+            f"Sub-agents in {paths.agent_name_for_root(project_path)} will register with that runtime. "
+            f"Stop the ancestor first if you need an independent instance here.",
+            err=True,
+        )
+        raise SystemExit(1)
+    except LaunchTimeout as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1)
+
+    validation = result.validation
+    if getattr(validation, "checks", None):
+        click.echo("Preflight:")
+        click.echo(validation.format())
         degraded = [c for c in validation.checks if not c.ok and not c.required]
         if degraded:
             names = ", ".join(c.name for c in degraded)
@@ -477,76 +489,11 @@ def start(foreground, fresh, subscribe):
                 f"until configured: {names}.",
                 err=True,
             )
-
-    pid_path = paths.manager_pid_path(project_path)
-    pid_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # In foreground/PID-1 mode (containers), skip the "already running"
-    # check — stale PID files from a previous container run are expected
-    # and the new process IS the only manager.
-    if not foreground and pid_path.exists():
-        try:
-            pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)
-            click.echo(f"Already running (pid {pid}). Use `bobi agent {paths.agent_name_for_root(project_path)} restart`.")
-            return
-        except (ProcessLookupError, ValueError):
-            pid_path.unlink(missing_ok=True)
-
-    # Prevent nested runtimes
-    from bobi.sdk import find_runtime_root
-    ancestor = find_runtime_root(project_path.parent)
-    if ancestor and ancestor != project_path:
-        ancestor_pid_path = paths.manager_pid_path(ancestor)
-        try:
-            anc_pid = int(ancestor_pid_path.read_text().strip())
-        except (ValueError, OSError):
-            anc_pid = 0
-        click.echo(
-            f"A manager is already running at {ancestor} (pid {anc_pid}). "
-            f"Sub-agents in {paths.agent_name_for_root(project_path)} will register with that runtime. "
-            f"Stop the ancestor first if you need an independent instance here.",
-            err=True,
-        )
-        raise SystemExit(1)
-
     if fresh:
-        _clear_manager_session(project_path)
-    else:
-        from bobi.sdk import check_image_rotation
-        if check_image_rotation(_manager_session_name(project_path), project_path):
-            click.echo("Installed image changed — rotating session.")
-
-    if foreground:
-        # In foreground/container mode, log to stdout/stderr only —
-        # drop file handlers and keep stream handlers.
-        root = logging.getLogger()
-        root.handlers = [h for h in root.handlers
-                         if not isinstance(h, logging.FileHandler)]
-        _run_from_config(project_path, cfg, extra_subscribe=extra_subscribe,
-                         foreground=True)
-    else:
-        log_file = _project_state_dir(project_path) / "manager.log"
-        env = os.environ.copy()
-        venv_bin = str(Path(sys.executable).parent)
-        local_bin = str(Path.home() / ".local" / "bin")
-        env["PATH"] = f"{venv_bin}:{local_bin}:{env.get('PATH', '')}"
-        env["PYTHONUNBUFFERED"] = "1"
-        cmd = [
-            sys.executable, "-m", "bobi.cli",
-            "agent", paths.agent_name_for_root(project_path), "start", "--foreground",
-        ]
-        if fresh:
-            cmd.append("--fresh")
-        for s in subscribe:
-            cmd.extend(["--subscribe", s])
-        with open(log_file, "a") as lf:
-            proc = subprocess.Popen(
-                cmd, stdout=lf, stderr=lf,
-                cwd=str(project_path), env=env,
-                start_new_session=True,
-            )
-        _print_startup_info(project_path, proc.pid, log_file)
+        click.echo("Cleared manager session — starting fresh.")
+    elif result.image_rotated:
+        click.echo("Installed image changed — rotating session.")
+    _print_startup_info(project_path, result.startup.pid, result.startup.log_file)
 
 
 @main.command(context_settings={"ignore_unknown_options": True})
@@ -1247,13 +1194,8 @@ def _manager_session_name(project_path: Path, role: str | None = None) -> str:
     The single definition of the manager naming convention — start, --fresh,
     and transcript lookup all resolve the same name through here.
     """
-    if role is None:
-        from bobi.config import Config
-        try:
-            role = Config.load(project_path).entry_point or "manager"
-        except Exception:
-            role = "manager"
-    return f"bobi-{paths.agent_name_for_root(project_path)}-{role}"
+    from bobi.service import manager_session_name
+    return manager_session_name(project_path, role)
 
 
 def _clear_manager_session(project_path: Path) -> None:
@@ -1264,14 +1206,8 @@ def _clear_manager_session(project_path: Path) -> None:
     api_key points at a now-orphaned deployment in the old bubble) would split
     the restarted sessions across bubbles.
     """
-    import shutil
-    from bobi import paths
-    from bobi.config import clear_bubble_state
-    from bobi.sdk import save_session_id
-    save_session_id(_manager_session_name(project_path), "")
-    clear_bubble_state(project_path)
-    for sub in ("deployments", "cursors"):
-        shutil.rmtree(paths.state_path(project_path) / sub, ignore_errors=True)
+    from bobi.service import clear_manager_session
+    clear_manager_session(project_path)
     click.echo("Cleared manager session — starting fresh.")
 
 
@@ -1341,22 +1277,31 @@ def stop(force):
         _systemctl("stop")
         return
 
-    pid_path = _find_pid_path()
-    if pid_path:
-        _stop_manager_pid(pid_path, force)
+    project_path = _ensure_root_bound()
+    from bobi.service import stop_team
+
+    result = stop_team(project_path, force=force)
+    if result.invalid_pid:
+        click.echo("Invalid PID file — cleaning up.")
+    elif result.stale:
+        click.echo(f"Process {result.pid} not found — cleaning up stale PID file.")
+    elif result.permission_denied:
+        click.echo(f"No permission to signal process {result.pid}.", err=True)
+    elif result.stopped:
+        click.echo(f"Stopping bobi (pid {result.pid})...")
+        click.echo("Stopped.")
+    elif result.killed:
+        click.echo(f"Stopping bobi (pid {result.pid})...")
+        click.echo("Killed.")
+    elif result.still_running:
+        click.echo(f"Stopping bobi (pid {result.pid})...")
+        click.echo("Process didn't exit — try: bobi agent <name> stop --force")
     else:
         click.echo("No PID file found — bobi is not running.")
 
-    project_path = _ensure_root_bound()
-    from bobi.kb.embedder import stop as stop_embedder
-    stop_embedder()
-
-    # Check if the local event server is still running
-    from bobi.events.server import health
-    es_port = _selected_local_event_server_port(project_path)
-    if health(f"http://localhost:{es_port}"):
+    if result.event_server_running:
         click.echo(
-            f"Event server is still running on port {es_port}. "
+            f"Event server is still running on port {result.event_server_port}. "
             "Use `bobi agent <name> event-server stop` to stop it."
         )
 
@@ -1399,29 +1344,9 @@ def _resolve_address(to: str | None) -> str | None:
     package's entry_point role, then the literal role "manager".
     Anything else → used as-is (exact session name).
     """
-    from bobi.sdk import get_registry, set_project_root
-
     project_path = _detect_project_root()
-    if project_path:
-        set_project_root(project_path)
-
-    registry = get_registry()
-    if to is None or to == "manager":
-        from bobi.config import Config
-        entry_point = ""
-        if project_path:
-            entry_point = Config.load(project_path).entry_point
-        roles = [r for r in dict.fromkeys([entry_point, "manager"]) if r]
-        for role in roles:
-            managers = registry.get_by_role(role)
-            active = [m for m in managers
-                      if m.status in ("idle", "running", "starting")]
-            if active:
-                return active[0].name
-            if managers:
-                return managers[0].name
-        return None
-    return to
+    from bobi.service import resolve_address
+    return resolve_address(project_path, to)
 
 
 @main.command()
@@ -1437,22 +1362,23 @@ def message(text, to, wait, timeout):
         bobi agent eng message --to eng-42-implement "try a different approach"
         bobi agent eng message --to manager "status?" --wait
     """
-    from bobi.inbox import deliver
+    from bobi.service import MessageDeliveryError, send_message
 
-    address = _resolve_address(to)
-    if not address:
-        target = to or "manager"
-        click.echo(f"No active session found for '{target}'.", err=True)
-        raise SystemExit(1)
-
-    ok, response = deliver(address, text, sender="cli", wait=wait, timeout=timeout)
-    if ok:
-        if wait and response:
-            click.echo(response)
+    project_path = _detect_project_root()
+    try:
+        result = send_message(
+            project_path, text, wait=wait, session=to, timeout=timeout, sender="cli"
+        )
+        if wait and result.response:
+            click.echo(result.response)
         else:
-            click.echo(f"Sent to {address}")
-    else:
-        click.echo(f"Failed: {response}", err=True)
+            click.echo(f"Sent to {result.address}")
+    except MessageDeliveryError as exc:
+        msg = str(exc)
+        if msg.startswith("No active session"):
+            click.echo(msg, err=True)
+        else:
+            click.echo(f"Failed: {msg}", err=True)
         raise SystemExit(1)
 
 
@@ -1495,18 +1421,21 @@ def compact(to):
 @click.option("--source", default="engineer", help="Source identifier")
 def ask(question, timeout, source):
     """Ask the manager a question (alias for: message --wait)."""
-    from bobi.inbox import deliver
+    from bobi.service import MessageDeliveryError, send_message
 
-    address = _resolve_address("manager")
-    if not address:
-        click.echo("No active manager session found.", err=True)
-        raise SystemExit(1)
-
-    ok, response = deliver(address, question, sender=source, wait=True, timeout=timeout)
-    if ok:
-        click.echo(response)
-    else:
-        click.echo(f"Failed: {response}", err=True)
+    project_path = _detect_project_root()
+    try:
+        result = send_message(
+            project_path, question, wait=True, session="manager",
+            timeout=timeout, sender=source,
+        )
+        click.echo(result.response)
+    except MessageDeliveryError as exc:
+        msg = str(exc)
+        if msg.startswith("No active session"):
+            click.echo("No active manager session found.", err=True)
+        else:
+            click.echo(f"Failed: {msg}", err=True)
         raise SystemExit(1)
 
 
@@ -1901,30 +1830,21 @@ def _print_transcript_entry(line: str) -> None:
 @main.command()
 def status():
     """Show active agents — manager + engineer sub-agents."""
-    from bobi.sdk import load_session_id, get_registry
-
     project_path = _detect_project_root()
-    running = False
-    pid_path = _find_pid_path()
-    if pid_path and pid_path.exists():
-        try:
-            pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)
-            running = True
-        except (ValueError, ProcessLookupError, PermissionError):
-            pass
 
     if not project_path:
         click.echo("No Bobi Agent runtime selected. Use `bobi agents list`, then `bobi agent <name> status`.")
         raise SystemExit(1)
 
-    if running:
-        click.echo(f"  Agent: running (pid {pid})")
+    from bobi.service import team_status
+
+    result = team_status(project_path)
+    if result.manager_running:
+        click.echo(f"  Agent: running (pid {result.manager_pid})")
     else:
         click.echo("  Agent: stopped")
 
-    registry = get_registry()
-    active = registry.list_active()
+    active = result.active_agents
     if not active:
         click.echo("  Sub-agents: none active")
         return
