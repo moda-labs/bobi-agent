@@ -1,6 +1,7 @@
 """Unit tests for the workflow orchestrator — schema parsing, handoff
 validation, route evaluation, step sequencing, and event emission."""
 
+import asyncio
 import json
 import textwrap
 from pathlib import Path
@@ -26,6 +27,7 @@ def _bind_runtime_root(root: Path, monkeypatch) -> Path:
     paths.package_dir(root).mkdir(parents=True, exist_ok=True)
     paths.agent_yaml_path(root).write_text("agent: test\nentry_point: manager\n")
     monkeypatch.setattr(paths, "_root", None)
+    monkeypatch.setenv("BOBI_BRAIN", "claude")
     paths.bind_root(root)
     return root
 
@@ -370,6 +372,38 @@ class FailingClient:
         self.connected = False
 
 
+class CrashingClient(FailingClient):
+    async def receive_response(self):
+        if False:
+            yield None
+        raise RuntimeError("codex subprocess exited 1: tool exploded")
+
+
+class TimeoutClient(FailingClient):
+    async def receive_response(self):
+        if False:
+            yield None
+        raise asyncio.TimeoutError()
+
+
+class ErrorResultClient(FakeClient):
+    async def receive_response(self):
+        yield FakeResultMessage(is_error=True, result="real brain failure")
+
+
+class ErrorOnStepClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.drains = 0
+
+    async def receive_response(self):
+        self.drains += 1
+        if self.drains == 1:
+            yield FakeResultMessage()
+        else:
+            yield FakeResultMessage(is_error=True, result="step brain failure")
+
+
 class TestHonestTerminalEmit:
     """MDS-65 RC#2/RC#4 — the orchestrator must emit the HONEST terminal session
     event (session.failed on failure, never session.completed after a failure)
@@ -415,6 +449,49 @@ class TestHonestTerminalEmit:
         # RC#4: the failure event carries requested_by for routing.
         failed = next(d for t, d in emits if t == "agent/session.failed")
         assert failed["requested_by"] == {"slack_user": "U1", "thread_ts": "123.45"}
+        assert failed["error"] == (
+            "network drop: response stream ended before turn result"
+        )
+
+    def test_stream_crash_surfaces_tool_crash_cause(self):
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture(
+            wf, CrashingClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is False
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert failed["error"] == (
+            "tool crash: codex subprocess exited 1: tool exploded"
+        )
+
+    def test_stream_timeout_surfaces_subprocess_timeout(self):
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture(
+            wf, TimeoutClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is False
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert failed["error"] == "subprocess timeout while draining response"
+
+    def test_initial_error_result_surfaces_brain_failure(self):
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture(
+            wf, ErrorResultClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is False
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert failed["error"] == "real brain failure"
+
+    def test_step_error_result_surfaces_brain_failure(self):
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture(
+            wf, ErrorOnStepClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is False
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert failed["error"] == "step brain failure"
+        step_failed = next(d for t, d in emits if t == "agent/step.failed")
+        assert step_failed["error"] == "step brain failure"
 
     def test_success_emits_session_completed_with_requested_by(self):
         wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])

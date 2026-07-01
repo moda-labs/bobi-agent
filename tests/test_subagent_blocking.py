@@ -26,6 +26,7 @@ def bound_root(tmp_path, monkeypatch):
     root leaked from earlier test files."""
     (tmp_path / ".bobi").mkdir()
     monkeypatch.setattr("bobi.paths._root", tmp_path)
+    monkeypatch.setenv("BOBI_BRAIN", "claude")
 
 
 from bobi.subagent import (
@@ -312,7 +313,10 @@ class TestRunAgentSupervisedNormal:
             )
 
         assert result.success is False
-        assert "connection lost" in result.error
+        assert result.error == (
+            "network drop: response stream ended before turn result "
+            "(no ResultMessage)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -568,7 +572,41 @@ class TestRunAgentSupervisedExceptions:
 
         assert result.success is False
         assert "CLI crashed" in result.error
+        assert result.error == "tool crash: CLI crashed"
         bad_client.disconnect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_reported_as_subprocess_timeout(self):
+        """A supervised run timeout should not be reported as a network drop."""
+        mock_module = MagicMock()
+        mock_module.AssistantMessage = FakeAssistantMessage
+        mock_module.ClaudeAgentOptions = MagicMock()
+        mock_module.ResultMessage = FakeResultMessage
+        mock_module.TextBlock = FakeTextBlock
+
+        bad_client = MagicMock()
+        bad_client.connect = AsyncMock(side_effect=asyncio.TimeoutError())
+        bad_client.disconnect = AsyncMock()
+
+        mock_module.ClaudeSDKClient = MagicMock(return_value=bad_client)
+
+        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
+
+            result = await _run_agent_supervised(
+                prompt="Do it",
+                cwd="/tmp/test",
+                run_key="TEST-TIMEOUT",
+                phase="implement",
+                timeout=60,
+            )
+
+        assert result.success is False
+        assert result.error == "subprocess timeout after 60s"
 
     @pytest.mark.asyncio
     async def test_disconnect_exception_swallowed(self):
@@ -696,7 +734,7 @@ class TestRunAgentSupervisedTracking:
             )
 
         mock_registry.mark_terminal.assert_any_call(
-            "agent-err-1-implement", "crashed", error="boom",
+            "agent-err-1-implement", "crashed", error="tool crash: boom",
             session_id=None, phase="implement",
         )
 
@@ -1278,4 +1316,3 @@ class TestRunCheckBlocking:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
