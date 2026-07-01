@@ -90,3 +90,13 @@ class TestContainerCliPath:
         assert "> /usr/local/bin/bobi" in dockerfile
         assert "/home/bobi/.local/bin/bobi" in dockerfile
         assert 'exec /opt/venv/bin/bobi "$@"' in dockerfile
+
+
+class TestContainerFastembedCache:
+    def test_dockerfile_bakes_model_into_fastembed_cache_path(self):
+        """fastembed ignores HF_HOME, so the image must seed the explicit
+        FASTEMBED_CACHE_PATH the KB sidecar uses at runtime."""
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+        assert "FASTEMBED_CACHE_PATH=/opt/bobi/models/fastembed" in dockerfile
+        assert 'mkdir -p "${FASTEMBED_CACHE_PATH}"' in dockerfile
+        assert "cache_dir=os.environ['FASTEMBED_CACHE_PATH']" in dockerfile

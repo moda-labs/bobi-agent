@@ -123,9 +123,11 @@ FROM builder-${BOBI_BUILD} AS builder
 # never `[kb]` — see builder-source for the torch-bloat rationale.)   #
 #####################################################################
 FROM python:3.11-slim AS model-baker
-ENV HF_HOME=/opt/bobi/models
+ENV HF_HOME=/opt/bobi/models \
+    FASTEMBED_CACHE_PATH=/opt/bobi/models/fastembed
 RUN pip install --no-cache-dir "fastembed>=0.4" \
-    && python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2')" \
+    && mkdir -p "${FASTEMBED_CACHE_PATH}" \
+    && python -c "import os; from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2', cache_dir=os.environ['FASTEMBED_CACHE_PATH'])" \
     && chmod -R a+rX /opt/bobi/models
 
 #####################################################################
@@ -149,6 +151,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PATH="/opt/venv/bin:/home/bobi/.local/bin:${PATH}" \
     HF_HOME=/opt/bobi/models \
+    FASTEMBED_CACHE_PATH=/opt/bobi/models/fastembed \
     DISABLE_AUTOUPDATER=1 \
     HOME=/home/bobi \
     DATA_DIR=/data \
