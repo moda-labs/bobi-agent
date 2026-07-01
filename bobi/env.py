@@ -123,17 +123,9 @@ def child_agent_env(root: Path, base: dict[str, str] | None = None) -> dict[str,
     _load_dotenv_into(env, resolved_root)
     env["BOBI_ROOT"] = str(resolved_root)
 
-    from bobi.brain import BRAIN_ENV, BRAIN_MODEL_ENV
+    from bobi.brain import pin_process_brain
 
     brain_kind = _configured_brain_kind(resolved_root, env)
-    if brain_kind:
-        env[BRAIN_ENV] = brain_kind
-    else:
-        env.pop(BRAIN_ENV, None)
-
     brain_model = _configured_brain_model(resolved_root, env)
-    if brain_model:
-        env[BRAIN_MODEL_ENV] = brain_model
-    else:
-        env.pop(BRAIN_MODEL_ENV, None)
+    pin_process_brain(brain_kind, brain_model, env)
     return env

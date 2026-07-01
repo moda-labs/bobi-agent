@@ -561,7 +561,7 @@ class TestRunAgentEntryRootBinding:
         )
         repo.mkdir()
 
-        from bobi.brain import BRAIN_ENV, BRAIN_MODEL_ENV
+        from bobi.brain import BRAIN_ENV, get_process_brain_model
         from bobi.subagent import _run_agent_entry
         _run_agent_entry({
             "task": "t", "cwd": str(repo), "root": str(root),
@@ -569,7 +569,7 @@ class TestRunAgentEntryRootBinding:
         })
 
         assert os.environ[BRAIN_ENV] == "codex"
-        assert os.environ[BRAIN_MODEL_ENV] == "gpt-5-codex"
+        assert get_process_brain_model() == "gpt-5-codex"
 
     @patch("bobi.subagent.spawn_adhoc")
     def test_clears_stale_process_brain_when_passed_root_has_default_brain(
@@ -582,7 +582,7 @@ class TestRunAgentEntryRootBinding:
         _write_agent_yaml(root, "name: t\n")
         repo.mkdir()
 
-        from bobi.brain import BRAIN_ENV, BRAIN_MODEL_ENV
+        from bobi.brain import BRAIN_ENV, get_process_brain_model
         from bobi.subagent import _run_agent_entry
         monkeypatch.setenv("BOBI_BRAIN_MODEL", "gpt-5-codex")
         _run_agent_entry({
@@ -591,7 +591,7 @@ class TestRunAgentEntryRootBinding:
         })
 
         assert BRAIN_ENV not in os.environ
-        assert BRAIN_MODEL_ENV not in os.environ
+        assert get_process_brain_model() == ""
 
     @patch("bobi.subagent.spawn_adhoc")
     def test_missing_root_is_a_spawner_bug(self, mock_spawn, tmp_path,

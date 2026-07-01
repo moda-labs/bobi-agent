@@ -332,7 +332,7 @@ async def _run_workflow_async(
     role: str = "",
 ) -> bool:
     """Async core: one brain session for all steps."""
-    from bobi.brain import get_brain
+    from bobi.brain import get_brain, get_process_brain_model
 
     _brain = get_brain()
     saved_id = load_session_id(session_name)
@@ -345,8 +345,7 @@ async def _run_workflow_async(
     def _effective_step_model(step: StepDef | None) -> str:
         if step and step.model:
             return step.model
-        from bobi.brain import BRAIN_MODEL_ENV
-        return os.environ.get(BRAIN_MODEL_ENV, "")
+        return get_process_brain_model()
 
     def _is_prompt_step(step: StepDef) -> bool:
         return not (

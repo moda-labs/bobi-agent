@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
@@ -219,11 +218,10 @@ class CodexBrain:
         resume: str | None = None,
         options: dict | None = None,
     ) -> BrainSession:
+        from bobi.brain import resolve_model_option
+
         opts = options or {}
-        model = str(opts.get("model", "") or "")
-        if not model:
-            from bobi.brain import BRAIN_MODEL_ENV
-            model = os.environ.get(BRAIN_MODEL_ENV, "")
+        model = resolve_model_option(str(opts.get("model", "") or ""))
         return _CodexSession(
             cwd=cwd or ".",
             instructions=_instructions(system_prompt),

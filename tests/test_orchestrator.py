@@ -398,6 +398,27 @@ class TestRunWorkflow:
         assert result is True
         assert calls[0]["options"]["model"] == "haiku"
 
+    def test_env_model_default_passed_to_brain_session(self, monkeypatch):
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        monkeypatch.setenv("BOBI_BRAIN_MODEL", "sonnet")
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is True
+        assert calls[0]["options"]["model"] == "sonnet"
+
     def test_model_change_starts_fresh_session(self, monkeypatch):
         calls = []
         clients = []
