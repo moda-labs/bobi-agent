@@ -565,6 +565,13 @@ def default_agent_runner(prompt: str, brain: str, *, cwd: str | None = None,
                 timeout=timeout,
             )
         )
+        # Surface the cold-path cost so a CI build log shows what a bootstrap
+        # actually spent (the warm path is free — no agent runs). Cost is
+        # brain-reported; some brains report $0, so log tokens/duration too.
+        log.info(
+            "Bootstrap agent (%s) finished: cost $%.4f, %.1fs",
+            brain or DEFAULT_BRAIN, result.total_cost_usd or 0.0,
+            (result.duration_ms or 0) / 1000.0)
         return result.final_text or ""
     except asyncio.TimeoutError:
         log.warning("Bootstrap agent timed out after %ss", timeout)
@@ -584,6 +591,17 @@ def default_agent_runner(prompt: str, brain: str, *, cwd: str | None = None,
 
 def _main(argv: list[str] | None = None) -> int:
     import argparse
+
+    # Surface this module's INFO logs (the per-bootstrap cost line) when run as a
+    # CLI — Python defaults to WARNING, so the cost would otherwise be swallowed.
+    # Scoped to `bobi.dep_bootstrap` so the subagent loop's own logs stay quiet.
+    if not log.handlers:
+        _h = logging.StreamHandler()
+        _h.setLevel(logging.INFO)
+        _h.setFormatter(logging.Formatter("%(message)s"))
+        log.addHandler(_h)
+        log.setLevel(logging.INFO)
+        log.propagate = False
 
     from bobi.brain import _BRAINS
     from bobi.build_render import _workspace_root
