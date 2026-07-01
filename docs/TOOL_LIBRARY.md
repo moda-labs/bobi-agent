@@ -123,6 +123,197 @@ inline (an explicit team `requires:` / `build:` / `host:` wins).
   `mcp_servers:` dict (leaf-wins per server name), rendered per brain at runtime
   (see below).
 
+## Cookbook: agent.yaml recipes
+
+Every recipe below is the `tool_library:` an author writes on a team's
+`agent.yaml`. `tool_library:` is consumed at compose and never appears frozen -
+the "yields" block is the surface(s) it splices into the composed `agent.yaml`
+(and `tools/`). Mix and match fields freely; a single dependency can carry any
+combination.
+
+### 1. A pinned CLI tool
+
+Deterministic install, no agent. Reference a catalog entry by name, or inline the
+same fields. Both forms are identical after compose.
+
+```yaml
+# by catalog name (the pin lives once, in bobi/tool_library/venn/tool.yaml)
+tool_library: [venn]
+
+# or inline, declared directly on the team
+tool_library:
+  - name: codex
+    success: command -v codex && codex --version
+    install:
+      apt: [nodejs, npm]
+      npm: ["@openai/codex@0.142.0"]
+```
+
+Yields a `build:` (baked into the image) and a `requires:` doctor gate. See
+[recipe 8](#8-inheritance-dedup-and-overrides) for how repeats across the `from:`
+chain collapse to one.
+
+### 2. A guide-only tool (agent-bootstrapped)
+
+No pinned recipe - you describe it and a bootstrap agent materializes it in CI,
+pins what it chose, and snapshots the result. At compose there is no `build:`
+yet; only the doctor gate and the usage doc are emitted.
+
+```yaml
+tool_library:
+  - name: gstack
+    why: "Headless browser QA via the gstack skill."
+    guide: "Install gstack per https://github.com/example/gstack and confirm `gstack browse` returns a screenshot."
+    success: "The agent can run `gstack browse https://example.com` and get a screenshot back."
+```
+
+```yaml
+# yields (pre-bootstrap):
+requires:
+  - name: gstack
+    why: Headless browser QA via the gstack skill.
+    check: The agent can run `gstack browse https://example.com` and get a screenshot back.
+# + tools/gstack.md  (the guide text, the agent-facing usage doc)
+```
+
+`success` may be **prose** (an agent judges it, as here) or **shell** (run
+directly). Use prose when the check is "the agent can actually do X"; use shell
+when a command exit code settles it.
+
+### 3. A non-CLI asset (font, data file, ...)
+
+A dependency is anything with a verifiable `success`, not just CLIs.
+
+```yaml
+tool_library:
+  - name: inter-font
+    why: "Brand font for rendered PDFs."
+    success: "fc-list | grep -qi Inter"
+    install:
+      apt: [fontconfig]
+      run_root:
+        - mkdir -p /usr/share/fonts/inter && curl -fsSL https://example.com/Inter.ttc -o /usr/share/fonts/inter/Inter.ttc && fc-cache -f
+```
+
+### 4. A stdio MCP server (install + connection)
+
+A local MCP server has two halves: **install** bakes the server binary, **mcp**
+wires the connection. `success` verifies the binary; the per-brain `initialize`
+handshake (over the emitted `mcp_servers:`) verifies the server actually answers.
+Declaring `mcp:` without `install:` fails preflight - nothing on PATH.
+
+```yaml
+tool_library:
+  - name: pirate-weather
+    why: "Current conditions + forecast via the Pirate Weather MCP server (tools/pirate-weather.md)."
+    success: >-
+      command -v pirate-weather-mcp >/dev/null 2>&1 &&
+      pirate-weather-mcp --version >/dev/null 2>&1
+    install:
+      apt: [python3-venv]
+      run_root:
+        - >-
+          python3 -m venv /opt/pirate-weather &&
+          /opt/pirate-weather/bin/pip install --no-cache-dir pirate-weather-mcp==1.4.0 &&
+          ln -sf /opt/pirate-weather/bin/pirate-weather-mcp /usr/local/bin/pirate-weather-mcp
+    mcp:
+      weather:                       # the MCP SERVER name (a name -> spec map)
+        type: stdio
+        command: /usr/local/bin/pirate-weather-mcp
+        args: ["--stdio"]
+        env:
+          PIRATE_WEATHER_API_KEY: ${PIRATE_WEATHER_API_KEY}
+```
+
+Yields `build:` + `requires:` + a top-level `mcp_servers.weather`. Note the
+dependency name (`pirate-weather`) and the server name (`weather`) are different
+namespaces - they need not match.
+
+### 5. A hosted MCP server (HTTP/SSE, no install)
+
+Nothing to materialize - just the URL and any auth headers. `${VAR}`
+interpolates from `run/.env` at load.
+
+```yaml
+tool_library:
+  - name: linear-mcp
+    success: "the linear MCP answers initialize"
+    mcp:
+      linear:
+        type: http                   # or `sse`
+        url: https://mcp.linear.app/mcp
+        headers:
+          Authorization: Bearer ${LINEAR_MCP_TOKEN}
+```
+
+### 6. One dependency, several MCP servers
+
+`mcp:` is a `{server-name: spec}` map, so one dependency can bring more than one
+server - that is why the servers are nested rather than implied by the dep name.
+
+```yaml
+tool_library:
+  - name: acme-suite
+    success: "both acme servers answer initialize"
+    mcp:
+      acme-crm:
+        type: http
+        url: https://acme.example/crm/mcp
+      acme-billing:
+        type: http
+        url: https://acme.example/billing/mcp
+```
+
+### 7. A dependency needing a host capability
+
+Some deps need a capability the container cannot grant itself (a kernel sysctl, a
+device). It is runtime wiring, surfaced to `bobi deploy` and verified by doctor,
+never baked into the image.
+
+```yaml
+tool_library:
+  - name: gstack
+    success: "the browser launches"
+    guide: "Headless browser QA."
+    host:
+      - sysctl: kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+### 8. Inheritance, dedup, and overrides
+
+`tool_library:` unions across the `from:` chain, so a base team's dependency is
+inherited; the build de-dupe collapses a pin declared in several layers to one:
+
+```yaml
+# base/agent.yaml       ->  tool_library: [venn]
+# leaf/agent.yaml       ->  from: base
+#                            tool_library: [venn]
+# composed leaf: venn baked once (one build recipe, one requires entry).
+```
+
+Any surface the framework would emit can be **overridden** by declaring it
+explicitly on the team - the leaf wins:
+
+```yaml
+# The dep would wire a stdio weather server, but this team points the same
+# server name at a hosted endpoint. The explicit mcp_servers.weather wins;
+# the dep's spec for that name is dropped.
+mcp_servers:
+  weather:
+    type: http
+    url: https://team.example/mcp
+tool_library:
+  - name: pirate-weather
+    success: "true"
+    mcp:
+      weather: { type: stdio, command: /usr/local/bin/pirate-weather-mcp }
+```
+
+The same leaf-wins rule holds for `requires:` (an explicit `requires: [{name:
+...}]` is neither duplicated nor clobbered) and for `host:` (per sysctl key). Two
+*dependencies* clashing on the same MCP server name or sysctl resolve first-wins
+in resolve order.
+
 ## MCP servers, rendered per brain
 
 An `mcp:` field is an MCP server's connection spec in the SDK-native shape - a
