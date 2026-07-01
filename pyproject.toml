@@ -30,6 +30,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "jinja2>=3.1",
     "claude-agent-sdk>=0.2.87",
+    "mcp>=1.23.0",
     "apsw>=3.40",
 ]
 

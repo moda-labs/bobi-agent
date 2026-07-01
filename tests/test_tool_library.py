@@ -242,6 +242,114 @@ def test_inline_dependency_expands_like_a_catalog_entry(project):
     assert "tool_library" not in cfg
 
 
+# --- mcp: per-brain wiring (#428 Stage 4) ------------------------------------
+
+
+def test_mcp_dependency_emits_mcp_servers(project):
+    """A dependency's `mcp:` spec is emitted into the composed agent.yaml's
+    top-level `mcp_servers:` (the SDK-native `{name: spec}` shape) so the Claude
+    pass-through carries it unchanged. Team-brought MCP, no built-in shim."""
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'tool_library:\n'
+                 '  - name: weather\n'
+                 '    success: "command -v weather-mcp"\n'
+                 '    mcp:\n'
+                 '      weather:\n'
+                 '        type: stdio\n'
+                 '        command: /usr/local/bin/weather-mcp\n'
+                 '        args: ["--stdio"]\n')
+    cfg = _agent_yaml(_compose(project, leaf)[0])
+
+    assert cfg["mcp_servers"]["weather"] == {
+        "type": "stdio",
+        "command": "/usr/local/bin/weather-mcp",
+        "args": ["--stdio"],
+    }
+
+
+def test_mcp_dependency_no_mcp_key_when_absent(project):
+    """A dependency without `mcp:` must not synthesize an empty `mcp_servers:`
+    key (byte-noise / churn guard)."""
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'tool_library:\n'
+                 '  - name: gizmo\n'
+                 '    success: "command -v gizmo"\n')
+    cfg = _agent_yaml(_compose(project, leaf)[0])
+    assert "mcp_servers" not in cfg
+
+
+def test_explicit_mcp_server_wins_over_dependency(project):
+    """An explicit team `mcp_servers.<name>` overrides a dependency's `mcp:` for
+    that name wholesale (leaf-wins escape hatch, mirrors requires/host)."""
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'mcp_servers:\n'
+                 '  weather:\n'
+                 '    type: http\n'
+                 '    url: https://team.example/mcp\n'
+                 'tool_library:\n'
+                 '  - name: weather\n'
+                 '    success: "true"\n'
+                 '    mcp:\n'
+                 '      weather:\n'
+                 '        type: stdio\n'
+                 '        command: /usr/local/bin/weather-mcp\n')
+    cfg = _agent_yaml(_compose(project, leaf)[0])
+    assert cfg["mcp_servers"]["weather"] == {
+        "type": "http",
+        "url": "https://team.example/mcp",
+    }
+
+
+def test_mcp_first_dependency_wins_on_name_clash(project):
+    """Two dependencies contributing the same MCP server name → first wins
+    (resolve order), the second is not field-merged (mirrors host dedup)."""
+    _team(project, "core",
+          'version: "1.0.0"\nentry_point: director\n'
+          'tool_library:\n'
+          '  - name: alpha\n'
+          '    success: "true"\n'
+          '    mcp:\n'
+          '      shared:\n'
+          '        type: stdio\n'
+          '        command: /opt/alpha\n')
+    leaf = _team(project, "moda",
+                 'from: core\nversion: "2.0.0"\n'
+                 'tool_library:\n'
+                 '  - name: beta\n'
+                 '    success: "true"\n'
+                 '    mcp:\n'
+                 '      shared:\n'
+                 '        type: stdio\n'
+                 '        command: /opt/beta\n')
+    cfg = _agent_yaml(_compose(project, leaf)[0])
+    # core resolves before the leaf's inline dep (from-chain order), so alpha wins.
+    assert cfg["mcp_servers"]["shared"]["command"] == "/opt/alpha"
+
+
+def test_mcp_two_dependencies_distinct_names_both_present(project):
+    """Two dependencies each bringing a distinct MCP server → both emitted."""
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'tool_library:\n'
+                 '  - name: alpha\n'
+                 '    success: "true"\n'
+                 '    mcp:\n'
+                 '      a:\n'
+                 '        type: stdio\n'
+                 '        command: /opt/a\n'
+                 '  - name: beta\n'
+                 '    success: "true"\n'
+                 '    mcp:\n'
+                 '      b:\n'
+                 '        type: stdio\n'
+                 '        command: /opt/b\n')
+    cfg = _agent_yaml(_compose(project, leaf)[0])
+    assert set(cfg["mcp_servers"]) == {"a", "b"}
+
+
 # --- pin lint (extends the #380 reproducibility convention) -------------------
 
 
