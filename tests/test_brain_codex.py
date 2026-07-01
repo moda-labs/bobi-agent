@@ -161,13 +161,29 @@ async def test_stream_ends_without_terminal_is_error():
 
 
 @pytest.mark.asyncio
-async def test_model_override_adds_flag():
+async def test_env_model_default_adds_flag(monkeypatch):
     sink = []
     events = [{"type": "turn.completed", "usage": {}}]
-    b = CodexBrain()
-    s = b.make_session(cwd="/w", system_prompt={"append": "S"},
-                       options={"model": "gpt-5-codex"})
+    monkeypatch.setenv("BOBI_BRAIN_MODEL", "gpt-5-codex")
+
+    s = CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"})
     s._runner = _runner_of(events, sink)
     await s.connect("hi")
     await _drain(s)
+
     assert "-m" in sink[0][0] and "gpt-5-codex" in sink[0][0]
+
+
+@pytest.mark.asyncio
+async def test_model_override_adds_flag(monkeypatch):
+    sink = []
+    events = [{"type": "turn.completed", "usage": {}}]
+    monkeypatch.setenv("BOBI_BRAIN_MODEL", "gpt-5-codex")
+    b = CodexBrain()
+    s = b.make_session(cwd="/w", system_prompt={"append": "S"},
+                       options={"model": "o3"})
+    s._runner = _runner_of(events, sink)
+    await s.connect("hi")
+    await _drain(s)
+    assert "-m" in sink[0][0] and "o3" in sink[0][0]
+    assert "gpt-5-codex" not in sink[0][0]

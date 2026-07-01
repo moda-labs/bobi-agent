@@ -254,6 +254,11 @@ class Config:
         """The configured brain kind, or "" for the framework default."""
         return str((self.brain or {}).get("kind", "") or "")
 
+    @property
+    def brain_model(self) -> str:
+        """The configured brain model override, or "" for the provider default."""
+        return str((self.brain or {}).get("model", "") or "")
+
     def credential(self, service: str, key: str) -> str:
         """Look up a credential value for a named service."""
         for svc in self.services:

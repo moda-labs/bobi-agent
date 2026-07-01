@@ -218,12 +218,15 @@ class CodexBrain:
         resume: str | None = None,
         options: dict | None = None,
     ) -> BrainSession:
+        from bobi.brain import resolve_model_option
+
         opts = options or {}
+        model = resolve_model_option(str(opts.get("model", "") or ""))
         return _CodexSession(
             cwd=cwd or ".",
             instructions=_instructions(system_prompt),
             resume=resume,
             # Claude-specific options (skills/hooks/permission_mode/max_turns)
             # don't apply to Codex; only a model override is honored.
-            model=str(opts.get("model", "") or ""),
+            model=model,
         )

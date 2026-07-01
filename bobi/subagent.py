@@ -27,6 +27,7 @@ from bobi.sdk import (
 from bobi.transient import is_transient_api_error
 from bobi.env import (
     _configured_brain_kind,
+    _configured_brain_model,
     agent_spawn_env,
     child_agent_env,
 )
@@ -1359,12 +1360,10 @@ def _run_agent_entry(args: dict) -> None:
             f"(no package/agent.yaml) — refusing to run with an unverified "
             f"identity."
         )
-    from bobi.brain import BRAIN_ENV
+    from bobi.brain import pin_process_brain
     brain_kind = _configured_brain_kind(project_root, os.environ)
-    if brain_kind:
-        os.environ[BRAIN_ENV] = brain_kind
-    else:
-        os.environ.pop(BRAIN_ENV, None)
+    brain_model = _configured_brain_model(project_root, os.environ)
+    pin_process_brain(brain_kind, brain_model)
 
     # Subscription is owned by the Session now: every Session subscribes to
     # inbox/<self> on start, and extra topics (the persistent agent's

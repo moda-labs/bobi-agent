@@ -143,10 +143,23 @@ the top of its `agent.yaml`:
 ```yaml
 brain:
   kind: codex          # omit the block entirely for Claude Code (the default)
+  model: gpt-5-codex   # optional: provider-specific model or alias
 ```
 
 Make sure the matching CLI is installed and authenticated (see
 [Set up an agent runtime](#1-set-up-an-agent-runtime) above).
+For Claude-backed teams, `model` can be an alias such as `haiku`, `sonnet`, or
+`opus`, or a full Claude model ID.
+
+Workflow steps can override the team default for that step:
+
+```yaml
+steps:
+  - name: discover
+    agent: prospect-targeter
+    model: haiku
+    prompt: "Find companies matching the wedge..."
+```
 
 Don't want to edit YAML by hand? Paste this into your Claude Code or Codex
 session:
