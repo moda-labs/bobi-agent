@@ -119,15 +119,24 @@ from fastembed import TextEmbedding
 cache = Path(os.environ["FASTEMBED_CACHE_PATH"])
 models_root = Path("/opt/bobi/models")
 assert cache == models_root / "fastembed"
-assert any(cache.iterdir())
-assert {path.name for path in models_root.iterdir()} == {"fastembed"}
+baked_model_manifest = {
+    (path.relative_to(models_root).as_posix(), path.is_dir(), path.stat().st_size)
+    for path in models_root.rglob("*")
+}
+assert any(
+    path == "fastembed" or path.startswith("fastembed/")
+    for path, _, _ in baked_model_manifest
+)
 
 model = TextEmbedding(
     model_name="sentence-transformers/all-MiniLM-L6-v2",
     cache_dir=str(cache),
 )
 list(model.embed(["cache smoke"]))
-assert {path.name for path in models_root.iterdir()} == {"fastembed"}
+assert {
+    (path.relative_to(models_root).as_posix(), path.is_dir(), path.stat().st_size)
+    for path in models_root.rglob("*")
+} == baked_model_manifest
 print("BAKED")
 """
     proc = _run(
