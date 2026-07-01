@@ -1,0 +1,20 @@
+# Minimal Codex-brained team - the team-images CI gate for "bobi bakes a working
+# Codex brain" (#428). Deliberately dependency-free and deploy-free: it exists
+# ONLY to prove that a `brain: codex` team composes to a build that bakes the
+# Codex CLI and passes its requires gate under BOBI_VERIFY_PHASE=build.
+#
+# The codex dependency expands from `brain: codex` alone (no explicit
+# `tool_library: [codex]`, no hand-declared build) now that the CI renderer
+# composes like deploy does. `verify: requires` re-runs codex's success as the
+# final build step, so a broken codex bake fails THIS build, not production.
+#
+# No Slack, no services, no deployment example - the ssh-push/subscription
+# delivery concern that the old `codex-test` team conflated is validated
+# separately (#543).
+version: "1.0.0"
+agent: codex-smoke
+entry_point: manager
+brain:
+  kind: codex
+build:
+  verify: requires

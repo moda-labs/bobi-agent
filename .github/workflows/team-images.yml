@@ -25,6 +25,10 @@ on:
       - "pyproject.toml"
       - "bobi/build_render.py"
       - "bobi/config.py"
+      # The renderer now composes (from: chain + tool_library/dependency
+      # expansion), so the expansion logic changes what a team bakes. (#428)
+      - "bobi/compose.py"
+      - "bobi/tool_library.py"
       - "scripts/build-team-images.sh"
       - ".github/workflows/team-images.yml"
   pull_request:

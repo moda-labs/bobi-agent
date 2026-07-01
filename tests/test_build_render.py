@@ -82,6 +82,52 @@ def test_composed_loader_bakes_codex_cli_for_codex_brain(tmp_path):
     assert any(r.name == "codex" for r in cfg.requires)
 
 
+def test_cli_renders_composed_build_for_standalone_tool_library(tmp_path):
+    """The `bobi.build_render` CLI (what build-team-images.sh runs in CI) must
+    render the COMPOSED build, so a standalone team declaring its CLI via
+    `tool_library:` (no inline build:) is baked by the CI gate exactly as
+    `bobi deploy` bakes it - not silently skipped. Regression for the
+    CI-vs-deploy divergence that left codex-test hand-declaring its build (#428).
+    """
+    team = tmp_path / "agents" / "pa"
+    team.mkdir(parents=True)
+    (team / "agent.yaml").write_text(dedent("""
+        agent: pa
+        tool_library:
+          - venn
+    """))
+    # Raw read sees no build: the pre-#428 CLI behavior that skipped the team.
+    assert load_team_config(team).build is None
+    # --check now reports a build (exit 0) because the CLI composes.
+    assert build_render._main([str(team), "--check"]) == 0
+    out = tmp_path / "pa.sh"
+    assert build_render._main([str(team), "--out", str(out)]) == 0
+    script = out.read_text()
+    assert "venn-cli==0.2.0" in script      # catalog pin, baked via expansion
+    assert "/opt/venn-cli" in script
+
+
+def test_cli_bakes_codex_for_bare_codex_brain(tmp_path):
+    """A `brain: codex` team with no explicit tool_library/build bakes the Codex
+    CLI + its requires gate through the CLI - the codex-smoke gate's contract."""
+    team = tmp_path / "agents" / "codex-smoke"
+    team.mkdir(parents=True)
+    (team / "agent.yaml").write_text(dedent("""
+        agent: codex-smoke
+        brain:
+          kind: codex
+        build:
+          verify: requires
+    """))
+    assert build_render._main([str(team), "--check"]) == 0
+    out = tmp_path / "codex.sh"
+    assert build_render._main([str(team), "--out", str(out)]) == 0
+    script = out.read_text()
+    assert "npm install -g @openai/codex@0.142.0" in script
+    assert "== verify requires ==" in script
+    assert "BOBI_VERIFY_PHASE=build" in script
+
+
 def test_renders_apt_npm_run_verify(tmp_path):
     script = render_team_deps_script(_team(tmp_path, ENG_TEAM))
     assert script.startswith("#!/usr/bin/env bash")
