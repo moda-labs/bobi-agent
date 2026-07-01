@@ -66,7 +66,7 @@ BUILTIN_DEFAULTS: dict = {
 _SCALAR_KEYS = {
     "team", "team_url", "fleet", "tenant", "region", "memory", "cpus",
     "volume_size", "auth", "event_server", "login_channel", "claude_version",
-    "org", "volume_name", "image",
+    "org", "volume_name", "image", "brain",
 }
 
 
@@ -153,6 +153,11 @@ class DeployConfig:
             raise DeployError(
                 f"deployment '{self.name}' has auth='{self.auth}' "
                 "(expected api_key or subscription)."
+            )
+        if self.brain not in ("", "claude", "codex"):
+            raise DeployError(
+                f"deployment '{self.name}' has brain='{self.brain}' "
+                "(expected claude or codex)."
             )
 
 
@@ -254,10 +259,14 @@ def load_deploy_config(project_path: Path, name: str,
         secrets_env=str(merged.get("secrets_env", "") or ""),
         secrets_env_file=str(merged.get("secrets_env_file", "") or ""),
     )
+    # Resolve the team's brain. A LOCAL team's agent.yaml is the source of truth
+    # (`brain.kind`). A team-url package isn't on disk at deploy time, so the
+    # deployment yaml's own `brain:` fills it — required for a team-url codex
+    # canary, which otherwise defaults to claude and demands ANTHROPIC_API_KEY
+    # instead of the OPENAI_API_KEY it actually authenticates with.
+    cfg.brain = _team_brain_kind(project_path, cfg) or str(
+        merged.get("brain", "") or "")
     cfg.validate()
-    # Resolve the team's brain from its agent.yaml (local teams only; a team-url
-    # package isn't on disk → "" → claude on the box).
-    cfg.brain = _team_brain_kind(project_path, cfg)
     return cfg
 
 

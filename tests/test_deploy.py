@@ -139,6 +139,40 @@ def test_bad_auth_is_an_error(repo):
         D.load_deploy_config(repo, "x")
 
 
+# --- brain resolution --------------------------------------------------------
+
+def test_team_url_brain_from_deployment_yaml(repo):
+    """A team-url package isn't on disk at deploy time, so its brain can't be
+    read from the tarball. The deployment yaml's `brain:` fills it, which selects
+    the OpenAI auth key (not Anthropic) for an api_key-mode Codex canary."""
+    (repo / "deployments" / "codex-smoke.yaml").write_text(
+        "team-url: https://r/codex-smoke.tar.gz\nauth: api_key\nbrain: codex\n"
+    )
+    cfg = D.load_deploy_config(repo, "codex-smoke")
+    assert cfg.brain == "codex"
+    assert D._brain_api_key(cfg.brain) == "OPENAI_API_KEY"
+
+
+def test_local_team_brain_wins_over_deployment_yaml(repo):
+    """A LOCAL team's agent.yaml is the source of truth for its brain; a stray
+    `brain:` in the deployment yaml never overrides it."""
+    pkg = repo / "agents" / "codex-team"
+    pkg.mkdir(parents=True)
+    pkg.joinpath("agent.yaml").write_text("agent: codex-team\nbrain:\n  kind: codex\n")
+    (repo / "deployments" / "codex-team.yaml").write_text(
+        "team: codex-team\nbrain: claude\n")
+    cfg = D.load_deploy_config(repo, "codex-team")
+    assert cfg.brain == "codex"  # agent.yaml wins, not the yaml's claude
+
+
+def test_bad_brain_is_an_error(repo):
+    (repo / "deployments" / "x.yaml").write_text(
+        "team-url: https://r/x.tgz\nbrain: gemini\n"
+    )
+    with pytest.raises(D.DeployError, match="brain="):
+        D.load_deploy_config(repo, "x")
+
+
 # --- repo + package resolution ----------------------------------------------
 
 def test_find_repo_root_walks_up(repo):
