@@ -569,9 +569,10 @@ def default_agent_runner(prompt: str, brain: str, *, cwd: str | None = None,
         # actually spent (the warm path is free — no agent runs). Cost is
         # brain-reported; some brains report $0, so log tokens/duration too.
         log.info(
-            "Bootstrap agent (%s) finished: cost $%.4f, %.1fs",
-            brain or DEFAULT_BRAIN, result.total_cost_usd or 0.0,
-            (result.duration_ms or 0) / 1000.0)
+            "Bootstrap agent (%s%s) finished: cost $%.4f, %.1fs",
+            brain or DEFAULT_BRAIN,
+            f", model={result.model}" if result.model else "",
+            result.total_cost_usd or 0.0, (result.duration_ms or 0) / 1000.0)
         return result.final_text or ""
     except asyncio.TimeoutError:
         log.warning("Bootstrap agent timed out after %ss", timeout)
