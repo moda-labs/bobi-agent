@@ -1,7 +1,7 @@
 """Integration tests for the bobi instance image (containerized-8 / #338).
 
 These verify the image contract from docs/CONTAINERIZED_DEPLOYMENT.md §2 (The image):
-non-root agent, no Node, native `claude` CLI on PATH, fastembed model baked in,
+non-root agent, no Node, native `claude` CLI on PATH, fastembed's runtime cache,
 and the entrypoint's auth-mode guards. They build the image once per session.
 
 The full acceptance criterion — a `docker run` reaching a healthy manager that
@@ -109,13 +109,39 @@ def test_no_node_runtime(image: str):
 
 @requires_docker
 @pytest.mark.timeout(120)
-def test_fastembed_model_baked(image: str):
-    """The embedding model is pre-downloaded into the image at HF_HOME."""
+def test_fastembed_cache_downloads_on_first_use(image: str):
+    """The image should not bake the model; first KB use downloads to /data."""
     proc = _run(
         "docker", "run", "--rm", "--entrypoint", "sh", image,
-        "-c", "test -n \"$(ls -A /opt/bobi/models 2>/dev/null)\" && echo BAKED || echo EMPTY",
+        "-c",
+        "test \"$FASTEMBED_CACHE_PATH\" = /data/.bobi/cache/fastembed "
+        "&& test ! -e /opt/bobi/models "
+        "&& echo FIRST_USE_CACHE",
     )
-    assert "BAKED" in proc.stdout, proc.stdout + proc.stderr
+    assert "FIRST_USE_CACHE" in proc.stdout, proc.stdout + proc.stderr
+
+
+@requires_docker
+@pytest.mark.timeout(120)
+def test_fastembed_cache_writable_on_existing_volume(image: str, tmp_path: Path):
+    """Existing stamped volumes still get the new runtime cache chowned."""
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / ".bobi-owned").write_text("")
+
+    proc = _run(
+        "docker", "run", "--rm",
+        "-v", f"{data}:/data",
+        "-e", "BOBI_AUTH=api_key",
+        "-e", "BOBI_AGENT=pytest",
+        "-e", "ANTHROPIC_API_KEY=dummy",
+        "--entrypoint", "sh", image,
+        "-c",
+        "timeout 3 /usr/local/bin/docker-entrypoint.sh >/tmp/entrypoint.log 2>&1 || true; "
+        "gosu bobi sh -c 'test -w \"$FASTEMBED_CACHE_PATH\" && test -w \"$HF_HOME\"' "
+        "&& echo CACHE_WRITABLE",
+    )
+    assert "CACHE_WRITABLE" in proc.stdout, proc.stdout + proc.stderr
 
 
 @requires_docker

@@ -168,8 +168,8 @@ class TestEmbeddingCompatibility:
 class TestResolveCacheDir:
     """_resolve_cache_dir bridges fastembed's cache to env the C8 image controls.
 
-    fastembed honors FASTEMBED_CACHE_PATH but ignores HF_HOME, so a pre-seeded
-    HF_HOME alone would silently re-download the model in the container.
+    fastembed honors FASTEMBED_CACHE_PATH but ignores HF_HOME, so the container
+    points first-use downloads at an explicit durable cache path.
     """
 
     def test_prefers_fastembed_cache_path(self, monkeypatch):
