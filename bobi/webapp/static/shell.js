@@ -104,58 +104,40 @@ async function route() {
   teardown = mountDashboard(el, { api });
 }
 
-/* Setup entry — name the team, then hand off to the hosted onboarding
-   flow at /setup/ (the full setup experience, served by this same app). */
+/** Open (or resume) an onboarding/editor session and navigate to it.
+    body: {} to create, {name, mode: "open"} to edit an existing design.
+    Returns null on success (navigation happens), else an error string. */
+export async function openSetup(body) {
+  const { ok, data } = await api("/api/setup/open", {
+    method: "POST",
+    body: JSON.stringify(body || {}),
+  });
+  if (ok && data && data.url) {
+    location.href = data.url;
+    return null;
+  }
+  return (data && data.error) || "could not start setup";
+}
+
+/* #/setup — a transient route: kick off onboarding and hand the browser
+   to the hosted setup flow. Kept for deep links; the dashboard's create
+   card is the primary entry. */
 async function mountSetupEntry(el) {
   el.innerHTML = "";
-  const page = document.createElement("div");
-  page.className = "page setup-entry";
-  page.innerHTML = `
-    <h1>Create a team</h1>
-    <p class="setup-hint">Name your agent team, then design it in a guided
-      conversation. You can rename it during setup.</p>
-    <form class="setup-form" data-el="form">
-      <input data-el="name" type="text" placeholder="e.g. content-review"
-             autocomplete="off" spellcheck="false">
-      <button class="btn primary" type="submit">Start onboarding</button>
-    </form>
-    <div class="setup-resume" data-el="resume" hidden></div>
-    <div class="action-error" data-el="error" hidden></div>`;
-  el.appendChild(page);
+  const wrap = document.createElement("div");
+  wrap.className = "stub";
+  const h = document.createElement("h2");
+  h.textContent = "Opening setup…";
+  wrap.appendChild(h);
+  el.appendChild(wrap);
 
-  const els = {};
-  for (const n of page.querySelectorAll("[data-el]")) els[n.dataset.el] = n;
-
-  const { ok, data } = await api("/api/setup/current");
-  if (ok && data && data.active && data.name) {
-    els.resume.hidden = false;
-    els.resume.innerHTML = "";
+  const err = await openSetup({});
+  if (err) {
+    h.textContent = "Couldn't open setup";
     const p = document.createElement("p");
-    p.textContent = `An onboarding session for “${data.name}” is in progress.`;
-    const b = document.createElement("a");
-    b.className = "btn";
-    b.href = "/setup/";
-    b.textContent = "Resume it";
-    els.resume.appendChild(p);
-    els.resume.appendChild(b);
+    p.textContent = err;
+    wrap.appendChild(p);
   }
-
-  els.form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    els.error.hidden = true;
-    const name = els.name.value.trim();
-    const { ok, data } = await api("/api/setup/open", {
-      method: "POST",
-      body: JSON.stringify({ name }),
-    });
-    if (ok && data && data.url) {
-      location.href = data.url;
-      return;
-    }
-    els.error.textContent = (data && data.error) || "could not start setup";
-    els.error.hidden = false;
-  });
-  els.name.focus();
 }
 
 window.addEventListener("hashchange", route);

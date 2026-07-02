@@ -1,5 +1,9 @@
-/* Dashboard — every agent slot on this machine as a row card:
-   running / stopped / design-only, with start/stop/open actions. */
+/* Dashboard — the home screen: a card grid of every agent on this machine
+   plus a create card. Cards navigate (installed → the agent's dashboard,
+   design-only → the editor); lifecycle actions live on the agent's own
+   dashboard, not here. */
+
+import { openSetup } from "../shell.js";
 
 export function mountDashboard(el, { api }) {
   el.innerHTML = "";
@@ -11,144 +15,86 @@ export function mountDashboard(el, { api }) {
   head.className = "page-head";
   const title = document.createElement("h1");
   title.textContent = "Your agents";
-  const create = document.createElement("a");
-  create.className = "btn primary";
-  create.href = "#/setup";
-  create.textContent = "Create team";
   head.appendChild(title);
-  head.appendChild(create);
   page.appendChild(head);
 
-  const list = document.createElement("div");
-  list.className = "agent-list";
-  page.appendChild(list);
-
-  const empty = document.createElement("p");
-  empty.className = "empty";
-  empty.hidden = true;
-  empty.textContent = "No agents yet. Create your first team to get started.";
-  page.appendChild(empty);
+  const grid = document.createElement("div");
+  grid.className = "agent-grid";
+  page.appendChild(grid);
 
   el.appendChild(page);
 
-  // Track in-flight lifecycle actions so polling doesn't clobber the
-  // "starting…"/"stopping…" state of a card mid-action.
-  const busy = new Map(); // name -> "starting" | "stopping"
   let lastAgents = [];
 
-  function statusOf(a) {
-    if (busy.has(a.name)) return busy.get(a.name);
-    if (!a.installed) return "design";
-    return a.running ? "running" : "stopped";
+  function card(a) {
+    const c = document.createElement("button");
+    c.type = "button";
+    c.className = "agent-tile";
+
+    const top = document.createElement("div");
+    top.className = "agent-top";
+    const name = document.createElement("span");
+    name.className = "agent-name";
+    name.textContent = a.name;
+    const status = document.createElement("span");
+    const st = !a.installed ? "design" : a.running ? "running" : "stopped";
+    status.className = "status " + st;
+    status.textContent = st === "design" ? "draft" : st;
+    top.appendChild(name);
+    top.appendChild(status);
+    c.appendChild(top);
+
+    const d = document.createElement("div");
+    d.className = "agent-desc";
+    d.textContent = a.description || (a.installed
+      ? "An installed agent team."
+      : "A design that hasn't been installed yet.");
+    c.appendChild(d);
+
+    const go = document.createElement("span");
+    go.className = "agent-go";
+    go.textContent = a.installed ? "Open →" : "Edit design →";
+    c.appendChild(go);
+
+    c.addEventListener("click", async () => {
+      if (a.installed) {
+        location.hash = "#/agents/" + encodeURIComponent(a.name);
+        return;
+      }
+      const err = await openSetup({ name: a.name, mode: "open" });
+      if (err) showError(err);
+    });
+    return c;
+  }
+
+  function createCard() {
+    const c = document.createElement("button");
+    c.type = "button";
+    c.className = "agent-tile create";
+    c.innerHTML = `
+      <span class="create-glyph" aria-hidden="true">+</span>
+      <span class="agent-name">Create a new agent</span>
+      <span class="agent-desc">From scratch or from a template, in a guided
+        conversation.</span>`;
+    c.addEventListener("click", async () => {
+      const err = await openSetup({});
+      if (err) showError(err);
+    });
+    return c;
+  }
+
+  function showError(msg) {
+    const note = document.createElement("div");
+    note.className = "action-error";
+    note.textContent = msg;
+    page.insertBefore(note, grid);
+    setTimeout(() => note.remove(), 12000);
   }
 
   function render() {
-    list.innerHTML = "";
-    empty.hidden = lastAgents.length > 0;
-    for (const a of lastAgents) {
-      list.appendChild(renderCard(a));
-    }
-  }
-
-  function renderCard(a) {
-    const st = statusOf(a);
-    const card = document.createElement("div");
-    card.className = "agent-card";
-
-    const info = document.createElement("div");
-    info.className = "agent-info";
-    const top = document.createElement("div");
-    top.className = "agent-top";
-    const name = document.createElement("a");
-    name.className = "agent-name";
-    name.textContent = a.name;
-    if (a.installed) name.href = "#/agents/" + encodeURIComponent(a.name);
-    const status = document.createElement("span");
-    status.className = "status " + st;
-    status.textContent =
-      st === "design" ? "not installed" :
-      st === "starting" ? "starting…" :
-      st === "stopping" ? "stopping…" : st;
-    top.appendChild(name);
-    top.appendChild(status);
-    info.appendChild(top);
-    if (a.description) {
-      const d = document.createElement("div");
-      d.className = "agent-desc";
-      d.textContent = a.description;
-      info.appendChild(d);
-    }
-    card.appendChild(info);
-
-    const actions = document.createElement("div");
-    actions.className = "agent-actions";
-    if (a.installed) {
-      if (st === "running") {
-        actions.appendChild(btn("Open", "primary", () => {
-          location.hash = "#/agents/" + encodeURIComponent(a.name);
-        }));
-        actions.appendChild(btn("Stop", "", () => act(a.name, "stop")));
-      } else if (st === "stopped") {
-        actions.appendChild(btn("Start", "primary", () => act(a.name, "start")));
-      } else {
-        const b = btn(st === "stopping" ? "Stopping…" : "Starting…", "", null);
-        b.disabled = true;
-        actions.appendChild(b);
-      }
-    } else {
-      const hint = document.createElement("span");
-      hint.className = "agent-hint";
-      hint.textContent = "design only";
-      actions.appendChild(hint);
-    }
-    card.appendChild(actions);
-    return card;
-  }
-
-  function btn(label, kind, onClick) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "btn " + kind;
-    b.textContent = label;
-    if (onClick) b.addEventListener("click", onClick);
-    return b;
-  }
-
-  async function act(name, verb) {
-    busy.set(name, verb === "start" ? "starting" : "stopping");
-    render();
-    const { ok, data } = await api(
-      "/api/agents/" + encodeURIComponent(name) + "/" + verb,
-      { method: "POST", body: "{}" });
-    if (!ok) {
-      busy.delete(name);
-      alertError(name, verb, data);
-      await poll();
-      return;
-    }
-    // Keep the busy state until polling observes the new run state.
-    await waitForState(name, verb === "start");
-    busy.delete(name);
-    await poll();
-  }
-
-  async function waitForState(name, wantRunning, tries = 40) {
-    for (let i = 0; i < tries; i++) {
-      const { ok, data } = await api(
-        "/api/agents/" + encodeURIComponent(name) + "/status");
-      if (ok && data && data.running === wantRunning) return;
-      await new Promise((r) => setTimeout(r, 750));
-    }
-  }
-
-  function alertError(name, verb, data) {
-    const detail = data && (data.report || data.error) || "unknown error";
-    // A visible but unobtrusive failure row on the card list.
-    const note = document.createElement("div");
-    note.className = "action-error";
-    note.textContent = `${verb} ${name} failed: ${detail}`;
-    page.insertBefore(note, list);
-    setTimeout(() => note.remove(), 12000);
+    grid.innerHTML = "";
+    for (const a of lastAgents) grid.appendChild(card(a));
+    grid.appendChild(createCard());
   }
 
   async function poll() {
@@ -159,6 +105,7 @@ export function mountDashboard(el, { api }) {
     }
   }
 
+  render();   // paint the create card immediately; agents fill in
   poll();
   const timer = setInterval(poll, 4000);
   return () => clearInterval(timer);

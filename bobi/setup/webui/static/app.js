@@ -9,6 +9,9 @@
   // Every /api and /static request goes through the helpers below, which
   // prefix it - keep it that way.
   const BASE = (document.querySelector('meta[name="bobi-base"]') || {}).content || "";
+  // Hosted inside the unified app: the dashboard is home. The SPA never
+  // shows its own hub, and every home-exit leaves to the shell instead.
+  const HOSTED = !!BASE;
   const H = { "x-bobi-webui-token": NONCE };
   const $ = (sel, el = document) => el.querySelector(sel);
   // Escapes for both element text AND double/single-quoted attribute contexts
@@ -149,6 +152,22 @@
   async function refresh() { S = await getJSON("/api/state"); render(); }
   async function boot() {
     S = await getJSON("/api/state");
+    if (HOSTED) {
+      // The unified app already welcomed the user and owns the home screen.
+      welcomed = true;
+      hostedChrome();
+      if (S.finished) { location.href = "/#/"; return; }
+      // Edit-an-existing-team deep link: /setup/?open=<source path> jumps
+      // straight into the open-mode conversation (cards pre-filled).
+      const openPath = new URLSearchParams(location.search).get("open");
+      if (openPath && S.stage === "start") {
+        const r = await postJSON("/api/start",
+          { mode: "open", location: openPath, team_path: openPath });
+        if (r.ok) { S = r.data; } else { toast(r.data.error || "couldn't open the team"); }
+      }
+      render();
+      return;
+    }
     // A finished session returns to the hub; so do returning users who already
     // have teams and aren't mid-setup. New users get the welcome on-ramp.
     if (S.finished) {
@@ -158,6 +177,11 @@
       catch { /* no hub — fall through to the welcome on-ramp */ }
     }
     render();
+  }
+  // Hosted titlebar: the address chip becomes the way back to the dashboard.
+  function hostedChrome() {
+    const addr = document.querySelector(".titlebar .addr");
+    if (addr) addr.innerHTML = '<a class="addr-back" href="/#/">&larr; dashboard</a>';
   }
   async function go(stage) {
     const r = await postJSON("/api/advance", { to: stage });
@@ -178,6 +202,7 @@
   // entry), so its Back routes by where it was entered from: back to the team
   // hub, or to the welcome on-ramp on first run.
   function introBack() {
+    if (HOSTED) { location.href = "/#/"; return; }
     if (introFrom === "hub") { atHome = true; render(); }
     else { welcomed = false; render(); }
   }
@@ -185,6 +210,7 @@
   // welcome screen both call this. The hub overlays any stage and is re-entrant,
   // so leaving mid-flow is safe; the server keeps each team's state.
   function goHome() {
+    if (HOSTED) { location.href = "/#/"; return; }
     if (atHome) { renderHome(); return; }
     atHome = true; welcomed = true;   // don't fall back to the welcome on-ramp
     building = false; buildGen++;      // supersede any in-flight build
@@ -1422,7 +1448,10 @@
       try { await navigator.clipboard.writeText(cmd); toast("Copied."); }
       catch { toast("Copy failed — select the command manually."); }
     });
-    $("#done-home").addEventListener("click", () => { atHome = true; renderHome(); });
+    $("#done-home").addEventListener("click", () => {
+      if (HOSTED) { location.href = "/#/"; return; }
+      atHome = true; renderHome();
+    });
   }
 
   // --- homepage (the re-entrant team hub) --------------------------------

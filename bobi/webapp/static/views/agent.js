@@ -1,19 +1,33 @@
-/* Agent view — one installed agent: subagent roster (left) + blocking chat
-   (right). Ported from the standalone agentui SPA; same behavior, routed
-   under #/agents/<name> with team-scoped endpoints. */
+/* Agent view — one agent's dashboard: run controls in the header, the
+   subagent roster (left), and chat (right). Roster/chat ported from the
+   standalone agentui SPA, routed under #/agents/<name> with team-scoped
+   endpoints. */
+
+import { openSetup } from "../shell.js";
 
 export function mountAgent(el, { api, name }) {
   const base = "/api/agents/" + encodeURIComponent(name);
 
   el.innerHTML = "";
+
+  const head = document.createElement("div");
+  head.className = "agent-ctl";
+  head.innerHTML = `
+    <span class="agent-ctl-name">${name.replace(/[&<>]/g, "")}</span>
+    <span class="status" data-el="runStatus">…</span>
+    <span class="ctl-spacer"></span>
+    <div class="agent-ctl-actions" data-el="actions"></div>
+    <button class="btn" data-el="edit" type="button">Edit source</button>`;
+  el.appendChild(head);
+
   const shell = document.createElement("div");
   shell.className = "shell";
   shell.innerHTML = `
     <aside class="sidebar">
       <div class="side-head mono"><a class="side-back" href="#/">&larr; agents</a> · subagents</div>
       <div class="cards" data-el="cards"></div>
-      <p class="empty" data-el="empty" hidden>No active subagents. Start the
-        agent from the dashboard, then launch sub-agents.</p>
+      <p class="empty" data-el="empty" hidden>No active subagents. Press Start
+        above to bring the team up.</p>
     </aside>
     <section class="pane">
       <div class="placeholder" data-el="placeholder">
@@ -45,8 +59,84 @@ export function mountAgent(el, { api, name }) {
   el.appendChild(shell);
 
   const els = {};
-  for (const n of shell.querySelectorAll("[data-el]")) {
+  for (const n of el.querySelectorAll("[data-el]")) {
     els[n.dataset.el] = n;
+  }
+
+  // --- run controls (header) -----------------------------------------
+  let runState = null;   // last /status payload
+  let busyVerb = null;   // "starting" | "stopping" | "restarting" while acting
+
+  function renderControls() {
+    const st = busyVerb ? busyVerb
+      : !runState ? "…"
+      : runState.running ? "running" : "stopped";
+    els.runStatus.className = "status " +
+      (busyVerb ? "starting" : runState && runState.running ? "running" : "stopped");
+    els.runStatus.textContent = st;
+
+    els.actions.innerHTML = "";
+    const btn = (label, kind, onClick, disabled) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "btn " + kind;
+      b.textContent = label;
+      b.disabled = !!disabled;
+      if (onClick) b.addEventListener("click", onClick);
+      els.actions.appendChild(b);
+    };
+    if (busyVerb) {
+      btn(busyVerb + "…", "", null, true);
+    } else if (runState && runState.running) {
+      btn("Stop", "", () => act("stop"));
+      btn("Restart", "", () => act("restart"));
+    } else if (runState) {
+      btn("Start", "primary", () => act("start"));
+    }
+  }
+
+  async function pollStatus() {
+    const { ok, data } = await api(base + "/status");
+    if (ok && data) {
+      runState = data;
+      if (!busyVerb) renderControls();
+    }
+  }
+
+  async function act(verb) {
+    busyVerb = verb === "start" ? "starting"
+      : verb === "stop" ? "stopping" : "restarting";
+    renderControls();
+    const { ok, data } = await api(base + "/" + verb,
+                                   { method: "POST", body: "{}" });
+    if (!ok) {
+      busyVerb = null;
+      renderControls();
+      ctlError((data && (data.report || data.error)) || verb + " failed");
+      return;
+    }
+    const wantRunning = verb !== "stop";
+    for (let i = 0; i < 40; i++) {
+      const { ok: sok, data: sd } = await api(base + "/status");
+      if (sok && sd && sd.running === wantRunning) { runState = sd; break; }
+      await new Promise((r) => setTimeout(r, 750));
+    }
+    busyVerb = null;
+    renderControls();
+    poll();   // refresh the roster right away
+  }
+
+  els.edit.addEventListener("click", async () => {
+    const err = await openSetup({ name, mode: "open" });
+    if (err) ctlError(err);
+  });
+
+  function ctlError(msg) {
+    const note = document.createElement("div");
+    note.className = "action-error";
+    note.textContent = msg;
+    head.insertAdjacentElement("afterend", note);
+    setTimeout(() => note.remove(), 12000);
   }
 
   // name -> [{who, text, error, pending}] so a chat survives roster refreshes.
@@ -343,7 +433,9 @@ export function mountAgent(el, { api, name }) {
 
   poll();
   pollMessages();
+  pollStatus();
   const t1 = setInterval(poll, 3000);
   const t2 = setInterval(pollMessages, 3000);
-  return () => { clearInterval(t1); clearInterval(t2); };
+  const t3 = setInterval(pollStatus, 4000);
+  return () => { clearInterval(t1); clearInterval(t2); clearInterval(t3); };
 }

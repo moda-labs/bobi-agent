@@ -176,43 +176,47 @@ class TestSetupHosting:
         assert bare.get("/setup/api/state").status_code == 403
         assert c.get("/setup/api/state").status_code == 200
 
-    def test_hosted_finish_launches_and_releases_session(self, bobi_install,
-                                                         monkeypatch):
-        launched = {}
+    def test_hosted_finish_returns_home_without_launching(self, bobi_install,
+                                                          monkeypatch):
+        # Finish returns to the dashboard; launching stays a deliberate
+        # action on the agent's card/dashboard (never automatic).
+        def fail_start(root, **kw):
+            raise AssertionError("finish must not launch")
 
-        def fake_start(root, **kw):
-            launched["root"] = root
-            return object()
-
-        monkeypatch.setattr(service, "start_team", fake_start)
+        monkeypatch.setattr(service, "start_team", fail_start)
+        monkeypatch.setattr(service, "spawn_team", fail_start)
         c = _client()
         self._open(c, monkeypatch)
         body = c.post("/setup/api/finish").json()
         assert body["finished"] is True
-        assert body["launched"] is True
-        assert body["redirect"] == "/#/agents/new-team"
-        from bobi import paths
-        assert launched["root"] == paths.agent_run_root("new-team")
+        assert body["redirect"] == "/#/"
         # The onboarding slot is released: current reports inactive and
-        # /setup/ redirects back to the shell's create form.
+        # /setup/ redirects back to the shell.
         assert c.get("/api/setup/current").json()["active"] is False
         assert c.get("/setup/",
                      follow_redirects=False).status_code == 307
 
-    def test_hosted_finish_launch_failure_keeps_session(self, bobi_install,
-                                                        monkeypatch):
-        def fake_start(root, **kw):
-            raise RuntimeError("event server refused to start")
+    def test_open_mode_deep_links_the_editor(self, bobi_install, monkeypatch):
+        import yaml as _yaml
 
-        monkeypatch.setattr(service, "start_team", fake_start)
-        c = _client()
-        self._open(c, monkeypatch)
-        body = c.post("/setup/api/finish").json()
-        assert body["finished"] is True
-        assert "event server" in body["launch_error"]
-        assert "redirect" not in body
-        # The session stays parked so the user can retry from the page.
-        assert c.get("/api/setup/current").json()["active"] is True
+        from bobi import paths
+        src = paths.agent_source_dir(bobi_install.agent_name)
+        src.mkdir(parents=True, exist_ok=True)
+        (src / "agent.yaml").write_text(_yaml.dump(
+            {"agent": bobi_install.agent_name}))
+        monkeypatch.setattr(server, "_claude_available", lambda: True)
+        r = _client().post("/api/setup/open",
+                           json={"name": bobi_install.agent_name,
+                                 "mode": "open"})
+        assert r.status_code == 200
+        assert r.json()["url"].startswith("/setup/?open=")
+        assert str(src) in r.json()["url"]
+
+    def test_open_mode_requires_source(self, bobi_install, monkeypatch):
+        monkeypatch.setattr(server, "_claude_available", lambda: True)
+        r = _client().post("/api/setup/open",
+                           json={"name": "no-src-slot", "mode": "open"})
+        assert r.status_code == 404
 
     def test_open_requires_claude(self, bobi_install, monkeypatch):
         monkeypatch.setattr(server, "_claude_available", lambda: False)

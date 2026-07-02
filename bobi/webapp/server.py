@@ -314,17 +314,28 @@ def build_app(*, token: str) -> FastAPI:
 
     @app.post("/api/setup/open")
     def setup_open(payload: dict) -> JSONResponse:
+        from bobi.setup import open_mode
         from bobi.setup.state import SetupState
         from bobi.setup.webui.server import build_app as build_setup_app
 
         name = (payload.get("name") or "").strip() or "new-agent"
+        mode = (payload.get("mode") or "create").strip()
         if not safe_name(name):
             return JSONResponse({"error": "bad name"}, status_code=400)
+        if mode not in ("create", "open"):
+            return JSONResponse({"error": "mode must be create or open"},
+                                status_code=400)
         if not _claude_available():
             return JSONResponse(
                 {"error": "the Claude Code CLI is required for setup — "
                           "install it first (https://claude.com/claude-code)."},
                 status_code=409)
+
+        src = paths.agent_source_dir(name)
+        if mode == "open" and not open_mode.is_team(src):
+            return JSONResponse(
+                {"error": f"'{name}' has no editable source at {src}"},
+                status_code=404)
 
         project = paths.agent_run_root(name)
         project.mkdir(parents=True, exist_ok=True)
@@ -339,33 +350,30 @@ def build_app(*, token: str) -> FastAPI:
             state.save(project)
 
         def on_finish() -> dict:
-            # Launch the just-installed team and route the browser back to
-            # its agent view. Raises map to `launch_error` in the finish
-            # response (the setup server catches them).
-            from bobi import service
-
-            with _binder.bound(project):
-                try:
-                    service.start_team(project)
-                except service.AlreadyRunning:
-                    pass  # already up (e.g. a re-finish after editing)
-                except service.PreflightFailed as e:
-                    raise RuntimeError(e.validation.format()) from e
-            # The onboarding session is done — release the slot so /setup/
-            # returns to the create form next time.
+            # Finish returns to the home dashboard; the user starts the
+            # team from its card there (launch stays a deliberate action).
+            # Release the slot so /setup/ starts clean next time.
             setup_host.app = None
             setup_host.name = None
             setup_host.project = None
-            return {"launched": True,
-                    "redirect": f"/#/agents/{name}"}
+            return {"redirect": "/#/"}
 
         setup_host.app = build_setup_app(state, project, nonce=token,
                                          base_path="/setup",
                                          on_finish=on_finish)
         setup_host.name = name
         setup_host.project = project
-        return JSONResponse({"url": "/setup/", "name": name,
-                             "resumed": resumed})
+
+        # Edit-an-existing-team entry: a fresh session deep-links the SPA
+        # into open mode for the slot's source (the SPA drives /api/start,
+        # which owns the copy/reverse-fill semantics). A resumed session is
+        # already mid-flow — don't re-open over it.
+        url = "/setup/"
+        if mode == "open" and not resumed:
+            from urllib.parse import quote
+
+            url = f"/setup/?open={quote(str(src))}"
+        return JSONResponse({"url": url, "name": name, "resumed": resumed})
 
     # --- subagents (sessions inside one agent) + chat -------------------
 
