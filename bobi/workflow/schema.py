@@ -37,6 +37,8 @@ class StepDef:
     condition: str = ""
     goto: str = ""
     else_goto: str = ""
+    max_iterations: int = 0
+    on_exhausted: str = ""
 
     # Await step fields
     await_event: str = ""
@@ -92,6 +94,8 @@ def load_workflow(path: Path) -> Workflow:
             condition=s.get("if", ""),
             goto=s.get("goto", ""),
             else_goto=s.get("else", ""),
+            max_iterations=_parse_max_iterations(s),
+            on_exhausted=s.get("on_exhausted", ""),
             await_event=s.get("await", ""),
             notify=s.get("notify", ""),
             message=s.get("message", ""),
@@ -99,9 +103,82 @@ def load_workflow(path: Path) -> Workflow:
         )
         steps.append(step)
 
-    return Workflow(
+    workflow = Workflow(
         name=raw.get("name", path.stem),
         steps=steps,
         trigger=raw.get("trigger", ""),
         description=raw.get("description", ""),
     )
+    _validate_back_edges(workflow)
+    return workflow
+
+
+def _parse_max_iterations(raw_step: dict[str, Any]) -> int:
+    """Return the configured visit cap for a step.
+
+    ``max_visits`` is accepted as an alias because the workflow problem is
+    fundamentally a repeated step visit guard; the stored field uses the ticket's
+    primary spelling, ``max_iterations``.
+    """
+    if "max_iterations" in raw_step:
+        raw_value = raw_step["max_iterations"]
+    elif "max_visits" in raw_step:
+        raw_value = raw_step["max_visits"]
+    else:
+        return 0
+
+    if isinstance(raw_value, bool):
+        raise ValueError(
+            f"Step {raw_step.get('name', '<unknown>')}: "
+            "max_iterations must be a positive integer"
+        )
+    if isinstance(raw_value, int):
+        value = raw_value
+    elif isinstance(raw_value, str):
+        try:
+            value = int(raw_value)
+        except ValueError as exc:
+            raise ValueError(
+                f"Step {raw_step.get('name', '<unknown>')}: "
+                "max_iterations must be a positive integer"
+            ) from exc
+    else:
+        raise ValueError(
+            f"Step {raw_step.get('name', '<unknown>')}: "
+            "max_iterations must be a positive integer"
+        )
+    if value < 1:
+        raise ValueError(
+            f"Step {raw_step.get('name', '<unknown>')}: "
+            "max_iterations must be a positive integer"
+        )
+    return value
+
+
+def _validate_back_edges(workflow: Workflow) -> None:
+    """Reject route back-edges unless the source step has an explicit bound."""
+    for index, step in enumerate(workflow.steps):
+        if step.on_exhausted:
+            exhausted_index = workflow.step_index(step.on_exhausted)
+            if exhausted_index < 0:
+                raise ValueError(
+                    f"Workflow {workflow.name}: step {step.name} "
+                    f"on_exhausted target {step.on_exhausted} was not found"
+                )
+            if exhausted_index <= index:
+                raise ValueError(
+                    f"Workflow {workflow.name}: step {step.name} "
+                    f"on_exhausted target {step.on_exhausted} must be later"
+                )
+        for field_name, target in (("goto", step.goto), ("else", step.else_goto)):
+            if not target:
+                continue
+            target_index = workflow.step_index(target)
+            if target_index < 0 or target_index > index:
+                continue
+            if step.max_iterations:
+                continue
+            raise ValueError(
+                f"Workflow {workflow.name}: unbounded back-edge from step "
+                f"{step.name} {field_name}: {target}; add max_iterations"
+            )
