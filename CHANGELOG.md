@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.37.0 — 2026-07-01
+
+Minor release: gstack joins the tool-library catalog.
+
+### Added
+- **gstack in the tool-library catalog (#428).** The headless-browser QA /
+  dogfooding toolchain (the `browse`, `qa`, `ship`, and `review` skills) is now a
+  reusable catalog entry — a team pulls it in with `tool_library: [gstack]`, with
+  the pins living once in the catalog instead of a hand-written per-team `build:`.
+  The entry is self-contained: it declares its own `nodejs`/`npm` (the base image
+  is Node-free) so its `bun` / Playwright / `./setup` install works standalone. (#583)
+
 ## 0.36.0 — 2026-07-01
 
 Minor release: the unified tool-library dependency model (#428, epic #515),
