@@ -87,12 +87,18 @@ def _sse(event: str, data) -> str:
 
 def build_app(state: SetupState, project: Path, *, nonce: str,
               model: str | None = None, stream_fn=None,
-              home_root: Path | None = None, base_path: str = ""):
+              home_root: Path | None = None, base_path: str = "",
+              on_finish=None):
     """Construct the FastAPI app. `stream_fn` overrides the LLM source
     (tests inject a fake). `home_root` overrides the Bobi home for tests.
     `base_path` is the mount prefix when hosted as a sub-app of the unified
     web app (e.g. "/setup") — the SPA prefixes its /api and /static URLs
-    with it. Empty (the standalone `bobi setup` server) changes nothing."""
+    with it. Empty (the standalone `bobi setup` server) changes nothing.
+    `on_finish` is the unified app's launch hook: called after Finish marks
+    the state complete; its dict return is merged into the finish response
+    (e.g. {"launched": True, "redirect": ...}); an exception surfaces as
+    `launch_error` without unwinding the finish. None (standalone) keeps
+    today's behavior: finish just marks done and shows the start command."""
     app = FastAPI()
     app.state.stream_fn = stream_fn
     app.state.model = model
@@ -1078,7 +1084,16 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # user can open and edit any team. The process ends when they stop it.
         state.finished = True
         state.save(project)
-        return serialize_state(state)
+        result = serialize_state(state)
+        if on_finish is not None:
+            # Hosted mode: launch the installed team and send the browser
+            # back to the unified app. A launch failure never unwinds the
+            # finish — the team is installed either way.
+            try:
+                result.update(on_finish() or {})
+            except Exception as e:  # noqa: BLE001 — surfaced to the UI
+                result["launch_error"] = str(e)
+        return result
 
     @app.get("/api/home")
     def home_teams() -> dict:

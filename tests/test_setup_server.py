@@ -1076,6 +1076,31 @@ class TestFinish:
         assert r.json()["finished"] is True
         assert s.finished is True
 
+    def test_finish_merges_on_finish_result(self, project):
+        # Hosted mode (the unified app): on_finish launches the team and its
+        # return rides the finish response so the SPA can redirect.
+        s = SetupState(stage=Stage.DONE)
+        c = _client(s, project,
+                    on_finish=lambda: {"launched": True, "redirect": "/#/x"})
+        body = c.post("/api/finish").json()
+        assert body["finished"] is True
+        assert body["launched"] is True
+        assert body["redirect"] == "/#/x"
+
+    def test_finish_survives_on_finish_failure(self, project):
+        # A launch failure surfaces as launch_error; the finish itself holds
+        # (the team is installed either way).
+        def boom():
+            raise RuntimeError("preflight: missing SLACK_BOT_TOKEN")
+
+        s = SetupState(stage=Stage.DONE)
+        c = _client(s, project, on_finish=boom)
+        body = c.post("/api/finish").json()
+        assert body["finished"] is True
+        assert s.finished is True
+        assert "SLACK_BOT_TOKEN" in body["launch_error"]
+        assert "redirect" not in body
+
 
 class TestHome:
     def test_lists_library_teams_with_descriptions(self, project, home):

@@ -338,8 +338,30 @@ def build_app(*, token: str) -> FastAPI:
             state = SetupState(team_name=name)
             state.save(project)
 
+        def on_finish() -> dict:
+            # Launch the just-installed team and route the browser back to
+            # its agent view. Raises map to `launch_error` in the finish
+            # response (the setup server catches them).
+            from bobi import service
+
+            with _binder.bound(project):
+                try:
+                    service.start_team(project)
+                except service.AlreadyRunning:
+                    pass  # already up (e.g. a re-finish after editing)
+                except service.PreflightFailed as e:
+                    raise RuntimeError(e.validation.format()) from e
+            # The onboarding session is done — release the slot so /setup/
+            # returns to the create form next time.
+            setup_host.app = None
+            setup_host.name = None
+            setup_host.project = None
+            return {"launched": True,
+                    "redirect": f"/#/agents/{name}"}
+
         setup_host.app = build_setup_app(state, project, nonce=token,
-                                         base_path="/setup")
+                                         base_path="/setup",
+                                         on_finish=on_finish)
         setup_host.name = name
         setup_host.project = project
         return JSONResponse({"url": "/setup/", "name": name,

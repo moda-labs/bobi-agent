@@ -1330,8 +1330,20 @@
       toast(r.ok ? "Opened the team folder." : (r.data.error || "couldn't open the folder"));
     });
     $("#fd-finish").addEventListener("click", async () => {
-      const b = $("#fd-finish"); b.disabled = true; b.textContent = "Finishing…";
-      try { await postJSON("/api/finish", {}); } catch { /* ignore */ }
+      const b = $("#fd-finish"); b.disabled = true;
+      // Hosted in the unified app (BASE set), finish also launches the team
+      // before returning — say so while the request runs.
+      b.textContent = BASE ? "Launching…" : "Finishing…";
+      let r = null;
+      try { r = await postJSON("/api/finish", {}); } catch { /* ignore */ }
+      const d = (r && r.data) || {};
+      if (d.redirect) {
+        // Launched — back to the unified app (dashboard / agent view).
+        _finished = true;
+        location.href = d.redirect;
+        return;
+      }
+      if (d.launch_error) toast("Launch failed: " + d.launch_error);
       renderFinished();
     });
 

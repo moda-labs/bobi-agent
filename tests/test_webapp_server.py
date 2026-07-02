@@ -176,6 +176,44 @@ class TestSetupHosting:
         assert bare.get("/setup/api/state").status_code == 403
         assert c.get("/setup/api/state").status_code == 200
 
+    def test_hosted_finish_launches_and_releases_session(self, bobi_install,
+                                                         monkeypatch):
+        launched = {}
+
+        def fake_start(root, **kw):
+            launched["root"] = root
+            return object()
+
+        monkeypatch.setattr(service, "start_team", fake_start)
+        c = _client()
+        self._open(c, monkeypatch)
+        body = c.post("/setup/api/finish").json()
+        assert body["finished"] is True
+        assert body["launched"] is True
+        assert body["redirect"] == "/#/agents/new-team"
+        from bobi import paths
+        assert launched["root"] == paths.agent_run_root("new-team")
+        # The onboarding slot is released: current reports inactive and
+        # /setup/ redirects back to the shell's create form.
+        assert c.get("/api/setup/current").json()["active"] is False
+        assert c.get("/setup/",
+                     follow_redirects=False).status_code == 307
+
+    def test_hosted_finish_launch_failure_keeps_session(self, bobi_install,
+                                                        monkeypatch):
+        def fake_start(root, **kw):
+            raise RuntimeError("event server refused to start")
+
+        monkeypatch.setattr(service, "start_team", fake_start)
+        c = _client()
+        self._open(c, monkeypatch)
+        body = c.post("/setup/api/finish").json()
+        assert body["finished"] is True
+        assert "event server" in body["launch_error"]
+        assert "redirect" not in body
+        # The session stays parked so the user can retry from the page.
+        assert c.get("/api/setup/current").json()["active"] is True
+
     def test_open_requires_claude(self, bobi_install, monkeypatch):
         monkeypatch.setattr(server, "_claude_available", lambda: False)
         r = _client().post("/api/setup/open", json={"name": "x"})
