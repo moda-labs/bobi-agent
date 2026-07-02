@@ -87,9 +87,12 @@ def _sse(event: str, data) -> str:
 
 def build_app(state: SetupState, project: Path, *, nonce: str,
               model: str | None = None, stream_fn=None,
-              home_root: Path | None = None):
+              home_root: Path | None = None, base_path: str = ""):
     """Construct the FastAPI app. `stream_fn` overrides the LLM source
-    (tests inject a fake). `home_root` overrides the Bobi home for tests."""
+    (tests inject a fake). `home_root` overrides the Bobi home for tests.
+    `base_path` is the mount prefix when hosted as a sub-app of the unified
+    web app (e.g. "/setup") — the SPA prefixes its /api and /static URLs
+    with it. Empty (the standalone `bobi setup` server) changes nothing."""
     app = FastAPI()
     app.state.stream_fn = stream_fn
     app.state.model = model
@@ -119,7 +122,8 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         legacy_header_names=(NONCE_HEADER, LEGACY_AGENTUI_TOKEN_HEADER),
         error_message="bad or missing nonce",
     )
-    serve_index(app, STATIC_DIR / "index.html", {"{{NONCE}}": nonce})
+    serve_index(app, STATIC_DIR / "index.html",
+                {"{{NONCE}}": nonce, "{{BASE}}": base_path})
     mount_static(app, STATIC_DIR)
 
     # --- state (deterministic) -----------------------------------------

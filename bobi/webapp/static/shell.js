@@ -97,12 +97,65 @@ async function route() {
   }
   if (r.view === "setup") {
     setSubtitle("setup");
-    stub(el, "Create a team",
-         "Onboarding moves in here soon. Until then run `bobi setup` in a terminal.");
+    mountSetupEntry(el);
     return;
   }
   setSubtitle("agents");
   teardown = mountDashboard(el, { api });
+}
+
+/* Setup entry — name the team, then hand off to the hosted onboarding
+   flow at /setup/ (the full setup experience, served by this same app). */
+async function mountSetupEntry(el) {
+  el.innerHTML = "";
+  const page = document.createElement("div");
+  page.className = "page setup-entry";
+  page.innerHTML = `
+    <h1>Create a team</h1>
+    <p class="setup-hint">Name your agent team, then design it in a guided
+      conversation. You can rename it during setup.</p>
+    <form class="setup-form" data-el="form">
+      <input data-el="name" type="text" placeholder="e.g. content-review"
+             autocomplete="off" spellcheck="false">
+      <button class="btn primary" type="submit">Start onboarding</button>
+    </form>
+    <div class="setup-resume" data-el="resume" hidden></div>
+    <div class="action-error" data-el="error" hidden></div>`;
+  el.appendChild(page);
+
+  const els = {};
+  for (const n of page.querySelectorAll("[data-el]")) els[n.dataset.el] = n;
+
+  const { ok, data } = await api("/api/setup/current");
+  if (ok && data && data.active && data.name) {
+    els.resume.hidden = false;
+    els.resume.innerHTML = "";
+    const p = document.createElement("p");
+    p.textContent = `An onboarding session for “${data.name}” is in progress.`;
+    const b = document.createElement("a");
+    b.className = "btn";
+    b.href = "/setup/";
+    b.textContent = "Resume it";
+    els.resume.appendChild(p);
+    els.resume.appendChild(b);
+  }
+
+  els.form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    els.error.hidden = true;
+    const name = els.name.value.trim();
+    const { ok, data } = await api("/api/setup/open", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    if (ok && data && data.url) {
+      location.href = data.url;
+      return;
+    }
+    els.error.textContent = (data && data.error) || "could not start setup";
+    els.error.hidden = false;
+  });
+  els.name.focus();
 }
 
 window.addEventListener("hashchange", route);

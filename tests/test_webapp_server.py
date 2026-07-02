@@ -119,6 +119,74 @@ class _FakeSpawn:
     startup = _FakeStartup()
 
 
+# --- hosted onboarding (the setup app mounted under /setup) ----------------
+
+class TestSetupHosting:
+    def _open(self, client, monkeypatch, name="new-team"):
+        monkeypatch.setattr(server, "_claude_available", lambda: True)
+        return client.post("/api/setup/open", json={"name": name})
+
+    def test_no_session_redirects_to_shell(self, bobi_install):
+        c = _client()
+        r = c.get("/setup/", follow_redirects=False)
+        assert r.status_code == 307
+        assert r.headers["location"] == "/#/setup"
+
+    def test_open_creates_session(self, bobi_install, monkeypatch):
+        c = _client()
+        r = self._open(c, monkeypatch)
+        assert r.status_code == 200
+        assert r.json() == {"url": "/setup/", "name": "new-team",
+                            "resumed": False}
+        cur = c.get("/api/setup/current").json()
+        assert cur == {"active": True, "name": "new-team"}
+        # setup state persisted under the slot's run root
+        from bobi.setup.state import SetupState
+        from bobi import paths
+        state = SetupState.load(paths.agent_run_root("new-team"))
+        assert state is not None
+        assert state.team_name == "new-team"
+
+    def test_open_resumes_unfinished_session(self, bobi_install, monkeypatch):
+        c = _client()
+        assert self._open(c, monkeypatch).json()["resumed"] is False
+        assert self._open(c, monkeypatch).json()["resumed"] is True
+
+    def test_hosted_page_serves_with_base_and_token(self, bobi_install,
+                                                    monkeypatch):
+        c = _client()
+        self._open(c, monkeypatch)
+        r = c.get("/setup/")
+        assert r.status_code == 200
+        assert TOKEN in r.text
+        assert '"/setup/static/app.js"' in r.text
+
+    def test_hosted_api_requires_token(self, bobi_install, monkeypatch):
+        # The mounted sub-app must still enforce its /api token check even
+        # though its url.path carries the /setup prefix (the root_path fix
+        # in webui_common.security). Both clients share one app so they see
+        # the same active onboarding session.
+        app = server.build_app(token=TOKEN)
+        c = TestClient(app, base_url="http://127.0.0.1")
+        c.headers.update({"x-bobi-webui-token": TOKEN})
+        monkeypatch.setattr(server, "_claude_available", lambda: True)
+        assert c.post("/api/setup/open",
+                      json={"name": "new-team"}).status_code == 200
+        bare = TestClient(app, base_url="http://127.0.0.1")
+        assert bare.get("/setup/api/state").status_code == 403
+        assert c.get("/setup/api/state").status_code == 200
+
+    def test_open_requires_claude(self, bobi_install, monkeypatch):
+        monkeypatch.setattr(server, "_claude_available", lambda: False)
+        r = _client().post("/api/setup/open", json={"name": "x"})
+        assert r.status_code == 409
+
+    def test_open_rejects_bad_name(self, bobi_install, monkeypatch):
+        monkeypatch.setattr(server, "_claude_available", lambda: True)
+        r = _client().post("/api/setup/open", json={"name": "../evil"})
+        assert r.status_code == 400
+
+
 # --- subagents + chat ------------------------------------------------------
 
 def _entry(name, role="engineer", **kw):

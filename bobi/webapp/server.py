@@ -191,6 +191,42 @@ def dashboard_snapshot() -> dict:
     return {"agents": cards, "home": str(paths.home_dir())}
 
 
+class _SetupHost:
+    """ASGI slot for the active onboarding session's setup app.
+
+    The unified app hosts ONE onboarding at a time (an explicit MVP
+    decision): POST /api/setup/open builds the standard setup app for a
+    named slot and parks it here; /setup/* requests forward to it. With no
+    active session, /setup/* redirects to the shell, which shows the
+    create form."""
+
+    def __init__(self):
+        self.app = None
+        self.name: str | None = None
+        self.project: Path | None = None
+
+    async def __call__(self, scope, receive, send):
+        if self.app is not None:
+            await self.app(scope, receive, send)
+            return
+        if scope["type"] != "http":
+            return
+        await send({
+            "type": "http.response.start",
+            "status": 307,
+            "headers": [(b"location", b"/#/setup")],
+        })
+        await send({"type": "http.response.body", "body": b""})
+
+
+def _claude_available() -> bool:
+    import shutil
+
+    from bobi.sdk import get_cli_path
+
+    return bool(shutil.which("claude")) or Path(get_cli_path()).exists()
+
+
 def build_app(*, token: str) -> FastAPI:
     app = FastAPI()
 
@@ -266,6 +302,48 @@ def build_app(*, token: str) -> FastAPI:
             "pid": result.pid,
             "still_running": result.still_running,
         })
+
+    # --- onboarding (the setup app, hosted) -----------------------------
+
+    setup_host = _SetupHost()
+    app.mount("/setup", setup_host)
+
+    @app.get("/api/setup/current")
+    def setup_current() -> dict:
+        return {"active": setup_host.app is not None, "name": setup_host.name}
+
+    @app.post("/api/setup/open")
+    def setup_open(payload: dict) -> JSONResponse:
+        from bobi.setup.state import SetupState
+        from bobi.setup.webui.server import build_app as build_setup_app
+
+        name = (payload.get("name") or "").strip() or "new-agent"
+        if not safe_name(name):
+            return JSONResponse({"error": "bad name"}, status_code=400)
+        if not _claude_available():
+            return JSONResponse(
+                {"error": "the Claude Code CLI is required for setup — "
+                          "install it first (https://claude.com/claude-code)."},
+                status_code=409)
+
+        project = paths.agent_run_root(name)
+        project.mkdir(parents=True, exist_ok=True)
+        paths.workspace_dir(project).mkdir(parents=True, exist_ok=True)
+
+        # Resume an interrupted onboarding for this slot; else start fresh.
+        state = SetupState.load(project)
+        resumed = bool(state) and not state.finished
+        if not resumed:
+            SetupState.clear(project)
+            state = SetupState(team_name=name)
+            state.save(project)
+
+        setup_host.app = build_setup_app(state, project, nonce=token,
+                                         base_path="/setup")
+        setup_host.name = name
+        setup_host.project = project
+        return JSONResponse({"url": "/setup/", "name": name,
+                             "resumed": resumed})
 
     # --- subagents (sessions inside one agent) + chat -------------------
 

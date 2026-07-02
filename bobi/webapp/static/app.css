@@ -165,6 +165,33 @@ a.agent-name[href]:hover { color: var(--accent); }
 
 .empty { color: var(--muted); font-size: 13.5px; }
 
+/* setup entry (create-team form) */
+.setup-entry { max-width: 520px; }
+.setup-entry h1 { font-size: 19px; font-weight: 650; margin: 0 0 6px; }
+.setup-hint { color: var(--muted); font-size: 14px; margin: 0 0 18px; }
+.setup-form { display: flex; gap: 10px; }
+.setup-form input {
+  flex: 1;
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  padding: 9px 12px;
+}
+.setup-form input:focus { outline: none; border-color: var(--accent); }
+.setup-resume {
+  margin-top: 18px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.setup-resume p { margin: 0 0 10px; color: var(--muted); font-size: 13.5px; }
+.setup-entry .action-error { margin-top: 14px; }
+
 /* stub views (routes that land in a later build) */
 .stub {
   margin: auto;

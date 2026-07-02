@@ -5,6 +5,10 @@
    never in the chat. Build/Done reuse the generating + done views. */
 (() => {
   const NONCE = document.querySelector('meta[name="bobi-nonce"]').content;
+  // Mount prefix when hosted inside the unified web app ("" standalone).
+  // Every /api and /static request goes through the helpers below, which
+  // prefix it - keep it that way.
+  const BASE = (document.querySelector('meta[name="bobi-base"]') || {}).content || "";
   const H = { "x-bobi-webui-token": NONCE };
   const $ = (sel, el = document) => el.querySelector(sel);
   // Escapes for both element text AND double/single-quoted attribute contexts
@@ -73,7 +77,7 @@
   // --- api helpers -------------------------------------------------------
   async function getJSON(path) {
     let r;
-    try { r = await fetch(path, { headers: H }); }
+    try { r = await fetch(BASE + path, { headers: H }); }
     catch (e) { markDisconnected(); throw e; }   // network failure = server gone
     markConnected();
     return r.json();
@@ -81,7 +85,7 @@
   async function postJSON(path, body) {
     let r;
     try {
-      r = await fetch(path, {
+      r = await fetch(BASE + path, {
         method: "POST", headers: { ...H, "content-type": "application/json" },
         body: JSON.stringify(body || {}),
       });
@@ -101,7 +105,7 @@
   async function sse(path, body, handlers) {
     let res;
     try {
-      res = await fetch(path, {
+      res = await fetch(BASE + path, {
         method: "POST", headers: { ...H, "content-type": "application/json" },
         body: JSON.stringify(body || {}),
       });
@@ -934,7 +938,7 @@
   let editSecrets = new Set();   // secret vars temporarily re-opened for editing
   // Copy a saved credential to the clipboard without ever showing it on screen.
   async function copySecret(varName) {
-    const r = await fetch("/api/credential/value?var=" + encodeURIComponent(varName), { headers: H });
+    const r = await fetch(BASE + "/api/credential/value?var=" + encodeURIComponent(varName), { headers: H });
     if (!r.ok) { toast("nothing to copy"); return; }
     const { value } = await r.json();
     try { await navigator.clipboard.writeText(value); toast(`${varName} copied`); }
@@ -1863,7 +1867,7 @@
   async function heartbeat() {
     if (_finished) return;
     try {
-      const r = await fetch("/api/ping", { headers: H });
+      const r = await fetch(BASE + "/api/ping", { headers: H });
       if (r.ok) markConnected(); else markDisconnected();
     } catch { markDisconnected(); }
   }
