@@ -42,7 +42,7 @@ from pathlib import Path
 
 import yaml
 
-from bobi.config import _ENV_VAR_RE, parse_env_file, write_env_file
+from bobi.config import _ENV_VAR_RE, parse_env_file, parse_env_ref, write_env_file
 
 log = logging.getLogger(__name__)
 
@@ -527,7 +527,9 @@ def scan_required_vars(agent_yaml: Path) -> list[str]:
     """
     if not agent_yaml.exists():
         return []
-    return [v for v in _ENV_VAR_RE.findall(agent_yaml.read_text()) if ":" not in v]
+    return [ref.name
+            for ref in map(parse_env_ref, _ENV_VAR_RE.findall(agent_yaml.read_text()))
+            if ref.required]
 
 
 def scan_declared_vars(agent_yaml: Path) -> list[str]:
@@ -543,7 +545,7 @@ def scan_declared_vars(agent_yaml: Path) -> list[str]:
         return []
     seen: dict[str, None] = {}
     for v in _ENV_VAR_RE.findall(agent_yaml.read_text()):
-        seen.setdefault(v.split(":", 1)[0], None)  # ${VAR:-x} -> VAR
+        seen.setdefault(parse_env_ref(v).name, None)  # ${VAR:-x} -> VAR
     return list(seen)
 
 

@@ -1,4 +1,4 @@
-version: "1.2.0"
+version: "1.2.1"
 
 entry_point: manager
 chat: slack
@@ -11,9 +11,9 @@ chat: slack
 # below; the catalog entry only provides the binary, not the secret.
 tool_library: [venn]
 
-# Cloud event server URL in production (.env), empty for an
+# Cloud event server URL in production (.env); optional - unset means an
 # auto-started local server (CI smoke tests, local dev).
-event_server: ${BOBI_EVENT_SERVER}
+event_server: ${BOBI_EVENT_SERVER:-}
 
 # GitHub events arrive via webhooks (native adapter auto-detects the
 # repo). Email has no webhook adapter — the new-emails monitor polls

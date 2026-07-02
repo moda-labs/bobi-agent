@@ -52,6 +52,7 @@ _EXEC_FLAGS = (
 # only 64 KiB, which turns a healthy long NDJSON event into a ValueError from
 # StreamReader.readline().
 _CODEX_STREAM_LIMIT = 16 * 1024 * 1024
+_CODEX_TERMINATE_TIMEOUT = 5.0
 
 
 def _instructions(system_prompt: Any) -> str:
@@ -89,10 +90,14 @@ async def _spawn_codex(argv: list[str], cwd: str) -> AsyncIterator[dict]:
         limit=_CODEX_STREAM_LIMIT,
     )
     assert proc.stdout is not None
+    assert proc.stderr is not None
+    stderr_task = asyncio.create_task(proc.stderr.read())
+    exhausted = False
     try:
         while True:
             line = await proc.stdout.readline()
             if not line:
+                exhausted = True
                 break
             s = line.decode("utf-8", "replace").strip()
             if not s:
@@ -102,12 +107,34 @@ async def _spawn_codex(argv: list[str], cwd: str) -> AsyncIterator[dict]:
             except json.JSONDecodeError:
                 continue
     finally:
-        if proc.returncode is None:
+        if not exhausted and proc.returncode is None:
             try:
                 proc.terminate()
             except ProcessLookupError:
                 pass
+            try:
+                await asyncio.wait_for(
+                    proc.wait(), timeout=_CODEX_TERMINATE_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
         await proc.wait()
+        try:
+            stderr = await asyncio.wait_for(
+                stderr_task, timeout=_CODEX_TERMINATE_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            stderr_task.cancel()
+            stderr = b""
+        if exhausted and proc.returncode:
+            detail = stderr.decode("utf-8", "replace").strip()
+            tail = detail[-2000:] if detail else "no stderr"
+            raise RuntimeError(
+                f"codex subprocess exited {proc.returncode}: {tail}"
+            )
 
 
 class _CodexSession:

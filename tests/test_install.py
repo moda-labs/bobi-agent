@@ -352,6 +352,62 @@ class TestNonInteractiveInstall:
         assert env["MY_API_KEY"] == "existing-key"
         assert env["BOBI_EVENT_SERVER"] == "wss://events.example.com"
 
+    def test_optional_var_from_environment_written_by_name(self, tmp_path, monkeypatch):
+        """A SET ${VAR:-default} value is copied from the environment into
+        .env under its plain name (regression: the raw 'VAR:-default' token
+        used to be looked up verbatim, so set optional vars were never
+        captured)."""
+        pack_dir = tmp_path / "agents" / "opt-team"
+        (pack_dir / "roles" / "manager").mkdir(parents=True)
+        (pack_dir / "roles" / "manager" / "ROLE.md").write_text("# Manager\n")
+        pack_dir.joinpath("agent.yaml").write_text(
+            "version: '1.0'\n"
+            "entry_point: manager\n"
+            "event_server: ${BOBI_EVENT_SERVER:-}\n"
+        )
+        pack_dir.joinpath("agent.md").write_text("# opt-team\n")
+
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        monkeypatch.setenv("BOBI_EVENT_SERVER", "wss://events.example.com")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["agents", "install", str(pack_dir), "--non-interactive"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        env = parse_env_file(home / "agents" / "opt-team" / "run" / ".env")
+        assert env["BOBI_EVENT_SERVER"] == "wss://events.example.com"
+
+    def test_optional_missing_warns_by_plain_name(self, tmp_path, monkeypatch):
+        """The optional-missing warning names the var, not the raw
+        'VAR:-default' token."""
+        pack_dir = tmp_path / "agents" / "opt-team"
+        (pack_dir / "roles" / "manager").mkdir(parents=True)
+        (pack_dir / "roles" / "manager" / "ROLE.md").write_text("# Manager\n")
+        pack_dir.joinpath("agent.yaml").write_text(
+            "version: '1.0'\n"
+            "entry_point: manager\n"
+            "model: ${OPTIONAL_MODEL:-sonnet}\n"
+        )
+        pack_dir.joinpath("agent.md").write_text("# opt-team\n")
+
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        monkeypatch.delenv("OPTIONAL_MODEL", raising=False)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["agents", "install", str(pack_dir), "--non-interactive"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        assert "OPTIONAL_MODEL" in result.output
+        assert "OPTIONAL_MODEL:-" not in result.output
+
     def test_interactive_default_still_prompts(self, pack_with_creds, tmp_path, monkeypatch):
         """Without --non-interactive, install still prompts (baseline)."""
         home = tmp_path / "home"
@@ -368,3 +424,61 @@ class TestNonInteractiveInstall:
         )
         assert result.exit_code == 0
         assert "credentials" in result.output.lower()
+
+    def test_interactive_event_server_prompt_hints_blank_is_local(
+            self, tmp_path, monkeypatch):
+        """The BOBI_EVENT_SERVER prompt says blank = the auto-started local
+        server, and an entered value for a ${VAR:-} ref is stored under its
+        plain name."""
+        pack_dir = tmp_path / "agents" / "opt-team"
+        (pack_dir / "roles" / "manager").mkdir(parents=True)
+        (pack_dir / "roles" / "manager" / "ROLE.md").write_text("# Manager\n")
+        pack_dir.joinpath("agent.yaml").write_text(
+            "version: '1.0'\n"
+            "entry_point: manager\n"
+            "event_server: ${BOBI_EVENT_SERVER:-}\n"
+        )
+        pack_dir.joinpath("agent.md").write_text("# opt-team\n")
+
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        monkeypatch.delenv("BOBI_EVENT_SERVER", raising=False)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["agents", "install", str(pack_dir)],
+            input="wss://events.example.com\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "leave blank to auto-start the local server" in result.output
+        env = parse_env_file(home / "agents" / "opt-team" / "run" / ".env")
+        assert env["BOBI_EVENT_SERVER"] == "wss://events.example.com"
+
+    def test_interactive_event_server_blank_stays_unset(
+            self, tmp_path, monkeypatch):
+        """Accepting the blank default leaves BOBI_EVENT_SERVER out of .env,
+        so start auto-launches the local event server."""
+        pack_dir = tmp_path / "agents" / "opt-team"
+        (pack_dir / "roles" / "manager").mkdir(parents=True)
+        (pack_dir / "roles" / "manager" / "ROLE.md").write_text("# Manager\n")
+        pack_dir.joinpath("agent.yaml").write_text(
+            "version: '1.0'\n"
+            "entry_point: manager\n"
+            "event_server: ${BOBI_EVENT_SERVER:-}\n"
+        )
+        pack_dir.joinpath("agent.md").write_text("# opt-team\n")
+
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        monkeypatch.delenv("BOBI_EVENT_SERVER", raising=False)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["agents", "install", str(pack_dir)],
+            input="\n",
+        )
+        assert result.exit_code == 0, result.output
+        env = parse_env_file(home / "agents" / "opt-team" / "run" / ".env")
+        assert "BOBI_EVENT_SERVER" not in env
