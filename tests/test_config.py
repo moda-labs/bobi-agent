@@ -4,7 +4,9 @@ import os
 from pathlib import Path
 from textwrap import dedent
 
-from bobi.config import Config, ServiceConfig, load_deployment_state, save_deployment_state, load_dotenv, find_required_env_vars
+from bobi.config import (Config, ServiceConfig, find_env_var_refs,
+                         find_required_env_vars, load_deployment_state,
+                         load_dotenv, save_deployment_state)
 
 
 def test_defaults_when_no_config(tmp_path):
@@ -159,6 +161,39 @@ def test_agent_yaml_missing_env_var_becomes_empty(tmp_path):
 
     cfg = Config.load(tmp_path)
     assert cfg.venn_api_key == ""
+
+
+def test_agent_yaml_optional_env_var_uses_fallback(tmp_path):
+    """${VAR:-default} resolves to the fallback when VAR is unset; ${VAR:-}
+    resolves to "" (an optional value with no fallback)."""
+    config_dir = tmp_path / "package"
+    config_dir.mkdir()
+    (config_dir / "agent.yaml").write_text(dedent("""
+        entry_point: manager
+        venn_api_key: ${NONEXISTENT_VAR_12345:-venn_fallback}
+        event_server: ${NONEXISTENT_EVENT_SERVER_12345:-}
+    """))
+
+    cfg = Config.load(tmp_path)
+    assert cfg.venn_api_key == "venn_fallback"
+    assert cfg.event_server_url == ""
+
+
+def test_agent_yaml_optional_env_var_prefers_environment(tmp_path, monkeypatch):
+    """A SET var wins over its ${VAR:-default} fallback (regression: the raw
+    'VAR:-default' token used to be looked up in the environment verbatim, so
+    optional refs always resolved to "")."""
+    monkeypatch.setenv("TEST_OPT_EVENT_SERVER", "wss://events.example.com")
+
+    config_dir = tmp_path / "package"
+    config_dir.mkdir()
+    (config_dir / "agent.yaml").write_text(dedent("""
+        entry_point: manager
+        event_server: ${TEST_OPT_EVENT_SERVER:-}
+    """))
+
+    cfg = Config.load(tmp_path)
+    assert cfg.event_server_url == "wss://events.example.com"
 
 
 def test_launch_admission_config_defaults_disabled(tmp_path):
@@ -420,6 +455,36 @@ def test_find_required_env_vars(tmp_path):
 
 def test_find_required_env_vars_no_config(tmp_path):
     assert find_required_env_vars(tmp_path) == []
+
+
+def test_find_env_var_refs_required_vs_optional(tmp_path):
+    """Bare ${VAR} refs are required; ${VAR:-default} refs are optional and
+    carry their fallback. Names are de-duped, plain (no ':-default' suffix),
+    and in order of first appearance."""
+    config_dir = tmp_path / "package"
+    config_dir.mkdir()
+    (config_dir / "agent.yaml").write_text(dedent("""
+        event_server: ${BOBI_EVENT_SERVER:-}
+        model: ${OPTIONAL_MODEL:-sonnet}
+        services:
+          - name: slack
+            credentials:
+              bot_token: ${SLACK_BOT_TOKEN}
+              extra: ${SLACK_BOT_TOKEN}
+    """))
+
+    refs = find_env_var_refs(tmp_path)
+    assert [r.name for r in refs] == [
+        "BOBI_EVENT_SERVER", "OPTIONAL_MODEL", "SLACK_BOT_TOKEN"]
+    by_name = {r.name: r for r in refs}
+    assert not by_name["BOBI_EVENT_SERVER"].required
+    assert by_name["BOBI_EVENT_SERVER"].default == ""
+    assert not by_name["OPTIONAL_MODEL"].required
+    assert by_name["OPTIONAL_MODEL"].default == "sonnet"
+    assert by_name["SLACK_BOT_TOKEN"].required
+
+    # find_required_env_vars keeps only the bare (required) refs.
+    assert find_required_env_vars(tmp_path) == ["SLACK_BOT_TOKEN"]
 
 
 def test_dotenv_resolves_in_config(tmp_path, monkeypatch):
