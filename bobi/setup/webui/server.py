@@ -262,7 +262,6 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
 
     @app.post("/api/start")
     def start(payload: dict) -> JSONResponse:
-        from bobi import paths
         from bobi.setup import open_mode
         from bobi.setup.authoring import slug
         mode = payload.get("mode", "create")
@@ -281,7 +280,13 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         elif mode == "registry":
             # A template defaults into its own library slot - the same
             # agents/<name>/src shape the home scan reads, so the finished
-            # team shows on the hub without the UI doing path math.
+            # team shows on the hub without the UI doing path math. A name
+            # that slugs to nothing (all punctuation / non-ASCII) has no
+            # slot to default into.
+            if not slug(team):
+                return JSONResponse(
+                    {"error": "choose a location for the team"},
+                    status_code=400)
             abs_loc = (library / slug(team) / "src").resolve()
         else:
             return JSONResponse({"error": "choose a location for the team"},
@@ -290,11 +295,9 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         if abs_loc == run_root or run_root in abs_loc.parents:
             return JSONResponse({"error": "pick a source location outside run/"},
                                 status_code=400)
-        state.source_dir = str(abs_loc)
-        state.finished = False   # starting/opening a team begins a fresh session
-        # Both modify-local and from-registry land in the same non-lossy
-        # edit-in-place authoring path; only create authors from scratch.
-        state.mode = "create" if mode == "create" else "open"
+        # Validate and materialize the source first; session state is mutated
+        # only after everything succeeded, so a rejected or failed start can't
+        # leave the session pointing at a team it never opened.
         if mode == "open":
             # The UI sends the team's source path (from a scan of whatever
             # folder the user chose), not just a name — teams can live anywhere
@@ -320,12 +323,12 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 open_mode.copy_into(src, abs_loc)
             except ValueError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
-            open_mode.reverse_fill(state, abs_loc)
         elif mode == "registry":
-            # Don't merge a template over a team that already lives at the target
-            # (fetch_into → copy_into uses copytree dirs_exist_ok). Open it from
-            # the hub or remove it first to start fresh.
-            if abs_loc.exists():
+            # Don't merge a template over a team that already lives at the
+            # target (fetch_into → copy_into uses copytree dirs_exist_ok), and
+            # don't nest one inside a direct-root team (agent.yaml right at
+            # the parent) - the scanner would list both as editable teams.
+            if abs_loc.exists() or open_mode.is_team(abs_loc.parent):
                 return JSONResponse(
                     {"error": f"a team already exists at {abs_loc} — open it from "
                      "the hub, or remove it first to start from this template."},
@@ -333,17 +336,29 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             try:
                 open_mode.fetch_into(project, team, abs_loc)
             except Exception as e:
+                # The guard above proved abs_loc didn't exist, so anything
+                # there now is this request's partial copy - remove it, else
+                # the leftover blocks the slot with a baffling 409 forever.
+                import shutil
+                shutil.rmtree(abs_loc, ignore_errors=True)
                 return JSONResponse({"error": f"couldn't download '{team}': {e}"},
                                     status_code=502)
-            open_mode.reverse_fill(state, abs_loc)
         else:
             name = (payload.get("name") or "").strip()
-            state.team_name = slug(name) if name else ""
             if open_mode.is_team(abs_loc):
                 return JSONResponse(
                     {"error": f"a team already exists at {abs_loc} — open it "
                      "from the hub, or choose another source directory."},
                     status_code=409)
+        state.source_dir = str(abs_loc)
+        state.finished = False   # starting/opening a team begins a fresh session
+        # Both modify-local and from-registry land in the same non-lossy
+        # edit-in-place authoring path; only create authors from scratch.
+        state.mode = "create" if mode == "create" else "open"
+        if mode == "create":
+            state.team_name = slug(name) if name else ""
+        else:
+            open_mode.reverse_fill(state, abs_loc)
         state.stage = Stage.DESIGN
         state.save(project)
         return JSONResponse(serialize_state(state))

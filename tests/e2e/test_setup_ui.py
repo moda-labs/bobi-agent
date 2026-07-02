@@ -284,6 +284,40 @@ def test_template_lands_in_library_slot_and_shows_on_hub(page, bobi, monkeypatch
     expect(page.locator(".hcard", has_text="eng-team")).to_be_visible()
 
 
+def test_template_at_custom_location_lands_in_child_folder(page, bobi,
+                                                           monkeypatch):
+    # A user-picked folder is a container: the template lands in a child named
+    # after it (and stays visible on the hub via the session's source_dir).
+    from bobi.setup import open_mode
+
+    def fake_list_registry_teams(proj):
+        return [{"name": "eng-team", "description": "An engineering team.",
+                 "official": True, "registry": "test"}]
+
+    def fake_fetch_into(proj, name, dest):
+        stage = _write_team_source(bobi.home / "stage" / name, name)
+        open_mode.copy_into(stage, dest)
+
+    monkeypatch.setattr(open_mode, "list_registry_teams", fake_list_registry_teams)
+    monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
+
+    page.goto(bobi.url)
+    page.click("#welcome-go")
+    # Change the location to home/projects via the picker.
+    page.click("#loc-change")
+    page.click(".pnode.up")
+    page.locator(".pnode", has_text="projects").click()
+    page.click("#pick-use")
+    expect(page.locator("#loc-path")).to_have_text(str(bobi.home / "projects"))
+    row = page.locator("[data-template='eng-team']")
+    expect(row).to_be_visible(timeout=5_000)
+    row.click()
+    expect(page.locator("#chinput")).to_be_visible(timeout=5_000)
+    assert (bobi.home / "projects" / "eng-team" / "agent.yaml").is_file()
+    page.click(".brand[data-home]")
+    expect(page.locator(".hcard", has_text="eng-team")).to_be_visible()
+
+
 def test_change_location_picker_updates_fyi(page, bobi):
     page.goto(bobi.url)
     page.click("#welcome-go")
