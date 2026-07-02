@@ -1359,6 +1359,25 @@ class TestIntro:
         assert r.status_code == 409
         assert (existing / "agent.md").read_text() == keep
 
+    def test_start_registry_accepts_existing_empty_dir(self, project, home,
+                                                       monkeypatch):
+        # The canonical slot src/ may already exist (empty) from the slot
+        # scaffolding — an empty dir is not "an existing team".
+        from bobi.setup import open_mode
+
+        def fake_fetch_into(proj, name, dest):
+            _seed_team(proj, name)
+            open_mode.copy_into(proj / "agents" / name, dest)
+
+        monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
+        empty = home / "agents" / "new-agent" / "src"
+        empty.mkdir(parents=True)
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "registry", "team": "eng-team",
+                                       "location": str(empty)})
+        assert r.status_code == 200
+        assert (empty / "agent.yaml").is_file()
+
     def test_start_registry_without_team_400(self, project):
         c = _client(SetupState(), project)
         r = c.post("/api/start", json={"mode": "registry",

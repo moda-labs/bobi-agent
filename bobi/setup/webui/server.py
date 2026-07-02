@@ -323,9 +323,15 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 return JSONResponse({"error": "pick a team to download"},
                                     status_code=400)
             # Don't merge a template over a team that already lives at the target
-            # (fetch_into → copy_into uses copytree dirs_exist_ok). Open it from
-            # the hub or remove it first to start fresh.
-            if abs_loc.exists():
+            # (fetch_into → copy_into uses copytree dirs_exist_ok). An existing
+            # but EMPTY directory is fine — the canonical slot src/ may already
+            # have been created by the slot scaffolding.
+            def _occupied(d: Path) -> bool:
+                try:
+                    return d.is_dir() and any(d.iterdir())
+                except OSError:
+                    return False
+            if abs_loc.is_file() or _occupied(abs_loc):
                 return JSONResponse(
                     {"error": f"a team already exists at {abs_loc} — open it from "
                      "the hub, or remove it first to start from this template."},

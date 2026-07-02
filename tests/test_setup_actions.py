@@ -206,6 +206,29 @@ class TestSaveCredential:
                                 "linear", "", prompt_fn=lambda v, s, i: "fresh")
         assert os.environ["LINEAR_API_KEY"] == "fresh"
 
+    def test_mirrors_pack_declared_credential_var(self, project, monkeypatch):
+        # A template/opened pack may reference a different ${VAR} than the
+        # connector catalog captures (eng-team's ${GH_TOKEN} vs the catalog's
+        # GITHUB_TOKEN). The save must reach the declared name too, or the
+        # installed team's interpolation comes up empty at preflight.
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        state = SetupState(team_name="eng-team")
+        src = actions.team_source_dir(project, state)
+        src.mkdir(parents=True, exist_ok=True)
+        (src / "agent.yaml").write_text(
+            "agent: eng-team\n"
+            "services:\n"
+            "- name: github\n"
+            "  credentials:\n"
+            "    token: ${GH_TOKEN}\n")
+        actions.save_credential(state, project, "GITHUB_TOKEN", "github", "",
+                                prompt_fn=lambda v, s, i: "ghp_secret")
+        env = actions.read_env(project)
+        assert env["GITHUB_TOKEN"] == "ghp_secret"
+        assert env["GH_TOKEN"] == "ghp_secret"
+        assert os.environ["GH_TOKEN"] == "ghp_secret"
+
     def test_bad_var_name_raises(self, project):
         with pytest.raises(ActionError):
             actions.save_credential(SetupState(), project, "not-a-var", "", "",

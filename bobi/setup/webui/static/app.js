@@ -1838,8 +1838,11 @@
     if (tmpl) {
       if (!tmpl.disabled) {
         const name = tmpl.dataset.template;
+        // The chosen location IS the team's source root (the canonical slot
+        // src/ by default) — don't nest the template inside a subfolder,
+        // which breaks the agents/<name>/src slot shape.
         startTeam({ mode: "registry", team: name,
-          location: introLoc.replace(/\/+$/, "") + "/" + name }, tmpl, "Downloading…");
+          location: introLoc }, tmpl, "Downloading…");
       }
       return;
     }

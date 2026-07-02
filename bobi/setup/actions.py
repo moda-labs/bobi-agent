@@ -182,6 +182,28 @@ def resolve_or_fetch(name: str, project: Path) -> Path | None:
 
 # --- credential capture ---------------------------------------------------
 
+def _declared_credential_vars(state: SetupState, project: Path,
+                              service: str) -> set[str]:
+    """The ${VAR} names the team's existing source declares for `service`'s
+    credentials. A template/opened pack may reference a different var than
+    the connector catalog captures (e.g. eng-team's ${GH_TOKEN} vs the
+    catalog's GITHUB_TOKEN) — the saved value must reach the declared name
+    or the installed team's interpolation comes up empty."""
+    src = team_source_dir(project, state)
+    try:
+        cfg = yaml.safe_load((src / "agent.yaml").read_text()) or {}
+    except Exception:
+        return set()
+    out: set[str] = set()
+    for s in cfg.get("services", []) or []:
+        if isinstance(s, dict) and s.get("name") == service:
+            for v in (s.get("credentials") or {}).values():
+                m = re.fullmatch(r"\$\{([A-Z][A-Z0-9_]*)\}", str(v).strip())
+                if m:
+                    out.add(m.group(1))
+    return out
+
+
 def save_credential(state: SetupState, project: Path, var_name: str,
                     service: str, instructions: str,
                     prompt_fn: Callable[[str, str, str], str]) -> dict:
@@ -212,11 +234,18 @@ def save_credential(state: SetupState, project: Path, var_name: str,
 
     env = read_env(project)
     env[var] = value
+    # Mirror the value to any differently-named ${VAR} the pack itself
+    # declares for this service, so its interpolation resolves too.
+    aliases = _declared_credential_vars(state, project, service) - {var}
+    for alias in aliases:
+        env[alias] = value
     write_env(project, env)
     # Refresh this process too: config.load_dotenv never overwrites an
     # existing os.environ entry, so a corrected credential would otherwise
     # stay stale for the rest of the setup session.
     os.environ[var] = value
+    for alias in aliases:
+        os.environ[alias] = value
     if var not in state.credentials_saved:
         state.credentials_saved.append(var)
     state.save(project)

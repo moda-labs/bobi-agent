@@ -218,6 +218,37 @@ class TestSetupHosting:
                            json={"name": "no-src-slot", "mode": "open"})
         assert r.status_code == 404
 
+    def test_open_mode_resolves_nested_source(self, bobi_install, monkeypatch):
+        # An older flow could land a template in a src/ SUBFOLDER
+        # (src/eng-team/); a single team child still resolves as the source.
+        import yaml as _yaml
+
+        from bobi import paths
+        nested = paths.agent_source_dir("legacy-slot") / "eng-team"
+        nested.mkdir(parents=True)
+        (nested / "agent.yaml").write_text(_yaml.dump({"agent": "eng-team"}))
+        monkeypatch.setattr(server, "_claude_available", lambda: True)
+        r = _client().post("/api/setup/open",
+                           json={"name": "legacy-slot", "mode": "open"})
+        assert r.status_code == 200
+        assert str(nested) in r.json()["url"]
+
+    def test_finish_renames_slot_to_team_name(self, bobi_install, monkeypatch):
+        # The slot opens under a placeholder name; the team gets its real
+        # name during setup (template pick / auto-name). Finish moves the
+        # whole slot dir to match (#526: a slot IS its team).
+        from bobi import paths
+
+        c = _client()
+        self._open(c, monkeypatch)   # slot "new-team"
+        # Name the team through the real flow (mutates the parked state).
+        r = c.post("/setup/api/rename", json={"name": "eng-team"})
+        assert r.status_code == 200
+        body = c.post("/setup/api/finish").json()
+        assert body["redirect"] == "/#/"
+        assert not paths.agent_dir("new-team").exists()
+        assert paths.agent_run_root("eng-team").is_dir()
+
     def test_open_requires_claude(self, bobi_install, monkeypatch):
         monkeypatch.setattr(server, "_claude_available", lambda: False)
         r = _client().post("/api/setup/open", json={"name": "x"})

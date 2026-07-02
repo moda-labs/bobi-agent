@@ -333,9 +333,15 @@ def build_app(*, token: str) -> FastAPI:
 
         src = paths.agent_source_dir(name)
         if mode == "open" and not open_mode.is_team(src):
-            return JSONResponse(
-                {"error": f"'{name}' has no editable source at {src}"},
-                status_code=404)
+            # Tolerate a nested source (an older flow could land a template
+            # in a src/ subfolder): a single team child counts as the source.
+            nested = open_mode.list_teams_in(src)
+            if len(nested) == 1:
+                src = Path(nested[0]["path"])
+            else:
+                return JSONResponse(
+                    {"error": f"'{name}' has no editable source at {src}"},
+                    status_code=404)
 
         project = paths.agent_run_root(name)
         project.mkdir(parents=True, exist_ok=True)
@@ -356,6 +362,20 @@ def build_app(*, token: str) -> FastAPI:
             setup_host.app = None
             setup_host.name = None
             setup_host.project = None
+            # The slot was opened under a placeholder name but the team got
+            # its real name during setup (template pick, auto-name, rename).
+            # A slot IS its team (#526: agents/<name>/), so move the whole
+            # slot dir to match. Nothing is running yet (finish no longer
+            # launches) and the session is released, so the move is safe.
+            final = (state.team_name or "").strip()
+            if final and final != name:
+                import shutil
+
+                old_dir = paths.agent_dir(name)
+                new_dir = paths.agent_dir(final)
+                if (safe_name(final) and old_dir.is_dir()
+                        and not new_dir.exists()):
+                    shutil.move(str(old_dir), str(new_dir))
             return {"redirect": "/#/"}
 
         setup_host.app = build_setup_app(state, project, nonce=token,
