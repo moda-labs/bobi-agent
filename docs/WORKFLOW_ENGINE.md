@@ -84,6 +84,7 @@ turn, then reads a handoff file. This is the only step type that uses the LLM.
 ```yaml
   - name: pickup
     agent: engineer
+    model: sonnet
     prompt: |
       Move the issue to In Progress. Explore the codebase, classify
       complexity, write the handoff.
@@ -96,6 +97,33 @@ turn, then reads a handoff file. This is the only step type that uses the LLM.
 `agent` names the role whose prompt frames the turn. `timeout` (seconds, default
 1800) is the declared deadline carried into the registry for the reconciler's
 dead-man check.
+
+`model` is optional. When omitted, prompt steps use the team default configured
+in `agent.yaml` under `brain.model` or the provider default when no model is
+configured:
+
+```yaml
+brain:
+  kind: codex
+  model: gpt-5-codex
+```
+
+Set `model` on an individual prompt step when that step should use a different
+provider-specific model or alias. For Claude-backed teams, aliases such as
+`haiku`, `sonnet`, and `opus` are accepted, as are full Claude model IDs:
+
+```yaml
+steps:
+  - name: discover
+    agent: prospect-targeter
+    model: haiku
+    prompt: "Find companies matching the wedge..."
+```
+
+Model changes are prompt-step boundaries. If a resumed workflow reaches a
+prompt step whose model differs from the saved session's model, the engine
+starts a fresh session for that step and injects the accumulated workflow
+context so the handoff chain remains intact.
 
 ### Route step
 

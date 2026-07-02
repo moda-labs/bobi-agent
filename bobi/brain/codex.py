@@ -272,7 +272,10 @@ class CodexBrain:
         resume: str | None = None,
         options: dict | None = None,
     ) -> BrainSession:
+        from bobi.brain import resolve_model_option
+
         opts = options or {}
+        model = resolve_model_option(str(opts.get("model", "") or ""))
         # Codex reads MCP servers from ~/.codex/config.toml, not from the CLI
         # invocation, so render the team's effective mcp_servers to disk before
         # the session's first `codex exec`. Render when there is a set to write OR
@@ -294,6 +297,6 @@ class CodexBrain:
             resume=resume,
             # Claude-specific options (skills/hooks/permission_mode/max_turns)
             # don't apply to Codex; only a model override is honored.
-            model=str(opts.get("model", "") or ""),
+            model=model,
             mcp_servers=mcp_servers,
         )

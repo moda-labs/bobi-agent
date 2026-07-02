@@ -289,7 +289,7 @@ def _run_from_config(project_path: Path, cfg: "Config",
 
     # Select the team's agent brain (#485) for this process and its subagents.
     from bobi.brain import set_process_brain
-    set_process_brain(cfg.brain_kind)
+    set_process_brain(cfg.brain_kind, cfg.brain_model)
 
     agent_name = cfg.agent
     role = cfg.entry_point or "manager"

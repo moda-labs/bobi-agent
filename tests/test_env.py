@@ -96,15 +96,17 @@ class TestChildAgentEnv:
         config_dir = paths.package_dir(root)
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text(
-            "agent: eng-team\nbrain:\n  kind: codex\n"
+            "agent: eng-team\nbrain:\n  kind: codex\n  model: gpt-5-codex\n"
         )
         monkeypatch.setenv("BOBI_ROOT", "/stale/root")
         monkeypatch.setenv("BOBI_BRAIN", "claude")
+        monkeypatch.setenv("BOBI_BRAIN_MODEL", "opus")
 
         env = child_agent_env(root)
 
         assert env["BOBI_ROOT"] == str(root)
         assert env["BOBI_BRAIN"] == "codex"
+        assert env["BOBI_BRAIN_MODEL"] == "gpt-5-codex"
 
     def test_clears_stale_parent_brain_for_default_brain_team(
         self, tmp_path, monkeypatch,
@@ -116,27 +118,32 @@ class TestChildAgentEnv:
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text("agent: eng-team\n")
         monkeypatch.setenv("BOBI_BRAIN", "codex")
+        monkeypatch.setenv("BOBI_BRAIN_MODEL", "gpt-5-codex")
 
         env = child_agent_env(root)
 
         assert "BOBI_BRAIN" not in env
+        assert "BOBI_BRAIN_MODEL" not in env
 
-    def test_interpolates_brain_kind_from_dotenv(self, tmp_path, monkeypatch):
+    def test_interpolates_brain_config_from_dotenv(self, tmp_path, monkeypatch):
         from bobi.env import child_agent_env
 
         root = tmp_path / "install"
         config_dir = paths.package_dir(root)
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text(
-            "agent: eng-team\nbrain:\n  kind: ${TEAM_BRAIN}\n"
+            "agent: eng-team\nbrain:\n  kind: ${TEAM_BRAIN}\n  model: ${TEAM_MODEL}\n"
         )
-        paths.env_path(root).write_text("TEAM_BRAIN=codex\n")
+        paths.env_path(root).write_text("TEAM_BRAIN=codex\nTEAM_MODEL=haiku\n")
         monkeypatch.delenv("TEAM_BRAIN", raising=False)
+        monkeypatch.delenv("TEAM_MODEL", raising=False)
 
         env = child_agent_env(root)
 
         assert env["TEAM_BRAIN"] == "codex"
+        assert env["TEAM_MODEL"] == "haiku"
         assert env["BOBI_BRAIN"] == "codex"
+        assert env["BOBI_BRAIN_MODEL"] == "haiku"
 
     def test_carries_parent_tool_and_credential_environment(self, tmp_path, monkeypatch):
         from bobi.env import child_agent_env
