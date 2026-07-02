@@ -11,9 +11,8 @@ from playwright.sync_api import expect
 GOAL_MSG = "triage our github issues and route to the right engineer"
 
 
-def _seed_library_team(home, name="legacy-bot"):
-    """Write a minimal valid team source into the BOBI_HOME/agents library."""
-    src = home / "agents" / name / "src"
+def _write_team_source(src, name):
+    """Write a minimal valid team source at src."""
     (src / "roles" / "lead").mkdir(parents=True)
     (src / "agent.yaml").write_text(
         "agent: " + name + "\nversion: 0.1.0\nentry_point: lead\n"
@@ -21,6 +20,11 @@ def _seed_library_team(home, name="legacy-bot"):
     (src / "agent.md").write_text("# " + name + "\n\nWatch the repo.\n")
     (src / "roles" / "lead" / "ROLE.md").write_text("# Lead\n\nRoute issues.\n")
     return src
+
+
+def _seed_library_team(home, name="legacy-bot"):
+    """Write a minimal valid team source into the BOBI_HOME/agents library."""
+    return _write_team_source(home / "agents" / name / "src", name)
 
 
 def _enter(page, url):
@@ -244,6 +248,40 @@ def test_welcome_leads_to_intro_with_custom_and_starts_editor(page, bobi_url):
     page.click("[data-newteam]")
     expect(page.locator("#chinput")).to_be_visible(timeout=5_000)
     expect(page.locator(".uni-panel .up-title")).to_have_text("Your team")
+
+
+def test_template_lands_in_library_slot_and_shows_on_hub(page, bobi, monkeypatch):
+    # The eng-team-template bug: picking a template used to bury its source at
+    # agents/new-agent/src/<name>, one level deeper than the hub scan reads, so
+    # the finished team never appeared on the home screen. Clicking a template
+    # row must land it in its own library slot and the hub must list it.
+    # The registry is faked in-process: the server thread shares this
+    # interpreter, so monkeypatching open_mode is visible to it.
+    from bobi.setup import open_mode
+
+    def fake_list_registry_teams(proj):
+        return [{"name": "eng-team", "description": "An engineering team.",
+                 "official": True, "registry": "test"}]
+
+    def fake_fetch_into(proj, name, dest):
+        stage = _write_team_source(bobi.home / "stage" / name, name)
+        open_mode.copy_into(stage, dest)
+
+    monkeypatch.setattr(open_mode, "list_registry_teams", fake_list_registry_teams)
+    monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
+
+    page.goto(bobi.url)
+    page.click("#welcome-go")
+    row = page.locator("[data-template='eng-team']")
+    expect(row).to_be_visible(timeout=5_000)       # template list loads lazily
+    row.click()
+    expect(page.locator("#chinput")).to_be_visible(timeout=5_000)  # in the editor
+    # The source landed in the template's own library slot.
+    slot = bobi.home / "agents" / "eng-team" / "src"
+    assert (slot / "agent.yaml").is_file()
+    # And the hub lists it.
+    page.click(".brand[data-home]")
+    expect(page.locator(".hcard", has_text="eng-team")).to_be_visible()
 
 
 def test_change_location_picker_updates_fyi(page, bobi):

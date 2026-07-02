@@ -1093,6 +1093,19 @@ class TestHome:
         c = _client(SetupState(), project, home_root=home)
         assert c.get("/api/home").json()["teams"] == []
 
+    def test_home_includes_session_team_outside_library(self, project, home):
+        # /api/intro merges the session's source_dir so a team authored at a
+        # user-chosen location stays visible. The hub list must do the same,
+        # else the team the user just built vanishes the moment the page
+        # transitions from finish to the hub.
+        src = home / "projects" / "moda"
+        _seed_team(src, "sales-prep", parent=".")     # team at <src>/sales-prep
+        state = SetupState(mode="create", team_name="sales-prep",
+                           source_dir=str(src))
+        c = _client(state, project, home_root=home)
+        teams = c.get("/api/home").json()["teams"]
+        assert any(t["name"] == "sales-prep" for t in teams)
+
 
 # --- intro: create / open + location -------------------------------------
 
@@ -1320,6 +1333,35 @@ class TestIntro:
         assert d["mode"] == "open"
         assert d["spec"]["goal"]
         assert (home / "bobi" / "eng-team" / "agent.yaml").is_file()
+
+    def test_start_registry_defaults_into_library_slot(self, project, home,
+                                                       monkeypatch):
+        # The eng-team-template bug: the UI used to append the template name
+        # to the default location (agents/new-agent/src/eng-team), one level
+        # deeper than the home scan reads, so the finished team never showed
+        # on the hub. With no location given, a template must land in its own
+        # library slot (agents/<name>/src) and be visible on /api/home.
+        from bobi.setup import open_mode
+
+        def fake_fetch_into(proj, name, dest):
+            _seed_team(proj, name)  # writes agents/<name>/
+            open_mode.copy_into(proj / "agents" / name, dest)
+
+        monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "registry", "team": "eng-team"})
+        assert r.status_code == 200
+        slot = home / "agents" / "eng-team" / "src"
+        assert (slot / "agent.yaml").is_file()
+        teams = c.get("/api/home").json()["teams"]
+        assert any(t["path"] == str(slot.resolve()) for t in teams)
+
+    def test_start_create_without_location_400(self, project):
+        # Only registry mode can derive a default location (from the template
+        # name) - create still requires an explicit one.
+        c = _client(SetupState(), project)
+        r = c.post("/api/start", json={"mode": "create"})
+        assert r.status_code == 400
 
     def test_start_registry_refuses_to_clobber_an_existing_team(self, project, home):
         # Selecting a (bundled/registry) template into a location already holding

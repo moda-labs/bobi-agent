@@ -1793,8 +1793,15 @@
     if (tmpl) {
       if (!tmpl.disabled) {
         const name = tmpl.dataset.template;
-        startTeam({ mode: "registry", team: name,
-          location: introLoc.replace(/\/+$/, "") + "/" + name }, tmpl, "Downloading…");
+        // At the default location the server picks the template's own library
+        // slot (agents/<name>/src). Appending the name to .../new-agent/src
+        // here would bury the team one level deeper than the home scan reads.
+        // A user-chosen folder is a container: the template lands in a child
+        // named after it.
+        const body = { mode: "registry", team: name };
+        if (introLoc !== introBase)
+          body.location = introLoc.replace(/\/+$/, "") + "/" + name;
+        startTeam(body, tmpl, "Downloading…");
       }
       return;
     }

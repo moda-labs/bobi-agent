@@ -143,28 +143,32 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     def ping() -> dict:
         return {"ok": True}
 
-    # --- intro: create / modify-existing / from-registry + a location --
-    @app.get("/api/intro")
-    def intro() -> dict:
-        from bobi.setup import open_mode
-        # Create defaults the team source into the library; Modify defaults to
-        # scanning the same library, but the user can point the scan elsewhere
-        # (another source tree, a thumb drive, wherever) via /api/teams. Install
-        # always targets the selected Bobi Agent's run/package directory; a
-        # source outside the default library copies in like a registry team.
-        from bobi.setup.actions import team_source_dir
-        teams = open_mode.list_teams_in(library)
+    def visible_teams() -> list[dict]:
+        # Every editable team source in the library, plus this session's team.
         # A team can be authored anywhere the user points /api/start (the chosen
         # location is persisted in state.source_dir). Surface this session's team
         # even when it lives outside the default library, deduped by path — else a
         # team the user explicitly placed elsewhere is invisible on the home screen.
+        from bobi.setup import open_mode
+        from bobi.setup.actions import team_source_dir
+        teams = open_mode.list_teams_in(library)
         if state.source_dir:
             src = team_source_dir(project, state)
             seen = {t["path"] for t in teams}
             teams += [t for t in open_mode.list_teams_in(src)
                       if t["path"] not in seen]
+        return teams
+
+    # --- intro: create / modify-existing / from-registry + a location --
+    @app.get("/api/intro")
+    def intro() -> dict:
+        # Create defaults the team source into the library; Modify defaults to
+        # scanning the same library, but the user can point the scan elsewhere
+        # (another source tree, a thumb drive, wherever) via /api/teams. Install
+        # always targets the selected Bobi Agent's run/package directory; a
+        # source outside the default library copies in like a registry team.
         default_source = paths.agent_source_dir(state.team_name or "new-agent")
-        return {"teams": teams,
+        return {"teams": visible_teams(),
                 "default_location": str(default_source),
                 "scan_dir": str(library)}
 
@@ -267,11 +271,21 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 {"error": "mode must be create, open, or registry"},
                 status_code=400)
         location = (payload.get("location") or "").strip()
-        if not location:
+        team = (payload.get("team") or "").strip()
+        if mode == "registry" and not team:
+            return JSONResponse({"error": "pick a team to download"},
+                                status_code=400)
+        if location:
+            loc = Path(location).expanduser()
+            abs_loc = (loc if loc.is_absolute() else home / loc).resolve()
+        elif mode == "registry":
+            # A template defaults into its own library slot - the same
+            # agents/<name>/src shape the home scan reads, so the finished
+            # team shows on the hub without the UI doing path math.
+            abs_loc = (library / slug(team) / "src").resolve()
+        else:
             return JSONResponse({"error": "choose a location for the team"},
                                 status_code=400)
-        loc = Path(location).expanduser()
-        abs_loc = (loc if loc.is_absolute() else home / loc).resolve()
         run_root = project.resolve()
         if abs_loc == run_root or run_root in abs_loc.parents:
             return JSONResponse({"error": "pick a source location outside run/"},
@@ -308,10 +322,6 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 return JSONResponse({"error": str(e)}, status_code=400)
             open_mode.reverse_fill(state, abs_loc)
         elif mode == "registry":
-            team = (payload.get("team") or "").strip()
-            if not team:
-                return JSONResponse({"error": "pick a team to download"},
-                                    status_code=400)
             # Don't merge a template over a team that already lives at the target
             # (fetch_into → copy_into uses copytree dirs_exist_ok). Open it from
             # the hub or remove it first to start fresh.
@@ -1078,11 +1088,11 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
 
     @app.get("/api/home")
     def home_teams() -> dict:
-        # The homepage's team list — every editable team source in the library.
+        # The homepage's team list - same visibility rules as the intro, so a
+        # team never shows on one screen and not the other.
         # NB: don't name this `home` — that shadows the `home` Path in this
         # scope and breaks every endpoint that closes over it (e.g. browse).
-        from bobi.setup import open_mode
-        return {"teams": open_mode.list_teams_in(library),
+        return {"teams": visible_teams(),
                 "library": str(library)}
 
     return app
