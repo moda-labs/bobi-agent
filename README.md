@@ -323,6 +323,7 @@ the prompt-injection surface, and trusted team code. Event-bus internals:
 
 | Goal | Read |
 |---|---|
+| Understand how Bobi works | [docs/OVERVIEW.md](docs/OVERVIEW.md) - the core concepts in 5 minutes |
 | Go from zero to a deployed agent | [docs/QUICKSTART.md](docs/QUICKSTART.md) - step-by-step quickstart |
 | Run and operate Bobi | [skills/bobi.md](skills/bobi.md) - full CLI reference |
 | Build your own agent | [skills/create-agent.md](skills/create-agent.md) · [docs/BUILDING_AGENT_TEAMS.md](docs/BUILDING_AGENT_TEAMS.md) |

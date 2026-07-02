@@ -381,6 +381,8 @@ Work through these in order:
 
 ## Where to go next
 
+- **Understand how it all works** - teams, tools, workflows, events, memory:
+  [OVERVIEW.md](OVERVIEW.md).
 - **Talk to your agent from Slack** instead of the terminal:
   [Slack setup](../skills/slack-setup.md).
 - **Connect Linear** so ticket updates drive the agent:
