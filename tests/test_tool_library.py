@@ -132,6 +132,28 @@ def test_explicit_codex_tool_still_bakes(project):
     assert CODEX_PIN in cfg["build"]["npm"]
 
 
+def test_gstack_catalog_entry_bakes_browser_toolchain(project):
+    """The gstack catalog entry is self-contained: it declares its own
+    nodejs/npm (the base image is Node-free), the pinned bun/Playwright/`./setup`
+    install, a `success` check, and its usage guide - so any team gets a working
+    browser-QA toolchain from `tool_library: [gstack]` alone, with no per-team
+    build recipe."""
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'tool_library: [gstack]\n')
+    dest = _compose(project, leaf)[0]
+    cfg = _agent_yaml(dest)
+    build = cfg["build"]
+    # Self-contained node: gstack must NOT rely on another dependency (e.g. the
+    # old codex bake) to supply the npm runtime its install needs.
+    assert "nodejs" in build["apt"] and "npm" in build["apt"]
+    assert "bun@1.3.14" in build["npm"]
+    assert any("playwright@1.61.0" in s for s in build["run_root"])
+    assert any("garrytan/gstack" in s for s in build["run"])
+    assert any(r["name"] == "gstack" for r in cfg["requires"])
+    assert (dest / "tools" / "gstack.md").is_file()
+
+
 # --- local / explicit wins (escape hatches) ----------------------------------
 
 
