@@ -4,6 +4,7 @@ readiness, gating, the accumulating Spec, and persistence."""
 import pytest
 
 from bobi.setup.state import (
+    Ingress,
     SPEC_SLOTS,
     Readiness,
     SetupState,
@@ -166,6 +167,10 @@ class TestPersistence:
         s.spec.autonomous_confirmed = True
         s.spec.services = [{"name": "salesforce", "status": "implied"}]
         s.spec.readiness = {"goal": "enough"}
+        s.ingress = Ingress(mode="quick_tunnel",
+                            url="https://agent.trycloudflare.com",
+                            verified=True,
+                            verified_at="2026-07-02T12:00:00+00:00")
         s.messages = [{"role": "user", "content": "build me a thing"}]
         s.save(tmp_path)
 
@@ -182,6 +187,9 @@ class TestPersistence:
         assert loaded.messages[0]["content"] == "build me a thing"
         assert loaded.session_id == "abc-123"
         assert loaded.credentials_saved == ["SLACK_BOT_TOKEN"]
+        assert loaded.ingress.mode == "quick_tunnel"
+        assert loaded.ingress.url == "https://agent.trycloudflare.com"
+        assert loaded.ingress.verified is True
 
     def test_round_trip_phase_and_role_dimensions(self, tmp_path):
         # The interview phase and the four per-role dimensions persist verbatim.

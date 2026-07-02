@@ -199,6 +199,7 @@ def build_agent_cfg(state: SetupState, catalog=None) -> dict:
         "agent": derive_team_name(state),
         "version": "0.1.0",
         "entry_point": compute_entry_point(state),
+        "event_server": "${BOBI_EVENT_SERVER:-}",
     }
     svcs = build_service_records(state, catalog)
     if svcs:
@@ -239,6 +240,7 @@ def merge_agent_yaml(existing_text: str, state: SetupState, catalog=None) -> str
     cfg["agent"] = managed["agent"]
     cfg.setdefault("version", managed.get("version", "0.1.0"))
     cfg["entry_point"] = managed["entry_point"]
+    cfg.setdefault("event_server", managed["event_server"])
     if managed.get("venn_api_key"):
         cfg.setdefault("venn_api_key", managed["venn_api_key"])
     # Union services by name: keep every existing entry untouched, append only

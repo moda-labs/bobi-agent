@@ -181,8 +181,11 @@ commit this file); you can also supply them as environment variables.
 
 You don't run the event server yourself - `bobi agent <name> start` launches a
 local one automatically. To receive webhooks from the public internet (Slack,
-GitHub, Linear), point the agent at a deployed event server: the shared Bobi
-cloud Worker by default, or your own Cloudflare Worker.
+GitHub, Linear), use the **Webhook ingress** row in `bobi setup`'s Connections
+card. It can keep the team local-only, verify a quick tunnel such as
+cloudflared/ngrok to `localhost:8080`, or save a durable HTTPS event server
+(`BOBI_EVENT_SERVER`) such as the shared Bobi cloud Worker or your own
+Cloudflare Worker.
 
 ### Talk to your agent from Slack (optional)
 
