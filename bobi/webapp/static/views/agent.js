@@ -253,6 +253,9 @@ export function mountAgent(el, { api, name }) {
     if (sub === selected) renderTranscript();
   }
 
+  // Submit-then-poll: POST returns a message id immediately; the reply
+  // arrives in the transcript (messages poll) and this watcher tracks the
+  // job's status endpoint for completion/errors. No held-open request.
   async function sendMessage(text) {
     if (sending || !selected) return;
     const sub = selected;
@@ -262,26 +265,46 @@ export function mountAgent(el, { api, name }) {
     const pending = { who: "agent", text: "", pending: true };
     push(sub, pending);
 
+    const finish = (replacement) => {
+      const msgs = history.get(sub);
+      const idx = msgs.indexOf(pending);
+      if (idx >= 0) {
+        if (replacement) msgs[idx] = replacement;
+        else msgs.splice(idx, 1);
+      }
+      if (sub === selected) renderTranscript();
+      sending = false;
+      els.send.disabled = false;
+      els.input.focus();
+    };
+
     const { ok, data } = await api(base + "/chat", {
       method: "POST",
       body: JSON.stringify({ subagent: sub, text }),
     });
-
-    const msgs = history.get(sub);
-    const idx = msgs.indexOf(pending);
-    if (idx >= 0) {
-      if (ok && data && typeof data.reply === "string") {
-        msgs[idx] = { who: "agent", text: data.reply || "(no reply)" };
-      } else {
-        msgs[idx] = { who: "agent", error: true,
-                      text: (data && data.error) || "delivery failed" };
-      }
+    if (!ok || !data || !data.message_id) {
+      finish({ who: "agent", error: true,
+               text: (data && data.error) || "delivery failed" });
+      return;
     }
-    if (sub === selected) renderTranscript();
 
-    sending = false;
-    els.send.disabled = false;
-    els.input.focus();
+    const watch = async () => {
+      const r = await api(base + "/chat/" + data.message_id);
+      const job = r.data || {};
+      if (r.ok && job.status === "pending") {
+        setTimeout(watch, 1500);
+        return;
+      }
+      if (r.ok && job.status === "done") {
+        // Reply is persisted — drop the placeholder and pull the truth.
+        finish(null);
+        loadMessages(sub);
+        return;
+      }
+      finish({ who: "agent", error: true,
+               text: job.error || "delivery failed" });
+    };
+    setTimeout(watch, 1200);
   }
 
   async function poll() {

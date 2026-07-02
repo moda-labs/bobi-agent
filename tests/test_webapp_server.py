@@ -270,7 +270,22 @@ class TestSubagents:
 
 
 class TestChat:
-    def test_chat_replies(self, bobi_install, monkeypatch):
+    """Chat is submit-then-poll: POST returns a message id right away; the
+    deliver runs in a background thread and its outcome lands on the job
+    status endpoint (the reply itself reaches the transcript)."""
+
+    def _await_job(self, client, agent, message_id, tries=100):
+        import time
+        for _ in range(tries):
+            r = client.get(f"/api/agents/{agent}/chat/{message_id}")
+            assert r.status_code == 200
+            job = r.json()
+            if job["status"] != "pending":
+                return job
+            time.sleep(0.02)
+        raise AssertionError("chat job never resolved")
+
+    def test_chat_submits_and_resolves(self, bobi_install, monkeypatch):
         seen = {}
 
         def fake_ask(root, agent, text, **kw):
@@ -278,11 +293,15 @@ class TestChat:
             return service.MessageResult(address=agent, response="done!")
 
         monkeypatch.setattr(service, "ask", fake_ask)
-        r = _client().post(
+        c = _client()
+        r = c.post(
             f"/api/agents/{bobi_install.agent_name}/chat",
             json={"subagent": "bobi-worker-1", "text": "go"})
         assert r.status_code == 200
-        assert r.json() == {"reply": "done!"}
+        mid = r.json()["message_id"]
+        assert mid
+        job = self._await_job(c, bobi_install.agent_name, mid)
+        assert job == {"status": "done"}
         assert seen["root"] == bobi_install.repo_path
         assert seen["agent"] == "bobi-worker-1"
 
@@ -292,25 +311,30 @@ class TestChat:
             json={"subagent": "x", "text": "  "})
         assert r.status_code == 400
 
-    def test_chat_unknown_subagent_404(self, bobi_install, monkeypatch):
-        def fake_ask(root, agent, text, **kw):
-            raise service.MessageDeliveryError(f"unknown agent '{agent}'")
-
-        monkeypatch.setattr(service, "ask", fake_ask)
-        r = _client().post(
-            f"/api/agents/{bobi_install.agent_name}/chat",
-            json={"subagent": "ghost", "text": "hi"})
-        assert r.status_code == 404
-
-    def test_chat_delivery_failure_502(self, bobi_install, monkeypatch):
+    def test_chat_delivery_failure_lands_on_job(self, bobi_install,
+                                                monkeypatch):
         def fake_ask(root, agent, text, **kw):
             raise service.MessageDeliveryError("session 'x' process is dead")
 
         monkeypatch.setattr(service, "ask", fake_ask)
-        r = _client().post(
+        c = _client()
+        r = c.post(
             f"/api/agents/{bobi_install.agent_name}/chat",
             json={"subagent": "x", "text": "hi"})
-        assert r.status_code == 502
+        assert r.status_code == 200
+        job = self._await_job(c, bobi_install.agent_name, r.json()["message_id"])
+        assert job["status"] == "error"
+        assert "dead" in job["error"]
+
+    def test_chat_unknown_agent_404(self, bobi_install):
+        r = _client().post("/api/agents/nope/chat",
+                           json={"subagent": "x", "text": "hi"})
+        assert r.status_code == 404
+
+    def test_chat_status_unknown_message_404(self, bobi_install):
+        r = _client().get(
+            f"/api/agents/{bobi_install.agent_name}/chat/deadbeef")
+        assert r.status_code == 404
 
 
 class TestLifecycle:

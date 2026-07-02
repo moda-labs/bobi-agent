@@ -397,10 +397,25 @@ def build_app(*, token: str) -> FastAPI:
             messages = read_chat(root, session)
         return JSONResponse({"messages": messages})
 
-    # Blocking request/response chat (sync def → threadpool; the binder
-    # allows same-root calls to proceed while this waits).
+    # Submit-then-poll chat: the POST returns a message id immediately and
+    # the deliver runs in a background thread — no request is held open for
+    # the agent's (up to minutes-long) reply, so the endpoint shape survives
+    # proxies and load balancers (the #525 SaaS discipline). The reply
+    # reaches the transcript via the messages poll; this job store carries
+    # only status and errors.
+    chat_jobs: dict[str, dict] = {}
+
+    def _prune_jobs() -> None:
+        if len(chat_jobs) <= 500:
+            return
+        for mid in [m for m, j in chat_jobs.items()
+                    if j["status"] != "pending"][:250]:
+            chat_jobs.pop(mid, None)
+
     @app.post("/api/agents/{name}/chat")
     def chat(name: str, payload: dict) -> JSONResponse:
+        import uuid
+
         from bobi import service
 
         root = _resolve(name)
@@ -410,14 +425,34 @@ def build_app(*, token: str) -> FastAPI:
         text = (payload.get("text") or "").strip()
         if not text:
             return JSONResponse({"error": "empty message"}, status_code=400)
-        with _binder.bound(root):
-            try:
-                result = service.ask(root, subagent, text,
-                                     timeout=DEFAULT_CHAT_TIMEOUT)
-            except service.MessageDeliveryError as e:
-                code = 404 if "unknown agent" in str(e) else 502
-                return JSONResponse({"error": str(e)}, status_code=code)
-        return JSONResponse({"reply": result.response})
+
+        message_id = uuid.uuid4().hex
+        _prune_jobs()
+        chat_jobs[message_id] = {"status": "pending"}
+
+        def work() -> None:
+            with _binder.bound(root):
+                try:
+                    service.ask(root, subagent, text,
+                                timeout=DEFAULT_CHAT_TIMEOUT)
+                    chat_jobs[message_id] = {"status": "done"}
+                except service.MessageDeliveryError as e:
+                    chat_jobs[message_id] = {"status": "error",
+                                             "error": str(e)}
+                except Exception as e:  # noqa: BLE001 — job must resolve
+                    chat_jobs[message_id] = {"status": "error",
+                                             "error": str(e)}
+
+        threading.Thread(target=work, daemon=True,
+                         name=f"chat-{message_id[:8]}").start()
+        return JSONResponse({"message_id": message_id})
+
+    @app.get("/api/agents/{name}/chat/{message_id}")
+    def chat_status(name: str, message_id: str) -> JSONResponse:
+        job = chat_jobs.get(message_id)
+        if job is None:
+            return JSONResponse({"error": "unknown message"}, status_code=404)
+        return JSONResponse(job)
 
     @app.post("/api/agents/{name}/restart")
     def restart_agent(name: str) -> JSONResponse:
