@@ -1081,6 +1081,67 @@ def setup(name, model, resume):
     raise SystemExit(run_setup(project_path, model=model, resume=resume))
 
 
+@main.group("app")
+def app_group():
+    """Manage the Bobi web app (dashboard for all your agents)."""
+
+
+@app_group.command("start")
+@click.option("--no-browser", is_flag=True, help="Don't open a browser.")
+def app_start(no_browser):
+    """Start the web app in the background (idempotent)."""
+    from bobi.webapp import daemon
+
+    try:
+        st = daemon.start(open_browser=not no_browser)
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"bobi app is running at {st.url} (pid {st.pid})")
+
+
+@app_group.command("stop")
+def app_stop():
+    """Stop the web app daemon."""
+    from bobi.webapp import daemon
+
+    st = daemon.stop()
+    click.echo(f"Stopped (pid {st.pid})." if st.pid else "Not running.")
+
+
+@app_group.command("restart")
+def app_restart():
+    """Restart the web app daemon."""
+    from bobi.webapp import daemon
+
+    daemon.stop()
+    try:
+        st = daemon.start(open_browser=False)
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"bobi app is running at {st.url} (pid {st.pid})")
+
+
+@app_group.command("status")
+def app_status():
+    """Show whether the web app daemon is running."""
+    from bobi.webapp import daemon
+
+    st = daemon.status()
+    if st.running:
+        click.echo(f"Running at {st.url} (pid {st.pid})")
+    else:
+        click.echo("Not running. Start it with `bobi app start`.")
+        raise SystemExit(1)
+
+
+@app_group.command("run", hidden=True)
+def app_run():
+    """Run the web app server in the foreground (the daemon child)."""
+    from bobi.webapp import daemon
+
+    raise SystemExit(daemon.run_foreground())
+
+
 @main.command()
 @click.argument("name", required=False)
 @click.option("--app", default=None,

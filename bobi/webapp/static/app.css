@@ -1,0 +1,194 @@
+/* bobi app — unified dashboard shell. Warm light chrome + the one dark
+   slab (chat transcripts). System fonts only, no build step. Tokens from
+   DESIGN.md via tokens.css. */
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+}
+
+.mono, .chip, .side-head, .card-meta, .status, .agent-hint {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 11px;
+}
+
+/* --- top bar --- */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.bar .mark { color: var(--accent); display: inline-flex; }
+.bar .home-link { text-decoration: none; }
+.bar .title {
+  font-family: var(--font-mono);
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+.bar .sub {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+  color: var(--muted);
+}
+.bar .spacer { flex: 1; }
+.dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(30, 142, 96, 0.15);
+}
+.dot.stale { background: var(--faint); box-shadow: none; }
+.dot.down  { background: var(--err); box-shadow: 0 0 0 3px rgba(181, 64, 46, 0.15); }
+
+/* --- view container --- */
+.view { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+
+/* --- dashboard page --- */
+.page {
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 28px 24px 48px;
+}
+.page-head {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.page-head h1 {
+  font-size: 19px;
+  font-weight: 650;
+  margin: 0;
+  flex: 1;
+}
+
+.btn {
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  padding: 7px 14px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.btn:hover { border-color: var(--accent); }
+.btn:disabled { color: var(--faint); cursor: default; border-color: var(--border); }
+.btn.primary {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.btn.primary:hover { background: var(--accent-2); border-color: var(--accent-2); }
+
+/* agent rows */
+.agent-list { display: flex; flex-direction: column; gap: 10px; }
+.agent-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.agent-info { flex: 1; min-width: 0; }
+.agent-top { display: flex; align-items: center; gap: 10px; }
+.agent-name {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  text-decoration: none;
+  word-break: break-all;
+}
+a.agent-name[href]:hover { color: var(--accent); }
+.agent-desc {
+  color: var(--muted);
+  font-size: 13.5px;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-hint { color: var(--faint); }
+.agent-actions { display: flex; gap: 8px; flex: none; }
+
+.status {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.status::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--faint); flex: none;
+}
+.status.running::before  { background: var(--ok); }
+.status.stopped::before  { background: var(--faint); }
+.status.starting::before, .status.stopping::before { background: var(--accent); }
+.status.design::before   { background: var(--border-strong); }
+
+.action-error {
+  background: rgba(181, 70, 43, 0.08);
+  border: 1px solid rgba(181, 70, 43, 0.35);
+  color: var(--err);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  font-size: 13px;
+  margin-bottom: 12px;
+  white-space: pre-wrap;
+}
+
+.empty { color: var(--muted); font-size: 13.5px; }
+
+/* stub views (routes that land in a later build) */
+.stub {
+  margin: auto;
+  text-align: center;
+  color: var(--muted);
+  padding: 40px 24px;
+}
+.stub h2 { font-size: 17px; font-weight: 650; color: var(--text); margin: 0 0 6px; }
+.stub p { margin: 0; font-size: 14px; }
+.stub code { font-family: var(--font-mono); font-size: 0.9em; }
+
+/* server-gone overlay */
+.gone {
+  position: fixed; inset: 0;
+  background: rgba(244, 241, 234, 0.86);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 12px;
+}
+.gone code { font-family: inherit; color: var(--text); }
+
+@media (prefers-reduced-motion: reduce) {
+  .btn { transition: none; }
+}
