@@ -1,12 +1,12 @@
-version: "1.1.3"
+version: "1.1.4"
 
 entry_point: director
 chat: slack
 max_concurrent_agents: 8
 
-# Cloud event server URL in production (.env), empty for an
+# Cloud event server URL in production (.env); optional - unset means an
 # auto-started local server.
-event_server: ${BOBI_EVENT_SERVER}
+event_server: ${BOBI_EVENT_SERVER:-}
 
 services:
   - name: github
