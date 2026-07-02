@@ -87,6 +87,7 @@ def _sdk_module(client):
 @pytest.fixture(autouse=True)
 def bound_root(tmp_path, monkeypatch):
     monkeypatch.setattr("bobi.paths._root", tmp_path)
+    monkeypatch.setenv("BOBI_BRAIN", "claude")
 
 
 def _register(run_key, phase, role=""):
@@ -166,6 +167,10 @@ class TestHonestTerminalStatus:
         client = FakeClient([[]])  # no ResultMessage
         result = await _run(client, "LOST-1", "implement")
         assert result.success is False
+        assert result.error == (
+            "network drop: response stream ended before turn result "
+            "(no ResultMessage)"
+        )
         assert get_registry().get(name).status == TERMINAL_FAILED
 
 
