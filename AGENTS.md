@@ -16,6 +16,8 @@ Bobi is an event-driven AI agent framework.
 - `docs/EVENT_SERVER.md`: event-server architecture, topics, and security model.
 - `docs/MONITORS.md`: monitor scheduler and the `script_cache` token-saving runner.
 - `docs/WORKFLOW_ENGINE.md`: workflow state machine, step types, suspend/resume.
+- `docs/TOOL_LIBRARY.md`: unified dependency model - declaring tools/skills/MCP
+  deps (pinned `install:` vs guide-only), the catalog, and how they bake + verify.
 - `docs/SECURITY.md`: overall security model (trust, credentials, prompt-injection).
 - `docs/TICKETING_POLICY.md`: Linear/GitHub ticketing conventions.
 - `docs/RELEASE_RUNBOOK.md`: release process and checklist.

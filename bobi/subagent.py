@@ -59,6 +59,9 @@ class AgentResult:
     num_turns: int = 0
     error: str = ""
     final_text: str = ""
+    # The model that served the run (from the brain's per-call cost breakdown) —
+    # for cost/observability, e.g. the bootstrap cost line. "" if unreported.
+    model: str = ""
     # Whether a failure was a transient API error (529/rate-limit/5xx). Set from
     # the shared classifier (bobi.transient) so the spawn path and the
     # persistent session agree on "transient" — the launcher's re-dispatch
@@ -365,6 +368,9 @@ async def _run_agent_supervised(
             result.duration_ms += result_msg.duration_ms
             result.total_cost_usd += result_msg.total_cost_usd or 0.0
             result.num_turns += result_msg.num_turns
+            for _c in result_msg.costs:
+                if _c.model:
+                    result.model = _c.model
 
             if result_msg.deferred_tool and on_input_needed:
                 deferred = result_msg.deferred_tool

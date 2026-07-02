@@ -353,6 +353,17 @@ if [ "${BOBI_AUTH:-api_key}" = "subscription" ] \
   as_app bobi agent "${AGENT_NAME}" login-bootstrap
 fi
 
+# --- 4c. Dependency snapshot is frozen; warm boot runs no bootstrap (#428) ---
+# The unified dependency model materializes + verifies a team's deps when the
+# team IMAGE is built (in CI, OQ1) and freezes the result. Production never runs
+# the bootstrap agent: a warm boot replays that snapshot. Surface the baked
+# dependency-set identity so `fly logs` shows which snapshot is live — `bobi
+# deploy` compares this same stamp (over `fly ssh`) to decide when a CHANGED
+# dependency set needs a rebuild + re-bootstrap.
+if [ -f /opt/bobi/dep-list.hash ]; then
+  log "Dependency snapshot $(cat /opt/bobi/dep-list.hash) — warm boot, no bootstrap (deps baked in CI, #428)."
+fi
+
 # --- 5. Hand off to the manager as the non-root user ------------------------
 # Agent UI on by default IN THE CONTAINER (the manager starts it on the private
 # 6PN; reach it with `bobi agent <name> ui <deployment>` / `fly proxy`). It's image

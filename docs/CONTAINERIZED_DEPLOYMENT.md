@@ -17,7 +17,8 @@ Pieces:
 - `scripts/fleet.sh` — fleet enumeration helper
 - `scripts/build-team-tarballs.sh` — package teams into `.tar.gz`
 - `.github/workflows/release.yml` — the single gated framework release pipeline:
-  build + smoke `ci-canary`, then publish the proven wheel
+  build + smoke both brain canaries (`ci-canary` Claude + `ci-codex-smoke` Codex),
+  then publish the proven wheel
 - `.github/workflows/deploy-agent-teams.yml.example` — example generic
   `deployments/*` reconciler for fleet-owning repos; `bobi deploy-init`
   generates the standalone version
@@ -329,6 +330,41 @@ build only verifies the binary, which needs no auth). Referenced-but-optional
 scoping vars (e.g. `channels: ${SLACK_CHANNELS}`, empty = whole workspace) may be
 declared empty in the env blob without blocking the deploy.
 
+### 2.6.1. Agent-bootstrapped dependencies + snapshot (#428)
+
+A `tool_library:` dependency (the unified model) can declare a loose `guide:` +
+required `success:` instead of pinned `install:` steps. A **guide-only** dep is
+materialized by a **bootstrap agent** at image-build time (in CI, not
+production): the agent reads the guide, installs the dependency with pinned
+versions, and reports the exact steps as a machine-readable recipe. That recipe
+feeds back through the same `build_render` renderer as an inline `build:`, so the
+snapshot is a normal image layer and there is one install code path. Every dep is
+verified against its `success` contract (per brain, build tier) before the layer
+is trusted. See `bobi/dep_bootstrap.py` and issue #428.
+
+- **One seam, agent-free for pinned teams.** `scripts/build-team-images.sh` and
+  the release rollout render each team through `python -m bobi.dep_bootstrap
+  --render`; a team with only pinned installs renders with no agent (a drop-in for
+  the old `build_render` render). A guide-only dep is materialized by the bootstrap
+  agent **inside a fresh base image** (`docker run` the base, so the recipe is
+  faithful to the image, not the CI host), gated on the brain key in the CI env
+  (`BOBI_BOOTSTRAP_BRAINS`, default `claude`). `bobi deploy` never runs the agent
+  (it refuses to source-build a guide-only team and directs you to the CI `image:`).
+  The full path (guide dep → live agent → frozen recipe → working image) is
+  exercised end-to-end by `tests/integration/test_dep_bootstrap_e2e.py` in the
+  container/claude CI suite.
+- **Re-bootstrap detection.** The image stamps the DECLARED dependency-set hash
+  (`/opt/bobi/dep-list.hash`, from `tool_library.dependency_list_hash`) alongside
+  the #379 build-deps stamp. `bobi deploy` reads it over `fly ssh`: a matching set
+  skips re-bootstrap; a changed set (a guide dep, a bumped pin, a `host:`/`mcp:`
+  change) rebuilds in place to re-bootstrap. A warm boot runs no agent.
+- **`host:` capabilities.** A dep can declare a host capability the container
+  cannot grant itself (a kernel sysctl, a device):
+  `host: [{sysctl: kernel.apparmor_restrict_unprivileged_userns=0}]`. It is
+  runtime wiring, never baked: `bobi deploy` surfaces it to the operator and
+  `bobi agent <name> doctor` verifies it on the host (see `bobi/host_caps.py`).
+  gstack's `/browse` sandbox sysctl is one instance of this model.
+
 ---
 
 ## 3. The provisioner (`scripts/provision-instance.sh`)
@@ -460,8 +496,9 @@ publish a GitHub Release   ─▶ release.yml  (the single gated pipeline)
    │                                 python -m build -> upload the wheel/sdist
    │                                 │
    │                              build-canary               (THE gate)
-   │                                 build canary image FROM the wheel + `ask`
-   │                                 it -> assert CANARY-OK end-to-end
+   │                                 for each brain canary (ci-canary Claude,
+   │                                 ci-codex-smoke Codex): build image FROM the
+   │                                 wheel + `ask` it -> assert CANARY-OK e2e
    │                                 ├──────────────┐
    │                              publish
    │                              same wheel -> PyPI + Homebrew
@@ -475,9 +512,12 @@ fleet repo deploy tag / dispatch ─▶ deploy-agent-teams.yml   (standalone, NO
 
 **A release is the deploy gate** — an edit pushed to `main` does NOT auto-deploy;
 you cut a release to ship the framework. **One functional gate guards the
-framework artifact**: `release.yml` builds the wheel once, builds `ci-canary`
-*from that wheel* and smokes it (`CANARY-OK`), and only then publishes the same
-wheel to PyPI and Homebrew. Production agent rollout is owned by fleet repos
+framework artifact**: `release.yml` builds the wheel once, builds both brain
+canaries (`ci-canary` Claude + `ci-codex-smoke` Codex) *from that wheel* and
+smokes each (`CANARY-OK`), and only then publishes the same wheel to PyPI and
+Homebrew. Codex is a hard gate at parity with Claude (#428); its instance is
+`bootstrap`-tolerant in `release.yml` (warn+skip until first provisioned, then a
+hard gate). Production agent rollout is owned by fleet repos
 such as `moda-agents`; they bump their pinned `bobi` version and run their own
 deploy workflow.
 
@@ -514,12 +554,13 @@ to one deployment). Jobs:
 > 'moda-eng-team' in place (ssh-push)`), pushing the team definition to the volume
 > and reloading. **`team-url` (HTTPS-fetch)** is the alternative when you'd rather
 > not give CI ssh, or to first-boot a dark instance with no SSH at all
-> (`team-packages.yml` publishes the tarballs). `deployments/canary.yaml` (the
-> always-on pipeline canary) exercises the `team-url` path via the published
-> `smoke-team.tar.gz`.
+> (`team-packages.yml` publishes the tarballs). The two always-on pipeline
+> canaries exercise the `team-url` path: `deployments/canary.yaml` (Claude,
+> app ci-canary) via `claude-smoke.tar.gz` and `deployments/codex-smoke.yaml`
+> (Codex, app ci-codex-smoke) via `codex-smoke.tar.gz`.
 
 ### team-packages.yml (only for `team-url` delivery)
-On push to main (path-filtered to `agents/**` + the smoke fixture), builds each
+On push to main (path-filtered to `agents/**` + the smoke fixtures), builds each
 team into `<team>.tar.gz` and **publishes to a rolling `teams-latest` GitHub
 Release** → stable public URL
 `https://github.com/<owner>/<repo>/releases/download/teams-latest/<team>.tar.gz`.
@@ -535,9 +576,10 @@ exact wheel we publish, is the single functional gate for PyPI/Homebrew:
   canary and PyPI run the identical artifact. A fail-fast
   `pip install dist/*.whl && bobi --version` rejects an obviously-broken wheel
   before the expensive canary build.
-- **build-canary** — deploy the canary from an image built **from that wheel**
-  (`--build-arg BOBI_BUILD=wheel`, the artifact staged into `dist/`), then a
-  functional `ask` asserts `CANARY-OK` end-to-end. **This is the gate.**
+- **build-canary** — for each brain canary (`ci-canary` Claude, `ci-codex-smoke`
+  Codex), deploy from an image built **from that wheel** (`--build-arg
+  BOBI_BUILD=wheel`, the artifact staged into `dist/`), then a functional `ask`
+  asserts `CANARY-OK` end-to-end. **This is the gate** - both brains at parity.
 - **publish** — `needs: build-canary`. Uploads the **same** wheel to PyPI via
   trusted publishing (`environment: pypi`).
 - **update-homebrew** — `needs: publish`. Bumps the tap and smokes bottle URLs.
@@ -763,8 +805,9 @@ docker run -d --name smoke -v "$(mktemp -d):/data" \
 docker exec smoke bobi agent <name> ask "Reply with: pong"
 ```
 
-Smoke target: `tests/fixtures/smoke-team` (zero-secret; needs only
-`BOBI_EVENT_SERVER` + an Anthropic key for the `ask` round-trip).
+Smoke targets: `tests/fixtures/claude-smoke` and `tests/fixtures/codex-smoke`
+(zero-secret; each needs only `BOBI_EVENT_SERVER` + its brain's key for the `ask`
+round-trip - an Anthropic key for Claude, an OpenAI key for Codex).
 Structural/unit coverage: `tests/test_gitops_c22.py`. Both GitOps workflows pass
 `actionlint` (+ shellcheck on run blocks).
 

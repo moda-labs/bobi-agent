@@ -37,8 +37,12 @@ class _FakeClient:
 
 
 class _FakeBrainWithoutMcpStatus:
-    name = "codex"
-    provider = "openai"
+    """A hypothetical brain that exposes no MCP status introspection at all —
+    the generic fallback path. (Both shipped brains support it: Claude natively,
+    Codex via a direct handshake, see the codex test below.)"""
+
+    name = "future"
+    provider = "future"
 
     def make_session(self, **kwargs):
         class Session:
@@ -159,7 +163,63 @@ class TestPollRace:
         assert len(results) == 1
         assert results[0].ok is False
         assert results[0].required is False
-        assert "not supported for codex brain" in results[0].detail
+        assert "not supported for future brain" in results[0].detail
+
+    def test_codex_brain_probes_via_direct_handshake(
+        self, monkeypatch, tmp_path
+    ):
+        """#428 Stage 4: Codex no longer warn-degrades — its get_mcp_status runs a
+        real initialize handshake, so the single-loop probe judges it like Claude.
+        A connected server → an ok CheckResult with the tool count."""
+        import bobi.brain
+        from bobi.brain.codex import CodexBrain
+
+        # Redirect config.toml render (make_session side effect) off the real home.
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+        monkeypatch.setattr(bobi.brain, "get_brain", lambda: CodexBrain())
+
+        async def _fake_probe(mcp_servers, timeout=20.0, env=None):
+            return {"mcpServers": [
+                {"name": n, "status": "connected", "tools": ["t1", "t2"],
+                 "error": None}
+                for n in mcp_servers
+            ]}
+        monkeypatch.setattr("bobi.mcp_handshake.probe_servers", _fake_probe)
+        monkeypatch.setattr(validate, "MCP_PROBE_POLL_INTERVAL", 0.0)
+
+        results = asyncio.run(
+            _async_probe_mcp(["weather"], {"weather": {
+                "type": "stdio", "command": "/abs/weather-mcp"}}, tmp_path)
+        )
+        assert len(results) == 1
+        assert results[0].ok is True
+        assert results[0].name == "weather"
+        assert "2 tools" in results[0].detail
+
+    def test_codex_brain_reports_failed_handshake(self, monkeypatch, tmp_path):
+        """A codex server that fails initialize is a blocking failure (per-brain
+        success is the handshake, not a warn)."""
+        import bobi.brain
+        from bobi.brain.codex import CodexBrain
+
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+        monkeypatch.setattr(bobi.brain, "get_brain", lambda: CodexBrain())
+
+        async def _fake_probe(mcp_servers, timeout=20.0, env=None):
+            return {"mcpServers": [
+                {"name": n, "status": "failed", "tools": [],
+                 "error": "spawn /abs/weather-mcp ENOENT"}
+                for n in mcp_servers
+            ]}
+        monkeypatch.setattr("bobi.mcp_handshake.probe_servers", _fake_probe)
+        monkeypatch.setattr(validate, "MCP_PROBE_POLL_INTERVAL", 0.0)
+
+        results = asyncio.run(
+            _async_probe_mcp(["weather"], {"weather": {
+                "type": "stdio", "command": "/abs/weather-mcp"}}, tmp_path)
+        )
+        assert results[0].ok is False
+        assert "ENOENT" in results[0].detail
 
 
 class TestBareNameWarning:

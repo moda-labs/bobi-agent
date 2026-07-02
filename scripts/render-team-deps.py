@@ -17,10 +17,7 @@ from __future__ import annotations
 import pathlib
 import sys
 
-from bobi.build_render import (
-    load_composed_team_config,
-    render_team_deps_script,
-)
+from bobi.dep_bootstrap import BootstrapError, render_team_deps
 from bobi.deploy import DeployError, load_deploy_config
 
 
@@ -39,18 +36,21 @@ def main(argv: list[str]) -> int:
     team_dir = root / "agents" / cfg.team
     if not (team_dir / "agent.yaml").exists():
         return 0
-    # Composed config: expands the from: chain + tool_library entries (#416) so a
-    # team that bakes its CLI via `tool_library:` still rebuilds its own image on
-    # a framework release (instead of being rolled the generic image).
-    tcfg = load_composed_team_config(team_dir, root)
-    spec = tcfg.build
-    if spec is None or not (
-        spec.apt or spec.npm or spec.run_root or spec.run or spec.verify_requires
-    ):
+    # Route through the bootstrap→render seam (#428 Stage 3): composes the from:
+    # chain + tool_library entries, runs the bootstrap agent for any guide-only
+    # dependency (the CI cold path), and freezes the resolved recipe through the
+    # ONE renderer — so a team that bakes its CLI via `tool_library:` rebuilds its
+    # own image on a framework release instead of being rolled the generic image.
+    try:
+        script = render_team_deps(team_dir, root)
+    except BootstrapError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if script is None:
         return 0  # generic — deploys on the shared base image
     out = root / "dist" / "team-deps" / f"{cfg.team}.sh"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render_team_deps_script(tcfg))
+    out.write_text(script)
     print(out.as_posix())
     return 0
 

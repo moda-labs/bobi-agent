@@ -1,17 +1,18 @@
-# deployments/canary.yaml — the fleet's permanent pipeline canary.
+# deployments/canary.yaml — the fleet's permanent Claude pipeline canary.
 #
 # An always-on instance that revalidates the whole deploy path on every release:
 # the GitOps thin client → `bobi deploy` → the base image → the event
-# server. It is the ONLY deployment in this repo — the production agent teams
-# moved to moda-labs/moda-agents (the `moda` fleet), leaving this repo's
-# `ci` fleet as the release self-gate alone.
+# server. Its Codex twin is deployments/codex-smoke.yaml (app ci-codex-smoke) —
+# both are release gates (release.yml smokes each from the same wheel). The
+# production agent teams moved to moda-labs/moda-agents (the `moda` fleet),
+# leaving this repo's `ci` fleet as the release self-gate alone.
 #
-# Runs the published, dependency-free smoke team via team-url (HTTPS-fetch): the
-# dark instance pulls the tarball at first boot — the design's CI/enterprise
-# delivery mode (no SSH needed; a Fly deploy token suffices). The smoke team has
-# no `requires:` gate, so it DISPATCHES in the bare generic image. App: ci-canary
-# (fleet `ci` from defaults.yaml).
-team-url: https://github.com/moda-labs/bobi-agent/releases/download/teams-latest/smoke-team.tar.gz
+# Runs the published, dependency-free claude-smoke team via team-url
+# (HTTPS-fetch): the dark instance pulls the tarball at first boot — the design's
+# CI/enterprise delivery mode (no SSH needed; a Fly deploy token suffices). The
+# smoke team has no `requires:` gate, so it DISPATCHES in the bare generic image.
+# App: ci-canary (fleet `ci` from defaults.yaml).
+team-url: https://github.com/moda-labs/bobi-agent/releases/download/teams-latest/claude-smoke.tar.gz
 
 # Right-sized to keep an always-on canary cheap (~$6/mo vs ~$25 at the 4gb/2cpu
 # defaults). The smoke team uses no knowledge base, so the baked fastembed model

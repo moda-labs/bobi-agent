@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.37.0 — 2026-07-01
+
+Minor release: gstack joins the tool-library catalog.
+
+### Added
+- **gstack in the tool-library catalog (#428).** The headless-browser QA /
+  dogfooding toolchain (the `browse`, `qa`, `ship`, and `review` skills) is now a
+  reusable catalog entry — a team pulls it in with `tool_library: [gstack]`, with
+  the pins living once in the catalog instead of a hand-written per-team `build:`.
+  The entry is self-contained: it declares its own `nodejs`/`npm` (the base image
+  is Node-free) so its `bun` / Playwright / `./setup` install works standalone. (#583)
+
+## 0.36.0 — 2026-07-01
+
+Minor release: the unified tool-library dependency model (#428, epic #515),
+Codex as a first-class base-image brain, plus runtime and web-UI hardening.
+
+### Added
+- **Unified agent-bootstrapped dependency model (#428).** A team declares CLI
+  tools, skill libraries, and MCP servers as one concept — a dependency with a
+  required `success` contract and optional `guide` / `install` / `host` / `mcp`.
+  Guide-only deps are materialized by a bootstrap agent at image build, verified
+  against `success` per brain, and snapshotted; a declared-set hash drives
+  re-bootstrap. (#571, #577, #578)
+- **Codex baked into the base image** as a first-class brain alongside Claude;
+  `brain: codex` teams no longer bake Codex per-team. (#573)
+- **MCP per-brain rendering.** A dependency's `mcp:` spec renders into Claude
+  session options and Codex `~/.codex/config.toml`, verified by the `initialize`
+  handshake. Direct `mcp_servers:` declarations keep working and win over a
+  dependency's `mcp:` for the same server. (#580)
+- **`bobi agents install --with-deps`.** Materialize a team's declared
+  dependencies on the local machine: the on-machine brain installs them, adapting
+  to the host, idempotently skipping already-satisfied ones, confirm-gated, and
+  never running `sudo` silently. (#581)
+- **Codex release-gate canary at parity.** `ci-codex-smoke` smokes the Codex
+  brain from the release wheel as a hard gate alongside the Claude canary. (#574)
+- **Resource-aware launch admission** to bound concurrent agent starts. (#565)
+
+### Changed
+- Extracted a runtime service core and a web-UI transport harness, and shared
+  web-UI design tokens. (#560, #563, #559)
+- Documentation pass: README rewrite, docs consolidation, Apache 2.0 license,
+  and ticketing policy. (#546, #551, #555)
+
+### Fixed
+- **Deploy resolves a team's brain from the deployment yaml for `team-url`
+  canaries**, so an api_key-mode Codex canary provisions with `OPENAI_API_KEY`
+  instead of defaulting to Claude and demanding `ANTHROPIC_API_KEY`. (#582)
+- Retry Claude `initialize` timeouts, exempt the agent lifecycle from the circuit
+  breaker, and report session-rotation retry errors. (#564, #562, #569)
+- Dropped the broken `openai` CLI catalog entry. (#575)
+- Made the unit suite hermetic against env and subprocess-PATH leaks. (#576)
+
 ## 0.35.4 — 2026-06-27
 
 Patch release for fleet deploys after the Bobi repo rename.

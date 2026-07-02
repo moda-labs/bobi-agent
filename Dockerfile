@@ -141,6 +141,9 @@ ARG BOBI_UID=10001
 # Pinned aichat (the general-purpose LLM gateway CLI). Bump deliberately via
 # `gh api repos/sigoden/aichat/releases/latest --jq .tag_name`.
 ARG AICHAT_VERSION=0.30.0
+# Pinned Codex CLI - the second first-class agent brain (#428/#485). Bump via
+# `gh release view --repo openai/codex --json tagName`.
+ARG CODEX_VERSION=rust-v0.142.5
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -160,13 +163,16 @@ ENV PYTHONUNBUFFERED=1 \
 #   curl, ca-certificates — fetch the claude installer; TLS
 #   gosu                  — drop privileges from root setup to the bobi user
 #   git                   — agents clone/operate on repos
+#   ripgrep, bubblewrap   — the Codex CLI's runtime helpers (code search + its
+#                           sandbox). The standalone codex binary uses these from
+#                           PATH; distro packages keep the image Node-free.
 # NB: no tini. Fly Machines (the deploy target) inject their own PID-1 init that
 # reaps zombies + forwards signals, and layering tini on top is a documented
 # cause of "failed to spawn ... No such file or directory" boot failures there.
 # For other container runtimes, run with an init (e.g. `docker run --init`).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        curl ca-certificates gosu git \
+        curl ca-certificates gosu git ripgrep bubblewrap \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root runtime user (see header: bypassPermissions-as-root guard).
@@ -201,6 +207,25 @@ RUN arch="$(dpkg --print-architecture)" \
        | tar -xz -C /usr/local/bin aichat \
     && chmod +x /usr/local/bin/aichat \
     && aichat --version
+
+# Codex CLI (#428): the second first-class agent brain, alongside native `claude`,
+# so a `brain: codex` team - or the upcoming per-task brain switch - runs on the
+# generic image at full parity with Claude, with NO per-team bake. The npm package
+# only vendors this same musl-static binary behind a Node shim; we take the binary
+# straight from GitHub releases, so the image stays Node-free (its rg/bwrap helpers
+# are the distro packages installed above). Pinned, arch-detected, system-wide on
+# PATH. Cache key is CODEX_VERSION alone, so a code-only rebuild never re-fetches.
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+         amd64) target=x86_64-unknown-linux-musl ;; \
+         arm64) target=aarch64-unknown-linux-musl ;; \
+         *) echo "codex: unsupported arch $arch" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://github.com/openai/codex/releases/download/${CODEX_VERSION}/codex-${target}.tar.gz" \
+       | tar -xz -C /usr/local/bin \
+    && mv "/usr/local/bin/codex-${target}" /usr/local/bin/codex \
+    && chmod +x /usr/local/bin/codex \
+    && codex --version
 
 # Baked fastembed embedding model (cold-start speed; immutable). HF_HOME points
 # here at both build and run, so it's a cache hit at runtime. Copied from

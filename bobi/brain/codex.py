@@ -14,9 +14,14 @@ loop drives — the manager already injects between turns — at the cost of a
 process spawn per turn. A hot ``app-server`` session is a later optimization.
 
 MVP scope / known gaps (tracked in the spec): no per-message cost in dollars
-(token counts only); MCP servers are not yet forwarded (Codex reads
-``~/.codex/config.toml``); the system prompt is prepended to the first turn of a
-fresh thread rather than written as ``AGENTS.md``.
+(token counts only); the system prompt is prepended to the first turn of a fresh
+thread rather than written as ``AGENTS.md``.
+
+MCP servers (#428 Stage 4): Codex reads them from ``~/.codex/config.toml`` at
+process start (nothing rides the CLI invocation), so :meth:`CodexBrain.make_session`
+renders the team's effective ``mcp_servers`` (splatted into ``options`` by
+``subagent.py``) to that file before the first ``codex exec`` runs. See
+``bobi.brain.codex_config``.
 """
 
 from __future__ import annotations
@@ -118,6 +123,7 @@ class _CodexSession:
         resume: str | None = None,
         model: str = "",
         runner=None,
+        mcp_servers: dict | None = None,
     ) -> None:
         self._cwd = cwd or "."
         self._instructions = instructions
@@ -125,6 +131,27 @@ class _CodexSession:
         self._model = model
         self._runner = runner or _spawn_codex
         self._pending: str | None = None
+        # Effective MCP servers (rendered into config.toml at make_session).
+        # Codex has no live status introspection, so the preflight probe reaches
+        # each server directly through get_mcp_status below (#428 Stage 4).
+        self._mcp_servers = mcp_servers or {}
+
+    async def get_mcp_status(self) -> dict:
+        """A Claude-``get_mcp_status``-shaped MCP status for the preflight probe.
+
+        Codex reads MCP from ``~/.codex/config.toml`` and can't report live
+        status, so this runs a direct ``initialize`` + ``tools/list`` handshake
+        against each configured server (proving the same servers config.toml
+        wires up actually answer). Keeps ``validate._async_probe_mcp`` a single
+        loop across brains instead of warn-degrading for Codex.
+
+        Probes under the runtime agent-spawn env so a bare-command stdio server
+        resolves on the same PATH it will launch under (parity with the Claude
+        probe, which passes the same env into the SDK)."""
+        from bobi.env import agent_spawn_env
+        from bobi.mcp_handshake import probe_servers
+
+        return await probe_servers(self._mcp_servers, env=agent_spawn_env())
 
     async def connect(self, prompt: str | None = None) -> None:
         # No persistent process — just stash any startup prompt for the first
@@ -222,6 +249,21 @@ class CodexBrain:
 
         opts = options or {}
         model = resolve_model_option(str(opts.get("model", "") or ""))
+        # Codex reads MCP servers from ~/.codex/config.toml, not from the CLI
+        # invocation, so render the team's effective mcp_servers to disk before
+        # the session's first `codex exec`. Render when there is a set to write OR
+        # a stale bobi-managed block to clear (a team that dropped its MCP deps);
+        # otherwise never touch the file. The write is idempotent (a no-op when
+        # unchanged) but errors PROPAGATE: a codex team that declares MCP and
+        # can't render config would silently run MCP-less, so surface it rather
+        # than pass preflight and fail at runtime.
+        from bobi.brain.codex_config import (
+            codex_home, config_has_managed_block, write_codex_config,
+        )
+        mcp_servers = opts.get("mcp_servers") or {}
+        home = codex_home()
+        if mcp_servers or config_has_managed_block(home):
+            write_codex_config(mcp_servers, home)
         return _CodexSession(
             cwd=cwd or ".",
             instructions=_instructions(system_prompt),
@@ -229,4 +271,5 @@ class CodexBrain:
             # Claude-specific options (skills/hooks/permission_mode/max_turns)
             # don't apply to Codex; only a model override is honored.
             model=model,
+            mcp_servers=mcp_servers,
         )

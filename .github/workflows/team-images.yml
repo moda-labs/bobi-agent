@@ -25,6 +25,14 @@ on:
       - "pyproject.toml"
       - "bobi/build_render.py"
       - "bobi/config.py"
+      # The renderer now composes (from: chain + tool_library/dependency
+      # expansion), so the expansion logic changes what a team bakes. (#428)
+      - "bobi/compose.py"
+      - "bobi/tool_library.py"
+      # The build now runs the bootstrap→render seam (dep_bootstrap --check/
+      # --render), which pulls in the harness + the brain registry. (#428 Stage 3)
+      - "bobi/dep_bootstrap.py"
+      - "bobi/brain/**"
       - "scripts/build-team-images.sh"
       - ".github/workflows/team-images.yml"
   pull_request:
@@ -51,4 +59,11 @@ jobs:
       - name: Build team images (no push — verify the build + requires gate)
         env:
           PUSH: "0"
+          # #428 Stage 3: a team with a guide-only dependency has its recipe
+          # materialized by the bootstrap agent inside a fresh base image (OQ1:
+          # bootstrap in CI). Provide the brain keys so that path can run; unused
+          # by declarative/pinned teams (no agent), so today's teams pay nothing.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          IS_SANDBOX: "1"
         run: scripts/build-team-images.sh
