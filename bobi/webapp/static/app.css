@@ -7,15 +7,35 @@
 
 html, body { height: 100%; }
 
+/* The framed app window — same treatment as the setup flow, so moving
+   between the shell and the hosted editor reads as one app. */
 body {
   margin: 0;
   font-family: var(--font-sans);
   font-size: 15px;
   line-height: 1.5;
   color: var(--text);
-  background: var(--bg);
+  background: radial-gradient(1200px 600px at 80% -10%, #FAF7F0 0%, var(--bg) 55%);
   display: flex;
   flex-direction: column;
+}
+html[data-retro="on"] body {
+  background:
+    radial-gradient(1200px 600px at 80% -10%, #FAF7F0 0%, var(--bg) 55%),
+    repeating-linear-gradient(90deg, rgba(120, 100, 70, .045) 0 1px, transparent 1px 24px),
+    repeating-linear-gradient(0deg, rgba(120, 100, 70, .045) 0 1px, transparent 1px 24px);
+}
+.app {
+  width: min(1240px, 96vw);
+  height: min(800px, 94vh);
+  margin: 2.6vh auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: 0 1px 0 #fff inset, 0 18px 50px -24px rgba(40, 30, 16, .35);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .mono, .chip, .side-head, .card-meta, .status, .agent-hint {
@@ -59,7 +79,14 @@ body {
 .dot.down  { background: var(--err); box-shadow: 0 0 0 3px rgba(181, 64, 46, 0.15); }
 
 /* --- view container --- */
-.view { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+.view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  background: var(--bg);
+}
 
 /* --- dashboard page --- */
 .page {

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-retro="on">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
+  <div class="app">
   <header class="bar">
     <a class="mark home-link" href="#/" aria-label="Dashboard">
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
@@ -26,6 +27,7 @@
   </header>
 
   <main id="view" class="view"></main>
+  </div>
 
   <div id="gone" class="gone" hidden>
     <p>The app server stopped. Restart it with <code>bobi app start</code>.</p>
