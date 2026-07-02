@@ -57,6 +57,51 @@ class TestCheckProjectConfig:
         assert "missing" in r.detail
 
 
+# --- Ingress reachability ---
+
+class TestCheckIngressReachability:
+
+    def test_warns_for_external_events_on_loopback(self, tmp_path):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "agent: test\n"
+            "services:\n"
+            "  - name: slack\n"
+            "    events: true\n"
+        )
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_ingress_reachability
+            r = _check_ingress_reachability()
+        assert not r.ok
+        assert not r.required
+        assert "slack" in r.detail
+        assert "external webhooks cannot reach" in r.detail
+        assert "event_server_url" in r.hint
+
+    def test_passes_for_remote_event_server(self, tmp_path):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "agent: test\n"
+            "event_server_url: https://events.example.com\n"
+            "services:\n"
+            "  - name: slack\n"
+            "    events: true\n"
+        )
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_ingress_reachability
+            r = _check_ingress_reachability()
+        assert r.ok
+
+    def test_malformed_config_does_not_crash_doctor_check(self, tmp_path):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text("agent: [broken\n")
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_ingress_reachability
+            r = _check_ingress_reachability()
+        assert r.ok
+        assert "skipped" in r.detail
+
+
 # --- Host capabilities (#428 Stage 3) ---
 
 

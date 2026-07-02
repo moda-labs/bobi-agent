@@ -80,6 +80,8 @@ class StartupInfo:
     package: str
     event_server_url: str
     event_server_label: str
+    ingress_warning: str
+    ingress_hint: str
     workflows: list[str]
     monitors: list[str]
     log_file: Path
@@ -168,6 +170,18 @@ def build_startup_info(project_path: Path, pid: int, log_file: Path) -> StartupI
         event_server_url = "localhost:8080"
         event_server_label = "auto"
 
+    ingress_warning = ""
+    ingress_hint = ""
+    try:
+        from bobi.ingress import check_ingress_reachability
+
+        warning = check_ingress_reachability(project_path)
+        if warning:
+            ingress_warning = warning.detail
+            ingress_hint = warning.hint
+    except Exception as exc:
+        log.debug("Ingress reachability check skipped: %s", exc)
+
     workflows: list[str] = []
     try:
         import logging as _logging
@@ -198,6 +212,8 @@ def build_startup_info(project_path: Path, pid: int, log_file: Path) -> StartupI
         package=cfg.agent,
         event_server_url=event_server_url,
         event_server_label=event_server_label,
+        ingress_warning=ingress_warning,
+        ingress_hint=ingress_hint,
         workflows=workflows,
         monitors=monitors,
         log_file=log_file,

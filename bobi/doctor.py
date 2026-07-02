@@ -43,6 +43,7 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_workflows())
     results.append(_check_bubble_auth())
     results.append(_check_event_server())
+    results.append(_check_ingress_reachability())
     results.append(_check_recent_events())
     results.append(_check_policy())
 
@@ -346,6 +347,30 @@ def _check_event_server() -> CheckResult:
     return CheckResult("Event server", ok=False,
                        detail="not running",
                        hint="`bobi agent <name> event-server start` or `bobi agent <name> start` will auto-launch")
+
+
+def _check_ingress_reachability() -> CheckResult:
+    """Warn when external webhook sources point at local-only ingress."""
+    root = bound_root()
+    if not root:
+        return CheckResult("Ingress reachability", ok=True,
+                           detail="no runtime selected")
+    try:
+        from bobi.ingress import check_ingress_reachability
+
+        warning = check_ingress_reachability(root)
+    except FileNotFoundError:
+        return CheckResult("Ingress reachability", ok=True,
+                           detail="no agent config")
+    except Exception as exc:
+        return CheckResult("Ingress reachability", ok=True,
+                           detail=f"skipped: {exc}")
+    if not warning:
+        return CheckResult("Ingress reachability", ok=True,
+                           detail="inbound event URL is reachable")
+    return CheckResult("Ingress reachability", ok=False,
+                       detail=warning.detail, hint=warning.hint,
+                       required=False)
 
 
 def _check_recent_events() -> CheckResult:

@@ -110,6 +110,21 @@ def test_spawn_team_returns_without_waiting_for_registration(bobi_install, monke
     assert spawned["cmd"][-2:] == ["start", "--foreground"]
 
 
+def test_startup_info_warns_when_inbound_events_use_local_ingress(bobi_install):
+    from bobi.service import build_startup_info
+
+    info = build_startup_info(
+        bobi_install.repo_path,
+        pid=os.getpid(),
+        log_file=bobi_install.state_dir / "manager.log",
+    )
+
+    assert info.event_server_url == "localhost:8080"
+    assert "slack" in info.ingress_warning
+    assert "external webhooks cannot reach" in info.ingress_warning
+    assert "event_server_url" in info.ingress_hint
+
+
 def test_team_status_returns_manager_and_active_agents(bobi_install):
     from bobi.sdk import SessionEntry, get_registry
     from bobi.service import team_status
