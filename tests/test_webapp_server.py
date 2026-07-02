@@ -119,6 +119,94 @@ class _FakeSpawn:
     startup = _FakeStartup()
 
 
+# --- subagents + chat ------------------------------------------------------
+
+def _entry(name, role="engineer", **kw):
+    from bobi.sdk import SessionEntry
+    return SessionEntry(name=name, role=role, **kw)
+
+
+class TestSubagents:
+    def test_unknown_agent_404(self, bobi_install):
+        assert _client().get("/api/agents/nope/subagents").status_code == 404
+
+    def test_roster_with_manager_badge(self, bobi_install, monkeypatch):
+        mgr = f"bobi-{bobi_install.agent_name}-director"
+        monkeypatch.setattr(
+            service, "list_agents",
+            lambda root: [_entry("bobi-worker-1"), _entry(mgr, role="director")])
+        r = _client().get(f"/api/agents/{bobi_install.agent_name}/subagents")
+        assert r.status_code == 200
+        subs = r.json()["subagents"]
+        # The manager orders first and carries the badge.
+        assert subs[0]["name"] == mgr
+        assert subs[0]["is_manager"] is True
+        assert subs[1]["is_manager"] is False
+
+    def test_messages_from_chat_log(self, bobi_install):
+        from bobi.chat_history import append_chat
+        append_chat(bobi_install.repo_path, "bobi-worker-1", "user", "hi")
+        append_chat(bobi_install.repo_path, "bobi-worker-1", "agent", "hello!")
+        r = _client().get(
+            f"/api/agents/{bobi_install.agent_name}"
+            "/subagents/bobi-worker-1/messages")
+        assert r.status_code == 200
+        assert r.json()["messages"] == [
+            {"role": "user", "text": "hi"},
+            {"role": "agent", "text": "hello!"},
+        ]
+
+    def test_messages_bad_session_name_404(self, bobi_install):
+        r = _client().get(
+            f"/api/agents/{bobi_install.agent_name}"
+            "/subagents/..%2Fetc/messages")
+        assert r.status_code == 404
+
+
+class TestChat:
+    def test_chat_replies(self, bobi_install, monkeypatch):
+        seen = {}
+
+        def fake_ask(root, agent, text, **kw):
+            seen.update(root=root, agent=agent, text=text)
+            return service.MessageResult(address=agent, response="done!")
+
+        monkeypatch.setattr(service, "ask", fake_ask)
+        r = _client().post(
+            f"/api/agents/{bobi_install.agent_name}/chat",
+            json={"subagent": "bobi-worker-1", "text": "go"})
+        assert r.status_code == 200
+        assert r.json() == {"reply": "done!"}
+        assert seen["root"] == bobi_install.repo_path
+        assert seen["agent"] == "bobi-worker-1"
+
+    def test_chat_empty_message_400(self, bobi_install):
+        r = _client().post(
+            f"/api/agents/{bobi_install.agent_name}/chat",
+            json={"subagent": "x", "text": "  "})
+        assert r.status_code == 400
+
+    def test_chat_unknown_subagent_404(self, bobi_install, monkeypatch):
+        def fake_ask(root, agent, text, **kw):
+            raise service.MessageDeliveryError(f"unknown agent '{agent}'")
+
+        monkeypatch.setattr(service, "ask", fake_ask)
+        r = _client().post(
+            f"/api/agents/{bobi_install.agent_name}/chat",
+            json={"subagent": "ghost", "text": "hi"})
+        assert r.status_code == 404
+
+    def test_chat_delivery_failure_502(self, bobi_install, monkeypatch):
+        def fake_ask(root, agent, text, **kw):
+            raise service.MessageDeliveryError("session 'x' process is dead")
+
+        monkeypatch.setattr(service, "ask", fake_ask)
+        r = _client().post(
+            f"/api/agents/{bobi_install.agent_name}/chat",
+            json={"subagent": "x", "text": "hi"})
+        assert r.status_code == 502
+
+
 class TestLifecycle:
     def test_start_spawns(self, bobi_install, monkeypatch):
         seen = {}
