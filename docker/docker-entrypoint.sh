@@ -135,7 +135,12 @@ try:
     data = json.loads((Path(os.environ["CODEX_CRED_DIR"]) / "auth.json").read_text())
 except Exception:
     sys.exit(1)
-sys.exit(0 if isinstance(data, dict) and "OPENAI_API_KEY" in data else 1)
+# API-key auth ONLY: a real OPENAI_API_KEY value AND no OAuth tokens. A codex
+# `login --device-auth` file carries an OPENAI_API_KEY field (null) ALONGSIDE
+# `tokens`, so a bare `"OPENAI_API_KEY" in data` misreads valid OAuth as an
+# API-key file and wipes it every boot (re-posting a device-login each time).
+sys.exit(0 if isinstance(data, dict) and data.get("OPENAI_API_KEY")
+         and not data.get("tokens") else 1)
 PY
 }
 
