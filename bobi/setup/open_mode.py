@@ -9,6 +9,7 @@ should degrade to blank cards, never crash setup.
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -189,6 +190,23 @@ def _first_paragraph(md: str) -> str:
     return " ".join(para)
 
 
+_CRED_VAR_RE = re.compile(r"^\$\{([A-Z][A-Z0-9_]*)\}$")
+
+
+def _declared_credential_vars(service: object) -> dict[str, str]:
+    """{credential_key: VAR} for a service block's `credentials:` ${VAR}
+    references (e.g. {"token": "GH_TOKEN"}). Non-reference values (inline
+    literals, malformed refs) are skipped."""
+    if not isinstance(service, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in (service.get("credentials") or {}).items():
+        m = _CRED_VAR_RE.match(str(value).strip())
+        if m:
+            out[str(key)] = m.group(1)
+    return out
+
+
 def reverse_fill(state: SetupState, source: Path) -> None:
     """Populate the spec (goal/roles/services/autonomous), team_name and chat
     from an existing pack so the editor cards reflect it. Never raises."""
@@ -219,7 +237,14 @@ def reverse_fill(state: SetupState, source: Path) -> None:
     for s in cfg.get("services", []) or []:
         name = s.get("name") if isinstance(s, dict) else str(s)
         if name and name != "slack":   # slack-as-chat is reflected via chat
-            svcs.append({"name": name})
+            entry: dict = {"name": name}
+            declared = _declared_credential_vars(s)
+            if declared:
+                # The pack's ${VAR} names are authoritative for credential
+                # capture — the Connect cards must speak them, not the
+                # connector catalog's authoring defaults.
+                entry["credential_vars"] = declared
+            svcs.append(entry)
     spec.services = svcs
 
     state.chat = cfg.get("chat") or "cli"

@@ -219,6 +219,45 @@ class TestCardsForSpec:
         cards = services.cards_for(["slack"], tmp_path)
         assert cards[0]["status"] == "connected"
 
+    def test_pack_declared_vars_override_catalog_names(self, tmp_path):
+        # A template/opened pack declares its own ${VAR} names (eng-team's
+        # ${GH_TOKEN}); the capture card must speak them — the catalog var
+        # is only the authoring default for packs setup writes itself.
+        cards = services.cards_for(
+            [{"name": "github", "credential_vars": {"token": "GH_TOKEN"}}],
+            tmp_path)
+        token_method = next(m for m in cards[0]["methods"]
+                            if m["key"] == "token")
+        assert [s["var"] for s in token_method["secrets"]] == ["GH_TOKEN"]
+
+    def test_declared_vars_map_multi_secret_methods_by_key(self, tmp_path):
+        cards = services.cards_for(
+            [{"name": "slack",
+              "credential_vars": {"bot_token": "MY_SLACK_BOT",
+                                  "signing_secret": "MY_SLACK_SIGNING"}}],
+            tmp_path)
+        method = cards[0]["methods"][0]
+        assert [s["var"] for s in method["secrets"]] == [
+            "MY_SLACK_BOT", "MY_SLACK_SIGNING"]
+
+    def test_declared_vars_flow_into_status(self, tmp_path, monkeypatch):
+        # A credential saved under the DECLARED name flips the card to
+        # connected; the catalog name alone does not satisfy it.
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        from bobi.setup.actions import write_env
+        spec = [{"name": "github", "credential_vars": {"token": "GH_TOKEN"}}]
+        write_env(tmp_path, {"GITHUB_TOKEN": "ghp_x"})
+        assert services.cards_for(spec, tmp_path)[0]["status"] != "connected"
+        write_env(tmp_path, {"GH_TOKEN": "ghp_x"})
+        assert services.cards_for(spec, tmp_path)[0]["status"] == "connected"
+
+    def test_no_declaration_keeps_catalog_names(self, tmp_path):
+        cards = services.cards_for([{"name": "github"}], tmp_path)
+        token_method = next(m for m in cards[0]["methods"]
+                            if m["key"] == "token")
+        assert [s["var"] for s in token_method["secrets"]] == ["GITHUB_TOKEN"]
+
     def test_venn_status_uses_connected_set(self, tmp_path, monkeypatch):
         monkeypatch.setenv("VENN_API_KEY", "k")
         connected = {"salesforce"}   # crm's alias

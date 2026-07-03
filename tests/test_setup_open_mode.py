@@ -62,3 +62,30 @@ def test_bundled_templates_listed_and_copied_offline(monkeypatch, tmp_path):
     open_mode.fetch_into(tmp_path, "alpha-team", dest)
     assert (dest / "agent.yaml").is_file()
     assert open_mode.is_team(dest)
+
+
+def test_reverse_fill_records_declared_credential_vars(tmp_path):
+    # The pack's credentials ${VAR} refs are authoritative for capture —
+    # reverse_fill must carry them into the spec so Connect cards speak
+    # the pack's names (eng-team's GH_TOKEN, not the catalog default).
+    from bobi.setup.state import SetupState
+
+    src = tmp_path / "team"
+    src.mkdir()
+    (src / "agent.yaml").write_text(
+        "agent: eng-team\n"
+        "services:\n"
+        "- name: github\n"
+        "  credentials:\n"
+        "    token: ${GH_TOKEN}\n"
+        "- name: linear\n"          # no credentials block
+        "- name: notion\n"
+        "  credentials:\n"
+        "    api_key: literal-not-a-ref\n")
+    state = SetupState()
+    open_mode.reverse_fill(state, src)
+    by_name = {s["name"]: s for s in state.spec.services}
+    assert by_name["github"]["credential_vars"] == {"token": "GH_TOKEN"}
+    assert "credential_vars" not in by_name["linear"]
+    # literal values are not ${VAR} references — nothing to capture under
+    assert "credential_vars" not in by_name["notion"]
