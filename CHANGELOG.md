@@ -35,6 +35,8 @@ a per-step brain model override and other runtime fixes.
   fell back. This nudged fresh eng-team installs onto the Moda Cloudflare event
   server instead of the bundled local one. (#585)
 
+## 0.37.0 — 2026-07-01
+
 Minor release: gstack joins the tool-library catalog.
 
 ### Added
