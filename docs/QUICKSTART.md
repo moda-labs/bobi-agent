@@ -12,16 +12,19 @@ have it troubleshoot with you.
 
 - The `bobi` CLI installed.
 - An agent runtime (Claude Code) installed and logged in.
-- Your first agent team installed and running - either one you design with the
-  interactive wizard, or the ready-made `eng-team`.
+- Your first agent team, designed with the `bobi setup` client and installed
+  on your machine.
 - The agent running locally, or deployed as an always-on instance on Fly.io.
+- Optionally, Slack wired up so you can talk to your team from chat.
 
 ## Prerequisites
 
 - **macOS or Linux** with a terminal.
 - **An Anthropic account** - a Claude Pro/Max subscription or an API key.
-  Every Bobi agent runs on Claude Code by default (OpenAI Codex also works;
-  see [Choose the runtime](../README.md#choose-the-runtime-optional)).
+  The `bobi setup` client runs on Claude Code, so you need this even if your
+  agents will run on OpenAI Codex. (Agents themselves can run on either
+  runtime; see [Choose the runtime](../README.md#choose-the-runtime-optional)
+  for switching a team to Codex.)
 - **Homebrew or uv** to install the CLI. If you have neither, uv is the
   quickest to get:
 
@@ -29,8 +32,6 @@ have it troubleshoot with you.
   curl -LsSf https://astral.sh/uv/install.sh | sh
   ```
 
-- **Optional, for the ready-made `eng-team`**: a GitHub personal access token
-  and a Slack workspace where you can install an app (Step 3, Path B).
 - **Optional, for cloud deployment**: a [Fly.io](https://fly.io) account
   (Step 5, Option B).
 
@@ -39,8 +40,8 @@ the CLI and go.
 
 ## Step 1: Install and log in to Claude Code
 
-Bobi runs each agent on Claude Code. Skip this step if you already have it
-installed and logged in.
+Bobi's setup client and (by default) each agent run on Claude Code. Skip this
+step if you already have it installed and logged in.
 
 ```bash
 brew install --cask claude-code
@@ -97,74 +98,93 @@ bobi --version
 Everything Bobi creates lives under one home directory, `~/.bobi` by default.
 You can inspect or delete it at any time without affecting anything else.
 
-## Step 3: Create your first agent team
-
-Pick one path. Path A is the recommended default for a brand-new user: the
-wizard walks you through everything and you don't need any external service
-credentials to get a working agent. Path B gets you the ready-made engineering
-team, but it requires GitHub and Slack credentials before it will start.
-
-### Path A (recommended): design your own with the setup wizard
+## Step 3: Create your agent team with the setup client
 
 ```bash
 bobi setup my-agent
 ```
 
-This opens a local web UI (on `127.0.0.1`) that takes you from an idea to an
-installed, runnable agent: describe what you want the agent to do, review what
-Bobi suggests, connect any services it needs, watch it build the team, then
-review and install it. Plain-language descriptions are fine - "watch my
-GitHub repo and summarize new issues every morning" is a perfectly good start.
-
-- Name it whatever you like - the examples below use `my-agent`. If you pick a
-  different name, substitute it in every later command.
-- You can interrupt the wizard anytime and pick up where you left off:
-
-  ```bash
-  bobi setup my-agent --resume
-  ```
-
-When the wizard finishes, your agent is installed and you can go straight to
-Step 4.
-
-### Path B: install the ready-made `eng-team`
-
-`eng-team` is the bundled engineering agent: it triages issues, opens PRs
-through a review-and-CI workflow, and watches for merge conflicts and stale
-PRs. It treats GitHub and Slack as core services, so have these ready:
-
-1. **A GitHub token** - create a personal access token at
-   [github.com/settings/tokens](https://github.com/settings/tokens) with repo
-   access (or run `gh auth token` if you already use the GitHub CLI).
-2. **Slack app credentials** - a bot token (`xoxb-...`) and signing secret.
-   The fastest way is Bobi's generator, which builds an app manifest for you:
-
-   ```bash
-   bobi create-slack-bot --app-name "Bobi"
-   ```
-
-   Follow its instructions, then see [Slack setup](../skills/slack-setup.md)
-   for the full walkthrough if anything is unclear.
-
-Then install:
+This opens a local web UI (on `127.0.0.1` - nothing leaves your machine) that
+takes you from an idea to an installed, runnable agent team. Name it whatever
+you like - the examples below use `my-agent`; if you pick a different name,
+substitute it in every later command. You can interrupt setup anytime and pick
+up where you left off:
 
 ```bash
-bobi agents install eng-team --name eng-team
+bobi setup my-agent --resume
 ```
 
-The installer prompts for each credential the team references (`GH_TOKEN`,
-`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, and optional scoping vars like
-`SLACK_CHANNELS`) and saves them to
-`~/.bobi/agents/eng-team/run/.env`. Never commit that file anywhere. For
-`BOBI_EVENT_SERVER`, leave it blank - Bobi auto-starts a local event server.
+The client walks you through four phases:
 
-> **Tip:** you can leave a prompt blank and fill it in later by editing
-> `~/.bobi/agents/eng-team/run/.env`, but `eng-team` will not start until its
-> required GitHub and Slack credentials are present. If you just want to see
-> Bobi working right now, use Path A instead.
+### 3a. Set up the agent team
 
-If you used Path B, substitute `eng-team` for `my-agent` in every command
-below.
+<!-- TODO(screenshot): the intro screen - location field, Browse button, and the create/modify/registry tabs -->
+
+First, pick where the agent team lives on your local drive (it defaults to a
+`~/bobi-agents/` library, with a Browse button to choose elsewhere), and
+choose how to start:
+
+- **Start from scratch** - describe what you want and Bobi authors the team.
+- **Use a template** - open an existing team on disk, or pull one from a
+  registry, and modify it from there.
+
+### 3b. Configure the team by chatting with Bobi
+
+<!-- TODO(screenshot): the main setup screen - chat on the left, the team panel cards filling in on the right -->
+
+Next, you configure the team in a conversation. The Bobi setup agent
+interviews you for the details of your agent team and tracks your progress in
+the panel along the right - cards fill in and check off live as you talk.
+Plain-language answers are fine; "watch my GitHub repo and summarize new
+issues every morning" is a perfectly good start. You'll cover:
+
+- **Goal and roles.** Define what each agent on the team does and what
+  success looks like. Bobi reflects back what it heard so you can correct it.
+- **Automations and schedules.** Anything the team should do on its own -
+  recurring checks, scheduled reports, triggered follow-ups. Each automation
+  carries its own leash: notify you, ask first, or act and report.
+- **Connections.** Hook the team up to the outside systems it needs, usually
+  via MCP:
+  - By default, Bobi looks for [Venn AI](https://venn.ai) - an MCP gateway
+    that lets you remotely set up and manage many MCP connections from a
+    single point, with one shared key.
+  - For services Venn doesn't offer, your best bet is the service's
+    **official hosted MCP**: drop in its official URL and connect with an API
+    key.
+  - For a service with no official remote MCP, you can build an MCP server
+    locally and connect it via a local command.
+  - If you ever get stuck on the mechanics - creating a GitHub API token, or
+    any other credential - just ask the Bobi setup agent in the chat. It will
+    walk you through it.
+- **Chat integration.** Set up Slack (or other chat) configuration here. You
+  can always talk to your team from the command line, but the real magic is
+  talking to it from Slack - you finish wiring that up after deployment
+  (Step 6).
+
+### 3c. Preview and confirm
+
+<!-- TODO(screenshot): the post-build file browser - file tree, file contents, Open folder -->
+
+Before anything is final, Bobi builds the team and shows you every file it
+created - browse the tree, read the contents, open the folder on disk - and
+you confirm the agent team creation.
+
+### 3d. The completion screen: your next three moves
+
+<!-- TODO(screenshot): the completion screen - success banner and the three next actions to cycle through -->
+
+Once your team is created, the final screen confirms it now lives on your
+local drive and walks you through your next three actions - one full screen
+each, cycle forward and back through them (you can close the window or return
+to the home screen at any point):
+
+1. **Test your Bobi team locally** by running it from your terminal - Step 4
+   below.
+2. **Deploy the agent team** - on your own hardware or on Fly.io - Step 5.
+3. **Finalize chat (Slack) configuration** so you can send and receive
+   messages from Slack - Step 6.
+
+The rest of this guide follows those same three moves.
 
 ## Step 4: Start the agent and talk to it
 
@@ -232,21 +252,25 @@ lives long-term.
 
 ## Step 5: Deploy it
 
-### Option A: keep it local (simplest)
+### Option A: run it on your own machine (always-on if the machine is)
 
-You already did it - `bobi agent my-agent start` is the local deployment. The
-agent runs as a daemon with a loopback event server, reacts to its scheduled
-monitors, and answers `ask`/`message` from your terminal. No cloud, no
-accounts beyond your Anthropic login.
+`bobi agent my-agent start` is already a local deployment: the agent runs as a
+daemon with a loopback event server, reacts to its scheduled monitors, and
+answers `ask`/`message` from your terminal. If you're on hardware that stays
+on - a Mac mini, a home server, a remote box - this can be your permanent
+deployment. Have Claude Code or Codex help you configure the event server and
+deployment for your machine: open a session and ask it to read
+[EVENT_SERVER.md](EVENT_SERVER.md) and set things up with you.
 
 Two limits to know about:
 
-- The agent only works while your machine is on.
+- The agent only works while the machine is on.
 - Inbound webhooks from the public internet (Slack messages, GitHub events)
   can't reach a loopback server. For those, deploy to Fly (Option B) or point
   the agent at a deployed event server.
 
-If local covers your needs, you're done - skip to
+If local covers your needs, skip ahead to
+[Step 6](#step-6-finalize-chat-slack-configuration) or
 [Where to go next](#where-to-go-next).
 
 ### Option B: deploy to Fly.io (always-on)
@@ -256,6 +280,15 @@ always-on Fly Machine - no Dockerfile, no server config. The deployed instance
 holds an outbound WebSocket to an internet-reachable event server (the shared
 Bobi cloud Worker by default - you don't need to set anything), so Slack and
 GitHub webhooks work out of the box.
+
+The easiest way through this is to let Claude Code or Codex drive it. Open a
+session and paste:
+
+```plaintext
+Read https://github.com/moda-labs/bobi-agent/blob/main/docs/CONTAINERIZED_DEPLOYMENT.md and help me deploy my bobi agent "my-agent" to Fly.io.
+```
+
+Or do it by hand:
 
 **1. Use a released Bobi version.** Deploy from a normal `uv tool install
 bobi` / Homebrew install (the instance image pins the version you're running).
@@ -275,37 +308,19 @@ prints exactly what's missing and how to fix it.
 **3. Write a secrets file.** Deployed instances default to API-key auth, so
 you need an Anthropic API key (from
 [console.anthropic.com](https://console.anthropic.com)) plus every credential
-your team uses. For a wizard-built agent with no external services:
+your team uses (the same ones you captured in setup - they live in
+`~/.bobi/agents/my-agent/run/.env`). For an agent with no external services:
 
 ```bash
 printf 'ANTHROPIC_API_KEY=sk-ant-your-key-here\n' > ./my-agent.env
 ```
 
-For `eng-team`, include its service credentials too:
-
-```bash
-cat > ./eng-team.env <<'EOF'
-ANTHROPIC_API_KEY=sk-ant-your-key-here
-GH_TOKEN=ghp_your-token-here
-SLACK_BOT_TOKEN=xoxb-your-token-here
-SLACK_SIGNING_SECRET=your-signing-secret-here
-SLACK_CHANNELS=
-EOF
-```
-
-Keep these files out of git.
+Keep this file out of git.
 
 **4. Deploy.** Point `--team` at your installed agent's source and go:
 
 ```bash
 bobi deploy my-agent --team ~/.bobi/agents/my-agent/src --env-file ./my-agent.env
-```
-
-For the bundled `eng-team`, a bare name works - Bobi fetches the package from
-its registry:
-
-```bash
-bobi deploy eng-team --env-file ./eng-team.env
 ```
 
 The command provisions the Fly app and volume, builds the image, ships your
@@ -331,6 +346,33 @@ bobi destroy my-agent
 For CI-driven fleets, GitOps, Codex-backed teams, and subscription-auth
 deployments, read the full runbook:
 [CONTAINERIZED_DEPLOYMENT.md](CONTAINERIZED_DEPLOYMENT.md).
+
+## Step 6: Finalize chat (Slack) configuration
+
+The command line works, but the real magic is talking to your Bobi team from
+Slack. If you set up Slack during `bobi setup`, one wiring step remains after
+you deploy, because Slack needs a reachable webhook URL:
+
+1. **Point Slack at your event server.** Go to your Slack app at
+   [api.slack.com/apps](https://api.slack.com/apps), open **Event
+   Subscriptions**, and set the Request URL to your event server's webhook
+   endpoint (`<event-server>/webhooks/slack`) with the scopes the Bobi Slack
+   adapter needs. The fastest way to get all of this right is Bobi's manifest
+   generator, which prefills the scopes and event subscriptions:
+
+   ```bash
+   bobi create-slack-bot --app-name "Bobi"
+   ```
+
+2. **Add the app to your workspace** and, ideally, invite it to a dedicated
+   channel for the team (`/invite @your-bot`).
+3. **Pass that channel's ID to Bobi** (the `SLACK_CHANNELS` variable in
+   `~/.bobi/agents/my-agent/run/.env`) so the agent knows where to listen and
+   post, then restart the agent. Send a test message in the channel to
+   confirm the round trip.
+
+The full walkthrough, including the manifest contents, URL verification, and
+troubleshooting, is in [Slack setup](../skills/slack-setup.md).
 
 ## If you get stuck
 
