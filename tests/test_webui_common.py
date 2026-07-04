@@ -180,3 +180,24 @@ def test_serve_container_writes_token_and_port_and_uses_ipv6_host(tmp_path, monk
     assert (tmp_path / "ui.port").read_text() == str(port)
     assert stat.S_IMODE((tmp_path / "ui.token").stat().st_mode) == 0o600
     assert seen["ran"] is True
+
+
+def test_serve_local_attaches_server_for_self_shutdown(monkeypatch):
+    # Setup's /api/shutdown flips should_exit on app.state.uvicorn_server —
+    # serve_local must attach the real server instance to the app it builds.
+    built = {}
+
+    class FakeServer:
+        def __init__(self, config):
+            self.config = config
+
+        def run(self, sockets):
+            pass
+
+    def app_factory(secret):
+        built["app"] = FastAPI()
+        return built["app"]
+
+    monkeypatch.setattr("bobi.webui_common.launcher.uvicorn.Server", FakeServer)
+    assert serve_local(app_factory, open_browser=False) == 0
+    assert isinstance(built["app"].state.uvicorn_server, FakeServer)

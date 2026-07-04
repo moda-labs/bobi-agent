@@ -832,3 +832,49 @@ class TestOpenModeWorkflowFiles:
         merged = yaml.safe_load(
             authoring.merge_monitors_yaml(existing, s))["monitors"]
         assert [m["name"] for m in merged] == ["hand-written"]
+
+
+class TestWorkflowAuthoringEdges:
+    def test_step_name_fallbacks_dedupe_and_prompt_fallback(self):
+        s = _spec_state(workflows=[{"name": "edgy", "steps": [
+            {"name": "same", "prompt": "one"},
+            {"name": "same", "prompt": "two"},
+            {"prompt": "unnamed gets step-N"},          # no name → step-3
+            {"name": "descy", "description": "from description"},
+            {"name": "empty"},                           # no prompt → skipped
+        ]}])
+        wf = yaml.safe_load(authoring.build_workflow_yaml(s, s.spec.workflows[0]))
+        names = [st["name"] for st in wf["steps"]]
+        assert names == ["same", "same-2", "step-3", "descy"]
+        assert wf["steps"][3]["prompt"] == "from description"
+
+    def test_workflow_slug_and_trigger_fallbacks(self):
+        s = _spec_state()
+        assert authoring.workflow_slug({"name": "!!"}) == "workflow"
+        wf = yaml.safe_load(authoring.build_workflow_yaml(
+            s, {"name": "quiet", "description": "does a thing",
+                "steps": [{"name": "a", "prompt": "p"}]}))
+        assert wf["trigger"] == "does a thing"     # trigger ← description
+        wf2 = yaml.safe_load(authoring.build_workflow_yaml(
+            s, {"name": "bare", "steps": [{"name": "a", "prompt": "p"}]}))
+        assert wf2["trigger"] == "bare"            # trigger ← name
+
+    def test_automation_name_truncation_and_fallbacks(self):
+        long_desc = "watch " + "x" * 60
+        assert authoring.automation_workflow_name(
+            {"description": long_desc}).startswith("auto-watch-")
+        assert len(authoring.automation_workflow_name(
+            {"description": long_desc})) <= 45
+        assert authoring.automation_workflow_name({}) == "auto-behavior"
+        # An event automation with a blank description ships nothing (matches
+        # the monitors path) — and never crashes the manifest.
+        s = _spec_state(autonomous=[{"description": "  ", "trigger": "event"}])
+        assert not any(p.path.startswith("workflows/auto-")
+                       for p in compute_manifest(s))
+
+    def test_spec_brief_names_workflows(self):
+        s = _spec_state(workflows=[{"name": "flow", "trigger": "a PR opens",
+                                    "steps": []}])
+        brief = authoring._spec_brief(s)
+        assert "flow (on: a PR opens)" in brief
+        assert "Workflows: none" in authoring._spec_brief(_spec_state())
