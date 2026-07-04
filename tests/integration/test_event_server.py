@@ -15,6 +15,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -23,6 +24,7 @@ from pathlib import Path
 
 import pytest
 import websocket
+import yaml
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 TEST_GRANTS_SECRET = "bobi-integration-test-grants"
@@ -994,6 +996,64 @@ class TestBubbleIsolation:
         tB.join(timeout=5)
         texts = [e["payload"].get("text") for e in evB if e.get("source") == "inbox"]
         assert "hi w2" in texts
+
+    def test_cli_events_publish_delivers_custom_topic(self, event_server, bobi_env):
+        """`bobi agent <name> events publish source/type` uses the same signed
+        publish path as library callers and reaches a source/type subscriber."""
+        from bobi.config import save_bubble_state
+
+        base_url, *_ = event_server
+        dep = _register(base_url, "custom-topic-cli", ["alert/firing"])
+        save_bubble_state(
+            bobi_env.project_path,
+            dep["bubble_id"],
+            dep["bubble_key"],
+        )
+
+        cfg_path = bobi_env.package_dir / "agent.yaml"
+        original_cfg = cfg_path.read_text()
+        cfg = yaml.safe_load(original_cfg) or {}
+        cfg["event_server"] = {"url": base_url}
+        cfg.pop("event_server_url", None)
+
+        events, ready, thread = _live_subscriber(
+            base_url,
+            dep["deployment_id"],
+            dep["api_key"],
+        )
+        assert ready.wait(5)
+
+        try:
+            cfg_path.write_text(yaml.dump(cfg, sort_keys=False))
+            result = subprocess.run(
+                [
+                    sys.executable, "-m", "bobi.cli",
+                    "agent", bobi_env.agent_name,
+                    "events", "publish", "alert/firing",
+                ],
+                input='{"title":"x"}',
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=str(bobi_env.project_path),
+                env={
+                    **os.environ,
+                    "BOBI_HOME": str(bobi_env.home_dir),
+                    "BOBI_ROOT": str(bobi_env.project_path),
+                },
+            )
+        finally:
+            cfg_path.write_text(original_cfg)
+
+        assert result.returncode == 0, result.stderr + result.stdout
+        thread.join(timeout=5)
+        matching = [
+            e for e in events
+            if e.get("source") == "alert"
+            and e.get("type") == "firing"
+            and e.get("payload", {}).get("title") == "x"
+        ]
+        assert matching, f"custom topic publish was not delivered: {events}"
 
     def test_unsigned_publish_rejected(self, event_server):
         base_url, *_ = event_server
