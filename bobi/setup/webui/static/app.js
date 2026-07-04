@@ -1524,9 +1524,9 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
     });
     $("#fd-finish").addEventListener("click", async () => {
       const b = $("#fd-finish"); b.disabled = true;
-      // Hosted in the unified app (BASE set), finish also launches the team
-      // before returning — say so while the request runs.
-      b.textContent = BASE ? "Launching…" : "Finishing…";
+      // Finish marks the state complete; launching stays a deliberate action
+      // in both modes (the hosted on_finish redirects, it does not launch).
+      b.textContent = "Finishing…";
       let r = null;
       try { r = await postJSON("/api/finish", {}); } catch { /* ignore */ }
       const d = (r && r.data) || {};
@@ -1632,14 +1632,23 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
     }];
     if (S.chat === "slack") {
       const savedCh = (S.credentials_saved || []).includes("SLACK_CHANNELS");
+      // A verified non-local ingress (the ingress wizard) already IS the
+      // event server Slack calls — show the concrete Request URL instead of
+      // the contradictory "deploy first" placeholder copy.
+      const ing = S.ingress || {};
+      const ingUrl = (ing.verified && ing.mode !== "local" && ing.url)
+        ? ing.url.replace(/\/+$/, "") + "/webhooks/slack" : "";
+      const urlSteps = ingUrl
+        ? `<li>Your event server is already verified. At <a class="exlink" href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a> → your app → <b>Event Subscriptions</b>, set the Request URL to <span class="mono">${esc(ingUrl)}</span>.</li>`
+        : `<li>Deploy first (previous step) — your event server's public URL is what Slack calls.</li>
+            <li>At <a class="exlink" href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a> → your app → <b>Event Subscriptions</b>, set the Request URL to <span class="mono">&lt;your event server&gt;/webhooks/slack</span>.</li>`;
       steps.push({
         key: "slack", label: "Finalize Slack",
         title: "Finish wiring Slack",
         html: `
-          <p class="ns-lede">After you deploy, Slack needs to know where to send events — then your team is reachable in your workspace.</p>
+          <p class="ns-lede">${ingUrl ? "" : "After you deploy, "}Slack needs to know where to send events — then your team is reachable in your workspace.</p>
           <ol class="ns-list">
-            <li>Deploy first (previous step) — your event server's public URL is what Slack calls.</li>
-            <li>At <a class="exlink" href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a> → your app → <b>Event Subscriptions</b>, set the Request URL to <span class="mono">&lt;your event server&gt;/webhooks/slack</span>.</li>
+            ${urlSteps}
             <li>Install the app to your workspace with the scopes below (the <span class="mono">bobi create-slack-bot</span> manifest prefills them).</li>
             <li>Invite the bot to a dedicated channel (<span class="mono">/invite @your-bot</span>), then save that channel here.</li>
           </ol>
