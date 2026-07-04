@@ -25,3 +25,6 @@ worktrees/
 # Local secrets for the Bobbers test drive (never commit)
 .bobbers.env
 *bobbers*.env
+
+# Local session handoff notes (never committed)
+handoffs/
