@@ -116,10 +116,10 @@ class TestWorkflows:
         result = cli_run("workflows", "validate", str(bad_file))
         assert result.returncode != 0
 
-    def test_workflows_validate_rejects_unbounded_back_edge(self, bobi_env, cli_run):
-        wf_file = bobi_env.workflows_dir / "unbounded-loop.yaml"
+    def test_workflows_validate_accepts_default_capped_back_edge(self, bobi_env, cli_run):
+        wf_file = bobi_env.workflows_dir / "default-capped-loop.yaml"
         wf_file.write_text(textwrap.dedent("""\
-            name: unbounded-loop
+            name: default-capped-loop
             steps:
               - name: review
                 prompt: "Review"
@@ -133,8 +133,7 @@ class TestWorkflows:
 
         result = cli_run("workflows", "validate", str(wf_file))
 
-        assert result.returncode != 0
-        assert "unbounded back-edge" in result.stderr
+        assert result.returncode == 0
 
 
 class TestRoles:

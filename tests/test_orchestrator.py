@@ -12,6 +12,7 @@ import pytest
 
 from bobi import paths
 from bobi.workflow.schema import (
+    DEFAULT_ROUTE_LOOP_MAX_ITERATIONS,
     Workflow, StepDef, HandoffContract, load_workflow,
 )
 from bobi.workflow.orchestrator import (
@@ -116,10 +117,10 @@ class TestSchemaLoad:
         assert step.max_iterations == 2
         assert step.on_exhausted == "escalate"
 
-    def test_rejects_unbounded_back_edge(self, tmp_path):
+    def test_applies_default_cap_to_back_edge(self, tmp_path):
         f = tmp_path / "test.yaml"
         f.write_text(textwrap.dedent("""\
-            name: unbounded-route
+            name: default-capped-route
             steps:
               - name: review
                 prompt: "Review"
@@ -130,13 +131,16 @@ class TestSchemaLoad:
               - name: done
                 prompt: "Done"
         """))
-        with pytest.raises(ValueError, match="unbounded back-edge"):
-            load_workflow(f)
+        wf = load_workflow(f)
+        assert (
+            wf.step_by_name("gate").max_iterations
+            == DEFAULT_ROUTE_LOOP_MAX_ITERATIONS
+        )
 
-    def test_rejects_unbounded_self_loop(self, tmp_path):
+    def test_applies_default_cap_to_self_loop(self, tmp_path):
         f = tmp_path / "test.yaml"
         f.write_text(textwrap.dedent("""\
-            name: unbounded-self-loop
+            name: default-capped-self-loop
             steps:
               - name: gate
                 if: "ready == true"
@@ -145,8 +149,11 @@ class TestSchemaLoad:
               - name: done
                 prompt: "Done"
         """))
-        with pytest.raises(ValueError, match="unbounded back-edge"):
-            load_workflow(f)
+        wf = load_workflow(f)
+        assert (
+            wf.step_by_name("gate").max_iterations
+            == DEFAULT_ROUTE_LOOP_MAX_ITERATIONS
+        )
 
     def test_max_visits_alias_loads_as_iteration_cap(self, tmp_path):
         f = tmp_path / "test.yaml"

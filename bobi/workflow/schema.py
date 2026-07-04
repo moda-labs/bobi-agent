@@ -17,6 +17,9 @@ from typing import Any
 import yaml
 
 
+DEFAULT_ROUTE_LOOP_MAX_ITERATIONS = 3
+
+
 @dataclass
 class HandoffContract:
     required: list[str] = field(default_factory=list)
@@ -156,7 +159,7 @@ def _parse_max_iterations(raw_step: dict[str, Any]) -> int:
 
 
 def _validate_back_edges(workflow: Workflow) -> None:
-    """Reject route back-edges unless the source step has an explicit bound."""
+    """Apply and validate route loop caps."""
     for index, step in enumerate(workflow.steps):
         if step.on_exhausted:
             exhausted_index = workflow.step_index(step.on_exhausted)
@@ -170,7 +173,7 @@ def _validate_back_edges(workflow: Workflow) -> None:
                     f"Workflow {workflow.name}: step {step.name} "
                     f"on_exhausted target {step.on_exhausted} must be later"
                 )
-        for field_name, target in (("goto", step.goto), ("else", step.else_goto)):
+        for target in (step.goto, step.else_goto):
             if not target:
                 continue
             target_index = workflow.step_index(target)
@@ -178,7 +181,4 @@ def _validate_back_edges(workflow: Workflow) -> None:
                 continue
             if step.max_iterations:
                 continue
-            raise ValueError(
-                f"Workflow {workflow.name}: unbounded back-edge from step "
-                f"{step.name} {field_name}: {target}; add max_iterations"
-            )
+            step.max_iterations = DEFAULT_ROUTE_LOOP_MAX_ITERATIONS
