@@ -20,8 +20,13 @@ no CLI. `serve()` is the socket→uvicorn foreground launcher.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import AsyncIterator
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 
 # Imported at module level (not inside build_app) so that, under
 # `from __future__ import annotations`, FastAPI can resolve the string
@@ -56,6 +61,13 @@ def serialize_state(state: SetupState) -> dict:
         "team_name": state.team_name,
         "source_dir": state.source_dir,
         "chat": state.chat,
+        "ingress": {
+            "mode": state.ingress.mode,
+            "url": state.ingress.url,
+            "verified": state.ingress.verified,
+            "verified_at": state.ingress.verified_at,
+            "error": state.ingress.error,
+        },
         "phase": state.phase,
         "spec": {
             "goal": spec.goal,
@@ -81,6 +93,51 @@ def serialize_state(state: SetupState) -> dict:
 
 def _sse(event: str, data) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _validate_public_event_server_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return "use a public https:// event server URL"
+    return None
+
+
+def _probe_event_server(url: str) -> tuple[bool, str]:
+    health_url = url.rstrip("/") + "/health"
+    req = UrlRequest(health_url, headers={"accept": "application/json"})
+    try:
+        with urlopen(req, timeout=8) as resp:
+            if not (200 <= resp.status < 300):
+                return False, f"/health returned HTTP {resp.status}"
+            try:
+                payload = json.loads(resp.read(4096).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return False, "/health did not return Bobi JSON"
+            if (isinstance(payload, dict)
+                    and payload.get("status") == "ok"
+                    and payload.get("auth") == "hmac"):
+                return True, ""
+            return False, "/health did not look like a Bobi event server"
+    except HTTPError as e:
+        return False, f"/health returned HTTP {e.code}"
+    except URLError as e:
+        return False, f"could not reach /health: {e.reason}"
+    except TimeoutError:
+        return False, "timed out reaching /health"
+    except OSError as e:
+        return False, f"could not reach /health: {e}"
+
+
+def _persist_ingress_env(project: Path, state: SetupState) -> None:
+    from bobi.setup import actions
+    env = actions.read_env(project)
+    if state.ingress.mode == "local":
+        env.pop("BOBI_EVENT_SERVER", None)
+        os.environ.pop("BOBI_EVENT_SERVER", None)
+    elif state.ingress.url:
+        env["BOBI_EVENT_SERVER"] = state.ingress.url
+        os.environ["BOBI_EVENT_SERVER"] = state.ingress.url
+    actions.write_env(project, env)
 
 
 # --- app -----------------------------------------------------------------
@@ -622,6 +679,46 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         from bobi.setup import actions
         return {"cards": cards, "catalog": catalog,
                 "venn_configured": bool(actions.venn_key(project))}
+
+    # --- ingress: how public webhooks reach the event server ------------
+    @app.post("/api/ingress/verify")
+    def ingress_verify(payload: dict) -> JSONResponse:
+        from datetime import datetime, timezone
+        from bobi.deploy import DEFAULT_EVENT_SERVER
+        mode = (payload.get("mode") or state.ingress.mode or "local").strip()
+        url = (payload.get("url") or state.ingress.url or "").strip().rstrip("/")
+        if mode == "bobi_cloud":
+            url = DEFAULT_EVENT_SERVER
+        if mode == "local":
+            state.ingress.mode = "local"
+            state.ingress.url = ""
+            state.ingress.verified = True
+            state.ingress.verified_at = datetime.now(timezone.utc).isoformat()
+            state.ingress.error = ""
+            _persist_ingress_env(project, state)
+            state.save(project)
+            return JSONResponse({"ok": True, "state": serialize_state(state)})
+        if mode not in ("quick_tunnel", "bobi_cloud", "custom_worker"):
+            return JSONResponse({"ok": False, "error": "unknown ingress mode"},
+                                status_code=400)
+        if not url:
+            return JSONResponse({"ok": False, "error": "event server URL required"},
+                                status_code=400)
+        err = _validate_public_event_server_url(url)
+        if err:
+            return JSONResponse({"ok": False, "error": err}, status_code=400)
+        ok, error = _probe_event_server(url)
+        if ok:
+            state.ingress.mode = mode
+            state.ingress.url = url
+            state.ingress.verified = True
+            state.ingress.verified_at = datetime.now(timezone.utc).isoformat()
+            state.ingress.error = ""
+            _persist_ingress_env(project, state)
+            state.save(project)
+        return JSONResponse({"ok": ok, "error": error,
+                             "state": serialize_state(state)},
+                            status_code=200 if ok else 502)
 
     # --- automate (suggester + commit) ---------------------------------
     @app.post("/api/automate/suggest")

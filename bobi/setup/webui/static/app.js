@@ -39,6 +39,12 @@
     { key: "slack", name: "Slack", soon: false },
     { key: "telegram", name: "Telegram", soon: true },
   ];
+  const INGRESS_LABELS = {
+    local: "Local only",
+    quick_tunnel: "Quick tunnel",
+    bobi_cloud: "Bobi cloud",
+    custom_worker: "Custom Worker",
+  };
 
   let S = null;            // latest serialized state
   let _connData = null;    // last /api/connect payload (drives connect cards)
@@ -738,11 +744,27 @@
     // Venn is ONE account-level connection many services share — pinned as the
     // top row (shown whenever we have connection data) so it can be set up /
     // managed first; the per-service rows follow.
+    const ingress = ingressRow();
     const venn = cards ? vennAccountRow(vennConfigured) : "";
     return `<div class="ucard ${(sp.services || []).length ? "filled" : "empty"}">
       <div class="ut">Connections ${slotDot(ok)}</div>
-      <div class="ud">${venn}${body}</div>
+      <div class="ud">${ingress}${venn}${body}</div>
       <div class="uadd"><button class="lnk add" data-addconn>+ add a connection</button></div></div>`;
+  }
+  function ingressRow() {
+    const ing = S.ingress || { mode: "local", url: "", verified: false };
+    const label = INGRESS_LABELS[ing.mode] || "Ingress";
+    const detail = ing.mode === "local"
+      ? "loopback only"
+      : (ing.url || "needs URL");
+    const badge = ing.verified
+      ? `<span class="cbadge connected">${CHECK} verified</span>`
+      : ing.error
+      ? `<span class="cbadge warn">check failed</span>`
+      : `<span class="cbadge">not checked</span>`;
+    return `<div class="uconn ingress-row">
+      <span><b>Webhook ingress</b><span class="ctag">${esc(label)} · ${esc(detail)}</span></span>
+      <span class="cright">${badge}<button class="lnk" data-ingressopen>Configure</button></span></div>`;
   }
   // Account-level Venn: one connection the user manages globally; any number of
   // Venn-backed services (Gmail, Slack, Salesforce…) are reached through it. One
@@ -855,6 +877,94 @@
     const r = await postJSON("/api/chat", { channel: key });
     if (!r.ok) { toast(r.data.error || "couldn't set"); return; }
     S = r.data; renderUniCards();
+  }
+
+  function openIngressModal() {
+    const cur = S.ingress || { mode: "local", url: "" };
+    const ov = document.createElement("div");
+    ov.className = "secret-ov";
+    ov.id = "ingress-ov";
+    const team = S.team_name || "<name>";
+    ov.innerHTML = `<div class="secret-panel ingress-panel">
+      <div class="sp-head"><b>Webhook ingress</b><button class="x" id="ingress-close">×</button></div>
+      <div class="sp-body">
+        <p class="fhelp">Pick how GitHub, Slack, and Linear can reach the event server. Local-only is fine for command-line teams; webhook services need an internet-facing HTTPS URL.</p>
+        <div class="ingress-options">
+          ${ingressOption("local", "Local only", "No public webhooks. Bobi auto-starts loopback when the team runs.")}
+          ${ingressOption("quick_tunnel", "Quick tunnel", "Fast local test with cloudflared or ngrok in front of localhost:8080.")}
+          ${ingressOption("bobi_cloud", "Bobi cloud", "Durable shared Worker for hosted webhook delivery.")}
+          ${ingressOption("custom_worker", "Custom Worker", "Durable event server you operate, usually a Cloudflare Worker.")}
+        </div>
+        <div id="ingress-fields"></div>
+        <div class="sp-actions"><button class="btn primary sm" id="ingress-save">Verify & save</button></div>
+        <div class="mcp-status" id="ingress-status"></div>
+      </div></div>`;
+    document.body.appendChild(ov);
+    let mode = cur.mode || "local";
+    ov.addEventListener("click", e => {
+      if (e.target.id === "ingress-close" || e.target === ov) { ov.remove(); return; }
+      const opt = e.target.closest("[data-ingressmode]");
+      if (opt) { mode = opt.dataset.ingressmode; draw(); return; }
+    });
+    $("#ingress-save").addEventListener("click", () => verifyIngress(mode, ov));
+    function draw() {
+      ov.querySelectorAll("[data-ingressmode]").forEach(b => b.classList.toggle("on", b.dataset.ingressmode === mode));
+      const url = cur.mode === mode ? (cur.url || "") : "";
+      let html = "";
+      if (mode === "local") {
+        html = `<div class="ingress-note">
+          <b>Local-only event server</b>
+          <span>Run <code>bobi agent ${esc(team)} start</code>. Bobi will start the loopback server automatically; external webhook providers cannot reach it.</span>
+        </div>`;
+      } else if (mode === "quick_tunnel") {
+        html = `<div class="ingress-note">
+          <b>Quick tunnel</b>
+          <span>Start the local event server, run a tunnel, then paste its HTTPS URL. The empty env override forces loopback startup even if a remote URL was previously saved.</span>
+          <div class="cmd mini"><span class="pr">$</span><span class="cmd-text">BOBI_EVENT_SERVER= bobi agent ${esc(team)} event-server start
+cloudflared tunnel --url http://127.0.0.1:8080</span></div>
+        </div>
+        <label class="fld"><span class="flab">Tunnel URL</span>
+          <input id="ingress-url" placeholder="https://example.trycloudflare.com" autocomplete="off" value="${esc(url)}"></label>`;
+      } else if (mode === "bobi_cloud") {
+        html = `<div class="ingress-note">
+          <b>Bobi cloud Worker</b>
+          <span>Setup will verify the shared Worker and save it as <code>BOBI_EVENT_SERVER</code> for this agent.</span>
+        </div>`;
+      } else {
+        html = `<div class="ingress-note">
+          <b>Custom Worker</b>
+          <span>Use your own deployed event server. Verification checks <code>/health</code> before saving.</span>
+        </div>
+        <label class="fld"><span class="flab">Event server URL</span>
+          <input id="ingress-url" placeholder="https://events.example.workers.dev" autocomplete="off" value="${esc(url)}"></label>`;
+      }
+      $("#ingress-fields").innerHTML = html;
+      $("#ingress-save").textContent = mode === "local" ? "Use local only" : "Verify & save";
+      const inp = $("#ingress-url");
+      if (inp) inp.addEventListener("keydown", e => {
+        if (e.key === "Enter") { e.preventDefault(); verifyIngress(mode, ov); }
+      });
+    }
+    draw();
+  }
+  function ingressOption(mode, label, sub) {
+    return `<button class="ingress-opt" type="button" data-ingressmode="${mode}">
+      <b>${esc(label)}</b><span>${esc(sub)}</span></button>`;
+  }
+  async function verifyIngress(mode, ov) {
+    const st = $("#ingress-status");
+    const url = ($("#ingress-url") && $("#ingress-url").value || "").trim();
+    st.innerHTML = `<div class="fhelp"><span class="spin"></span> Checking ingress…</div>`;
+    const r = await postJSON("/api/ingress/verify", { mode, url });
+    if (!r.ok || !r.data.ok) {
+      st.innerHTML = `<div class="mcp-err">${esc((r.data && (r.data.error || r.data.message)) || "couldn't verify ingress")}</div>`;
+      if (r.data && r.data.state) { S = r.data.state; renderUniCards(); }
+      return;
+    }
+    S = r.data.state;
+    renderUniCards();
+    ov.remove();
+    toast("ingress verified");
   }
 
   // --- conversation ------------------------------------------------------
@@ -1891,6 +2001,7 @@
     }
     const sco = e.target.closest("[data-secretcopy]");
     if (sco) { copySecret(sco.dataset.secretcopy); return; }
+    if (e.target.closest("[data-ingressopen]")) { openIngressModal(); return; }
     const vs = e.target.closest("[data-vennsetup]");
     if (vs) { openVennSetup(); return; }
     if (e.target.closest("[data-vennconnect]")) { vennConnect(); return; }

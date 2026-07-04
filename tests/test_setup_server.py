@@ -3,6 +3,7 @@ deterministic + streaming endpoints. Driven by Starlette's TestClient with
 an injected fake LLM source: no network, no CLI."""
 
 import json
+import os
 import re
 
 import pytest
@@ -161,6 +162,121 @@ class TestSerializeState:
         s = SetupState(stage=Stage.CHAT)
         s.spec.goal = "Do the thing."
         assert server.serialize_state(s)["advance_blocker"] is None
+
+    def test_exposes_ingress_choice(self, project):
+        s = SetupState()
+        s.ingress.mode = "quick_tunnel"
+        s.ingress.url = "https://agent.trycloudflare.com"
+        s.ingress.verified = True
+        data = server.serialize_state(s)
+        assert data["ingress"] == {
+            "mode": "quick_tunnel",
+            "url": "https://agent.trycloudflare.com",
+            "verified": True,
+            "verified_at": "",
+            "error": "",
+        }
+
+
+class TestIngressEndpoint:
+    class _HealthResponse:
+        status = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self, _limit):
+            return self._body
+
+    def test_ingress_verify_is_the_only_mutation_endpoint(self, project):
+        c = _client(SetupState(), project)
+        r = c.post("/api/ingress", json={"mode": "local"})
+        assert r.status_code == 404
+
+    def test_probe_requires_bobi_health_payload(self, monkeypatch):
+        monkeypatch.setattr(
+            server,
+            "urlopen",
+            lambda *a, **k: self._HealthResponse(b'{"status":"ok","auth":"hmac"}'),
+        )
+        assert server._probe_event_server("https://events.example.com") == (True, "")
+
+        monkeypatch.setattr(
+            server,
+            "urlopen",
+            lambda *a, **k: self._HealthResponse(b'{"status":"ok"}'),
+        )
+        ok, err = server._probe_event_server("https://events.example.com")
+        assert ok is False
+        assert "Bobi event server" in err
+
+    def test_local_ingress_verified_and_removes_event_server_env(self, project):
+        (project / ".env").write_text("BOBI_EVENT_SERVER=https://old.example\n")
+        os.environ["BOBI_EVENT_SERVER"] = "https://old.example"
+        s = SetupState()
+        c = _client(s, project)
+        r = c.post("/api/ingress/verify", json={"mode": "local"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert s.ingress.mode == "local"
+        assert s.ingress.verified is True
+        assert "BOBI_EVENT_SERVER" not in (project / ".env").read_text()
+        assert "BOBI_EVENT_SERVER" not in os.environ
+
+    def test_quick_tunnel_verifies_health_and_saves_event_server(self, project,
+                                                                 monkeypatch):
+        monkeypatch.setattr(server, "_probe_event_server", lambda url: (True, ""))
+        os.environ["BOBI_EVENT_SERVER"] = "https://stale.example"
+        s = SetupState()
+        c = _client(s, project)
+        r = c.post("/api/ingress/verify", json={
+            "mode": "quick_tunnel",
+            "url": "https://agent.trycloudflare.com/",
+        })
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert s.ingress.mode == "quick_tunnel"
+        assert s.ingress.url == "https://agent.trycloudflare.com"
+        assert s.ingress.verified is True
+        assert "BOBI_EVENT_SERVER=https://agent.trycloudflare.com" in (
+            project / ".env").read_text()
+        assert os.environ["BOBI_EVENT_SERVER"] == "https://agent.trycloudflare.com"
+
+    def test_ingress_requires_public_https_url(self, project):
+        c = _client(SetupState(), project)
+        r = c.post("/api/ingress/verify", json={
+            "mode": "custom_worker",
+            "url": "http://events.example.com",
+        })
+        assert r.status_code == 400
+        assert "https" in r.json()["error"]
+
+    def test_failed_probe_keeps_previous_verified_ingress(self, project,
+                                                          monkeypatch):
+        monkeypatch.setattr(server, "_probe_event_server",
+                            lambda url: (False, "boom"))
+        (project / ".env").write_text("BOBI_EVENT_SERVER=https://old.example\n")
+        os.environ["BOBI_EVENT_SERVER"] = "https://old.example"
+        s = SetupState()
+        s.ingress.mode = "bobi_cloud"
+        s.ingress.url = "https://old.example"
+        s.ingress.verified = True
+        c = _client(s, project)
+        r = c.post("/api/ingress/verify", json={
+            "mode": "custom_worker",
+            "url": "https://events.example.com",
+        })
+        assert r.status_code == 502
+        assert r.json()["error"] == "boom"
+        assert s.ingress.verified is True
+        assert s.ingress.url == "https://old.example"
+        assert "BOBI_EVENT_SERVER=https://old.example" in (
+            project / ".env").read_text()
+        assert os.environ["BOBI_EVENT_SERVER"] == "https://old.example"
 
 
 # --- conversation turn ---------------------------------------------------
