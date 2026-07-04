@@ -143,6 +143,13 @@ scope (too narrow? too wide?). Bind these review lenses to **your review gate**.
 - Write tests BEFORE implementation (TDD)
 - Run the project's test command before every PR
 - The test command is auto-detected from package.json / pyproject.toml / Makefile
+- If a local test run fails during collection because optional test dependencies
+  are missing, install the same extras CI uses and rerun the exact failed command
+  before reporting it as a caveat. For this repo, broad non-integration tests use
+  `pip install -e ".[dev,kb]"`. Only report a dependency caveat if the install or
+  rerun still fails, and name that failure. Do not leave stale "missing
+  pytest/numpy/fastembed/sqlite_vec" caveats in a PR summary after the matching
+  command passes locally or in CI.
 
 ---
 
