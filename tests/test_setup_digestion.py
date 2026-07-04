@@ -220,3 +220,20 @@ class TestDigestTurn:
         _run(_collect(digestion.digest_turn(s, tmp_path, "hi", stream_fn=fake)))
         assert s.messages[-1]["content"] == "just a chat reply, no block"
         assert s.spec.goal == ""
+
+
+class TestServicesRewritePreservesDeclaredVars:
+    def test_credential_vars_survive_llm_services_replacement(self):
+        # reverse_fill attaches pack-declared credential vars; the digestion
+        # emits fresh {"name": ...} lists every turn and must not lose them,
+        # or Connect cards would silently revert to catalog var names.
+        s = SetupState()
+        s.spec.services = [
+            {"name": "github", "credential_vars": {"token": "GH_TOKEN"}}]
+        apply_deltas(s, DigestionResult(
+            reply="",
+            deltas={"services": [{"name": "github"}, {"name": "notion"}]}))
+        assert s.spec.services == [
+            {"name": "github", "credential_vars": {"token": "GH_TOKEN"}},
+            {"name": "notion"},
+        ]

@@ -1076,6 +1076,31 @@ class TestFinish:
         assert r.json()["finished"] is True
         assert s.finished is True
 
+    def test_finish_merges_on_finish_result(self, project):
+        # Hosted mode (the unified app): on_finish launches the team and its
+        # return rides the finish response so the SPA can redirect.
+        s = SetupState(stage=Stage.DONE)
+        c = _client(s, project,
+                    on_finish=lambda: {"launched": True, "redirect": "/#/x"})
+        body = c.post("/api/finish").json()
+        assert body["finished"] is True
+        assert body["launched"] is True
+        assert body["redirect"] == "/#/x"
+
+    def test_finish_survives_on_finish_failure(self, project):
+        # A launch failure surfaces as launch_error; the finish itself holds
+        # (the team is installed either way).
+        def boom():
+            raise RuntimeError("preflight: missing SLACK_BOT_TOKEN")
+
+        s = SetupState(stage=Stage.DONE)
+        c = _client(s, project, on_finish=boom)
+        body = c.post("/api/finish").json()
+        assert body["finished"] is True
+        assert s.finished is True
+        assert "SLACK_BOT_TOKEN" in body["launch_error"]
+        assert "redirect" not in body
+
 
 class TestHome:
     def test_lists_library_teams_with_descriptions(self, project, home):
@@ -1460,6 +1485,25 @@ class TestIntro:
             "mode": "registry", "team": "market-research", "location": str(existing)})
         assert r.status_code == 409
         assert (existing / "agent.md").read_text() == keep
+
+    def test_start_registry_accepts_existing_empty_dir(self, project, home,
+                                                       monkeypatch):
+        # The canonical slot src/ may already exist (empty) from the slot
+        # scaffolding — an empty dir is not "an existing team".
+        from bobi.setup import open_mode
+
+        def fake_fetch_into(proj, name, dest):
+            _seed_team(proj, name)
+            open_mode.copy_into(proj / "agents" / name, dest)
+
+        monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
+        empty = home / "agents" / "new-agent" / "src"
+        empty.mkdir(parents=True)
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "registry", "team": "eng-team",
+                                       "location": str(empty)})
+        assert r.status_code == 200
+        assert (empty / "agent.yaml").is_file()
 
     def test_start_registry_without_team_400(self, project):
         c = _client(SetupState(), project)

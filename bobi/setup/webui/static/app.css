@@ -10,6 +10,9 @@ html[data-retro="on"] body{ background:radial-gradient(1200px 600px at 80% -10%,
 .tdots{display:flex;gap:7px;} .tdots i{width:11px;height:11px;border-radius:50%;display:block;background:#D9CFC0;} .tdots i:nth-child(1){background:#E0A89A;} .tdots i:nth-child(2){background:#E6CE9C;} .tdots i:nth-child(3){background:#B9D6AE;}
 .addr{ font-family:var(--font-mono); font-size:12px; color:var(--muted); display:flex; align-items:center; gap:7px; }
 .addr .lock{width:11px;height:11px;color:var(--accent);}
+/* hosted in the unified app: the address chip is the way back home */
+.addr-back{ color:var(--muted); text-decoration:none; }
+.addr-back:hover{ color:var(--accent); }
 .spacer{flex:1;}
 .titlebar .brand{display:flex;align-items:center;gap:8px;padding:3px 7px;margin:0 -7px;background:none;border:0;font:inherit;color:inherit;border-radius:8px;cursor:pointer;transition:background .15s;}
 .titlebar button.brand:hover{background:var(--raised);}

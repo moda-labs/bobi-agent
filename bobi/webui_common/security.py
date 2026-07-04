@@ -44,7 +44,15 @@ def install_security(
         host = _host_without_port(request.headers.get("host") or "")
         if host and host not in ALLOWED_HOSTS:
             return JSONResponse({"error": "host not allowed"}, status_code=403)
-        if request.url.path.startswith("/api"):
+        # Strip the mount prefix so the check also fires when this app is
+        # mounted as a sub-app (e.g. setup under /setup in the unified app):
+        # there url.path is the FULL outer path and a bare startswith("/api")
+        # would silently skip the token check.
+        path = request.url.path
+        root = request.scope.get("root_path", "")
+        if root and path.startswith(root):
+            path = path[len(root):]
+        if path.startswith("/api"):
             if not any(request.headers.get(name) == secret for name in header_names):
                 return JSONResponse({"error": error_message}, status_code=403)
         return await call_next(request)

@@ -230,7 +230,18 @@ def apply_deltas(state: SetupState, result: DigestionResult) -> None:
     if isinstance(d.get("roles"), list):
         spec.roles = d["roles"]
     if isinstance(d.get("services"), list):
-        spec.services = d["services"]
+        # The digestion emits fresh {"name": ...} entries; carry over the
+        # pack-declared credential vars reverse_fill attached, or the
+        # Connect cards would silently fall back to catalog var names
+        # mid-conversation.
+        declared = {s.get("name"): s["credential_vars"]
+                    for s in spec.services
+                    if isinstance(s, dict) and s.get("credential_vars")}
+        spec.services = [
+            {**s, "credential_vars": declared[s["name"]]}
+            if isinstance(s, dict) and s.get("name") in declared else s
+            for s in d["services"]
+        ]
     if isinstance(d.get("autonomous"), list):
         spec.autonomous = d["autonomous"]
     if d.get("chat") in ("cli", "slack", "telegram"):

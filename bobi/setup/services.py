@@ -607,6 +607,39 @@ def venn_connected_names(project: Path, key: str | None = None) -> set[str] | No
     return {s.server_name.lower() for s in servers if s.connected}
 
 
+def _with_declared_vars(conn: Connector,
+                        declared: dict[str, str]) -> Connector:
+    """A copy of `conn` whose secret var names are replaced by the ${VAR}
+    names the team's own agent.yaml declares — the pack is authoritative
+    for naming; the catalog vars are only authoring defaults for packs
+    setup writes itself.
+
+    Mapping rule per secret: a declared credential key matches a catalog
+    secret whose var name contains it (bot_token → SLACK_BOT_TOKEN); if the
+    pack declares exactly one var and the method has exactly one required
+    secret, they pair directly. Unmatched secrets keep their catalog name.
+    """
+    from dataclasses import replace
+
+    if not declared:
+        return conn
+
+    def _map_secret(secret: Secret, method: AuthMethod) -> Secret:
+        for key, var in declared.items():
+            if key.upper() in secret.var.upper():
+                return replace(secret, var=var)
+        required = [s for s in method.secrets if not s.optional]
+        if len(declared) == 1 and len(required) == 1 and secret is required[0]:
+            return replace(secret, var=next(iter(declared.values())))
+        return secret
+
+    methods = tuple(
+        replace(m, secrets=tuple(_map_secret(s, m) for s in m.secrets))
+        for m in conn.methods
+    )
+    return replace(conn, methods=methods)
+
+
 def _present_vars(connector: Connector, env: dict) -> set:
     """Which of this connector's secret vars are already set (env or process)."""
     present = set()
@@ -641,6 +674,10 @@ def cards_for(service_names, project: Path,
         if conn.key in seen:
             continue
         seen.add(conn.key)
+        if isinstance(raw, dict) and raw.get("credential_vars"):
+            # An opened/template pack declares its own ${VAR} names —
+            # capture under those, not the catalog's authoring defaults.
+            conn = _with_declared_vars(conn, raw["credential_vars"])
 
         if conn.kind == "venn":
             vc = (any(n in connected for n in conn.names())

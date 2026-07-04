@@ -5,6 +5,13 @@
    never in the chat. Build/Done reuse the generating + done views. */
 (() => {
   const NONCE = document.querySelector('meta[name="bobi-nonce"]').content;
+  // Mount prefix when hosted inside the unified web app ("" standalone).
+  // Every /api and /static request goes through the helpers below, which
+  // prefix it - keep it that way.
+  const BASE = (document.querySelector('meta[name="bobi-base"]') || {}).content || "";
+  // Hosted inside the unified app: the dashboard is home. The SPA never
+  // shows its own hub, and every home-exit leaves to the shell instead.
+  const HOSTED = !!BASE;
   const H = { "x-bobi-webui-token": NONCE };
   const $ = (sel, el = document) => el.querySelector(sel);
   // Escapes for both element text AND double/single-quoted attribute contexts
@@ -73,7 +80,7 @@
   // --- api helpers -------------------------------------------------------
   async function getJSON(path) {
     let r;
-    try { r = await fetch(path, { headers: H }); }
+    try { r = await fetch(BASE + path, { headers: H }); }
     catch (e) { markDisconnected(); throw e; }   // network failure = server gone
     markConnected();
     return r.json();
@@ -81,7 +88,7 @@
   async function postJSON(path, body) {
     let r;
     try {
-      r = await fetch(path, {
+      r = await fetch(BASE + path, {
         method: "POST", headers: { ...H, "content-type": "application/json" },
         body: JSON.stringify(body || {}),
       });
@@ -101,7 +108,7 @@
   async function sse(path, body, handlers) {
     let res;
     try {
-      res = await fetch(path, {
+      res = await fetch(BASE + path, {
         method: "POST", headers: { ...H, "content-type": "application/json" },
         body: JSON.stringify(body || {}),
       });
@@ -145,6 +152,22 @@
   async function refresh() { S = await getJSON("/api/state"); render(); }
   async function boot() {
     S = await getJSON("/api/state");
+    if (HOSTED) {
+      // The unified app already welcomed the user and owns the home screen.
+      welcomed = true;
+      hostedChrome();
+      if (S.finished) { location.href = "/#/"; return; }
+      // Edit-an-existing-team deep link: /setup/?open=<source path> jumps
+      // straight into the open-mode conversation (cards pre-filled).
+      const openPath = new URLSearchParams(location.search).get("open");
+      if (openPath && S.stage === "start") {
+        const r = await postJSON("/api/start",
+          { mode: "open", location: openPath, team_path: openPath });
+        if (r.ok) { S = r.data; } else { toast(r.data.error || "couldn't open the team"); }
+      }
+      render();
+      return;
+    }
     // A finished session returns to the hub; so do returning users who already
     // have teams and aren't mid-setup. New users get the welcome on-ramp.
     if (S.finished) {
@@ -154,6 +177,11 @@
       catch { /* no hub — fall through to the welcome on-ramp */ }
     }
     render();
+  }
+  // Hosted titlebar: the address chip becomes the way back to the dashboard.
+  function hostedChrome() {
+    const addr = document.querySelector(".titlebar .addr");
+    if (addr) addr.innerHTML = '<a class="addr-back" href="/#/">&larr; dashboard</a>';
   }
   async function go(stage) {
     const r = await postJSON("/api/advance", { to: stage });
@@ -174,6 +202,7 @@
   // entry), so its Back routes by where it was entered from: back to the team
   // hub, or to the welcome on-ramp on first run.
   function introBack() {
+    if (HOSTED) { location.href = "/#/"; return; }
     if (introFrom === "hub") { atHome = true; render(); }
     else { welcomed = false; render(); }
   }
@@ -181,6 +210,7 @@
   // welcome screen both call this. The hub overlays any stage and is re-entrant,
   // so leaving mid-flow is safe; the server keeps each team's state.
   function goHome() {
+    if (HOSTED) { location.href = "/#/"; return; }
     if (atHome) { renderHome(); return; }
     atHome = true; welcomed = true;   // don't fall back to the welcome on-ramp
     building = false; buildGen++;      // supersede any in-flight build
@@ -936,7 +966,7 @@
   let editSecrets = new Set();   // secret vars temporarily re-opened for editing
   // Copy a saved credential to the clipboard without ever showing it on screen.
   async function copySecret(varName) {
-    const r = await fetch("/api/credential/value?var=" + encodeURIComponent(varName), { headers: H });
+    const r = await fetch(BASE + "/api/credential/value?var=" + encodeURIComponent(varName), { headers: H });
     if (!r.ok) { toast("nothing to copy"); return; }
     const { value } = await r.json();
     try { await navigator.clipboard.writeText(value); toast(`${varName} copied`); }
@@ -1328,8 +1358,20 @@
       toast(r.ok ? "Opened the team folder." : (r.data.error || "couldn't open the folder"));
     });
     $("#fd-finish").addEventListener("click", async () => {
-      const b = $("#fd-finish"); b.disabled = true; b.textContent = "Finishing…";
-      try { await postJSON("/api/finish", {}); } catch { /* ignore */ }
+      const b = $("#fd-finish"); b.disabled = true;
+      // Hosted in the unified app (BASE set), finish also launches the team
+      // before returning — say so while the request runs.
+      b.textContent = BASE ? "Launching…" : "Finishing…";
+      let r = null;
+      try { r = await postJSON("/api/finish", {}); } catch { /* ignore */ }
+      const d = (r && r.data) || {};
+      if (d.redirect) {
+        // Launched — back to the unified app (dashboard / agent view).
+        _finished = true;
+        location.href = d.redirect;
+        return;
+      }
+      if (d.launch_error) toast("Launch failed: " + d.launch_error);
       renderFinished();
     });
 
@@ -1408,7 +1450,10 @@
       try { await navigator.clipboard.writeText(cmd); toast("Copied."); }
       catch { toast("Copy failed — select the command manually."); }
     });
-    $("#done-home").addEventListener("click", () => { atHome = true; renderHome(); });
+    $("#done-home").addEventListener("click", () => {
+      if (HOSTED) { location.href = "/#/"; return; }
+      atHome = true; renderHome();
+    });
   }
 
   // --- homepage (the re-entrant team hub) --------------------------------
@@ -1874,7 +1919,7 @@
   async function heartbeat() {
     if (_finished) return;
     try {
-      const r = await fetch("/api/ping", { headers: H });
+      const r = await fetch(BASE + "/api/ping", { headers: H });
       if (r.ok) markConnected(); else markDisconnected();
     } catch { markDisconnected(); }
   }

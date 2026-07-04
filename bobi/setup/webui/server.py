@@ -87,9 +87,18 @@ def _sse(event: str, data) -> str:
 
 def build_app(state: SetupState, project: Path, *, nonce: str,
               model: str | None = None, stream_fn=None,
-              home_root: Path | None = None):
+              home_root: Path | None = None, base_path: str = "",
+              on_finish=None):
     """Construct the FastAPI app. `stream_fn` overrides the LLM source
-    (tests inject a fake). `home_root` overrides the Bobi home for tests."""
+    (tests inject a fake). `home_root` overrides the Bobi home for tests.
+    `base_path` is the mount prefix when hosted as a sub-app of the unified
+    web app (e.g. "/setup") — the SPA prefixes its /api and /static URLs
+    with it. Empty (the standalone `bobi setup` server) changes nothing.
+    `on_finish` is the unified app's launch hook: called after Finish marks
+    the state complete; its dict return is merged into the finish response
+    (e.g. {"launched": True, "redirect": ...}); an exception surfaces as
+    `launch_error` without unwinding the finish. None (standalone) keeps
+    today's behavior: finish just marks done and shows the start command."""
     app = FastAPI()
     app.state.stream_fn = stream_fn
     app.state.model = model
@@ -119,7 +128,8 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         legacy_header_names=(NONCE_HEADER, LEGACY_AGENTUI_TOKEN_HEADER),
         error_message="bad or missing nonce",
     )
-    serve_index(app, STATIC_DIR / "index.html", {"{{NONCE}}": nonce})
+    serve_index(app, STATIC_DIR / "index.html",
+                {"{{NONCE}}": nonce, "{{BASE}}": base_path})
     mount_static(app, STATIC_DIR)
 
     # --- state (deterministic) -----------------------------------------
@@ -324,11 +334,18 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             except ValueError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
         elif mode == "registry":
-            # Don't merge a template over a team that already lives at the
-            # target (fetch_into → copy_into uses copytree dirs_exist_ok), and
-            # don't nest one inside a direct-root team (agent.yaml right at
-            # the parent) - the scanner would list both as editable teams.
-            if abs_loc.exists() or open_mode.is_team(abs_loc.parent):
+            # Don't merge a template over a team that already lives at the target
+            # (fetch_into → copy_into uses copytree dirs_exist_ok). An existing
+            # but EMPTY directory is fine — the canonical slot src/ may already
+            # have been created by the slot scaffolding. Also don't nest one
+            # inside a direct-root team (agent.yaml right at the parent) - the
+            # scanner would list both as editable teams.
+            def _occupied(d: Path) -> bool:
+                try:
+                    return d.is_dir() and any(d.iterdir())
+                except OSError:
+                    return False
+            if abs_loc.is_file() or _occupied(abs_loc) or open_mode.is_team(abs_loc.parent):
                 return JSONResponse(
                     {"error": f"a team already exists at {abs_loc} — open it from "
                      "the hub, or remove it first to start from this template."},
@@ -336,9 +353,9 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             try:
                 open_mode.fetch_into(project, team, abs_loc)
             except Exception as e:
-                # The guard above proved abs_loc didn't exist, so anything
-                # there now is this request's partial copy - remove it, else
-                # the leftover blocks the slot with a baffling 409 forever.
+                # Anything now in the target is this request's partial copy -
+                # remove it, else the leftover blocks the slot with a baffling
+                # 409 forever.
                 import shutil
                 shutil.rmtree(abs_loc, ignore_errors=True)
                 return JSONResponse({"error": f"couldn't download '{team}': {e}"},
@@ -1099,7 +1116,16 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # user can open and edit any team. The process ends when they stop it.
         state.finished = True
         state.save(project)
-        return serialize_state(state)
+        result = serialize_state(state)
+        if on_finish is not None:
+            # Hosted mode: launch the installed team and send the browser
+            # back to the unified app. A launch failure never unwinds the
+            # finish — the team is installed either way.
+            try:
+                result.update(on_finish() or {})
+            except Exception as e:  # noqa: BLE001 — surfaced to the UI
+                result["launch_error"] = str(e)
+        return result
 
     @app.get("/api/home")
     def home_teams() -> dict:

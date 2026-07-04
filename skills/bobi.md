@@ -36,6 +36,8 @@ bobi agent eng ask "what's the status?"
 ## Machine Commands
 
 ```bash
+bobi app start                        # unified web app (dashboard + onboarding
+bobi app stop|restart|status          #   + chat), runs in the background
 bobi setup <name>                     # design/build/install a Bobi Agent
 bobi agents install <source> --name <name>
 bobi agents install <source> --name <name> --with-deps  # + install declared deps locally

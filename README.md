@@ -121,7 +121,15 @@ bobi agent eng-team ask "What can I help with right now?"
 bobi agent eng-team subagents launch --role engineer --task "Fix the login bug"
 ```
 
-Prefer to design your own agent from scratch? Run the interactive wizard:
+Prefer a visual home for all of this? The unified web app opens as a
+dashboard of every agent on your machine - create a team in a guided
+conversation, launch it, and chat with its agents, all in the browser:
+
+```bash
+bobi app start        # runs in the background; stop/restart/status manage it
+```
+
+Prefer to design your own agent from scratch in a standalone wizard? Run:
 
 ```bash
 bobi setup            # go from an idea to a runnable agent, interactively

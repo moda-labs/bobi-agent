@@ -1,13 +1,14 @@
 # Frontend QA
 
-The `bobi setup` UI and `bobi agent <name> ui` are local-only vanilla web UIs.
-They do not have a hosted preview deployment in normal PRs. Do not treat the
-absence of a hosted preview URL as a QA blocker for changes limited to these
-local surfaces.
+The `bobi app` unified web app, the `bobi setup` UI, and `bobi agent <name> ui`
+are local-only vanilla web UIs. They do not have a hosted preview deployment in
+normal PRs. Do not treat the absence of a hosted preview URL as a QA blocker
+for changes limited to these local surfaces.
 
-For changes under `bobi/setup/webui/`, `bobi/agentui/`, `bobi/webui_common/`,
-or other code that changes local UI routes, static mounting, nonce/token checks,
-or Host-guard behavior, run the local Playwright e2e suite instead:
+For changes under `bobi/webapp/`, `bobi/setup/webui/`, `bobi/agentui/`,
+`bobi/webui_common/`, or other code that changes local UI routes, static
+mounting, nonce/token checks, or Host-guard behavior, run the local Playwright
+e2e suite instead:
 
 ```bash
 pytest tests/e2e/test_setup_ui.py tests/e2e/test_agent_ui.py
@@ -30,9 +31,14 @@ pip install -e ".[dev]"
 python -m playwright install chromium
 ```
 
+For changes confined to `bobi/webapp/`, run its server and daemon unit suites
+(`tests/test_webapp_server.py`, `tests/test_webapp_daemon.py`) and smoke-test
+via `bobi app start`.
+
 Use manual loopback smoke testing when behavior is not covered by the e2e tests:
 
 ```bash
+bobi app start
 bobi setup
 bobi agent <name> ui
 ```

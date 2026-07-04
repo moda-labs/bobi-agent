@@ -206,6 +206,7 @@ class TestSaveCredential:
                                 "linear", "", prompt_fn=lambda v, s, i: "fresh")
         assert os.environ["LINEAR_API_KEY"] == "fresh"
 
+
     def test_bad_var_name_raises(self, project):
         with pytest.raises(ActionError):
             actions.save_credential(SetupState(), project, "not-a-var", "", "",
