@@ -14,6 +14,9 @@ name: Release
 #                                CANARY-OK end-to-end. THIS is the gate.
 #   5. publish                   needs build-canary → upload the SAME wheel to PyPI
 #                                and update/smoke Homebrew.
+#   6. publish-image             needs build-canary → build the base image FROM the
+#                                same wheel and push ghcr.io/moda-labs/bobi (#609),
+#                                so consumers can FROM/run the exact released bytes.
 #
 # Why the canary is built from the WHEEL, not source: it then proves the exact
 # artifact we publish actually boots and answers — catching wheel/sdist packaging
@@ -263,6 +266,69 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  # --------------------------------------------------------------------------
+  # Publish the base image to GHCR (#609) — gated on build-canary, like the PyPI
+  # publish. Built FROM the SAME wheel the canary proved (BOBI_BUILD=wheel), so
+  # ghcr.io/moda-labs/bobi:<version> runs the exact bytes released to PyPI: a
+  # consumer on their own orchestrator can `docker run` it or `FROM` it without
+  # vendoring our Dockerfile. Multi-arch (amd64+arm64): the Dockerfile already
+  # arch-detects its pinned binaries (claude/aichat/codex); arm64 builds under
+  # QEMU emulation. `:latest` moves only on real release events, never on a
+  # workflow_dispatch re-run of an old tag.
+  publish-image:
+    name: Publish base image to GHCR
+    needs: build-canary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
+
+      # The SAME artifact the canary smoked and PyPI publishes — do NOT rebuild.
+      # builder-wheel installs dist/*.whl (re-included in .dockerignore).
+      - name: Stage the proven wheel into the build context
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Resolve image version from the release tag
+        id: version
+        # Prefer the Release's tag; fall back to the ref name for a manual
+        # dispatch of a tag (re-push after a transient failure).
+        env:
+          TAG: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref_name }}
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push the multi-arch base image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            BOBI_BUILD=wheel
+          # No provenance attestation: it adds unknown/unknown manifest entries
+          # that confuse `docker run` UIs and downstream FROM digest pinning.
+          provenance: false
+          tags: |
+            ghcr.io/moda-labs/bobi:${{ steps.version.outputs.version }}
+            ${{ github.event_name == 'release' && 'ghcr.io/moda-labs/bobi:latest' || '' }}
 
   # --------------------------------------------------------------------------
   # Deploy the Cloudflare event server before the canary. The canary proves the
