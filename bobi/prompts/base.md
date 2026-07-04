@@ -43,6 +43,12 @@ is present in the event. If no `placeholder_ts` exists, reply normally
 without `--edit`. Subsequent replies in the same thread should also be
 posted normally (no `--edit`).
 
+Chat events may also carry a `conversation:` line (e.g.
+`conversation: slack:T123:channel:C456:thread:171.42`). It is a reply
+address for the upcoming channel-agnostic `bobi reply` command. Ignore
+it for now and keep replying with `bobi slack-reply` as described above;
+do not pass the conversation reference to `slack-reply`.
+
 ## CLI tools
 
 ### Launch agents

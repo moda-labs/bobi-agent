@@ -82,7 +82,7 @@ def _esbuild_dir() -> Path | None:
             ["npm", "install", "--no-audit", "--no-fund", "--silent", "esbuild"],
             cwd=str(cache), check=True, capture_output=True, timeout=180,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutError, OSError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         return None
     if (cache / "node_modules" / "esbuild" / "package.json").exists():
         return cache
@@ -101,10 +101,18 @@ def _generate_adapter_event(code: str, channel: str) -> dict:
     driver = textwrap.dedent(
         """
         const esbuild = require("esbuild");
-        const fs = require("fs");
-        const src = fs.readFileSync(process.argv[1], "utf8");
-        // Transpile the REAL adapter (TS type-erasure only) and run its logic.
-        const out = esbuild.transformSync(src, { loader: "ts", format: "esm" }).code;
+        // BUNDLE the REAL adapter (not just type-erase it) so its own sibling
+        // imports resolve and run: slack.ts imports ../conversation, which a
+        // bare `data:` URL module cannot resolve (ERR_UNSUPPORTED_RESOLVE_REQUEST).
+        // Bundling inlines those deps, so normalizeSlackWebhook runs its actual
+        // logic - the whole point of generating the event from the adapter.
+        const out = esbuild.buildSync({
+          entryPoints: [process.argv[1]],
+          bundle: true,
+          format: "esm",
+          platform: "node",
+          write: false,
+        }).outputFiles[0].text;
         const mod = "data:text/javascript;base64," + Buffer.from(out).toString("base64");
         import(mod).then((m) => {
           // A genuine Slack event_callback webhook for a DM carrying the code.
@@ -205,6 +213,7 @@ def test_full_bootstrap_smoke_real_event_through_pty(adapter_event, tmp_path, mo
     package = project / "package"
     package.mkdir(parents=True)
     monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("BOBI_BRAIN", "claude")
     (package / "agent.yaml").write_text(
         "agent: test\n"
         "event_server_url: wss://example\n"

@@ -68,6 +68,10 @@ bobi agent <name> events
 bobi agent <name> transcript show manager
 bobi agent <name> transcript search "query"
 bobi agent <name> costs
+
+# Reply into a chat conversation (channel-agnostic; ref comes from the event)
+bobi reply <conversation> "text"
+bobi reply <conversation> --edit <ts> "text"
 ```
 
 ## Sub-Agents

@@ -1,4 +1,4 @@
-"""Tests for slack-reply CLI command."""
+"""Tests for the slack-reply and channel-agnostic reply CLI commands."""
 
 import json
 from pathlib import Path
@@ -182,3 +182,140 @@ class TestSlackReplyCommand:
             ])
         assert result.exit_code != 0
         assert "Slack" in result.output and "error" in result.output.lower()
+
+
+class TestReplyCommand:
+    """`bobi reply <conversation>` - channel-agnostic front of the same send path (#618)."""
+
+    def test_posts_to_dm_from_ref(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+
+        requests_made: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests_made.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        with patch.object(pooled, '_client', _mock_client(handler)):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "reply", "slack:T123:dm:D456", "Hello world",
+            ])
+        assert result.exit_code == 0
+        assert "Sent to D456" in result.output
+
+        body = json.loads(requests_made[0].content)
+        assert body["channel"] == "D456"
+        assert body["text"] == "Hello world"
+        assert "thread_ts" not in body
+
+    def test_posts_into_thread_from_ref(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+
+        requests_made: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests_made.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        with patch.object(pooled, '_client', _mock_client(handler)):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "reply", "slack:T123:channel:C789:thread:1780165787.159589",
+                "Thread reply",
+            ])
+        assert result.exit_code == 0
+
+        body = json.loads(requests_made[0].content)
+        assert body["channel"] == "C789"
+        assert body["thread_ts"] == "1780165787.159589"
+
+    def test_edit_updates_placeholder(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+
+        requests_made: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests_made.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        with patch.object(pooled, '_client', _mock_client(handler)):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "reply", "slack:T123:channel:C789:thread:171.42",
+                "--edit", "171.99", "Real response",
+            ])
+        assert result.exit_code == 0
+        assert "Updated 171.99 in C789" in result.output
+
+        update_reqs = [r for r in requests_made if "chat.update" in str(r.url)]
+        assert len(update_reqs) == 1
+        body = json.loads(update_reqs[0].content)
+        assert body["ts"] == "171.99"
+        assert body["channel"] == "C789"
+
+    def test_reads_text_from_stdin(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+
+        requests_made: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests_made.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        with patch.object(pooled, '_client', _mock_client(handler)):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "reply", "slack:T123:dm:D456",
+            ], input="Hello from stdin\n")
+        assert result.exit_code == 0
+
+        body = json.loads(requests_made[0].content)
+        assert body["text"] == "Hello from stdin"
+
+    def test_rejects_invalid_ref(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(main, ["reply", "not-a-ref", "Hello"])
+        assert result.exit_code != 0
+        assert "Invalid conversation reference" in result.output
+
+    def test_rejects_unsupported_channel(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "reply", "whatsapp:747:dm:15550001111", "Hello",
+        ])
+        assert result.exit_code != 0
+        assert "Unsupported channel: whatsapp" in result.output
+
+    def test_rejects_empty_text(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(main, ["reply", "slack:T123:dm:D456"], input="")
+        assert result.exit_code != 0
+        assert "No text to send" in result.output
+
+    def test_missing_token(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch, slack_bot_token="")
+        runner = CliRunner()
+        result = runner.invoke(main, ["reply", "slack:T123:dm:D456", "Hello"])
+        assert result.exit_code != 0
+        assert "bot token" in result.output.lower()
+
+    def test_slack_error_includes_workspace_scope_hint(self, tmp_path, monkeypatch):
+        """A cross-workspace ref fails at the Slack API; the error must name
+        the ref's workspace so the token mismatch is diagnosable."""
+        _setup_project(tmp_path, monkeypatch)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": False, "error": "channel_not_found"})
+
+        with patch.object(pooled, '_client', _mock_client(handler)):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "reply", "slack:T_OTHER:channel:C9:thread:1.2", "Hello",
+            ])
+        assert result.exit_code != 0
+        assert "T_OTHER" in result.output
+        assert "workspace" in result.output

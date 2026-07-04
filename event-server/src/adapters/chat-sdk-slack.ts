@@ -13,6 +13,8 @@
  */
 import { parseSlackWebhookBody } from "@chat-adapter/slack/webhook";
 import type { NormalizedEvent, SlackNormalizationResult } from "../core";
+import { slackConversation } from "../conversation";
+import { escapeRegExp } from "./slack";
 
 export type ChatSdkBridgeResult = SlackNormalizationResult;
 
@@ -26,7 +28,11 @@ export type ChatSdkBridgeResult = SlackNormalizationResult;
  */
 export function bridgeSlackWebhook(
 	body: string,
-	selfBotId?: string,
+	// Same shapes as normalizeSlackWebhook: a workspace may host several of
+	// our bots, so both filters take a set (bare string accepted for
+	// single-bot callers/tests).
+	selfBotIds?: string | Iterable<string>,
+	selfBotUserIds?: string | Iterable<string>,
 ): ChatSdkBridgeResult {
 	let parsed;
 	try {
@@ -59,8 +65,13 @@ export function bridgeSlackWebhook(
 		return { event: null, skip: true };
 	}
 
-	// Self-loop filter: skip only our own bot's messages
-	if (innerEvent.bot_id && selfBotId && innerEvent.bot_id === selfBotId) {
+	// Self-loop filter: skip messages authored by ANY of our bots, matching
+	// normalizeSlackWebhook's multi-bot set semantics.
+	const selfSet =
+		typeof selfBotIds === "string"
+			? new Set([selfBotIds])
+			: new Set(selfBotIds ?? []);
+	if (innerEvent.bot_id && selfSet.has(innerEvent.bot_id as string)) {
 		return { event: null, skip: true };
 	}
 
@@ -68,10 +79,25 @@ export function bridgeSlackWebhook(
 	const eventType = innerEvent.type as string;
 	const channelType = (innerEvent.channel_type as string) || "";
 	const threadTs = (innerEvent.thread_ts as string) || "";
+	const rawText = ((innerEvent.text as string) || "").slice(0, 4000);
+
+	// Mention/message dedup, identical to normalizeSlackWebhook: a channel
+	// @mention arrives as both app_mention and message.* with the same ts;
+	// drop the message copy so one human message yields one event.
+	const selfUserSet =
+		typeof selfBotUserIds === "string"
+			? new Set([selfBotUserIds])
+			: new Set(selfBotUserIds ?? []);
+	const mentionsSelfUser =
+		selfUserSet.size > 0
+		&& [...selfUserSet].some((id) =>
+			new RegExp(`<@${escapeRegExp(id)}(?:\\|[^>]+)?>`).test(rawText));
 
 	let slackEventType: string;
 	if (eventType === "app_mention") {
 		slackEventType = "slack.mention";
+	} else if (eventType === "message" && mentionsSelfUser && channelType !== "im" && channelType !== "mpim") {
+		return { event: null, skip: true };
 	} else if (channelType === "im" || channelType === "mpim") {
 		slackEventType = "slack.dm";
 	} else if (threadTs) {
@@ -85,17 +111,26 @@ export function bridgeSlackWebhook(
 	const appId = (raw.api_app_id as string) || "";
 	const channel = (innerEvent.channel as string) || "";
 	const userId = (innerEvent.user as string) || "";
-	const rawText = ((innerEvent.text as string) || "").slice(0, 4000);
 	const ts = (innerEvent.ts as string) || "";
 	const isDm = channelType === "im" || channelType === "mpim";
 
+	// Topic emission matches normalizeSlackWebhook: legacy workspace/channel
+	// topics ONLY when Slack omits api_app_id. Emitting both app-qualified and
+	// legacy topics lets stale legacy subscriptions cross-deliver events
+	// between two apps in the same workspace.
 	const topics: string[] = [];
 	if (teamId) {
-		if (appId) topics.push(`slack:${teamId}:app:${appId}`);
-		topics.push(`slack:${teamId}`);
+		if (appId) {
+			topics.push(`slack:${teamId}:app:${appId}`);
+		} else {
+			topics.push(`slack:${teamId}`);
+		}
 		if (channel && !isDm) {
-			if (appId) topics.push(`slack:${teamId}:app:${appId}:${channel}`);
-			topics.push(`slack:${teamId}:${channel}`);
+			if (appId) {
+				topics.push(`slack:${teamId}:app:${appId}:${channel}`);
+			} else {
+				topics.push(`slack:${teamId}:${channel}`);
+			}
 		}
 	}
 
@@ -111,6 +146,10 @@ export function bridgeSlackWebhook(
 	// Preserve bot_id so the circuit breaker can detect bot authorship.
 	if (botId) fields.bot_id = botId;
 
+	// Channel-agnostic reply address (#618). Anchoring policy lives in
+	// slackConversation so both normalizers cannot diverge.
+	const conversation = slackConversation(teamId, channel, channelType, ts, threadTs);
+
 	return {
 		event: {
 			v: 2,
@@ -120,6 +159,7 @@ export function bridgeSlackWebhook(
 			topics,
 			delivery: "chat",
 			text: rawText,
+			...(conversation ? { conversation } : {}),
 			fields,
 			timestamp: new Date().toISOString(),
 			payload: {
