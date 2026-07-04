@@ -257,6 +257,11 @@ export function createTopicEvent(
 		topics,
 		delivery: (body.delivery as "chat" | "bulk") || "bulk",
 		text,
+		// Reply address survives publish/forward: an agent re-publishing a chat
+		// event must not strip the field the receiver needs for `bobi reply`.
+		...(typeof body.conversation === "string" && body.conversation
+			? { conversation: body.conversation }
+			: {}),
 		fields: body.fields as Record<string, string | number | boolean> | undefined,
 		run_key: body.run_key as string | undefined,
 		payload,
@@ -617,14 +622,21 @@ export async function sendSlackMessage(
 ): Promise<SlackSendResult> {
 	const body: Record<string, unknown> = { channel, text };
 	if (threadTs) body.thread_ts = threadTs;
+	return slackApi(botToken, "chat.postMessage", body);
+}
 
-	const resp = await fetch("https://slack.com/api/chat.postMessage", {
+async function slackApi(
+	botToken: string,
+	method: string,
+	payload: Record<string, unknown>,
+): Promise<SlackSendResult> {
+	const resp = await fetch(`https://slack.com/api/${method}`, {
 		method: "POST",
 		headers: {
 			Authorization: `Bearer ${botToken}`,
 			"Content-Type": "application/json",
 		},
-		body: JSON.stringify(body),
+		body: JSON.stringify(payload),
 	});
 	return (await resp.json()) as SlackSendResult;
 }
@@ -635,15 +647,27 @@ export async function updateSlackMessage(
 	ts: string,
 	text: string,
 ): Promise<SlackSendResult> {
-	const resp = await fetch("https://slack.com/api/chat.update", {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${botToken}`,
-			"Content-Type": "application/json",
-		},
-		body: JSON.stringify({ channel, ts, text }),
-	});
-	return (await resp.json()) as SlackSendResult;
+	return slackApi(botToken, "chat.update", { channel, ts, text });
+}
+
+// Clear (or set) the assistant thread status. Used after a gateway edit so
+// the "is thinking..." indicator does not linger until Slack's ~2min expiry.
+// Best-effort: only DM threads support it, so failures are ignored.
+export async function setSlackThreadStatus(
+	botToken: string,
+	channel: string,
+	threadTs: string,
+	status: string,
+): Promise<void> {
+	try {
+		await slackApi(botToken, "assistant.threads.setStatus", {
+			channel_id: channel,
+			thread_ts: threadTs,
+			status,
+		});
+	} catch {
+		// non-fatal
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,7 +1162,7 @@ export function bubbleScopedWorkspaceKey(bubbleId: string, workspaceId: string):
 }
 
 // Resolve the sending bot's token for an outbound Slack send. Bubble-scoped
-// lookup ONLY — no fallback to the global workspace store. A workspace
+// lookup ONLY - no fallback to the global workspace store. A workspace
 // registered by another bubble (or only inbound-registered) is absent here and
 // yields the same empty result as a truly unknown workspace, so an attacker
 // can't probe which workspaces another bubble registered.
@@ -1208,18 +1232,25 @@ export async function handleSlackSend(
 
 // Channel-agnostic outbound send (#618): { conversation, text, mode?, edit_ref? }.
 // Parses the conversation reference and delegates to the channel's send
-// machinery — Slack is the only channel today. `mode: "update"` edits the
+// machinery - Slack is the only channel today. `mode: "update"` edits the
 // message identified by `edit_ref` (e.g. a placeholder) instead of posting.
 // Same auth contract as handleSlackSend: `bubbleId` is the authenticated
 // bubble, and credentials resolve only under its scope.
+//
+// Text is sent raw: markdown->mrkdwn conversion lives client-side
+// (bobi/slack.py format_slack_message), matching /slack/send. The Phase 2
+// Chat SDK migration (#190) moves conversion into the gateway; until then
+// callers must convert before POSTing.
 export async function handleChannelsSend(
 	storage: StorageAdapter,
 	body: Record<string, unknown>,
 	bubbleId: string,
 ): Promise<HandlerResult> {
-	const ref = body.conversation as string;
-	const text = body.text as string;
-	if (!ref || !text) {
+	const ref = body.conversation;
+	const text = body.text;
+	// Explicit string checks: a non-string conversation (array, number) must
+	// be a 400, not a TypeError escaping the handler as a 500.
+	if (typeof ref !== "string" || !ref || typeof text !== "string" || !text) {
 		return { status: 400, body: { error: "conversation and text required" } };
 	}
 	const conv = parseConversation(ref);
@@ -1260,6 +1291,11 @@ export async function handleChannelsSend(
 	}
 	if (!result.ok) {
 		return { status: 502, body: { ok: false, error: result.error } };
+	}
+	// Replacing a placeholder must also clear the "is thinking..." status the
+	// placeholder flow set, matching the CLI edit path (slack-reply --edit).
+	if (mode === "update" && conv.threadId) {
+		await setSlackThreadStatus(botToken, conv.chatId, conv.threadId, "");
 	}
 	return { status: 200, body: { ok: true, ts: result.ts } };
 }

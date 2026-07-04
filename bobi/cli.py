@@ -1458,11 +1458,13 @@ def ask(question, timeout, source):
         raise SystemExit(1)
 
 
-def _slack_reply_send(channel, thread, edit_ts, text):
+def _slack_reply_send(channel, thread, edit_ts, text, scope=""):
     """Post or edit a Slack message with the locally configured bot token.
 
     Shared send path behind both ``slack-reply`` and the channel-agnostic
-    ``reply`` (#618). Exits the process on failure.
+    ``reply`` (#618). *scope* is the conversation ref's workspace id, used
+    only to explain failures: the local token is not validated against it,
+    so a cross-workspace ref fails at the Slack API. Exits on failure.
     """
     import httpx
 
@@ -1492,6 +1494,12 @@ def _slack_reply_send(channel, thread, edit_ts, text):
             click.echo(f"Sent to {channel}")
     except RuntimeError as e:
         click.echo(str(e), err=True)
+        if scope:
+            click.echo(
+                f"(conversation is scoped to workspace {scope}; the locally "
+                "configured slack bot token must belong to that workspace)",
+                err=True,
+            )
         sys.exit(1)
     except (httpx.HTTPError, OSError, TimeoutError) as e:
         click.echo(f"Failed: {e}", err=True)
@@ -1515,12 +1523,6 @@ def reply(conversation, text, edit_ref):
     """
     from .conversation import parse_conversation
 
-    if text is None:
-        text = click.get_text_stream("stdin").read().rstrip("\n")
-    if not text.strip():
-        click.echo("No text to send (pass TEXT or pipe via stdin)", err=True)
-        sys.exit(1)
-
     conv = parse_conversation(conversation)
     if conv is None:
         click.echo(f"Invalid conversation reference: {conversation}", err=True)
@@ -1529,7 +1531,17 @@ def reply(conversation, text, edit_ref):
         click.echo(f"Unsupported channel: {conv.source}", err=True)
         sys.exit(1)
 
-    _slack_reply_send(conv.chat_id, conv.thread_id, edit_ref, text)
+    if text is None:
+        # Fail fast on an interactive terminal instead of blocking on EOF.
+        if sys.stdin.isatty():
+            click.echo("No text to send (pass TEXT or pipe via stdin)", err=True)
+            sys.exit(1)
+        text = click.get_text_stream("stdin").read().rstrip("\n")
+    if not text.strip():
+        click.echo("No text to send (pass TEXT or pipe via stdin)", err=True)
+        sys.exit(1)
+
+    _slack_reply_send(conv.chat_id, conv.thread_id, edit_ref, text, scope=conv.scope)
 
 
 @main.command("slack-reply")

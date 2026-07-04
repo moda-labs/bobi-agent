@@ -450,7 +450,7 @@ export default {
 		}
 
 		if (method === "POST" && path === "/channels/send") {
-			// Channel-agnostic send (#618) — same mandatory bubble auth as
+			// Channel-agnostic send (#618) - same mandatory bubble auth as
 			// /slack/send. Raw text so the signature verifies over the wire bytes.
 			const raw = await request.text();
 			let data: Record<string, unknown>;

@@ -351,7 +351,7 @@ describe("normalizeSlackPayload", () => {
 			event: { type: "app_mention", user: "U1", channel: "C456",
 				channel_type: "channel", text: "hi", ts: "1234.5678" },
 		});
-		// A top-level message anchors its own thread (ts) — matching where the
+		// A top-level message anchors its own thread (ts) - matching where the
 		// placeholder handler already posts.
 		expect(mention.event!.conversation).toBe("slack:T123:channel:C456:thread:1234.5678");
 
@@ -822,6 +822,24 @@ describe("createTopicEvent", () => {
 	it("uses body as payload when no payload field", () => {
 		const event = createTopicEvent("test", { foo: "bar" });
 		expect(event.payload).toEqual({ foo: "bar" });
+	});
+
+	// #618: a published/forwarded chat event keeps its reply address; a
+	// non-string conversation is dropped rather than passed through.
+	it("passes a string conversation through and drops non-strings", () => {
+		const event = createTopicEvent("relay/chat", {
+			source: "relay",
+			delivery: "chat",
+			text: "forwarded",
+			conversation: "slack:T1:channel:C9:thread:1.2",
+		});
+		expect(event.conversation).toBe("slack:T1:channel:C9:thread:1.2");
+
+		const bad = createTopicEvent("relay/chat", {
+			source: "relay",
+			conversation: ["slack", "T1"],
+		});
+		expect(bad.conversation).toBeUndefined();
 	});
 
 	it("routes path-topic events on both the bare and source-qualified topic", () => {
@@ -1986,6 +2004,20 @@ describe("handleChannelsSend", () => {
 		expect((result.body as Record<string, string>).error).toContain("invalid conversation");
 	});
 
+	// Regression: a non-string conversation must be a 400, not a TypeError
+	// escaping the handler as a 500.
+	it("rejects a non-string conversation with 400", async () => {
+		const store = createMockStorage();
+		for (const bad of [["slack", "T1", "dm", "D1"], 42, { ref: "x" }]) {
+			const result = await handleChannelsSend(
+				store, { conversation: bad, text: "hi" }, "bubA");
+			expect(result.status).toBe(400);
+		}
+		const result = await handleChannelsSend(
+			store, { conversation: "slack:T1:dm:D1", text: ["hi"] }, "bubA");
+		expect(result.status).toBe(400);
+	});
+
 	it("rejects an unsupported channel", async () => {
 		const store = createMockStorage();
 		const result = await handleChannelsSend(
@@ -2043,7 +2075,7 @@ describe("handleChannelsSend", () => {
 		expect(calls[0].body.thread_ts).toBeUndefined();
 	});
 
-	it("mode update edits the message named by edit_ref", async () => {
+	it("mode update edits the message named by edit_ref and clears thread status", async () => {
 		const store = createMockStorage();
 		const calls = stubSlackApi("T1");
 		await seedWorkspace(store, "bubA");
@@ -2052,9 +2084,13 @@ describe("handleChannelsSend", () => {
 			text: "final answer", mode: "update", edit_ref: "12.99",
 		}, "bubA");
 		expect(result.status).toBe(200);
-		expect(calls).toHaveLength(1);
+		expect(calls).toHaveLength(2);
 		expect(calls[0].url).toContain("chat.update");
 		expect(calls[0].body).toMatchObject({ channel: "C9", ts: "12.99", text: "final answer" });
+		// Replacing a placeholder clears the "is thinking..." indicator,
+		// matching the CLI edit path.
+		expect(calls[1].url).toContain("assistant.threads.setStatus");
+		expect(calls[1].body).toMatchObject({ channel_id: "C9", thread_ts: "12.34", status: "" });
 	});
 
 	it("surfaces a Slack API error as 502", async () => {

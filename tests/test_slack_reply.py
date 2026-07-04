@@ -185,7 +185,7 @@ class TestSlackReplyCommand:
 
 
 class TestReplyCommand:
-    """`bobi reply <conversation>` — channel-agnostic front of the same send path (#618)."""
+    """`bobi reply <conversation>` - channel-agnostic front of the same send path (#618)."""
 
     def test_posts_to_dm_from_ref(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
@@ -302,3 +302,20 @@ class TestReplyCommand:
         result = runner.invoke(main, ["reply", "slack:T123:dm:D456", "Hello"])
         assert result.exit_code != 0
         assert "bot token" in result.output.lower()
+
+    def test_slack_error_includes_workspace_scope_hint(self, tmp_path, monkeypatch):
+        """A cross-workspace ref fails at the Slack API; the error must name
+        the ref's workspace so the token mismatch is diagnosable."""
+        _setup_project(tmp_path, monkeypatch)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": False, "error": "channel_not_found"})
+
+        with patch.object(pooled, '_client', _mock_client(handler)):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "reply", "slack:T_OTHER:channel:C9:thread:1.2", "Hello",
+            ])
+        assert result.exit_code != 0
+        assert "T_OTHER" in result.output
+        assert "workspace" in result.output

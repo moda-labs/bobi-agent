@@ -30,11 +30,19 @@ class Conversation:
 
 
 def build_conversation(conv: Conversation) -> str:
+    segments = [conv.source, conv.scope, conv.chat_type, conv.chat_id]
+    if conv.thread_id:
+        segments.append(conv.thread_id)
+    for seg in segments:
+        if not seg or ":" in seg:
+            raise ValueError(f"invalid conversation segment: {seg!r}")
     base = f"{conv.source}:{conv.scope}:{conv.chat_type}:{conv.chat_id}"
     return f"{base}:thread:{conv.thread_id}" if conv.thread_id else base
 
 
 def parse_conversation(ref: str) -> Conversation | None:
+    if not isinstance(ref, str):
+        return None
     parts = ref.split(":")
     if len(parts) not in (4, 6):
         return None

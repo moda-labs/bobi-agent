@@ -242,11 +242,56 @@ describe("bridge parity with existing normalizeSlackWebhook", () => {
 			},
 		});
 		const result = bridgeSlackWebhook(body);
+		// App-qualified ONLY - emitting the legacy workspace topic alongside
+		// would let stale legacy subscriptions cross-deliver events between
+		// two apps in one workspace (matches normalizeSlackWebhook).
 		expect(result.event!.topics).toEqual([
 			"slack:T0952RZRZ0X:app:A0952APP",
-			"slack:T0952RZRZ0X",
 		]);
 		expect(result.event!.fields!.api_app_id).toBe("A0952APP");
+	});
+
+	it("drops the message copy of a channel @mention (dedup parity)", () => {
+		// Slack sends a channel @mention as BOTH app_mention and message.*
+		// with the same ts; only the app_mention must survive.
+		const body = JSON.stringify({
+			type: "event_callback",
+			team_id: "T0952RZRZ0X",
+			event_id: "Ev05DUP",
+			event: {
+				type: "message",
+				user: "U123USER",
+				channel: "C456CHAN",
+				channel_type: "channel",
+				text: "<@U_BOTUSER> please check",
+				ts: "1718100003.000400",
+				thread_ts: "1718100000.000100",
+			},
+		});
+		const result = bridgeSlackWebhook(body, undefined, "U_BOTUSER");
+		expect(result.skip).toBe(true);
+		// A DM mentioning the bot user still delivers (dedup is channel-only).
+		const dm = bridgeSlackWebhook(
+			dmPayload({ text: "<@U_BOTUSER> hi" }), undefined, "U_BOTUSER");
+		expect(dm.skip).toBe(false);
+	});
+
+	it("filters messages from any of several of our bots", () => {
+		const body = JSON.stringify({
+			type: "event_callback",
+			team_id: "T0952RZRZ0X",
+			event_id: "Ev06BOT",
+			event: {
+				type: "message",
+				bot_id: "B_SECOND",
+				channel: "D789DM",
+				channel_type: "im",
+				text: "bot chatter",
+				ts: "1718100004.000500",
+			},
+		});
+		expect(bridgeSlackWebhook(body, ["B_FIRST", "B_SECOND"]).skip).toBe(true);
+		expect(bridgeSlackWebhook(body, "B_OTHER").skip).toBe(false);
 	});
 
 	it("uses event_id as the envelope id", () => {

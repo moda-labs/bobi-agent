@@ -4,6 +4,19 @@ import pytest
 
 from bobi.conversation import Conversation, build_conversation, parse_conversation
 
+# GOLDEN VECTOR - keep identical to event-server/test/conversation.spec.ts.
+# The grammar is hand-mirrored across TS and Python; this shared vector turns
+# drift into a test failure (same pattern as the bubble-signing parity vector).
+GOLDEN_REF = "slack:T0GOLD:channel:C0GOLD:thread:1718000000.000042"
+GOLDEN_PARSED = Conversation("slack", "T0GOLD", "channel", "C0GOLD", "1718000000.000042")
+
+
+class TestGoldenVector:
+
+    def test_parses_and_rebuilds_the_golden_ref(self):
+        assert parse_conversation(GOLDEN_REF) == GOLDEN_PARSED
+        assert build_conversation(GOLDEN_PARSED) == GOLDEN_REF
+
 
 class TestParseConversation:
 
@@ -35,3 +48,19 @@ class TestParseConversation:
     ])
     def test_rejects_malformed_refs(self, ref):
         assert parse_conversation(ref) is None
+
+    def test_rejects_non_string_ref(self):
+        assert parse_conversation(["slack", "T1"]) is None
+        assert parse_conversation(42) is None
+
+
+class TestBuildConversation:
+
+    @pytest.mark.parametrize("conv", [
+        Conversation("slack", "T1", "channel", "a:thread:b"),
+        Conversation("slack", "T1", "channel", "C1", "1:2"),
+        Conversation("slack", "", "dm", "D1"),
+    ])
+    def test_rejects_delimiter_bearing_or_empty_segments(self, conv):
+        with pytest.raises(ValueError, match="invalid conversation segment"):
+            build_conversation(conv)

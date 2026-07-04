@@ -92,7 +92,7 @@ def format_event_for_manager(event: dict) -> str:
     if text:
         lines.append(f"  {text}")
 
-    # Channel-agnostic reply address (#618) — the agent echoes this back
+    # Channel-agnostic reply address (#618) - the agent echoes this back
     # verbatim via `bobi reply <conversation>`.
     conversation = event.get("conversation", "")
     if conversation:

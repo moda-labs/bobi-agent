@@ -485,7 +485,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	}
 
 	if (method === "POST" && path === "/channels/send") {
-		// Channel-agnostic send (#618) — same mandatory bubble auth as /slack/send.
+		// Channel-agnostic send (#618) - same mandatory bubble auth as /slack/send.
 		const body = await readBody(req);
 		const data = parseJson(body);
 		if (!data) return json(res, { error: "invalid JSON" }, 400);
