@@ -13,6 +13,8 @@ import pytest
 from bobi import build as B
 from bobi import deploy as D
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 # --- fixtures ----------------------------------------------------------------
 
@@ -48,13 +50,14 @@ GUIDE_TEAM = """
 """
 
 
+
 @pytest.fixture
 def recorder(monkeypatch):
     """Record every build._run command; docker is assumed present."""
     calls = []
 
-    def fake_run(cmd, *, cwd=None, check=True, extra_env=None):
-        calls.append({"cmd": cmd, "cwd": cwd, "extra_env": extra_env})
+    def fake_run(cmd):
+        calls.append({"cmd": cmd})
 
         class R:
             returncode = 0
@@ -85,7 +88,7 @@ def test_default_tag_and_source_context(tmp_path, recorder):
     assert cmd[cmd.index("-t") + 1] == "bobi-eng-team:latest"
     assert result.tags == ["bobi-eng-team:latest"]
     assert result.mode == "source"
-    # source mode: BOBI_BUILD defaults in the Dockerfile — no build-arg needed
+    # source mode: BOBI_BUILD defaults in the Dockerfile, no build-arg needed
     assert not any(a.startswith("BOBI_BUILD=") for a in cmd)
 
 
@@ -101,6 +104,17 @@ def test_team_deps_staged_and_passed(tmp_path, recorder):
     assert "apt-get install -y --no-install-recommends jq" in script
     # both in-image identity stamps render through the ONE seam
     assert "/opt/bobi/team-deps.hash" in script
+
+
+def test_real_eng_team_composed_render(tmp_path):
+    """The real checked-in eng-team renders its composed hook with the
+    requires re-verify bake (coverage the deleted render-team-deps test
+    carried; catches compose/tool_library regressions against a real team)."""
+    rel = B.stage_team_deps(REPO_ROOT / "agents" / "eng-team", REPO_ROOT,
+                            ctx=tmp_path, allow_agent=False)
+    assert rel == "dist/team-deps/eng-team.sh"
+    script = (tmp_path / rel).read_text()
+    assert "verify gh" in script
 
 
 def test_multi_tag_and_push(tmp_path, recorder):
@@ -131,6 +145,28 @@ def test_generic_team_builds_plain_image(tmp_path, recorder):
     assert not any(a.startswith("TEAM_DEPS=") for a in cmd)  # noop hook default
 
 
+# --- staging contract ----------------------------------------------------------
+
+def test_baking_team_without_ctx_is_clean_error(tmp_path):
+    repo = _make_repo(tmp_path, BAKING_TEAM)
+    with pytest.raises(B.BuildError, match="no build context"):
+        B.stage_team_deps(repo / "agents" / "eng-team", repo, ctx=None,
+                          allow_agent=True)
+
+
+def test_dockerfile_escape_hatch_refused_in_build_path(tmp_path):
+    """A raw-Dockerfile team must not silently become a generic image under
+    the team's tag; deploy's long-standing generic-image contract stays."""
+    repo = _make_repo(tmp_path, GENERIC_TEAM)
+    team = repo / "agents" / "eng-team"
+    # the escape hatch is a raw Dockerfile SIBLING of agent.yaml (config.py
+    # loader sets BuildSpec.dockerfile when the file exists)
+    (team / "Dockerfile").write_text("FROM scratch\n")
+    with pytest.raises(B.BuildError, match="Dockerfile escape hatch"):
+        B.stage_team_deps(team, repo, ctx=None, allow_agent=True)
+    assert B.stage_team_deps(team, repo, ctx=None, allow_agent=False) is None
+
+
 # --- guide-only deps: containerized bootstrap ---------------------------------
 
 @pytest.fixture
@@ -139,8 +175,8 @@ def bootstrap_recorder(monkeypatch):
     into the mounted out dir, as the real in-container bootstrap does."""
     calls = []
 
-    def fake_run(cmd, *, cwd=None, check=True, extra_env=None):
-        calls.append({"cmd": cmd, "cwd": cwd, "extra_env": extra_env})
+    def fake_run(cmd):
+        calls.append({"cmd": cmd})
         if cmd[:2] == ["docker", "run"]:
             mounts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
             out = next(m.split(":")[0] for m in mounts
@@ -165,8 +201,9 @@ def test_guide_dep_bootstraps_inside_base_image(tmp_path, bootstrap_recorder,
     result = B.build_team_image(str(team), project_path=repo)
 
     base, final = _builds(bootstrap_recorder)
-    # base image: same Dockerfile/context, NO team deps, the bootstrap tag
-    assert base[base.index("-t") + 1] == B.BOOTSTRAP_BASE_TAG
+    # base image: same Dockerfile/context, NO team deps, input-derived tag
+    base_tag = base[base.index("-t") + 1]
+    assert base_tag.startswith(f"{B.BOOTSTRAP_BASE_REPO}:")
     assert not any(a.startswith("TEAM_DEPS=") for a in base)
     # final image bakes the bootstrapped hook
     assert "TEAM_DEPS=dist/team-deps/eng-team.sh" in final
@@ -177,7 +214,9 @@ def test_guide_dep_bootstraps_inside_base_image(tmp_path, bootstrap_recorder,
     (run,) = [c["cmd"] for c in bootstrap_recorder
               if c["cmd"][:2] == ["docker", "run"]]
     # recipe faithful to the image, not the host: flattened team dir ro +
-    # out dir are the ONLY mounts; cwd off any mount; image python runs
+    # out dir are the ONLY mounts; cwd off any mount; image python runs;
+    # the run targets the SAME tag the base build produced
+    assert base_tag in run
     assert f"{team}:{B._TEAM_MOUNT}:ro" in run
     assert run[run.index("-w") + 1] == "/tmp"
     assert run[run.index("--entrypoint") + 1] == "python"
@@ -188,6 +227,17 @@ def test_guide_dep_bootstraps_inside_base_image(tmp_path, bootstrap_recorder,
     assert "IS_SANDBOX=1" in run
     assert "ANTHROPIC_API_KEY" in run
     assert "OPENAI_API_KEY" not in run  # unset key is not forwarded
+
+
+def test_bootstrap_base_tag_scopes_by_build_inputs():
+    """Concurrent builds with different modes/versions must not share a base
+    tag (a retag between one run's build and run would violate OQ6)."""
+    a = B._bootstrap_base_tag({}, Path("/repo/Dockerfile"))
+    b = B._bootstrap_base_tag({"BOBI_BUILD": "pypi", "BOBI_VERSION": "1.0"},
+                              Path("/repo/Dockerfile"))
+    c = B._bootstrap_base_tag({}, Path("/elsewhere/Dockerfile"))
+    assert len({a, b, c}) == 3
+    assert a == B._bootstrap_base_tag({}, Path("/repo/Dockerfile"))  # stable
 
 
 def test_stage_team_deps_refuses_guide_deps_without_agent(tmp_path):
@@ -210,7 +260,7 @@ def test_deploy_guide_dep_error_points_at_bobi_build(tmp_path):
 def test_binary_mode_pins_pypi_version(tmp_path, recorder, monkeypatch):
     repo = _make_repo(tmp_path, BAKING_TEAM)
     team = repo / "agents" / "eng-team"
-    # no checkout anywhere above the project path → binary mode
+    # no checkout anywhere above the project path -> binary mode
     pkg = tmp_path / "_deploy"
     (pkg / "docker").mkdir(parents=True)
     (pkg / "Dockerfile").write_text("FROM scratch\n")
@@ -241,6 +291,17 @@ def test_binary_mode_pins_pypi_version(tmp_path, recorder, monkeypatch):
                            build_mode="wheel")
 
 
+def test_explicit_bobi_version_wins(tmp_path, recorder, monkeypatch):
+    """The wrapper's BOBI_VERSION contract: an explicit pin overrides the
+    installed version (which may be unpublished in a dev checkout)."""
+    repo = _make_repo(tmp_path, BAKING_TEAM)
+    monkeypatch.setattr(D, "_bobi_version", lambda: "0.0.0.dev0")
+    B.build_team_image(str(repo / "agents" / "eng-team"), project_path=repo,
+                       build_mode="pypi", bobi_version="0.38.0")
+    (cmd,) = _builds(recorder)
+    assert "BOBI_VERSION=0.38.0" in cmd
+
+
 def test_source_checkout_can_force_pypi_mode(tmp_path, recorder, monkeypatch):
     repo = _make_repo(tmp_path, BAKING_TEAM)
     monkeypatch.setattr(D, "_bobi_version", lambda: "9.9.9")
@@ -248,20 +309,23 @@ def test_source_checkout_can_force_pypi_mode(tmp_path, recorder, monkeypatch):
                        build_mode="pypi")
     (cmd,) = _builds(recorder)
     assert "BOBI_BUILD=pypi" in cmd and "BOBI_VERSION=9.9.9" in cmd
-    assert cmd[-1] == str(repo)  # context unchanged — mode only flips args
+    assert cmd[-1] == str(repo)  # context unchanged, mode only flips args
 
 
-def test_wheel_mode_requires_a_staged_wheel(tmp_path, recorder):
+def test_wheel_mode_requires_exactly_one_wheel(tmp_path, recorder):
     repo = _make_repo(tmp_path, BAKING_TEAM)
-    with pytest.raises(B.BuildError, match="wheel"):
-        B.build_team_image(str(repo / "agents" / "eng-team"),
-                           project_path=repo, build_mode="wheel")
+    team = str(repo / "agents" / "eng-team")
+    with pytest.raises(B.BuildError, match="exactly one"):
+        B.build_team_image(team, project_path=repo, build_mode="wheel")
     (repo / "dist").mkdir()
     (repo / "dist" / "bobi-1.0-py3-none-any.whl").write_text("")
-    B.build_team_image(str(repo / "agents" / "eng-team"), project_path=repo,
-                       build_mode="wheel")
+    B.build_team_image(team, project_path=repo, build_mode="wheel")
     (cmd,) = _builds(recorder)
     assert "BOBI_BUILD=wheel" in cmd
+    # a stale second wheel must not silently ship (Dockerfile installs dist/*)
+    (repo / "dist" / "bobi-0.9-py3-none-any.whl").write_text("")
+    with pytest.raises(B.BuildError, match="exactly one"):
+        B.build_team_image(team, project_path=repo, build_mode="wheel")
 
 
 # --- preflight -----------------------------------------------------------------
@@ -287,9 +351,9 @@ def test_cli_build_wiring(tmp_path, monkeypatch):
 
     seen = {}
 
-    def fake_build(team, *, tags, push, build_mode, brains):
+    def fake_build(team, *, tags, push, build_mode, bobi_version, brains):
         seen.update(team=team, tags=tags, push=push, build_mode=build_mode,
-                    brains=brains)
+                    bobi_version=bobi_version, brains=brains)
         return B.BuildResult(tags=tags or ["bobi-x:latest"],
                              team_dir=Path("/t"), mode="source",
                              team_deps="dist/team-deps/x.sh")
@@ -297,11 +361,12 @@ def test_cli_build_wiring(tmp_path, monkeypatch):
     monkeypatch.setattr("bobi.build.build_team_image", fake_build)
     result = CliRunner().invoke(cli_main, [
         "build", "./my-team", "--tag", "ghcr.io/a/t:1", "--push",
-        "--build", "pypi", "--brains", "claude,codex"])
+        "--build", "pypi", "--bobi-version", "0.38.0",
+        "--brains", "claude,codex"])
     assert result.exit_code == 0, result.output
     assert seen == {"team": "./my-team", "tags": ["ghcr.io/a/t:1"],
                     "push": True, "build_mode": "pypi",
-                    "brains": ["claude", "codex"]}
+                    "bobi_version": "0.38.0", "brains": ["claude", "codex"]}
     assert "Built + pushed ghcr.io/a/t:1" in result.output
 
 
@@ -317,3 +382,20 @@ def test_cli_build_maps_errors(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli_main, ["build", "./my-team"])
     assert result.exit_code != 0
     assert "docker not found" in result.output
+
+
+def test_cli_build_maps_compose_and_deploy_errors(tmp_path, monkeypatch):
+    """ComposeError (bad from:/catalog ref) and DeployError (e.g. version
+    lookup) must surface as clean click errors, not tracebacks."""
+    from click.testing import CliRunner
+
+    from bobi.cli import main as cli_main
+    from bobi.compose import ComposeError
+
+    def boom(*a, **k):
+        raise ComposeError("unknown base 'nope' in from: chain")
+
+    monkeypatch.setattr("bobi.build.build_team_image", boom)
+    result = CliRunner().invoke(cli_main, ["build", "./my-team"])
+    assert result.exit_code != 0
+    assert "unknown base" in result.output

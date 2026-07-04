@@ -49,7 +49,6 @@ GUIDE_TEAM = """
 
 TEAM = "dep-e2e"
 E2E_TAG = "pytest"                              # pin TAG so cleanup is deterministic
-BASE_TAG = f"bobi-bootstrap-base:{E2E_TAG}"    # built by build-team-images.sh
 TEAM_IMG = f"bobi-e2e/bobi-dep-e2e:{E2E_TAG}"  # REGISTRY=bobi-e2e, TAG=E2E_TAG
 TEAM_IMG_LATEST = "bobi-e2e/bobi-dep-e2e:latest"
 
@@ -112,7 +111,13 @@ def bootstrapped_team_image():
         yield TEAM_IMG
     finally:
         shutil.rmtree(team_root, ignore_errors=True)
-        _run("docker", "image", "rm", "-f", TEAM_IMG, TEAM_IMG_LATEST, BASE_TAG)
+        _run("docker", "image", "rm", "-f", TEAM_IMG, TEAM_IMG_LATEST)
+        # `bobi build` tags the throwaway bootstrap base by input hash
+        # (bobi-bootstrap-base:<hash>, build.py:_bootstrap_base_tag), so
+        # remove whatever tags exist under that repo name.
+        base = _run("docker", "images", "-q", "bobi-bootstrap-base")
+        for img_id in dict.fromkeys(base.stdout.split()):
+            _run("docker", "image", "rm", "-f", img_id)
 
 
 @requires_docker

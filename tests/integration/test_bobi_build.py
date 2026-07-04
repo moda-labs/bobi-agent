@@ -55,8 +55,13 @@ def test_bobi_build_bakes_and_verifies_apt_dep():
               - name: jq
                 check: "command -v jq"
         """))
-        result = build_team_image(str(team), tags=[tag],
-                                  project_path=REPO_ROOT)
+        try:
+            result = build_team_image(str(team), tags=[tag],
+                                      project_path=REPO_ROOT)
+        finally:
+            # staged into the real checkout's build context; don't leave it
+            (REPO_ROOT / "dist" / "team-deps" / "jq-team.sh").unlink(
+                missing_ok=True)
     assert result.tags == [tag]
     assert result.team_deps == "dist/team-deps/jq-team.sh"
 

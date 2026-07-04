@@ -1029,7 +1029,7 @@ def _render_team_deps_into_context(project_path: Path, cfg: DeployConfig,
     # tool_library expansion, #416), renders the deps hook with both identity
     # stamps, and writes it into the build context. allow_agent=False because
     # `bobi deploy` never runs the bootstrap agent (OQ1: bootstrap at image
-    # build) — a guide-only dependency (guide, no pinned install) must not be
+    # build) - a guide-only dependency (guide, no pinned install) must not be
     # silently dropped from the image, so it refuses instead.
     from bobi.build import GuideDepsError, stage_team_deps
     try:
@@ -1039,10 +1039,9 @@ def _render_team_deps_into_context(project_path: Path, cfg: DeployConfig,
             allow_agent=False)
     except GuideDepsError as exc:
         raise DeployError(
-            f"team '{cfg.team}' declares guide-only dependencies "
-            f"({', '.join(exc.deps)}) that a bootstrap agent must resolve at "
-            f"build time; `bobi deploy` does not run that agent. Build + push "
-            f"the team image with `bobi build <team-dir> --tag <ref> --push` "
+            f"{exc}; `bobi deploy` does not run that agent. Build + push the "
+            f"team image with `bobi build <team-dir> --tag <ref> --push` "
+            f"(scripts/build-team-images.sh for Fly's app-scoped registry) "
             f"and deploy it with `image:` or `team-url:`.") from exc
 
 

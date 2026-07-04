@@ -431,7 +431,8 @@ def team_has_bake(team_dir: "Path", project_path: "Path | None" = None) -> bool:
 def render_team_deps(team_dir: "Path", project_path: "Path | None" = None, *,
                      brains: list[str] | None = None,
                      agent_runner: AgentRunner | None = None,
-                     shell_runner: ShellRunner | None = None) -> str | None:
+                     shell_runner: ShellRunner | None = None,
+                     cfg=None, deps: list[Dependency] | None = None) -> str | None:
     """Bootstrap a team's guide-only deps and render its team-deps.sh (#428 Stage 3).
 
     The single seam the image build calls (`build-team-images.sh`, the release
@@ -445,6 +446,10 @@ def render_team_deps(team_dir: "Path", project_path: "Path | None" = None, *,
     Returns None for a generic team (nothing to bake). Raises `BootstrapError` if
     a guide-dep fails its agentic preflight, so an unverified snapshot is never
     frozen.
+
+    `cfg`/`deps` let a caller that already composed the team and resolved its
+    dependency set (build.py:stage_team_deps) pass them in, avoiding a second
+    chain walk + registry fetch; omitted, they are computed here as before.
     """
     from pathlib import Path
 
@@ -458,8 +463,9 @@ def render_team_deps(team_dir: "Path", project_path: "Path | None" = None, *,
 
     team_dir = Path(team_dir)
     project_path = project_path or _workspace_root(team_dir)
-    cfg = load_composed_team_config(team_dir, project_path)
-    deps = resolve_team_dependencies(team_dir, project_path)
+    cfg = cfg or load_composed_team_config(team_dir, project_path)
+    deps = deps if deps is not None else resolve_team_dependencies(
+        team_dir, project_path)
 
     spec = cfg.build
     declarative = spec is not None and bool(

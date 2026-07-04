@@ -306,7 +306,7 @@ re-deploys stay cheap. No `build:` → the default `docker/noop-deps.sh` →
 byte-identical to the generic image. `run_root:` steps run as root for tools `apt`
 can't express (e.g. `npx playwright install-deps chromium`). CI
 (`.github/workflows/team-images.yml` → `scripts/build-team-images.sh`, a thin
-wrapper over `bobi build`) is a build-only **verify gate** — it builds each team
+wrapper over `bobi build`) is a build-only **verify gate**: it builds each team
 image (running the `requires` check) but does not push.
 
 **Building a standalone image: `bobi build` (#610).** For BYO-orchestrator
@@ -321,7 +321,8 @@ The team ref resolves exactly as deploy's (`team-dir` path, registry
 `name@version` pin, or bare name under `agents/`; a `from:` chain is flattened
 on the host). In a bobi checkout the framework builds from source (`--build
 pypi|wheel` to override); from a plain `pip install bobi` the bundled deploy
-assets build in pypi mode pinned to the CLI's own version — no checkout needed.
+assets build in pypi mode pinned to the CLI's own version (or an explicit
+`--bobi-version`), no checkout needed.
 A guide-only dependency is bootstrapped by the agent inside a fresh base image
 (§2.6.1), so `bobi build` is also the CI entry point for that path. `--push` is
 a plain `docker push` through the local docker credential helpers, so GHCR /
