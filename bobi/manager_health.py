@@ -1,10 +1,10 @@
 """Manager health endpoint — lightweight HTTP server for container liveness
 and readiness probes.
 
-Exposes ``GET /health`` on a localhost port and writes the port number to
-``state/manager-health.port`` for discovery.  Designed for PID-1 container
-mode where an orchestrator (Fly, ECS, k8s) needs a machine-readable health
-signal.
+Exposes ``GET /health`` on a bind address/port and writes the port number to
+``state/manager-health.port`` for discovery. Defaults preserve the original
+localhost ephemeral-port behavior. Designed for PID-1 container mode where an
+orchestrator (Fly, ECS, k8s) needs a machine-readable health signal.
 
 The server runs in a daemon thread so it never blocks the manager's main
 loop.  Graceful shutdown via :func:`stop`.
@@ -27,6 +27,10 @@ _thread: threading.Thread | None = None
 _port_file: Path | None = None
 
 
+class _HealthServer(HTTPServer):
+    allow_reuse_address = True
+
+
 def _make_handler(manager_pid: int, project_name: str,
                   session_status_fn, manager_block_fn):
     """Build the request handler class with closed-over manager state."""
@@ -35,23 +39,38 @@ def _make_handler(manager_pid: int, project_name: str,
 
         def do_GET(self):
             if self.path == "/health":
-                status = session_status_fn()
-                body = {
-                    "status": "ok",
-                    "pid": manager_pid,
-                    "project": project_name,
-                }
-                # The entry-point (director) session's progress signal — the
-                # input the #464 watchdog needs to tell a wedged director apart
-                # from a healthy idle one. Additive; omitted when no manager
-                # session is wired so existing consumers keep the old shape.
-                manager = manager_block_fn() if manager_block_fn else None
-                if manager is not None:
-                    body["manager"] = manager
-                body["sessions"] = status
-                self._json_response(200, body)
+                self._json_response(200, self._health_body())
+            elif self.path == "/ready":
+                body = self._ready_body()
+                code = 200 if body["status"] == "ready" else 503
+                self._json_response(code, body)
             else:
                 self._json_response(404, {"error": "not found"})
+
+        def _health_body(self):
+            body = {
+                "status": "ok",
+                "pid": manager_pid,
+                "project": project_name,
+            }
+            # The entry-point (director) session's progress signal — the
+            # input the #464 watchdog needs to tell a wedged director apart
+            # from a healthy idle one. Additive; omitted when no manager
+            # session is wired so existing consumers keep the old shape.
+            manager = manager_block_fn() if manager_block_fn else None
+            if manager is not None:
+                body["manager"] = manager
+            body["sessions"] = session_status_fn()
+            return body
+
+        def _ready_body(self):
+            manager = manager_block_fn() if manager_block_fn else None
+            if manager and manager.get("status") in {"running", "idle"}:
+                return {"status": "ready", "manager": manager}
+            body = {"status": "not_ready"}
+            if manager is not None:
+                body["manager"] = manager
+            return body
 
         def _json_response(self, code: int, data: dict):
             payload = json.dumps(data).encode()
@@ -112,10 +131,27 @@ def _session_status_from_registry():
         return []
 
 
+def _configured_bind() -> str:
+    return os.environ.get("BOBI_HEALTH_BIND", "127.0.0.1") or "127.0.0.1"
+
+
+def _configured_port() -> int:
+    raw = os.environ.get("BOBI_HEALTH_PORT")
+    if raw in (None, ""):
+        return 0
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise ValueError("BOBI_HEALTH_PORT must be an integer") from exc
+    if port < 0 or port > 65535:
+        raise ValueError("BOBI_HEALTH_PORT must be between 0 and 65535")
+    return port
+
+
 def start(state_dir: Path, project_name: str,
           session_status_fn=None, manager_session: str | None = None,
           manager_status_fn=None) -> int:
-    """Start the health server on a free port.  Returns the bound port.
+    """Start the health server. Returns the bound port.
 
     ``session_status_fn`` is a callable returning a list of session dicts
     for the ``sessions`` key in the health payload.  Defaults to reading
@@ -141,7 +177,9 @@ def start(state_dir: Path, project_name: str,
 
     handler = _make_handler(manager_pid, project_name, status_fn,
                             manager_block_fn)
-    _server = HTTPServer(("127.0.0.1", 0), handler)
+    bind = _configured_bind()
+    configured_port = _configured_port()
+    _server = _HealthServer((bind, configured_port), handler)
     port = _server.server_address[1]
 
     _port_file = state_dir / "manager-health.port"
@@ -151,7 +189,7 @@ def start(state_dir: Path, project_name: str,
                                name="manager-health")
     _thread.start()
 
-    log.info("Manager health server listening on 127.0.0.1:%d", port)
+    log.info("Manager health server listening on %s:%d", bind, port)
     return port
 
 
@@ -161,6 +199,7 @@ def stop():
 
     if _server is not None:
         _server.shutdown()
+        _server.server_close()
         _server = None
     _thread = None
 

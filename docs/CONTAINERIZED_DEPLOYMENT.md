@@ -183,13 +183,47 @@ team lands, it proceeds to start.
 
 ### Health
 
-The manager exposes `GET /health` on a localhost port written to
-`/data/project/run/state/manager-health.port`. The image `HEALTHCHECK` (and Fly
-script checks) read that file and probe the endpoint:
+The manager exposes `GET /health` on a port written to
+`/data/project/run/state/manager-health.port`. By default it binds
+`127.0.0.1` on an ephemeral port, preserving the image `HEALTHCHECK` and Fly
+script checks that read the port file and probe the endpoint:
 
 ```bash
 docker inspect -f '{{.State.Health.Status}}' <container>
 ```
+
+Kubernetes `httpGet` probes originate from the kubelet against the pod IP, so
+set a fixed port and non-loopback bind address for k8s deployments. Use
+`127.0.0.1` or `0.0.0.0` for `BOBI_HEALTH_BIND`; the bundled Docker/Fly
+healthcheck probes `127.0.0.1`, so binding to a specific pod IP is not
+compatible with that script.
+
+```yaml
+env:
+  - name: BOBI_HEALTH_BIND
+    value: "0.0.0.0"
+  - name: BOBI_HEALTH_PORT
+    value: "8081"
+ports:
+  - name: health
+    containerPort: 8081
+livenessProbe:
+  httpGet:
+    path: /health
+    port: health
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: health
+```
+
+`/health` is a cheap in-process liveness check. `/ready` returns `503` until the
+director session reports `running` or `idle`, then returns `200`.
+
+Keep the health port private to the pod network. `/health` includes process and
+session status for operators, so do not expose it through a public Service or
+Ingress. For Docker and Fly, leave the default loopback bind in place; the
+bundled `HEALTHCHECK` probes `127.0.0.1` via the port file.
 
 ### Fly build gotchas (each one cost real debugging - do not regress)
 

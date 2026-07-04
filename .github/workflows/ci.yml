@@ -118,6 +118,11 @@ jobs:
     name: Integration tests (no Claude)
     runs-on: ubuntu-latest
     env:
+      # hf-xet can hang indefinitely on unauthenticated GitHub runners.
+      # Use the regular Hub download path and cap each file transfer so CI
+      # fails fast instead of reaching GitHub's 6h cancellation limit.
+      HF_HUB_DISABLE_XET: "1"
+      HF_HUB_DOWNLOAD_TIMEOUT: "120"
       FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.fastembed-cache
     steps:
       - uses: actions/checkout@v5
