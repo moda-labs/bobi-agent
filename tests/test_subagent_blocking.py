@@ -225,7 +225,7 @@ class TestRunAgentSupervisedNormal:
         mock_module.ResultMessage = FakeResultMessage
         mock_module.TextBlock = FakeTextBlock
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -266,7 +266,7 @@ class TestRunAgentSupervisedNormal:
         mock_module.ResultMessage = FakeResultMessage
         mock_module.TextBlock = FakeTextBlock
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -297,7 +297,7 @@ class TestRunAgentSupervisedNormal:
         mock_module.ResultMessage = FakeResultMessage
         mock_module.TextBlock = FakeTextBlock
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -359,7 +359,7 @@ class TestRunAgentSupervisedDeferral:
         mock_module.TextBlock = FakeTextBlock
         mock_module.HookMatcher = MagicMock()
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -425,7 +425,7 @@ class TestRunAgentSupervisedDeferral:
         mock_module.TextBlock = FakeTextBlock
         mock_module.HookMatcher = MagicMock()
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -470,7 +470,7 @@ class TestRunAgentSupervisedDeferral:
         mock_module.ResultMessage = FakeResultMessage
         mock_module.TextBlock = FakeTextBlock
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -513,7 +513,7 @@ class TestRunAgentSupervisedResume:
         mock_module.ResultMessage = FakeResultMessage
         mock_module.TextBlock = FakeTextBlock
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value="old-sess-id"), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value="old-sess-id"), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -555,7 +555,7 @@ class TestRunAgentSupervisedExceptions:
 
         mock_module.ClaudeSDKClient = MagicMock(return_value=bad_client)
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -590,7 +590,7 @@ class TestRunAgentSupervisedExceptions:
 
         mock_module.ClaudeSDKClient = MagicMock(return_value=bad_client)
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -629,7 +629,7 @@ class TestRunAgentSupervisedExceptions:
         mock_module.ResultMessage = FakeResultMessage
         mock_module.TextBlock = FakeTextBlock
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -671,7 +671,7 @@ class TestRunAgentSupervisedTracking:
         mock_module.ResultMessage = FakeResultMessage
         mock_module.TextBlock = FakeTextBlock
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id") as mock_save, \
              patch(f"{SDK_PATCH}.log_activity") as mock_log, \
              patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry), \
@@ -696,7 +696,7 @@ class TestRunAgentSupervisedTracking:
         )
 
         # Session ID saved
-        mock_save.assert_called_with("agent-test-t1-spec", "sess-track")
+        mock_save.assert_called_with("agent-test-t1-spec", "sess-track", model="")
 
         # Activity logged (now carries the terminal status)
         mock_log.assert_any_call(
@@ -721,7 +721,7 @@ class TestRunAgentSupervisedTracking:
 
         mock_registry = MagicMock()
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry), \
@@ -1405,7 +1405,7 @@ class TestLaunchModelResolution:
                 return _CapturingBrainSession()
 
         with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
-             patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+             patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
@@ -1415,4 +1415,64 @@ class TestLaunchModelResolution:
             )
 
         assert result.success is True
+        assert captured["options"]["model"] == "haiku"
+
+
+class TestModelAwareSessionResume:
+    """A session recorded under one model must not resume under another
+    (#617 review findings 2-3)."""
+
+    def test_guard_blocks_resume_on_model_change(self):
+        from bobi.sdk import load_resumable_session_id, save_session_id
+        save_session_id("s1", "sess-abc", model="haiku")
+        assert load_resumable_session_id("s1", "haiku") == "sess-abc"
+        assert load_resumable_session_id("s1", "opus") == ""
+        assert load_resumable_session_id("s1", "") == ""
+
+    def test_empty_recorded_model_still_guards(self):
+        from bobi.sdk import load_resumable_session_id, save_session_id
+        save_session_id("s2", "sess-abc", model="")
+        assert load_resumable_session_id("s2", "") == "sess-abc"
+        assert load_resumable_session_id("s2", "haiku") == ""
+
+    def test_missing_record_resumes_unconditionally(self):
+        from bobi.sdk import load_resumable_session_id, save_session_id
+        save_session_id("s3", "sess-abc")  # model=None: pre-#617 shape
+        assert load_resumable_session_id("s3", "haiku") == "sess-abc"
+
+    def test_clearing_id_clears_model_record(self):
+        from bobi.sdk import load_resumable_session_id, save_session_id
+        save_session_id("s4", "sess-abc", model="haiku")
+        save_session_id("s4", "")
+        save_session_id("s4", "sess-new")  # fresh save, no model known yet
+        assert load_resumable_session_id("s4", "opus") == "sess-new"
+
+    @pytest.mark.asyncio
+    async def test_supervised_resume_respects_model_guard(self, tmp_path):
+        """_run_agent_supervised resolves the role model BEFORE loading the
+        saved id and consults the guard with it."""
+        _write_roles_yaml(tmp_path)
+        from bobi.sdk import save_session_id
+        name = _session_name("k", role="monitor", phase="check")
+        save_session_id(name, "sess-old", model="")  # ran under the default
+
+        captured: dict = {}
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                captured.update(kwargs)
+                return _CapturingBrainSession()
+
+        with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = await _run_agent_supervised(
+                prompt="check", cwd="/tmp", run_key="k", phase="check",
+                timeout=5, role="monitor",
+            )
+
+        assert result.success is True
+        # roles.monitor.model=haiku differs from the recorded default: fresh.
+        assert captured["resume"] is None
         assert captured["options"]["model"] == "haiku"

@@ -95,19 +95,17 @@ def resolve_model(cfg, role: str | None = None, explicit: str | None = None) -> 
 
     Precedence: *explicit* (a launch flag or caller override) >
     ``roles.<role>.model`` from team config > the process default
-    (``brain.model``, pinned as ``BOBI_BRAIN_MODEL``). Returns "" when nothing
-    is configured so brain adapters fall through to the provider default.
+    (``brain.model``, pinned as ``BOBI_BRAIN_MODEL``) > "" (the provider
+    default). The role lookup is the only step ``resolve_model_option``
+    does not already own, so everything else delegates to it.
 
     *cfg* is duck-typed (anything with ``role_model()``) so this module stays
     import-free of ``bobi.config``.
     """
-    if explicit:
-        return str(explicit)
-    if role and cfg is not None:
-        model = cfg.role_model(role)
-        if model:
-            return model
-    return get_process_brain_model()
+    chosen = str(explicit or "")
+    if not chosen and role and cfg is not None:
+        chosen = cfg.role_model(role)
+    return resolve_model_option(chosen)
 
 
 def pin_process_brain(

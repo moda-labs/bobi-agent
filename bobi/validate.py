@@ -102,6 +102,7 @@ def validate_config(project_path: Path) -> ValidationResult:
     checks: list[CheckResult] = []
 
     checks.append(_check_entry_point(cfg, project_path))
+    checks.extend(_check_roles(cfg, project_path))
     checks.extend(_check_service_credentials(cfg))
     checks.extend(_check_venn_services(cfg))
     checks.extend(_check_mcp_servers(cfg, project_path))
@@ -132,6 +133,48 @@ def _check_entry_point(cfg, project_path: Path) -> CheckResult:
         )
 
     return CheckResult("entry_point", ok=True, detail=cfg.entry_point)
+
+
+# Roles the runtime uses without a roles/ prompt directory. Monitor checks
+# always launch as role "monitor" (bobi/subagent.py run_check_blocking), so
+# roles.monitor.* is meaningful in every pack.
+_BUILTIN_ROLES = {"monitor"}
+
+
+def _check_roles(cfg, project_path: Path) -> list[CheckResult]:
+    """Validate the `roles:` mapping (#617).
+
+    A misconfigured entry fails silently at runtime (the agent just runs on
+    the default model), so surface shape errors and unknown role names here
+    as warnings.
+    """
+    if not isinstance(cfg.roles, dict) or not cfg.roles:
+        return []
+
+    from bobi import paths
+    installed_roles = paths.roles_dir(project_path)
+    known = set(_BUILTIN_ROLES)
+    if installed_roles.is_dir():
+        known.update(p.name for p in installed_roles.iterdir() if p.is_dir())
+
+    checks = []
+    for name, entry in cfg.roles.items():
+        if not isinstance(entry, dict):
+            checks.append(CheckResult(
+                f"roles.{name}", ok=False, required=False,
+                detail=f"must be a mapping, got {type(entry).__name__}",
+                hint=f"write `roles: {{{name}: {{model: {entry}}}}}`",
+            ))
+            continue
+        # Only warn about unknown names when the pack ships role dirs to
+        # check against; a dirless pack can't distinguish typo from intent.
+        if installed_roles.is_dir() and name not in known:
+            checks.append(CheckResult(
+                f"roles.{name}", ok=False, required=False,
+                detail="unknown role name; its model override will never apply",
+                hint=f"known roles: {', '.join(sorted(known))}",
+            ))
+    return checks
 
 
 def _check_service_credentials(cfg) -> list[CheckResult]:

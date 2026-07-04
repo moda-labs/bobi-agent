@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from bobi.sdk import (
-    save_session_id, load_session_id, log_activity,
+    save_session_id, load_resumable_session_id, log_activity,
     get_registry, SessionEntry, SessionRegistry,
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
@@ -101,6 +101,16 @@ def _build_prompt(phase: str, run_key: str, role: str = "", context: str = "") -
     return "\n\n".join(parts)
 
 
+def _load_team_config():
+    """Best-effort team Config from the installation root, or None."""
+    from bobi.config import Config
+    from bobi.paths import bobi_root
+    try:
+        return Config.load(bobi_root())
+    except Exception:
+        return None
+
+
 def _resolve_launch_model(role: str, explicit: str = "", cfg=None) -> str:
     """Resolve the model for a launch from team config (#617).
 
@@ -111,12 +121,7 @@ def _resolve_launch_model(role: str, explicit: str = "", cfg=None) -> str:
     from bobi.brain import resolve_model
 
     if cfg is None and not explicit:
-        from bobi.config import Config
-        from bobi.paths import bobi_root
-        try:
-            cfg = Config.load(bobi_root())
-        except Exception:
-            cfg = None
+        cfg = _load_team_config()
     return resolve_model(cfg, role=role, explicit=explicit)
 
 
@@ -351,13 +356,13 @@ async def _run_agent_supervised(
     from bobi.brain import AssistantText, TurnResult, get_brain
 
     name = _session_name(run_key, role=role, phase=phase)
-    saved_id = load_session_id(name)
+    model = _resolve_launch_model(role)
+    saved_id = load_resumable_session_id(name, model)
     registry = get_registry()
 
     hooks = _make_defer_hook() if on_input_needed else None
 
     label = role or "agent"
-    model = _resolve_launch_model(role)
     client = get_brain().make_session(
         cwd=cwd,
         system_prompt={
@@ -404,7 +409,7 @@ async def _run_agent_supervised(
                                   error=result.error, phase=phase)
                 return result
 
-            save_session_id(name, result_msg.session_id)
+            save_session_id(name, result_msg.session_id, model=model)
             result.session_id = result_msg.session_id
             result.duration_ms += result_msg.duration_ms
             result.total_cost_usd += result_msg.total_cost_usd or 0.0
@@ -507,14 +512,8 @@ def run_phase_blocking(
 
     # Pass through any user-declared MCP servers from config so workflow
     # step agents also have access to them.
-    from bobi.paths import bobi_root as _mr
-    from bobi.config import Config as _Config
-    try:
-        _cfg = _Config.load(_mr())
-        _mcp = _cfg.mcp_servers
-    except Exception:
-        _cfg = None
-        _mcp = None
+    _cfg = _load_team_config()
+    _mcp = _cfg.mcp_servers if _cfg else None
     model = _resolve_launch_model(role, cfg=_cfg)
 
     session = Session(
@@ -664,14 +663,8 @@ def spawn_adhoc(
     # Resolve MCP servers: caller-supplied override, else config-declared.
     # Done here so all spawn paths (CLI, workflow, subagent) go through one
     # call site.
-    from bobi.paths import bobi_root as _mr
-    from bobi.config import Config as _Config
-    try:
-        _cfg = _Config.load(_mr())
-        merged_mcp = mcp_servers or _cfg.mcp_servers
-    except Exception:
-        _cfg = None
-        merged_mcp = mcp_servers
+    _cfg = _load_team_config()
+    merged_mcp = mcp_servers or (_cfg.mcp_servers if _cfg else None)
     model = _resolve_launch_model(role, explicit=model, cfg=_cfg)
 
     session = Session(
