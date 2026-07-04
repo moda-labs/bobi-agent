@@ -312,6 +312,23 @@ class TestEventsCommand:
             assert result.exit_code != 0
             assert "reserved for webhooks" in result.output
 
+    def test_publish_rejects_webhook_source_labels(self, bobi_install):
+        for topic in [
+            "github/firing",
+            "linear/firing",
+            "slack/firing",
+        ]:
+            result = CliRunner().invoke(
+                main,
+                [
+                    "agent", TEST_AGENT_NAME, "events", "publish",
+                    topic, "--json", '{"title":"x"}',
+                ],
+            )
+
+            assert result.exit_code != 0
+            assert "sources are reserved for webhooks" in result.output
+
     def test_publish_without_payload_does_not_read_interactive_stdin(
         self,
         bobi_install,

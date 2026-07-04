@@ -1000,15 +1000,12 @@ class TestBubbleIsolation:
     def test_cli_events_publish_delivers_custom_topic(self, event_server, bobi_env):
         """`bobi agent <name> events publish source/type` uses the same signed
         publish path as library callers and reaches a source/type subscriber."""
-        from bobi.config import save_bubble_state
+        from bobi.config import bubble_state_path, save_bubble_state
 
         base_url, *_ = event_server
         dep = _register(base_url, "custom-topic-cli", ["alert/firing"])
-        save_bubble_state(
-            bobi_env.project_path,
-            dep["bubble_id"],
-            dep["bubble_key"],
-        )
+        bubble_path = bubble_state_path(bobi_env.project_path)
+        original_bubble = bubble_path.read_text() if bubble_path.exists() else None
 
         cfg_path = bobi_env.package_dir / "agent.yaml"
         original_cfg = cfg_path.read_text()
@@ -1024,6 +1021,11 @@ class TestBubbleIsolation:
         assert ready.wait(5)
 
         try:
+            save_bubble_state(
+                bobi_env.project_path,
+                dep["bubble_id"],
+                dep["bubble_key"],
+            )
             cfg_path.write_text(yaml.dump(cfg, sort_keys=False))
             result = subprocess.run(
                 [
@@ -1044,6 +1046,11 @@ class TestBubbleIsolation:
             )
         finally:
             cfg_path.write_text(original_cfg)
+            if original_bubble is None:
+                bubble_path.unlink(missing_ok=True)
+            else:
+                bubble_path.write_text(original_bubble)
+                bubble_path.chmod(0o600)
 
         assert result.returncode == 0, result.stderr + result.stdout
         thread.join(timeout=5)
@@ -1077,6 +1084,49 @@ class TestBubbleIsolation:
         with pytest.raises(urllib.error.HTTPError) as ei:
             _register(base_url, "intruder", ["inbox/x"], a["bubble_id"], "bkey_wrong")
         assert ei.value.code == 403
+
+    def test_signed_generic_publish_rejects_global_topics_without_delivery(
+            self, event_server):
+        """Global webhook topics must stay webhook-only through the real HTTP
+        route, including URL path parsing and signature verification."""
+        base_url, *_ = event_server
+
+        for name, subscriptions, topic, body in [
+            (
+                "global-source-guard",
+                ["repo"],
+                "repo",
+                {"source": "github:org", "payload": {"text": "fake"}},
+            ),
+            (
+                "global-path-guard",
+                ["ci/github:org"],
+                "github:org",
+                {"source": "ci", "payload": {"text": "fake"}},
+            ),
+        ]:
+            dep = _register(base_url, name, subscriptions)
+            events, ready, thread = _live_subscriber(
+                base_url,
+                dep["deployment_id"],
+                dep["api_key"],
+            )
+            assert ready.wait(5)
+
+            with pytest.raises(urllib.error.HTTPError) as ei:
+                _post_event_signed(
+                    base_url,
+                    topic,
+                    body,
+                    dep["bubble_id"],
+                    dep["bubble_key"],
+                )
+            assert ei.value.code == 400
+            thread.join(timeout=5)
+            assert events == [], (
+                "global-topic generic publish was rejected but still delivered: "
+                f"{events}"
+            )
 
     def test_webhook_fans_out_across_bubbles(self, event_server):
         """Inbound webhooks remain GLOBAL, but #488 now admits only bubbles with
