@@ -253,6 +253,9 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 except Exception:
                     log.exception("Reactor failed processing event %s — "
                                   "delivering it un-dispatched", e.get("type"))
+            if reactor_result == "deduped":
+                log.info("Dropping duplicate event delivery %s", e.get("type"))
+                continue
             target = chat_events if e.get("delivery") == "chat" else bulk_events
             target.append((reactor_result, e))
 

@@ -125,6 +125,7 @@ describe("normalizeGitHubPayload", () => {
 		expect(event!.type).toBe("github.issue_comment");
 		expect(event!.fields!.is_pull_request).toBe(true);
 		expect(event!.fields!.comment_id).toBe(99887766);
+		expect(event!.fields!.comment_body).toBe("Rendered spec");
 		expect(event!.fields!.sender).toBe("bobi");
 	});
 

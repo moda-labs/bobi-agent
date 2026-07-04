@@ -1,9 +1,7 @@
 """Tests for event reactor — deterministic auto-dispatch of workflows on event match."""
 
 import time
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import patch
 
 from bobi.events.reactor import AutoDispatchRule, EventReactor
 
@@ -600,6 +598,19 @@ class TestEventReactorFromConfig:
         reactor = EventReactor.from_config(config, cwd="/tmp/project")
         assert reactor.rules[0].allow_self_authored is True
 
+    def test_from_config_parses_dedup_only(self):
+        """dedup_only tracks duplicate deliveries without dispatching."""
+        config = [
+            {
+                "event": "github.issue_comment",
+                "workflow": "pr-comment-event-dedup",
+                "dedup_only": True,
+            },
+        ]
+        reactor = EventReactor.from_config(config, cwd="/tmp/project")
+        assert reactor.rules[0].dedup_only is True
+        assert reactor.rules[0].workflow == "pr-comment-event-dedup"
+
     def test_from_config_hygiene_flags_default(self):
         """Self-author skip is on by default (allow_self_authored defaults
         False)."""
@@ -618,6 +629,38 @@ class TestEventReactorFromConfig:
         reactor = EventReactor.from_config(config, cwd="/tmp/project",
                                            self_login="bobi")
         assert reactor.self_login == "bobi"
+
+    @patch("bobi.subagent.launch_agent")
+    def test_dedup_only_records_first_and_dedups_redelivery(self, mock_launch):
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="pr-comment-event-dedup",
+            match={"is_pull_request": True},
+            cooldown=1800,
+            dedup_only=True,
+            allow_self_authored=True,
+        )
+        reactor = EventReactor(rules=[rule], cwd="/tmp/project",
+                               self_login="bobi")
+        first = {
+            "type": "github.issue_comment",
+            "id": "delivery-1",
+            "topics": ["github:moda-labs/test"],
+            "fields": {
+                "number": 42,
+                "is_pull_request": True,
+                "comment_id": 123,
+                "sender": "bobi",
+            },
+        }
+        redelivery = {
+            **first,
+            "id": "delivery-2",
+        }
+
+        assert reactor.process(first) is None
+        assert reactor.process(redelivery) == "deduped"
+        mock_launch.assert_not_called()
 
 
 class TestConfigAutoDispatch:
@@ -687,7 +730,8 @@ class TestPrFeedbackDispatchHygiene:
         ]
 
     def _issue_comment_event(self, *, sender="reviewer1",
-                             comment_id=1, number=410, delivery="d1"):
+                             comment_id=1, number=410, delivery="d1",
+                             comment_body="Please add a test."):
         fields = {
             "action": "created",
             "number": number,
@@ -695,6 +739,7 @@ class TestPrFeedbackDispatchHygiene:
             "sender": sender,
             "is_pull_request": True,
             "comment_id": comment_id,
+            "comment_body": comment_body,
         }
         return {
             "type": "github.issue_comment",

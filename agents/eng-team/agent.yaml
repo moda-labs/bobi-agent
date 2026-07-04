@@ -91,28 +91,34 @@ auto_dispatch:
     suppress: true
     allow_self_authored: true
 
-  # pr-feedback guards (issue #411): the bot's OWN comments are skipped by
-  # DEFAULT (no flag needed — the lead posts a "Rendered spec" link per spec
-  # policy that must not spin up a feedback engineer). Draft PRs are NOT
-  # skipped — a held draft is exactly where feedback discussion belongs, and
-  # the self-author skip already stops the only loop that matters (per review,
-  # underminedsk 2026-06-22). The self-author skip needs the bot's GitHub
-  # login, resolved at startup via `gh api user`.
+  # Formal changes-requested reviews still dispatch deterministically. PR
+  # comments are routed by director markdown policy below, because question-only
+  # comments need direct answers rather than feedback workers.
   - event: github.pull_request_review
     match:
       review_state: changes_requested
     workflow: pr-feedback
     cooldown: 1800
 
+  # PR comments are delivered to the director for markdown-policy routing:
+  # question-only comments are answered directly; actionable requested-change
+  # text routes to pr-feedback. These structural dedup rules do not classify
+  # text or launch workers. They only drop redeliveries of the same stable
+  # comment id so one webhook + monitor replay cannot make the director act
+  # twice on the same visible comment.
   - event: github.pull_request_review_comment
-    workflow: pr-feedback
+    workflow: pr-comment-event-dedup
     cooldown: 1800
+    dedup_only: true
+    allow_self_authored: true
 
   - event: github.issue_comment
     match:
       is_pull_request: true
-    workflow: pr-feedback
+    workflow: pr-comment-event-dedup
     cooldown: 1800
+    dedup_only: true
+    allow_self_authored: true
 
   # issue-lifecycle / pr-closed legitimately react to the bot's OWN actions
   # (the bot self-assigns issues to start work; the bot merges PRs and that
