@@ -13,6 +13,10 @@ truststore.inject_into_ssl()
 import click
 
 from bobi import paths
+from bobi.install import (
+    install_pack as _install_pack,
+    write_install_gitignore as _write_install_gitignore,
+)
 
 from .__version__ import __version__
 
@@ -551,65 +555,6 @@ def supervise(start_args):
     raise SystemExit(supervisor.run())
 
 
-def _install_pack(pack_dir: Path, project_path: Path,
-                  local_source: bool = True, *, pinned: bool = False) -> None:
-    """Compose the pack's `from:` chain into run/package/ for runtime use.
-
-    The installed copy is a frozen runtime image: install regenerates it
-    verbatim from the pack source every time, including agent.yaml.
-    Machine- and runtime-specific variance enters through ${VAR}
-    references resolved from run/.env, never by editing the
-    installed copy.
-
-    A team may declare `from: <base-team>`; compose then walks the chain
-    (base → … → leaf) and merges the layers into one flat image (#446/#451).
-    A team with no `from:` composes to a single-layer image identical in
-    content to the team itself — the common case is unchanged. ``pinned``
-    resolves the chain registry-only at locked versions (CI/deploy).
-    """
-    import shutil
-
-    from bobi import compose as _compose
-
-    dest = paths.package_dir(project_path)
-    dest.mkdir(parents=True, exist_ok=True)
-
-    locked = _read_compose_lock(dest) if pinned else None
-    chain = _compose.resolve_chain(pack_dir, project_path, pinned=pinned,
-                                   locked=locked)
-
-    # Clear the previously frozen copy of each surface the composed chain
-    # contributes, so a re-install drops stale files (e.g. a tool the new chain
-    # no longer ships). A surface NO layer contributes is left untouched — the
-    # pre-compose install semantics — so package-added files (e.g. an extra
-    # `package/workflows/*.yaml`) survive a reinstall of the same team.
-    contributed = {sub for layer in chain
-                   for sub in ["roles", "tools", "workflows", "monitors", "context"]
-                   if (layer.dir / sub).is_dir()}
-    for sub in contributed:
-        d = dest / sub
-        if d.exists():
-            shutil.rmtree(d)
-
-    prov = _compose.compose(chain, dest)
-
-    # Seed workspace leaf → base (seed-if-absent), so an overlay's own template
-    # wins and the base only fills files the overlay doesn't supply. (Mirrors the
-    # deploy flatten's leaf-wins merge_workspace; user edits already on disk are
-    # never overwritten regardless of order.)
-    for layer in reversed(chain):
-        _seed_workspace(layer.dir, project_path)
-
-    # The leaf's directory name is the installed agent name (the team a user
-    # named on the CLI), regardless of how deep its `from:` chain runs.
-    cfg = _read_yaml(dest / "agent.yaml")
-    cfg.setdefault("agent", pack_dir.name)
-    _write_yaml(dest / "agent.yaml", cfg)
-
-    _write_compose_lock(dest, chain, prov)
-    _write_install_manifest(dest, pack_dir, local_source)
-
-
 def _materialize_local_deps(pack_dir: Path, project_path: Path, *,
                             non_interactive: bool) -> None:
     """Drive the local brain to install the team's declared deps (#428 Stage 5).
@@ -704,120 +649,6 @@ def _materialize_local_deps(pack_dir: Path, project_path: Path, *,
                    f"{', '.join(failed)}. The team still installed; fix these "
                    f"and re-run `bobi agents install ... --with-deps`, or "
                    f"`bobi agent {slot} doctor`.", err=True)
-
-
-def _read_yaml(path: Path) -> dict:
-    import yaml as _yaml
-    if not path.exists():
-        return {}
-    return _yaml.safe_load(path.read_text()) or {}
-
-
-def _write_yaml(path: Path, data: dict) -> None:
-    import yaml as _yaml
-    path.write_text(_yaml.dump(data, default_flow_style=False, sort_keys=False))
-
-
-def _read_compose_lock(dest: Path) -> dict[str, str]:
-    """The {team_name: version} map recorded by the last compose, used by
-    `install --pinned` to pin otherwise-floating `latest` refs reproducibly."""
-    import json as _json
-    f = dest / "compose-lock.json"
-    if not f.exists():
-        return {}
-    try:
-        data = _json.loads(f.read_text())
-    except (OSError, ValueError):
-        return {}
-    locked = {}
-    for layer in data.get("chain", []):
-        ref, ver = layer.get("ref"), layer.get("version")
-        if ref and ver:
-            name = ref.split("@", 1)[0]
-            locked[name] = ver
-    return locked
-
-
-def _write_compose_lock(dest: Path, chain, prov) -> None:
-    """Record the resolved `from:` chain + provenance so a deploy/outside-org
-    install is reproducible and `doctor` can flag a drifted local sibling."""
-    import json as _json
-    (dest / "compose-lock.json").write_text(_json.dumps({
-        "chain": prov.chain,
-        "provenance": prov.items,
-        "warnings": prov.warnings,
-    }, indent=1))
-
-
-def _seed_workspace(pack_dir: Path, project_path: Path) -> None:
-    """Seed <run>/workspace/ from the pack's workspace/ templates.
-
-    Workspace files are user-owned domain content (context the user fills
-    in, directories agents write into). Unlike the frozen image, each file
-    is copied only if absent — reinstall never overwrites user edits.
-    """
-    import shutil
-
-    src = pack_dir / "workspace"
-    if not src.is_dir():
-        return
-    dest = paths.workspace_dir(project_path)
-    for f in sorted(src.rglob("*")):
-        rel = f.relative_to(src)
-        target = dest / rel
-        if f.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-        elif not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(f, target)
-
-
-def _write_install_manifest(dest: Path, pack_dir: Path,
-                            local_source: bool) -> None:
-    """Record a hash of every installed file so doctor can flag drift.
-
-    Edits to a frozen image are lost on the next install; the manifest
-    lets `bobi agent <name> doctor` warn before that happens.
-    """
-    import hashlib
-    import json as _json
-
-    files = {}
-    for subdir in ["roles", "tools", "workflows", "monitors", "context"]:
-        d = dest / subdir
-        if d.is_dir():
-            for f in sorted(d.rglob("*")):
-                if f.is_file() and "__pycache__" not in f.parts:
-                    files[f.relative_to(dest).as_posix()] = \
-                        hashlib.sha256(f.read_bytes()).hexdigest()
-    for name in ["agent.yaml", "agent.md"]:
-        f = dest / name
-        if f.exists():
-            files[name] = hashlib.sha256(f.read_bytes()).hexdigest()
-
-    (dest / "install-manifest.json").write_text(_json.dumps({
-        "agent": pack_dir.name,
-        "source": str(pack_dir),
-        "frozen": local_source,
-        "files": files,
-    }, indent=1))
-
-
-def _write_install_gitignore(project_path: Path, local_source: bool) -> None:
-    """Write package/.gitignore based on which install path was taken.
-
-    Runtime state is always ignored. When the team source lives in the
-    repo (local source of truth), the installed copies are build artifacts
-    and get ignored too. A downloaded team's installed copy IS the source
-    of truth, so it stays check-in-able. Install owns this file and
-    rewrites it each run so switching paths doesn't leave stale entries.
-    """
-    entries = [".gitignore", "install-manifest.json", "compose-lock.json"]
-    if local_source:
-        entries += ["roles/", "tools/", "workflows/", "monitors/", "context/",
-                    "agent.md", "agent.yaml"]
-    gitignore = paths.package_dir(project_path) / ".gitignore"
-    gitignore.write_text("\n".join(entries) + "\n")
 
 
 @main.command("login-bootstrap")
@@ -1268,6 +1099,67 @@ def setup(name, model, resume):
 
     from bobi.setup import run_setup
     raise SystemExit(run_setup(project_path, model=model, resume=resume))
+
+
+@main.group("app")
+def app_group():
+    """Manage the Bobi web app (dashboard for all your agents)."""
+
+
+@app_group.command("start")
+@click.option("--no-browser", is_flag=True, help="Don't open a browser.")
+def app_start(no_browser):
+    """Start the web app in the background (idempotent)."""
+    from bobi.webapp import daemon
+
+    try:
+        st = daemon.start(open_browser=not no_browser)
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"bobi app is running at {st.url} (pid {st.pid})")
+
+
+@app_group.command("stop")
+def app_stop():
+    """Stop the web app daemon."""
+    from bobi.webapp import daemon
+
+    st = daemon.stop()
+    click.echo(f"Stopped (pid {st.pid})." if st.pid else "Not running.")
+
+
+@app_group.command("restart")
+def app_restart():
+    """Restart the web app daemon."""
+    from bobi.webapp import daemon
+
+    daemon.stop()
+    try:
+        st = daemon.start(open_browser=False)
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"bobi app is running at {st.url} (pid {st.pid})")
+
+
+@app_group.command("status")
+def app_status():
+    """Show whether the web app daemon is running."""
+    from bobi.webapp import daemon
+
+    st = daemon.status()
+    if st.running:
+        click.echo(f"Running at {st.url} (pid {st.pid})")
+    else:
+        click.echo("Not running. Start it with `bobi app start`.")
+        raise SystemExit(1)
+
+
+@app_group.command("run", hidden=True)
+def app_run():
+    """Run the web app server in the foreground (the daemon child)."""
+    from bobi.webapp import daemon
+
+    raise SystemExit(daemon.run_foreground())
 
 
 @main.command()

@@ -121,7 +121,15 @@ bobi agent eng-team ask "What can I help with right now?"
 bobi agent eng-team subagents launch --role engineer --task "Fix the login bug"
 ```
 
-Prefer to design your own agent from scratch? Run the interactive wizard:
+Prefer a visual home for all of this? The unified web app opens as a
+dashboard of every agent on your machine - create a team in a guided
+conversation, launch it, and chat with its agents, all in the browser:
+
+```bash
+bobi app start        # runs in the background; stop/restart/status manage it
+```
+
+Prefer to design your own agent from scratch in a standalone wizard? Run:
 
 ```bash
 bobi setup            # go from an idea to a runnable agent, interactively
@@ -181,8 +189,17 @@ commit this file); you can also supply them as environment variables.
 
 You don't run the event server yourself - `bobi agent <name> start` launches a
 local one automatically. To receive webhooks from the public internet (Slack,
-GitHub, Linear), point the agent at a deployed event server: the shared Bobi
-cloud Worker by default, or your own Cloudflare Worker.
+GitHub, Linear), use the **Webhook ingress** row in `bobi setup`'s Connections
+card. It can keep the team local-only, verify a quick tunnel such as
+cloudflared/ngrok to `localhost:8080`, or save a durable HTTPS event server
+(`BOBI_EVENT_SERVER`) such as the shared Bobi cloud Worker or your own
+Cloudflare Worker. Setup-authored `agent.yaml` files reference that optional
+environment variable so verified public ingress is used when present, while an
+unset value leaves the automatic local event server path unchanged.
+
+If you already run the local event server behind a Cloudflare tunnel, use the
+quick tunnel option; the wizard does not replace that topology, it validates and
+persists the tunnel URL for webhook-backed services.
 
 ### Talk to your agent from Slack (optional)
 
@@ -336,9 +353,16 @@ the prompt-injection surface, and trusted team code. Event-bus internals:
 git clone https://github.com/moda-labs/bobi-agent.git
 cd bobi-agent
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-pytest tests/ --ignore=tests/integration/
+pip install -e ".[dev,kb]"
+pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q
 ```
+
+That install is intended to match the CI `Unit tests` job in
+`.github/workflows/ci.yml`. It includes the normal test tools plus
+knowledge-base dependencies such as `fastembed`, `sqlite-vec`, and their numeric
+stack, including `numpy`, because full unit-test collection imports KB modules.
+Use the narrower `.[dev]` install for e2e-only work where the KB test surface is
+not being collected.
 
 ## License
 

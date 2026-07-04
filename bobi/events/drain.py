@@ -63,6 +63,21 @@ def _thread_key(event: dict) -> tuple[str, str, str]:
     return (event.get("source", ""), channel, thread_ts)
 
 
+def _is_passive_slack_thread_reply(event: dict) -> bool:
+    """Whether a Slack event should be delivered without placeholder UX."""
+    return (
+        event.get("source") == "slack"
+        and event.get("type") == "slack.thread_reply"
+    )
+
+
+def _without_placeholder_fields(event: dict) -> dict:
+    """Return an event copy with Slack placeholder metadata removed."""
+    fields = dict(event.get("fields", {}))
+    fields.pop("placeholder_ts", None)
+    return dict(event, fields=fields)
+
+
 def _prepare_chat_events(events: list[dict]) -> list[dict]:
     """Run input channel handlers on chat events, returning augmented copies.
 
@@ -86,6 +101,10 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
 
     result: list[dict] = []
     for event in events:
+        if _is_passive_slack_thread_reply(event):
+            result.append(_without_placeholder_fields(event))
+            continue
+
         source = event.get("source", "")
         handler = get_channel_handler(source)
         if handler is None:
@@ -234,6 +253,9 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 except Exception:
                     log.exception("Reactor failed processing event %s — "
                                   "delivering it un-dispatched", e.get("type"))
+            if reactor_result == "deduped":
+                log.info("Dropping duplicate event delivery %s", e.get("type"))
+                continue
             target = chat_events if e.get("delivery") == "chat" else bulk_events
             target.append((reactor_result, e))
 

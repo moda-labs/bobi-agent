@@ -5,6 +5,13 @@
    never in the chat. Build/Done reuse the generating + done views. */
 (() => {
   const NONCE = document.querySelector('meta[name="bobi-nonce"]').content;
+  // Mount prefix when hosted inside the unified web app ("" standalone).
+  // Every /api and /static request goes through the helpers below, which
+  // prefix it - keep it that way.
+  const BASE = (document.querySelector('meta[name="bobi-base"]') || {}).content || "";
+  // Hosted inside the unified app: the dashboard is home. The SPA never
+  // shows its own hub, and every home-exit leaves to the shell instead.
+  const HOSTED = !!BASE;
   const H = { "x-bobi-webui-token": NONCE };
   const $ = (sel, el = document) => el.querySelector(sel);
   // Escapes for both element text AND double/single-quoted attribute contexts
@@ -32,6 +39,12 @@
     { key: "slack", name: "Slack", soon: false },
     { key: "telegram", name: "Telegram", soon: true },
   ];
+  const INGRESS_LABELS = {
+    local: "Local only",
+    quick_tunnel: "Quick tunnel",
+    bobi_cloud: "Bobi cloud",
+    custom_worker: "Custom Worker",
+  };
 
   let S = null;            // latest serialized state
   let _connData = null;    // last /api/connect payload (drives connect cards)
@@ -73,7 +86,7 @@
   // --- api helpers -------------------------------------------------------
   async function getJSON(path) {
     let r;
-    try { r = await fetch(path, { headers: H }); }
+    try { r = await fetch(BASE + path, { headers: H }); }
     catch (e) { markDisconnected(); throw e; }   // network failure = server gone
     markConnected();
     return r.json();
@@ -81,7 +94,7 @@
   async function postJSON(path, body) {
     let r;
     try {
-      r = await fetch(path, {
+      r = await fetch(BASE + path, {
         method: "POST", headers: { ...H, "content-type": "application/json" },
         body: JSON.stringify(body || {}),
       });
@@ -101,7 +114,7 @@
   async function sse(path, body, handlers) {
     let res;
     try {
-      res = await fetch(path, {
+      res = await fetch(BASE + path, {
         method: "POST", headers: { ...H, "content-type": "application/json" },
         body: JSON.stringify(body || {}),
       });
@@ -145,6 +158,22 @@
   async function refresh() { S = await getJSON("/api/state"); render(); }
   async function boot() {
     S = await getJSON("/api/state");
+    if (HOSTED) {
+      // The unified app already welcomed the user and owns the home screen.
+      welcomed = true;
+      hostedChrome();
+      if (S.finished) { location.href = "/#/"; return; }
+      // Edit-an-existing-team deep link: /setup/?open=<source path> jumps
+      // straight into the open-mode conversation (cards pre-filled).
+      const openPath = new URLSearchParams(location.search).get("open");
+      if (openPath && S.stage === "start") {
+        const r = await postJSON("/api/start",
+          { mode: "open", location: openPath, team_path: openPath });
+        if (r.ok) { S = r.data; } else { toast(r.data.error || "couldn't open the team"); }
+      }
+      render();
+      return;
+    }
     // A finished session returns to the hub; so do returning users who already
     // have teams and aren't mid-setup. New users get the welcome on-ramp.
     if (S.finished) {
@@ -154,6 +183,11 @@
       catch { /* no hub — fall through to the welcome on-ramp */ }
     }
     render();
+  }
+  // Hosted titlebar: the address chip becomes the way back to the dashboard.
+  function hostedChrome() {
+    const addr = document.querySelector(".titlebar .addr");
+    if (addr) addr.innerHTML = '<a class="addr-back" href="/#/">&larr; dashboard</a>';
   }
   async function go(stage) {
     const r = await postJSON("/api/advance", { to: stage });
@@ -174,6 +208,7 @@
   // entry), so its Back routes by where it was entered from: back to the team
   // hub, or to the welcome on-ramp on first run.
   function introBack() {
+    if (HOSTED) { location.href = "/#/"; return; }
     if (introFrom === "hub") { atHome = true; render(); }
     else { welcomed = false; render(); }
   }
@@ -181,6 +216,7 @@
   // welcome screen both call this. The hub overlays any stage and is re-entrant,
   // so leaving mid-flow is safe; the server keeps each team's state.
   function goHome() {
+    if (HOSTED) { location.href = "/#/"; return; }
     if (atHome) { renderHome(); return; }
     atHome = true; welcomed = true;   // don't fall back to the welcome on-ramp
     building = false; buildGen++;      // supersede any in-flight build
@@ -319,12 +355,13 @@
   // Two ways in: start from a registry "template" (download + reverse-fill,
   // non-lossy edit) or design a new team from scratch (auto-named in chat).
   // Modify-an-existing-team will return later in a different shape.
-  let introRegistry = null, introBase = "bobi", introLoc = "";
+  let introRegistry = null, introBase = "bobi", introLoc = "", introLocChanged = false;
   async function renderIntro() {
     setPanes("1fr");
     const data = await getJSON("/api/intro");
     introBase = data.default_location || introBase;
     introLoc = introBase;
+    introLocChanged = false;
     drawIntro();
     loadTemplates();
   }
@@ -404,7 +441,8 @@
   function wireIntro() {
     const lc = $("#loc-change");
     if (lc) lc.addEventListener("click", () => openFolderPicker(p => {
-      introLoc = p; const lp = $("#loc-path"); if (lp) { lp.textContent = p; lp.title = p; }
+      introLoc = p; introLocChanged = true;
+      const lp = $("#loc-path"); if (lp) { lp.textContent = p; lp.title = p; }
     }));
   }
   // Shared start path: disables the clicked control, posts, advances on success.
@@ -761,11 +799,27 @@
     // Venn is ONE account-level connection many services share — pinned as the
     // top row (shown whenever we have connection data) so it can be set up /
     // managed first; the per-service rows follow.
+    const ingress = ingressRow();
     const venn = cards ? vennAccountRow(vennConfigured) : "";
     return `<div class="ucard ${(sp.services || []).length ? "filled" : "empty"}">
       <div class="ut">Connections ${slotDot(ok)}</div>
-      <div class="ud">${venn}${body}</div>
+      <div class="ud">${ingress}${venn}${body}</div>
       <div class="uadd"><button class="lnk add" data-addconn>+ add a connection</button></div></div>`;
+  }
+  function ingressRow() {
+    const ing = S.ingress || { mode: "local", url: "", verified: false };
+    const label = INGRESS_LABELS[ing.mode] || "Ingress";
+    const detail = ing.mode === "local"
+      ? "loopback only"
+      : (ing.url || "needs URL");
+    const badge = ing.verified
+      ? `<span class="cbadge connected">${CHECK} verified</span>`
+      : ing.error
+      ? `<span class="cbadge warn">check failed</span>`
+      : `<span class="cbadge">not checked</span>`;
+    return `<div class="uconn ingress-row">
+      <span><b>Webhook ingress</b><span class="ctag">${esc(label)} · ${esc(detail)}</span></span>
+      <span class="cright">${badge}<button class="lnk" data-ingressopen>Configure</button></span></div>`;
   }
   // Account-level Venn: one connection the user manages globally; any number of
   // Venn-backed services (Gmail, Slack, Salesforce…) are reached through it. One
@@ -880,6 +934,94 @@
     S = r.data; renderUniCards();
   }
 
+  function openIngressModal() {
+    const cur = S.ingress || { mode: "local", url: "" };
+    const ov = document.createElement("div");
+    ov.className = "secret-ov";
+    ov.id = "ingress-ov";
+    const team = S.team_name || "<name>";
+    ov.innerHTML = `<div class="secret-panel ingress-panel">
+      <div class="sp-head"><b>Webhook ingress</b><button class="x" id="ingress-close">×</button></div>
+      <div class="sp-body">
+        <p class="fhelp">Pick how GitHub, Slack, and Linear can reach the event server. Local-only is fine for command-line teams; webhook services need an internet-facing HTTPS URL.</p>
+        <div class="ingress-options">
+          ${ingressOption("local", "Local only", "No public webhooks. Bobi auto-starts loopback when the team runs.")}
+          ${ingressOption("quick_tunnel", "Quick tunnel", "Fast local test with cloudflared or ngrok in front of localhost:8080.")}
+          ${ingressOption("bobi_cloud", "Bobi cloud", "Durable shared Worker for hosted webhook delivery.")}
+          ${ingressOption("custom_worker", "Custom Worker", "Durable event server you operate, usually a Cloudflare Worker.")}
+        </div>
+        <div id="ingress-fields"></div>
+        <div class="sp-actions"><button class="btn primary sm" id="ingress-save">Verify & save</button></div>
+        <div class="mcp-status" id="ingress-status"></div>
+      </div></div>`;
+    document.body.appendChild(ov);
+    let mode = cur.mode || "local";
+    ov.addEventListener("click", e => {
+      if (e.target.id === "ingress-close" || e.target === ov) { ov.remove(); return; }
+      const opt = e.target.closest("[data-ingressmode]");
+      if (opt) { mode = opt.dataset.ingressmode; draw(); return; }
+    });
+    $("#ingress-save").addEventListener("click", () => verifyIngress(mode, ov));
+    function draw() {
+      ov.querySelectorAll("[data-ingressmode]").forEach(b => b.classList.toggle("on", b.dataset.ingressmode === mode));
+      const url = cur.mode === mode ? (cur.url || "") : "";
+      let html = "";
+      if (mode === "local") {
+        html = `<div class="ingress-note">
+          <b>Local-only event server</b>
+          <span>Run <code>bobi agent ${esc(team)} start</code>. Bobi will start the loopback server automatically; external webhook providers cannot reach it.</span>
+        </div>`;
+      } else if (mode === "quick_tunnel") {
+        html = `<div class="ingress-note">
+          <b>Quick tunnel</b>
+          <span>Start the local event server, run a tunnel, then paste its HTTPS URL. The empty env override forces loopback startup even if a remote URL was previously saved.</span>
+          <div class="cmd mini"><span class="pr">$</span><span class="cmd-text">BOBI_EVENT_SERVER= bobi agent ${esc(team)} event-server start
+cloudflared tunnel --url http://127.0.0.1:8080</span></div>
+        </div>
+        <label class="fld"><span class="flab">Tunnel URL</span>
+          <input id="ingress-url" placeholder="https://example.trycloudflare.com" autocomplete="off" value="${esc(url)}"></label>`;
+      } else if (mode === "bobi_cloud") {
+        html = `<div class="ingress-note">
+          <b>Bobi cloud Worker</b>
+          <span>Setup will verify the shared Worker and save it as <code>BOBI_EVENT_SERVER</code> for this agent.</span>
+        </div>`;
+      } else {
+        html = `<div class="ingress-note">
+          <b>Custom Worker</b>
+          <span>Use your own deployed event server. Verification checks <code>/health</code> before saving.</span>
+        </div>
+        <label class="fld"><span class="flab">Event server URL</span>
+          <input id="ingress-url" placeholder="https://events.example.workers.dev" autocomplete="off" value="${esc(url)}"></label>`;
+      }
+      $("#ingress-fields").innerHTML = html;
+      $("#ingress-save").textContent = mode === "local" ? "Use local only" : "Verify & save";
+      const inp = $("#ingress-url");
+      if (inp) inp.addEventListener("keydown", e => {
+        if (e.key === "Enter") { e.preventDefault(); verifyIngress(mode, ov); }
+      });
+    }
+    draw();
+  }
+  function ingressOption(mode, label, sub) {
+    return `<button class="ingress-opt" type="button" data-ingressmode="${mode}">
+      <b>${esc(label)}</b><span>${esc(sub)}</span></button>`;
+  }
+  async function verifyIngress(mode, ov) {
+    const st = $("#ingress-status");
+    const url = ($("#ingress-url") && $("#ingress-url").value || "").trim();
+    st.innerHTML = `<div class="fhelp"><span class="spin"></span> Checking ingress…</div>`;
+    const r = await postJSON("/api/ingress/verify", { mode, url });
+    if (!r.ok || !r.data.ok) {
+      st.innerHTML = `<div class="mcp-err">${esc((r.data && (r.data.error || r.data.message)) || "couldn't verify ingress")}</div>`;
+      if (r.data && r.data.state) { S = r.data.state; renderUniCards(); }
+      return;
+    }
+    S = r.data.state;
+    renderUniCards();
+    ov.remove();
+    toast("ingress verified");
+  }
+
   // --- conversation ------------------------------------------------------
   function cueText() {
     const r = S.spec.readiness.goal;
@@ -989,7 +1131,7 @@
   let editSecrets = new Set();   // secret vars temporarily re-opened for editing
   // Copy a saved credential to the clipboard without ever showing it on screen.
   async function copySecret(varName) {
-    const r = await fetch("/api/credential/value?var=" + encodeURIComponent(varName), { headers: H });
+    const r = await fetch(BASE + "/api/credential/value?var=" + encodeURIComponent(varName), { headers: H });
     if (!r.ok) { toast("nothing to copy"); return; }
     const { value } = await r.json();
     try { await navigator.clipboard.writeText(value); toast(`${varName} copied`); }
@@ -1381,8 +1523,20 @@
       toast(r.ok ? "Opened the team folder." : (r.data.error || "couldn't open the folder"));
     });
     $("#fd-finish").addEventListener("click", async () => {
-      const b = $("#fd-finish"); b.disabled = true; b.textContent = "Finishing…";
-      try { await postJSON("/api/finish", {}); } catch { /* ignore */ }
+      const b = $("#fd-finish"); b.disabled = true;
+      // Hosted in the unified app (BASE set), finish also launches the team
+      // before returning — say so while the request runs.
+      b.textContent = BASE ? "Launching…" : "Finishing…";
+      let r = null;
+      try { r = await postJSON("/api/finish", {}); } catch { /* ignore */ }
+      const d = (r && r.data) || {};
+      if (d.redirect) {
+        // Launched — back to the unified app (dashboard / agent view).
+        _finished = true;
+        location.href = d.redirect;
+        return;
+      }
+      if (d.launch_error) toast("Launch failed: " + d.launch_error);
       renderFinished();
     });
 
@@ -1520,18 +1674,19 @@
       </div>
       <section class="ns-step" id="ns-step"></section>
       <div class="ns-exit">
-        <button class="btn ghost" id="ns-home">Go to homepage</button>
-        <button class="btn ghost" id="ns-close">Close &amp; end setup</button>
+        <button class="btn ghost" id="ns-home">${HOSTED ? "Go to dashboard" : "Go to homepage"}</button>
+        ${HOSTED ? "" : `<button class="btn ghost" id="ns-close">Close &amp; end setup</button>`}
       </div>
     </main>`;
     drawNsStep();
     $("#ns-prev").addEventListener("click", () => { if (nsIndex > 0) { nsIndex--; drawNsStep(); } });
     $("#ns-next").addEventListener("click", () => {
       if (nsIndex < nsSteps().length - 1) { nsIndex++; drawNsStep(); }
-      else { atHome = true; renderHome(); }
+      else { goHome(); }
     });
-    $("#ns-home").addEventListener("click", () => { atHome = true; renderHome(); });
-    $("#ns-close").addEventListener("click", endSession);
+    $("#ns-home").addEventListener("click", goHome);
+    const nsClose = $("#ns-close");
+    if (nsClose) nsClose.addEventListener("click", endSession);
   }
   function drawNsStep() {
     const steps = nsSteps();
@@ -1578,7 +1733,9 @@
     });
   }
   // Close & end setup: stop the local server and leave a static goodbye —
-  // nothing left on screen depends on it.
+  // nothing left on screen depends on it. Standalone only: hosted in the
+  // unified app the dashboard owns the server's lifecycle (the Close button
+  // isn't rendered there).
   async function endSession() {
     _finished = true;   // suppress the disconnect overlay; this exit is chosen
     try { await postJSON("/api/shutdown", {}); } catch { /* it's exiting */ }
@@ -2034,8 +2191,17 @@
     if (tmpl) {
       if (!tmpl.disabled) {
         const name = tmpl.dataset.template;
-        startTeam({ mode: "registry", team: name,
-          location: introLoc.replace(/\/+$/, "") + "/" + name }, tmpl, "Downloading…");
+        // At the default location the server picks the template's own library
+        // slot (agents/<name>/src). Appending the name to .../new-agent/src
+        // here would bury the team one level deeper than the home scan reads.
+        // A user-chosen folder is a container: the template lands in a child
+        // named after it.
+        const body = { mode: "registry", team: name };
+        // slugify the child folder: the name comes from the registry (possibly
+        // third-party) and must not steer the path (e.g. "../..").
+        if (introLocChanged)
+          body.location = introLoc.replace(/\/+$/, "") + "/" + (slugify(name) || "team");
+        startTeam(body, tmpl, "Downloading…");
       }
       return;
     }
@@ -2079,6 +2245,7 @@
     }
     const sco = e.target.closest("[data-secretcopy]");
     if (sco) { copySecret(sco.dataset.secretcopy); return; }
+    if (e.target.closest("[data-ingressopen]")) { openIngressModal(); return; }
     const vs = e.target.closest("[data-vennsetup]");
     if (vs) { openVennSetup(); return; }
     if (e.target.closest("[data-vennconnect]")) { vennConnect(); return; }
@@ -2107,7 +2274,7 @@
   async function heartbeat() {
     if (_finished) return;
     try {
-      const r = await fetch("/api/ping", { headers: H });
+      const r = await fetch(BASE + "/api/ping", { headers: H });
       if (r.ok) markConnected(); else markDisconnected();
     } catch { markDisconnected(); }
   }

@@ -66,6 +66,7 @@ class TestDeterministicBodies:
         cfg = yaml.safe_load(build_agent_yaml(_spec_state()))
         assert cfg["agent"] == "triage-bot"
         assert cfg["entry_point"] == "triage-lead"
+        assert cfg["event_server"] == "${BOBI_EVENT_SERVER:-}"
         names = {s["name"] for s in cfg["services"]}
         assert names == {"github", "slack"}
         slack = next(s for s in cfg["services"] if s["name"] == "slack")
@@ -328,6 +329,19 @@ class TestNonLossyMerges:
         s.team_name = "new-name"
         merged = yaml.safe_load(authoring.merge_agent_yaml(existing, s))
         assert merged["agent"] == "new-name"
+
+    def test_merge_agent_yaml_adds_optional_event_server_reference(self):
+        existing = "agent: legacy\nversion: 0.1.0\nentry_point: lead\n"
+        merged = yaml.safe_load(authoring.merge_agent_yaml(existing, _spec_state()))
+        assert merged["event_server"] == "${BOBI_EVENT_SERVER:-}"
+
+    def test_merge_agent_yaml_preserves_existing_event_server(self):
+        existing = (
+            "agent: legacy\nversion: 0.1.0\nentry_point: lead\n"
+            "event_server: https://events.test\n"
+        )
+        merged = yaml.safe_load(authoring.merge_agent_yaml(existing, _spec_state()))
+        assert merged["event_server"] == "https://events.test"
 
     def test_merge_monitors_unions_by_name(self):
         existing = ("monitors:\n  - name: hand-written\n"

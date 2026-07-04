@@ -479,6 +479,28 @@ mono labels, system fonts, no build step.
   defense-in-depth. In both modes the browser talks to *localhost*, so the same
   loopback Host guard + token check as setup applies unchanged.
 
+## Unified web app (`bobi app`) — #525
+
+One machine-scoped app over everything above. `bobi app start` runs a
+background daemon (state under `$BOBI_HOME/webapp/`, persisted token, default
+port 8642) serving a shell with a hash router:
+
+- **`#/` Dashboard** - every agent slot on the machine (running / stopped /
+  design-only) with start/stop/open actions. Subsumes the "two homes" problem:
+  the setup hub's design library and the runtime roster share this one home.
+- **`#/agents/<name>`** - the Agent UI above, as a route; endpoints are
+  team-scoped (`/api/agents/<name>/subagents`, `.../chat`) and resolve the
+  runtime per request. Chat is submit-then-poll (no held-open request).
+- **`#/setup`** - a create-team form that hands off to the full setup app,
+  mounted unmodified under `/setup/` (the SPA prefixes URLs with a `{{BASE}}`
+  mount prefix; standalone `bobi setup` passes an empty prefix and is
+  unchanged). In hosted mode Finish installs, **launches**, and returns to
+  `#/agents/<name>` instead of printing a start command.
+
+Same design language verbatim: tokens.css, warm chrome, one dark slab, amber
+accent. The standalone `bobi setup` and container `ui` surfaces keep working
+during the transition.
+
 ## Decisions log
 | date | decision | rationale |
 |---|---|---|

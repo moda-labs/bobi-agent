@@ -12,6 +12,7 @@ import pytest
 
 from bobi import paths
 from bobi.workflow.schema import (
+    DEFAULT_ROUTE_LOOP_MAX_ITERATIONS,
     Workflow, StepDef, HandoffContract, load_workflow,
 )
 from bobi.workflow.orchestrator import (
@@ -92,6 +93,137 @@ class TestSchemaLoad:
         assert step.condition == "needs_spec == true"
         assert step.goto == "spec"
         assert step.else_goto == "implement"
+
+    def test_load_route_iteration_cap(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: bounded-route
+            steps:
+              - name: review
+                prompt: "Review"
+              - name: gate
+                if: "clean == true"
+                goto: done
+                else: review
+                max_iterations: 2
+                on_exhausted: escalate
+              - name: done
+                prompt: "Done"
+              - name: escalate
+                prompt: "Escalate"
+        """))
+        wf = load_workflow(f)
+        step = wf.step_by_name("gate")
+        assert step.max_iterations == 2
+        assert step.on_exhausted == "escalate"
+
+    def test_applies_default_cap_to_back_edge(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: default-capped-route
+            steps:
+              - name: review
+                prompt: "Review"
+              - name: gate
+                if: "clean == true"
+                goto: done
+                else: review
+              - name: done
+                prompt: "Done"
+        """))
+        wf = load_workflow(f)
+        assert (
+            wf.step_by_name("gate").max_iterations
+            == DEFAULT_ROUTE_LOOP_MAX_ITERATIONS
+        )
+
+    def test_applies_default_cap_to_self_loop(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: default-capped-self-loop
+            steps:
+              - name: gate
+                if: "ready == true"
+                goto: done
+                else: gate
+              - name: done
+                prompt: "Done"
+        """))
+        wf = load_workflow(f)
+        assert (
+            wf.step_by_name("gate").max_iterations
+            == DEFAULT_ROUTE_LOOP_MAX_ITERATIONS
+        )
+
+    def test_max_visits_alias_loads_as_iteration_cap(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: alias-route
+            steps:
+              - name: review
+                prompt: "Review"
+              - name: gate
+                if: "clean == true"
+                goto: done
+                else: review
+                max_visits: 3
+              - name: done
+                prompt: "Done"
+        """))
+        wf = load_workflow(f)
+        assert wf.step_by_name("gate").max_iterations == 3
+
+    def test_rejects_float_iteration_cap(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: float-cap
+            steps:
+              - name: gate
+                if: "ready == true"
+                goto: done
+                else: gate
+                max_iterations: 2.9
+              - name: done
+                prompt: "Done"
+        """))
+        with pytest.raises(ValueError, match="positive integer"):
+            load_workflow(f)
+
+    def test_rejects_backward_on_exhausted_target(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: backward-exhausted
+            steps:
+              - name: retry
+                prompt: "Retry"
+              - name: gate
+                if: "ready == true"
+                goto: done
+                else: retry
+                max_iterations: 2
+                on_exhausted: retry
+              - name: done
+                prompt: "Done"
+        """))
+        with pytest.raises(ValueError, match="on_exhausted"):
+            load_workflow(f)
+
+    def test_rejects_missing_on_exhausted_target(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: missing-exhausted
+            steps:
+              - name: gate
+                if: "ready == true"
+                goto: done
+                else: gate
+                max_iterations: 2
+                on_exhausted: missing
+              - name: done
+                prompt: "Done"
+        """))
+        with pytest.raises(ValueError, match="on_exhausted"):
+            load_workflow(f)
 
     def test_load_await_step(self, tmp_path):
         f = tmp_path / "test.yaml"
@@ -366,6 +498,46 @@ class TestRunWorkflow:
         ])
         result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", run_key="1")
         assert result is True
+
+    def test_route_iteration_cap_routes_to_on_exhausted(self, tmp_path, monkeypatch):
+        _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        review_handoffs = []
+
+        def _fake_handoff(session_name, step_name):
+            if step_name == "review":
+                review_handoffs.append(session_name)
+                return {"clean": False}
+            return {}
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="review", prompt="review",
+                    handoff=HandoffContract(required=["clean"])),
+            StepDef(name="gate", condition="clean == true", goto="done",
+                    else_goto="review", max_iterations=2,
+                    on_exhausted="escalate"),
+            StepDef(name="done", prompt="done"),
+            StepDef(name="escalate", prompt="escalate"),
+        ])
+
+        with patch("bobi.workflow.orchestrator._read_handoff",
+                   side_effect=_fake_handoff):
+            result = self._mock_asyncio_run(
+                wf, task="t", repo="r", cwd="/tmp", run_key="1",
+            )
+
+        assert result is True
+        assert len(review_handoffs) == 2
+
+    def test_route_iteration_cap_without_on_exhausted_fails(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="gate", condition="ready == true", goto="done",
+                    else_goto="gate", max_iterations=1),
+            StepDef(name="done", prompt="done"),
+        ])
+
+        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", run_key="1")
+
+        assert result is False
 
     def test_session_name_is_deterministic(self):
         name1 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "42")

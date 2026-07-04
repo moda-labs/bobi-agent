@@ -119,6 +119,28 @@ class Spec:
 
 
 @dataclass
+class Ingress:
+    """How public webhooks reach this setup's event server.
+
+    ``mode`` is one of:
+      - local: loopback-only, no public webhook ingress
+      - quick_tunnel: temporary public tunnel to the local event server
+      - bobi_cloud: shared Bobi Worker
+      - custom_worker: user-managed public Worker/event server
+
+    The selected URL is persisted for setup resume and, for public modes, saved
+    to run/.env as BOBI_EVENT_SERVER so generated integration helpers point at
+    the verified ingress path.
+    """
+
+    mode: str = "local"
+    url: str = ""
+    verified: bool = False
+    verified_at: str = ""
+    error: str = ""
+
+
+@dataclass
 class SetupState:
     stage: Stage = Stage.START
     mode: str = "create"             # "create" | "open"
@@ -128,6 +150,7 @@ class SetupState:
     source_dir: str = ""
     chat: str = ""                   # how you talk to the team: "cli"|"slack"|"telegram"
     spec: Spec = field(default_factory=Spec)
+    ingress: Ingress = field(default_factory=Ingress)
 
     # The brain's current interview focus, so the panel can show where we are:
     # "goal" | "role:<slug>" | "automations" | "connections" | "wrap" (or "").
@@ -222,6 +245,11 @@ class SetupState:
             spec_fields = set(Spec.__dataclass_fields__)
             data["spec"] = Spec(**{k: v for k, v in raw_spec.items()
                                    if k in spec_fields})
+        raw_ingress = data.get("ingress")
+        if isinstance(raw_ingress, dict):
+            ingress_fields = set(Ingress.__dataclass_fields__)
+            data["ingress"] = Ingress(**{k: v for k, v in raw_ingress.items()
+                                         if k in ingress_fields})
         known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in known})
 

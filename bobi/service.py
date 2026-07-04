@@ -721,6 +721,33 @@ def send_message(
     return MessageResult(address=address, response=response)
 
 
+def ask(
+    project_path: Path,
+    agent: str,
+    text: str,
+    *,
+    sender: str = "web-ui",
+    timeout: int = 300,
+) -> MessageResult:
+    """Blocking chat with one live session, persisted to its web-UI chat log.
+
+    Only addresses sessions that are actually live — a caller (e.g. a web UI)
+    can never fan a message at an arbitrary name. The exchange is appended to
+    the session's ``webui-chat.jsonl`` so a chat panel survives refresh."""
+    project_path = _bind(project_path)
+    if agent not in {e.name for e in list_agents(project_path)}:
+        raise MessageDeliveryError(f"unknown agent '{agent}'")
+
+    result = send_message(project_path, text, wait=True, session=agent,
+                          timeout=timeout, sender=sender)
+
+    from bobi.chat_history import append_chat
+
+    append_chat(project_path, agent, "user", text)
+    append_chat(project_path, agent, "agent", result.response)
+    return result
+
+
 def _parse_local_event_server_port(url: str) -> int | None:
     if not url:
         return None
