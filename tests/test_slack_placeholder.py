@@ -332,6 +332,35 @@ class TestSlackInputChannel:
 
     @patch("bobi.slack.StatusRefreshLoop")
     @patch("bobi.slack.post_placeholder")
+    def test_prepare_keeps_placeholder_for_dm(self, mock_placeholder,
+                                               mock_loop_cls):
+        """DMs are active Slack events and still get placeholder UX."""
+        from bobi.events.channels import SlackInputChannel
+
+        mock_placeholder.return_value = "171.99"
+        mock_loop = MagicMock()
+        mock_loop_cls.return_value = mock_loop
+
+        handler = SlackInputChannel()
+        event = _make_slack_event(
+            channel="D123",
+            thread_ts="",
+            ts="171.50",
+        )
+        event["type"] = "slack.dm"
+        event["fields"]["channel_type"] = "im"
+
+        result = handler.prepare(event, "xoxb-test")
+
+        mock_placeholder.assert_called_once_with(
+            "xoxb-test", "D123", thread_ts="171.50",
+        )
+        mock_loop_cls.assert_called_once_with("xoxb-test", "D123", "171.50")
+        mock_loop.start.assert_called_once()
+        assert result["fields"]["placeholder_ts"] == "171.99"
+
+    @patch("bobi.slack.StatusRefreshLoop")
+    @patch("bobi.slack.post_placeholder")
     def test_prepare_uses_ts_when_no_thread_ts(self, mock_placeholder,
                                                 mock_loop_cls):
         """When thread_ts is empty, uses ts as the thread anchor."""
@@ -397,6 +426,46 @@ class TestSlackInputChannel:
         result = handler.prepare(event, "xoxb-test")
 
         assert result is event
+
+    @patch("bobi.slack.StatusRefreshLoop")
+    @patch("bobi.slack.post_placeholder")
+    def test_prepare_skips_passive_thread_reply(self, mock_placeholder,
+                                                 mock_loop_cls):
+        """Thread replies are passive context and must not create Slack noise."""
+        from bobi.events.channels import SlackInputChannel
+
+        handler = SlackInputChannel()
+        event = _make_slack_event()
+        event["type"] = "slack.thread_reply"
+
+        result = handler.prepare(event, "xoxb-test")
+
+        assert "placeholder_ts" not in result["fields"]
+        mock_placeholder.assert_not_called()
+        mock_loop_cls.assert_not_called()
+
+    @patch("bobi.slack.StatusRefreshLoop")
+    @patch("bobi.slack.post_placeholder")
+    def test_prepare_strips_stale_placeholder_from_thread_reply(
+        self,
+        mock_placeholder,
+        mock_loop_cls,
+    ):
+        """Passive thread replies must not carry stale placeholder metadata."""
+        from bobi.events.channels import SlackInputChannel
+
+        handler = SlackInputChannel()
+        event = _make_slack_event()
+        event["type"] = "slack.thread_reply"
+        event["fields"]["placeholder_ts"] = "stale"
+
+        result = handler.prepare(event, "xoxb-test")
+
+        assert result is not event
+        assert "placeholder_ts" not in result["fields"]
+        assert event["fields"]["placeholder_ts"] == "stale"
+        mock_placeholder.assert_not_called()
+        mock_loop_cls.assert_not_called()
 
     @patch("bobi.slack.post_placeholder")
     def test_prepare_does_not_mutate_original(self, mock_placeholder):
@@ -750,6 +819,107 @@ class TestDrainChannelIntegration:
         assert len(delivered) == 1  # all chat events delivered in one batch
         assert delivered[0].count("placeholder_ts") == 2
         assert delivered[0].count("171.99") == 2
+
+    @patch("bobi.slack.StatusRefreshLoop")
+    @patch("bobi.slack.post_placeholder")
+    def test_prepare_chat_events_keeps_thread_reply_passive(self,
+                                                             mock_placeholder,
+                                                             mock_loop_cls,
+                                                             monkeypatch):
+        """Mixed batches keep active placeholders off passive thread replies."""
+        from bobi.events.drain import _prepare_chat_events
+
+        mock_placeholder.return_value = "171.99"
+        mock_loop = MagicMock()
+        mock_loop_cls.return_value = mock_loop
+
+        active = _make_slack_event(ts="171.50", text="active mention")
+        passive = _make_slack_event(ts="171.51", text="passive chatter")
+        passive["type"] = "slack.thread_reply"
+
+        cfg = _FakeConfig({("slack", "bot_token"): "xoxb-test"})
+        monkeypatch.setattr("bobi.events.drain._get_project_config", lambda: cfg)
+
+        prepared = _prepare_chat_events([active, passive])
+
+        assert prepared[0]["type"] == "slack.mention"
+        assert prepared[0]["fields"]["placeholder_ts"] == "171.99"
+        assert prepared[1] is not passive
+        assert prepared[1]["type"] == "slack.thread_reply"
+        assert "placeholder_ts" not in prepared[1]["fields"]
+        mock_placeholder.assert_called_once_with(
+            "xoxb-test", "C123", thread_ts="171.42",
+        )
+        mock_loop_cls.assert_called_once_with("xoxb-test", "C123", "171.42")
+        mock_loop.start.assert_called_once()
+
+    def test_prepare_chat_events_strips_stale_thread_reply_placeholder(self,
+                                                                       monkeypatch):
+        """Passive replies do not deliver stale placeholder metadata."""
+        from bobi.events.drain import _prepare_chat_events
+
+        passive = _make_slack_event(ts="171.51", text="passive chatter")
+        passive["type"] = "slack.thread_reply"
+        passive["fields"]["placeholder_ts"] = "stale"
+
+        cfg = _FakeConfig({("slack", "bot_token"): "xoxb-test"})
+        monkeypatch.setattr("bobi.events.drain._get_project_config", lambda: cfg)
+
+        prepared = _prepare_chat_events([passive])
+
+        assert prepared[0] is not passive
+        assert prepared[0]["type"] == "slack.thread_reply"
+        assert "placeholder_ts" not in prepared[0]["fields"]
+        assert passive["fields"]["placeholder_ts"] == "stale"
+
+    @patch("bobi.events.channels.SlackInputChannel.prepare")
+    def test_drain_does_not_reuse_placeholder_for_thread_reply(self,
+                                                                mock_prepare,
+                                                                monkeypatch):
+        """Passive thread replies must not inherit another event's placeholder."""
+        from queue import SimpleQueue
+        from bobi.events.drain import drain_loop
+
+        e1 = _make_slack_event(ts="171.50", text="active mention")
+        e2 = _make_slack_event(ts="171.51", text="passive chatter")
+        e2["type"] = "slack.thread_reply"
+
+        augmented = dict(e1, fields=dict(e1["fields"], placeholder_ts="171.99"))
+        mock_prepare.return_value = augmented
+
+        q = SimpleQueue()
+        q.put(e1)
+        q.put(e2)
+
+        delivered = []
+
+        from bobi.inbox import register_local_inbox, unregister_local_inbox
+
+        class _CaptureInbox:
+            def push(self, msg):
+                delivered.append(msg.text)
+                raise SystemExit
+
+        def fake_formatter(ev):
+            lines = [f"Event: {ev['source']}/{ev['type']}"]
+            for k, v in ev.get("fields", {}).items():
+                lines.append(f"  {k}: {v}")
+            return "\n".join(lines)
+
+        cfg = _FakeConfig({("slack", "bot_token"): "xoxb-test"})
+        monkeypatch.setattr("bobi.events.drain._get_project_config", lambda: cfg)
+        monkeypatch.setattr("bobi.events.drain.DRAIN_INTERVAL", 0)
+
+        register_local_inbox("test-session", _CaptureInbox())
+        try:
+            with pytest.raises(SystemExit):
+                drain_loop("test-session", queue=q, formatter=fake_formatter)
+        finally:
+            unregister_local_inbox("test-session")
+
+        mock_prepare.assert_called_once_with(e1, "xoxb-test")
+        assert delivered[0].count("placeholder_ts") == 1
+        assert "slack.thread_reply" in delivered[0]
 
     @patch("bobi.events.channels.SlackInputChannel.prepare")
     def test_drain_separate_placeholders_for_different_threads(self, mock_prepare,

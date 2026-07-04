@@ -25,10 +25,11 @@ Event: slack/slack.mention
 
 ### Slack placeholder messages
 
-When a Slack event arrives, the framework automatically posts an
+When a Slack mention or DM arrives, the framework automatically posts an
 "Evaluating…" placeholder and sets a "is thinking…" typing indicator.
-The event includes a `placeholder_ts` field with the placeholder's
-message timestamp.
+Those `slack.mention` and `slack.dm` events include a `placeholder_ts`
+field with the placeholder's message timestamp. Passive
+`slack.thread_reply` events do not include one.
 
 **Use `--edit` to replace the placeholder with your actual response:**
 
