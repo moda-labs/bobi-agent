@@ -427,6 +427,10 @@ async def _run_workflow_async(
         str(runtime_scope.get("model", "") or "")
         if isinstance(runtime_scope, dict) else ""
     )
+    visit_counts = (
+        dict(runtime_scope.get("visits", {}) or {})
+        if isinstance(runtime_scope, dict) else {}
+    )
     current_model = saved_session_model if saved_session_model else first_prompt_model
     fresh_resume_step = None
 
@@ -509,8 +513,44 @@ async def _run_workflow_async(
         step_idx = start_step
         failed_step = ""
 
+        def _exhaust_step(step: StepDef) -> tuple[int, str]:
+            error = (
+                f"Step {step.name} exceeded max_iterations="
+                f"{step.max_iterations}"
+            )
+            log.error("%s in workflow %s", error, workflow.name)
+            _emit_lifecycle_event("agent/step.exhausted", {
+                "run_key": run_key,
+                "workflow": workflow.name,
+                "step": step.name,
+                "visits": visit_counts[step.name],
+                "max_iterations": step.max_iterations,
+                "on_exhausted": step.on_exhausted,
+                "text": error,
+            }, blocking=True)
+            if step.on_exhausted:
+                jump = workflow.step_index(step.on_exhausted)
+                if jump >= 0:
+                    return jump, ""
+                error = (
+                    f"{error}; on_exhausted target "
+                    f"{step.on_exhausted!r} was not found"
+                )
+            return -1, error
+
         while step_idx < len(workflow.steps):
             step = workflow.steps[step_idx]
+            visit_counts[step.name] = int(visit_counts.get(step.name, 0)) + 1
+
+            if step.max_iterations and visit_counts[step.name] > step.max_iterations:
+                exhausted_jump, error = _exhaust_step(step)
+                if exhausted_jump >= 0:
+                    step_idx = exhausted_jump
+                    continue
+                failed_step = step.name
+                run_failed, failure_error = True, error
+                _emit_step_failed(run_key, workflow.name, step.name, error)
+                return False
 
             # Route step — deterministic, no LLM
             if step.condition:
@@ -520,6 +560,21 @@ async def _run_workflow_async(
                 if target:
                     jump = workflow.step_index(target)
                     if jump >= 0:
+                        if (
+                            step.max_iterations
+                            and jump <= step_idx
+                            and visit_counts[step.name] >= step.max_iterations
+                        ):
+                            exhausted_jump, error = _exhaust_step(step)
+                            if exhausted_jump >= 0:
+                                step_idx = exhausted_jump
+                                continue
+                            failed_step = step.name
+                            run_failed, failure_error = True, error
+                            _emit_step_failed(
+                                run_key, workflow.name, step.name, error,
+                            )
+                            return False
                         step_idx = jump
                         continue
                 step_idx += 1
@@ -558,7 +613,10 @@ async def _run_workflow_async(
                 run.suspended_at_step = step_idx + 1
                 run.await_event = step.await_event
                 run.session_name = session_name
-                ctx.set_scope("_runtime", {"model": current_model})
+                ctx.set_scope("_runtime", {
+                    "model": current_model,
+                    "visits": visit_counts,
+                })
                 run.variable_scopes = ctx.scopes
                 run.repo = repo
                 run.cwd = cwd

@@ -116,6 +116,25 @@ class TestWorkflows:
         result = cli_run("workflows", "validate", str(bad_file))
         assert result.returncode != 0
 
+    def test_workflows_validate_accepts_default_capped_back_edge(self, bobi_env, cli_run):
+        wf_file = bobi_env.workflows_dir / "default-capped-loop.yaml"
+        wf_file.write_text(textwrap.dedent("""\
+            name: default-capped-loop
+            steps:
+              - name: review
+                prompt: "Review"
+              - name: gate
+                if: "clean == true"
+                goto: done
+                else: review
+              - name: done
+                prompt: "Done"
+        """))
+
+        result = cli_run("workflows", "validate", str(wf_file))
+
+        assert result.returncode == 0
+
 
 class TestRoles:
 

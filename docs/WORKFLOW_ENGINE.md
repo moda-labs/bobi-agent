@@ -137,6 +137,11 @@ Deterministic branch, no LLM. Evaluates `if:` and jumps to `goto:` when true or
     else: implement
 ```
 
+Route steps that jump to themselves or an earlier step are capped at 3 visits by
+default. Use `max_iterations` or its alias `max_visits` to set a different
+positive integer cap. When the cap is exhausted, the workflow fails unless
+`on_exhausted` names a later step to continue with.
+
 ### Await step
 
 Suspends the workflow until a named external event arrives. The engine persists
