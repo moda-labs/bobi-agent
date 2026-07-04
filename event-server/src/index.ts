@@ -24,6 +24,7 @@ import {
 	handleUpdateSubscriptions,
 	handleDeregisterDeployment,
 	handleTopicEvent,
+	handleChannelsSend,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
 	handleTestSeedResourceGrants,
@@ -446,6 +447,27 @@ export default {
 			const bubble = await authenticateBubble(storage, ctx);
 			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
 			return respond(await handleSlackSend(storage, data, bubble.id));
+		}
+
+		if (method === "POST" && path === "/channels/send") {
+			// Channel-agnostic send (#618) — same mandatory bubble auth as
+			// /slack/send. Raw text so the signature verifies over the wire bytes.
+			const raw = await request.text();
+			let data: Record<string, unknown>;
+			try {
+				data = JSON.parse(raw);
+			} catch {
+				return Response.json({ error: "invalid JSON" }, { status: 400 });
+			}
+			const ctx = readBubbleAuthHeaders(
+				(n) => request.headers.get(n),
+				method,
+				url.pathname + url.search,
+				raw,
+			);
+			const bubble = await authenticateBubble(storage, ctx);
+			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
+			return respond(await handleChannelsSend(storage, data, bubble.id));
 		}
 
 		if (method === "POST" && path === "/resources/authorize") {

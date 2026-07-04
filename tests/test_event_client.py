@@ -58,6 +58,20 @@ class TestFormatEventForManager:
         assert "user_id: U123" in text
         assert "channel: D456" in text
 
+    def test_conversation_ref_renders_for_bobi_reply(self):
+        """#618: the channel-agnostic reply address must reach the agent."""
+        event = {
+            "v": 2, "source": "slack", "type": "slack.dm",
+            "topics": ["slack:T123"],
+            "delivery": "chat",
+            "text": "hello",
+            "conversation": "slack:T123:dm:D456:thread:123.456",
+            "fields": {"user_id": "U123", "channel": "D456"},
+            "payload": {},
+        }
+        text = format_event_for_manager(event)
+        assert "conversation: slack:T123:dm:D456:thread:123.456" in text
+
     def test_v2_linear_event_renders_text_and_fields(self):
         event = {
             "v": 2, "source": "linear", "type": "linear.Issue.update",

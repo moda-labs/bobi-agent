@@ -319,4 +319,17 @@ describe("bridge result feeds into existing event server", () => {
 		expect(payload.ts).toBe("1718100002.000300");
 		expect(payload.thread_ts).toBe("1718100000.000100");
 	});
+
+	// #618: the bridge emits the same conversation ref as adapters/slack.ts.
+	it("emits a conversation ref matching the hand-rolled normalizer", () => {
+		const mention = bridgeSlackWebhook(mentionPayload());
+		expect(mention.event!.conversation)
+			.toBe("slack:T0952RZRZ0X:channel:C456CHAN:thread:1718100000.000100");
+		const thread = bridgeSlackWebhook(threadReplyPayload());
+		expect(thread.event!.conversation)
+			.toBe("slack:T0952RZRZ0X:channel:C456CHAN:thread:1718100000.000100");
+		const dm = bridgeSlackWebhook(dmPayload());
+		expect(dm.event!.conversation)
+			.toBe("slack:T0952RZRZ0X:dm:D789DM:thread:1718100001.000200");
+	});
 });

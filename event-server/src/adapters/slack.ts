@@ -1,4 +1,5 @@
 import type { NormalizedEvent, SlackNormalizationResult } from "../core";
+import { slackConversation } from "../conversation";
 
 function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -137,6 +138,12 @@ export function normalizeSlackWebhook(
 	if (botId) fields.bot_id = botId;
 	if (files.length > 0) fields.files = JSON.stringify(files);
 
+	// Channel-agnostic reply address (#618). Replies land in the thread the
+	// message came from; a top-level channel message anchors its own thread (ts).
+	const conversation = teamId && channel
+		? slackConversation(teamId, channel, channelType, threadTs || ts)
+		: undefined;
+
 	return {
 		event: {
 			v: 2,
@@ -146,6 +153,7 @@ export function normalizeSlackWebhook(
 			topics,
 			delivery: "chat",
 			text: rawText,
+			...(conversation ? { conversation } : {}),
 			fields,
 			timestamp: new Date().toISOString(),
 			payload: {

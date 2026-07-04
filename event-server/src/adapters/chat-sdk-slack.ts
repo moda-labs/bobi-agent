@@ -13,6 +13,7 @@
  */
 import { parseSlackWebhookBody } from "@chat-adapter/slack/webhook";
 import type { NormalizedEvent, SlackNormalizationResult } from "../core";
+import { slackConversation } from "../conversation";
 
 export type ChatSdkBridgeResult = SlackNormalizationResult;
 
@@ -111,6 +112,13 @@ export function bridgeSlackWebhook(
 	// Preserve bot_id so the circuit breaker can detect bot authorship.
 	if (botId) fields.bot_id = botId;
 
+	// Channel-agnostic reply address (#618) — identical to adapters/slack.ts:
+	// replies land in the originating thread; a top-level message anchors its
+	// own thread (ts).
+	const conversation = teamId && channel
+		? slackConversation(teamId, channel, channelType, threadTs || ts)
+		: undefined;
+
 	return {
 		event: {
 			v: 2,
@@ -120,6 +128,7 @@ export function bridgeSlackWebhook(
 			topics,
 			delivery: "chat",
 			text: rawText,
+			...(conversation ? { conversation } : {}),
 			fields,
 			timestamp: new Date().toISOString(),
 			payload: {

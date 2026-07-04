@@ -33,6 +33,7 @@ import {
 	handleUpdateSubscriptions,
 	handleDeregisterDeployment,
 	handleTopicEvent,
+	handleChannelsSend,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
 	resolveSlackSigningSecret,
@@ -339,6 +340,36 @@ describe("normalizeSlackPayload", () => {
 		});
 		expect(result.event!.type).toBe("slack.thread_reply");
 		expect(result.event!.fields!.thread_ts).toBe("123.000");
+	});
+
+	// #618: every chat event carries a channel-agnostic conversation ref the
+	// agent echoes back to `bobi reply` / POST /channels/send.
+	it("emits a conversation ref threaded on the originating message", () => {
+		const mention = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: { type: "app_mention", user: "U1", channel: "C456",
+				channel_type: "channel", text: "hi", ts: "1234.5678" },
+		});
+		// A top-level message anchors its own thread (ts) — matching where the
+		// placeholder handler already posts.
+		expect(mention.event!.conversation).toBe("slack:T123:channel:C456:thread:1234.5678");
+
+		const threadReply = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: { type: "message", user: "U1", channel: "C456",
+				channel_type: "channel", text: "re", ts: "123.456", thread_ts: "123.000" },
+		});
+		expect(threadReply.event!.conversation).toBe("slack:T123:channel:C456:thread:123.000");
+
+		const dm = normalizeSlackPayload({
+			type: "event_callback",
+			team_id: "T123",
+			event: { type: "message", user: "U1", channel: "D789",
+				channel_type: "im", text: "yo", ts: "9.1" },
+		});
+		expect(dm.event!.conversation).toBe("slack:T123:dm:D789:thread:9.1");
 	});
 
 	it("skips message-channel duplicate when thread reply mentions our bot user", () => {
@@ -1910,6 +1941,136 @@ describe("handleSlackSend", () => {
 		const result = await handleSlackSend(store, { channel: "C1", text: "hi", workspace: "T1" }, "bubA");
 		expect(result.status).toBe(400);
 		expect((result.body as Record<string, string>).error).toContain("bot token");
+	});
+});
+
+describe("handleChannelsSend", () => {
+	// Stub fetch capturing Slack Web API calls; auth.test succeeds so a signed
+	// workspace registration can seed the bubble-scoped token record.
+	function stubSlackApi(teamId: string) {
+		const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes("/auth.test")) {
+				return fetchOk(200, { ok: true, team_id: teamId, bot_id: "B1" });
+			}
+			if (u.includes("/bots.info")) {
+				return fetchOk(200, { ok: true, bot: { app_id: "A1" } });
+			}
+			calls.push({ url: u, body: JSON.parse(String(init?.body ?? "{}")) });
+			return fetchOk(200, { ok: true, ts: "99.1" });
+		}));
+		return calls;
+	}
+
+	async function seedWorkspace(store: ReturnType<typeof createMockStorage>, bubbleId: string) {
+		await handleSlackWorkspaceRegister(
+			store, { workspace_id: "T1", bot_token: "xoxb-A", bot_id: "B1" }, bubbleId,
+		);
+	}
+
+	it("rejects missing conversation and missing text", async () => {
+		const store = createMockStorage();
+		let result = await handleChannelsSend(store, { text: "hi" }, "bubA");
+		expect(result.status).toBe(400);
+		expect((result.body as Record<string, string>).error).toContain("conversation");
+		result = await handleChannelsSend(store, { conversation: "slack:T1:dm:D1" }, "bubA");
+		expect(result.status).toBe(400);
+	});
+
+	it("rejects a malformed conversation reference", async () => {
+		const store = createMockStorage();
+		const result = await handleChannelsSend(
+			store, { conversation: "slack:T1:D1", text: "hi" }, "bubA");
+		expect(result.status).toBe(400);
+		expect((result.body as Record<string, string>).error).toContain("invalid conversation");
+	});
+
+	it("rejects an unsupported channel", async () => {
+		const store = createMockStorage();
+		const result = await handleChannelsSend(
+			store, { conversation: "whatsapp:747:dm:15550001111", text: "hi" }, "bubA");
+		expect(result.status).toBe(400);
+		expect((result.body as Record<string, string>).error).toContain("unsupported channel: whatsapp");
+	});
+
+	it("rejects an invalid mode and update without edit_ref", async () => {
+		const store = createMockStorage();
+		let result = await handleChannelsSend(
+			store, { conversation: "slack:T1:dm:D1", text: "hi", mode: "stream" }, "bubA");
+		expect(result.status).toBe(400);
+		expect((result.body as Record<string, string>).error).toContain("invalid mode");
+		result = await handleChannelsSend(
+			store, { conversation: "slack:T1:dm:D1", text: "hi", mode: "update" }, "bubA");
+		expect(result.status).toBe(400);
+		expect((result.body as Record<string, string>).error).toContain("edit_ref");
+	});
+
+	// Same tenancy boundary as handleSlackSend: bubble-scoped lookup only.
+	it("does not read another bubble's workspace registration", async () => {
+		const store = createMockStorage();
+		stubSlackApi("T1");
+		await seedWorkspace(store, "bubB");
+		const result = await handleChannelsSend(
+			store, { conversation: "slack:T1:dm:D1", text: "hi" }, "bubA");
+		expect(result.status).toBe(400);
+		expect((result.body as Record<string, string>).error).toContain("bot token");
+	});
+
+	it("posts into the thread encoded in the conversation ref", async () => {
+		const store = createMockStorage();
+		const calls = stubSlackApi("T1");
+		await seedWorkspace(store, "bubA");
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34", text: "hello",
+		}, "bubA");
+		expect(result.status).toBe(200);
+		expect((result.body as Record<string, unknown>).ts).toBe("99.1");
+		expect(calls).toHaveLength(1);
+		expect(calls[0].url).toContain("chat.postMessage");
+		expect(calls[0].body).toMatchObject({ channel: "C9", text: "hello", thread_ts: "12.34" });
+	});
+
+	it("posts without thread_ts when the ref has no thread", async () => {
+		const store = createMockStorage();
+		const calls = stubSlackApi("T1");
+		await seedWorkspace(store, "bubA");
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:dm:D7", text: "yo",
+		}, "bubA");
+		expect(result.status).toBe(200);
+		expect(calls[0].body.channel).toBe("D7");
+		expect(calls[0].body.thread_ts).toBeUndefined();
+	});
+
+	it("mode update edits the message named by edit_ref", async () => {
+		const store = createMockStorage();
+		const calls = stubSlackApi("T1");
+		await seedWorkspace(store, "bubA");
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34",
+			text: "final answer", mode: "update", edit_ref: "12.99",
+		}, "bubA");
+		expect(result.status).toBe(200);
+		expect(calls).toHaveLength(1);
+		expect(calls[0].url).toContain("chat.update");
+		expect(calls[0].body).toMatchObject({ channel: "C9", ts: "12.99", text: "final answer" });
+	});
+
+	it("surfaces a Slack API error as 502", async () => {
+		const store = createMockStorage();
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes("/auth.test")) return fetchOk(200, { ok: true, team_id: "T1", bot_id: "B1" });
+			if (u.includes("/bots.info")) return fetchOk(200, { ok: true, bot: { app_id: "A1" } });
+			return fetchOk(200, { ok: false, error: "channel_not_found" });
+		}));
+		await seedWorkspace(store, "bubA");
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:dm:D1", text: "hi",
+		}, "bubA");
+		expect(result.status).toBe(502);
+		expect((result.body as Record<string, string>).error).toBe("channel_not_found");
 	});
 });
 

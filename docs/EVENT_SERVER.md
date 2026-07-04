@@ -98,6 +98,7 @@ Every delivered event is a v2 `NormalizedEvent` (`core.ts`), wrapped on the wire
   "topics": ["github:moda-labs/bobi"], // the routing keys (see catalog below)
   "delivery": "bulk",            // "chat" (slack) | "bulk" (github/linear/monitor)
   "text": "...",                 // human summary the agent reads
+  "conversation": "slack:T1:channel:C9:thread:12.34", // chat events: reply address (#618)
   "fields": { "number": 42, "action": "opened" }, // flat routing/context map
   "payload": { /* raw webhook body or publisher payload, passed through */ },
   "bubble_id": "bub_...",        // set for authenticated /events publishes; UNSET for webhooks
@@ -108,6 +109,15 @@ Every delivered event is a v2 `NormalizedEvent` (`core.ts`), wrapped on the wire
 The server extracts routing fields and passes `payload` through untouched - agents
 are models and interpret raw payloads directly. Routing context (repo, channel,
 `thread_ts`, ...) is delivered in `fields`, not at the top level.
+
+**Conversation references** (`conversation.ts`, mirrored by `bobi/conversation.py`).
+Chat adapters set a channel-agnostic reply address on every chat event:
+`<source>:<scope>:<chat_type>:<chat_id>[:thread:<thread_id>]`, where `scope` is the
+platform's tenancy unit (Slack team id). The agent echoes it back verbatim -
+`bobi reply <conversation>` or `POST /channels/send`
+`{conversation, text, mode: post|update, edit_ref?}` - and the gateway parses it to
+address the platform send. Only adapters build refs and only the gateway parses
+them; the agent never assembles platform routing fields.
 
 ## Ingestion: getting events in
 
@@ -274,6 +284,7 @@ concurrent first-registrations converge on a single bubble.
 | Publish | `POST /events/{topic}` | bubble signature |
 | Authorize resource | `POST /resources/authorize` | bubble signature |
 | Slack send | `POST /slack/send` | bubble signature (bubble-scoped to its own workspace) |
+| Channel send | `POST /channels/send` | bubble signature (same tenancy boundary as `/slack/send`) |
 | WS subscribe / update subs / deregister | `/deployments/{id}/...` | bearer `api_key` (issued at register) |
 
 The bubble key authenticates *membership*; the per-deployment `api_key`
