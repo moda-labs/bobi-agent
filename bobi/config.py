@@ -16,6 +16,7 @@ import yaml
 log = logging.getLogger(__name__)
 
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
+_DOTENV_LOADED: dict[str, str] = {}
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,23 @@ def load_dotenv(project_path: Path) -> None:
     for key, value in parse_env_file(paths.env_path(project_path)).items():
         if key not in os.environ:
             os.environ[key] = value
+            _DOTENV_LOADED[key] = value
+
+
+def project_env(project_path: Path) -> dict[str, str]:
+    """Return process env overlaid onto this runtime's .env.
+
+    Values previously injected into ``os.environ`` by ``load_dotenv`` are not
+    treated as real process env here, which keeps one runtime's .env from
+    satisfying another runtime's explicit interpolation.
+    """
+    from bobi import paths
+    env = parse_env_file(paths.env_path(project_path))
+    for key, value in os.environ.items():
+        if _DOTENV_LOADED.get(key) == value:
+            continue
+        env[key] = value
+    return env
 
 
 def find_env_var_refs(project_path: Path) -> list[EnvVarRef]:
@@ -100,19 +118,20 @@ def find_required_env_vars(project_path: Path) -> list[str]:
     return [r.name for r in find_env_var_refs(project_path) if r.required]
 
 
-def _interpolate_env(value):
+def _interpolate_env(value, env: dict[str, str] | None = None):
     """Recursively resolve ${VAR} / ${VAR:-default} references in strings,
     dicts, and lists. An unset (or empty) VAR resolves to its ``:-`` fallback
     when it has one, else ""."""
+    lookup = os.environ if env is None else env
     if isinstance(value, str):
         def _resolve(m: "re.Match[str]") -> str:
             ref = parse_env_ref(m.group(1))
-            return os.environ.get(ref.name) or ref.default
+            return lookup.get(ref.name) or ref.default
         return _ENV_VAR_RE.sub(_resolve, value)
     if isinstance(value, dict):
-        return {k: _interpolate_env(v) for k, v in value.items()}
+        return {k: _interpolate_env(v, env) for k, v in value.items()}
     if isinstance(value, list):
-        return [_interpolate_env(v) for v in value]
+        return [_interpolate_env(v, env) for v in value]
     return value
 
 
@@ -325,10 +344,10 @@ class Config:
         agent_yaml = _project_config_path(project_path)
         if not agent_yaml.exists():
             return cls()
-        return cls._parse(agent_yaml)
+        return cls._parse(agent_yaml, env=project_env(project_path))
 
     @classmethod
-    def _parse(cls, path: Path) -> "Config":
+    def _parse(cls, path: Path, env: dict[str, str] | None = None) -> "Config":
         raw_uninterpolated = _load_yaml(path)
         # Preserve monitor commands and requires check/fix commands
         # verbatim — they may contain ${VAR} or ~ intended for shell
@@ -341,7 +360,7 @@ class Config:
         # build steps are shell commands run at image-build time; preserve them
         # verbatim (they may carry ~ or literal $VAR for the build shell).
         build_raw = raw_uninterpolated.get("build", None)
-        raw = _interpolate_env(raw_uninterpolated)
+        raw = _interpolate_env(raw_uninterpolated, env)
         raw["monitors"] = monitors_raw
 
         services = []

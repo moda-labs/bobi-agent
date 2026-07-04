@@ -336,7 +336,8 @@ def spawn_team(
         )
 
     log_file = paths.state_dir(project_path) / "manager.log"
-    env = os.environ.copy()
+    from bobi.env import child_agent_env
+    env = child_agent_env(project_path)
     venv_bin = str(Path(sys.executable).parent)
     local_bin = str(Path.home() / ".local" / "bin")
     env["PATH"] = f"{venv_bin}:{local_bin}:{env.get('PATH', '')}"

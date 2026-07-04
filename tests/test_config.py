@@ -507,6 +507,24 @@ def test_dotenv_resolves_in_config(tmp_path, monkeypatch):
     monkeypatch.delenv("TEST_DOTENV_TOKEN")
 
 
+def test_config_load_dotenv_values_do_not_leak_between_projects(tmp_path, monkeypatch):
+    monkeypatch.delenv("SHARED_SLACK_TOKEN", raising=False)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    for root, token in [(first, "xoxb-first"), (second, "xoxb-second")]:
+        _write_agent_yaml(root, """
+            services:
+              - name: slack
+                events: true
+                credentials:
+                  bot_token: ${SHARED_SLACK_TOKEN}
+        """)
+        (root / ".env").write_text(f"SHARED_SLACK_TOKEN={token}\n")
+
+    assert Config.load(first).credential("slack", "bot_token") == "xoxb-first"
+    assert Config.load(second).credential("slack", "bot_token") == "xoxb-second"
+
+
 def test_venn_services_property(tmp_path):
     config_dir = tmp_path / "package"
     config_dir.mkdir()
