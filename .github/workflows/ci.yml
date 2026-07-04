@@ -117,6 +117,8 @@ jobs:
   integration-fast:
     name: Integration tests (no Claude)
     runs-on: ubuntu-latest
+    env:
+      FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.fastembed-cache
     steps:
       - uses: actions/checkout@v5
 
@@ -135,11 +137,32 @@ jobs:
         # fastembed uses ONNX (no torch needed).
         run: pip install -e ".[dev,kb]"
 
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.fastembed-cache
+          key: fastembed-all-MiniLM-L6-v2-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'bobi/kb/sidecar.py') }}
+
       - name: Pre-download embedding model
         # The KB sidecar downloads all-MiniLM-L6-v2 on first use.
         # Pre-cache it so the 30s sidecar startup timeout isn't racing
         # a model download over a variable-speed network.
-        run: python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2')"
+        timeout-minutes: 8
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 120 python -c "from fastembed import TextEmbedding; from bobi.kb.sidecar import _FASTEMBED_MODEL, _resolve_cache_dir; model = TextEmbedding(model_name=_FASTEMBED_MODEL, cache_dir=_resolve_cache_dir()); next(model.embed(['cache warmup']))"; then
+              if ! test -n "$(find "$FASTEMBED_CACHE_PATH" -mindepth 1 -print -quit)"; then
+                echo "::error::embedding model cache is empty after warmup"
+                exit 1
+              fi
+              exit 0
+            fi
+            echo "::warning::embedding model download attempt ${attempt} failed or timed out; retrying"
+            rm -rf "$FASTEMBED_CACHE_PATH"
+            sleep 5
+          done
+          echo "::error::embedding model download failed after 3 attempts"
+          exit 1
 
       - name: Run all non-Claude integration tests
         # Tests that need the claude CLI skip via requires_claude.
