@@ -9,7 +9,7 @@ from click.testing import CliRunner
 from bobi.__version__ import __version__
 from bobi import paths
 from bobi.cli import main
-from bobi.subagent import CheckResult
+from bobi.subagent import CheckResult, GateResult
 from tests.conftest import TEST_AGENT_NAME
 
 
@@ -174,6 +174,59 @@ class TestSubagents:
             "source": {"kind": "test"},
             "ids": [1, 2],
         }
+
+
+class TestMonitorGate:
+    """`monitors gate` is the scheduler's relevance-gate plumbing (#630):
+    read the request file, run the gate agent, print the verdict line."""
+
+    def _request(self, tmp_path, **overrides):
+        payload = {"criterion": "about billing", "name": "gate-billing",
+                   "items": [{"key": "m1", "data": {"subject": "refund"}}]}
+        payload.update(overrides)
+        req = tmp_path / "req.json"
+        req.write_text(json.dumps(payload))
+        return req
+
+    def test_prints_verdict_line(self, bobi_install, tmp_path):
+        gate = GateResult(success=True, relevant=["m1"])
+        with patch("bobi.subagent.run_gate_blocking", return_value=gate) as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "monitors", "gate",
+                "--request", str(self._request(tmp_path)),
+            ])
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output.strip().splitlines()[-1])
+        assert verdict == {"success": True, "relevant": ["m1"]}
+        assert mock.call_args[0][0] == "about billing"
+        assert mock.call_args[0][1] == [{"key": "m1",
+                                         "data": {"subject": "refund"}}]
+        assert mock.call_args[1]["name"] == "gate-billing"
+
+    def test_gate_failure_exits_nonzero_with_verdict(self, bobi_install, tmp_path):
+        gate = GateResult(success=False, error="no verdict")
+        with patch("bobi.subagent.run_gate_blocking", return_value=gate):
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "monitors", "gate",
+                "--request", str(self._request(tmp_path)),
+            ])
+        assert result.exit_code == 1
+        # The verdict line still prints so the scheduler parses "success": false.
+        assert '"success": false' in result.output
+
+    def test_missing_request_file_fails(self, bobi_install, tmp_path):
+        result = CliRunner().invoke(main, [
+            "agent", TEST_AGENT_NAME, "monitors", "gate",
+            "--request", str(tmp_path / "nope.json"),
+        ])
+        assert result.exit_code == 1
+
+    def test_empty_items_rejected(self, bobi_install, tmp_path):
+        result = CliRunner().invoke(main, [
+            "agent", TEST_AGENT_NAME, "monitors", "gate",
+            "--request", str(self._request(tmp_path, items=[])),
+        ])
+        assert result.exit_code == 1
 
 
 class TestEventsCommand:

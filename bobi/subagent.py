@@ -1687,6 +1687,174 @@ def run_check_blocking(
 
 
 # ---------------------------------------------------------------------------
+# Non-interactive relevance gate (two-tier semantic gate, #630)
+# ---------------------------------------------------------------------------
+
+# The gate judges items already provided inline in the prompt - no tool use
+# expected, so the turn cap stays far below a check's.
+GATE_MAX_TURNS = 2
+# Per-item payload cap in the gate prompt. Full payloads still publish; the
+# gate only needs enough text to judge relevance.
+GATE_ITEM_CHARS = 2000
+
+
+@dataclass
+class GateResult:
+    """Outcome of a non-interactive relevance gate.
+
+    `relevant` holds the dedup keys of items judged to match the criterion,
+    always a subset of the presented keys. `success` is False only when the
+    gate agent errored or produced no parseable verdict (indeterminate) -
+    an explicit empty `relevant` list is a successful "nothing matched".
+    """
+
+    success: bool
+    relevant: list[str] = field(default_factory=list)
+    raw_output: str = ""
+    error: str = ""
+    duration_ms: int = 0
+    total_cost_usd: float = 0.0
+
+
+def _build_gate_prompt(criterion: str, items: list[dict[str, Any]]) -> str:
+    """Verdict-only prompt: judge inline items against a relevance criterion."""
+    rendered = []
+    for item in items:
+        key = str(item.get("key", ""))
+        data = item.get("data") or {}
+        try:
+            payload = json.dumps(data, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            payload = str(data)
+        if len(payload) > GATE_ITEM_CHARS:
+            payload = payload[:GATE_ITEM_CHARS] + "...[truncated]"
+        rendered.append(f"- key: {key}\n  item: {payload}")
+    return "\n\n".join([
+        "You are a non-interactive relevance gate running out-of-band - not "
+        "in a conversation. Below is a relevance criterion and a batch of "
+        "items detected by a monitor. Judge each item strictly against the "
+        "criterion using only the item content shown. Do NOT run commands, "
+        "fetch anything, or take any action - judge and report.",
+        f"Relevance criterion:\n{criterion}",
+        "Items:\n" + "\n".join(rendered),
+        "When finished, output your result as a SINGLE line of JSON as the "
+        "very last thing you say, with nothing after it:\n"
+        '  {"relevant": ["<key>", ...]}\n'
+        "List exactly the keys of the items that match the criterion, and "
+        'output {"relevant": []} when none match. Never invent keys and '
+        "never omit the verdict line.",
+    ])
+
+
+def _parse_gate_verdict(text: str, presented_keys: set[str]) -> list[str] | None:
+    """Return the relevant keys a gate agent emitted, or None.
+
+    None means no parseable verdict - indeterminate, never "nothing matched".
+    Keys are filtered to the presented set so a hallucinated key can never
+    publish an event.
+    """
+    if not text:
+        return None
+    for chunk in reversed(_extract_json_objects(text)):
+        try:
+            parsed = json.loads(chunk)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("relevant"), list):
+            return [str(k) for k in parsed["relevant"] if str(k) in presented_keys]
+    return None
+
+
+def run_gate_blocking(
+    criterion: str,
+    items: list[dict[str, Any]],
+    cwd: str,
+    name: str | None = None,
+    timeout: int = CHECK_TIMEOUT,
+    attempts: int = 2,
+) -> GateResult:
+    """Run a one-shot relevance gate agent over a batch of new monitor items.
+
+    The cheap tier of the two-tier semantic gate (#630): the mechanical poll
+    already decided what is NEW, this agent only judges which new items match
+    the monitor's `relevance:` criterion. Runs on role "monitor" so the
+    `roles.monitor.model` cheap default (#617) applies, with a small turn cap
+    because the items are inline - no tool use expected.
+
+    Same indeterminate semantics as run_check_blocking: an errored run or a
+    missing verdict is retried, and exhausting attempts returns success=False
+    so the scheduler leaves the items unjudged for the next tick - never a
+    silent "nothing matched".
+    """
+    import hashlib
+
+    presented = {str(i.get("key", "")) for i in items}
+    short_hash = hashlib.sha256(
+        (criterion + "".join(sorted(presented))).encode()).hexdigest()[:8]
+    slug = name or f"gate-{short_hash}"
+    phase = "gate"
+    session = _session_name(slug, role="monitor", phase=phase)
+
+    prompt = _build_gate_prompt(criterion, items)
+
+    registry = get_registry()
+    registry.register(SessionEntry(
+        name=session, session_id="", role="monitor",
+        run_key=slug, title=criterion[:80], phase=phase,
+        cwd=cwd, status="starting",
+    ))
+
+    last_error = "gate did not run"
+    last_result: AgentResult | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        # Fresh run_key on retry, same as checks: the supervised runner
+        # resumes a saved session id, and replaying a botched transcript is
+        # exactly what a retry must avoid.
+        run_key = slug if attempt == 1 else f"{slug}-retry{attempt}"
+        try:
+            result = asyncio.run(
+                asyncio.wait_for(
+                    _run_agent_supervised(prompt, cwd, run_key, phase, timeout,
+                                          role="monitor",
+                                          max_turns=GATE_MAX_TURNS),
+                    timeout=timeout,
+                )
+            )
+        except asyncio.TimeoutError:
+            registry.update(session, status="error")
+            last_error = f"timeout after {timeout}s"
+            log.warning(f"Gate '{slug}' attempt {attempt}/{attempts}: {last_error}")
+            continue
+
+        last_result = result
+        if not result.success:
+            last_error = result.error or "gate agent failed"
+            log.warning(f"Gate '{slug}' attempt {attempt}/{attempts} failed: {last_error}")
+            continue
+
+        relevant = _parse_gate_verdict(result.final_text, presented)
+        if relevant is None:
+            last_error = "gate produced no parseable verdict"
+            log.warning(f"Gate '{slug}' attempt {attempt}/{attempts}: {last_error}")
+            continue
+
+        return GateResult(
+            success=True, relevant=relevant,
+            raw_output=result.final_text, duration_ms=result.duration_ms,
+            total_cost_usd=result.total_cost_usd,
+        )
+
+    # Exhausted attempts without a verdict - indeterminate, not "no matches".
+    registry.update(session, status="error")
+    return GateResult(
+        success=False, error=last_error,
+        raw_output=last_result.final_text if last_result else "",
+        duration_ms=last_result.duration_ms if last_result else 0,
+        total_cost_usd=last_result.total_cost_usd if last_result else 0.0,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Agent inspection — registry-backed
 # ---------------------------------------------------------------------------
 

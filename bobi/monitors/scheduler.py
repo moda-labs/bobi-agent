@@ -55,6 +55,14 @@ Monitor flavors:
     agent with the rendered delta, and on a successful run advances the cursor
     and publishes `system/policy.updated` directly — bypassing _reconcile dedup
     because a completion signal is not a deduped finding.
+
+A command/check monitor may additionally set `relevance:` (#630) — the
+two-tier semantic gate. The mechanical detector still decides what exists at
+$0; the scheduler dedups first and sends ONLY the new conditions to a
+short-lived cheap-model gate agent that judges them against the criterion.
+Relevant items publish normally; irrelevant items are recorded active without
+publishing, so each item is judged exactly once. A tick with nothing new
+never touches a model.
 """
 
 from __future__ import annotations
@@ -141,6 +149,11 @@ def _monitor_state_path() -> Path:
 
 
 TICK_INTERVAL = 30  # seconds between scheduler ticks
+
+# Most new items a single relevance-gate call judges (#630). Overflow items
+# are simply not recorded, so the next tick re-detects them as new and gates
+# the next batch — bounded prompt size with no lost items.
+GATE_MAX_ITEMS = 20
 
 # How late a weekday-gated (`days:`) at-monitor may fire and still count as a
 # live run rather than a missed-while-down catch-up. A live fire lands within
@@ -251,6 +264,103 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
                      name=f"check-wait-{monitor.name}").start()
 
 
+def _parse_gate_output(output: str) -> dict | None:
+    """Extract the trailing gate verdict JSON a gate process printed, or None.
+
+    `bobi agent <name> monitors gate` prints its verdict as a single JSON line
+    ({"success": ..., "relevant": [...]}). None means the process produced no
+    parseable verdict - an indeterminate run, never "nothing matched".
+    """
+    for line in reversed((output or "").strip().splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and "relevant" in parsed:
+            return parsed
+    return None
+
+
+def _default_spawn_gate(monitor, cwd: str | None, items: list, on_verdict) -> None:
+    """Launch a non-interactive relevance-gate subprocess over new items (#630).
+
+    Mirrors _default_spawn_check: out-of-band so the scheduler thread is never
+    blocked, cost attributed to role=monitor. The batch of new items rides in
+    a request file under run/state/gates/ because real payloads (emails) do
+    not fit argv. The waiter thread hands the trailing verdict JSON (or None)
+    to ``on_verdict`` when the process exits; judging which keys publish stays
+    in the scheduler.
+    """
+    import tempfile
+
+    from bobi import paths
+    root = paths.bobi_root()
+
+    gates_dir = paths.state_dir() / "gates"
+    try:
+        gates_dir.mkdir(parents=True, exist_ok=True)
+        fd, request_path = tempfile.mkstemp(
+            dir=gates_dir, prefix=f"{monitor.name.replace('/', '_')}-",
+            suffix=".json")
+        with open(fd, "w") as f:
+            json.dump({
+                "criterion": monitor.relevance,
+                "name": f"gate-{monitor.name}",
+                "items": [{"key": c.key, "data": c.data} for c in items],
+            }, f)
+    except OSError as e:
+        log.error(f"Failed to write gate request for monitor {monitor.name}: {e}")
+        on_verdict(None)
+        return
+
+    cmd = [
+        sys.executable, "-m", "bobi.cli",
+        "agent", paths.agent_name_for_root(root), "monitors", "gate",
+        "--request", str(request_path),
+    ]
+
+    log_path = paths.state_dir() / "manager.log"
+
+    try:
+        with open(log_path, "a") as lf:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=lf,
+                                    text=True, start_new_session=True,
+                                    cwd=str(root))
+    except OSError as e:
+        log.error(f"Failed to spawn gate for monitor {monitor.name}: {e}")
+        Path(request_path).unlink(missing_ok=True)
+        on_verdict(None)
+        return
+
+    def _wait() -> None:
+        from bobi.subagent import CHECK_TIMEOUT
+        # run_gate_blocking retries internally (attempts=2, each bounded by
+        # CHECK_TIMEOUT), so allow both attempts plus startup slack.
+        budget = 2 * CHECK_TIMEOUT + 120
+        try:
+            out, _ = proc.communicate(timeout=budget)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            log.error(f"Gate for monitor {monitor.name} exceeded {budget}s - killed")
+            on_verdict(None)
+            return
+        finally:
+            Path(request_path).unlink(missing_ok=True)
+        if out:  # keep the gate's output observable in manager.log
+            try:
+                with open(log_path, "a") as lf:
+                    lf.write(out)
+            except OSError:
+                pass
+        on_verdict(_parse_gate_output(out))
+
+    threading.Thread(target=_wait, daemon=True,
+                     name=f"gate-wait-{monitor.name}").start()
+
+
 def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result) -> None:
     """Launch the out-of-band curator agent with a pre-rendered task (#456).
 
@@ -311,10 +421,12 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result) -> No
 class MonitorScheduler:
     def __init__(self, publish=None, state_path: Path | None = None,
                  now=None, registry_loader=None, spawn_check=None,
-                 project_path: Path | None = None, spawn_curator=None):
+                 project_path: Path | None = None, spawn_curator=None,
+                 spawn_gate=None):
         self.publish = publish or _default_publish
         self.spawn_check = spawn_check or _default_spawn_check
         self.spawn_curator = spawn_curator or _default_spawn_curator
+        self.spawn_gate = spawn_gate or _default_spawn_gate
         self.state_path = Path(state_path) if state_path else _monitor_state_path()
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._project_path = project_path
@@ -326,6 +438,10 @@ class MonitorScheduler:
         # Waiter threads for out-of-band checks reconcile concurrently with
         # the scheduler thread — all state mutation goes through this lock.
         self._state_lock = threading.RLock()
+        # Monitors with a relevance gate verdict still pending. In-memory on
+        # purpose: a manager restart mid-gate recorded nothing, so re-gating
+        # the same items is safe and loses nothing.
+        self._gates_in_flight: set[str] = set()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -477,7 +593,13 @@ class MonitorScheduler:
             conditions = None  # detection in flight — reconciled on verdict
 
         if conditions is not None:
-            self._reconcile(monitor, conditions)
+            if monitor.relevance and not monitor.notify:
+                # Two-tier semantic gate (#630): the mechanical detector
+                # decided what exists, a cheap-model gate judges what is new.
+                self._reconcile_gated(monitor, conditions,
+                                      registry.projects_for(monitor))
+            else:
+                self._reconcile(monitor, conditions)
 
         with self._state_lock:
             self.state.setdefault(monitor.state_key, {})["last_run"] = now.isoformat()
@@ -516,6 +638,88 @@ class MonitorScheduler:
             log.warning(f"Monitor {monitor.name} failed to publish {event} "
                         f"({condition.key}) — will retry next interval")
         return ok
+
+    # --- relevance gate (two-tier semantic gate, #630) -------------------
+
+    def _reconcile_gated(self, monitor, conditions: list,
+                         projects: list[Path]) -> None:
+        """Dedup first, then judge ONLY the new conditions with a cheap-model
+        relevance gate before anything publishes.
+
+        The cost shape is the point: a tick where the mechanical detector
+        finds nothing new ends here with zero LLM calls (the common case).
+        Only genuinely new keys ride to an out-of-band gate agent; the
+        verdict callback publishes the relevant ones and records the
+        irrelevant ones active WITHOUT publishing, so each item is judged
+        exactly once. Clearing semantics match _reconcile: disappeared keys
+        drop out and re-fire the whole path if they recur.
+        """
+        with self._state_lock:
+            entry = self.state.setdefault(monitor.state_key, {})
+            previous = set(entry.get("active", []))
+            current = {c.key: c for c in conditions}
+            entry["active"] = [k for k in current if k in previous]
+            self._save_state()
+            new = [current[k] for k in current if k not in previous]
+            if not new:
+                return  # nothing new — no LLM call this tick
+            if monitor.state_key in self._gates_in_flight:
+                # A verdict is still pending. The unrecorded keys stay new
+                # and re-enter here on the tick after it lands.
+                log.info(f"Monitor {monitor.name}: gate already in flight — "
+                         f"deferring {len(new)} new item(s)")
+                return
+            if len(new) > GATE_MAX_ITEMS:
+                log.info(f"Monitor {monitor.name}: {len(new)} new items — "
+                         f"gating the first {GATE_MAX_ITEMS}, the rest stay "
+                         "new for the next interval")
+                new = new[:GATE_MAX_ITEMS]
+            self._gates_in_flight.add(monitor.state_key)
+
+        cwd = str(projects[0]) if projects else None
+        log.info(f"Monitor {monitor.name}: gating {len(new)} new item(s) "
+                 "against its relevance criterion")
+        try:
+            self.spawn_gate(monitor, cwd, new,
+                            lambda verdict: self._on_gate_verdict(monitor, new, verdict))
+        except Exception as e:
+            # A spawn that raised will never deliver a verdict — lift the
+            # in-flight guard so the next tick can retry.
+            with self._state_lock:
+                self._gates_in_flight.discard(monitor.state_key)
+            log.error(f"Failed to spawn gate for monitor {monitor.name}: {e}")
+
+    def _on_gate_verdict(self, monitor, judged: list,
+                         verdict: dict | None) -> None:
+        """Reconcile a relevance-gate verdict (waiter-thread callback).
+
+        Relevant items publish through _fire and are recorded active only
+        when the publish succeeds (same retry invariant as _reconcile).
+        Irrelevant items are recorded active without publishing — judged
+        once, never re-judged. An indeterminate gate records nothing, so
+        every judged key stays new and the next tick retries.
+        """
+        with self._state_lock:
+            self._gates_in_flight.discard(monitor.state_key)
+            if not isinstance(verdict, dict) or not verdict.get("success", False):
+                log.warning(f"Monitor {monitor.name}: gate indeterminate — "
+                            "leaving new items unjudged, retrying next interval")
+                return
+            raw = verdict.get("relevant", [])
+            relevant = {str(k) for k in raw} if isinstance(raw, list) else set()
+            entry = self.state.setdefault(monitor.state_key, {})
+            active = list(entry.get("active", []))
+            for condition in judged:
+                if condition.key in active:
+                    continue
+                if condition.key in relevant:
+                    if self._fire(monitor, condition):
+                        active.append(condition.key)
+                    # failed publish: stays new, retried next interval
+                else:
+                    active.append(condition.key)
+            entry["active"] = active
+            self._save_state()
 
     # --- detectors ------------------------------------------------------
 

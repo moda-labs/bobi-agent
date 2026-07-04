@@ -135,6 +135,53 @@ class TestCheckRoles:
         assert self._check(Config(), tmp_path) == []
 
 
+class TestCheckMonitorRelevance:
+    """relevance: on an ungateable monitor flavor is silently ignored at
+    runtime, so validate must surface it (#630)."""
+
+    def _check(self, tmp_path, monitors):
+        import yaml
+        from bobi.validate import _check_monitor_relevance
+        pkg = tmp_path / "package"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "agent.yaml").write_text("entry_point: manager\n")
+        (pkg / "monitors.yaml").write_text(yaml.dump({"monitors": monitors}))
+        return _check_monitor_relevance(tmp_path)
+
+    def test_relevance_on_check_monitor_passes(self, tmp_path):
+        results = self._check(tmp_path, [
+            {"name": "billing", "check": "venn_poll", "interval": "5m",
+             "relevance": "about billing"}])
+        assert results == []
+
+    def test_relevance_on_command_monitor_passes(self, tmp_path):
+        results = self._check(tmp_path, [
+            {"name": "billing", "command": "echo '[]'",
+             "relevance": "about billing"}])
+        assert results == []
+
+    def test_relevance_on_description_only_warns(self, tmp_path):
+        results = self._check(tmp_path, [
+            {"name": "watch", "description": "watch the inbox",
+             "relevance": "about billing"}])
+        assert len(results) == 1
+        assert not results[0].ok
+        assert not results[0].required  # warning, not blocking
+        assert "ignored" in results[0].detail
+
+    def test_relevance_on_notify_warns(self, tmp_path):
+        results = self._check(tmp_path, [
+            {"name": "roundup", "notify": True, "command": "echo '[]'",
+             "relevance": "about billing"}])
+        assert len(results) == 1
+        assert not results[0].ok
+
+    def test_no_relevance_no_warnings(self, tmp_path):
+        results = self._check(tmp_path, [
+            {"name": "watch", "description": "watch the inbox"}])
+        assert results == []
+
+
 class TestCheckServiceCredentials:
 
     def test_slack_with_token(self):

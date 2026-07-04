@@ -21,7 +21,8 @@ class Condition:
 # kept in `extra` (e.g. `url:` for a deploy-health check) so new check types
 # need no schema change.
 _RESERVED = {"name", "description", "interval", "event", "check", "command",
-             "enabled", "at", "tz", "days", "notify", "role", "curator"}
+             "enabled", "at", "tz", "days", "notify", "role", "curator",
+             "relevance"}
 
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -134,6 +135,7 @@ class Monitor:
     event: str = ""
     check: str = ""
     command: str = ""
+    relevance: str = ""
     notify: bool = False
     role: str = ""
     curator: bool = False
@@ -163,6 +165,7 @@ class Monitor:
             event=raw.get("event", f"monitor/{raw['name']}"),
             check=raw.get("check", ""),
             command=raw.get("command", ""),
+            relevance=str(raw.get("relevance", "") or ""),
             notify=bool(raw.get("notify", False)),
             role=raw.get("role", ""),
             curator=bool(raw.get("curator", False)),
@@ -191,6 +194,8 @@ class Monitor:
             record["check"] = self.check
         if self.command:
             record["command"] = self.command
+        if self.relevance:
+            record["relevance"] = self.relevance
         if self.notify:
             record["notify"] = True
         if self.role:
