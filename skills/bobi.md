@@ -64,6 +64,7 @@ bobi agent <name> ask "question"
 bobi agent <name> message "text"
 bobi agent <name> compact
 bobi agent <name> events
+bobi agent <name> events publish alert/firing --json '{"title":"x"}'
 
 bobi agent <name> transcript show manager
 bobi agent <name> transcript search "query"
@@ -122,6 +123,7 @@ bobi agent support ask "summarize the current queue"
 # Inspect operation
 bobi agent support status
 bobi agent support events
+echo '{"title":"x"}' | bobi agent support events publish alert/firing
 bobi agent support transcript show manager
 ```
 

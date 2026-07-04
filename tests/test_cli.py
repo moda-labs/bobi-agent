@@ -239,6 +239,133 @@ class TestEventsCommand:
         assert "legacy_push" not in result.output
         assert "new_pr" in result.output
 
+    def test_publish_reads_payload_from_stdin(self, bobi_install):
+        with patch("bobi.events.publish.post_event", return_value=True) as post:
+            result = CliRunner().invoke(
+                main,
+                ["agent", TEST_AGENT_NAME, "events", "publish", "alert/firing"],
+                input='{"title":"x"}',
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Published alert/firing" in result.output
+        post.assert_called_once_with(
+            "alert/firing",
+            {"title": "x"},
+            project_path=bobi_install.repo_path,
+        )
+
+    def test_publish_reads_payload_from_json_option(self, bobi_install):
+        with patch("bobi.events.publish.post_event", return_value=True) as post:
+            result = CliRunner().invoke(
+                main,
+                [
+                    "agent", TEST_AGENT_NAME, "events", "publish",
+                    "alert/firing", "--json", '{"title":"x"}',
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        post.assert_called_once_with(
+            "alert/firing",
+            {"title": "x"},
+            project_path=bobi_install.repo_path,
+        )
+
+    def test_publish_rejects_non_object_payload(self, bobi_install):
+        result = CliRunner().invoke(
+            main,
+            ["agent", TEST_AGENT_NAME, "events", "publish", "alert/firing"],
+            input='["x"]',
+        )
+
+        assert result.exit_code != 0
+        assert "Payload must be a JSON object" in result.output
+
+    def test_publish_rejects_bare_topic(self, bobi_install):
+        result = CliRunner().invoke(
+            main,
+            [
+                "agent", TEST_AGENT_NAME, "events", "publish",
+                "firing", "--json", '{"title":"x"}',
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "source/type" in result.output
+
+    def test_publish_rejects_global_topic_prefixes(self, bobi_install):
+        for topic in [
+            "github:org/repo",
+            "linear:TEAM/firing",
+            "slack:T123/firing",
+            "alert/github:org",
+        ]:
+            result = CliRunner().invoke(
+                main,
+                [
+                    "agent", TEST_AGENT_NAME, "events", "publish",
+                    topic, "--json", '{"title":"x"}',
+                ],
+            )
+
+            assert result.exit_code != 0
+            assert "reserved for webhooks" in result.output
+
+    def test_publish_rejects_webhook_source_labels(self, bobi_install):
+        for topic in [
+            "github/firing",
+            "linear/firing",
+            "slack/firing",
+        ]:
+            result = CliRunner().invoke(
+                main,
+                [
+                    "agent", TEST_AGENT_NAME, "events", "publish",
+                    topic, "--json", '{"title":"x"}',
+                ],
+            )
+
+            assert result.exit_code != 0
+            assert "sources are reserved for webhooks" in result.output
+
+    def test_publish_without_payload_does_not_read_interactive_stdin(
+        self,
+        bobi_install,
+        monkeypatch,
+    ):
+        class TtyStdin:
+            @staticmethod
+            def isatty():
+                return True
+
+            @staticmethod
+            def read():
+                raise AssertionError("interactive stdin should not be read")
+
+        monkeypatch.setattr("click.get_text_stream", lambda name: TtyStdin())
+        result = CliRunner().invoke(
+            main,
+            ["agent", TEST_AGENT_NAME, "events", "publish", "alert/firing"],
+        )
+
+        assert result.exit_code != 0
+        assert "Provide payload with --json or stdin" in result.output
+
+    def test_publish_reports_rejected_publish(self, bobi_install):
+        with patch("bobi.events.publish.post_event", return_value=False):
+            result = CliRunner().invoke(
+                main,
+                [
+                    "agent", TEST_AGENT_NAME, "events", "publish",
+                    "alert/firing", "--json", '{"title":"x"}',
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "Publish failed" in result.output
+        assert "bubble credentials" in result.output
+
 
 class TestEventServerCommand:
     def test_status_uses_selected_runtime_port_file(self, bobi_install, monkeypatch):

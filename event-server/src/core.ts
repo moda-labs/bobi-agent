@@ -937,6 +937,9 @@ export async function handleTopicEvent(
 	}
 
 	const event = createTopicEvent(topic, body, bubble.id);
+	if (event.topics.some((key) => isGlobalTopic(key))) {
+		return { status: 400, body: { error: "global topics are webhook-only" } };
+	}
 	const delivered = await storage.deliver(event);
 	return { status: 200, body: { delivered_to: delivered } };
 }

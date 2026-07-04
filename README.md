@@ -246,6 +246,7 @@ bobi agent <name> message "update"        # fire-and-forget
 # Observe
 bobi agent <name> status                  # active agents
 bobi agent <name> events                  # recent events and decisions
+bobi agent <name> events publish alert/firing --json '{"title":"x"}'
 bobi agent <name> transcript show <sess>  # session transcript
 bobi agent <name> doctor                  # system health check
 ```

@@ -1903,6 +1903,24 @@ describe("handleTopicEvent", () => {
 		expect(result.status).toBe(400);
 		expect(store.delivered).toHaveLength(0);
 	});
+
+	it("rejects source-derived global webhook topics on generic publishes", async () => {
+		const store = createMockStorage();
+		const bubble = seedBubble(store, "bub_A", "bkey_A");
+
+		for (const [topic, body] of [
+			["repo", { source: "github:org", payload: { text: "fake" } }],
+			["issue", { source: "linear:TEAM", payload: { text: "fake" } }],
+			["mention", { source: "slack:T123", payload: { text: "fake" } }],
+			["github:org", { source: "ci", payload: { text: "fake" } }],
+		] as const) {
+			const raw = JSON.stringify(body);
+			const ctx = await signCtx(bubble, "POST", `/events/${topic}`, raw);
+			const result = await handleTopicEvent(store, topic, body, ctx);
+			expect(result.status).toBe(400);
+		}
+		expect(store.delivered).toHaveLength(0);
+	});
 });
 
 describe("handleSlackSend", () => {

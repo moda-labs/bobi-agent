@@ -2177,10 +2177,7 @@ def skill(name):
     click.echo(path.read_text())
 
 
-@main.command()
-@click.option("--tail", default=20, help="Number of recent entries to show")
-@click.option("--decisions-only", is_flag=True, help="Show only manager decisions")
-def events(tail, decisions_only):
+def _show_events(tail: int, decisions_only: bool) -> None:
     """Show recent events and manager decisions as a unified timeline."""
     project_path = _detect_project_root()
 
@@ -2257,6 +2254,82 @@ def events(tail, decisions_only):
 
     if malformed:
         click.echo(f"\n  ⚠ {malformed} malformed line(s) skipped", err=True)
+
+
+def _parse_event_publish_payload(json_payload: str | None) -> dict:
+    if json_payload is None:
+        stdin = click.get_text_stream("stdin")
+        if stdin.isatty():
+            raise click.UsageError("Provide payload with --json or stdin.")
+        raw = stdin.read()
+    else:
+        raw = json_payload
+    raw = raw.strip()
+    if not raw:
+        raise click.UsageError("Provide payload with --json or stdin.")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise click.UsageError(f"Payload must be valid JSON: {exc.msg}.") from exc
+    if not isinstance(payload, dict):
+        raise click.UsageError("Payload must be a JSON object.")
+    return payload
+
+
+def _validate_event_publish_topic(topic: str) -> str:
+    source, sep, etype = topic.partition("/")
+    if not sep or not source or not etype:
+        raise click.UsageError(
+            "Topic must use source/type form, e.g. alert/firing."
+        )
+    reserved_sources = {"github", "linear", "slack"}
+    if source in reserved_sources:
+        raise click.UsageError(
+            "github, linear, and slack sources are reserved for webhooks."
+        )
+    global_prefixes = ("github:", "linear:", "slack:")
+    if (
+        topic.startswith(global_prefixes)
+        or source.startswith(global_prefixes)
+        or etype.startswith(global_prefixes)
+    ):
+        raise click.UsageError(
+            "github:, linear:, and slack: topics are reserved for webhooks."
+        )
+    return topic
+
+
+@main.group(invoke_without_command=True)
+@click.option("--tail", default=20, help="Number of recent entries to show")
+@click.option("--decisions-only", is_flag=True, help="Show only manager decisions")
+@click.pass_context
+def events(ctx, tail, decisions_only):
+    """Show recent events and manager decisions as a unified timeline."""
+    if ctx.invoked_subcommand is not None:
+        return
+    _show_events(tail, decisions_only)
+
+
+@events.command("publish")
+@click.argument("topic")
+@click.option("--json", "json_payload", default=None,
+              help="JSON object payload. If omitted, payload is read from stdin.")
+def events_publish(topic, json_payload):
+    """Publish a signed custom-topic event."""
+    project_path = _detect_project_root()
+    topic = _validate_event_publish_topic(topic)
+    payload = _parse_event_publish_payload(json_payload)
+
+    from bobi.events.publish import post_event
+    if not post_event(topic, payload, project_path=project_path):
+        click.echo(
+            "Publish failed. Ensure the agent is started, bubble credentials "
+            "are minted, and the event server accepted the signed publish.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    click.echo(f"Published {topic}")
 
 
 
