@@ -101,6 +101,152 @@ class TestAutoDispatchRule:
         }
         assert rule.matches(event) is True
 
+    def test_question_only_comment_does_not_match_when_guard_enabled(self):
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="pr-feedback",
+            match={"is_pull_request": True},
+            skip_question_only=True,
+        )
+        event = {
+            "type": "github.issue_comment",
+            "fields": {
+                "is_pull_request": True,
+                "comment_body": "@Bobi-Agent why is this necessary?",
+            },
+        }
+
+        assert rule.matches(event) is False
+
+    def test_polite_question_only_comment_does_not_match(self):
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="pr-feedback",
+            match={"is_pull_request": True},
+            skip_question_only=True,
+        )
+        event = {
+            "type": "github.issue_comment",
+            "fields": {
+                "is_pull_request": True,
+                "comment_body": "Could you please explain why this is needed?",
+            },
+        }
+
+        assert rule.matches(event) is False
+
+    def test_direct_request_question_matches(self):
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="pr-feedback",
+            match={"is_pull_request": True},
+            skip_question_only=True,
+        )
+        event = {
+            "type": "github.issue_comment",
+            "fields": {
+                "is_pull_request": True,
+                "comment_body": "Could you please add a regression test?",
+            },
+        }
+
+        assert rule.matches(event) is True
+
+    @pytest.mark.parametrize("body", [
+        "Can we add a regression test?",
+        "Should this handle null?",
+        "Please add a test?",
+        "Can this use a guard clause instead?",
+        "Could it update the caller too?",
+        "Can you make sure this handles null?",
+        "Could you include a regression test?",
+        "Please avoid this pattern?",
+    ])
+    def test_common_actionable_question_requests_match(self, body):
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="pr-feedback",
+            match={"is_pull_request": True},
+            skip_question_only=True,
+        )
+        event = {
+            "type": "github.issue_comment",
+            "fields": {
+                "is_pull_request": True,
+                "comment_body": body,
+            },
+        }
+
+        assert rule.matches(event) is True
+
+    def test_ambiguous_question_dispatches_for_human_triage(self):
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="pr-feedback",
+            match={"is_pull_request": True},
+            skip_question_only=True,
+        )
+        event = {
+            "type": "github.issue_comment",
+            "fields": {
+                "is_pull_request": True,
+                "comment_body": "Should we keep this?",
+            },
+        }
+
+        assert rule.matches(event) is True
+
+    def test_explanatory_use_question_does_not_match(self):
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="pr-feedback",
+            match={"is_pull_request": True},
+            skip_question_only=True,
+        )
+        event = {
+            "type": "github.issue_comment",
+            "fields": {
+                "is_pull_request": True,
+                "comment_body": "Can you explain how to use this?",
+            },
+        }
+
+        assert rule.matches(event) is False
+
+    def test_actionable_comment_matches_when_question_guard_enabled(self):
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="pr-feedback",
+            match={"is_pull_request": True},
+            skip_question_only=True,
+        )
+        event = {
+            "type": "github.issue_comment",
+            "fields": {
+                "is_pull_request": True,
+                "comment_body": "Can you explain this? Also please add a test.",
+            },
+        }
+
+        assert rule.matches(event) is True
+
+    def test_plain_change_request_matches_when_question_guard_enabled(self):
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="pr-feedback",
+            match={"is_pull_request": True},
+            skip_question_only=True,
+        )
+        event = {
+            "type": "github.issue_comment",
+            "fields": {
+                "is_pull_request": True,
+                "comment_body": "Please add a regression test before merging.",
+            },
+        }
+
+        assert rule.matches(event) is True
+
     def test_field_condition_missing_field_does_not_match(self):
         rule = AutoDispatchRule(
             event="github.issue_comment",
@@ -600,6 +746,19 @@ class TestEventReactorFromConfig:
         reactor = EventReactor.from_config(config, cwd="/tmp/project")
         assert reactor.rules[0].allow_self_authored is True
 
+    def test_from_config_parses_question_only_guard(self):
+        """skip_question_only lets question-only comments reach the director."""
+        config = [
+            {
+                "event": "github.issue_comment",
+                "match": {"is_pull_request": True},
+                "workflow": "pr-feedback",
+                "skip_question_only": True,
+            },
+        ]
+        reactor = EventReactor.from_config(config, cwd="/tmp/project")
+        assert reactor.rules[0].skip_question_only is True
+
     def test_from_config_hygiene_flags_default(self):
         """Self-author skip is on by default (allow_self_authored defaults
         False)."""
@@ -683,11 +842,13 @@ class TestPrFeedbackDispatchHygiene:
                 workflow="pr-feedback",
                 match={"is_pull_request": True},
                 cooldown=cooldown,
+                skip_question_only=True,
             ),
         ]
 
     def _issue_comment_event(self, *, sender="reviewer1",
-                             comment_id=1, number=410, delivery="d1"):
+                             comment_id=1, number=410, delivery="d1",
+                             comment_body="Please add a test."):
         fields = {
             "action": "created",
             "number": number,
@@ -695,6 +856,7 @@ class TestPrFeedbackDispatchHygiene:
             "sender": sender,
             "is_pull_request": True,
             "comment_id": comment_id,
+            "comment_body": comment_body,
         }
         return {
             "type": "github.issue_comment",
@@ -715,6 +877,20 @@ class TestPrFeedbackDispatchHygiene:
         result = reactor.process(event)
 
         assert result is None
+        time.sleep(0.05)
+        mock_launch.assert_not_called()
+
+    @patch("bobi.subagent.launch_agent")
+    def test_skips_question_only_pr_comment(self, mock_launch):
+        """Question-only PR comments must reach the director answer path."""
+        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
+                               self_login="bobi")
+        event = self._issue_comment_event(
+            sender="zach",
+            comment_body="@Bobi-Agent can you explain why this change is necessary?",
+        )
+
+        assert reactor.process(event) is None
         time.sleep(0.05)
         mock_launch.assert_not_called()
 

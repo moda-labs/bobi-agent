@@ -112,7 +112,8 @@ Use deterministic routing where possible:
 |---|---|
 | Assigned issue or issue labeled `agent` | `issue-lifecycle` |
 | Approved spec or implementation request | `issue-lifecycle` at the relevant phase |
-| PR review, inline comment, or PR comment with actionable feedback | `pr-feedback` |
+| PR review, inline comment, or PR comment with actionable requested-change text | `pr-feedback` |
+| Question-only PR or issue comment | Answer directly, or launch `adhoc` if code knowledge is needed |
 | Closed or merged PR cleanup | `pr-closed` |
 | Merge conflict monitor condition | `merge-conflict` |
 | CI or build failure on an open PR | `build-failure` |
@@ -168,7 +169,9 @@ When a GitHub issue receives the `agent` label, auto-dispatch
 
 Any comment on a PR or issue that contains a question must be answered,
 including open, merged, or closed PRs. If answering requires code knowledge,
-launch an `adhoc` worker and answer from its result.
+launch an `adhoc` worker and answer from its result. Do not launch
+`pr-feedback` for a question-only comment unless the visible text also includes
+an actionable requested change.
 
 ### Summarize before dispatching
 

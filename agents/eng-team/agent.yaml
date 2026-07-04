@@ -107,12 +107,14 @@ auto_dispatch:
   - event: github.pull_request_review_comment
     workflow: pr-feedback
     cooldown: 1800
+    skip_question_only: true
 
   - event: github.issue_comment
     match:
       is_pull_request: true
     workflow: pr-feedback
     cooldown: 1800
+    skip_question_only: true
 
   # issue-lifecycle / pr-closed legitimately react to the bot's OWN actions
   # (the bot self-assigns issues to start work; the bot merges PRs and that

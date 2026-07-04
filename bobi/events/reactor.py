@@ -11,6 +11,7 @@ Rules are defined in agent.yaml under ``auto_dispatch``.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -21,6 +22,51 @@ log = logging.getLogger(__name__)
 
 DEFAULT_COOLDOWN = 1800  # 30 minutes
 _MAX_DEDUP_ENTRIES = 500
+_ACTIONABLE_COMMENT_RE = re.compile(
+    r"\b("
+    r"add|address|adjust|avoid|delete|ensure|fix|handle|implement|include|"
+    r"move|remove|rename|replace|resolve|revert|update|use|must"
+    r")\b",
+    re.IGNORECASE,
+)
+_DIRECT_REQUEST_QUESTION_RE = re.compile(
+    r"\b(?:"
+    r"(?:can|could|would)\s+(?:you|we|this|it)\s+(?:please\s+|pls\s+)?|"
+    r"(?:can|could|would)\s+(?:you|we)\s+(?:please\s+|pls\s+)?make\s+sure\s+|"
+    r"should\s+(?:this|it|we)\s+|"
+    r"(?:please|pls)\s+"
+    r")"
+    r"(?:add|address|adjust|avoid|delete|ensure|fix|handle|implement|include|"
+    r"move|remove|rename|replace|resolve|revert|update|use)\b",
+    re.IGNORECASE,
+)
+_EXPLANATORY_QUESTION_RE = re.compile(
+    r"\b(?:clarify|explain|how|necessary|needed|reason|what|why)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_question_only_comment(fields: dict) -> bool:
+    """Return True when a comment asks only for an answer, not code changes."""
+    text = str(
+        fields.get("comment_body")
+        or fields.get("review_body")
+        or ""
+    ).strip()
+    if "?" not in text:
+        return False
+    for part in re.split(r"(?<=[.!?])\s+", text):
+        part = part.strip()
+        if not part:
+            continue
+        if part.endswith("?"):
+            if _DIRECT_REQUEST_QUESTION_RE.search(part):
+                return False
+            if not _EXPLANATORY_QUESTION_RE.search(part):
+                return False
+        elif _ACTIONABLE_COMMENT_RE.search(part):
+            return False
+    return True
 
 
 @dataclass
@@ -38,14 +84,19 @@ class AutoDispatchRule:
     # rare rule that deliberately reacts to the bot's own action (e.g. pr-closed
     # worktree cleanup on a bot-merged PR) opts back in with allow_self_authored.
     allow_self_authored: bool = False  # opt-in: DO dispatch on the bot's own events
+    # Let question-only comments reach the director, whose standing instruction
+    # is to answer questions directly instead of treating them as change requests.
+    skip_question_only: bool = False
 
     def matches(self, event: dict) -> bool:
         """Return True if the event matches this rule's type and field conditions."""
         if event.get("type") != self.event:
             return False
+        fields = event.get("fields", {})
+        if self.skip_question_only and _is_question_only_comment(fields):
+            return False
         if not self.match:
             return True
-        fields = event.get("fields", {})
         return all(fields.get(k) == v for k, v in self.match.items())
 
     def dedup_key(self, event: dict) -> str:
@@ -150,6 +201,7 @@ class EventReactor:
                 cooldown=entry.get("cooldown", DEFAULT_COOLDOWN),
                 suppress=entry.get("suppress", False),
                 allow_self_authored=entry.get("allow_self_authored", False),
+                skip_question_only=entry.get("skip_question_only", False),
             ))
         return cls(rules=rules, cwd=cwd, self_login=self_login)
 
