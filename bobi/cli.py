@@ -22,6 +22,23 @@ from .__version__ import __version__
 
 _PACKAGE_DIR = Path(__file__).parent
 
+# Prompt hints for framework-level env vars an agent.yaml may reference.
+# These are not credentials in the secret sense, so tell the user what a
+# blank answer means instead of implying a value is required.
+_ENV_VAR_HINTS = {
+    "BOBI_EVENT_SERVER":
+        "event server URL - leave blank to auto-start the local server",
+}
+
+
+def _interactive_terminal() -> bool:
+    """True when both ends of the session are a real terminal.
+
+    Split out so tests can stub interactivity (the test runner replaces
+    stdin/stdout with pipes).
+    """
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
 
 def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     """Print a startup summary with environment info."""
@@ -276,7 +293,7 @@ def _run_from_config(project_path: Path, cfg: "Config",
 
     # Select the team's agent brain (#485) for this process and its subagents.
     from bobi.brain import set_process_brain
-    set_process_brain(cfg.brain_kind)
+    set_process_brain(cfg.brain_kind, cfg.brain_model)
 
     agent_name = cfg.agent
     role = cfg.entry_point or "manager"
@@ -789,29 +806,29 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
     if parts:
         click.echo("\n".join(parts))
 
-    # Collect required env vars and write run/.env
-    from bobi.config import (find_required_env_vars, parse_env_file,
-                                  write_env_file)
-    env_vars = find_required_env_vars(project_path)
-    if env_vars:
+    # Collect referenced env vars and write run/.env
+    from bobi.config import find_env_var_refs, parse_env_file, write_env_file
+    env_refs = find_env_var_refs(project_path)
+    if env_refs:
         env_file = paths.env_path(project_path)
         existing = parse_env_file(env_file)
 
         click.echo()
-        missing = [v for v in env_vars if v not in existing and v not in os.environ]
+        missing = [r for r in env_refs
+                   if r.name not in existing and r.name not in os.environ]
 
         if non_interactive:
             # Pull values from the environment — never prompt.
-            for var in env_vars:
-                if var not in existing and var in os.environ:
-                    existing[var] = os.environ[var]
-            # A bare ${VAR} is a required secret; ${VAR:-default}/${VAR:+alt}
-            # (a ':' in the captured reference) carries its own fallback and is
-            # optional. Fail fast on missing required secrets so a container
-            # entrypoint (`install --non-interactive && start`) never marches
-            # into a broken start with empty credentials.
-            required_missing = [v for v in missing if ":" not in v]
-            optional_missing = [v for v in missing if ":" in v]
+            for ref in env_refs:
+                if ref.name not in existing and ref.name in os.environ:
+                    existing[ref.name] = os.environ[ref.name]
+            # A bare ${VAR} is a required secret; ${VAR:-default} carries its
+            # own fallback and is optional. Fail fast on missing required
+            # secrets so a container entrypoint (`install --non-interactive
+            # && start`) never marches into a broken start with empty
+            # credentials.
+            required_missing = [r.name for r in missing if r.required]
+            optional_missing = [r.name for r in missing if not r.required]
             if required_missing:
                 click.echo(
                     "Error: required secrets missing from the environment: "
@@ -827,13 +844,16 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
             write_env_file(env_file, existing)
         elif missing:
             click.echo("This agent needs credentials:")
-            for var in missing:
+            for ref in missing:
+                hint = _ENV_VAR_HINTS.get(
+                    ref.name, "" if ref.required else "optional")
+                label = f"  {ref.name} ({hint})" if hint else f"  {ref.name}"
                 try:
-                    value = click.prompt(f"  {var}", default="", show_default=False)
+                    value = click.prompt(label, default="", show_default=False)
                 except (EOFError, click.Abort):
                     value = ""
                 if value:
-                    existing[var] = value
+                    existing[ref.name] = value
 
             write_env_file(env_file, existing)
             click.echo(f"Credentials saved to {env_file}")
@@ -1589,11 +1609,12 @@ def slack_read_thread(workspace, channel, thread, limit, as_json):
 
 
 @main.command("create-slack-bot")
-@click.option("--app-name", default="bobi agent",
-              help="Display name for the Slack app")
+@click.option("--app-name", default=None,
+              help='Display name for the Slack app (default: "bobi agent"; '
+                   "prompted when run interactively)")
 @click.option("--event-server", default="",
               help="Event server base URL (default: the configured server, "
-                   "else the bobi cloud)")
+                   "else prompted interactively, else the bobi cloud)")
 @click.option("--format", "fmt", type=click.Choice(["yaml", "json"]),
               default="yaml", help="Manifest output format")
 @click.option("--output", "-o", "output", type=click.Path(), default="",
@@ -1620,14 +1641,21 @@ def create_slack_bot(app_name, event_server, fmt, output, show_url, open_browser
         bobi create-slack-bot --event-server https://my-worker.workers.dev
         bobi create-slack-bot --no-open                # just print the link
     """
+    from .deploy import DEFAULT_EVENT_SERVER
     from .slack_manifest import (
         create_app_url, manifest_to_json, render_manifest, webhook_url,
     )
 
+    interactive = _interactive_terminal()
+
+    if app_name is None:
+        app_name = (click.prompt("Slack app display name", default="bobi agent")
+                    if interactive else "bobi agent")
+
     if not event_server:
         # Resolve from the project config when run inside an install; this
         # command also works before any Bobi Agent is installed, so a missing
-        # root is fine; use the bobi cloud below when no runtime is selected.
+        # root is fine.
         try:
             project_path = _detect_project_root()
         except click.UsageError:
@@ -1635,8 +1663,23 @@ def create_slack_bot(app_name, event_server, fmt, output, show_url, open_browser
         if project_path:
             from .config import Config
             event_server = Config.load(project_path).event_server_url
+    if not event_server and interactive:
+        # No configured server: let the user pick before the manifest is
+        # rendered and the create page opens. Slack must be able to reach
+        # this URL from the internet, so a laptop running the local event
+        # server needs a public tunnel in front of localhost:8080.
+        click.echo("Where should Slack send events (the app's request URL)?")
+        click.echo("  Press Enter to use the bobi cloud event server, or type "
+                   "your own URL.")
+        click.echo("  Running the agent on this machine with the local event "
+                   "server? Slack can't reach localhost - put a public tunnel "
+                   "(e.g. cloudflared or ngrok) in front of localhost:8080 "
+                   "and enter the tunnel URL.")
+        event_server = click.prompt("Event server URL",
+                                    default=DEFAULT_EVENT_SERVER)
+        click.echo("")
     if not event_server:
-        from .deploy import DEFAULT_EVENT_SERVER
+        # Non-interactive with nothing configured: the bobi cloud.
         event_server = DEFAULT_EVENT_SERVER
 
     manifest_yaml = render_manifest(app_name, event_server)

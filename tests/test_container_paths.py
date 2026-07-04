@@ -90,3 +90,20 @@ class TestContainerCliPath:
         assert "> /usr/local/bin/bobi" in dockerfile
         assert "/home/bobi/.local/bin/bobi" in dockerfile
         assert 'exec /opt/venv/bin/bobi "$@"' in dockerfile
+
+
+class TestContainerFastembedCache:
+    def test_dockerfile_uses_volume_fastembed_cache_path(self):
+        """fastembed ignores HF_HOME, so first-use downloads must land in a
+        writable persistent cache path."""
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+        assert "FASTEMBED_CACHE_PATH=/data/.bobi/cache/fastembed" in dockerfile
+        assert "FROM python:3.11-slim AS model-baker" not in dockerfile
+        assert "COPY --from=model-baker" not in dockerfile
+
+    def test_entrypoint_prepares_fastembed_cache_path(self):
+        entrypoint = (REPO_ROOT / "docker" / "docker-entrypoint.sh").read_text()
+        assert '"${FASTEMBED_CACHE_PATH:-${BOBI_HOME}/cache/fastembed}"' in entrypoint
+        assert '"${HF_HOME:-${BOBI_HOME}/cache/huggingface}"' in entrypoint
+        assert "chown \"${APP_USER}:${APP_USER}\" \"${DATA_DIR}\" \"${BOBI_HOME}\" \"${RUN_ROOT}\"" in entrypoint
+        assert '"${FASTEMBED_CACHE_PATH:-${BOBI_HOME}/cache/fastembed}"' in entrypoint

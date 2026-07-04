@@ -469,6 +469,39 @@ def test_codex_requires_subscription_does_not_overwrite_oauth_auth(tmp_path, mon
     assert auth_file.read_text() == '{"tokens":"subscription"}\n'
 
 
+def test_codex_requires_subscription_recognizes_real_oauth_auth(tmp_path, monkeypatch):
+    """A REAL codex OAuth `auth.json` carries an `OPENAI_API_KEY` field (null)
+    ALONGSIDE its `tokens` - `codex login` writes both. The subscription check
+    must treat this as OAuth (pass), not misread the mere presence of the
+    `OPENAI_API_KEY` key as an API-key auth file. Regression for the device-login
+    flood: the entrypoint used the same naive `"OPENAI_API_KEY" in data` test and
+    wiped valid OAuth creds on every boot, re-posting a device code each time."""
+    entry = tool_library.load_entry("codex")
+    check = entry.success
+    home = tmp_path / "home"
+    bin_dir = tmp_path / "bin"
+    (home / ".codex").mkdir(parents=True)
+    # The shape `codex login --device-auth` actually writes.
+    (home / ".codex" / "auth.json").write_text(
+        '{"OPENAI_API_KEY": null, "tokens": {"id_token": "i", '
+        '"access_token": "a", "refresh_token": "r"}, "last_refresh": "t"}\n')
+    bin_dir.mkdir()
+    codex = bin_dir / "codex"
+    codex.write_text("#!/usr/bin/env bash\nexit 0\n")
+    codex.chmod(0o755)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("BOBI_AUTH", "subscription")
+    monkeypatch.delenv("BOBI_VERIFY_PHASE", raising=False)
+
+    proc = subprocess.run(
+        ["bash", "-c", check], capture_output=True, text=True,
+        env={**os.environ, "HOME": str(home),
+             "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+    )
+    assert proc.returncode == 0, (
+        f"real OAuth auth.json misread as an API-key file: {proc.stderr}")
+
+
 def test_codex_requires_subscription_rejects_api_key_auth_file(tmp_path, monkeypatch):
     entry = tool_library.load_entry("codex")
     check = entry.success
@@ -658,7 +691,7 @@ agent: acme
 requires:
   - name: codex
     why: "Delegate a coding sub-task to the Codex CLI (tools/codex.md)."
-    check: "command -v codex >/dev/null 2>&1 && { if [ \\"${BOBI_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; fi; if [ -f ~/.codex/auth.json ]; then if [ \\"${BOBI_AUTH:-api_key}\\" = \\"subscription\\" ] && python3 -c 'import json, pathlib, sys; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; data=json.loads(p.read_text()); sys.exit(0 if isinstance(data, dict) and \\"OPENAI_API_KEY\\" in data else 1)'; then false; else python3 -c 'import subprocess, sys; sys.exit(subprocess.run([\\"codex\\", \\"exec\\", \\"-s\\", \\"read-only\\", \\"--skip-git-repo-check\\", \\"reply OK\\"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=8).returncode)'; fi; elif [ \\"${BOBI_VERIFY_PHASE:-}\\" = \\"build\\" ]; then codex --version >/dev/null 2>&1; else false; fi; }"
+    check: "command -v codex >/dev/null 2>&1 && { if [ \\"${BOBI_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; fi; if [ -f ~/.codex/auth.json ]; then if [ \\"${BOBI_AUTH:-api_key}\\" = \\"subscription\\" ] && python3 -c 'import json, pathlib, sys; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; data=json.loads(p.read_text()); sys.exit(0 if isinstance(data, dict) and data.get(\\"OPENAI_API_KEY\\") and not data.get(\\"tokens\\") else 1)'; then false; else python3 -c 'import subprocess, sys; sys.exit(subprocess.run([\\"codex\\", \\"exec\\", \\"-s\\", \\"read-only\\", \\"--skip-git-repo-check\\", \\"reply OK\\"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=8).returncode)'; fi; elif [ \\"${BOBI_VERIFY_PHASE:-}\\" = \\"build\\" ]; then codex --version >/dev/null 2>&1; else false; fi; }"
     fix: "npm install -g @openai/codex@0.142.0 && { if [ \\"${BOBI_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; else codex auth login || echo 'Set OPENAI_API_KEY in run/.env or run codex auth login'; fi; }"
   - name: venn
     why: "Reach external services (email, calendar, CRM) via the Venn CLI (tools/venn.md). Auth via VENN_API_KEY."

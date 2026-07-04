@@ -151,10 +151,23 @@ the top of its `agent.yaml`:
 ```yaml
 brain:
   kind: codex          # omit the block entirely for Claude Code (the default)
+  model: gpt-5-codex   # optional: provider-specific model or alias
 ```
 
 Make sure the matching CLI is installed and authenticated (see
 [Set up an agent runtime](#1-set-up-an-agent-runtime) above).
+For Claude-backed teams, `model` can be an alias such as `haiku`, `sonnet`, or
+`opus`, or a full Claude model ID.
+
+Workflow steps can override the team default for that step:
+
+```yaml
+steps:
+  - name: discover
+    agent: prospect-targeter
+    model: haiku
+    prompt: "Find companies matching the wedge..."
+```
 
 Don't want to edit YAML by hand? Paste this into your Claude Code or Codex
 session:
@@ -270,8 +283,9 @@ bobi deploy eng-team
 The command provisions the machine, ships the image, and starts the agent; run it
 again and it updates the instance in place. Behind it:
 
-- **Immutable image.** The framework, a pinned agent runtime, and the embedding
-  model are baked into one image - the image is the unit of update.
+- **Immutable image.** The framework and pinned agent runtimes are baked into one
+  image - the image is the unit of update. The embedding model downloads on first
+  KB use into the durable volume cache.
 - **Durable state.** Credentials and session transcripts live on a mounted volume,
   so they survive image updates and the agent resumes where it left off.
 - **Self-managing.** A machine restart policy plus a supervision watchdog keep the

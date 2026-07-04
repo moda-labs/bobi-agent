@@ -27,6 +27,7 @@ from bobi.sdk import (
 from bobi.transient import is_transient_api_error
 from bobi.env import (
     _configured_brain_kind,
+    _configured_brain_model,
     agent_spawn_env,
     child_agent_env,
 )
@@ -66,6 +67,24 @@ class AgentResult:
     # persistent session agree on "transient" — the launcher's re-dispatch
     # decision can consult it. Survival/retry stays at the #444 layer (§4.3).
     transient: bool = False
+
+
+def _network_drop_error(detail: str = "") -> str:
+    base = "network drop: response stream ended before turn result"
+    return f"{base} ({detail})" if detail else base
+
+
+def _timeout_error(timeout: int | None = None) -> str:
+    if timeout is None:
+        return "subprocess timeout while draining response"
+    return f"subprocess timeout after {timeout}s"
+
+
+def _tool_crash_error(error: BaseException | str) -> str:
+    message = str(error).strip() or error.__class__.__name__
+    if message.startswith("tool crash:"):
+        return message
+    return f"tool crash: {message}"
 
 
 def _build_prompt(phase: str, run_key: str, role: str = "", context: str = "") -> str:
@@ -357,7 +376,7 @@ async def _run_agent_supervised(
                     result_msg = msg
 
             if result_msg is None:
-                result.error = "connection lost (no ResultMessage)"
+                result.error = _network_drop_error("no ResultMessage")
                 _persist_terminal(registry, name, TERMINAL_FAILED,
                                   error=result.error, phase=phase)
                 return result
@@ -405,11 +424,11 @@ async def _run_agent_supervised(
             return result
 
     except asyncio.TimeoutError:
-        result.error = f"timeout after {timeout}s"
+        result.error = _timeout_error(timeout)
         _persist_terminal(registry, name, TERMINAL_FAILED, error=result.error,
                           phase=phase)
     except Exception as e:
-        result.error = str(e)
+        result.error = _tool_crash_error(e)
         # An unhandled executor exception is a crash, not a clean failure.
         _persist_terminal(registry, name, TERMINAL_CRASHED, error=result.error,
                           phase=phase)
@@ -1359,12 +1378,10 @@ def _run_agent_entry(args: dict) -> None:
             f"(no package/agent.yaml) — refusing to run with an unverified "
             f"identity."
         )
-    from bobi.brain import BRAIN_ENV
+    from bobi.brain import pin_process_brain
     brain_kind = _configured_brain_kind(project_root, os.environ)
-    if brain_kind:
-        os.environ[BRAIN_ENV] = brain_kind
-    else:
-        os.environ.pop(BRAIN_ENV, None)
+    brain_model = _configured_brain_model(project_root, os.environ)
+    pin_process_brain(brain_kind, brain_model)
 
     # Subscription is owned by the Session now: every Session subscribes to
     # inbox/<self> on start, and extra topics (the persistent agent's

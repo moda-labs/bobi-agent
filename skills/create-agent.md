@@ -201,6 +201,7 @@ description: >
 steps:
   - name: step-name
     agent: role-name
+    model: sonnet      # optional: override the team default for this prompt step
     prompt: |
       Instructions for this step.
     handoff:
@@ -222,6 +223,28 @@ Step types:
 - **Prompt step**: `agent` + `prompt` — agent executes and writes handoff
 - **Route step**: `if` + `goto` + `else` — deterministic branch
 - **Await step**: `await` — suspends until external event arrives
+
+Runtime model selection lives in `agent.yaml` by default:
+
+```yaml
+brain:
+  kind: codex          # omit the block entirely for Claude Code
+  model: gpt-5-codex   # optional provider-specific model or alias
+```
+
+Workflow prompt steps can override that team default for just one step:
+
+```yaml
+steps:
+  - name: discover
+    agent: prospect-targeter
+    model: haiku
+    prompt: "Find companies matching the wedge..."
+```
+
+For Claude-backed teams, `model` can be an alias such as `haiku`, `sonnet`, or
+`opus`, or a full Claude model ID. Bobi passes provider-native model strings to
+the selected backend; it does not translate model names across providers.
 
 Always include `adhoc.yaml`:
 ```yaml

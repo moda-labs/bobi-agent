@@ -15,6 +15,7 @@ kind to its factory; Phase 1 ships only ``claude``.
 from __future__ import annotations
 
 import os
+from collections.abc import MutableMapping
 
 from bobi.brain.base import (
     AssistantText,
@@ -43,9 +44,67 @@ DEFAULT_BRAIN = "claude"
 # child agents get a stricter root-bound value from ``child_agent_env()`` so a
 # stale ambient value from another installation cannot leak across sessions.
 BRAIN_ENV = "BOBI_BRAIN"
+_BRAIN_MODEL_ENV = "BOBI_BRAIN_MODEL"
+# Compatibility for older external code that imported the constant directly.
+# Bobi internals should use the helpers below so model env handling stays here.
+BRAIN_MODEL_ENV = _BRAIN_MODEL_ENV
 
 
-def set_process_brain(kind: str | None) -> None:
+def get_process_brain_model(
+    env: MutableMapping[str, str] | None = None,
+) -> str:
+    """Return the configured default model for the selected process brain."""
+    lookup = os.environ if env is None else env
+    return lookup.get(_BRAIN_MODEL_ENV, "")
+
+
+def _set_process_brain_model(
+    model: str | None,
+    env: MutableMapping[str, str] | None = None,
+) -> None:
+    """Pin or clear the process brain model in *env*.
+
+    Keeping the env var name private to this module prevents the model
+    selection contract from being reimplemented across brain adapters and
+    launch paths.
+    """
+    target = os.environ if env is None else env
+    if model:
+        target[_BRAIN_MODEL_ENV] = model
+    else:
+        target.pop(_BRAIN_MODEL_ENV, None)
+
+
+def with_default_model_option(options: dict | None) -> dict:
+    """Return *options* with the process default model filled in if absent."""
+    extra = dict(options or {})
+    if not extra.get("model"):
+        model = get_process_brain_model()
+        if model:
+            extra["model"] = model
+    return extra
+
+
+def resolve_model_option(model: str | None) -> str:
+    """Return an explicit model or the process default model."""
+    return str(model or "") or get_process_brain_model()
+
+
+def pin_process_brain(
+    kind: str | None,
+    model: str | None,
+    env: MutableMapping[str, str] | None = None,
+) -> None:
+    """Pin the process brain kind and model into *env*, clearing stale values."""
+    target = os.environ if env is None else env
+    if kind:
+        target[BRAIN_ENV] = kind
+    else:
+        target.pop(BRAIN_ENV, None)
+    _set_process_brain_model(model, env=target)
+
+
+def set_process_brain(kind: str | None, model: str | None = None) -> None:
     """Record the team's brain kind for the current process.
 
     A no-op for an empty/None kind (keeps the framework default). At top-level
@@ -55,8 +114,16 @@ def set_process_brain(kind: str | None) -> None:
     ``bobi.env.child_agent_env()`` rewrites the child's value from the
     verified installation root.
     """
-    if kind and not os.environ.get(BRAIN_ENV):
+    existing_kind = os.environ.get(BRAIN_ENV, "")
+    if kind and not existing_kind:
         os.environ[BRAIN_ENV] = kind
+        existing_kind = kind
+    model_matches_active_brain = (
+        (kind and existing_kind == kind)
+        or (not kind and existing_kind in ("", DEFAULT_BRAIN))
+    )
+    if model and model_matches_active_brain and not get_process_brain_model():
+        _set_process_brain_model(model)
 
 
 def get_brain(kind: str | None = None) -> BrainFactory:
@@ -93,5 +160,9 @@ __all__ = [
     "DEFAULT_BRAIN",
     "BRAIN_ENV",
     "get_brain",
+    "get_process_brain_model",
+    "pin_process_brain",
+    "resolve_model_option",
     "set_process_brain",
+    "with_default_model_option",
 ]

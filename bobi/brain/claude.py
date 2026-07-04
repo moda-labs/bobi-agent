@@ -245,7 +245,9 @@ class ClaudeBrain:
 
         from bobi.sdk import get_cli_path
 
-        extra = dict(options or {})
+        from bobi.brain import with_default_model_option
+
+        extra = with_default_model_option(options)
         # Defaults every call site shared; an explicit value in ``options`` wins.
         extra.setdefault("permission_mode", "bypassPermissions")
         kwargs = dict(cwd=cwd, cli_path=get_cli_path(), resume=resume, **extra)
@@ -288,7 +290,10 @@ class ClaudeBrain:
             "BOBI_CLAUDE_CONNECT_BACKOFF_SECONDS",
             DEFAULT_CONNECT_BACKOFF_SECONDS,
         )
+        from bobi.brain import resolve_model_option
+
         extra = dict(options or {})
+        model = resolve_model_option(model)
         extra.setdefault("permission_mode", "bypassPermissions")
         extra.setdefault("include_partial_messages", True)
         opts = ClaudeAgentOptions(

@@ -151,6 +151,43 @@ async def test_spawn_codex_accepts_large_ndjson_events(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_spawn_codex_raises_on_nonzero_exit_with_stderr(tmp_path):
+    script = "import sys\nprint('tool exploded', file=sys.stderr)\nsys.exit(7)\n"
+
+    with pytest.raises(RuntimeError, match="codex subprocess exited 7: tool exploded"):
+        [ev async for ev in _spawn_codex([sys.executable, "-c", script], str(tmp_path))]
+
+
+@pytest.mark.asyncio
+async def test_spawn_codex_close_after_terminal_event_does_not_raise(tmp_path):
+    script = (
+        "import json, time\n"
+        "print(json.dumps({'type': 'turn.completed', 'usage': {}}), flush=True)\n"
+        "time.sleep(10)\n"
+    )
+
+    stream = _spawn_codex([sys.executable, "-c", script], str(tmp_path))
+    ev = await stream.__anext__()
+    assert ev["type"] == "turn.completed"
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_spawn_codex_close_kills_sigterm_resistant_child(tmp_path):
+    script = (
+        "import json, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print(json.dumps({'type': 'turn.completed', 'usage': {}}), flush=True)\n"
+        "time.sleep(10)\n"
+    )
+
+    stream = _spawn_codex([sys.executable, "-c", script], str(tmp_path))
+    ev = await stream.__anext__()
+    assert ev["type"] == "turn.completed"
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_stream_ends_without_terminal_is_error():
     events = [{"type": "thread.started", "thread_id": "th-x"}]  # no turn.completed
     s = _CodexSession(cwd="/w", instructions="", runner=_runner_of(events))
@@ -161,16 +198,31 @@ async def test_stream_ends_without_terminal_is_error():
 
 
 @pytest.mark.asyncio
-async def test_model_override_adds_flag():
+async def test_env_model_default_adds_flag(monkeypatch):
     sink = []
     events = [{"type": "turn.completed", "usage": {}}]
-    b = CodexBrain()
-    s = b.make_session(cwd="/w", system_prompt={"append": "S"},
-                       options={"model": "gpt-5-codex"})
+    monkeypatch.setenv("BOBI_BRAIN_MODEL", "gpt-5-codex")
+
+    s = CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"})
     s._runner = _runner_of(events, sink)
     await s.connect("hi")
     await _drain(s)
+
     assert "-m" in sink[0][0] and "gpt-5-codex" in sink[0][0]
+
+@pytest.mark.asyncio
+async def test_model_override_adds_flag(monkeypatch):
+    sink = []
+    events = [{"type": "turn.completed", "usage": {}}]
+    monkeypatch.setenv("BOBI_BRAIN_MODEL", "gpt-5-codex")
+    b = CodexBrain()
+    s = b.make_session(cwd="/w", system_prompt={"append": "S"},
+                       options={"model": "o3"})
+    s._runner = _runner_of(events, sink)
+    await s.connect("hi")
+    await _drain(s)
+    assert "-m" in sink[0][0] and "o3" in sink[0][0]
+    assert "gpt-5-codex" not in sink[0][0]
 
 
 # --- MCP config rendering (#428 Stage 4) ------------------------------------

@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.38.0 — 2026-07-02
+
+Patch/minor release: fixes a production Codex OAuth device-login flood, plus
+a per-step brain model override and other runtime fixes.
+
+### Added
+- **Per-step brain model override (MOD-240).** A team can set a `brain.model`
+  default alongside `brain.kind`, and individual workflow steps can override
+  `model:` to start a fresh brain session when the effective model changes.
+  Claude aliases (`haiku`, `sonnet`, `opus`), full Claude model IDs, and Codex
+  model IDs (e.g. `gpt-5-codex`) all pass through unchanged. (#550)
+
+### Fixed
+- **Codex OAuth device-login flood.** A subscription (Codex OAuth) instance
+  re-posted a device-login code to its Slack login channel on every reboot.
+  Both the entrypoint and the codex catalog `success` check misread a valid
+  OAuth `auth.json` (which carries a null `OPENAI_API_KEY` field alongside its
+  `tokens`) as a stale API-key file, wiping it and forcing a fresh login each
+  boot. Now treated as API-key auth only when there is a real `OPENAI_API_KEY`
+  value and no OAuth `tokens`. (#586)
+- **Fastembed cache path baked into the image.** The Dockerfile set `HF_HOME`
+  but never created the directory before the fastembed model download, so the
+  subsequent `chmod` failed. The bake and runtime now share one explicit
+  `/opt/bobi/models/fastembed` cache path, created ahead of time. (#579)
+- **Surfaced agent failure causes (MOD-246).** Opaque "connection lost" session
+  failures now distinguish network-drop, subprocess-timeout, and tool-crash
+  causes; Codex subprocess stderr is preserved, and workflow draining surfaces
+  clean brain error results instead of turning them into later handoff
+  failures. (#570)
+- **Fresh installs default to the local event server (#584).** Config
+  interpolation's `${VAR:-default}` looked up the literal string `VAR:-default`
+  in the environment instead of applying the default, so optional refs never
+  fell back. This nudged fresh eng-team installs onto the Moda Cloudflare event
+  server instead of the bundled local one. (#585)
+
 ## 0.37.0 — 2026-07-01
 
 Minor release: gstack joins the tool-library catalog.

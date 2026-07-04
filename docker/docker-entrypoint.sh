@@ -135,7 +135,12 @@ try:
     data = json.loads((Path(os.environ["CODEX_CRED_DIR"]) / "auth.json").read_text())
 except Exception:
     sys.exit(1)
-sys.exit(0 if isinstance(data, dict) and "OPENAI_API_KEY" in data else 1)
+# API-key auth ONLY: a real OPENAI_API_KEY value AND no OAuth tokens. A codex
+# `login --device-auth` file carries an OPENAI_API_KEY field (null) ALONGSIDE
+# `tokens`, so a bare `"OPENAI_API_KEY" in data` misreads valid OAuth as an
+# API-key file and wipes it every boot (re-posting a device-login each time).
+sys.exit(0 if isinstance(data, dict) and data.get("OPENAI_API_KEY")
+         and not data.get("tokens") else 1)
 PY
 }
 
@@ -151,7 +156,9 @@ fi
 # Only durable state lives on the volume: BOBI_HOME, the selected run root, and
 # Claude's config dir (CLAUDE_CONFIG_DIR). HOME is on the image and needs no
 # volume prep.
-mkdir -p "${BOBI_HOME}" "${RUN_ROOT}" "${RUN_ROOT}/workspace" "${CLAUDE_CONFIG_DIR}"
+mkdir -p "${BOBI_HOME}" "${RUN_ROOT}" "${RUN_ROOT}/workspace" "${CLAUDE_CONFIG_DIR}" \
+  "${HF_HOME:-${BOBI_HOME}/cache/huggingface}" \
+  "${FASTEMBED_CACHE_PATH:-${BOBI_HOME}/cache/fastembed}"
 
 # Fly/EC2/k8s mount fresh volumes owned by root. Take ownership once so the
 # non-root user can write; a stamp keeps subsequent boots from re-walking a
@@ -161,7 +168,10 @@ if [ ! -e "${DATA_DIR}/.bobi-owned" ]; then
   chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}"
   : > "${DATA_DIR}/.bobi-owned"
 else
-  chown "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${BOBI_HOME}" "${RUN_ROOT}" "${CLAUDE_CONFIG_DIR}"
+  chown "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${BOBI_HOME}" "${RUN_ROOT}" \
+    "${CLAUDE_CONFIG_DIR}" \
+    "${HF_HOME:-${BOBI_HOME}/cache/huggingface}" \
+    "${FASTEMBED_CACHE_PATH:-${BOBI_HOME}/cache/fastembed}"
 fi
 
 # --- 1b. Make ~/.claude coincide with the durable volume config dir (C24) -----

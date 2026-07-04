@@ -1,6 +1,7 @@
 """Unit tests for the workflow orchestrator — schema parsing, handoff
 validation, route evaluation, step sequencing, and event emission."""
 
+import asyncio
 import json
 import textwrap
 from pathlib import Path
@@ -22,10 +23,17 @@ from bobi.workflow.orchestrator import (
 from bobi.workflow.state import WorkflowRun
 
 
+@pytest.fixture(autouse=True)
+def default_brain_env(monkeypatch):
+    monkeypatch.delenv("BOBI_BRAIN", raising=False)
+    monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
+
+
 def _bind_runtime_root(root: Path, monkeypatch) -> Path:
     paths.package_dir(root).mkdir(parents=True, exist_ok=True)
     paths.agent_yaml_path(root).write_text("agent: test\nentry_point: manager\n")
     monkeypatch.setattr(paths, "_root", None)
+    monkeypatch.setenv("BOBI_BRAIN", "claude")
     paths.bind_root(root)
     return root
 
@@ -56,6 +64,18 @@ class TestSchemaLoad:
         assert wf.steps[0].prompt.strip() == "Say hello"
         assert wf.steps[0].handoff.required == ["greeting"]
         assert wf.steps[0].timeout == 60
+
+    def test_load_step_model(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: test-wf
+            steps:
+              - name: discover
+                model: haiku
+                prompt: "Find prospects"
+        """))
+        wf = load_workflow(f)
+        assert wf.steps[0].model == "haiku"
 
     def test_load_route_step(self, tmp_path):
         f = tmp_path / "test.yaml"
@@ -274,6 +294,15 @@ class FakeClient:
         self.connected = False
 
 
+class FakeBrainClient(FakeClient):
+    """Fake normalized BrainSession for tests that patch get_brain directly."""
+
+    async def receive_response(self):
+        from bobi.brain import AssistantText, TurnResult
+        yield AssistantText(text="Done.")
+        yield TurnResult(session_id="test-session-id")
+
+
 class TestRunWorkflow:
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
@@ -348,6 +377,107 @@ class TestRunWorkflow:
         name2 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "43")
         assert name1 != name2
 
+    def test_step_model_passed_to_brain_session(self, monkeypatch):
+        calls = []
+        clients = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                client = FakeBrainClient()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="haiku"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is True
+        assert calls[0]["options"]["model"] == "haiku"
+
+    def test_env_model_default_passed_to_brain_session(self, monkeypatch):
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        monkeypatch.setenv("BOBI_BRAIN_MODEL", "sonnet")
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is True
+        assert calls[0]["options"]["model"] == "sonnet"
+
+    def test_model_change_starts_fresh_session(self, monkeypatch):
+        calls = []
+        clients = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                client = FakeBrainClient()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="haiku"),
+            StepDef(name="score", prompt="score", model="sonnet"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is True
+        assert [c["options"].get("model") for c in calls] == ["haiku", "sonnet"]
+        assert len(clients) == 2
+        assert "Continue workflow `t`" in clients[1].queries[0]
+        assert "run_key: '1'" in clients[1].queries[0]
+
+    def test_model_change_preserves_explicit_role(self, monkeypatch):
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        forced_role = paths.roles_dir() / "forced" / "ROLE.md"
+        forced_role.parent.mkdir(parents=True, exist_ok=True)
+        forced_role.write_text("PROMPT forced")
+        scorer_role = paths.roles_dir() / "scorer" / "ROLE.md"
+        scorer_role.parent.mkdir(parents=True, exist_ok=True)
+        scorer_role.write_text("PROMPT scorer")
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="haiku"),
+            StepDef(name="score", prompt="score", model="sonnet", agent="scorer"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1", role="forced",
+        )
+
+        assert result is True
+        assert [c["options"].get("model") for c in calls] == ["haiku", "sonnet"]
+        prompts = [c["system_prompt"]["append"] for c in calls]
+        assert all("PROMPT forced" in prompt for prompt in prompts), prompts
+        assert all("PROMPT scorer" not in prompt for prompt in prompts)
+
 
 class FailingClient:
     """ClaudeSDKClient mock whose turn yields no ResultMessage — _drain_response
@@ -368,6 +498,38 @@ class FailingClient:
 
     async def disconnect(self):
         self.connected = False
+
+
+class CrashingClient(FailingClient):
+    async def receive_response(self):
+        if False:
+            yield None
+        raise RuntimeError("codex subprocess exited 1: tool exploded")
+
+
+class TimeoutClient(FailingClient):
+    async def receive_response(self):
+        if False:
+            yield None
+        raise asyncio.TimeoutError()
+
+
+class ErrorResultClient(FakeClient):
+    async def receive_response(self):
+        yield FakeResultMessage(is_error=True, result="real brain failure")
+
+
+class ErrorOnStepClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.drains = 0
+
+    async def receive_response(self):
+        self.drains += 1
+        if self.drains == 1:
+            yield FakeResultMessage()
+        else:
+            yield FakeResultMessage(is_error=True, result="step brain failure")
 
 
 class TestHonestTerminalEmit:
@@ -415,6 +577,49 @@ class TestHonestTerminalEmit:
         # RC#4: the failure event carries requested_by for routing.
         failed = next(d for t, d in emits if t == "agent/session.failed")
         assert failed["requested_by"] == {"slack_user": "U1", "thread_ts": "123.45"}
+        assert failed["error"] == (
+            "network drop: response stream ended before turn result"
+        )
+
+    def test_stream_crash_surfaces_tool_crash_cause(self):
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture(
+            wf, CrashingClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is False
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert failed["error"] == (
+            "tool crash: codex subprocess exited 1: tool exploded"
+        )
+
+    def test_stream_timeout_surfaces_subprocess_timeout(self):
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture(
+            wf, TimeoutClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is False
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert failed["error"] == "subprocess timeout while draining response"
+
+    def test_initial_error_result_surfaces_brain_failure(self):
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture(
+            wf, ErrorResultClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is False
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert failed["error"] == "real brain failure"
+
+    def test_step_error_result_surfaces_brain_failure(self):
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture(
+            wf, ErrorOnStepClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is False
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert failed["error"] == "step brain failure"
+        step_failed = next(d for t, d in emits if t == "agent/step.failed")
+        assert step_failed["error"] == "step brain failure"
 
     def test_success_emits_session_completed_with_requested_by(self):
         wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
@@ -534,6 +739,57 @@ class TestAwaitStep:
         assert success is True
         reloaded = WorkflowRun.load(run.run_id)
         assert reloaded.status == "completed"
+
+    def test_resume_model_change_starts_fresh_session(self, tmp_path, monkeypatch):
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+
+        run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {
+            "input": {"task": "t", "repo": "r", "run_key": "1"},
+            "_runtime": {"model": "haiku"},
+        }
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.run_key = "1"
+        run.save()
+
+        calls = []
+        clients = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                client = FakeBrainClient()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it", model="sonnet"),
+        ])
+
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="old-session"), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            success = resume_workflow(run, wf)
+
+        assert success is True
+        assert calls[0]["resume"] is None
+        assert calls[0]["options"]["model"] == "sonnet"
+        assert "Continue workflow `t`" in clients[0].queries[0]
+        assert "_runtime" not in clients[0].queries[0]
 
     def test_find_waiting_returns_none_when_no_match(self, tmp_path, monkeypatch):
         root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)

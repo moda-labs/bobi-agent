@@ -18,6 +18,30 @@ log = logging.getLogger(__name__)
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
 
+@dataclass(frozen=True)
+class EnvVarRef:
+    """One ${VAR} reference in agent.yaml.
+
+    A bare ``${VAR}`` is a required secret; ``${VAR:-default}`` carries its
+    own fallback and is optional.
+    """
+
+    name: str
+    default: str = ""
+    required: bool = True
+
+
+def parse_env_ref(token: str) -> EnvVarRef:
+    """Parse the inside of a ``${...}`` reference into an EnvVarRef."""
+    if ":" not in token:
+        return EnvVarRef(name=token)
+    name, sep, default = token.partition(":-")
+    if sep:
+        return EnvVarRef(name=name, default=default, required=False)
+    # Any other ':' form is treated as optional with no fallback.
+    return EnvVarRef(name=token.split(":", 1)[0], required=False)
+
+
 def parse_env_file(path: Path) -> dict[str, str]:
     """Parse a .env file into a dict (quotes stripped, comments skipped)."""
     result: dict[str, str] = {}
@@ -52,22 +76,39 @@ def load_dotenv(project_path: Path) -> None:
             os.environ[key] = value
 
 
-def find_required_env_vars(project_path: Path) -> list[str]:
-    """Scan package/agent.yaml for ${VAR} references and return var names."""
+def find_env_var_refs(project_path: Path) -> list[EnvVarRef]:
+    """Scan package/agent.yaml for ${VAR} references.
+
+    De-duped by name, order preserved; a required reference wins over an
+    optional one to the same name.
+    """
     from bobi import paths
     agent_yaml = paths.agent_yaml_path(project_path)
     if not agent_yaml.exists():
         return []
-    content = agent_yaml.read_text()
-    return _ENV_VAR_RE.findall(content)
+    refs: dict[str, EnvVarRef] = {}
+    for token in _ENV_VAR_RE.findall(agent_yaml.read_text()):
+        ref = parse_env_ref(token)
+        prior = refs.get(ref.name)
+        if prior is None or (ref.required and not prior.required):
+            refs[ref.name] = ref
+    return list(refs.values())
+
+
+def find_required_env_vars(project_path: Path) -> list[str]:
+    """The bare ${VAR} names agent.yaml requires (${VAR:-default} excluded)."""
+    return [r.name for r in find_env_var_refs(project_path) if r.required]
 
 
 def _interpolate_env(value):
-    """Recursively resolve ${ENV_VAR} references in strings, dicts, and lists."""
+    """Recursively resolve ${VAR} / ${VAR:-default} references in strings,
+    dicts, and lists. An unset (or empty) VAR resolves to its ``:-`` fallback
+    when it has one, else ""."""
     if isinstance(value, str):
-        return _ENV_VAR_RE.sub(
-            lambda m: os.environ.get(m.group(1), ""), value
-        )
+        def _resolve(m: "re.Match[str]") -> str:
+            ref = parse_env_ref(m.group(1))
+            return os.environ.get(ref.name) or ref.default
+        return _ENV_VAR_RE.sub(_resolve, value)
     if isinstance(value, dict):
         return {k: _interpolate_env(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -253,6 +294,11 @@ class Config:
     def brain_kind(self) -> str:
         """The configured brain kind, or "" for the framework default."""
         return str((self.brain or {}).get("kind", "") or "")
+
+    @property
+    def brain_model(self) -> str:
+        """The configured brain model override, or "" for the provider default."""
+        return str((self.brain or {}).get("model", "") or "")
 
     def credential(self, service: str, key: str) -> str:
         """Look up a credential value for a named service."""

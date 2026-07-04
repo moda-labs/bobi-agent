@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import time
 import threading
 from pathlib import Path
 
@@ -134,6 +135,45 @@ from bobi.transient import (  # noqa: F401  (re-exported for back-compat)
     TRANSIENT_API_STATUSES,
     is_transient_api_error,
 )
+
+# Liveness guard for queued work while a session is temporarily not ready
+# (active turn, rotation, reconnect, or recovery). The message must remain
+# queued until the session recovers; after this window, emit a best-effort
+# operator alert so the stuck state is visible.
+SESSION_UNREACHABLE_ALERT_AFTER = 120.0
+SESSION_READY_WAIT_POLL = 1.0
+
+
+def _emit_session_unreachable_alert(
+    *,
+    session: str,
+    state: str,
+    message_id: str,
+    sender: str,
+    wait: bool,
+    elapsed: float,
+) -> None:
+    """Emit a best-effort alert for a queued message stuck behind readiness."""
+    try:
+        from bobi.events.publish import post_event
+        post_event(
+            "system/session.unreachable",
+            {
+                "session": session,
+                "state": state,
+                "message_id": message_id,
+                "sender": sender,
+                "wait": wait,
+                "elapsed_seconds": round(elapsed, 1),
+                "text": (
+                    f"Session '{session}' has been unreachable for "
+                    f"{elapsed:.0f}s while a queued message waits; current "
+                    f"state: {state}."
+                ),
+            },
+        )
+    except Exception:
+        log.warning("Failed to emit session unreachable alert", exc_info=True)
 
 
 class Session:
@@ -642,17 +682,41 @@ class Session:
 
     async def _process_message(self, msg: Message) -> None:
         """Wait for ready state, inject a message, and optionally respond."""
-        deadline = 300.0  # seconds
+        wait_started = time.monotonic()
+        alerted_unreachable = False
         while self._state not in ("waiting_input", "stopped", "error"):
+            elapsed = time.monotonic() - wait_started
+            if (
+                not alerted_unreachable
+                and elapsed >= SESSION_UNREACHABLE_ALERT_AFTER
+            ):
+                _emit_session_unreachable_alert(
+                    session=self.name,
+                    state=self._state,
+                    message_id=msg.id,
+                    sender=msg.sender,
+                    wait=msg.wait,
+                    elapsed=elapsed,
+                )
+                alerted_unreachable = True
             if self._input_ready:
-                try:
-                    await asyncio.wait_for(self._input_ready.wait(), timeout=deadline)
-                except asyncio.TimeoutError:
-                    pass
-                break
+                if self._input_ready.is_set():
+                    # A set event with a still-not-ready state is stale. Do not
+                    # clear it here: a real ready transition could race between
+                    # the loop condition and this branch. Sleep briefly instead
+                    # so stale events cannot spin the loop.
+                    await asyncio.sleep(SESSION_READY_WAIT_POLL)
+                else:
+                    try:
+                        await asyncio.wait_for(
+                            self._input_ready.wait(),
+                            timeout=SESSION_READY_WAIT_POLL,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
             else:
                 # Fallback: no event yet (shouldn't happen after _run)
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(SESSION_READY_WAIT_POLL)
 
         if self._state in ("stopped", "error"):
             # Dropping the message means no turn runs, so clear any Slack

@@ -14,9 +14,17 @@ hand-pick scopes or wire the event URL yourself.
 bobi create-slack-bot --app-name "Agent Dispatch"
 ```
 
-This prints a Slack app manifest plus a one-click create link. The request URL
-is filled in from your project config when run inside an install, otherwise the
-bobi cloud event server (override with `--event-server https://…`).
+This prints a Slack app manifest plus a one-click create link. Run
+interactively, it asks for the app name and the event server URL before
+rendering anything: press Enter to use the bobi cloud event server, or enter
+your own URL. If the agent runs on your own machine with the local event
+server, Slack can't reach localhost - put a public tunnel (cloudflared, ngrok)
+in front of `localhost:8080` and enter the tunnel URL.
+
+Scripted or piped, there are no prompts: the request URL comes from your
+project config when run inside an install, otherwise the bobi cloud event
+server (override either with `--event-server https://…` /
+`--app-name <name>`).
 
 Then create the app one of three ways:
 

@@ -1,13 +1,13 @@
-version: "1.0.1"
+version: "1.0.2"
 
 # Entry point role for `bobi agent <name> start`.
 entry_point: assistant
 chat: slack
 max_concurrent_agents: 3
 
-# Cloud event server URL in production (.env), empty for an
+# Cloud event server URL in production (.env); optional - unset means an
 # auto-started local server.
-event_server: ${BOBI_EVENT_SERVER}
+event_server: ${BOBI_EVENT_SERVER:-}
 
 # The assistant talks to its principal on a chat surface (Slack by
 # default) and reaches the real world — email, calendar, tasks — through

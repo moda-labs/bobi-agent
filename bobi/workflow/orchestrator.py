@@ -1,8 +1,8 @@
-"""Workflow orchestrator — deterministic state machine driving one agent session.
+"""Workflow orchestrator — deterministic state machine driving agent sessions.
 
-One Claude Code session persists across all steps. The agent accumulates
-context as it progresses — what it learns in setup carries into pickup,
-pickup insights carry into implement.
+One brain session persists across steps until a prompt step changes the
+effective model. Workflow handoffs carry structured context across steps and
+across any model switch.
 
 One registry entry per workflow. One log file. One session ID.
 
@@ -30,6 +30,9 @@ from bobi.sdk import (
 from bobi.subagent import (
     AgentResult,
     _emit_lifecycle_event,
+    _network_drop_error,
+    _timeout_error,
+    _tool_crash_error,
 )
 from bobi.workflow.schema import Workflow, StepDef
 from bobi.workflow.state import WorkflowRun
@@ -332,7 +335,7 @@ async def _run_workflow_async(
     role: str = "",
 ) -> bool:
     """Async core: one brain session for all steps."""
-    from bobi.brain import get_brain
+    from bobi.brain import get_brain, get_process_brain_model
 
     _brain = get_brain()
     saved_id = load_session_id(session_name)
@@ -342,12 +345,47 @@ async def _run_workflow_async(
 
     project_root = _find_project_root(cwd)
 
-    def _make_session(resume_id=None, agent_name=""):
+    def _effective_step_model(step: StepDef | None) -> str:
+        if step and step.model:
+            return step.model
+        return get_process_brain_model()
+
+    def _is_prompt_step(step: StepDef) -> bool:
+        return not (
+            step.condition or step.action or step.notify or step.await_event
+        )
+
+    def _first_prompt_step() -> StepDef | None:
+        for candidate in workflow.steps[start_step:]:
+            if _is_prompt_step(candidate):
+                return candidate
+        return None
+
+    def _continuation_prompt(step: StepDef) -> str:
+        scopes = {
+            name: data for name, data in ctx.scopes.items()
+            if name != "_runtime"
+        }
+        context_yaml = yaml.safe_dump(scopes, sort_keys=True).strip()
+        return (
+            f"Continue workflow `{workflow.name}` for issue #{run_key}. "
+            f"The next step is `{step.name}`. Use this workflow context from "
+            "the original input and prior handoffs:\n\n"
+            "```yaml\n"
+            f"{context_yaml}\n"
+            "```"
+        )
+
+    def _make_session(resume_id=None, agent_name="", model=""):
         agent_prompt = ""
         if agent_name:
             agent_prompt = resolve_agent_prompt(agent_name, project_root, interactive=interactive)
         else:
             agent_prompt = resolve_agent_prompt("", project_root, interactive=interactive)
+
+        options = {"max_turns": 200, "skills": "all"}
+        if model:
+            options["model"] = model
 
         return _brain.make_session(
             cwd=cwd,
@@ -366,7 +404,7 @@ async def _run_workflow_async(
                 ),
             },
             resume=resume_id,
-            options={"max_turns": 200, "skills": "all"},
+            options=options,
         )
 
     _emit_lifecycle_event("agent/session.started", {
@@ -381,28 +419,38 @@ async def _run_workflow_async(
             if s.agent:
                 first_agent = s.agent
                 break
+    current_agent = first_agent
+    first_prompt_step = _first_prompt_step()
+    first_prompt_model = _effective_step_model(first_prompt_step)
+    runtime_scope = ctx.scopes.get("_runtime", {})
+    saved_session_model = (
+        str(runtime_scope.get("model", "") or "")
+        if isinstance(runtime_scope, dict) else ""
+    )
+    current_model = saved_session_model if saved_session_model else first_prompt_model
+    fresh_resume_step = None
 
-    # Try resume, fall back to fresh session
-    for attempt in range(2):
-        resume_id = saved_id if attempt == 0 else None
-        client = _make_session(resume_id, agent_name=first_agent)
-        try:
-            initial_prompt = task if not resume_id else None
-            await client.connect(initial_prompt)
-            if resume_id:
-                await client.query(task)
-            await _drain_response(client, session_name, run_key)
-            break
-        except Exception as e:
-            if resume_id and attempt == 0:
-                log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
-                save_session_id(session_name, "")
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-                continue
-            raise
+    if saved_id and saved_session_model and saved_session_model != first_prompt_model:
+        log.info(
+            "Saved workflow session model %r differs from next step model %r; "
+            "starting a fresh session.",
+            saved_session_model or "<default>", first_prompt_model or "<default>",
+        )
+        saved_id = ""
+        current_model = first_prompt_model
+        fresh_resume_step = first_prompt_step
+    elif (
+        saved_id and start_step > 0 and not saved_session_model
+        and first_prompt_step and first_prompt_step.model
+    ):
+        log.info(
+            "Saved workflow session has no recorded model and next step has "
+            "explicit model %r; starting a fresh session.",
+            first_prompt_step.model,
+        )
+        saved_id = ""
+        current_model = first_prompt_model
+        fresh_resume_step = first_prompt_step
 
     # Terminal-emit outcome (MDS-65 RC#2). The `finally` emits the honest
     # lifecycle event for this session: session.completed on success/suspend,
@@ -417,7 +465,43 @@ async def _run_workflow_async(
     # terminal in the registry (the reconciler leaves "waiting" alone).
     suspended = False
 
+    # Try resume, fall back to fresh session
+    for attempt in range(2):
+        resume_id = (saved_id or None) if attempt == 0 else None
+        client = _make_session(
+            resume_id, agent_name=current_agent, model=current_model,
+        )
+        try:
+            if resume_id:
+                initial_prompt = None
+            elif fresh_resume_step is not None:
+                initial_prompt = _continuation_prompt(fresh_resume_step)
+            else:
+                initial_prompt = task
+            await client.connect(initial_prompt)
+            if resume_id:
+                await client.query(task)
+            _, drain_error = await _drain_response(
+                client, session_name, run_key,
+            )
+            if drain_error:
+                raise RuntimeError(drain_error)
+            break
+        except Exception as e:
+            if resume_id and attempt == 0:
+                log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
+                save_session_id(session_name, "")
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                continue
+            run_failed, failure_error = True, str(e)
+            break
+
     try:
+        if run_failed:
+            return False
 
         registry.update(session_name, status="running",
                         session_id=saved_id or "")
@@ -474,6 +558,7 @@ async def _run_workflow_async(
                 run.suspended_at_step = step_idx + 1
                 run.await_event = step.await_event
                 run.session_name = session_name
+                ctx.set_scope("_runtime", {"model": current_model})
                 run.variable_scopes = ctx.scopes
                 run.repo = repo
                 run.cwd = cwd
@@ -500,6 +585,36 @@ async def _run_workflow_async(
             step_start = time.time()
             registry.update(session_name, phase=step.name)
 
+            step_model = _effective_step_model(step)
+            if step_model != current_model:
+                log.info(
+                    "Step %s: switching model from %r to %r",
+                    step.name, current_model or "<default>",
+                    step_model or "<default>",
+                )
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                current_model = step_model
+                if not role:
+                    current_agent = step.agent or current_agent
+                client = _make_session(
+                    resume_id=None, agent_name=current_agent,
+                    model=current_model,
+                )
+                await client.connect(_continuation_prompt(step))
+                _, drain_error = await _drain_response(
+                    client, session_name, run_key,
+                )
+                if drain_error:
+                    failed_step = step.name
+                    run_failed, failure_error = True, drain_error
+                    _emit_step_failed(
+                        run_key, workflow.name, step.name, drain_error,
+                    )
+                    return False
+
             _emit_lifecycle_event("agent/step.started", {
                 "run_key": run_key,
                 "workflow": workflow.name,
@@ -512,13 +627,15 @@ async def _run_workflow_async(
             log.info(f"Step {step.name}: injecting prompt ({len(prompt)} chars)")
 
             await client.query(prompt)
-            final_text = await _drain_response(client, session_name, run_key)
+            final_text, drain_error = await _drain_response(
+                client, session_name, run_key,
+            )
 
             if final_text is None:
                 failed_step = step.name
-                run_failed, failure_error = True, "connection lost"
+                run_failed, failure_error = True, drain_error
                 _emit_step_failed(run_key, workflow.name, step.name,
-                                  "connection lost")
+                                  drain_error)
                 return False
 
             # Validate handoff
@@ -618,8 +735,10 @@ async def _run_workflow_async(
             pass
 
 
-async def _drain_response(client, session_name: str, run_key: str) -> str | None:
-    """Drain one turn of the agent's response. Returns final text or None."""
+async def _drain_response(
+    client, session_name: str, run_key: str,
+) -> tuple[str | None, str]:
+    """Drain one turn. Returns ``(final_text, error)``."""
     from bobi.brain import AssistantText, TurnResult
 
     final_text = ""
@@ -634,10 +753,18 @@ async def _drain_response(client, session_name: str, run_key: str) -> str | None
                 save_session_id(session_name, msg.session_id)
                 log_activity("stop", {"session_id": msg.session_id},
                              session=session_name)
-                return final_text
+                if msg.is_error:
+                    return None, msg.result_text or "turn failed"
+                return final_text, ""
+    except asyncio.TimeoutError:
+        error = _timeout_error()
+        log.error(f"Drain timeout: {error}")
+        return None, error
     except Exception as e:
-        log.error(f"Drain error: {e}")
-    return None
+        error = _tool_crash_error(e)
+        log.error(f"Drain error: {error}")
+        return None, error
+    return None, _network_drop_error()
 
 
 def _emit_step_failed(run_key, workflow_name, step_name, error):
