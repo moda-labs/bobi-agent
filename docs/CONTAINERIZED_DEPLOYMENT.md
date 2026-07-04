@@ -101,6 +101,23 @@ docker build -t bobi:dev --build-arg CLAUDE_VERSION=2.1.89 .
 
 Build args: `CLAUDE_VERSION` (default `stable`), `BOBI_UID` (default `10001`).
 
+### Or pull the released image (GHCR)
+
+Every release also publishes this image to GHCR (#609), built from the exact
+wheel released to PyPI, multi-arch (amd64/arm64):
+
+```bash
+docker pull ghcr.io/moda-labs/bobi:<version>   # or :latest
+```
+
+Use it anywhere a locally built `bobi:dev` appears below, or as a base for a
+downstream image:
+
+```dockerfile
+FROM ghcr.io/moda-labs/bobi:<version>
+# add packages on top (switch back to USER bobi if you change it)
+```
+
 ### Run it with Docker (local contract test)
 
 The image needs a volume at `/data`, an auth mode, the team to install, the
