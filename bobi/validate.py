@@ -9,21 +9,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from bobi.env import agent_spawn_env
+from bobi.mcp_handshake import preflight_timeout
 
 log = logging.getLogger(__name__)
 
 # Stdio MCP servers spawn a subprocess and run their MCP `initialize` handshake
 # (~1–2s), so a single status read catches them mid-spawn in the `pending`
 # window and false-fails them (MDS-63). Poll until each target server leaves
-# `pending`, bounded by a hard ~10s ceiling (0.5s × 20).
+# `pending`, bounded by BOBI_MCP_PREFLIGHT_TIMEOUT (default 10s).
 MCP_PROBE_POLL_INTERVAL = 0.5
-MCP_PROBE_MAX_POLLS = 20
+
+
+def _mcp_probe_max_polls() -> int:
+    timeout = preflight_timeout()
+    if MCP_PROBE_POLL_INTERVAL <= 0:
+        return math.ceil(timeout)
+    return math.ceil(timeout / MCP_PROBE_POLL_INTERVAL)
 
 
 def supports_unicode(stream=None) -> bool:
@@ -345,15 +353,25 @@ async def _async_probe_mcp(
             for name in names
         ]
     try:
-        await client.connect()
-        status = await get_mcp_status()
+        timeout = preflight_timeout()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        async def wait_remaining(awaitable_factory):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            return await asyncio.wait_for(awaitable_factory(), timeout=remaining)
+
+        await wait_remaining(client.connect)
+        status = await wait_remaining(get_mcp_status)
 
         # MDS-63: poll until every target server leaves the `pending` spawn
         # window (or the bounded budget elapses). Servers that genuinely
         # failed / need-auth report on the first non-pending poll, so real
         # failures add no latency.
         targets = set(names)
-        for _ in range(MCP_PROBE_MAX_POLLS):
+        for _ in range(_mcp_probe_max_polls()):
             servers = {s.get("name"): s for s in status.get("mcpServers", [])}
             still_pending = [
                 n for n in targets
@@ -361,8 +379,11 @@ async def _async_probe_mcp(
             ]
             if not still_pending:
                 break
-            await asyncio.sleep(MCP_PROBE_POLL_INTERVAL)
-            status = await get_mcp_status()
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(MCP_PROBE_POLL_INTERVAL, remaining))
+            status = await wait_remaining(get_mcp_status)
 
         servers = {s.get("name"): s for s in status.get("mcpServers", [])}
         return [_judge_mcp_server(name, servers.get(name)) for name in names]

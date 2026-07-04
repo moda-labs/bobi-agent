@@ -176,9 +176,13 @@ class _CodexSession:
         resolves on the same PATH it will launch under (parity with the Claude
         probe, which passes the same env into the SDK)."""
         from bobi.env import agent_spawn_env
-        from bobi.mcp_handshake import probe_servers
+        from bobi.mcp_handshake import preflight_timeout, probe_servers
 
-        return await probe_servers(self._mcp_servers, env=agent_spawn_env())
+        return await probe_servers(
+            self._mcp_servers,
+            timeout=preflight_timeout(),
+            env=agent_spawn_env(),
+        )
 
     async def connect(self, prompt: str | None = None) -> None:
         # No persistent process — just stash any startup prompt for the first
