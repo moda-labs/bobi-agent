@@ -54,6 +54,13 @@ class InputChannelHandler(Protocol):
 _active_loops: dict[tuple[str, str], object] = {}
 
 
+def _without_placeholder_fields(event: dict) -> dict:
+    """Return an event copy with Slack placeholder metadata removed."""
+    fields = dict(event.get("fields", {}))
+    fields.pop("placeholder_ts", None)
+    return dict(event, fields=fields)
+
+
 class SlackInputChannel:
     """Post an "Evaluating..." placeholder and set typing status on arrival.
 
@@ -71,6 +78,9 @@ class SlackInputChannel:
         return "bot_token"
 
     def prepare(self, event: dict, token: str) -> dict:
+        if event.get("type") == "slack.thread_reply":
+            return _without_placeholder_fields(event)
+
         from bobi.slack import post_placeholder, StatusRefreshLoop
 
         fields = event.get("fields", {})
