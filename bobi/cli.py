@@ -2831,7 +2831,10 @@ main.add_command(event_server_cmd)
               help="Keep the agent alive after initial task, accepting inbox messages")
 @click.option("--subscribe", multiple=True,
               help="Subscribe to event topics (e.g. moda-labs/bobi-agent, slack:T123)")
-def subagents_launch(workflow, role, run_key, task, timeout, wait, post_event, requested_by, non_interactive, persistent, subscribe):
+@click.option("--model", default="",
+              help="Model override for this launch (provider-native, e.g. haiku, "
+                   "opus, or a full model ID). Wins over step and role config.")
+def subagents_launch(workflow, role, run_key, task, timeout, wait, post_event, requested_by, non_interactive, persistent, subscribe, model):
     """Launch a sub-agent with a workflow and role.
 
     Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
@@ -2848,11 +2851,13 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, post_event, r
                     requested_by=requested_by,
                     interactive=not non_interactive,
                     persistent=persistent,
-                    subscribe=list(subscribe))
+                    subscribe=list(subscribe),
+                    model=model)
 
 
 def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait, post_event,
-                    requested_by, interactive=True, persistent=False, subscribe=None):
+                    requested_by, interactive=True, persistent=False, subscribe=None,
+                    model=""):
     """Dispatch logic for the agent command."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
@@ -2899,6 +2904,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait, post_e
         persistent=persistent,
         subscribe=subscribe or [],
         run_key=run_key,
+        model=model,
     )
     click.echo(f"Agent started: {session_name}")
 

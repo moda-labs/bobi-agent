@@ -220,6 +220,11 @@ def build_agent_cfg(state: SetupState, catalog=None) -> dict:
         cfg["venn_api_key"] = "${VENN_API_KEY}"
     if state.chat and state.chat != "cli":
         cfg["chat"] = state.chat
+    # Monitor checks are frequent observe-and-report runs - default them to a
+    # cheap model instead of inheriting the manager's (#617, #549 Part A).
+    # Setup-generated packs run on the default Claude brain, so the alias is
+    # always valid here.
+    cfg["roles"] = {"monitor": {"model": "haiku"}}
     return cfg
 
 
@@ -245,6 +250,7 @@ def merge_agent_yaml(existing_text: str, state: SetupState, catalog=None) -> str
     cfg.setdefault("version", managed.get("version", "0.1.0"))
     cfg["entry_point"] = managed["entry_point"]
     cfg.setdefault("event_server", managed["event_server"])
+    cfg.setdefault("roles", managed.get("roles", {}))
     if managed.get("venn_api_key"):
         cfg.setdefault("venn_api_key", managed["venn_api_key"])
     # Union services by name: keep every existing entry untouched, append only

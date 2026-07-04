@@ -159,8 +159,13 @@ def run_workflow(
     interactive: bool = True,
     role: str = "",
     input_fields: dict | None = None,
+    model: str = "",
 ) -> bool:
-    """Execute a workflow end-to-end with a single agent session."""
+    """Execute a workflow end-to-end with a single agent session.
+
+    ``model`` is an explicit launch override: like ``--role``, it wins over
+    every step-level and config-level model for the whole run.
+    """
     run_key = run_key or "adhoc"
     requested_by = requested_by or {}
     started_at = time.time()
@@ -209,6 +214,7 @@ def run_workflow(
         _run_workflow_async(
             workflow, task, repo, work_cwd, run_key, session_name,
             registry, ctx, requested_by, timeout, interactive, role=role,
+            launch_model=model,
         )
     )
 
@@ -333,9 +339,10 @@ async def _run_workflow_async(
     interactive: bool = True,
     start_step: int = 0,
     role: str = "",
+    launch_model: str = "",
 ) -> bool:
     """Async core: one brain session for all steps."""
-    from bobi.brain import get_brain, get_process_brain_model
+    from bobi.brain import get_brain, resolve_model
 
     _brain = get_brain()
     saved_id = load_session_id(session_name)
@@ -344,11 +351,22 @@ async def _run_workflow_async(
     from bobi.prompts.resolver import resolve_agent_prompt
 
     project_root = _find_project_root(cwd)
+    from bobi.config import Config
+    try:
+        team_cfg = Config.load(project_root)
+    except Exception:
+        team_cfg = None
 
     def _effective_step_model(step: StepDef | None) -> str:
+        # Launch flag > step override > acting role's configured model >
+        # team default (#617). The acting role mirrors prompt resolution:
+        # a forced --role wins, else the step's agent, else the inherited one.
+        if launch_model:
+            return launch_model
         if step and step.model:
             return step.model
-        return get_process_brain_model()
+        step_role = role or ((step.agent if step else "") or current_agent)
+        return resolve_model(team_cfg, role=step_role)
 
     def _is_prompt_step(step: StepDef) -> bool:
         return not (

@@ -101,6 +101,25 @@ def _build_prompt(phase: str, run_key: str, role: str = "", context: str = "") -
     return "\n\n".join(parts)
 
 
+def _resolve_launch_model(role: str, explicit: str = "", cfg=None) -> str:
+    """Resolve the model for a launch from team config (#617).
+
+    Loads ``Config`` from the installation root when the caller has not
+    already loaded one. Returns "" when nothing is configured so the brain
+    adapter falls through to the provider default.
+    """
+    from bobi.brain import resolve_model
+
+    if cfg is None and not explicit:
+        from bobi.config import Config
+        from bobi.paths import bobi_root
+        try:
+            cfg = Config.load(bobi_root())
+        except Exception:
+            cfg = None
+    return resolve_model(cfg, role=role, explicit=explicit)
+
+
 def _session_name(run_key: str, role: str = "", phase: str = "") -> str:
     prefix = role.lower() if role else "agent"
     if phase:
@@ -338,6 +357,7 @@ async def _run_agent_supervised(
     hooks = _make_defer_hook() if on_input_needed else None
 
     label = role or "agent"
+    model = _resolve_launch_model(role)
     client = get_brain().make_session(
         cwd=cwd,
         system_prompt={
@@ -349,7 +369,10 @@ async def _run_agent_supervised(
             ),
         },
         resume=saved_id or None,
-        options={"max_turns": max_turns, "hooks": hooks, "skills": "all"},
+        options={
+            "max_turns": max_turns, "hooks": hooks, "skills": "all",
+            **({"model": model} if model else {}),
+        },
     )
     registry.update(name, status="running", phase=phase, session_id=saved_id or "")
 
@@ -490,7 +513,9 @@ def run_phase_blocking(
         _cfg = _Config.load(_mr())
         _mcp = _cfg.mcp_servers
     except Exception:
+        _cfg = None
         _mcp = None
+    model = _resolve_launch_model(role, cfg=_cfg)
 
     session = Session(
         name=name,
@@ -504,6 +529,7 @@ def run_phase_blocking(
             "skills": "all",
             "max_turns": 200,
             **({"mcp_servers": _mcp} if _mcp else {}),
+            **({"model": model} if model else {}),
         },
     )
 
@@ -581,6 +607,7 @@ def spawn_adhoc(
     role: str = "",
     mcp_servers: dict | None = None,
     subscribe: list[str] | None = None,
+    model: str = "",
 ) -> AgentResult:
     """Spawn an agent with a freeform task prompt.
 
@@ -589,6 +616,9 @@ def spawn_adhoc(
 
     ``subscribe`` adds event topics beyond the session's own ``inbox/<self>``
     (the manager passes its external resource topics here).
+
+    ``model`` is an explicit override (e.g. the launch flag); when empty the
+    role's configured model or the team default applies.
 
     With ``persistent=True`` the session stays alive after the initial
     task completes, accepting messages via its inbox until explicitly
@@ -640,7 +670,9 @@ def spawn_adhoc(
         _cfg = _Config.load(_mr())
         merged_mcp = mcp_servers or _cfg.mcp_servers
     except Exception:
+        _cfg = None
         merged_mcp = mcp_servers
+    model = _resolve_launch_model(role, explicit=model, cfg=_cfg)
 
     session = Session(
         name=run_key,
@@ -654,6 +686,7 @@ def spawn_adhoc(
             "skills": "all",
             "max_turns": 200,
             **({"mcp_servers": merged_mcp} if merged_mcp else {}),
+            **({"model": model} if model else {}),
         },
         role=role,
         subscribe=subscribe,
@@ -870,6 +903,7 @@ def launch_agent(
     subscribe: list[str] | None = None,
     run_key: str | None = None,
     input_fields: dict | None = None,
+    model: str = "",
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
@@ -930,6 +964,7 @@ def launch_agent(
         "persistent": persistent,
         "subscribe": subscribe or [],
         "input_fields": input_fields or {},
+        "model": model,
     })
     script = (
         "import json, sys; "
@@ -1355,6 +1390,7 @@ def _run_agent_entry(args: dict) -> None:
     persistent = args.get("persistent", False)
     subscribe = args.get("subscribe", [])
     input_fields = args.get("input_fields", {})
+    model = args.get("model", "")
 
     from bobi.paths import bind_root, bobi_root
     # The spawner tells the child its installation root — identity is
@@ -1397,6 +1433,7 @@ def _run_agent_entry(args: dict) -> None:
             persistent=True,
             role=role,
             subscribe=subscribe,
+            model=model,
         )
         return
 
@@ -1422,6 +1459,7 @@ def _run_agent_entry(args: dict) -> None:
         interactive=interactive,
         role=role,
         input_fields=input_fields,
+        model=model,
     )
 
 

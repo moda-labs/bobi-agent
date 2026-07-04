@@ -572,6 +572,86 @@ class TestRunWorkflow:
         assert result is True
         assert calls[0]["options"]["model"] == "haiku"
 
+    def test_role_model_used_for_step(self, tmp_path, monkeypatch):
+        """A step without model: falls back to the acting role's configured
+        model (#617)."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.agent_yaml_path(root).write_text(
+            "agent: test\nentry_point: manager\n"
+            "roles:\n  scorer:\n    model: haiku\n"
+        )
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="score", prompt="score", agent="scorer"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is True
+        assert calls[0]["options"]["model"] == "haiku"
+
+    def test_step_model_beats_role_model(self, tmp_path, monkeypatch):
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.agent_yaml_path(root).write_text(
+            "agent: test\nentry_point: manager\n"
+            "roles:\n  scorer:\n    model: haiku\n"
+        )
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="score", prompt="score", agent="scorer", model="sonnet"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is True
+        assert calls[0]["options"]["model"] == "sonnet"
+
+    def test_launch_model_overrides_step_and_role(self, tmp_path, monkeypatch):
+        """An explicit launch --model wins over step and role config for the
+        whole run (#617)."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.agent_yaml_path(root).write_text(
+            "agent: test\nentry_point: manager\n"
+            "roles:\n  scorer:\n    model: haiku\n"
+        )
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="sonnet"),
+            StepDef(name="score", prompt="score", agent="scorer"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1", model="opus",
+        )
+
+        assert result is True
+        assert [c["options"].get("model") for c in calls] == ["opus"]
+
     def test_env_model_default_passed_to_brain_session(self, monkeypatch):
         calls = []
 

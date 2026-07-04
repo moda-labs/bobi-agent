@@ -289,6 +289,10 @@ class Config:
     # Which agent "brain" drives this team's agents (#485). `{kind: claude|codex|
     # …, model: <optional override>}`. Empty = the framework default (claude).
     brain: dict = field(default_factory=dict)
+    # Per-role settings (#617). `roles: {<role>: {model: <override>}}`. A role's
+    # model is a provider-native string for the team's brain (Claude aliases
+    # like `haiku`, full Claude IDs, Codex IDs) - never translated.
+    roles: dict = field(default_factory=dict)
 
     @property
     def brain_kind(self) -> str:
@@ -299,6 +303,13 @@ class Config:
     def brain_model(self) -> str:
         """The configured brain model override, or "" for the provider default."""
         return str((self.brain or {}).get("model", "") or "")
+
+    def role_model(self, role: str) -> str:
+        """The model configured for *role*, or "" when unconfigured."""
+        entry = (self.roles or {}).get(role)
+        if isinstance(entry, dict):
+            return str(entry.get("model", "") or "")
+        return ""
 
     def credential(self, service: str, key: str) -> str:
         """Look up a credential value for a named service."""
@@ -391,6 +402,7 @@ class Config:
             max_concurrent_agents=int(raw.get("max_concurrent_agents", 0)),
             launch_admission=cls._parse_launch_admission(raw.get("launch_admission", {})),
             brain=raw.get("brain", {}) if isinstance(raw.get("brain"), dict) else {},
+            roles=raw.get("roles", {}) if isinstance(raw.get("roles"), dict) else {},
         )
 
     @staticmethod
