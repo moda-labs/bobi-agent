@@ -14,8 +14,10 @@ name: Team images
 # build context — Fly creates app + registry + machine together, no separate
 # registry push). A "build once in CI → push to a registry → deploy many by ref"
 # optimization is deferred (Fly's registry rejects pushes to a never-deployed
-# app; GHCR needs write:packages). So CI's job here is purely to catch a broken
-# build spec early. Path-filtered so unrelated PRs pay nothing.
+# app; a GHCR flow would follow release.yml's publish-image pattern, which
+# already pushes the BASE image with the workflow GITHUB_TOKEN). So CI's job
+# here is purely to catch a broken build spec early. Path-filtered so
+# unrelated PRs pay nothing.
 on:
   push:
     branches: [main]

@@ -1,13 +1,8 @@
-from pathlib import Path
-
-import yaml
-
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from tests.workflow_utils import load_workflow
 
 
 def _ci_workflow() -> dict:
-    return yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    return load_workflow("ci.yml")
 
 
 def test_integration_fast_model_download_is_bounded_without_hf_xet():

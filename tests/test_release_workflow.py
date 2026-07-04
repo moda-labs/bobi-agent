@@ -1,51 +1,111 @@
-from pathlib import Path
-
-import yaml
+from tests.workflow_utils import load_workflow
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+def _jobs() -> dict:
+    return load_workflow("release.yml")["jobs"]
 
 
-def _release_workflow() -> dict:
-    return yaml.safe_load(
-        (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text()
+def _build_step(job: dict) -> dict:
+    return next(
+        step
+        for step in job["steps"]
+        if str(step.get("uses", "")).startswith("docker/build-push-action")
     )
 
 
-def test_publish_image_is_gated_on_the_canary():
-    job = _release_workflow()["jobs"]["publish-image"]
-    assert job["needs"] == "build-canary"
+def test_image_publish_requires_a_canary_that_actually_ran():
+    jobs = _jobs()
+    job = jobs["publish-image"]
+    assert "build-canary" in job["needs"]
+    # Plain job success is not enough: build-canary exits 0 without smoking
+    # anything when FLY_API_TOKEN is unset.
+    assert "needs.build-canary.outputs.smoked == 'true'" in job["if"]
+    assert jobs["build-canary"]["outputs"]["smoked"] == "${{ steps.canary.outputs.smoked }}"
 
 
-def test_publish_image_can_write_packages():
-    job = _release_workflow()["jobs"]["publish-image"]
-    assert job["permissions"]["packages"] == "write"
+def test_image_publish_refuses_non_release_refs():
+    # A bare dispatch from a branch would bake an unreleased wheel whose
+    # version collides with an already-published tag.
+    job = _jobs()["publish-image"]
+    assert "github.event_name == 'release'" in job["if"]
+    assert "startsWith" in job["if"]
+    assert any(
+        step.get("name") == "Assert the ref matches the wheel version"
+        for step in job["steps"]
+    )
 
 
-def test_publish_image_builds_from_the_proven_wheel():
-    steps = _release_workflow()["jobs"]["publish-image"]["steps"]
+def test_image_builds_natively_per_arch_never_under_qemu():
+    # The runtime stage executes the fetched binaries (claude --version et
+    # al); the Bun-compiled claude binary segfaults under qemu-user.
+    job = _jobs()["publish-image"]
+    runners = {
+        entry["platform"]: entry["runner"]
+        for entry in job["strategy"]["matrix"]["include"]
+    }
+    assert runners == {
+        "linux/amd64": "ubuntu-latest",
+        "linux/arm64": "ubuntu-24.04-arm",
+    }
+    assert not any("qemu" in str(step.get("uses", "")) for step in job["steps"])
 
+
+def test_image_builds_from_the_proven_wheel_in_the_checkout_context():
+    job = _jobs()["publish-image"]
     download = next(
-        step for step in steps if step.get("uses", "").startswith("actions/download-artifact")
+        step
+        for step in job["steps"]
+        if str(step.get("uses", "")).startswith("actions/download-artifact")
     )
-    assert download["with"]["name"] == "dist"
-    assert download["with"]["path"] == "dist/"
+    assert download["with"] == {"name": "dist", "path": "dist/"}
 
-    build = next(
-        step for step in steps if step.get("uses", "").startswith("docker/build-push-action")
-    )
+    build = _build_step(job)
+    # The action's default Git context would not contain the downloaded dist/.
+    assert build["with"]["context"] == "."
     assert "BOBI_BUILD=wheel" in build["with"]["build-args"]
-
-
-def test_publish_image_pushes_versioned_and_latest_tags():
-    steps = _release_workflow()["jobs"]["publish-image"]["steps"]
-    build = next(
-        step for step in steps if step.get("uses", "").startswith("docker/build-push-action")
-    )
     assert build["with"]["push"] is True
-    assert build["with"]["platforms"] == "linux/amd64,linux/arm64"
 
-    tags = build["with"]["tags"]
-    assert "ghcr.io/moda-labs/bobi:${{ steps.version.outputs.version }}" in tags
-    # :latest must move only on real release events.
-    assert "github.event_name == 'release' && 'ghcr.io/moda-labs/bobi:latest'" in tags
+
+def test_version_and_claude_pin_have_a_single_source_of_truth():
+    jobs = _jobs()
+    # Both come from build-wheel outputs: version from the wheel filename,
+    # claude pin resolved once so canary + all arches bake the same CLI.
+    assert "build-wheel" in jobs["publish-image"]["needs"]
+    build = _build_step(jobs["publish-image"])
+    assert (
+        "CLAUDE_VERSION=${{ needs.build-wheel.outputs.claude-version }}"
+        in build["with"]["build-args"]
+    )
+    assert "needs.build-wheel.outputs.claude-version" in str(
+        jobs["build-canary"]["env"]
+    )
+
+    dispatch = next(
+        step
+        for step in jobs["update-homebrew"]["steps"]
+        if str(step.get("uses", "")).startswith("peter-evans/repository-dispatch")
+    )
+    assert "needs.build-wheel.outputs.version" in dispatch["with"]["client-payload"]
+
+
+def test_latest_moves_only_for_the_repos_latest_release():
+    jobs = _jobs()
+    manifest = next(
+        step
+        for step in jobs["publish-manifest"]["steps"]
+        if "imagetools create" in step.get("run", "")
+    )
+    run = manifest["run"]
+    # The decision input is releases/latest (excludes prereleases and drafts),
+    # and :latest is only added behind that comparison.
+    assert "releases/latest" in run
+    assert '"${IMAGE}:latest"' in run
+    # No unconditional :latest anywhere in the per-arch build tags.
+    build = _build_step(jobs["publish-image"])
+    assert ":latest" not in build["with"]["tags"]
+
+
+def test_publish_jobs_are_time_bounded():
+    jobs = _jobs()
+    assert jobs["publish-image"]["timeout-minutes"] <= 45
+    assert jobs["publish-manifest"]["timeout-minutes"] <= 15
