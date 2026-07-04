@@ -1025,46 +1025,24 @@ def _render_team_deps_into_context(project_path: Path, cfg: DeployConfig,
         if cfg.team_version:
             raise
         return None
-    from bobi.build_render import (
-        load_composed_team_config,
-        render_team_deps_script,
-    )
-    from bobi.tool_library import dependency_list_hash, resolve_team_dependencies
-    # Read the COMPOSED build (from: chain + tool_library expansion), not the raw
-    # leaf — a team may declare its baked CLI via `tool_library:` with no inline
-    # build: (#416). Reading raw would skip the bake and leave the requires gate
-    # failing on the box.
-    tcfg = load_composed_team_config(team_dir, project_path)
-    deps = resolve_team_dependencies(team_dir, project_path)
-    # A guide-only dependency (guide, no pinned install) must be materialized by a
-    # bootstrap agent at BUILD time (#428 Stage 3); `bobi deploy` never runs that
-    # agent (OQ1: bootstrap in CI). Refuse to source-build such a team instead of
-    # silently shipping the generic image without the dependency — the operator
-    # builds + pushes the image in CI and deploys it via `image:` / `team-url:`.
-    agent_deps = [d for d in deps if not d.install and d.guide.strip()]
-    if agent_deps:
+    # The shared staging seam (#610): composes the team (from: chain +
+    # tool_library expansion, #416), renders the deps hook with both identity
+    # stamps, and writes it into the build context. allow_agent=False because
+    # `bobi deploy` never runs the bootstrap agent (OQ1: bootstrap at image
+    # build) - a guide-only dependency (guide, no pinned install) must not be
+    # silently dropped from the image, so it refuses instead.
+    from bobi.build import GuideDepsError, stage_team_deps
+    try:
+        return stage_team_deps(
+            team_dir, project_path,
+            ctx=Path(assets.build_context) if assets else None,
+            allow_agent=False)
+    except GuideDepsError as exc:
         raise DeployError(
-            f"team '{cfg.team}' declares guide-only dependencies "
-            f"({', '.join(d.name for d in agent_deps)}) that a bootstrap agent "
-            f"must resolve at build time; `bobi deploy` does not run that agent. "
-            f"Build + push the team image in CI (scripts/build-team-images.sh) "
-            f"and deploy it with `image:` or `team-url:`.")
-    spec = tcfg.build
-    if spec is None or not (spec.apt or spec.npm or spec.run_root or spec.run
-                            or spec.verify_requires):
-        return None  # no spec, or a pure raw-Dockerfile escape hatch
-    ctx = Path(assets.build_context)
-    rel = Path("dist") / "team-deps" / f"{team_dir.name}.sh"
-    out = ctx / rel
-    out.parent.mkdir(parents=True, exist_ok=True)
-    # Stamp the declared dependency-set hash too (#428): deterministic from the
-    # declaration alone (no agent), so a later deploy can detect a changed set and
-    # rebuild. Guide recipes aren't baked here (guarded above), only pinned ones.
-    # "" for a team with no declared deps (matches _local_dep_list_hash).
-    out.write_text(render_team_deps_script(
-        tcfg, dep_list_hash=dependency_list_hash(deps) if deps else ""))
-    log.info("rendered team-deps hook for '%s' → %s", team_dir.name, rel)
-    return str(rel)
+            f"{exc}; `bobi deploy` does not run that agent. Build + push the "
+            f"team image with `bobi build <team-dir> --tag <ref> --push` "
+            f"(scripts/build-team-images.sh for Fly's app-scoped registry) "
+            f"and deploy it with `image:` or `team-url:`.") from exc
 
 
 def _local_team_deps_hash(project_path: Path, cfg: DeployConfig) -> str:

@@ -296,8 +296,8 @@ build:
 prompt edit is still a hot update — only a deps change rebuilds an image.
 
 **How it builds (built on Fly during deploy).** `bobi deploy` renders the
-`build:` spec to a shell hook (`bobi/build_render.py` →
-`deploy.py:_render_team_deps_into_context`) into the build context and builds the
+`build:` spec to a shell hook (the shared staging seam
+`build.py:stage_team_deps`, #610) into the build context and builds the
 ONE Dockerfile **on Fly's remote builder** with `--build-arg TEAM_DEPS=<rendered>`
 — Fly creates app + registry + machine together (no separate registry push), and
 its builder caches the tool layers. The hook runs as a stable layer **below** the
@@ -305,11 +305,31 @@ framework-wheel copy, so a code-only framework release rebuilds only the wheel a
 re-deploys stay cheap. No `build:` → the default `docker/noop-deps.sh` →
 byte-identical to the generic image. `run_root:` steps run as root for tools `apt`
 can't express (e.g. `npx playwright install-deps chromium`). CI
-(`.github/workflows/team-images.yml` → `scripts/build-team-images.sh`) is a
-build-only **verify gate** — it builds each team image (running the `requires`
-check) but does not push. (A "build once → push to a registry → deploy many by
-ref" optimization is deferred: Fly's registry rejects pushes to a never-deployed
-app, GHCR needs `write:packages`.)
+(`.github/workflows/team-images.yml` → `scripts/build-team-images.sh`, a thin
+wrapper over `bobi build`) is a build-only **verify gate**: it builds each team
+image (running the `requires` check) but does not push.
+
+**Building a standalone image: `bobi build` (#610).** For BYO-orchestrator
+deployments (Kubernetes and similar), `bobi build` is the one command from team
+declaration to a tagged, pushable image:
+
+```bash
+bobi build ./my-team --tag ghcr.io/acme/my-team:1 --push
+```
+
+The team ref resolves exactly as deploy's (`team-dir` path, registry
+`name@version` pin, or bare name under `agents/`; a `from:` chain is flattened
+on the host). In a bobi checkout the framework builds from source (`--build
+pypi|wheel` to override); from a plain `pip install bobi` the bundled deploy
+assets build in pypi mode pinned to the CLI's own version (or an explicit
+`--bobi-version`), no checkout needed.
+A guide-only dependency is bootstrapped by the agent inside a fresh base image
+(§2.6.1), so `bobi build` is also the CI entry point for that path. `--push` is
+a plain `docker push` through the local docker credential helpers, so GHCR /
+Artifact Registry / ECR all work. Deploying the image (manifests, secrets
+wiring) stays the consumer's job; the image is the supported contract surface.
+For Fly, prefer `bobi deploy` (Fly's registry is app-scoped; the CI wrapper
+handles its holder-app dance).
 
 **Image HOME + volume config dir (no build/runtime split).** `$HOME` stays on the
 **image** (`/home/bobi`) at build AND runtime, so `run:` steps bake
@@ -345,14 +365,16 @@ snapshot is a normal image layer and there is one install code path. Every dep i
 verified against its `success` contract (per brain, build tier) before the layer
 is trusted. See `bobi/dep_bootstrap.py` and issue #428.
 
-- **One seam, agent-free for pinned teams.** `scripts/build-team-images.sh` and
-  the release rollout render each team through `python -m bobi.dep_bootstrap
-  --render`; a team with only pinned installs renders with no agent (a drop-in for
+- **One seam, agent-free for pinned teams.** `bobi build` (and the CI wrapper
+  driving it) renders each team through `dep_bootstrap.render_team_deps`; a team
+  with only pinned installs renders with no agent (a drop-in for
   the old `build_render` render). A guide-only dep is materialized by the bootstrap
-  agent **inside a fresh base image** (`docker run` the base, so the recipe is
-  faithful to the image, not the CI host), gated on the brain key in the CI env
-  (`BOBI_BOOTSTRAP_BRAINS`, default `claude`). `bobi deploy` never runs the agent
-  (it refuses to source-build a guide-only team and directs you to the CI `image:`).
+  agent **inside a fresh base image** (`docker run` the base with only the
+  flattened team dir and an output dir mounted, so the recipe is
+  faithful to the image, not the CI host), gated on the brain key in the env
+  (`--brains` / `BOBI_BOOTSTRAP_BRAINS` in CI, default `claude`). `bobi deploy`
+  never runs the agent (it refuses to source-build a guide-only team and directs
+  you to `bobi build` + `image:`).
   The full path (guide dep → live agent → frozen recipe → working image) is
   exercised end-to-end by `tests/integration/test_dep_bootstrap_e2e.py` in the
   container/claude CI suite.
