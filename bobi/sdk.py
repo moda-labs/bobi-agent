@@ -427,9 +427,20 @@ def get_registry() -> SessionRegistry:
     return _registry
 
 
-def save_session_id(name: str, session_id: str) -> None:
+def save_session_id(name: str, session_id: str, model: str | None = None) -> None:
+    """Persist a session's resume id, plus the model it runs under (#617).
+
+    ``model=None`` leaves any recorded model untouched (for callers that do
+    not know it); clearing the id (``session_id=""``) clears the model record
+    too, so a fresh session never inherits a stale model note.
+    """
     sd = _sessions_dir()
     (sd / f"{name}.id").write_text(session_id)
+    model_path = sd / f"{name}.model"
+    if not session_id:
+        model_path.unlink(missing_ok=True)
+    elif model is not None:
+        model_path.write_text(model)
     registry = get_registry()
     registry.update(name, session_id=session_id)
 
@@ -439,6 +450,32 @@ def load_session_id(name: str) -> str:
     if path.exists():
         return path.read_text().strip()
     return ""
+
+
+def load_resumable_session_id(name: str, model: str) -> str:
+    """The saved session id, unless it was recorded under a different model.
+
+    A session created under one model must not be resumed under another - the
+    same rule the workflow orchestrator applies with a fresh session on model
+    change. An empty recorded model means "ran under the provider default" and
+    still guards; only sessions with no record at all (saved before #617)
+    resume unconditionally, and they get a model record on their next save.
+    """
+    saved_id = load_session_id(name)
+    if not saved_id:
+        return ""
+    model_path = _sessions_dir() / f"{name}.model"
+    if not model_path.exists():
+        return saved_id
+    recorded = model_path.read_text().strip()
+    if recorded != (model or ""):
+        log.info(
+            "Session %s was recorded under model %r but %r is now resolved; "
+            "starting fresh.", name, recorded or "<default>",
+            model or "<default>",
+        )
+        return ""
+    return saved_id
 
 
 def log_activity(event: str, data: dict | None = None, session: str = "") -> None:

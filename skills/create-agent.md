@@ -232,6 +232,19 @@ brain:
   model: gpt-5-codex   # optional provider-specific model or alias
 ```
 
+Individual roles can declare their own model, applied whenever an agent
+launches with that role (subagents, workflow steps, monitor checks):
+
+```yaml
+roles:
+  monitor: {model: haiku}    # cheap observe-and-report checks
+  planner: {model: opus}
+```
+
+Role models pick a model within the team's brain, never a different brain.
+Precedence: `--model` launch flag > step `model:` > `roles.<role>.model` >
+`brain.model` > provider default.
+
 Workflow prompt steps can override that team default for just one step:
 
 ```yaml

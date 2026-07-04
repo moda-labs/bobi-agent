@@ -26,6 +26,7 @@ from bobi.inbox import Inbox, Message
 from bobi.sdk import (
     save_session_id,
     load_session_id,
+    load_resumable_session_id,
     log_activity,
     get_registry,
     SessionEntry,
@@ -286,6 +287,16 @@ class Session:
             resume=resume,
             options=self._extra_options,
         )
+
+    def _session_model(self) -> str:
+        """The effective configured model for this session (#617).
+
+        The explicit option if set, else the process default the adapter
+        would fill in - the string recorded alongside the saved session id
+        so a resume under a different model starts fresh instead.
+        """
+        from bobi.brain import resolve_model_option
+        return resolve_model_option(self._extra_options.get("model"))
 
     async def _safe_disconnect(self, client) -> None:
         """Disconnect a client, swallowing errors — used to discard a hung or
@@ -597,7 +608,8 @@ class Session:
                             except Exception:
                                 pass
                 elif isinstance(msg, TurnResult):
-                    save_session_id(self.name, msg.session_id)
+                    save_session_id(self.name, msg.session_id,
+                                    model=self._session_model())
                     self._last_is_error = msg.is_error
                     cost = msg.total_cost_usd or 0.0
                     self._total_cost_usd += cost
@@ -813,7 +825,7 @@ class Session:
             await self._process_message(msg)
 
     async def _run(self, startup_prompt: str | None = None) -> None:
-        saved_id = load_session_id(self.name)
+        saved_id = load_resumable_session_id(self.name, self._session_model())
         resume_id = saved_id or None
 
         self._client = self._make_brain_session(resume=resume_id)

@@ -77,7 +77,10 @@ every tick, so monitors added at runtime take effect without a restart.
 - **Description-only** (`description:`, no command) - when output needs
   interpretation, the scheduler spawns a short-lived check agent that observes
   and returns a verdict. Costs an LLM call per interval; use when diffable JSON
-  isn't available.
+  isn't available. Check agents run with role `monitor`, so
+  `roles: {monitor: {model: haiku}}` in `agent.yaml` puts every check on a
+  cheap model instead of the manager's (setup-generated packs ship this
+  default).
 - **Curator** (`curator: true`) - the one flavor whose agent *writes* an
   artifact (`policy.md`) instead of returning a verdict.
 

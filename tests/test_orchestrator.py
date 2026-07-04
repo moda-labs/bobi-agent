@@ -572,6 +572,45 @@ class TestRunWorkflow:
         assert result is True
         assert calls[0]["options"]["model"] == "haiku"
 
+    def _run_with_scorer_role(self, tmp_path, monkeypatch, steps, **kwargs):
+        """One workflow run against a root whose config maps scorer→haiku;
+        returns the models captured from every make_session call (#617)."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.agent_yaml_path(root).write_text(
+            "agent: test\nentry_point: manager\n"
+            "roles:\n  scorer:\n    model: haiku\n"
+        )
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kw):
+                calls.append(kw)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=steps)
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1", **kwargs,
+        )
+        assert result is True
+        return [c["options"].get("model") for c in calls]
+
+    @pytest.mark.parametrize("steps,kwargs,expected", [
+        # role model applies when the step has none
+        ([StepDef(name="score", prompt="score", agent="scorer")],
+         {}, ["haiku"]),
+        # explicit step model beats the role model
+        ([StepDef(name="score", prompt="score", agent="scorer", model="sonnet")],
+         {}, ["sonnet"]),
+        # launch --model beats step and role config for the whole run
+        ([StepDef(name="discover", prompt="discover", model="sonnet"),
+          StepDef(name="score", prompt="score", agent="scorer")],
+         {"model": "opus"}, ["opus"]),
+    ], ids=["role-fallback", "step-beats-role", "launch-beats-all"])
+    def test_model_precedence(self, tmp_path, monkeypatch, steps, kwargs, expected):
+        models = self._run_with_scorer_role(tmp_path, monkeypatch, steps, **kwargs)
+        assert models == expected
+
     def test_env_model_default_passed_to_brain_session(self, monkeypatch):
         calls = []
 
@@ -962,6 +1001,110 @@ class TestAwaitStep:
         assert calls[0]["options"]["model"] == "sonnet"
         assert "Continue workflow `t`" in clients[0].queries[0]
         assert "_runtime" not in clients[0].queries[0]
+
+    def test_resume_preserves_launch_model(self, tmp_path, monkeypatch):
+        """A launch --model override survives suspension: the resume re-applies
+        it instead of re-resolving to the config default, tripping the
+        mismatch guard, and dropping the saved session (#617 review)."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+
+        run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {
+            "input": {"task": "t", "repo": "r", "run_key": "1"},
+            "_runtime": {"model": "opus", "launch_model": "opus"},
+        }
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.run_key = "1"
+        run.save()
+
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="old-session"), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            success = resume_workflow(run, wf)
+
+        assert success is True
+        # The mismatch guard must NOT fire: same model, saved session kept.
+        assert calls[0]["resume"] == "old-session"
+        assert calls[0]["options"]["model"] == "opus"
+
+    def test_resume_role_model_change_starts_fresh_session(self, tmp_path, monkeypatch):
+        """A pre-#617 suspend (no recorded model) resumed after a role model
+        was configured must start fresh, not resume the default-model session
+        under the role's model (#617 review)."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
+        paths.agent_yaml_path(root).write_text(
+            "agent: test\nentry_point: manager\n"
+            "roles:\n  implementer:\n    model: haiku\n"
+        )
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+
+        run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {
+            "input": {"task": "t", "repo": "r", "run_key": "1"},
+        }
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.run_key = "1"
+        run.save()
+
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it", agent="implementer"),
+        ])
+
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="old-session"), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            success = resume_workflow(run, wf)
+
+        assert success is True
+        assert calls[0]["resume"] is None
+        assert calls[0]["options"]["model"] == "haiku"
 
     def test_find_waiting_returns_none_when_no_match(self, tmp_path, monkeypatch):
         root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
