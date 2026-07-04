@@ -67,6 +67,16 @@ class TestHealthServer:
         manager_health.stop()
         assert manager_health.start(state_dir, "test-project") == configured_port
 
+    @pytest.mark.parametrize("value", ["not-a-port", "-1", "65536"])
+    def test_invalid_configured_port_fails_loudly(self, tmp_path, monkeypatch,
+                                                  value):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        monkeypatch.setenv("BOBI_HEALTH_PORT", value)
+
+        with pytest.raises(ValueError, match="BOBI_HEALTH_PORT"):
+            manager_health.start(state_dir, "test-project")
+
     def test_health_endpoint_returns_ok(self, tmp_path):
         state_dir = tmp_path / "state"
         state_dir.mkdir()

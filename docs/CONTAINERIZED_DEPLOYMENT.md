@@ -193,7 +193,10 @@ docker inspect -f '{{.State.Health.Status}}' <container>
 ```
 
 Kubernetes `httpGet` probes originate from the kubelet against the pod IP, so
-set a fixed port and non-loopback bind address for k8s deployments:
+set a fixed port and non-loopback bind address for k8s deployments. Use
+`127.0.0.1` or `0.0.0.0` for `BOBI_HEALTH_BIND`; the bundled Docker/Fly
+healthcheck probes `127.0.0.1`, so binding to a specific pod IP is not
+compatible with that script.
 
 ```yaml
 env:
