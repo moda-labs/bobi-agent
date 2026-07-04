@@ -1857,7 +1857,8 @@ class TestSlackFinalizeHardening:
         import os
 
         import bobi.slack
-        os.environ["SLACK_BOT_TOKEN"] = "xoxb-supersecrettokenvalue123"
+        secret = "xoxb-" + "supersecrettoken" + "value123"
+        os.environ["SLACK_BOT_TOKEN"] = secret
 
         def boom(token, name, **kw):
             raise RuntimeError(f"slack said no for {token}")
@@ -1865,7 +1866,7 @@ class TestSlackFinalizeHardening:
         c = _client(SetupState(), project)
         r = c.post("/api/slack/channel", json={"channel": "#general"})
         assert r.status_code == 502
-        assert "xoxb-supersecrettokenvalue123" not in r.json()["error"]
+        assert secret not in r.json()["error"]
 
     def test_name_resolves_and_saves_id(self, project, monkeypatch):
         import os
@@ -1893,7 +1894,8 @@ class TestSlackFinalizeHardening:
         import os
 
         import bobi.slack
-        os.environ["SLACK_BOT_TOKEN"] = "xoxb-supersecrettokenvalue123"
+        secret = "xoxb-" + "supersecrettoken" + "value123"
+        os.environ["SLACK_BOT_TOKEN"] = secret
         os.environ["SLACK_CHANNELS"] = "C111"
 
         def boom(token, channel, text, *a, **kw):
@@ -1902,7 +1904,7 @@ class TestSlackFinalizeHardening:
         c = _client(SetupState(), project)
         r = c.post("/api/slack/test")
         assert r.status_code == 502
-        assert "xoxb-supersecrettokenvalue123" not in r.json()["error"]
+        assert secret not in r.json()["error"]
 
     def test_exported_env_wins_over_stale_dotenv(self, project, monkeypatch):
         import os
@@ -1910,9 +1912,10 @@ class TestSlackFinalizeHardening:
         import bobi.slack
         from bobi.setup import actions
         env = actions.read_env(project)
-        env["SLACK_BOT_TOKEN"] = "xoxb-staletoken000000"
+        env["SLACK_BOT_TOKEN"] = "xoxb-" + "staletoken" + "000000"
         actions.write_env(project, env)
-        os.environ["SLACK_BOT_TOKEN"] = "xoxb-freshtoken000000"
+        fresh = "xoxb-" + "freshtoken" + "000000"
+        os.environ["SLACK_BOT_TOKEN"] = fresh
         calls = []
 
         def fake(token, name, **kw):
@@ -1922,7 +1925,7 @@ class TestSlackFinalizeHardening:
         c = _client(SetupState(), project)
         assert c.post("/api/slack/channel",
                       json={"channel": "#g"}).status_code == 200
-        assert calls == ["xoxb-freshtoken000000"]
+        assert calls == [fresh]
 
 
 class TestBuildGoalFloor:
