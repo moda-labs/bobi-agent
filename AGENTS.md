@@ -70,8 +70,13 @@ Bobi is an event-driven AI agent framework.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,kb]"
 ```
+
+Use this install for broad non-integration test runs. It matches the CI `Unit
+tests` job and includes the knowledge-base dependencies imported during test
+collection. Use `.[dev]` only for focused e2e work that does not collect the KB
+test surface.
 
 ## Worktree Policy
 
@@ -87,7 +92,7 @@ pip install -e ".[dev]"
 ## Tests
 
 ```bash
-pytest tests/ --ignore=tests/integration/  # unit tests
+pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q  # unit tests
 pytest tests/                              # full suite, includes integration tests
 ```
 
