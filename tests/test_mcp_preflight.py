@@ -19,6 +19,7 @@ class _FakeClient:
     """Fake ClaudeSDKClient: returns scripted get_mcp_status() snapshots."""
     HANG_CONNECT = False
     HANG_STATUS = False
+    HANG_DISCONNECT = False
 
     def __init__(self, options=None):
         self.options = options
@@ -31,6 +32,8 @@ class _FakeClient:
         self.connects += 1
 
     async def disconnect(self):
+        if _FakeClient.HANG_DISCONNECT:
+            await asyncio.sleep(10)
         pass
 
     async def get_mcp_status(self):
@@ -75,6 +78,7 @@ def _install_fake_client(monkeypatch, snapshots, interval=0.0):
     _FakeClient.SNAPSHOTS = snapshots
     _FakeClient.HANG_CONNECT = False
     _FakeClient.HANG_STATUS = False
+    _FakeClient.HANG_DISCONNECT = False
     monkeypatch.setattr(bobi.brain, "get_brain", lambda: _FakeClaudeBrain())
     monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "claude")
     # Don't actually sleep between polls.
@@ -189,7 +193,45 @@ class TestPollRace:
         )
         assert len(results) == 1
         assert results[0].ok is False
-        assert "probe failed" in results[0].detail
+        assert "timed out" in results[0].detail
+
+    def test_deadline_after_sleep_reports_pending(
+        self, monkeypatch, tmp_path
+    ):
+        snapshots = [
+            {"mcpServers": [{"name": "slow", "status": "pending"}]},
+            {"mcpServers": [{"name": "slow", "status": "connected",
+                             "tools": []}]},
+        ]
+        _install_fake_client(monkeypatch, snapshots, interval=0.02)
+        monkeypatch.setenv("BOBI_MCP_PREFLIGHT_TIMEOUT", "0.01")
+
+        results = validate._probe_mcp_servers(
+            ["slow"], {"slow": {"type": "stdio", "command": "/abs/slow"}},
+            tmp_path,
+        )
+        assert len(results) == 1
+        assert results[0].ok is False
+        assert "pending" in results[0].detail
+
+    def test_timeout_does_not_hang_on_disconnect(
+        self, monkeypatch, tmp_path
+    ):
+        snapshots = [
+            {"mcpServers": [{"name": "slow", "status": "pending"}]},
+        ]
+        _install_fake_client(monkeypatch, snapshots, interval=0.01)
+        _FakeClient.HANG_STATUS = True
+        _FakeClient.HANG_DISCONNECT = True
+        monkeypatch.setenv("BOBI_MCP_PREFLIGHT_TIMEOUT", "0.05")
+
+        results = validate._probe_mcp_servers(
+            ["slow"], {"slow": {"type": "stdio", "command": "/abs/slow"}},
+            tmp_path,
+        )
+        assert len(results) == 1
+        assert results[0].ok is False
+        assert "timed out" in results[0].detail
 
     def test_one_connect_for_many_servers(self, monkeypatch, tmp_path):
         """D-63b: a single connect()/poll judges every server."""

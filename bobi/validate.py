@@ -280,6 +280,16 @@ def _probe_mcp_servers(
     """Connect once via the Claude SDK and judge every named server."""
     try:
         return asyncio.run(_async_probe_mcp(names, all_servers, project_path))
+    except asyncio.TimeoutError:
+        timeout = preflight_timeout()
+        return [
+            CheckResult(
+                name, ok=False,
+                detail=f"mcp — probe timed out after {timeout:g}s",
+                hint="Check server URL/command and credentials",
+            )
+            for name in names
+        ]
     except Exception as e:
         return [
             CheckResult(
@@ -383,12 +393,16 @@ async def _async_probe_mcp(
             if remaining <= 0:
                 break
             await asyncio.sleep(min(MCP_PROBE_POLL_INTERVAL, remaining))
-            status = await wait_remaining(get_mcp_status)
+            try:
+                status = await wait_remaining(get_mcp_status)
+            except asyncio.TimeoutError:
+                break
 
         servers = {s.get("name"): s for s in status.get("mcpServers", [])}
         return [_judge_mcp_server(name, servers.get(name)) for name in names]
     finally:
         try:
-            await client.disconnect()
+            disconnect_timeout = min(1.0, max(0.05, preflight_timeout()))
+            await asyncio.wait_for(client.disconnect(), timeout=disconnect_timeout)
         except Exception:
             pass
