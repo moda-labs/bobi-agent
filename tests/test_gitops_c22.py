@@ -439,7 +439,11 @@ def test_release_publishes_to_pypi_only_after_the_canary():
     jobs = _jobs(_load(WF_RELEASE))
     assert jobs["deploy-event-server"]["needs"] == ["subscription-login-smoke", "build-wheel"]
     assert "deploy-event-server" in jobs["build-canary"]["needs"]
-    assert jobs["update-homebrew"]["needs"] == "publish"
+    # Homebrew stays behind the canary via publish; build-wheel is in needs
+    # only for its version output (the wheel filename, the single source of
+    # truth all publish jobs share).
+    assert "publish" in jobs["update-homebrew"]["needs"]
+    assert "build-wheel" in jobs["update-homebrew"]["needs"]
     assert "roll-fleet" not in jobs
     assert "deploy-teams" not in jobs
 
