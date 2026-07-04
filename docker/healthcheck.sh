@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Container liveness probe. The manager health server (C2) binds 127.0.0.1 on a
-# free port and writes it to state/manager-health.port; read it and probe
-# /health. Works for `docker run` HEALTHCHECK and Fly script checks alike
-# (both execute inside the machine, where localhost is reachable).
+# Container liveness probe. The manager health server writes its bound port to
+# state/manager-health.port; read it and probe /health over localhost. Works for
+# `docker run` HEALTHCHECK and Fly script checks alike (both execute inside the
+# machine, where localhost is reachable).
 set -euo pipefail
 
 if [ -n "${BOBI_ROOT:-}" ]; then
