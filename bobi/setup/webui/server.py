@@ -639,34 +639,6 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 "venn_configured": bool(actions.venn_key(project))}
 
     # --- ingress: how public webhooks reach the event server ------------
-    @app.post("/api/ingress")
-    def ingress(payload: dict) -> JSONResponse:
-        from bobi.deploy import DEFAULT_EVENT_SERVER
-        mode = (payload.get("mode") or "").strip()
-        if mode not in ("local", "quick_tunnel", "bobi_cloud", "custom_worker"):
-            return JSONResponse({"error": "unknown ingress mode"}, status_code=400)
-        url = (payload.get("url") or "").strip().rstrip("/")
-        if mode == "bobi_cloud":
-            url = DEFAULT_EVENT_SERVER
-        if mode == "local":
-            url = ""
-        elif not url:
-            return JSONResponse({"error": "event server URL required"},
-                                status_code=400)
-        if url:
-            err = _validate_public_event_server_url(url)
-            if err:
-                return JSONResponse({"error": err}, status_code=400)
-        state.ingress.mode = mode
-        state.ingress.url = url
-        state.ingress.verified = False
-        state.ingress.verified_at = ""
-        state.ingress.error = ""
-        if mode == "local":
-            _persist_ingress_env(project, state)
-        state.save(project)
-        return JSONResponse(serialize_state(state))
-
     @app.post("/api/ingress/verify")
     def ingress_verify(payload: dict) -> JSONResponse:
         from datetime import datetime, timezone

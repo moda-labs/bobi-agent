@@ -194,6 +194,11 @@ class TestIngressEndpoint:
         def read(self, _limit):
             return self._body
 
+    def test_ingress_verify_is_the_only_mutation_endpoint(self, project):
+        c = _client(SetupState(), project)
+        r = c.post("/api/ingress", json={"mode": "local"})
+        assert r.status_code == 404
+
     def test_probe_requires_bobi_health_payload(self, monkeypatch):
         monkeypatch.setattr(
             server,
