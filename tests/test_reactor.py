@@ -603,13 +603,13 @@ class TestEventReactorFromConfig:
         config = [
             {
                 "event": "github.issue_comment",
-                "workflow": "pr-comment-delivery-dedup",
+                "workflow": "pr-comment-event-dedup",
                 "dedup_only": True,
             },
         ]
         reactor = EventReactor.from_config(config, cwd="/tmp/project")
         assert reactor.rules[0].dedup_only is True
-        assert reactor.rules[0].workflow == "pr-comment-delivery-dedup"
+        assert reactor.rules[0].workflow == "pr-comment-event-dedup"
 
     def test_from_config_hygiene_flags_default(self):
         """Self-author skip is on by default (allow_self_authored defaults
@@ -634,7 +634,7 @@ class TestEventReactorFromConfig:
     def test_dedup_only_records_first_and_dedups_redelivery(self, mock_launch):
         rule = AutoDispatchRule(
             event="github.issue_comment",
-            workflow="pr-comment-delivery-dedup",
+            workflow="pr-comment-event-dedup",
             match={"is_pull_request": True},
             cooldown=1800,
             dedup_only=True,

@@ -130,7 +130,7 @@ class TestDrainAutoDispatch:
             rules=[
                 AutoDispatchRule(
                     event="github.issue_comment",
-                    workflow="pr-comment-delivery-dedup",
+                    workflow="pr-comment-event-dedup",
                     match={"is_pull_request": True},
                     dedup_only=True,
                     allow_self_authored=True,
