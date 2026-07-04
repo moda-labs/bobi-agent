@@ -344,9 +344,16 @@ the prompt-injection surface, and trusted team code. Event-bus internals:
 git clone https://github.com/moda-labs/bobi-agent.git
 cd bobi-agent
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-pytest tests/ --ignore=tests/integration/
+pip install -e ".[dev,kb]"
+pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q
 ```
+
+That install is intended to match the CI `Unit tests` job in
+`.github/workflows/ci.yml`. It includes the normal test tools plus
+knowledge-base dependencies such as `fastembed`, `sqlite-vec`, and their numeric
+stack, including `numpy`, because full unit-test collection imports KB modules.
+Use the narrower `.[dev]` install for e2e-only work where the KB test surface is
+not being collected.
 
 ## License
 
