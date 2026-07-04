@@ -598,3 +598,223 @@ class TestRoleDimensionsAndAutomations:
         assert "Run by the lead role." in mon["description"]
         assert "Do: summarize new issues" in mon["description"]
         assert mon["notify"] is True
+
+
+class TestWorkflowAuthoring:
+    def test_build_workflow_yaml_parses_and_gates(self, tmp_path):
+        s = _spec_state(workflows=[{
+            "name": "Issue Lifecycle", "description": "triage to PR",
+            "trigger": "a new issue lands",
+            "steps": [
+                {"name": "triage", "role": "Triage Lead",
+                 "prompt": "Classify the issue."},
+                {"name": "plan", "role": "router",
+                 "prompt": "Propose a fix plan.", "hitl": True},
+                {"name": "done", "role": "nobody-known", "prompt": "Wrap up."},
+            ]}])
+        text = authoring.build_workflow_yaml(s, s.spec.workflows[0])
+        path = tmp_path / "issue-lifecycle.yaml"
+        path.write_text(text)
+        from bobi.workflow.schema import load_workflow
+        wf = load_workflow(path)
+        assert wf.name == "issue-lifecycle"
+        assert wf.trigger == "a new issue lands"
+        assert [st.name for st in wf.steps] == [
+            "triage", "plan", "plan-approval", "done"]
+        assert wf.step_by_name("plan-approval").await_event == "approval"
+        assert wf.step_by_name("triage").agent == "triage-lead"
+        # a role the team doesn't have is dropped, not authored broken
+        assert wf.step_by_name("done").agent == ""
+
+    def test_manifest_includes_spec_workflows(self):
+        s = _spec_state(workflows=[
+            {"name": "release", "trigger": "cut a release",
+             "steps": [{"name": "ship", "prompt": "Do it."}]},
+            {"name": "adhoc", "steps": []},   # can't shadow the stub
+            {"steps": []},                    # unnamed → skipped
+        ])
+        paths_ = [f.path for f in compute_manifest(s)]
+        assert "workflows/release.yaml" in paths_
+        assert paths_.count("workflows/adhoc.yaml") == 1
+
+    def test_empty_steps_fall_back_to_single_step(self):
+        s = _spec_state(workflows=[{"name": "x", "description": "do x",
+                                    "steps": []}])
+        wf = yaml.safe_load(authoring.build_workflow_yaml(s, s.spec.workflows[0]))
+        assert wf["steps"] == [{"name": "run", "prompt": "do x"}]
+
+
+class TestEventAutomations:
+    def _auto(self, **kw):
+        base = {"description": "React to incoming email", "leash": "act",
+                "trigger": "event", "cadence": "when an email arrives",
+                "role": "Triage Lead", "command": "Summarize the email."}
+        base.update(kw)
+        return base
+
+    def test_event_automation_becomes_workflow_not_monitor(self):
+        s = _spec_state(autonomous=[self._auto()])
+        paths_ = [f.path for f in compute_manifest(s)]
+        assert "workflows/auto-react-to-incoming-email.yaml" in paths_
+        assert not any(p.startswith("monitors/") for p in paths_)
+
+    def test_schedule_automation_still_becomes_monitor(self):
+        s = _spec_state(autonomous=[{"description": "daily digest",
+                                     "leash": "notify", "trigger": "schedule",
+                                     "cadence": "1d"}])
+        paths_ = [f.path for f in compute_manifest(s)]
+        assert "monitors/defaults.yaml" in paths_
+        assert not any(p.startswith("workflows/auto-") for p in paths_)
+
+    def test_legacy_automation_without_trigger_stays_a_monitor(self):
+        s = _spec_state(autonomous=[{"description": "old behavior",
+                                     "cadence": "15m"}])
+        mons = yaml.safe_load(build_monitors_yaml(s))["monitors"]
+        assert mons[0]["name"] == "old-behavior"
+
+    def test_event_automations_are_excluded_from_monitors(self):
+        s = _spec_state(autonomous=[self._auto(),
+                                    {"description": "digest", "cadence": "1d"}])
+        mons = yaml.safe_load(build_monitors_yaml(s))["monitors"]
+        assert [m["name"] for m in mons] == ["digest"]
+
+    def test_ask_leash_gets_approval_gate(self, tmp_path):
+        s = _spec_state(autonomous=[self._auto(leash="ask")])
+        text = authoring.build_automation_workflow_yaml(s, s.spec.autonomous[0])
+        path = tmp_path / "wf.yaml"
+        path.write_text(text)
+        from bobi.workflow.schema import load_workflow
+        wf = load_workflow(path)
+        assert [st.name for st in wf.steps] == ["react", "react-approval", "act"]
+        assert wf.steps[1].await_event == "approval"
+        assert wf.trigger == "when an email arrives"
+        assert wf.steps[0].agent == "triage-lead"
+
+    def test_event_only_automations_write_no_monitors_file(self):
+        s = _spec_state(autonomous=[self._auto()])
+        assert not authoring.has_monitors(s)
+
+
+class TestSlackChannelsKnob:
+    def test_slack_chat_service_carries_channels_ref(self):
+        s = _spec_state()
+        s.chat = "slack"
+        cfg = yaml.safe_load(build_agent_yaml(s))
+        slack = next(r for r in cfg["services"] if r["name"] == "slack")
+        assert slack["channels"] == "${SLACK_CHANNELS:-}"   # optional: channel is saved AFTER deploy
+
+    def test_non_slack_chat_has_no_channels_knob(self):
+        cfg = yaml.safe_load(build_agent_yaml(_spec_state()))
+        slack = next(r for r in cfg["services"] if r["name"] == "slack")
+        assert "channels" not in slack
+
+
+class TestWorkflowCollisions:
+    def _wf(self, name):
+        return {"name": name, "steps": [{"name": "a", "prompt": "p"}]}
+
+    def _auto(self):
+        return {"description": "React to email", "trigger": "event",
+                "leash": "act", "cadence": "when an email arrives"}
+
+    def test_colliding_names_get_suffixes_not_dropped(self):
+        s = _spec_state(
+            workflows=[self._wf("adhoc"), self._wf("My Flow"),
+                       self._wf("my flow")],
+            autonomous=[self._auto(), self._auto()])
+        paths_ = [f.path for f in compute_manifest(s)]
+        assert paths_.count("workflows/adhoc.yaml") == 1   # the stub wins
+        assert "workflows/adhoc-2.yaml" in paths_
+        assert "workflows/my-flow.yaml" in paths_
+        assert "workflows/my-flow-2.yaml" in paths_
+        assert "workflows/auto-react-to-email.yaml" in paths_
+        assert "workflows/auto-react-to-email-2.yaml" in paths_
+
+    def test_suffixed_file_carries_suffixed_name(self):
+        s = _spec_state(workflows=[self._wf("adhoc")])
+        spec = next(f for f in compute_manifest(s)
+                    if f.path == "workflows/adhoc-2.yaml")
+        assert yaml.safe_load(spec.content)["name"] == "adhoc-2"
+
+
+class TestAutomationLeashBranches:
+    def _auto(self, leash):
+        return {"description": "React to email", "trigger": "event",
+                "leash": leash, "cadence": "when an email arrives",
+                "command": "Summarize it."}
+
+    def test_notify_leash_observes_only(self):
+        s = _spec_state(autonomous=[self._auto("notify")])
+        wf = yaml.safe_load(
+            authoring.build_automation_workflow_yaml(s, s.spec.autonomous[0]))
+        assert len(wf["steps"]) == 1
+        assert "do not take action yourself" in wf["steps"][0]["prompt"]
+
+    def test_act_leash_acts_and_reports(self):
+        s = _spec_state(autonomous=[self._auto("act")])
+        wf = yaml.safe_load(
+            authoring.build_automation_workflow_yaml(s, s.spec.autonomous[0]))
+        assert len(wf["steps"]) == 1
+        assert "Do it, then report" in wf["steps"][0]["prompt"]
+
+
+class TestEventOnlyValidation:
+    def _pack(self, tmp_path, s, with_monitors_file=True):
+        from bobi.setup.actions import validate_pack
+        pack = tmp_path / "pack"
+        (pack / "roles" / "triage-lead").mkdir(parents=True)
+        (pack / "agent.yaml").write_text(build_agent_yaml(s))
+        (pack / "agent.md").write_text("# team\n")
+        (pack / "roles/triage-lead/ROLE.md").write_text("# role\n")
+        for fs in compute_manifest(s):
+            if fs.path.startswith("workflows/") or (
+                    with_monitors_file and fs.path.startswith("monitors/")):
+                target = pack / fs.path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(fs.content)
+        project = tmp_path / "run"
+        project.mkdir()
+        return validate_pack(pack, s, project)
+
+    def test_event_only_automations_pass_validation(self, tmp_path):
+        # Event automations ship as workflows — validation must not demand a
+        # monitors file that build (correctly) never writes.
+        s = _spec_state(autonomous=[{"description": "React to email",
+                                     "trigger": "event", "leash": "act"}])
+        findings = self._pack(tmp_path, s)
+        assert not [d for ok, d in findings if not ok]
+
+    def test_scheduled_without_monitors_file_still_fails(self, tmp_path):
+        s = _spec_state(autonomous=[{"description": "daily digest",
+                                     "cadence": "1d", "leash": "notify"}])
+        findings = self._pack(tmp_path, s, with_monitors_file=False)
+        bad = [d for ok, d in findings if not ok]
+        assert any("monitors/defaults.yaml is missing" in d for d in bad)
+
+
+class TestOpenModeWorkflowFiles:
+    def test_spec_workflows_overwrite_but_adhoc_keeps_hand_edits(self, tmp_path):
+        from bobi.setup.authoring import _deterministic_body
+        s = _spec_state(workflows=[{"name": "flow",
+                                    "steps": [{"name": "a", "prompt": "new"}]}])
+        manifest = compute_manifest(s)
+        flow = next(f for f in manifest if f.path == "workflows/flow.yaml")
+        target = tmp_path / "flow.yaml"
+        target.write_text("name: flow\nsteps: []\n")
+        assert "new" in _deterministic_body(flow, target, s)
+        adhoc = next(f for f in manifest if f.path == "workflows/adhoc.yaml")
+        t2 = tmp_path / "adhoc.yaml"
+        t2.write_text("hand-edited\n")
+        assert _deterministic_body(adhoc, t2, s) == "hand-edited\n"
+
+    def test_merge_monitors_drops_migrated_event_behavior(self):
+        # schedule → event flip must not leave the old poll monitor running
+        # alongside the new event workflow.
+        s = _spec_state(autonomous=[{"description": "React to email",
+                                     "trigger": "event", "leash": "act"}])
+        existing = yaml.dump({"monitors": [
+            {"name": "react-to-email", "interval": "15m"},
+            {"name": "hand-written", "interval": "1h"}]})
+        merged = yaml.safe_load(
+            authoring.merge_monitors_yaml(existing, s))["monitors"]
+        assert [m["name"] for m in merged] == ["hand-written"]

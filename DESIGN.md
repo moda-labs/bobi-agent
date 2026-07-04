@@ -220,16 +220,30 @@ the location field. Source dirs are kept separate from `run/`.
   your own words; bobi reflects it back (typed out) and asks at most one good
   follow-up. **Contextual quick-add chips** (emitted by the digestion brain, not
   hardcoded) sit by the input as one-tap conversational adds.
-- **Right: the team panel.** Five cards fill in and check off live:
-  **Goal · Roles · Automations · Connections · Chat.** The panel holds state +
-  structured controls + secret inputs — the things a freeform chat shouldn't.
+- **Right: the team panel.** Six cards fill in and check off live:
+  **Goal · Roles · Workflows (optional) · Automations · Connections · Chat.**
+  The panel holds state + structured controls + secret inputs — the things a
+  freeform chat shouldn't.
+- **Workflows — the one window into internal structure.** Once the roles
+  settle, the interview moves to a **workflows phase**: bobi proposes the
+  deterministic, repeatable flows it can see (with **human-approval gates**
+  marked — codified as `await: approval` steps), the user accepts, refines in
+  chat, or says "no workflows" (a valid, settled answer). Clicking a flow opens
+  its **generated YAML read-only in a dark slab popup** — the machine writes in
+  the dark; edits go through the conversation. Optional: never counts toward
+  the gathered meter. (Amends the earlier "internal structure stays invisible"
+  stance — deterministic flows and their HITL gates are a trust surface the
+  user should see.)
 - **Auto-name + rename.** The team's name shows in the panel header and is
   click-to-edit (a ✎ pencil makes it discoverable → `/api/rename`). Renaming a
   team whose source folder is named after it **moves the folder to match** and
   updates the `agent:` field, so the name actually sticks.
-- **The Finish gate.** A **Finish →** button appears only once all five are
-  gathered — the four spec slots self-scored "enough" plus a chosen chat channel
-  (a `N/5 gathered` meter shows progress). Clicking it starts the build.
+- **The Finish gate is soft.** **Finish →** is always clickable. With all five
+  gathered (the four spec slots self-scored "enough" plus a chosen chat
+  channel — a `N/5 gathered` meter shows progress) it builds immediately;
+  short of that, a confirmation popup ("you haven't completed all the agent
+  setup — sure?") lets the user move on anyway. The only hard floor left is
+  structural: the goal must be non-empty to build.
 
 ### Connections — the deliberate exception to the magic
 Connect stays explicit because auth is an unavoidable user action and
@@ -288,6 +302,11 @@ framing, not "monitors": *"anything bobi should do on its own?"* Maps to
   first** (proposes, waits) / **act** (does it, reports). (Named **Automate**
   2026-06-14 over "Autopilot", which read as unsupervised; the leash plus the
   plain verb keep "you're in control".)
+- **Per-behavior trigger:** each item is pinned as **schedule** (an interval /
+  wall-clock cadence → a description-only monitor) or **event** (reacts to a
+  webhook-fed event → an event-triggered workflow whose trigger text feeds the
+  manager's dispatch menu; an "ask" leash gets a real `await: approval` gate).
+  Event automations are never silently downgraded to a 15-minute poll.
 - **bobi suggests, doesn't just collect.** A dedicated suggestion prompt
   ideates concrete, non-spammy proactive behaviors from the team's intent — a
   "did more than I expected" beat. The user toggles, edits, adds, or skips;
@@ -295,7 +314,8 @@ framing, not "monitors": *"anything bobi should do on its own?"* Maps to
 
 ### Build → file browser → finish
 - **Build pour.** Finish kicks off `author → validate → install`. Deterministic
-  files (`agent.yaml`, `workflows/adhoc.yaml`, monitors) are written verbatim;
+  files (`agent.yaml`, `workflows/*.yaml` — the adhoc stub, the codified flows,
+  and one per event automation — monitors) are written verbatim;
   prose files (`agent.md`, each `ROLE.md`, custom `tools/*.md`) stream
   token-by-token to disk. The file list and `entry_point` are **computed by the
   wizard, never LLM-decided**.
@@ -305,11 +325,18 @@ framing, not "monitors": *"anything bobi should do on its own?"* Maps to
   real folder via the OS file manager — works while the local server is alive),
   and **Finish**. If no files are found it says so with the path, instead of a
   silent void.
-- **Finish ends cleanly.** `/api/finish` marks the state complete and **stops the
-  local setup server**, then the page transitions to a **static completion
-  screen** (no server-dependent buttons left to strand the user) with the
-  named `start` command. Open-folder/file-browsing happen *before* Finish,
-  while the server is alive.
+- **Finish → the next-steps carousel.** `/api/finish` marks the state complete
+  but the **server stays alive**. The screen opens with the check seal and
+  "All set" **on one line** plus a plain statement of where the team lives,
+  then a **carousel — one full card per step**, cycled forward/back: (1) test
+  it locally in the terminal (start / status / ask / task / watch / restart,
+  all copyable); (2) deploy — local always-on or Fly.io, each with a
+  paste-into-Claude-Code/Codex prompt; (3) when chat is Slack, finalize Slack —
+  the scopes on-screen, the api.slack.com walkthrough, and a live channel
+  input + **Send a test message** button (`/api/slack/channel`,
+  `/api/slack/test`). "Go to homepage" and **"Close & end setup"** stay
+  visible on every step; Close posts `/api/shutdown`, which stops the server
+  and leaves a static goodbye.
 
 ### Modify mode is non-lossy
 Editing an existing team must never flatten the work that's already there.
@@ -407,9 +434,11 @@ inspecting proxies (Zscaler, etc.) whose root is in the keychain but not certifi
 
 **Key endpoints.** `/api/intro`,`/api/registry`,`/api/browse`,`/api/start`
 (create/open/registry) · `/api/message` (SSE) · `/api/rename` · `/api/connect`,
-`/api/credential`(+`/value`),`/api/chat`,`/api/automate` · `/api/advance` ·
+`/api/credential`(+`/value`),`/api/chat`,`/api/automate` · `/api/workflow/yaml`
+(read-only preview) · `/api/advance` ·
 `/api/build`(SSE),`/api/validate`,`/api/install` · `/api/files`,`/api/file`,
-`/api/reveal` · `/api/finish`.
+`/api/reveal` · `/api/finish` · `/api/slack/channel`,`/api/slack/test` ·
+`/api/shutdown`.
 
 ---
 
@@ -477,4 +506,8 @@ mono labels, system fonts, no build step.
 | 2026-06-16 | **Branding reverted to `bobi`** in the shipping UI; `bobbi` rebrand deferred to the whole-codebase rename | don't ship `bobbi` ahead of the rename; also fixed wrong command/path examples |
 | 2026-06-23 | **Runtime Agent UI**: cards per live agent + blocking click-to-chat; reuses the setup design language | a running team had no visual surface; private-via-`fly proxy` keeps the Fly box dark (no public ingress) |
 | 2026-06-18 | **Connections cascade gains an `mcp` rung** (native → venn → mcp → custom); hosted MCPs from a static registry wire into `agent.yaml` `mcp_servers:` (MOD-203) | a service Venn doesn't cover often ships a hosted MCP — wire it in directly instead of dropping to a hand-authored guide; live-search + CLI rungs deferred |
+| 2026-07-03 | **Workflows become a sixth, optional card**: a workflows interview phase after roles, brain-proposed flows with `await: approval` HITL gates, read-only YAML in a dark-slab popup | deterministic flows + approval gates are a trust surface the user should see; amends "internal structure stays invisible" |
+| 2026-07-03 | **Automations pin a trigger — schedule vs event**; event ones codify as event-triggered workflows, not a 15-minute poll | "listen for incoming emails" as a silent 15m monitor was dishonest; webhooks are the event path |
+| 2026-07-03 | **Finish gate is soft**: always clickable, incomplete spec gets a confirm popup; hard floor stays goal-non-empty | forgiving north star — a grayed-out button walls the user off from their own decision |
+| 2026-07-03 | **Completion screen = one-line "All set" + next-steps carousel** (test locally / deploy / finalize Slack with a live channel input + test button); the server lives until "Close & end setup" (`/api/shutdown`) | the static completion screen buried the how-to-run story; the Slack test needs a live server, so closing became the explicit exit |
 ```

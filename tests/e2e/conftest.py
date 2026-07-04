@@ -60,6 +60,19 @@ def _fake_llm():
             # Venn-backed services appear only once the user implies them.
             if "email" in ctx or "calendar" in ctx:
                 deltas["services"] += [{"name": "email"}, {"name": "calendar"}]
+            # Workflows settle once the user describes (or declines) a flow.
+            if "workflow" in ctx or "lifecycle" in ctx:
+                deltas["workflows"] = [{
+                    "name": "issue-lifecycle",
+                    "description": "Triage each new issue and open a PR.",
+                    "trigger": "a new GitHub issue lands",
+                    "steps": [
+                        {"name": "triage", "role": "triager",
+                         "prompt": "Classify the issue.", "hitl": False},
+                        {"name": "fix", "role": "triager",
+                         "prompt": "Implement a fix.", "hitl": True},
+                    ]}]
+                payload["workflows_confirmed"] = True
             # Automations settle once the user weighs in on proactive behavior.
             if any(k in ctx for k in ("automat", "proactive", "stale",
                                       "on its own", "nothing")):

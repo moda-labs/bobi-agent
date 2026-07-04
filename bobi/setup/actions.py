@@ -295,10 +295,15 @@ def validate_pack(pack_dir: Path, state: SetupState,
             findings.append((True, "monitors/defaults.yaml parses"))
         except Exception as e:
             findings.append((False, f"monitors/defaults.yaml: {e}"))
-    elif state.spec.autonomous:
-        findings.append((False,
-                         f"{len(state.spec.autonomous)} proactive behavior(s) "
-                         "were specified but monitors/defaults.yaml is missing"))
+    else:
+        # Only SCHEDULED behaviors need a monitors file — event-shaped
+        # automations are codified as event-triggered workflows instead
+        # (already validated by the workflow loop above).
+        from bobi.setup.authoring import has_monitors
+        if has_monitors(state):
+            findings.append((False,
+                             "scheduled proactive behavior(s) were specified "
+                             "but monitors/defaults.yaml is missing"))
 
     # literal secrets: known token shapes, plus the exact values the user
     # saved during this setup — exact matching catches every service the

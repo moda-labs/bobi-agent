@@ -433,6 +433,17 @@ textarea.answer:focus, input.answer:focus{ outline:none; border-color:var(--acce
 .rdot.done{background:var(--ok);border-color:var(--ok);}
 .rdot.wip{border-style:dashed;border-color:var(--accent);}
 
+/* Workflows card — the optional tag, the human-gate badge, and the read-only
+   YAML popup (a small dark slab: the machine writes in the dark) */
+.ut-opt{margin-left:auto;font-family:var(--font-mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;font-weight:600;color:var(--faint);border:1px solid var(--border);border-radius:999px;padding:1px 7px;}
+/* neutral, not amber: the accent is reserved for brand actions (DESIGN.md),
+   and a pauses-for-approval badge is a state marker, not an action */
+.wf-hitl{flex:0 0 auto;font-family:var(--font-mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;font-weight:600;color:var(--muted);background:var(--surface);border:1px solid var(--border-strong);border-radius:999px;padding:1px 7px;}
+.wf-panel{width:min(640px,100%);display:flex;flex-direction:column;}
+.wf-slab{background:var(--slab-bg);border-top:2px solid var(--slab-accent);max-height:60vh;overflow-y:auto;display:flex;}
+.wf-slab .code{flex:1;}
+.wf-foot{padding:10px 18px;border-top:1px solid var(--border);font-size:11.5px;color:var(--faint);font-family:var(--font-mono);}
+
 /* add-an-item affordance under a card */
 .uadd{margin-top:10px;}
 .lnk.add{font-family:var(--font-mono);font-size:11px;color:var(--accent);background:none;border:0;padding:0;cursor:pointer;}
@@ -574,6 +585,44 @@ html[data-retro="on"] .cmd{color:color-mix(in srgb,var(--slab-accent) 35%,var(--
 .deploy .cmd .cmd-text{white-space:pre-wrap;word-break:break-word;}
 .deploy-note{font-size:12.5px;color:var(--muted);line-height:1.55;margin:2px 0 0;}
 .deploy-note .mono{font-size:11.5px;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:1px 5px;}
+
+/* final screen: seal + "All set" on ONE line (vertical space is precious) */
+.done-head{display:flex;align-items:center;gap:16px;margin-bottom:12px;}
+.done-head .seal{margin-bottom:0;flex:0 0 auto;}
+.done-head-copy{min-width:0;}
+.done-head-copy h1{font-size:23px;line-height:1.15;letter-spacing:-.02em;margin:3px 0 0;font-weight:680;}
+
+/* final screen: the next-steps carousel — one full card per step */
+.ns-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:20px 0 12px;flex-wrap:wrap;}
+.ns-dots{display:flex;gap:7px;flex-wrap:wrap;}
+.ns-dot{display:inline-flex;align-items:center;gap:7px;font-family:var(--font-mono);font-size:11px;letter-spacing:.04em;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:5px 12px 5px 6px;cursor:pointer;}
+.ns-dot .ns-dot-n{width:17px;height:17px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border-strong);border-radius:50%;font-size:10px;color:var(--faint);background:var(--raised);}
+.ns-dot:hover{border-color:var(--border-strong);color:var(--text);}
+.ns-dot:focus-visible{outline:none;border-color:var(--accent-ring);box-shadow:0 0 0 3px var(--accent-soft);}
+.ns-dot.on{color:var(--text);border-color:var(--accent);background:var(--accent-soft);}
+.ns-dot.on .ns-dot-n{color:#fff;background:var(--accent);border-color:var(--accent);}
+.ns-nav{display:flex;gap:8px;}
+.ns-step{border:1px solid var(--border);background:var(--raised);border-radius:var(--radius);padding:20px 22px 22px;}
+.ns-eyebrow{font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);font-weight:600;}
+.ns-step h2{font-size:18px;letter-spacing:-.01em;margin:6px 0 4px;font-weight:660;}
+.ns-lede{font-size:13.5px;color:var(--muted);line-height:1.55;margin:0 0 14px;}
+.ns-list{margin:0 0 14px;padding-left:20px;display:flex;flex-direction:column;gap:7px;}
+.ns-list li{font-size:13px;color:var(--text);line-height:1.5;}
+.cmdlist{display:flex;flex-direction:column;gap:2px;}
+.cmd-item{display:flex;flex-direction:column;gap:0;}
+.cmd-k{font-family:var(--font-mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);margin-top:6px;}
+.cmd-item .cmd{margin:5px 0 6px;}
+/* a paste-into-your-coding-agent prompt, distinct from a shell command */
+.cmd.prompt{align-items:flex-start;font-size:12px;line-height:1.55;}
+.cmd.prompt .cmd-text{white-space:pre-wrap;word-break:break-word;}
+.slackrow{display:flex;gap:8px;margin-top:14px;}
+.slackrow input{flex:1;font-family:var(--font-mono);font-size:12.5px;border:1px solid var(--border-strong);border-radius:8px;padding:9px 11px;background:var(--surface);}
+.slackrow input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
+/* muted by default ("saving…"), green ONLY on confirmed success */
+.ns-slackstatus{font-family:var(--font-mono);font-size:11.5px;color:var(--muted);margin-top:9px;min-height:16px;}
+.ns-slackstatus.ok{color:var(--ok);}
+.ns-slackstatus.err{color:var(--err);}
+.ns-exit{display:flex;justify-content:space-between;gap:10px;margin-top:18px;}
 
 /* post-build screen: a built-in file browser over the generated team */
 .filesdone{display:flex;flex-direction:column;height:100%;min-height:0;}

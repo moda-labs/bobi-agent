@@ -71,7 +71,13 @@ class Spec:
     # "systems" (list of systems it accesses), "triggers" (what makes it run),
     # "status": "in_progress"|"complete"}.
     roles: list = field(default_factory=list)
-    # [{"description","leash","cadence","role" (which agent runs it),"command"}]
+    # Deterministic multi-step flows the brain proposes once the roles are
+    # settled (an OPTIONAL slot — never gates the Finish meter):
+    # [{"name","description","trigger","steps":
+    #     [{"name","role","prompt","hitl" (human approval gate after)}]}]
+    workflows: list = field(default_factory=list)
+    # [{"description","leash","cadence","role" (which agent runs it),"command",
+    #   "trigger" ("schedule" | "event" — how it fires)}]
     autonomous: list = field(default_factory=list)
     services: list = field(default_factory=list)    # [{"name","status"}]
     # User-defined custom MCP connections added through the "add a connector"
@@ -88,6 +94,9 @@ class Spec:
     # Autonomous is "enough" only once explicitly confirmed — even when the
     # answer is "nothing proactive" (an empty list is a real decision here).
     autonomous_confirmed: bool = False
+    # Same for workflows: "this team has no set flows" is a real answer, and
+    # the card should read settled once the user has weighed in.
+    workflows_confirmed: bool = False
 
     # Brain-emitted self-scores per slot (slot -> Readiness value). Absent
     # until the digestion prompt scores it; readiness_for() falls back to a

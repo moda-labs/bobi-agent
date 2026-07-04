@@ -19,6 +19,8 @@ features:
     messages_tab_read_only_enabled: false
 oauth_config:
   scopes:
+    # Shown in the setup UI's finalize-Slack step — keep SLACK_SCOPES in
+    # bobi/setup/webui/static/app.js in lockstep with this list.
     bot:
       - app_mentions:read    # app_mention events
       - channels:history     # read + thread replies in public channels
