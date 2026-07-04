@@ -107,10 +107,10 @@ A good `command:` monitor returns a flat JSON list of items with stable
 command line, confirm the output is diffable, then commit it with
 `record_monitor`. When the need is "items *about X*" (relevance is a
 judgment call but the pull itself is mechanical), keep the diffable
-poll and add a `relevance:` criterion — a cheap-model gate judges only
+poll and add a `relevance:` criterion - a cheap-model gate judges only
 the new items each interval and only relevant ones publish the event.
 Reserve a description-only monitor for output that cannot be pulled
-mechanically at all (nested, paginated, no stable ids) — an agent
+mechanically at all (nested, paginated, no stable ids) - an agent
 evaluates it per interval; note that this costs an LLM call each time.
 
 Native services (github, slack, linear) push webhooks — they need no

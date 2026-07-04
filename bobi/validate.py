@@ -190,8 +190,8 @@ def _check_monitor_relevance(project_path: Path) -> list[CheckResult]:
     """Warn when `relevance:` is set on a monitor flavor it cannot gate (#630).
 
     The relevance gate only applies to mechanical detectors (`command:` or
-    `check:`); on notify/curator/description-only monitors the key is
-    silently ignored at runtime, so surface it here as a warning.
+    `check:`); on flavors without one (notify, description-only, curator-only)
+    the key is silently ignored at runtime, so surface it here as a warning.
     """
     try:
         from bobi.monitors.registry import MonitorRegistry
@@ -201,16 +201,16 @@ def _check_monitor_relevance(project_path: Path) -> list[CheckResult]:
 
     checks = []
     for m in monitors:
-        if not m.relevance:
+        # Monitor.gated is the same predicate the scheduler routes on, so
+        # validate can never drift from the runtime.
+        if not m.relevance or m.gated:
             continue
-        gateable = (m.command or m.check) and not m.notify and not m.curator
-        if not gateable:
-            checks.append(CheckResult(
-                f"monitors.{m.name}", ok=False, required=False,
-                detail="relevance: is ignored on this flavor",
-                hint="the relevance gate needs a mechanical detector "
-                     "(command: or check:, e.g. tool_poll/venn_poll)",
-            ))
+        checks.append(CheckResult(
+            f"monitors.{m.name}", ok=False, required=False,
+            detail="relevance: is ignored on this flavor",
+            hint="the relevance gate needs a mechanical detector "
+                 "(command: or check:, e.g. tool_poll/venn_poll)",
+        ))
     return checks
 
 

@@ -208,6 +208,16 @@ class Monitor:
         return record
 
     @property
+    def gated(self) -> bool:
+        """Whether conditions pass through the relevance gate (#630): a
+        `relevance:` criterion on a mechanical detector. The single source of
+        truth for both the runtime routing (scheduler.run_monitor) and
+        validation (_check_monitor_relevance) - the two must never drift.
+        """
+        return (bool(self.relevance) and not self.notify
+                and bool(self.command or self.check))
+
+    @property
     def interval_seconds(self) -> int:
         return parse_interval(self.interval)
 

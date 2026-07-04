@@ -115,8 +115,22 @@ is judged exactly once. A tick with nothing new never touches a model.
 
 Failure semantics mirror checks: an indeterminate gate (error, no verdict)
 records nothing, so the same items are re-detected as new and re-judged next
-interval. Editing `relevance:` does not re-judge items already seen - recorded
-keys stay recorded.
+interval (three consecutive indeterminate verdicts escalate to an error log).
+A judged-relevant item whose publish failed is parked in `pending_publish`
+and retried mechanically at $0 - never re-sent to the model, whose second
+opinion on a borderline item could differ. A relevant verdict publishes even
+if the item has since left the poll window: it was real when detected.
+Editing `relevance:` does not re-judge items already seen - recorded keys
+stay recorded.
+
+Two operational constraints: a batch is capped at 20 items per gate call
+(overflow stays new for the next interval), and deferred items are only
+re-judged if the detector still reports them - so keep the poll window wide
+enough to cover a burst across a couple of intervals (e.g. `maxResults` well
+above the expected per-interval inflow). Item content is untrusted input to
+a model: the gate prompt instructs the model to treat it as data, but a
+crafted item could still skew a batch verdict - see `docs/SECURITY.md` for
+the prompt-injection posture.
 
 Compared to a description-only monitor, which re-reasons the whole state every
 interval, the gate costs one cheap call only on ticks with new items. Reserve

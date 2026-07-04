@@ -1584,6 +1584,9 @@ class TestRunGateBlocking:
         assert captured["role"] == "monitor"
         assert captured["max_turns"] == GATE_MAX_TURNS
         assert captured["phase"] == "gate"
+        # A gate is a stateless judgment: it must never resume the previous
+        # batch's transcript (cost growth + stale-item verdict pollution).
+        assert captured["fresh"] is True
 
     def test_missing_verdict_retries_then_succeeds(self):
         calls = []
@@ -1602,7 +1605,7 @@ class TestRunGateBlocking:
         assert result.success is True
         assert result.relevant == ["m2"]
         assert len(calls) == 2
-        # Fresh run_key on retry — never resume the botched transcript.
+        # Fresh run_key on retry - never resume the botched transcript.
         assert calls[0] != calls[1]
 
     def test_exhausted_attempts_is_indeterminate(self):

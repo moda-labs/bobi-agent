@@ -27,7 +27,7 @@ class TestMaxTurnsCap:
         # Mock the entire execution chain
         async def mock_supervised(prompt, cwd, run_key, phase, timeout,
                                   on_input_needed=None, role="",
-                                  max_turns=200):
+                                  max_turns=200, fresh=False):
             # Capture the max_turns that was passed
             captured_options.append(max_turns)
             from bobi.subagent import AgentResult

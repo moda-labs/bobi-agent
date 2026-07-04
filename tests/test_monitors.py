@@ -957,6 +957,20 @@ class TestRelevanceSchema:
         assert m.relevance == ""
         assert "relevance" not in m.to_dict()
 
+    def test_gated_predicate_single_source_of_truth(self):
+        """Monitor.gated is the one predicate both the scheduler routing and
+        validate consult - it must gate exactly the mechanical detectors."""
+        gated = dict(relevance="about x")
+        assert Monitor(name="a", command="echo", **gated).gated
+        assert Monitor(name="b", check="venn_poll", **gated).gated
+        # run_monitor's elif chain hits command/check before curator, so a
+        # command+curator combo IS gated at runtime - gated must agree.
+        assert Monitor(name="c", command="echo", curator=True, **gated).gated
+        assert not Monitor(name="d", **gated).gated              # description-only
+        assert not Monitor(name="e", notify=True, command="echo", **gated).gated
+        assert not Monitor(name="f", curator=True, **gated).gated
+        assert not Monitor(name="g", command="echo").gated       # no criterion
+
 
 def _gated_monitor(**overrides):
     """A command monitor with a relevance criterion (the gated shape)."""
@@ -1033,7 +1047,7 @@ class TestRelevanceGateScheduling:
 
         assert published == []
         assert sched.state["billing"]["active"] == []
-        # The item is still new — the next tick re-gates it.
+        # The item is still new - the next tick re-gates it.
         sched._reconcile_gated(m, conditions, [])
         assert len(gates) == 2
 
@@ -1046,18 +1060,37 @@ class TestRelevanceGateScheduling:
         assert published == []
         assert sched.state["billing"]["active"] == []
 
-    def test_failed_publish_leaves_key_new_for_retry(self, tmp_path):
+    def test_failed_publish_retries_mechanically_without_regating(self, tmp_path):
+        """A judged-relevant item whose publish failed must NOT go back to
+        the model (a second opinion on a borderline item could flip and
+        silently drop the finding). It parks in pending_publish and the next
+        tick retries only the publish, at $0."""
         m = _gated_monitor()
         gates = []
-        sched, _ = _scheduler(tmp_path, [m], gates=gates,
-                              publish=lambda event, data: False)
-        conditions = [Condition(key="m1", data={})]
+        published = []
+        ok = {"value": False}
+
+        def publish(event, data):
+            published.append({"event": event, "data": data})
+            return ok["value"]
+
+        sched, _ = _scheduler(tmp_path, [m], gates=gates, publish=publish)
+        conditions = [Condition(key="m1", data={"subject": "refund"})]
         sched._reconcile_gated(m, conditions, [])
         gates[0][3]({"success": True, "relevant": ["m1"]})
-        # Publish failed: not recorded, so the next tick re-gates and retries.
+
+        # Publish failed: parked as pending, not active, judged exactly once.
         assert sched.state["billing"]["active"] == []
+        assert sched.state["billing"]["pending_publish"] == {
+            "m1": {"subject": "refund"}}
+
+        # Next tick: no second gate call, one mechanical publish retry.
+        ok["value"] = True
         sched._reconcile_gated(m, conditions, [])
-        assert len(gates) == 2
+        assert len(gates) == 1
+        assert [p["data"]["finding_key"] for p in published] == ["m1", "m1"]
+        assert sched.state["billing"]["active"] == ["m1"]
+        assert "pending_publish" not in sched.state["billing"]
 
     def test_in_flight_guard_prevents_concurrent_gates(self, tmp_path):
         m = _gated_monitor()
@@ -1080,7 +1113,7 @@ class TestRelevanceGateScheduling:
         conditions = [Condition(key=f"k{i}", data={}) for i in range(GATE_MAX_ITEMS + 5)]
         sched._reconcile_gated(m, conditions, [])
         assert len(gates[0][2]) == GATE_MAX_ITEMS
-        # Overflow items were not recorded — they stay new for the next tick.
+        # Overflow items were not recorded - they stay new for the next tick.
         gates[0][3]({"success": True, "relevant": []})
         assert len(sched.state["billing"]["active"]) == GATE_MAX_ITEMS
 
@@ -1212,3 +1245,67 @@ class TestDefaultSpawnGate:
                             lambda v: got.setdefault("verdict", v))
         # Synchronous failure path: indeterminate, never silently dropped.
         assert got["verdict"] is None
+        # The request file must not leak when the spawn failed.
+        assert list((paths.state_dir(project) / "gates").glob("*.json")) == []
+
+
+class TestWriteGateRequest:
+    def _bind(self, tmp_path, monkeypatch):
+        import bobi.sdk as sdk_mod
+        project = tmp_path / "proj"
+        paths.state_dir(project)
+        paths.package_dir(project).mkdir(parents=True)
+        paths.agent_yaml_path(project).write_text("agent: test-pack\n")
+        monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
+        paths.bind_root(project)
+        return project
+
+    def test_non_json_safe_payload_is_stringified(self, tmp_path, monkeypatch):
+        """A check plugin may return datetimes/Decimals in Condition.data;
+        the request writer must stringify, not raise every tick."""
+        import json as json_mod
+        from datetime import datetime as dt
+        from bobi.monitors.scheduler import _write_gate_request
+
+        project = self._bind(tmp_path, monkeypatch)
+        m = _gated_monitor()
+        path = _write_gate_request(
+            m, [Condition(key="m1", data={"at": dt(2026, 7, 4)})])
+        assert path is not None
+        request = json_mod.loads(Path(path).read_text())
+        assert "2026-07-04" in request["items"][0]["data"]["at"]
+
+    def test_oversized_payload_truncated_at_write_time(self, tmp_path, monkeypatch):
+        """The gate prompt truncates per item anyway - large payloads must
+        not be written and re-parsed in full per gate call."""
+        import json as json_mod
+        from bobi.monitors.scheduler import _write_gate_request
+        from bobi.subagent import GATE_ITEM_CHARS
+
+        project = self._bind(tmp_path, monkeypatch)
+        m = _gated_monitor()
+        path = _write_gate_request(
+            m, [Condition(key="m1", data={"body": "x" * (GATE_ITEM_CHARS * 3)})])
+        request = json_mod.loads(Path(path).read_text())
+        data = request["items"][0]["data"]
+        assert len(data["truncated_payload"]) == GATE_ITEM_CHARS
+
+    def test_orphaned_request_files_swept(self, tmp_path, monkeypatch):
+        """A manager that died mid-gate leaves its request file (raw item
+        payloads) behind; the next gate write sweeps stale ones."""
+        import os
+        import time as time_mod
+        from bobi.monitors.scheduler import (_GATE_REQUEST_MAX_AGE,
+                                             _write_gate_request)
+
+        project = self._bind(tmp_path, monkeypatch)
+        gates_dir = paths.state_dir(project) / "gates"
+        gates_dir.mkdir(parents=True, exist_ok=True)
+        orphan = gates_dir / "dead-manager.json"
+        orphan.write_text("{}")
+        stale = time_mod.time() - _GATE_REQUEST_MAX_AGE - 60
+        os.utime(orphan, (stale, stale))
+
+        m = _gated_monitor()
+        _write_gate_request(m, [Condition(key="m1", data={})])
+        assert not orphan.exists()

@@ -176,6 +176,14 @@ class TestCheckMonitorRelevance:
         assert len(results) == 1
         assert not results[0].ok
 
+    def test_relevance_on_command_plus_curator_passes(self, tmp_path):
+        """run_monitor's elif chain routes command before curator, so this
+        combo IS gated at runtime - validate must not claim otherwise."""
+        results = self._check(tmp_path, [
+            {"name": "combo", "command": "echo '[]'", "curator": True,
+             "relevance": "about billing"}])
+        assert results == []
+
     def test_no_relevance_no_warnings(self, tmp_path):
         results = self._check(tmp_path, [
             {"name": "watch", "description": "watch the inbox"}])
