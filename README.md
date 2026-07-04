@@ -189,6 +189,10 @@ Cloudflare Worker. Setup-authored `agent.yaml` files reference that optional
 environment variable so verified public ingress is used when present, while an
 unset value leaves the automatic local event server path unchanged.
 
+If you already run the local event server behind a Cloudflare tunnel, use the
+quick tunnel option; the wizard does not replace that topology, it validates and
+persists the tunnel URL for webhook-backed services.
+
 ### Talk to your agent from Slack (optional)
 
 By default you talk to an agent from the terminal (`bobi agent <name> ask`). To
