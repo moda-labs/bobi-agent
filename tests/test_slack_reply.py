@@ -1,321 +1,362 @@
-"""Tests for the slack-reply and channel-agnostic reply CLI commands."""
+"""Tests for `bobi reply` / `bobi read-conversation` and the deprecated
+slack-* shims (#190 Phase 2).
 
+All of these go through the channel gateway: the CLI signs requests with the
+instance's bubble key and POSTs to the event server's /channels/* endpoints.
+No Slack token is read client-side and no markdown is converted client-side.
+"""
+
+import base64
 import json
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-from textwrap import dedent
+from unittest.mock import patch
 
 import httpx
 from click.testing import CliRunner
 
-from bobi.cli import main
-from bobi import paths
 from bobi import http as pooled
+from bobi import paths
+from bobi.cli import main
+from bobi.config import save_bubble_state
 
 
-def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
-    """Set up project config with a Slack bot token."""
+def _setup_project(tmp_path, monkeypatch, *, with_bubble=True):
     config_dir = paths.package_dir(tmp_path)
     config_dir.mkdir(parents=True)
-    if slack_bot_token:
-        yaml = (
-            "entry_point: manager\n"
-            "services:\n"
-            "  - name: slack\n"
-            "    credentials:\n"
-            f"      bot_token: '{slack_bot_token}'\n"
-        )
-    else:
-        yaml = "entry_point: manager\n"
-    paths.agent_yaml_path(tmp_path).write_text(yaml)
+    paths.agent_yaml_path(tmp_path).write_text("entry_point: manager\n")
     monkeypatch.setenv("BOBI_ROOT", str(tmp_path))
+    if with_bubble:
+        save_bubble_state(tmp_path, "bub_test", "bkey_test")
 
 
 def _mock_client(handler):
-    """Create an httpx.Client with a MockTransport backed by *handler*."""
     transport = httpx.MockTransport(handler)
     return httpx.Client(transport=transport)
 
 
-def _ok_handler(request: httpx.Request) -> httpx.Response:
-    """Default handler that returns {"ok": True}."""
-    return httpx.Response(200, json={"ok": True})
-
-
-class TestSlackReplyCommand:
-
-    def test_success(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch)
-
-        requests_made: list[httpx.Request] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests_made.append(request)
-            return httpx.Response(200, json={"ok": True})
-
-        mock_client = _mock_client(handler)
-        with patch.object(pooled, '_client', mock_client):
-            runner = CliRunner()
-            result = runner.invoke(main, [
-                "slack-reply", "-w", "T123", "-c", "D456", "Hello world",
-            ])
-        assert result.exit_code == 0
-        assert "Sent to D456" in result.output
-
-        assert len(requests_made) >= 1
-        req = requests_made[0]
-        body = json.loads(req.content)
-        assert body["channel"] == "D456"
-        assert body["text"] == "Hello world"
-        assert "thread_ts" not in body
-
-    def test_with_thread(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch)
-
-        requests_made: list[httpx.Request] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests_made.append(request)
-            return httpx.Response(200, json={"ok": True})
-
-        mock_client = _mock_client(handler)
-        with patch.object(pooled, '_client', mock_client):
-            runner = CliRunner()
-            result = runner.invoke(main, [
-                "slack-reply", "-w", "T123", "-c", "C789",
-                "-t", "1780165787.159589", "Thread reply",
-            ])
-        assert result.exit_code == 0
-
-        req = requests_made[0]
-        body = json.loads(req.content)
-        assert body["thread_ts"] == "1780165787.159589"
-
-    def test_missing_token(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch, slack_bot_token="")
-
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "slack-reply", "-w", "T_NONE", "-c", "D456", "Hello",
-        ])
-        assert result.exit_code != 0
-        assert "bot token" in result.output.lower()
-
-    def test_markdown_conversion(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch)
-
-        requests_made: list[httpx.Request] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests_made.append(request)
-            return httpx.Response(200, json={"ok": True})
-
-        mock_client = _mock_client(handler)
-        with patch.object(pooled, '_client', mock_client):
-            runner = CliRunner()
-            result = runner.invoke(main, [
-                "slack-reply", "-w", "T123", "-c", "D456",
-                "**bold** and [link](https://example.com)",
-            ])
-        assert result.exit_code == 0
-
-        req = requests_made[0]
-        body = json.loads(req.content)
-        assert "*bold*" in body["text"]
-        assert "<https://example.com|link>" in body["text"]
-
-    def test_escaped_newlines_become_real(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch)
-
-        requests_made: list[httpx.Request] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests_made.append(request)
-            return httpx.Response(200, json={"ok": True})
-
-        mock_client = _mock_client(handler)
-        with patch.object(pooled, '_client', mock_client):
-            runner = CliRunner()
-            result = runner.invoke(main, [
-                "slack-reply", "-w", "T123", "-c", "D456",
-                "line one\\nline two\\ttabbed",
-            ])
-        assert result.exit_code == 0
-
-        req = requests_made[0]
-        body = json.loads(req.content)
-        assert body["text"] == "line one\nline two\ttabbed"
-        assert "\\n" not in body["text"]
-
-    def test_real_newlines_preserved(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch)
-
-        requests_made: list[httpx.Request] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests_made.append(request)
-            return httpx.Response(200, json={"ok": True})
-
-        mock_client = _mock_client(handler)
-        with patch.object(pooled, '_client', mock_client):
-            runner = CliRunner()
-            result = runner.invoke(main, [
-                "slack-reply", "-w", "T123", "-c", "D456", "line one\nline two",
-            ])
-        assert result.exit_code == 0
-
-        req = requests_made[0]
-        body = json.loads(req.content)
-        assert body["text"] == "line one\nline two"
-
-    def test_slack_api_error(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch)
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"ok": False, "error": "channel_not_found"})
-
-        mock_client = _mock_client(handler)
-        with patch.object(pooled, '_client', mock_client):
-            runner = CliRunner()
-            result = runner.invoke(main, [
-                "slack-reply", "-w", "T123", "-c", "D456", "Hello",
-            ])
-        assert result.exit_code != 0
-        assert "Slack" in result.output and "error" in result.output.lower()
+def _gateway_ok(requests_log, response=None):
+    """Handler that records requests and returns a gateway success."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_log.append(request)
+        return httpx.Response(200, json=response or {"ok": True, "ts": "99.1"})
+    return handler
 
 
 class TestReplyCommand:
-    """`bobi reply <conversation>` - channel-agnostic front of the same send path (#618)."""
+    """bobi reply <conversation> — the channel-agnostic reply path."""
 
-    def test_posts_to_dm_from_ref(self, tmp_path, monkeypatch):
+    def test_posts_markdown_through_gateway(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
-
-        requests_made: list[httpx.Request] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests_made.append(request)
-            return httpx.Response(200, json={"ok": True})
-
-        with patch.object(pooled, '_client', _mock_client(handler)):
+        reqs = []
+        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
             runner = CliRunner()
             result = runner.invoke(main, [
-                "reply", "slack:T123:dm:D456", "Hello world",
+                "reply", "slack:T0952RZRZ0X:dm:D0B51JP1N4C", "**Hello** there",
             ])
-        assert result.exit_code == 0
-        assert "Sent to D456" in result.output
+        assert result.exit_code == 0, result.output
+        assert "Sent to slack:T0952RZRZ0X:dm:D0B51JP1N4C" in result.output
 
-        body = json.loads(requests_made[0].content)
-        assert body["channel"] == "D456"
-        assert body["text"] == "Hello world"
-        assert "thread_ts" not in body
+        req = reqs[0]
+        assert str(req.url).endswith("/channels/send")
+        body = json.loads(req.content)
+        # Raw markdown goes to the gateway — never converted client-side.
+        assert body["text"] == "**Hello** there"
+        assert body["conversation"] == "slack:T0952RZRZ0X:dm:D0B51JP1N4C"
+        # A reply resolves the response context.
+        assert body["mode"] == "final"
+        # Bubble-signed request headers.
+        assert req.headers["x-moda-bubble"] == "bub_test"
+        assert req.headers["x-moda-signature"]
+        assert req.headers["x-moda-algo"] == "hmac-sha256"
 
-    def test_posts_into_thread_from_ref(self, tmp_path, monkeypatch):
+    def test_edit_sends_edit_ref(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
-
-        requests_made: list[httpx.Request] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests_made.append(request)
-            return httpx.Response(200, json={"ok": True})
-
-        with patch.object(pooled, '_client', _mock_client(handler)):
+        reqs = []
+        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
             runner = CliRunner()
             result = runner.invoke(main, [
-                "reply", "slack:T123:channel:C789:thread:1780165787.159589",
-                "Thread reply",
-            ])
-        assert result.exit_code == 0
-
-        body = json.loads(requests_made[0].content)
-        assert body["channel"] == "C789"
-        assert body["thread_ts"] == "1780165787.159589"
-
-    def test_edit_updates_placeholder(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch)
-
-        requests_made: list[httpx.Request] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests_made.append(request)
-            return httpx.Response(200, json={"ok": True})
-
-        with patch.object(pooled, '_client', _mock_client(handler)):
-            runner = CliRunner()
-            result = runner.invoke(main, [
-                "reply", "slack:T123:channel:C789:thread:171.42",
+                "reply", "slack:T1:channel:C123:thread:171.42",
                 "--edit", "171.99", "Real response",
             ])
-        assert result.exit_code == 0
-        assert "Updated 171.99 in C789" in result.output
+        assert result.exit_code == 0, result.output
+        assert "Updated 171.99" in result.output
+        body = json.loads(reqs[0].content)
+        assert body["mode"] == "final"
+        assert body["edit_ref"] == "171.99"
 
-        update_reqs = [r for r in requests_made if "chat.update" in str(r.url)]
-        assert len(update_reqs) == 1
-        body = json.loads(update_reqs[0].content)
-        assert body["ts"] == "171.99"
-        assert body["channel"] == "C789"
+    def test_file_upload_sends_b64_payload(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        f = tmp_path / "report.txt"
+        f.write_bytes(b"file-bytes")
+        reqs = []
+        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "reply", "slack:T1:channel:C123:thread:171.42",
+                "--file", str(f), "--title", "Report", "here you go",
+            ])
+        assert result.exit_code == 0, result.output
+        body = json.loads(reqs[0].content)
+        assert body["files"] == [{
+            "name": "report.txt",
+            "content_b64": base64.b64encode(b"file-bytes").decode(),
+            "title": "Report",
+        }]
+        assert body["text"] == "here you go"
+
+    def test_edit_with_file_resolves_placeholder_and_attaches(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        f = tmp_path / "x.txt"
+        f.write_text("x")
+        reqs = []
+        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "reply", "slack:T1:channel:C1:thread:1.1",
+                "--edit", "1.2", "--file", str(f), "done - attached",
+            ])
+        assert result.exit_code == 0, result.output
+        body = json.loads(reqs[0].content)
+        assert body["edit_ref"] == "1.2"
+        assert body["files"][0]["name"] == "x.txt"
+        assert body["text"] == "done - attached"
+
+    def test_edit_with_file_requires_text(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        f = tmp_path / "x.txt"
+        f.write_text("x")
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "reply", "slack:T1:dm:D1", "--edit", "1.2", "--file", str(f),
+        ], input="")
+        assert result.exit_code == 1
+        assert "requires TEXT" in result.output
 
     def test_reads_text_from_stdin(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
+        reqs = []
+        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
+            runner = CliRunner()
+            result = runner.invoke(
+                main, ["reply", "slack:T1:dm:D1"], input="piped text\n")
+        assert result.exit_code == 0, result.output
+        assert json.loads(reqs[0].content)["text"] == "piped text"
 
-        requests_made: list[httpx.Request] = []
+    def test_piped_comment_survives_with_file(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        f = tmp_path / "report.pdf"
+        f.write_bytes(b"pdf")
+        reqs = []
+        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                ["reply", "slack:T1:dm:D1", "--file", str(f)],
+                input="please review this\n")
+        assert result.exit_code == 0, result.output
+        body = json.loads(reqs[0].content)
+        assert body["text"] == "please review this"
+        assert body["files"][0]["name"] == "report.pdf"
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests_made.append(request)
-            return httpx.Response(200, json={"ok": True})
-
-        with patch.object(pooled, '_client', _mock_client(handler)):
+    def test_unescapes_literal_newlines(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        reqs = []
+        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
             runner = CliRunner()
             result = runner.invoke(main, [
-                "reply", "slack:T123:dm:D456",
-            ], input="Hello from stdin\n")
-        assert result.exit_code == 0
-
-        body = json.loads(requests_made[0].content)
-        assert body["text"] == "Hello from stdin"
+                "reply", "slack:T1:dm:D1", "line one\\nline two\\tindented",
+            ])
+        assert result.exit_code == 0, result.output
+        assert json.loads(reqs[0].content)["text"] == "line one\nline two\tindented"
 
     def test_rejects_invalid_ref(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
         runner = CliRunner()
-        result = runner.invoke(main, ["reply", "not-a-ref", "Hello"])
-        assert result.exit_code != 0
+        result = runner.invoke(main, ["reply", "slack:T1:D1", "hi"])
+        assert result.exit_code == 1
         assert "Invalid conversation reference" in result.output
 
-    def test_rejects_unsupported_channel(self, tmp_path, monkeypatch):
+    def test_unsupported_channel_error_comes_from_gateway(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "reply", "whatsapp:747:dm:15550001111", "Hello",
-        ])
-        assert result.exit_code != 0
-        assert "Unsupported channel: whatsapp" in result.output
+
+        def handler(request):
+            return httpx.Response(
+                400, json={"error": "unsupported channel: whatsapp"})
+
+        with patch.object(pooled, '_client', _mock_client(handler)):
+            runner = CliRunner()
+            result = runner.invoke(
+                main, ["reply", "whatsapp:747:dm:15550001111", "hi"])
+        assert result.exit_code == 1
+        assert "unsupported channel: whatsapp" in result.output
 
     def test_rejects_empty_text(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
         runner = CliRunner()
-        result = runner.invoke(main, ["reply", "slack:T123:dm:D456"], input="")
-        assert result.exit_code != 0
+        result = runner.invoke(main, ["reply", "slack:T1:dm:D1"], input="  \n")
+        assert result.exit_code == 1
         assert "No text to send" in result.output
 
-    def test_missing_token(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch, slack_bot_token="")
+    def test_missing_bubble_credential(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch, with_bubble=False)
         runner = CliRunner()
-        result = runner.invoke(main, ["reply", "slack:T123:dm:D456", "Hello"])
-        assert result.exit_code != 0
-        assert "bot token" in result.output.lower()
+        result = runner.invoke(main, ["reply", "slack:T1:dm:D1", "hi"])
+        assert result.exit_code == 1
+        assert "bubble" in result.output.lower()
 
-    def test_slack_error_includes_workspace_scope_hint(self, tmp_path, monkeypatch):
-        """A cross-workspace ref fails at the Slack API; the error must name
-        the ref's workspace so the token mismatch is diagnosable."""
+    def test_gateway_error_is_surfaced_with_hint(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
 
+        def handler(request):
+            return httpx.Response(400, json={"error": "no bot token for workspace"})
+
+        with patch.object(pooled, '_client', _mock_client(handler)):
+            runner = CliRunner()
+            result = runner.invoke(main, ["reply", "slack:T1:dm:D1", "hi"])
+        assert result.exit_code == 1
+        assert "no bot token for workspace" in result.output
+        assert "channel gateway" in result.output
+
+    def test_server_unreachable(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+
+        def handler(request):
+            raise httpx.ConnectError("connection refused")
+
+        with patch.object(pooled, '_client', _mock_client(handler)):
+            runner = CliRunner()
+            result = runner.invoke(main, ["reply", "slack:T1:dm:D1", "hi"])
+        assert result.exit_code == 1
+        assert "unreachable" in result.output
+
+
+class TestReadConversationCommand:
+    def _history_handler(self, requests_log, messages):
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"ok": False, "error": "channel_not_found"})
+            requests_log.append(request)
+            return httpx.Response(200, json={"ok": True, "messages": messages})
+        return handler
+
+    def test_renders_messages(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        reqs = []
+        messages = [
+            {"user": "U1", "text": "question", "ts": "12.34"},
+            {"user": "U2", "text": "answer", "ts": "12.35",
+             "files": [{"name": "a.png", "mimetype": "image/png"}]},
+        ]
+        with patch.object(pooled, '_client',
+                          _mock_client(self._history_handler(reqs, messages))):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "read-conversation", "slack:T1:channel:C1:thread:12.34", "-n", "50",
+            ])
+        assert result.exit_code == 0, result.output
+        assert "[12.34] U1: question" in result.output
+        assert ">> a.png (image/png)" in result.output
+        assert "2 message(s)" in result.output
+
+        req = reqs[0]
+        assert req.method == "GET"
+        assert "/channels/history?" in str(req.url)
+        assert "limit=50" in str(req.url)
+        assert req.headers["x-moda-signature"]
+
+    def test_json_output(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        messages = [{"user": "U1", "text": "hi", "ts": "1.2"}]
+        with patch.object(pooled, '_client',
+                          _mock_client(self._history_handler([], messages))):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "read-conversation", "slack:T1:dm:D1:thread:1.2", "--json-output",
+            ])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == messages
+
+
+class TestDeprecatedSlackShims:
+    """slack-reply / slack-upload-file / slack-read-thread rewrite their
+    flags into a conversation reference and call the gateway path."""
+
+    def test_slack_reply_rewrites_flags_and_warns(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        reqs = []
+        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "slack-reply", "-w", "T0952RZRZ0X", "-c", "C123",
+                "-t", "171.42", "hello",
+            ])
+        assert result.exit_code == 0, result.output
+        assert "deprecated" in result.output
+        body = json.loads(reqs[0].content)
+        assert body["conversation"] == "slack:T0952RZRZ0X:channel:C123:thread:171.42"
+        assert body["text"] == "hello"
+        assert body["mode"] == "final"
+
+    def test_slack_reply_dm_channel_without_thread(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        reqs = []
+        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "slack-reply", "-w", "T1", "-c", "D456", "hi",
+            ])
+        assert result.exit_code == 0, result.output
+        body = json.loads(reqs[0].content)
+        assert body["conversation"] == "slack:T1:dm:D456"
+
+    def test_slack_reply_edit_flag(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        reqs = []
+        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "slack-reply", "-w", "T1", "-c", "C1", "-t", "171.42",
+                "--edit", "171.99", "final answer",
+            ])
+        assert result.exit_code == 0, result.output
+        body = json.loads(reqs[0].content)
+        assert body["edit_ref"] == "171.99"
+
+    def test_slack_upload_file_shim(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        f = tmp_path / "shot.png"
+        f.write_bytes(b"png-bytes")
+        reqs = []
+        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "slack-upload-file", str(f), "-w", "T1", "-c", "C1",
+                "-t", "171.42", "--title", "Shot", "--comment", "see this",
+            ])
+        assert result.exit_code == 0, result.output
+        assert "deprecated" in result.output
+        assert "Uploaded shot.png to C1" in result.output
+        body = json.loads(reqs[0].content)
+        assert body["conversation"] == "slack:T1:channel:C1:thread:171.42"
+        assert body["text"] == "see this"
+        assert body["files"][0]["name"] == "shot.png"
+        assert body["files"][0]["title"] == "Shot"
+        assert base64.b64decode(body["files"][0]["content_b64"]) == b"png-bytes"
+
+    def test_slack_read_thread_shim(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+        reqs = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            reqs.append(request)
+            return httpx.Response(200, json={"ok": True, "messages": [
+                {"user": "U1", "text": "hi", "ts": "1.2"},
+            ]})
 
         with patch.object(pooled, '_client', _mock_client(handler)):
             runner = CliRunner()
             result = runner.invoke(main, [
-                "reply", "slack:T_OTHER:channel:C9:thread:1.2", "Hello",
+                "slack-read-thread", "-w", "T1", "-c", "C1", "-t", "1.2",
             ])
-        assert result.exit_code != 0
-        assert "T_OTHER" in result.output
-        assert "workspace" in result.output
+        assert result.exit_code == 0, result.output
+        assert "deprecated" in result.output
+        assert "[1.2] U1: hi" in result.output
+        assert "/channels/history?" in str(reqs[0].url)
+        assert "slack%3AT1%3Achannel%3AC1%3Athread%3A1.2" in str(reqs[0].url)

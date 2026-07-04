@@ -72,9 +72,14 @@ bobi agent <name> transcript search "query"
 bobi agent <name> costs
 
 # Reply into a chat conversation (channel-agnostic; ref comes from the event)
-bobi reply <conversation> "text"
-bobi reply <conversation> --edit <ts> "text"
+bobi reply <conversation> "markdown text"
+bobi reply <conversation> --edit <ts> "text"     # resolve a placeholder
+bobi reply <conversation> --file <path> "comment"
+bobi read-conversation <conversation> [-n 50] [--json-output]
 ```
+
+`slack-reply`, `slack-upload-file`, and `slack-read-thread` are deprecated
+shims over the same gateway path; use `bobi reply` / `bobi read-conversation`.
 
 ## Sub-Agents
 

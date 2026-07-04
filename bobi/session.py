@@ -684,10 +684,11 @@ class Session:
             self._set_state("error")
             registry.update(self.name, status="error")
 
-        # Turn complete — clear any "is thinking…" Slack indicators the drain
-        # loop started for this turn. The slack-reply CLI can't do this (it
-        # runs in a subprocess without the manager's loop registry), so the
-        # indicator would otherwise refresh itself forever.
+        # Turn complete — clear any "is thinking…" indicators the drain loop
+        # started for this turn. The gateway clears the indicator when a
+        # reply resolves the response context (`bobi reply` sends mode
+        # final), but the manager's refresh loop would re-set it on the next
+        # tick; this in-process sweep is what actually stops the loops.
         self._stop_status_indicators()
 
         return self._last_response

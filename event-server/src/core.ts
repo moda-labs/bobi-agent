@@ -276,8 +276,9 @@ export function createTopicEvent(
 
 import { normalizeGitHubWebhook } from "./adapters/github";
 import { normalizeLinearWebhook } from "./adapters/linear";
-import { normalizeSlackWebhook } from "./adapters/slack";
-import { parseConversation } from "./conversation";
+import { bridgeSlackWebhook } from "./adapters/chat-sdk-slack";
+import { getChannelAdapter, slackApiUrl, truncateForChannel, type OutboundFile } from "./channels";
+import { parseConversation, type Conversation } from "./conversation";
 
 export { normalizeGitHubWebhook as normalizeGitHubPayload } from "./adapters/github";
 export { normalizeLinearWebhook as normalizeLinearPayload } from "./adapters/linear";
@@ -607,69 +608,6 @@ function randomToken(prefix: string): string {
 	return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
-export interface SlackSendResult {
-	ok: boolean;
-	error?: string;
-	ts?: string;
-	[key: string]: unknown;
-}
-
-export async function sendSlackMessage(
-	botToken: string,
-	channel: string,
-	text: string,
-	threadTs?: string,
-): Promise<SlackSendResult> {
-	const body: Record<string, unknown> = { channel, text };
-	if (threadTs) body.thread_ts = threadTs;
-	return slackApi(botToken, "chat.postMessage", body);
-}
-
-async function slackApi(
-	botToken: string,
-	method: string,
-	payload: Record<string, unknown>,
-): Promise<SlackSendResult> {
-	const resp = await fetch(`https://slack.com/api/${method}`, {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${botToken}`,
-			"Content-Type": "application/json",
-		},
-		body: JSON.stringify(payload),
-	});
-	return (await resp.json()) as SlackSendResult;
-}
-
-export async function updateSlackMessage(
-	botToken: string,
-	channel: string,
-	ts: string,
-	text: string,
-): Promise<SlackSendResult> {
-	return slackApi(botToken, "chat.update", { channel, ts, text });
-}
-
-// Clear (or set) the assistant thread status. Used after a gateway edit so
-// the "is thinking..." indicator does not linger until Slack's ~2min expiry.
-// Best-effort: only DM threads support it, so failures are ignored.
-export async function setSlackThreadStatus(
-	botToken: string,
-	channel: string,
-	threadTs: string,
-	status: string,
-): Promise<void> {
-	try {
-		await slackApi(botToken, "assistant.threads.setStatus", {
-			channel_id: channel,
-			thread_ts: threadTs,
-			status,
-		});
-	} catch {
-		// non-fatal
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Transport-agnostic handlers
 // ---------------------------------------------------------------------------
@@ -705,10 +643,23 @@ export async function handleLinearWebhook(
 	return { status: 200, body: { delivered_to: delivered } };
 }
 
+// `body` is the raw webhook JSON string; `payload` its parsed form (parsed
+// here when the caller has not already done so for the signature check).
+// Normalization runs through the Chat SDK bridge (#628) — the hand-rolled
+// normalizeSlackWebhook remains only as the golden parity reference until
+// the bridge has soaked (#629).
 export async function handleSlackWebhook(
 	storage: StorageAdapter,
-	payload: Record<string, unknown>,
+	body: string,
+	payload?: Record<string, unknown>,
 ): Promise<HandlerResult> {
+	if (!payload) {
+		try {
+			payload = JSON.parse(body) as Record<string, unknown>;
+		} catch {
+			return { status: 400, body: { error: "invalid JSON" } };
+		}
+	}
 	const teamId = (payload.team_id as string) || "";
 	const apiAppId = (payload.api_app_id as string) || "";
 	let selfBotIds: Set<string> | undefined;
@@ -724,7 +675,7 @@ export async function handleSlackWebhook(
 		selfBotUserIds = workspaceBotUserIds(ws, apiAppId);
 	}
 
-	const result = normalizeSlackWebhook(payload, selfBotIds, selfBotUserIds);
+	const result = bridgeSlackWebhook(body, selfBotIds, selfBotUserIds, payload);
 
 	if (result.challenge !== undefined) {
 		return { status: 200, body: { challenge: result.challenge } };
@@ -1196,9 +1147,34 @@ async function resolveSlackSendToken(
 	return botToken;
 }
 
+// Resolve the sending credential for a conversation's channel, scoped to the
+// AUTHENTICATED bubble. The switch is the single place Phase 3 extends when a
+// new channel brings its own credential store.
+async function resolveChannelSendToken(
+	storage: StorageAdapter,
+	bubbleId: string,
+	conv: Conversation,
+	body: Record<string, unknown>,
+): Promise<string> {
+	if (conv.source === "slack") {
+		return resolveSlackSendToken(
+			storage,
+			bubbleId,
+			conv.scope,
+			(body.app_id as string) || "",
+			(body.bot_id as string) || "",
+		);
+	}
+	return "";
+}
+
 // `bubbleId` is the AUTHENTICATED bubble (the entry files reject an unsigned or
 // bad-signature request with 403 before calling this). The Slack credentials
 // are looked up under that bubble's scope only — the outbound tenancy boundary.
+//
+// Legacy Slack-shaped send, kept as a shim over the channel adapter for
+// pre-#618 clients. Text arrives pre-converted (mrkdwn) and is sent verbatim;
+// the generic /channels/send path takes raw markdown instead.
 export async function handleSlackSend(
 	storage: StorageAdapter,
 	body: Record<string, unknown>,
@@ -1221,9 +1197,17 @@ export async function handleSlackSend(
 		return { status: 400, body: { error: "no bot token for workspace" } };
 	}
 
+	const adapter = getChannelAdapter("slack")!;
+	const conv: Conversation = {
+		source: "slack",
+		scope: (body.workspace as string) || "",
+		chatType: "channel",
+		chatId: channel,
+		...(body.thread_ts ? { threadId: body.thread_ts as string } : {}),
+	};
 	let result;
 	try {
-		result = await sendSlackMessage(botToken, channel, text, body.thread_ts as string | undefined);
+		result = await adapter.send(botToken, conv, text);
 	} catch (err) {
 		return { status: 502, body: { ok: false, error: String(err) } };
 	}
@@ -1233,17 +1217,47 @@ export async function handleSlackSend(
 	return { status: 200, body: { ok: true, ts: result.ts } };
 }
 
-// Channel-agnostic outbound send (#618): { conversation, text, mode?, edit_ref? }.
-// Parses the conversation reference and delegates to the channel's send
-// machinery - Slack is the only channel today. `mode: "update"` edits the
-// message identified by `edit_ref` (e.g. a placeholder) instead of posting.
-// Same auth contract as handleSlackSend: `bubbleId` is the authenticated
-// bubble, and credentials resolve only under its scope.
+// One outbound file on /channels/send: { name, content_b64, title? }.
+function decodeOutboundFiles(raw: unknown): OutboundFile[] | null {
+	if (raw === undefined) return [];
+	if (!Array.isArray(raw)) return null;
+	const files: OutboundFile[] = [];
+	for (const item of raw) {
+		if (!item || typeof item !== "object") return null;
+		const f = item as Record<string, unknown>;
+		if (typeof f.name !== "string" || !f.name || typeof f.content_b64 !== "string" || !f.content_b64) {
+			return null;
+		}
+		let data: Uint8Array;
+		try {
+			data = Uint8Array.from(atob(f.content_b64), (c) => c.charCodeAt(0));
+		} catch {
+			return null;
+		}
+		files.push({
+			name: f.name,
+			data,
+			...(typeof f.title === "string" && f.title ? { title: f.title } : {}),
+		});
+	}
+	return files;
+}
+
+// Channel-agnostic outbound send (#618, #629):
+//   { conversation, text?, mode?, edit_ref?, files? }
+// Parses the conversation reference and delegates to the channel's adapter.
+// `bubbleId` is the authenticated bubble; credentials resolve only under its
+// scope (same contract as handleSlackSend).
 //
-// Text is sent raw: markdown->mrkdwn conversion lives client-side
-// (bobi/slack.py format_slack_message), matching /slack/send. The Phase 2
-// Chat SDK migration (#190) moves conversion into the gateway; until then
-// callers must convert before POSTing.
+// Text arrives as raw markdown — formatting is the gateway's job (the Slack
+// adapter delivers it natively via markdown_text). Modes:
+//   post    post a new message
+//   update  edit the message named by edit_ref (e.g. a placeholder)
+//   final   resolve the response context: edit edit_ref when given, else
+//           post; then clear the typing indicator either way
+// Capability degradation happens here: update on a channel without edit
+// support becomes a follow-up post; typing on a channel without indicators
+// is a silent no-op.
 export async function handleChannelsSend(
 	storage: StorageAdapter,
 	body: Record<string, unknown>,
@@ -1253,19 +1267,32 @@ export async function handleChannelsSend(
 	const text = body.text;
 	// Explicit string checks: a non-string conversation (array, number) must
 	// be a 400, not a TypeError escaping the handler as a 500.
-	if (typeof ref !== "string" || !ref || typeof text !== "string" || !text) {
-		return { status: 400, body: { error: "conversation and text required" } };
+	if (typeof ref !== "string" || !ref) {
+		return { status: 400, body: { error: "conversation required" } };
+	}
+	const files = decodeOutboundFiles(body.files);
+	if (files === null) {
+		return { status: 400, body: { error: "invalid files: expected [{name, content_b64, title?}]" } };
+	}
+	// Text is required unless files carry the payload (it then becomes the
+	// upload comment). A present-but-non-string text is always a 400.
+	if (text !== undefined && typeof text !== "string") {
+		return { status: 400, body: { error: "text must be a string" } };
+	}
+	if (!text && files.length === 0) {
+		return { status: 400, body: { error: "text or files required" } };
 	}
 	const conv = parseConversation(ref);
 	if (!conv) {
 		return { status: 400, body: { error: "invalid conversation reference" } };
 	}
-	if (conv.source !== "slack") {
+	const adapter = getChannelAdapter(conv.source);
+	if (!adapter) {
 		return { status: 400, body: { error: `unsupported channel: ${conv.source}` } };
 	}
 
 	const mode = (body.mode as string) || "post";
-	if (mode !== "post" && mode !== "update") {
+	if (mode !== "post" && mode !== "update" && mode !== "final") {
 		return { status: 400, body: { error: `invalid mode: ${mode}` } };
 	}
 	const editRef = (body.edit_ref as string) || "";
@@ -1273,34 +1300,126 @@ export async function handleChannelsSend(
 		return { status: 400, body: { error: "edit_ref required for mode: update" } };
 	}
 
-	const botToken = await resolveSlackSendToken(
-		storage,
-		bubbleId,
-		conv.scope,
-		(body.app_id as string) || "",
-		(body.bot_id as string) || "",
-	);
+	const botToken = await resolveChannelSendToken(storage, bubbleId, conv, body);
 	if (!botToken) {
 		return { status: 400, body: { error: "no bot token for workspace" } };
 	}
 
+	const caps = adapter.descriptor.capabilities;
+	const outText = truncateForChannel((text as string) || "", caps);
+
 	let result;
 	try {
-		result = mode === "update"
-			? await updateSlackMessage(botToken, conv.chatId, editRef, text)
-			: await sendSlackMessage(botToken, conv.chatId, text, conv.threadId);
+		if (files.length > 0) {
+			if (!adapter.uploadFiles || !caps.files) {
+				return { status: 400, body: { error: `channel ${conv.source} does not support files` } };
+			}
+			// A file reply that resolves a placeholder: a message cannot be
+			// edited INTO a file share, so replace the placeholder text first,
+			// then attach the file without a duplicate comment.
+			if (editRef && (mode === "update" || mode === "final")) {
+				if (!outText) {
+					return { status: 400, body: { error: "text required when edit_ref is combined with files" } };
+				}
+				if (adapter.update && caps.edit) {
+					const edited = await adapter.update(botToken, conv, editRef, outText, { markdown: true });
+					if (!edited.ok) {
+						return { status: 502, body: { ok: false, error: edited.error } };
+					}
+				}
+				result = await adapter.uploadFiles(botToken, conv, files);
+			} else {
+				result = await adapter.uploadFiles(botToken, conv, files, outText || undefined);
+			}
+		} else if (editRef && (mode === "update" || mode === "final")) {
+			// Degrade to a follow-up post on a channel without edit support.
+			result = adapter.update && caps.edit
+				? await adapter.update(botToken, conv, editRef, outText, { markdown: true })
+				: await adapter.send(botToken, conv, outText, { markdown: true });
+		} else {
+			result = await adapter.send(botToken, conv, outText, { markdown: true });
+		}
 	} catch (err) {
 		return { status: 502, body: { ok: false, error: String(err) } };
 	}
 	if (!result.ok) {
 		return { status: 502, body: { ok: false, error: result.error } };
 	}
-	// Replacing a placeholder must also clear the "is thinking..." status the
-	// placeholder flow set, matching the CLI edit path (slack-reply --edit).
-	if (mode === "update" && conv.threadId) {
-		await setSlackThreadStatus(botToken, conv.chatId, conv.threadId, "");
+	// Resolving a response context (placeholder edit or final reply) also
+	// clears the "is thinking..." indicator the placeholder flow set.
+	if ((mode === "update" || mode === "final") && adapter.typing && caps.typing) {
+		await adapter.typing(botToken, conv, false);
 	}
 	return { status: 200, body: { ok: true, ts: result.ts } };
+}
+
+// POST /channels/typing (#629): { conversation, on }. Sets or clears the
+// channel's thinking/typing indicator. A channel without typing support is a
+// silent no-op (200, supported: false) — capability degradation is the
+// gateway's job, not the caller's.
+export async function handleChannelsTyping(
+	storage: StorageAdapter,
+	body: Record<string, unknown>,
+	bubbleId: string,
+): Promise<HandlerResult> {
+	const ref = body.conversation;
+	if (typeof ref !== "string" || !ref || typeof body.on !== "boolean") {
+		return { status: 400, body: { error: "conversation and on required" } };
+	}
+	const conv = parseConversation(ref);
+	if (!conv) {
+		return { status: 400, body: { error: "invalid conversation reference" } };
+	}
+	const adapter = getChannelAdapter(conv.source);
+	if (!adapter) {
+		return { status: 400, body: { error: `unsupported channel: ${conv.source}` } };
+	}
+	if (!adapter.typing || !adapter.descriptor.capabilities.typing) {
+		return { status: 200, body: { ok: true, supported: false } };
+	}
+	const botToken = await resolveChannelSendToken(storage, bubbleId, conv, body);
+	if (!botToken) {
+		return { status: 400, body: { error: "no bot token for workspace" } };
+	}
+	await adapter.typing(botToken, conv, body.on);
+	return { status: 200, body: { ok: true, supported: true } };
+}
+
+// GET /channels/history (#629): ?conversation=...&limit=... — read the
+// messages of a conversation (Slack: the thread the ref anchors). Returns
+// { ok, messages: [{user, text, ts, files?}] } oldest-first.
+export async function handleChannelsHistory(
+	storage: StorageAdapter,
+	conversationRef: string,
+	limit: number,
+	bubbleId: string,
+): Promise<HandlerResult> {
+	if (!conversationRef) {
+		return { status: 400, body: { error: "conversation required" } };
+	}
+	const conv = parseConversation(conversationRef);
+	if (!conv) {
+		return { status: 400, body: { error: "invalid conversation reference" } };
+	}
+	const adapter = getChannelAdapter(conv.source);
+	if (!adapter) {
+		return { status: 400, body: { error: `unsupported channel: ${conv.source}` } };
+	}
+	if (!adapter.fetchConversation) {
+		return { status: 400, body: { error: `channel ${conv.source} does not support history` } };
+	}
+	const botToken = await resolveChannelSendToken(storage, bubbleId, conv, {});
+	if (!botToken) {
+		return { status: 400, body: { error: "no bot token for workspace" } };
+	}
+	const capped = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 1000) : 100;
+	let messages;
+	try {
+		messages = await adapter.fetchConversation(botToken, conv, capped);
+	} catch (err) {
+		return { status: 502, body: { ok: false, error: String(err) } };
+	}
+	return { status: 200, body: { ok: true, messages } };
 }
 
 // `bubbleId`, when present, is the AUTHENTICATED bubble that signed the
@@ -1328,7 +1447,7 @@ export async function handleSlackWorkspaceRegister(
 	const signingSecret = (body.signing_secret as string) || undefined;
 	if (bubbleId) {
 		try {
-			const resp = await fetch("https://slack.com/api/auth.test", {
+			const resp = await fetch(`${slackApiUrl()}auth.test`, {
 				headers: { Authorization: `Bearer ${botToken}` },
 			});
 			const data = (await resp.json()) as Record<string, unknown>;
@@ -1341,7 +1460,7 @@ export async function handleSlackWorkspaceRegister(
 		}
 	} else if (!botId) {
 		try {
-			const resp = await fetch("https://slack.com/api/auth.test", {
+			const resp = await fetch(`${slackApiUrl()}auth.test`, {
 				headers: { Authorization: `Bearer ${botToken}` },
 			});
 			const data = (await resp.json()) as Record<string, unknown>;
@@ -1356,7 +1475,7 @@ export async function handleSlackWorkspaceRegister(
 	if (!appId && botId) {
 		try {
 			const resp = await fetch(
-				`https://slack.com/api/bots.info?bot=${encodeURIComponent(botId)}`,
+				`${slackApiUrl()}bots.info?bot=${encodeURIComponent(botId)}`,
 				{ headers: { Authorization: `Bearer ${botToken}` } },
 			);
 			const data = (await resp.json()) as Record<string, unknown>;

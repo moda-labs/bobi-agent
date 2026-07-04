@@ -20,16 +20,12 @@ DRAIN_INTERVAL = 2
 _DRAIN_STOP = object()
 
 
-def _get_project_config():
-    """Load the project Config, or return None if unavailable."""
+def _get_project_root():
+    """Resolve the project root, or None if unavailable."""
     try:
         from bobi.sdk import get_project_root
-        from bobi.config import Config
 
-        root = get_project_root()
-        if not root:
-            return None
-        return Config.load(root)
+        return get_project_root() or None
     except Exception:
         return None
 
@@ -83,18 +79,16 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
 
     Each handler may post placeholders, set typing status, or inject
     fields (e.g. ``placeholder_ts``) into the event before delivery.
+    Handlers talk to the channel gateway (#190), so no credential is
+    resolved here - the event server holds the channel tokens.
 
     When multiple events in a batch target the same thread, only the
     first triggers a placeholder — subsequent events reuse the same
     ``placeholder_ts`` to avoid duplicate "Evaluating…" messages (#232).
-
-    Credential resolution is generic: the handler declares its
-    ``credential_key`` and the drain loop resolves it via
-    ``cfg.credential(source, key)`` from the project's service config.
     """
     from bobi.events.channels import get_channel_handler
 
-    cfg = _get_project_config()
+    project_root = _get_project_root()
 
     # Track placeholder_ts per thread so we post at most one per batch.
     seen_threads: dict[tuple[str, str, str], str] = {}
@@ -111,11 +105,6 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
             result.append(event)
             continue
 
-        token = cfg.credential(source, handler.credential_key) if cfg else ""
-        if not token:
-            result.append(event)
-            continue
-
         key = _thread_key(event)
         existing_ts = seen_threads.get(key)
 
@@ -125,7 +114,7 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
             fields["placeholder_ts"] = existing_ts
             result.append(dict(event, fields=fields))
         else:
-            prepared = handler.prepare(event, token)
+            prepared = handler.prepare(event, project_root)
             placeholder_ts = prepared.get("fields", {}).get("placeholder_ts", "")
             if placeholder_ts:
                 seen_threads[key] = placeholder_ts

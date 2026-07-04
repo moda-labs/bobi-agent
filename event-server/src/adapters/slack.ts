@@ -5,6 +5,24 @@ export function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Whether *text* @-mentions any of OUR bot users (`<@Uxxx>` or `<@Uxxx|label>`).
+ * Shared by both normalizers so the mention-dedup grammar cannot diverge.
+ * Accepts a bare string for single-bot callers/tests.
+ */
+export function mentionsAnySelfUser(
+	text: string,
+	selfBotUserIds?: string | Iterable<string>,
+): boolean {
+	const ids =
+		typeof selfBotUserIds === "string"
+			? new Set([selfBotUserIds])
+			: new Set(selfBotUserIds ?? []);
+	return ids.size > 0
+		&& [...ids].some((id) =>
+			new RegExp(`<@${escapeRegExp(id)}(?:\\|[^>]+)?>`).test(text));
+}
+
 export function normalizeSlackWebhook(
 	payload: Record<string, unknown>,
 	// A workspace may host SEVERAL of our bots (one per team), so the self-filter
@@ -48,14 +66,7 @@ export function normalizeSlackWebhook(
 	const threadTs = (event.thread_ts as string) || "";
 	const rawText = ((event.text as string) || "").slice(0, 4000);
 
-	const selfUserSet =
-		typeof selfBotUserIds === "string"
-			? new Set([selfBotUserIds])
-			: new Set(selfBotUserIds ?? []);
-	const mentionsSelfUser =
-		selfUserSet.size > 0
-		&& [...selfUserSet].some((id) =>
-			new RegExp(`<@${escapeRegExp(id)}(?:\\|[^>]+)?>`).test(rawText));
+	const mentionsSelfUser = mentionsAnySelfUser(rawText, selfBotUserIds);
 
 	let slackEventType: string;
 	if (eventType === "app_mention") {

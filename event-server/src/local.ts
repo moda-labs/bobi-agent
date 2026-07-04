@@ -27,6 +27,8 @@ import {
 	handleDeregisterDeployment,
 	handleTopicEvent,
 	handleChannelsSend,
+	handleChannelsTyping,
+	handleChannelsHistory,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
 	handleTestSeedResourceGrants,
@@ -40,6 +42,11 @@ import {
 	conversationKey,
 	buildLoopDetectedEvent,
 } from "./circuit-breaker";
+import { setSlackApiUrl } from "./channels";
+
+// Integration-test seam: point the Slack Web API at a local stub. Unset in
+// production, where the default (https://slack.com/api/) applies.
+setSlackApiUrl(process.env.BOBI_ES_SLACK_API_URL);
 
 const MAX_BUFFER = 10_000;
 
@@ -316,6 +323,39 @@ function respond(res: http.ServerResponse, result: HandlerResult) {
 	json(res, result.body, result.status);
 }
 
+// Shared prologue of every mandatory bubble-signed route: read the exact wire
+// bytes (the signature covers them), parse JSON, authenticate. Writes the
+// error response and returns null on failure. A GET carries an empty body,
+// which verifies and parses as {}.
+async function bubbleAuthedJson(
+	req: http.IncomingMessage,
+	res: http.ServerResponse,
+	url: URL,
+): Promise<{ bubble: BubbleRecord; data: Record<string, unknown> } | null> {
+	const body = await readBody(req);
+	let data: Record<string, unknown> = {};
+	if (body) {
+		const parsed = parseJson(body);
+		if (!parsed) {
+			json(res, { error: "invalid JSON" }, 400);
+			return null;
+		}
+		data = parsed;
+	}
+	const ctx = readBubbleAuthHeaders(
+		(n) => req.headers[n] as string | undefined,
+		req.method || "GET",
+		url.pathname + url.search,
+		body,
+	);
+	const bubble = await authenticateBubble(storage, ctx);
+	if (!bubble) {
+		json(res, { error: "forbidden" }, 403);
+		return null;
+	}
+	return { bubble, data };
+}
+
 // ---------------------------------------------------------------------------
 // Routing table
 // ---------------------------------------------------------------------------
@@ -392,7 +432,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 			if (!valid) return json(res, { error: "invalid signature" }, 401);
 		}
 
-		return respond(res, await handleSlackWebhook(storage, payload));
+		return respond(res, await handleSlackWebhook(storage, body, payload));
 	}
 
 	if (method === "POST" && path === "/deployments") {
@@ -470,51 +510,41 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	}
 
 	if (method === "POST" && path === "/slack/send") {
-		const body = await readBody(req);
-		const data = parseJson(body);
-		if (!data) return json(res, { error: "invalid JSON" }, 400);
-		const ctx = readBubbleAuthHeaders(
-			(n) => req.headers[n] as string | undefined,
-			method,
-			url.pathname + url.search,
-			body,
-		);
-		const bubble = await authenticateBubble(storage, ctx);
-		if (!bubble) return json(res, { error: "forbidden" }, 403);
-		return respond(res, await handleSlackSend(storage, data, bubble.id));
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleSlackSend(storage, auth.data, auth.bubble.id));
 	}
 
 	if (method === "POST" && path === "/channels/send") {
 		// Channel-agnostic send (#618) - same mandatory bubble auth as /slack/send.
-		const body = await readBody(req);
-		const data = parseJson(body);
-		if (!data) return json(res, { error: "invalid JSON" }, 400);
-		const ctx = readBubbleAuthHeaders(
-			(n) => req.headers[n] as string | undefined,
-			method,
-			url.pathname + url.search,
-			body,
-		);
-		const bubble = await authenticateBubble(storage, ctx);
-		if (!bubble) return json(res, { error: "forbidden" }, 403);
-		return respond(res, await handleChannelsSend(storage, data, bubble.id));
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleChannelsSend(storage, auth.data, auth.bubble.id));
+	}
+
+	if (method === "POST" && path === "/channels/typing") {
+		// Set/clear a channel's thinking indicator (#629).
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleChannelsTyping(storage, auth.data, auth.bubble.id));
+	}
+
+	if (method === "GET" && path === "/channels/history") {
+		// Read a conversation's messages (#629). The signature covers the full
+		// path INCLUDING the query string, with an empty body.
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		const conversation = url.searchParams.get("conversation") || "";
+		const limit = parseInt(url.searchParams.get("limit") || "100", 10);
+		return respond(res, await handleChannelsHistory(storage, conversation, limit, auth.bubble.id));
 	}
 
 	if (method === "POST" && path === "/resources/authorize") {
 		// Mandatory bubble auth; the credential in the body is verified once and
 		// never persisted/logged (mirrors /slack/send wiring).
-		const body = await readBody(req);
-		const data = parseJson(body);
-		if (!data) return json(res, { error: "invalid JSON" }, 400);
-		const ctx = readBubbleAuthHeaders(
-			(n) => req.headers[n] as string | undefined,
-			method,
-			url.pathname + url.search,
-			body,
-		);
-		const bubble = await authenticateBubble(storage, ctx);
-		if (!bubble) return json(res, { error: "forbidden" }, 403);
-		return respond(res, await handleAuthorizeResource(storage, data, bubble.id));
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleAuthorizeResource(storage, auth.data, auth.bubble.id));
 	}
 
 	if (method === "POST" && path === "/__test/resource-grants" && testGrantsSecret) {

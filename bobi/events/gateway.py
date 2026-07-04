@@ -1,0 +1,148 @@
+"""Signed client for the event server's channel gateway endpoints (#190).
+
+The gateway owns all outbound chat delivery: formatting (markdown goes out
+raw and is rendered by the channel), placeholder/typing UX, credentials, and
+capability degradation. This module is the only Python path that talks to
+``/channels/*`` - the CLI (``bobi reply``, ``bobi read-conversation``) and
+the drain loop's input channel policy both call through here.
+
+Requests are HMAC-signed with the instance's bubble key (same scheme as
+:mod:`bobi.events.publish`). The channel credential itself lives on the
+event server, registered at session start (``register_slack_workspaces``);
+no Slack token is read or transmitted here.
+"""
+
+from __future__ import annotations
+
+import base64
+import logging
+from pathlib import Path
+from urllib.parse import urlencode
+
+import httpx
+
+from bobi import http as pooled
+
+log = logging.getLogger(__name__)
+
+
+class GatewayError(RuntimeError):
+    """A gateway request failed - carries a human-readable reason."""
+
+
+def _gateway_context(project_path: Path | None) -> tuple[str, str, str]:
+    """Resolve (event_server_url, bubble_id, bubble_key) for this instance."""
+    if project_path is None:
+        from bobi.paths import bobi_root
+        project_path = bobi_root()
+    else:
+        project_path = Path(project_path)
+
+    from bobi.config import load_bubble_state
+    from bobi.events.publish import _event_server_url
+
+    es_url = _event_server_url(project_path)
+    bubble = load_bubble_state(project_path)
+    bubble_id = bubble.get("bubble_id", "")
+    bubble_key = bubble.get("bubble_key", "")
+    if not (bubble_id and bubble_key):
+        raise GatewayError(
+            "No bubble credential found - is the agent started? The channel "
+            "gateway only accepts requests signed with the instance's bubble key."
+        )
+    return es_url, bubble_id, bubble_key
+
+
+def _request(project_path: Path | None, method: str, path: str,
+             body: str = "", *, timeout: float = 30.0) -> dict:
+    """Send a bubble-signed request to the gateway and return the JSON body.
+
+    ``path`` includes the query string when present; the signature covers the
+    exact path and body bytes transmitted. Raises :class:`GatewayError` with
+    the server's error message on any failure.
+    """
+    from bobi.events.signing import sign_headers
+
+    es_url, bubble_id, bubble_key = _gateway_context(project_path)
+    headers = {"Content-Type": "application/json"}
+    headers.update(sign_headers(bubble_id, bubble_key, method, path, body))
+
+    try:
+        if method == "GET":
+            resp = pooled.get(f"{es_url}{path}", headers=headers, timeout=timeout)
+        else:
+            resp = pooled.post(
+                f"{es_url}{path}", content=body, headers=headers, timeout=timeout,
+            )
+    except (httpx.HTTPError, OSError, TimeoutError) as exc:
+        raise GatewayError(
+            f"Event server unreachable at {es_url}: {exc}"
+        ) from exc
+
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    if resp.status_code >= 400 or not data.get("ok", True):
+        detail = data.get("error") or f"HTTP {resp.status_code}"
+        raise GatewayError(f"Gateway {method} {path.split('?')[0]} failed: {detail}")
+    return data
+
+
+def channels_send(project_path: Path | None, conversation: str, text: str = "",
+                  *, mode: str = "post", edit_ref: str = "",
+                  files: list[dict] | None = None,
+                  timeout: float = 30.0) -> dict:
+    """POST /channels/send. Text is raw markdown; the gateway formats it.
+
+    ``mode`` is ``post | update | final`` (final = edit ``edit_ref`` when
+    given, else post, then clear the typing indicator). ``files`` entries are
+    ``{name, content_b64, title?}``. Returns the response dict (``ts`` is the
+    posted/updated message id).
+    """
+    from bobi.events.signing import serialize_body
+
+    payload: dict = {"conversation": conversation, "mode": mode}
+    if text:
+        payload["text"] = text
+    if edit_ref:
+        payload["edit_ref"] = edit_ref
+    if files:
+        payload["files"] = files
+    body = serialize_body(payload)
+    return _request(project_path, "POST", "/channels/send", body, timeout=timeout)
+
+
+def channels_typing(project_path: Path | None, conversation: str,
+                    on: bool) -> bool:
+    """POST /channels/typing. Best-effort: returns False instead of raising,
+    so a typing hiccup never breaks event delivery or a reply."""
+    from bobi.events.signing import serialize_body
+
+    body = serialize_body({"conversation": conversation, "on": bool(on)})
+    try:
+        _request(project_path, "POST", "/channels/typing", body, timeout=10.0)
+        return True
+    except GatewayError as exc:
+        log.debug("channels/typing failed for %s: %s", conversation, exc)
+        return False
+
+
+def channels_history(project_path: Path | None, conversation: str,
+                     limit: int = 100) -> list[dict]:
+    """GET /channels/history - the conversation's messages, oldest-first."""
+    query = urlencode({"conversation": conversation, "limit": limit})
+    data = _request(project_path, "GET", f"/channels/history?{query}")
+    messages = data.get("messages", [])
+    return messages if isinstance(messages, list) else []
+
+
+def file_payload(path: Path, *, title: str = "", filename: str = "") -> dict:
+    """Build one /channels/send files[] entry from a local file."""
+    entry: dict = {
+        "name": filename or path.name,
+        "content_b64": base64.b64encode(path.read_bytes()).decode("ascii"),
+    }
+    if title:
+        entry["title"] = title
+    return entry

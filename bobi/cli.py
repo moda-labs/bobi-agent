@@ -1507,194 +1507,102 @@ def ask(question, timeout, source):
         raise SystemExit(1)
 
 
-def _slack_reply_send(channel, thread, edit_ts, text, scope=""):
-    """Post or edit a Slack message with the locally configured bot token.
-
-    Shared send path behind both ``slack-reply`` and the channel-agnostic
-    ``reply`` (#618). *scope* is the conversation ref's workspace id, used
-    only to explain failures: the local token is not validated against it,
-    so a cross-workspace ref fails at the Slack API. Exits on failure.
-    """
-    import httpx
-
-    from .slack import post_slack_message, update_slack_message, set_thread_status
-
-    token = ""
-    project_path = _detect_project_root()
-    if project_path:
-        from .config import Config
-        cfg = Config.load(project_path)
-        token = cfg.credential("slack", "bot_token")
-    if not token:
-        click.echo("No bot token configured (set credentials.bot_token under the slack service in agent.yaml)", err=True)
-        sys.exit(1)
-
-    try:
-        if edit_ts:
-            update_slack_message(token, channel, edit_ts, text)
-            if thread:
-                set_thread_status(token, channel, thread, "")
-                # Stop the background refresh loop (if one is running).
-                from .events.channels import stop_refresh_loop
-                stop_refresh_loop(channel, thread)
-            click.echo(f"Updated {edit_ts} in {channel}")
-        else:
-            post_slack_message(token, channel, text, thread_ts=thread)
-            click.echo(f"Sent to {channel}")
-    except RuntimeError as e:
-        click.echo(str(e), err=True)
-        if scope:
-            click.echo(
-                f"(conversation is scoped to workspace {scope}; the locally "
-                "configured slack bot token must belong to that workspace)",
-                err=True,
-            )
-        sys.exit(1)
-    except (httpx.HTTPError, OSError, TimeoutError) as e:
-        click.echo(f"Failed: {e}", err=True)
-        sys.exit(1)
-
-
-@main.command("reply")
-@click.argument("conversation")
-@click.argument("text", required=False)
-@click.option("--edit", "edit_ref", default="", help="Message ref (ts) to edit instead of posting new")
-def reply(conversation, text, edit_ref):
-    """Reply into a conversation, on whatever chat channel it came from.
-
-    CONVERSATION is the ``conversation`` reference carried on the inbound
-    event - echo it back verbatim. Reads TEXT from stdin when omitted.
-
-    Usage:
-        bobi reply slack:T0952RZRZ0X:dm:D0B51JP1N4C "Hello"
-        bobi reply slack:T0952RZRZ0X:channel:C123:thread:171.42 "Thread reply"
-        bobi reply slack:T0952RZRZ0X:channel:C123:thread:171.42 --edit 171.99 "Real response"
-    """
+def _parse_conversation_or_exit(conversation):
+    """Parse a conversation reference, exiting with a clear error if invalid."""
     from .conversation import parse_conversation
 
     conv = parse_conversation(conversation)
     if conv is None:
         click.echo(f"Invalid conversation reference: {conversation}", err=True)
         sys.exit(1)
-    if conv.source != "slack":
-        click.echo(f"Unsupported channel: {conv.source}", err=True)
-        sys.exit(1)
-
-    if text is None:
-        # Fail fast on an interactive terminal instead of blocking on EOF.
-        if sys.stdin.isatty():
-            click.echo("No text to send (pass TEXT or pipe via stdin)", err=True)
-            sys.exit(1)
-        text = click.get_text_stream("stdin").read().rstrip("\n")
-    if not text.strip():
-        click.echo("No text to send (pass TEXT or pipe via stdin)", err=True)
-        sys.exit(1)
-
-    _slack_reply_send(conv.chat_id, conv.thread_id, edit_ref, text, scope=conv.scope)
+    return conv
 
 
-@main.command("slack-reply")
-@click.argument("text")
-@click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
-@click.option("--channel", "-c", required=True, help="Slack channel ID (e.g. D0B51JP1N4C)")
-@click.option("--thread", "-t", default="", help="Thread timestamp to reply in")
-@click.option("--edit", "edit_ts", default="", help="Placeholder message ts to edit instead of posting new")
-def slack_reply(text, workspace, channel, thread, edit_ts):
-    """Post a message to Slack. Used by the manager to reply to Slack events.
-
-    Usage:
-        bobi slack-reply -w T0952RZRZ0X -c D0B51JP1N4C "Hello"
-        bobi slack-reply -w T0952RZRZ0X -c C123 -t 1780165787.159589 "Thread reply"
-        bobi slack-reply -w T0952RZRZ0X -c C123 -t 171.42 --edit 171.99 "Real response"
-    """
-    _slack_reply_send(channel, thread, edit_ts, text)
-
-
-@main.command("slack-upload-file")
-@click.argument("file_path", type=click.Path(exists=True))
-@click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
-@click.option("--channel", "-c", required=True, help="Slack channel ID")
-@click.option("--thread", "-t", default="", help="Thread timestamp to upload into")
-@click.option("--title", default="", help="File title in Slack")
-@click.option("--comment", default="", help="Initial comment with the file")
-@click.option("--filename", default="", help="Override filename (default: basename of path)")
-def slack_upload_file(file_path, workspace, channel, thread, title, comment, filename):
-    """Upload a file to Slack.
-
-    Usage:
-        bobi slack-upload-file ./screenshot.png -w T0952RZRZ0X -c C123
-        bobi slack-upload-file ./report.pdf -w T0952RZRZ0X -c C123 -t 171.42 --title "Report"
-    """
-    import httpx
-    from pathlib import Path
-
-    from .slack import upload_slack_file
-
-    token = ""
-    project_path = _detect_project_root()
-    if project_path:
-        from .config import Config
-        cfg = Config.load(project_path)
-        token = cfg.credential("slack", "bot_token")
-    if not token:
-        click.echo("No bot token configured (set credentials.bot_token under the slack service in agent.yaml)", err=True)
-        sys.exit(1)
-
-    p = Path(file_path)
-    file_data = p.read_bytes()
-    fname = filename or p.name
+def _gateway_call(fn, *args, **kwargs):
+    """Run a gateway client call, exiting with its message on failure."""
+    from .events.gateway import GatewayError
 
     try:
-        upload_slack_file(
-            token, channel, file_data, fname,
-            title=title, thread_ts=thread, initial_comment=comment,
+        return fn(*args, **kwargs)
+    except GatewayError as e:
+        click.echo(str(e), err=True)
+        click.echo(
+            "(replies go through the event server's channel gateway; make "
+            "sure the agent is started so the server is running and its "
+            "chat workspace is registered)",
+            err=True,
         )
-        click.echo(f"Uploaded {fname} to {channel}")
-    except RuntimeError as e:
+        sys.exit(1)
+
+
+def _slack_conversation_from_flags(workspace, channel, thread):
+    """Rewrite legacy -w/-c/-t flags into a conversation reference.
+
+    Used by the deprecated ``slack-*`` shims. The chat_type only needs to
+    satisfy the ref grammar - the gateway addresses Slack by channel id.
+    """
+    from .conversation import Conversation, build_conversation
+
+    chat_type = "dm" if channel.startswith("D") else "channel"
+    try:
+        return build_conversation(Conversation(
+            "slack", workspace, chat_type, channel, thread or ""))
+    except ValueError as e:
         click.echo(str(e), err=True)
         sys.exit(1)
-    except (httpx.HTTPError, OSError, TimeoutError) as e:
-        click.echo(f"Failed: {e}", err=True)
-        sys.exit(1)
 
 
-@main.command("slack-read-thread")
-@click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
-@click.option("--channel", "-c", required=True, help="Slack channel ID")
-@click.option("--thread", "-t", required=True, help="Thread timestamp to read")
-@click.option("--limit", "-n", default=100, help="Max messages to fetch (default: 100)")
-@click.option("--json-output", "as_json", is_flag=True, help="Output as JSON")
-def slack_read_thread(workspace, channel, thread, limit, as_json):
-    """Read all messages in a Slack thread.
+def _deprecated_slack_command(old, conversation):
+    click.echo(
+        f"Warning: `bobi {old}` is deprecated - use "
+        f"`bobi reply {conversation}` (the `conversation:` reference on the "
+        "event) instead. This shim will be removed after one release cycle.",
+        err=True,
+    )
 
-    Usage:
-        bobi slack-read-thread -w T0952RZRZ0X -c C123 -t 1780165787.159589
-        bobi slack-read-thread -w T0952RZRZ0X -c C123 -t 171.42 --json-output
+
+def _unescape_shell_literals(text):
+    """Turn literal ``\\n`` / ``\\t`` escapes into real characters.
+
+    Reply text often arrives through shell arguments where newlines survive
+    only as two-character escapes; rendering them literally mangles
+    multi-line messages. (Previously done by bobi.slack.format_slack_message
+    on the old direct-send path.)
     """
+    return text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+
+
+def _channels_reply_send(conversation, text, edit_ref, files=None):
+    """Send a reply through the channel gateway (#190 Phase 2).
+
+    Shared path behind ``reply`` and the deprecated ``slack-reply`` /
+    ``slack-upload-file`` shims. Text goes out as raw markdown; the gateway
+    owns formatting, truncation, and clearing the typing indicator. Mode
+    ``final`` resolves the response context: it edits ``edit_ref`` when
+    given, else posts, then clears the thinking indicator.
+    """
+    from .events.gateway import channels_send
+
+    result = _gateway_call(
+        channels_send, _detect_project_root(), conversation,
+        _unescape_shell_literals(text),
+        mode="final", edit_ref=edit_ref, files=files,
+    )
+    if edit_ref:
+        click.echo(f"Updated {edit_ref} in {conversation}")
+    else:
+        click.echo(f"Sent to {conversation}")
+    return result
+
+
+def _read_conversation(conversation, limit, as_json):
+    """Fetch and render a conversation's messages via the gateway."""
     import json as _json
 
-    import httpx
+    from .events.gateway import channels_history
 
-    from .slack import fetch_slack_thread
-
-    token = ""
-    project_path = _detect_project_root()
-    if project_path:
-        from .config import Config
-        cfg = Config.load(project_path)
-        token = cfg.credential("slack", "bot_token")
-    if not token:
-        click.echo("No bot token configured (set credentials.bot_token under the slack service in agent.yaml)", err=True)
-        sys.exit(1)
-
-    try:
-        messages = fetch_slack_thread(token, channel, thread, limit=limit)
-    except RuntimeError as e:
-        click.echo(str(e), err=True)
-        sys.exit(1)
-    except (httpx.HTTPError, OSError, TimeoutError) as e:
-        click.echo(f"Failed: {e}", err=True)
-        sys.exit(1)
+    messages = _gateway_call(
+        channels_history, _detect_project_root(), conversation, limit)
 
     if as_json:
         click.echo(_json.dumps(messages, indent=2))
@@ -1710,6 +1618,124 @@ def slack_read_thread(workspace, channel, thread, limit, as_json):
                 mimetype = f.get("mimetype", "")
                 click.echo(f"  >> {name} ({mimetype})")
         click.echo(f"\n{len(messages)} message(s)")
+
+
+@main.command("reply")
+@click.argument("conversation")
+@click.argument("text", required=False)
+@click.option("--edit", "edit_ref", default="", help="Message ref (ts) to edit instead of posting new")
+@click.option("--file", "file_path", type=click.Path(exists=True), default=None,
+              help="Upload a file into the conversation (TEXT becomes its comment)")
+@click.option("--title", default="", help="File title (with --file)")
+def reply(conversation, text, edit_ref, file_path, title):
+    """Reply into a conversation, on whatever chat channel it came from.
+
+    CONVERSATION is the ``conversation`` reference carried on the inbound
+    event - echo it back verbatim. Reads TEXT from stdin when omitted.
+    Write plain markdown; the gateway converts it for the channel.
+
+    Usage:
+        bobi reply slack:T0952RZRZ0X:dm:D0B51JP1N4C "Hello"
+        bobi reply slack:T0952RZRZ0X:channel:C123:thread:171.42 "Thread reply"
+        bobi reply slack:T0952RZRZ0X:channel:C123:thread:171.42 --edit 171.99 "Real response"
+        bobi reply slack:T0952RZRZ0X:channel:C123:thread:171.42 --file report.pdf "Here's the report"
+        bobi reply slack:T0952RZRZ0X:channel:C123:thread:171.42 --edit 171.99 --file out.png "Done - see attached"
+    """
+    _parse_conversation_or_exit(conversation)
+
+    if text is None:
+        # Fail fast on an interactive terminal instead of blocking on EOF
+        # (a piped comment also works alongside --file).
+        if not sys.stdin.isatty():
+            text = click.get_text_stream("stdin").read().rstrip("\n")
+        elif file_path is None:
+            click.echo("No text to send (pass TEXT or pipe via stdin)", err=True)
+            sys.exit(1)
+    text = (text or "").strip()
+    if not text and file_path is None:
+        click.echo("No text to send (pass TEXT or pipe via stdin)", err=True)
+        sys.exit(1)
+    if edit_ref and file_path and not text:
+        # The gateway replaces the placeholder with TEXT, then attaches the
+        # file - without text there is nothing to resolve the placeholder with.
+        click.echo("--edit with --file requires TEXT", err=True)
+        sys.exit(1)
+
+    files = None
+    if file_path is not None:
+        from pathlib import Path
+
+        from .events.gateway import file_payload
+        files = [file_payload(Path(file_path), title=title)]
+
+    _channels_reply_send(conversation, text, edit_ref, files)
+
+
+@main.command("read-conversation")
+@click.argument("conversation")
+@click.option("--limit", "-n", default=100, help="Max messages to fetch (default: 100)")
+@click.option("--json-output", "as_json", is_flag=True, help="Output as JSON")
+def read_conversation(conversation, limit, as_json):
+    """Read the messages of a conversation (e.g. the Slack thread it anchors).
+
+    Usage:
+        bobi read-conversation slack:T0952RZRZ0X:channel:C123:thread:171.42
+        bobi read-conversation slack:T0952RZRZ0X:dm:D456:thread:171.42 --json-output
+    """
+    _parse_conversation_or_exit(conversation)
+    _read_conversation(conversation, limit, as_json)
+
+
+@main.command("slack-reply")
+@click.argument("text")
+@click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
+@click.option("--channel", "-c", required=True, help="Slack channel ID (e.g. D0B51JP1N4C)")
+@click.option("--thread", "-t", default="", help="Thread timestamp to reply in")
+@click.option("--edit", "edit_ts", default="", help="Placeholder message ts to edit instead of posting new")
+def slack_reply(text, workspace, channel, thread, edit_ts):
+    """Deprecated: use `bobi reply <conversation>`. Post a message to Slack."""
+    conversation = _slack_conversation_from_flags(workspace, channel, thread)
+    _deprecated_slack_command("slack-reply", conversation)
+    _channels_reply_send(conversation, text, edit_ts)
+
+
+@main.command("slack-upload-file")
+@click.argument("file_path", type=click.Path(exists=True))
+@click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
+@click.option("--channel", "-c", required=True, help="Slack channel ID")
+@click.option("--thread", "-t", default="", help="Thread timestamp to upload into")
+@click.option("--title", default="", help="File title in Slack")
+@click.option("--comment", default="", help="Initial comment with the file")
+@click.option("--filename", default="", help="Override filename (default: basename of path)")
+def slack_upload_file(file_path, workspace, channel, thread, title, comment, filename):
+    """Deprecated: use `bobi reply <conversation> --file`. Upload a file to Slack."""
+    from pathlib import Path
+
+    from .events.gateway import file_payload
+
+    conversation = _slack_conversation_from_flags(workspace, channel, thread)
+    _deprecated_slack_command("slack-upload-file", conversation)
+    p = Path(file_path)
+    files = [file_payload(p, title=title, filename=filename)]
+    from .events.gateway import channels_send
+    _gateway_call(
+        channels_send, _detect_project_root(), conversation, comment,
+        mode="post", files=files,
+    )
+    click.echo(f"Uploaded {filename or p.name} to {channel}")
+
+
+@main.command("slack-read-thread")
+@click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
+@click.option("--channel", "-c", required=True, help="Slack channel ID")
+@click.option("--thread", "-t", required=True, help="Thread timestamp to read")
+@click.option("--limit", "-n", default=100, help="Max messages to fetch (default: 100)")
+@click.option("--json-output", "as_json", is_flag=True, help="Output as JSON")
+def slack_read_thread(workspace, channel, thread, limit, as_json):
+    """Deprecated: use `bobi read-conversation <conversation>`. Read a Slack thread."""
+    conversation = _slack_conversation_from_flags(workspace, channel, thread)
+    _deprecated_slack_command("slack-read-thread", conversation)
+    _read_conversation(conversation, limit, as_json)
 
 
 @main.command("create-slack-bot")

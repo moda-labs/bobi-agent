@@ -14,7 +14,7 @@
 import { parseSlackWebhookBody } from "@chat-adapter/slack/webhook";
 import type { NormalizedEvent, SlackNormalizationResult } from "../core";
 import { slackConversation } from "../conversation";
-import { escapeRegExp } from "./slack";
+import { mentionsAnySelfUser } from "./slack";
 
 export type ChatSdkBridgeResult = SlackNormalizationResult;
 
@@ -25,6 +25,8 @@ export type ChatSdkBridgeResult = SlackNormalizationResult;
  *
  * @param body - Raw JSON string from the Slack webhook POST body
  * @param selfBotId - Our bot's ID, used to filter self-loop messages
+ * @param payload - Optional pre-parsed body (callers that already parsed it
+ *   for signature/challenge handling pass it to avoid a second JSON.parse)
  */
 export function bridgeSlackWebhook(
 	body: string,
@@ -33,11 +35,15 @@ export function bridgeSlackWebhook(
 	// single-bot callers/tests).
 	selfBotIds?: string | Iterable<string>,
 	selfBotUserIds?: string | Iterable<string>,
+	payload?: Record<string, unknown>,
 ): ChatSdkBridgeResult {
 	let parsed;
 	try {
 		parsed = parseSlackWebhookBody(body);
-	} catch {
+	} catch (err) {
+		// Never silent: a parser rejection here drops a user message. Keep the
+		// skip (the route must still 200 so Slack stops retrying) but log it.
+		console.warn(`chat-sdk bridge failed to parse Slack webhook: ${String(err)}`);
 		return { event: null, skip: true };
 	}
 
@@ -52,7 +58,7 @@ export function bridgeSlackWebhook(
 	}
 
 	// We only process event_callback payloads
-	const raw = JSON.parse(body) as Record<string, unknown>;
+	const raw = payload ?? (JSON.parse(body) as Record<string, unknown>);
 	if (raw.type !== "event_callback") {
 		return { event: null, skip: true };
 	}
@@ -84,14 +90,7 @@ export function bridgeSlackWebhook(
 	// Mention/message dedup, identical to normalizeSlackWebhook: a channel
 	// @mention arrives as both app_mention and message.* with the same ts;
 	// drop the message copy so one human message yields one event.
-	const selfUserSet =
-		typeof selfBotUserIds === "string"
-			? new Set([selfBotUserIds])
-			: new Set(selfBotUserIds ?? []);
-	const mentionsSelfUser =
-		selfUserSet.size > 0
-		&& [...selfUserSet].some((id) =>
-			new RegExp(`<@${escapeRegExp(id)}(?:\\|[^>]+)?>`).test(rawText));
+	const mentionsSelfUser = mentionsAnySelfUser(rawText, selfBotUserIds);
 
 	let slackEventType: string;
 	if (eventType === "app_mention") {
@@ -136,6 +135,25 @@ export function bridgeSlackWebhook(
 
 	const botId = (innerEvent.bot_id as string) || "";
 
+	// Extract file attachments (images, documents, etc.) — same shape as
+	// normalizeSlackWebhook so the agent's fields.files contract holds.
+	const rawFiles = innerEvent.files as Array<Record<string, unknown>> | undefined;
+	const files: Array<Record<string, string>> = [];
+	if (Array.isArray(rawFiles)) {
+		for (const f of rawFiles) {
+			const entry: Record<string, string> = {};
+			if (f.id) entry.id = String(f.id);
+			if (f.name) entry.name = String(f.name);
+			if (f.mimetype) entry.mimetype = String(f.mimetype);
+			if (f.filetype) entry.filetype = String(f.filetype);
+			if (f.url_private) entry.url_private = String(f.url_private);
+			if (f.url_private_download)
+				entry.url_private_download = String(f.url_private_download);
+			if (f.size) entry.size = String(f.size);
+			files.push(entry);
+		}
+	}
+
 	const fields: Record<string, string | number | boolean> = {};
 	if (userId) fields.user_id = userId;
 	if (channel) fields.channel = channel;
@@ -145,6 +163,7 @@ export function bridgeSlackWebhook(
 	if (threadTs) fields.thread_ts = threadTs;
 	// Preserve bot_id so the circuit breaker can detect bot authorship.
 	if (botId) fields.bot_id = botId;
+	if (files.length > 0) fields.files = JSON.stringify(files);
 
 	// Channel-agnostic reply address (#618). Anchoring policy lives in
 	// slackConversation so both normalizers cannot diverge.
@@ -170,6 +189,7 @@ export function bridgeSlackWebhook(
 				ts,
 				thread_ts: threadTs,
 				...(botId ? { bot_id: botId } : {}),
+				...(files.length > 0 ? { files } : {}),
 			},
 		},
 		skip: false,

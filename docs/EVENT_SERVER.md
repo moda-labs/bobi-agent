@@ -115,8 +115,15 @@ Chat adapters set a channel-agnostic reply address on every chat event:
 `<source>:<scope>:<chat_type>:<chat_id>[:thread:<thread_id>]`, where `scope` is the
 platform's tenancy unit (Slack team id). The agent echoes it back verbatim -
 `bobi reply <conversation>` or `POST /channels/send`
-`{conversation, text, mode: post|update, edit_ref?}` - and the gateway parses it to
-address the platform send. Only adapters build refs and only the gateway parses
+`{conversation, text, mode: post|update|final, edit_ref?, files?}` - and the gateway
+parses it to address the platform send. Text is raw markdown; formatting is the
+gateway's job (Slack: native `markdown_text`), and `mode: final` resolves a response
+context (edit `edit_ref` when given, else post, then clear the typing indicator).
+`POST /channels/typing` sets/clears the thinking indicator and `GET /channels/history`
+reads a conversation's messages; both share the send path's auth and tenancy
+boundary. Channel capabilities (edit, typing, files, length budget) are declared per
+adapter in `event-server/src/channels.ts` (`ChannelDescriptor`); degradation is the
+gateway's job, not the caller's. Only adapters build refs and only the gateway parses
 them; the agent never assembles platform routing fields.
 
 ## Ingestion: getting events in
@@ -130,9 +137,11 @@ never from client input**:
   (`X-Hub-Signature-256`, HMAC-SHA256) is verified when `WEBHOOK_SECRET` is set.
 - **Slack** (`POST /webhooks/slack`): handles the `url_verification` challenge and
   retry dedup; verifies the `v0=` signature within a ±300s window, with the signing
-  secret resolved per authoring app (`api_app_id`). Maps to
-  `slack.mention` / `slack.dm` / `slack.thread_reply` and filters our own bots'
-  messages.
+  secret resolved per authoring app (`api_app_id`). Normalization runs through the
+  Chat SDK bridge (`adapters/chat-sdk-slack.ts`, #628); the hand-rolled
+  `adapters/slack.ts` normalizer remains as the golden parity reference until the
+  bridge has soaked. Maps to `slack.mention` / `slack.dm` / `slack.thread_reply` and
+  filters our own bots' messages.
 - **Linear** (`POST /webhooks/linear`): `type = linear.<type>.<action>`, key
   `linear:<TEAM_KEY>`. No HTTP-layer signature check - inbound Linear relies on a
   secret webhook URL plus the delivery-time grant filter.
@@ -285,6 +294,8 @@ concurrent first-registrations converge on a single bubble.
 | Authorize resource | `POST /resources/authorize` | bubble signature |
 | Slack send | `POST /slack/send` | bubble signature (bubble-scoped to its own workspace) |
 | Channel send | `POST /channels/send` | bubble signature (same tenancy boundary as `/slack/send`) |
+| Channel typing | `POST /channels/typing` | bubble signature |
+| Channel history | `GET /channels/history` | bubble signature (covers path + query, empty body) |
 | WS subscribe / update subs / deregister | `/deployments/{id}/...` | bearer `api_key` (issued at register) |
 
 The bubble key authenticates *membership*; the per-deployment `api_key`

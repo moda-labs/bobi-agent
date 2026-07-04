@@ -271,6 +271,53 @@ describe("event-server", () => {
 		});
 		expect(response.status).toBe(403);
 	});
+
+	// #629: channel gateway endpoints share the mandatory bubble-signed auth.
+	it("rejects unsigned channels typing with 403", async () => {
+		const response = await SELF.fetch("https://example.com/channels/typing", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ conversation: "slack:T1:dm:D1", on: true }),
+		});
+		expect(response.status).toBe(403);
+	});
+
+	it("signed channels typing reaches the handler (400: no workspace)", async () => {
+		const bubble = await mintBubble();
+		const body = JSON.stringify({ conversation: "slack:T1:dm:D1:thread:1.2", on: true });
+		const headers = await bubbleHeaders(
+			bubble.bubble_id, bubble.bubble_key, "POST", "/channels/typing", body,
+		);
+		const response = await SELF.fetch("https://example.com/channels/typing", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...headers },
+			body,
+		});
+		expect(response.status).toBe(400);
+		const data = await response.json() as { error: string };
+		expect(data.error).toContain("bot token");
+	});
+
+	it("rejects unsigned channels history with 403", async () => {
+		const response = await SELF.fetch(
+			"https://example.com/channels/history?conversation=slack%3AT1%3Adm%3AD1&limit=5",
+		);
+		expect(response.status).toBe(403);
+	});
+
+	// The GET signature covers the full path INCLUDING the query string, with
+	// an empty body.
+	it("signed channels history reaches the handler (400: no workspace)", async () => {
+		const bubble = await mintBubble();
+		const path = "/channels/history?conversation=slack%3AT1%3Adm%3AD1%3Athread%3A1.2&limit=5";
+		const headers = await bubbleHeaders(
+			bubble.bubble_id, bubble.bubble_key, "GET", path, "",
+		);
+		const response = await SELF.fetch(`https://example.com${path}`, { headers });
+		expect(response.status).toBe(400);
+		const data = await response.json() as { error: string };
+		expect(data.error).toContain("bot token");
+	});
 });
 
 
