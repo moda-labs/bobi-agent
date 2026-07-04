@@ -199,6 +199,10 @@ def build_agent_cfg(state: SetupState, catalog=None) -> dict:
         "agent": derive_team_name(state),
         "version": "0.1.0",
         "entry_point": compute_entry_point(state),
+        # The setup ingress wizard writes verified public ingress to
+        # BOBI_EVENT_SERVER. Keep the generated config wired to that optional
+        # env var so public webhook setup takes effect without breaking the
+        # default local-only flow when it is unset.
         "event_server": "${BOBI_EVENT_SERVER:-}",
     }
     svcs = build_service_records(state, catalog)

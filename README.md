@@ -185,7 +185,9 @@ GitHub, Linear), use the **Webhook ingress** row in `bobi setup`'s Connections
 card. It can keep the team local-only, verify a quick tunnel such as
 cloudflared/ngrok to `localhost:8080`, or save a durable HTTPS event server
 (`BOBI_EVENT_SERVER`) such as the shared Bobi cloud Worker or your own
-Cloudflare Worker.
+Cloudflare Worker. Setup-authored `agent.yaml` files reference that optional
+environment variable so verified public ingress is used when present, while an
+unset value leaves the automatic local event server path unchanged.
 
 ### Talk to your agent from Slack (optional)
 
