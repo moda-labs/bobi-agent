@@ -117,6 +117,13 @@ jobs:
   integration-fast:
     name: Integration tests (no Claude)
     runs-on: ubuntu-latest
+    env:
+      # hf-xet can hang indefinitely on unauthenticated GitHub runners.
+      # Use the regular Hub download path and cap each file transfer so CI
+      # fails fast instead of reaching GitHub's 6h cancellation limit.
+      HF_HUB_DISABLE_XET: "1"
+      HF_HUB_DOWNLOAD_TIMEOUT: "120"
+      FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.fastembed-cache
     steps:
       - uses: actions/checkout@v5
 
@@ -139,7 +146,8 @@ jobs:
         # The KB sidecar downloads all-MiniLM-L6-v2 on first use.
         # Pre-cache it so the 30s sidecar startup timeout isn't racing
         # a model download over a variable-speed network.
-        run: python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2')"
+        timeout-minutes: 10
+        run: python -c "import os; from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2', cache_dir=os.environ['FASTEMBED_CACHE_PATH'])"
 
       - name: Run all non-Claude integration tests
         # Tests that need the claude CLI skip via requires_claude.
