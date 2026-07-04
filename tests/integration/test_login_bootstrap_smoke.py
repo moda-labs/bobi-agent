@@ -101,10 +101,18 @@ def _generate_adapter_event(code: str, channel: str) -> dict:
     driver = textwrap.dedent(
         """
         const esbuild = require("esbuild");
-        const fs = require("fs");
-        const src = fs.readFileSync(process.argv[1], "utf8");
-        // Transpile the REAL adapter (TS type-erasure only) and run its logic.
-        const out = esbuild.transformSync(src, { loader: "ts", format: "esm" }).code;
+        // BUNDLE the REAL adapter (not just type-erase it) so its own sibling
+        // imports resolve and run: slack.ts imports ../conversation, which a
+        // bare `data:` URL module cannot resolve (ERR_UNSUPPORTED_RESOLVE_REQUEST).
+        // Bundling inlines those deps, so normalizeSlackWebhook runs its actual
+        // logic - the whole point of generating the event from the adapter.
+        const out = esbuild.buildSync({
+          entryPoints: [process.argv[1]],
+          bundle: true,
+          format: "esm",
+          platform: "node",
+          write: false,
+        }).outputFiles[0].text;
         const mod = "data:text/javascript;base64," + Buffer.from(out).toString("base64");
         import(mod).then((m) => {
           // A genuine Slack event_callback webhook for a DM carrying the code.
