@@ -323,12 +323,13 @@
   // Two ways in: start from a registry "template" (download + reverse-fill,
   // non-lossy edit) or design a new team from scratch (auto-named in chat).
   // Modify-an-existing-team will return later in a different shape.
-  let introRegistry = null, introBase = "bobi", introLoc = "";
+  let introRegistry = null, introBase = "bobi", introLoc = "", introLocChanged = false;
   async function renderIntro() {
     setPanes("1fr");
     const data = await getJSON("/api/intro");
     introBase = data.default_location || introBase;
     introLoc = introBase;
+    introLocChanged = false;
     drawIntro();
     loadTemplates();
   }
@@ -408,7 +409,8 @@
   function wireIntro() {
     const lc = $("#loc-change");
     if (lc) lc.addEventListener("click", () => openFolderPicker(p => {
-      introLoc = p; const lp = $("#loc-path"); if (lp) { lp.textContent = p; lp.title = p; }
+      introLoc = p; introLocChanged = true;
+      const lp = $("#loc-path"); if (lp) { lp.textContent = p; lp.title = p; }
     }));
   }
   // Shared start path: disables the clicked control, posts, advances on success.
@@ -1793,8 +1795,17 @@
     if (tmpl) {
       if (!tmpl.disabled) {
         const name = tmpl.dataset.template;
-        startTeam({ mode: "registry", team: name,
-          location: introLoc.replace(/\/+$/, "") + "/" + name }, tmpl, "Downloading…");
+        // At the default location the server picks the template's own library
+        // slot (agents/<name>/src). Appending the name to .../new-agent/src
+        // here would bury the team one level deeper than the home scan reads.
+        // A user-chosen folder is a container: the template lands in a child
+        // named after it.
+        const body = { mode: "registry", team: name };
+        // slugify the child folder: the name comes from the registry (possibly
+        // third-party) and must not steer the path (e.g. "../..").
+        if (introLocChanged)
+          body.location = introLoc.replace(/\/+$/, "") + "/" + (slugify(name) || "team");
+        startTeam(body, tmpl, "Downloading…");
       }
       return;
     }
