@@ -98,14 +98,17 @@ turn, then reads a handoff file. This is the only step type that uses the LLM.
 1800) is the declared deadline carried into the registry for the reconciler's
 dead-man check.
 
-`model` is optional. When omitted, prompt steps use the team default configured
-in `agent.yaml` under `brain.model` or the provider default when no model is
-configured:
+`model` is optional. When omitted, a prompt step uses the acting role's
+configured model (`roles.<role>.model` in `agent.yaml`), then the team default
+(`brain.model`), then the provider default. An explicit `--model` on
+`subagents launch` wins over all of them for the whole run:
 
 ```yaml
 brain:
   kind: codex
   model: gpt-5-codex
+roles:
+  prospect-targeter: {model: gpt-5-mini}
 ```
 
 Set `model` on an individual prompt step when that step should use a different

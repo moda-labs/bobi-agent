@@ -73,6 +73,49 @@ class TestDeterministicBodies:
         assert slack["credentials"]["bot_token"] == "${SLACK_BOT_TOKEN}"
         assert slack["events"] is True
 
+    def test_monitor_role_defaults_to_cheap_model(self):
+        # Generated packs put monitor checks on a cheap model by default
+        # (#617, #549 Part A). Setup output runs on the default Claude
+        # brain, so the alias is always valid.
+        cfg = yaml.safe_load(build_agent_yaml(_spec_state()))
+        assert cfg["roles"] == {"monitor": {"model": "haiku"}}
+
+    def test_merge_preserves_hand_written_roles(self):
+        from bobi.setup.authoring import merge_agent_yaml
+        existing = (
+            "agent: triage-bot\nentry_point: triage-lead\n"
+            "roles:\n  monitor:\n    model: opus\n"
+        )
+        merged = yaml.safe_load(merge_agent_yaml(existing, _spec_state()))
+        assert merged["roles"] == {"monitor": {"model": "opus"}}
+
+    def test_merge_adds_monitor_default_to_existing_roles_block(self):
+        # Per-key union (like mcp_servers): a hand-written roles block
+        # missing the monitor entry still gains the cheap default
+        # (#617 review finding).
+        from bobi.setup.authoring import merge_agent_yaml
+        existing = (
+            "agent: triage-bot\nentry_point: triage-lead\n"
+            "roles:\n  reviewer:\n    model: opus\n"
+        )
+        merged = yaml.safe_load(merge_agent_yaml(existing, _spec_state()))
+        assert merged["roles"] == {
+            "reviewer": {"model": "opus"},
+            "monitor": {"model": "haiku"},
+        }
+
+    def test_merge_skips_monitor_default_for_non_claude_brain(self):
+        # `haiku` is a Claude alias; injecting it into a codex pack would
+        # break every monitor check (#617 review finding).
+        from bobi.setup.authoring import merge_agent_yaml
+        existing = (
+            "agent: triage-bot\nentry_point: triage-lead\n"
+            "brain:\n  kind: codex\n"
+        )
+        merged = yaml.safe_load(merge_agent_yaml(existing, _spec_state()))
+        assert "roles" not in merged
+        assert merged["brain"] == {"kind": "codex"}
+
     def test_venn_services_declare_the_shared_key(self):
         # A team using Venn-backed services must declare venn_api_key so
         # Named start resolves it from the env / .env (else preflight

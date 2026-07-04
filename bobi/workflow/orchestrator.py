@@ -159,8 +159,13 @@ def run_workflow(
     interactive: bool = True,
     role: str = "",
     input_fields: dict | None = None,
+    model: str = "",
 ) -> bool:
-    """Execute a workflow end-to-end with a single agent session."""
+    """Execute a workflow end-to-end with a single agent session.
+
+    ``model`` is an explicit launch override: like ``--role``, it wins over
+    every step-level and config-level model for the whole run.
+    """
     run_key = run_key or "adhoc"
     requested_by = requested_by or {}
     started_at = time.time()
@@ -209,6 +214,7 @@ def run_workflow(
         _run_workflow_async(
             workflow, task, repo, work_cwd, run_key, session_name,
             registry, ctx, requested_by, timeout, interactive, role=role,
+            launch_model=model,
         )
     )
 
@@ -286,11 +292,21 @@ def resume_workflow(
         "text": f"Workflow {workflow.name} resumed for {run_key}",
     })
 
+    # A launch-time --model override survives suspension via the _runtime
+    # scope; without it the resume would re-resolve to the config default,
+    # trip the model-mismatch guard, and both discard the saved session and
+    # silently change the run's model.
+    runtime_scope = run.variable_scopes.get("_runtime", {})
+    launch_model = (
+        str(runtime_scope.get("launch_model", "") or "")
+        if isinstance(runtime_scope, dict) else ""
+    )
+
     success = asyncio.run(
         _run_workflow_async(
             workflow, f"Resuming workflow from step {step_idx}", repo, cwd,
             run_key, session_name, registry, ctx, requested_by, timeout,
-            interactive, start_step=step_idx,
+            interactive, start_step=step_idx, launch_model=launch_model,
         )
     )
 
@@ -333,9 +349,10 @@ async def _run_workflow_async(
     interactive: bool = True,
     start_step: int = 0,
     role: str = "",
+    launch_model: str = "",
 ) -> bool:
     """Async core: one brain session for all steps."""
-    from bobi.brain import get_brain, get_process_brain_model
+    from bobi.brain import get_brain, get_process_brain_model, resolve_model
 
     _brain = get_brain()
     saved_id = load_session_id(session_name)
@@ -344,11 +361,22 @@ async def _run_workflow_async(
     from bobi.prompts.resolver import resolve_agent_prompt
 
     project_root = _find_project_root(cwd)
+    from bobi.config import Config
+    try:
+        team_cfg = Config.load(project_root)
+    except Exception:
+        team_cfg = None
 
     def _effective_step_model(step: StepDef | None) -> str:
+        # Launch flag > step override > acting role's configured model >
+        # team default (#617). The acting role mirrors prompt resolution:
+        # a forced --role wins, else the step's agent, else the inherited one.
+        if launch_model:
+            return launch_model
         if step and step.model:
             return step.model
-        return get_process_brain_model()
+        step_role = role or ((step.agent if step else "") or current_agent)
+        return resolve_model(team_cfg, role=step_role)
 
     def _is_prompt_step(step: StepDef) -> bool:
         return not (
@@ -445,12 +473,17 @@ async def _run_workflow_async(
         fresh_resume_step = first_prompt_step
     elif (
         saved_id and start_step > 0 and not saved_session_model
-        and first_prompt_step and first_prompt_step.model
+        and first_prompt_model
+        and first_prompt_model != get_process_brain_model()
     ):
+        # No recorded model means the run was suspended before models were
+        # tracked, i.e. it ran on the process default. Any effective model
+        # that differs from that default - explicit step model OR a
+        # role-derived one - must not resume the old session.
         log.info(
-            "Saved workflow session has no recorded model and next step has "
-            "explicit model %r; starting a fresh session.",
-            first_prompt_step.model,
+            "Saved workflow session has no recorded model and next step "
+            "resolves to model %r; starting a fresh session.",
+            first_prompt_model,
         )
         saved_id = ""
         current_model = first_prompt_model
@@ -615,6 +648,7 @@ async def _run_workflow_async(
                 run.session_name = session_name
                 ctx.set_scope("_runtime", {
                     "model": current_model,
+                    "launch_model": launch_model,
                     "visits": visit_counts,
                 })
                 run.variable_scopes = ctx.scopes

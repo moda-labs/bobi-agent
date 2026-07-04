@@ -26,11 +26,32 @@ nothing more.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 
-# A generous default: a first stdio launch may resolve dependencies (npx/uvx
-# download) before the server answers initialize. Mirrors setup/mcp_probe.
+# A first stdio launch may resolve dependencies (npx/uvx download) before the
+# server answers initialize. Keep the standalone handshake default unchanged,
+# while the agent startup preflight uses the separate 10s ceiling shared with
+# validate's MCP poll loop.
+PREFLIGHT_TIMEOUT_ENV = "BOBI_MCP_PREFLIGHT_TIMEOUT"
+PREFLIGHT_DEFAULT_TIMEOUT = 10.0
 DEFAULT_TIMEOUT = 20.0
+
+
+def preflight_timeout(default: float = PREFLIGHT_DEFAULT_TIMEOUT) -> float:
+    """Configured MCP preflight timeout in seconds.
+
+    Invalid, empty, zero, or negative values fall back to the caller's default
+    so a typo in the environment does not accidentally disable startup checks.
+    """
+    raw = os.environ.get(PREFLIGHT_TIMEOUT_ENV)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if math.isfinite(value) and value > 0 else default
 
 
 async def _handshake(read, write) -> list[str]:
@@ -94,7 +115,7 @@ async def probe_server(name: str, spec: dict,
         return {"name": name, "status": "connected", "tools": tools, "error": None}
     except asyncio.TimeoutError:
         return {"name": name, "status": "failed", "tools": [],
-                "error": f"timed out after {int(timeout)}s"}
+                "error": f"timed out after {timeout:g}s"}
     except Exception as e:  # noqa: BLE001 — surface any launch/handshake failure
         return {"name": name, "status": "failed", "tools": [],
                 "error": str(e) or type(e).__name__}

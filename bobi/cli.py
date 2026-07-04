@@ -1458,19 +1458,13 @@ def ask(question, timeout, source):
         raise SystemExit(1)
 
 
-@main.command("slack-reply")
-@click.argument("text")
-@click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
-@click.option("--channel", "-c", required=True, help="Slack channel ID (e.g. D0B51JP1N4C)")
-@click.option("--thread", "-t", default="", help="Thread timestamp to reply in")
-@click.option("--edit", "edit_ts", default="", help="Placeholder message ts to edit instead of posting new")
-def slack_reply(text, workspace, channel, thread, edit_ts):
-    """Post a message to Slack. Used by the manager to reply to Slack events.
+def _slack_reply_send(channel, thread, edit_ts, text, scope=""):
+    """Post or edit a Slack message with the locally configured bot token.
 
-    Usage:
-        bobi slack-reply -w T0952RZRZ0X -c D0B51JP1N4C "Hello"
-        bobi slack-reply -w T0952RZRZ0X -c C123 -t 1780165787.159589 "Thread reply"
-        bobi slack-reply -w T0952RZRZ0X -c C123 -t 171.42 --edit 171.99 "Real response"
+    Shared send path behind both ``slack-reply`` and the channel-agnostic
+    ``reply`` (#618). *scope* is the conversation ref's workspace id, used
+    only to explain failures: the local token is not validated against it,
+    so a cross-workspace ref fails at the Slack API. Exits on failure.
     """
     import httpx
 
@@ -1500,10 +1494,71 @@ def slack_reply(text, workspace, channel, thread, edit_ts):
             click.echo(f"Sent to {channel}")
     except RuntimeError as e:
         click.echo(str(e), err=True)
+        if scope:
+            click.echo(
+                f"(conversation is scoped to workspace {scope}; the locally "
+                "configured slack bot token must belong to that workspace)",
+                err=True,
+            )
         sys.exit(1)
     except (httpx.HTTPError, OSError, TimeoutError) as e:
         click.echo(f"Failed: {e}", err=True)
         sys.exit(1)
+
+
+@main.command("reply")
+@click.argument("conversation")
+@click.argument("text", required=False)
+@click.option("--edit", "edit_ref", default="", help="Message ref (ts) to edit instead of posting new")
+def reply(conversation, text, edit_ref):
+    """Reply into a conversation, on whatever chat channel it came from.
+
+    CONVERSATION is the ``conversation`` reference carried on the inbound
+    event - echo it back verbatim. Reads TEXT from stdin when omitted.
+
+    Usage:
+        bobi reply slack:T0952RZRZ0X:dm:D0B51JP1N4C "Hello"
+        bobi reply slack:T0952RZRZ0X:channel:C123:thread:171.42 "Thread reply"
+        bobi reply slack:T0952RZRZ0X:channel:C123:thread:171.42 --edit 171.99 "Real response"
+    """
+    from .conversation import parse_conversation
+
+    conv = parse_conversation(conversation)
+    if conv is None:
+        click.echo(f"Invalid conversation reference: {conversation}", err=True)
+        sys.exit(1)
+    if conv.source != "slack":
+        click.echo(f"Unsupported channel: {conv.source}", err=True)
+        sys.exit(1)
+
+    if text is None:
+        # Fail fast on an interactive terminal instead of blocking on EOF.
+        if sys.stdin.isatty():
+            click.echo("No text to send (pass TEXT or pipe via stdin)", err=True)
+            sys.exit(1)
+        text = click.get_text_stream("stdin").read().rstrip("\n")
+    if not text.strip():
+        click.echo("No text to send (pass TEXT or pipe via stdin)", err=True)
+        sys.exit(1)
+
+    _slack_reply_send(conv.chat_id, conv.thread_id, edit_ref, text, scope=conv.scope)
+
+
+@main.command("slack-reply")
+@click.argument("text")
+@click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
+@click.option("--channel", "-c", required=True, help="Slack channel ID (e.g. D0B51JP1N4C)")
+@click.option("--thread", "-t", default="", help="Thread timestamp to reply in")
+@click.option("--edit", "edit_ts", default="", help="Placeholder message ts to edit instead of posting new")
+def slack_reply(text, workspace, channel, thread, edit_ts):
+    """Post a message to Slack. Used by the manager to reply to Slack events.
+
+    Usage:
+        bobi slack-reply -w T0952RZRZ0X -c D0B51JP1N4C "Hello"
+        bobi slack-reply -w T0952RZRZ0X -c C123 -t 1780165787.159589 "Thread reply"
+        bobi slack-reply -w T0952RZRZ0X -c C123 -t 171.42 --edit 171.99 "Real response"
+    """
+    _slack_reply_send(channel, thread, edit_ts, text)
 
 
 @main.command("slack-upload-file")
@@ -2831,7 +2886,10 @@ main.add_command(event_server_cmd)
               help="Keep the agent alive after initial task, accepting inbox messages")
 @click.option("--subscribe", multiple=True,
               help="Subscribe to event topics (e.g. moda-labs/bobi-agent, slack:T123)")
-def subagents_launch(workflow, role, run_key, task, timeout, wait, post_event, requested_by, non_interactive, persistent, subscribe):
+@click.option("--model", default="",
+              help="Model override for this launch (provider-native, e.g. haiku, "
+                   "opus, or a full model ID). Wins over step and role config.")
+def subagents_launch(workflow, role, run_key, task, timeout, wait, post_event, requested_by, non_interactive, persistent, subscribe, model):
     """Launch a sub-agent with a workflow and role.
 
     Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
@@ -2848,11 +2906,13 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, post_event, r
                     requested_by=requested_by,
                     interactive=not non_interactive,
                     persistent=persistent,
-                    subscribe=list(subscribe))
+                    subscribe=list(subscribe),
+                    model=model)
 
 
 def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait, post_event,
-                    requested_by, interactive=True, persistent=False, subscribe=None):
+                    requested_by, interactive=True, persistent=False, subscribe=None,
+                    model=""):
     """Dispatch logic for the agent command."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
@@ -2899,6 +2959,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait, post_e
         persistent=persistent,
         subscribe=subscribe or [],
         run_key=run_key,
+        model=model,
     )
     click.echo(f"Agent started: {session_name}")
 

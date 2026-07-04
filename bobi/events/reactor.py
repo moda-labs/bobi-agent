@@ -41,6 +41,7 @@ class AutoDispatchRule:
     # Track stable ids without launching a workflow. The first delivery reaches
     # the director; redeliveries are dropped by the drain loop.
     dedup_only: bool = False
+    task: str | None = None
 
     def matches(self, event: dict) -> bool:
         """Return True if the event matches this rule's type and field conditions."""
@@ -146,6 +147,12 @@ class EventReactor:
         """Build a reactor from the auto_dispatch config list."""
         rules = []
         for entry in config:
+            task = entry.get("task")
+            if task is not None and not isinstance(task, str):
+                event = entry.get("event", "<unknown>")
+                raise TypeError(
+                    f"auto_dispatch rule for {event} has non-string task template"
+                )
             rules.append(AutoDispatchRule(
                 event=entry["event"],
                 workflow=entry.get("workflow", ""),
@@ -154,6 +161,7 @@ class EventReactor:
                 suppress=entry.get("suppress", False),
                 allow_self_authored=entry.get("allow_self_authored", False),
                 dedup_only=entry.get("dedup_only", False),
+                task=task,
             ))
         return cls(rules=rules, cwd=cwd, self_login=self_login)
 
@@ -224,8 +232,6 @@ class EventReactor:
         repo = topics[0].removeprefix("github:") if topics else "unknown"
         event_type = event.get("type", "")
 
-        task = self._build_task(rule, event_type, fields, number, repo)
-
         # Pass event fields into the workflow's input scope so native
         # actions and route conditions can resolve ${{ input.* }} variables.
         input_fields = {
@@ -234,6 +240,9 @@ class EventReactor:
             "pr_number": number,
         }
         input_fields.update(fields)
+
+        task = self._build_task(rule, event_type, fields, number, repo,
+                                input_fields)
 
         # Deterministic per-comment launch key (issue #411) — see run_key().
         run_key = rule.run_key(event)
@@ -268,8 +277,15 @@ class EventReactor:
 
     @staticmethod
     def _build_task(rule: AutoDispatchRule, event_type: str, fields: dict,
-                    number, repo: str) -> str:
+                    number, repo: str, input_fields: dict) -> str:
         """Build a human-readable task description from event context."""
+        if rule.task is not None:
+            from bobi.workflow.variables import VariableContext
+
+            ctx = VariableContext()
+            ctx.set_scope("input", input_fields)
+            return ctx.resolve(rule.task)
+
         action = fields.get("action", "")
 
         # PR closed (merged or abandoned)

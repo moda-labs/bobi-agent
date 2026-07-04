@@ -220,6 +220,12 @@ def build_agent_cfg(state: SetupState, catalog=None) -> dict:
         cfg["venn_api_key"] = "${VENN_API_KEY}"
     if state.chat and state.chat != "cli":
         cfg["chat"] = state.chat
+    # Monitor checks are frequent observe-and-report runs - default them to a
+    # cheap model instead of inheriting the manager's (#617, #549 Part A).
+    # `haiku` is a Claude alias: valid here because build_agent_cfg never
+    # emits a brain: key (fresh packs run the default Claude brain), and
+    # merge_agent_yaml skips this default for packs on another brain.
+    cfg["roles"] = {"monitor": {"model": "haiku"}}
     return cfg
 
 
@@ -245,6 +251,18 @@ def merge_agent_yaml(existing_text: str, state: SetupState, catalog=None) -> str
     cfg.setdefault("version", managed.get("version", "0.1.0"))
     cfg["entry_point"] = managed["entry_point"]
     cfg.setdefault("event_server", managed["event_server"])
+    # Union roles per-key (like mcp_servers below): keep every hand-written
+    # role entry, add only the ones setup manages. Skip the injection entirely
+    # for packs on a non-Claude brain - the managed default is a Claude alias
+    # and would be an invalid model id for e.g. codex.
+    existing_brain = cfg.get("brain") if isinstance(cfg.get("brain"), dict) else {}
+    if str(existing_brain.get("kind", "") or "") in ("", "claude"):
+        existing_roles = cfg.get("roles") if isinstance(cfg.get("roles"), dict) else {}
+        merged_roles = dict(existing_roles)
+        for k, v in (managed.get("roles") or {}).items():
+            merged_roles.setdefault(k, v)
+        if merged_roles:
+            cfg["roles"] = merged_roles
     if managed.get("venn_api_key"):
         cfg.setdefault("venn_api_key", managed["venn_api_key"])
     # Union services by name: keep every existing entry untouched, append only

@@ -90,6 +90,51 @@ class TestCheckEntryPoint:
         assert "defaulting" in result.detail
 
 
+class TestCheckRoles:
+    """roles: misconfiguration fails silently at runtime, so validate must
+    surface it (#617 review finding)."""
+
+    def _check(self, cfg, tmp_path):
+        from bobi.validate import _check_roles
+        return _check_roles(cfg, tmp_path)
+
+    def test_valid_roles_pass(self, tmp_path):
+        (tmp_path / "package" / "roles" / "reviewer").mkdir(parents=True)
+        cfg = Config(roles={"reviewer": {"model": "opus"},
+                            "monitor": {"model": "haiku"}})
+        assert self._check(cfg, tmp_path) == []
+
+    def test_non_dict_entry_warns(self, tmp_path):
+        cfg = Config(roles={"reviewer": "opus"})
+        results = self._check(cfg, tmp_path)
+        assert len(results) == 1
+        assert not results[0].ok
+        assert not results[0].required  # warning, not blocking
+        assert "must be a mapping" in results[0].detail
+
+    def test_unknown_role_name_warns(self, tmp_path):
+        (tmp_path / "package" / "roles" / "reviewer").mkdir(parents=True)
+        cfg = Config(roles={"moniter": {"model": "haiku"}})  # typo
+        results = self._check(cfg, tmp_path)
+        assert len(results) == 1
+        assert not results[0].ok
+        assert not results[0].required
+        assert "unknown role" in results[0].detail
+        assert "monitor" in results[0].hint  # built-in listed as known
+
+    def test_monitor_is_builtin_even_without_role_dir(self, tmp_path):
+        (tmp_path / "package" / "roles" / "reviewer").mkdir(parents=True)
+        cfg = Config(roles={"monitor": {"model": "haiku"}})
+        assert self._check(cfg, tmp_path) == []
+
+    def test_no_role_dirs_skips_name_check(self, tmp_path):
+        cfg = Config(roles={"anything": {"model": "haiku"}})
+        assert self._check(cfg, tmp_path) == []
+
+    def test_empty_roles_pass(self, tmp_path):
+        assert self._check(Config(), tmp_path) == []
+
+
 class TestCheckServiceCredentials:
 
     def test_slack_with_token(self):

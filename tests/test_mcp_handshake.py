@@ -117,6 +117,17 @@ def test_probe_timeout_becomes_failed(monkeypatch):
     assert "timed out" in out["error"]
 
 
+def test_preflight_timeout_reads_env(monkeypatch):
+    monkeypatch.setenv("BOBI_MCP_PREFLIGHT_TIMEOUT", "60")
+    assert mcp_handshake.preflight_timeout() == 60.0
+
+
+def test_preflight_timeout_rejects_invalid_values(monkeypatch):
+    for value in ("", "nope", "0", "-1", "inf", "-inf", "nan"):
+        monkeypatch.setenv("BOBI_MCP_PREFLIGHT_TIMEOUT", value)
+        assert mcp_handshake.preflight_timeout(default=12.0) == 12.0
+
+
 # --- probe_servers (fan-out) ------------------------------------------------
 
 
@@ -128,6 +139,20 @@ def test_probe_servers_returns_get_mcp_status_shape(monkeypatch):
     out = asyncio.run(mcp_handshake.probe_servers(
         {"a": {"command": "/a"}, "b": {"command": "/b"}}))
     assert set(s["name"] for s in out["mcpServers"]) == {"a", "b"}
+
+
+def test_probe_servers_default_timeout_stays_standalone_default(monkeypatch):
+    seen = []
+
+    async def _fake_one(name, spec, timeout, env):
+        seen.append(timeout)
+        return {"name": name, "status": "connected", "tools": [], "error": None}
+
+    monkeypatch.setenv("BOBI_MCP_PREFLIGHT_TIMEOUT", "60")
+    monkeypatch.setattr(mcp_handshake, "probe_server", _fake_one)
+    asyncio.run(mcp_handshake.probe_servers(
+        {"a": {"command": "/a"}, "b": {"command": "/b"}}))
+    assert seen == [mcp_handshake.DEFAULT_TIMEOUT, mcp_handshake.DEFAULT_TIMEOUT]
 
 
 def test_probe_servers_empty_is_empty():

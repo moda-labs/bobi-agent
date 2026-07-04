@@ -7,6 +7,10 @@ export interface NormalizedEvent {
 	topics: string[];
 	delivery: "chat" | "bulk";
 	text: string;
+	// Channel-agnostic reply address (#618). Set by chat adapters; the agent
+	// echoes it back verbatim to /channels/send (via `bobi reply`) instead of
+	// assembling platform-specific routing fields. See conversation.ts.
+	conversation?: string;
 	fields?: Record<string, string | number | boolean>;
 	run_key?: string;
 	payload: Record<string, unknown>;
@@ -253,6 +257,11 @@ export function createTopicEvent(
 		topics,
 		delivery: (body.delivery as "chat" | "bulk") || "bulk",
 		text,
+		// Reply address survives publish/forward: an agent re-publishing a chat
+		// event must not strip the field the receiver needs for `bobi reply`.
+		...(typeof body.conversation === "string" && body.conversation
+			? { conversation: body.conversation }
+			: {}),
 		fields: body.fields as Record<string, string | number | boolean> | undefined,
 		run_key: body.run_key as string | undefined,
 		payload,
@@ -268,6 +277,7 @@ export function createTopicEvent(
 import { normalizeGitHubWebhook } from "./adapters/github";
 import { normalizeLinearWebhook } from "./adapters/linear";
 import { normalizeSlackWebhook } from "./adapters/slack";
+import { parseConversation } from "./conversation";
 
 export { normalizeGitHubWebhook as normalizeGitHubPayload } from "./adapters/github";
 export { normalizeLinearWebhook as normalizeLinearPayload } from "./adapters/linear";
@@ -612,16 +622,52 @@ export async function sendSlackMessage(
 ): Promise<SlackSendResult> {
 	const body: Record<string, unknown> = { channel, text };
 	if (threadTs) body.thread_ts = threadTs;
+	return slackApi(botToken, "chat.postMessage", body);
+}
 
-	const resp = await fetch("https://slack.com/api/chat.postMessage", {
+async function slackApi(
+	botToken: string,
+	method: string,
+	payload: Record<string, unknown>,
+): Promise<SlackSendResult> {
+	const resp = await fetch(`https://slack.com/api/${method}`, {
 		method: "POST",
 		headers: {
 			Authorization: `Bearer ${botToken}`,
 			"Content-Type": "application/json",
 		},
-		body: JSON.stringify(body),
+		body: JSON.stringify(payload),
 	});
 	return (await resp.json()) as SlackSendResult;
+}
+
+export async function updateSlackMessage(
+	botToken: string,
+	channel: string,
+	ts: string,
+	text: string,
+): Promise<SlackSendResult> {
+	return slackApi(botToken, "chat.update", { channel, ts, text });
+}
+
+// Clear (or set) the assistant thread status. Used after a gateway edit so
+// the "is thinking..." indicator does not linger until Slack's ~2min expiry.
+// Best-effort: only DM threads support it, so failures are ignored.
+export async function setSlackThreadStatus(
+	botToken: string,
+	channel: string,
+	threadTs: string,
+	status: string,
+): Promise<void> {
+	try {
+		await slackApi(botToken, "assistant.threads.setStatus", {
+			channel_id: channel,
+			thread_ts: threadTs,
+			status,
+		});
+	} catch {
+		// non-fatal
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,6 +1161,38 @@ export function bubbleScopedWorkspaceKey(bubbleId: string, workspaceId: string):
 	return `${bubbleId}:${workspaceId}`;
 }
 
+// Resolve the sending bot's token for an outbound Slack send. Bubble-scoped
+// lookup ONLY - no fallback to the global workspace store. A workspace
+// registered by another bubble (or only inbound-registered) is absent here and
+// yields the same empty result as a truly unknown workspace, so an attacker
+// can't probe which workspaces another bubble registered.
+//
+// Pick the sending bot's token: by app_id, then bot_id, then the single
+// registered bot, then the legacy workspace token. With several bots in a
+// workspace, "the workspace's bot_token" is ambiguous.
+async function resolveSlackSendToken(
+	storage: StorageAdapter,
+	bubbleId: string,
+	workspaceId: string,
+	appId: string,
+	botId: string,
+): Promise<string> {
+	if (!workspaceId) return "";
+	const ws = await storage.getSlackWorkspace(bubbleScopedWorkspaceKey(bubbleId, workspaceId));
+	if (!ws) return "";
+	let botToken = ws.bot_token || "";
+	if (appId && ws.bots?.[appId]) {
+		botToken = ws.bots[appId].bot_token;
+	} else if (botId && ws.bots) {
+		const match = Object.values(ws.bots).find((b) => b.bot_id === botId);
+		if (match) botToken = match.bot_token;
+	} else if (!botToken && ws.bots) {
+		const vals = Object.values(ws.bots);
+		if (vals.length >= 1) botToken = vals[0].bot_token;
+	}
+	return botToken;
+}
+
 // `bubbleId` is the AUTHENTICATED bubble (the entry files reject an unsigned or
 // bad-signature request with 403 before calling this). The Slack credentials
 // are looked up under that bubble's scope only — the outbound tenancy boundary.
@@ -1129,35 +1207,13 @@ export async function handleSlackSend(
 		return { status: 400, body: { error: "channel and text required" } };
 	}
 
-	const workspaceId = body.workspace as string;
-	if (!workspaceId) {
-		return { status: 400, body: { error: "no bot token for workspace" } };
-	}
-
-	// Bubble-scoped lookup ONLY — no fallback to the global workspace store.
-	// A workspace registered by another bubble (or only inbound-registered) is
-	// absent here and returns the same opaque 400 as a truly unknown workspace,
-	// so an attacker can't probe which workspaces another bubble registered.
-	const ws = await storage.getSlackWorkspace(bubbleScopedWorkspaceKey(bubbleId, workspaceId));
-	if (!ws) {
-		return { status: 400, body: { error: "no bot token for workspace" } };
-	}
-
-	// Pick the sending bot's token: by app_id, then bot_id, then the single
-	// registered bot, then the legacy workspace token. With several bots in a
-	// workspace, "the workspace's bot_token" is ambiguous.
-	const appId = (body.app_id as string) || "";
-	const botId = (body.bot_id as string) || "";
-	let botToken = ws.bot_token || "";
-	if (appId && ws.bots?.[appId]) {
-		botToken = ws.bots[appId].bot_token;
-	} else if (botId && ws.bots) {
-		const match = Object.values(ws.bots).find((b) => b.bot_id === botId);
-		if (match) botToken = match.bot_token;
-	} else if (!botToken && ws.bots) {
-		const vals = Object.values(ws.bots);
-		if (vals.length >= 1) botToken = vals[0].bot_token;
-	}
+	const botToken = await resolveSlackSendToken(
+		storage,
+		bubbleId,
+		(body.workspace as string) || "",
+		(body.app_id as string) || "",
+		(body.bot_id as string) || "",
+	);
 	if (!botToken) {
 		return { status: 400, body: { error: "no bot token for workspace" } };
 	}
@@ -1170,6 +1226,76 @@ export async function handleSlackSend(
 	}
 	if (!result.ok) {
 		return { status: 502, body: { ok: false, error: result.error } };
+	}
+	return { status: 200, body: { ok: true, ts: result.ts } };
+}
+
+// Channel-agnostic outbound send (#618): { conversation, text, mode?, edit_ref? }.
+// Parses the conversation reference and delegates to the channel's send
+// machinery - Slack is the only channel today. `mode: "update"` edits the
+// message identified by `edit_ref` (e.g. a placeholder) instead of posting.
+// Same auth contract as handleSlackSend: `bubbleId` is the authenticated
+// bubble, and credentials resolve only under its scope.
+//
+// Text is sent raw: markdown->mrkdwn conversion lives client-side
+// (bobi/slack.py format_slack_message), matching /slack/send. The Phase 2
+// Chat SDK migration (#190) moves conversion into the gateway; until then
+// callers must convert before POSTing.
+export async function handleChannelsSend(
+	storage: StorageAdapter,
+	body: Record<string, unknown>,
+	bubbleId: string,
+): Promise<HandlerResult> {
+	const ref = body.conversation;
+	const text = body.text;
+	// Explicit string checks: a non-string conversation (array, number) must
+	// be a 400, not a TypeError escaping the handler as a 500.
+	if (typeof ref !== "string" || !ref || typeof text !== "string" || !text) {
+		return { status: 400, body: { error: "conversation and text required" } };
+	}
+	const conv = parseConversation(ref);
+	if (!conv) {
+		return { status: 400, body: { error: "invalid conversation reference" } };
+	}
+	if (conv.source !== "slack") {
+		return { status: 400, body: { error: `unsupported channel: ${conv.source}` } };
+	}
+
+	const mode = (body.mode as string) || "post";
+	if (mode !== "post" && mode !== "update") {
+		return { status: 400, body: { error: `invalid mode: ${mode}` } };
+	}
+	const editRef = (body.edit_ref as string) || "";
+	if (mode === "update" && !editRef) {
+		return { status: 400, body: { error: "edit_ref required for mode: update" } };
+	}
+
+	const botToken = await resolveSlackSendToken(
+		storage,
+		bubbleId,
+		conv.scope,
+		(body.app_id as string) || "",
+		(body.bot_id as string) || "",
+	);
+	if (!botToken) {
+		return { status: 400, body: { error: "no bot token for workspace" } };
+	}
+
+	let result;
+	try {
+		result = mode === "update"
+			? await updateSlackMessage(botToken, conv.chatId, editRef, text)
+			: await sendSlackMessage(botToken, conv.chatId, text, conv.threadId);
+	} catch (err) {
+		return { status: 502, body: { ok: false, error: String(err) } };
+	}
+	if (!result.ok) {
+		return { status: 502, body: { ok: false, error: result.error } };
+	}
+	// Replacing a placeholder must also clear the "is thinking..." status the
+	// placeholder flow set, matching the CLI edit path (slack-reply --edit).
+	if (mode === "update" && conv.threadId) {
+		await setSlackThreadStatus(botToken, conv.chatId, conv.threadId, "");
 	}
 	return { status: 200, body: { ok: true, ts: result.ts } };
 }

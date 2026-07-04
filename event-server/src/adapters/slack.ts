@@ -1,6 +1,7 @@
 import type { NormalizedEvent, SlackNormalizationResult } from "../core";
+import { slackConversation } from "../conversation";
 
-function escapeRegExp(value: string): string {
+export function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
@@ -137,6 +138,10 @@ export function normalizeSlackWebhook(
 	if (botId) fields.bot_id = botId;
 	if (files.length > 0) fields.files = JSON.stringify(files);
 
+	// Channel-agnostic reply address (#618). Anchoring policy lives in
+	// slackConversation so both normalizers cannot diverge.
+	const conversation = slackConversation(teamId, channel, channelType, ts, threadTs);
+
 	return {
 		event: {
 			v: 2,
@@ -146,6 +151,7 @@ export function normalizeSlackWebhook(
 			topics,
 			delivery: "chat",
 			text: rawText,
+			...(conversation ? { conversation } : {}),
 			fields,
 			timestamp: new Date().toISOString(),
 			payload: {

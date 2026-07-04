@@ -128,6 +128,42 @@ def test_config_parses_brain(tmp_path):
     assert Config.load(tmp_path).brain_model == ""
 
 
+def test_config_parses_roles(tmp_path):
+    """agent.yaml `roles:` round-trips into Config + the role_model helper."""
+    from bobi.config import Config
+    from bobi import paths
+
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text(
+        "agent: t\nroles:\n  monitor:\n    model: haiku\n  planner: {}\n"
+    )
+    cfg = Config.load(tmp_path)
+    assert cfg.role_model("monitor") == "haiku"
+    assert cfg.role_model("planner") == ""      # role entry without a model
+    assert cfg.role_model("engineer") == ""     # unknown role
+    # Absent roles → empty mapping, everything falls through.
+    paths.agent_yaml_path(tmp_path).write_text("agent: t\n")
+    assert Config.load(tmp_path).role_model("monitor") == ""
+
+
+def test_resolve_model_precedence(monkeypatch):
+    """explicit > roles.<role>.model > process default > "" (#617)."""
+    from bobi.brain import resolve_model
+    from bobi.config import Config
+
+    cfg = Config(roles={"monitor": {"model": "haiku"}})
+
+    assert resolve_model(cfg, role="monitor", explicit="opus") == "opus"
+    assert resolve_model(cfg, role="monitor") == "haiku"
+    assert resolve_model(cfg, role="engineer") == ""   # unconfigured → unchanged
+    assert resolve_model(None, role="monitor") == ""
+
+    monkeypatch.setenv("BOBI_BRAIN_MODEL", "sonnet")
+    assert resolve_model(cfg, role="monitor") == "haiku"    # role beats team default
+    assert resolve_model(cfg, role="engineer") == "sonnet"  # falls to team default
+    assert resolve_model(None) == "sonnet"
+
+
 def test_claude_brain_uses_env_model_default(monkeypatch):
     captured = {}
 

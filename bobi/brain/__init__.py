@@ -90,6 +90,24 @@ def resolve_model_option(model: str | None) -> str:
     return str(model or "") or get_process_brain_model()
 
 
+def resolve_model(cfg, role: str | None = None, explicit: str | None = None) -> str:
+    """Resolve the model for an agent launch (#617).
+
+    Precedence: *explicit* (a launch flag or caller override) >
+    ``roles.<role>.model`` from team config > the process default
+    (``brain.model``, pinned as ``BOBI_BRAIN_MODEL``) > "" (the provider
+    default). The role lookup is the only step ``resolve_model_option``
+    does not already own, so everything else delegates to it.
+
+    *cfg* is duck-typed (anything with ``role_model()``) so this module stays
+    import-free of ``bobi.config``.
+    """
+    chosen = str(explicit or "")
+    if not chosen and role and cfg is not None:
+        chosen = cfg.role_model(role)
+    return resolve_model_option(chosen)
+
+
 def pin_process_brain(
     kind: str | None,
     model: str | None,
@@ -162,6 +180,7 @@ __all__ = [
     "get_brain",
     "get_process_brain_model",
     "pin_process_brain",
+    "resolve_model",
     "resolve_model_option",
     "set_process_brain",
     "with_default_model_option",
