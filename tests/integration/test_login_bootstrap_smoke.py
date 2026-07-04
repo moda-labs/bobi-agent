@@ -82,7 +82,7 @@ def _esbuild_dir() -> Path | None:
             ["npm", "install", "--no-audit", "--no-fund", "--silent", "esbuild"],
             cwd=str(cache), check=True, capture_output=True, timeout=180,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutError, OSError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         return None
     if (cache / "node_modules" / "esbuild" / "package.json").exists():
         return cache
@@ -213,6 +213,7 @@ def test_full_bootstrap_smoke_real_event_through_pty(adapter_event, tmp_path, mo
     package = project / "package"
     package.mkdir(parents=True)
     monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("BOBI_BRAIN", "claude")
     (package / "agent.yaml").write_text(
         "agent: test\n"
         "event_server_url: wss://example\n"
