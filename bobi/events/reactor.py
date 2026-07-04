@@ -11,7 +11,6 @@ Rules are defined in agent.yaml under ``auto_dispatch``.
 from __future__ import annotations
 
 import logging
-import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -22,51 +21,6 @@ log = logging.getLogger(__name__)
 
 DEFAULT_COOLDOWN = 1800  # 30 minutes
 _MAX_DEDUP_ENTRIES = 500
-_ACTIONABLE_COMMENT_RE = re.compile(
-    r"\b("
-    r"add|address|adjust|avoid|delete|ensure|fix|handle|implement|include|"
-    r"move|remove|rename|replace|resolve|revert|update|use|must"
-    r")\b",
-    re.IGNORECASE,
-)
-_DIRECT_REQUEST_QUESTION_RE = re.compile(
-    r"\b(?:"
-    r"(?:can|could|would)\s+(?:you|we|this|it)\s+(?:please\s+|pls\s+)?|"
-    r"(?:can|could|would)\s+(?:you|we)\s+(?:please\s+|pls\s+)?make\s+sure\s+|"
-    r"should\s+(?:this|it|we)\s+|"
-    r"(?:please|pls)\s+"
-    r")"
-    r"(?:add|address|adjust|avoid|delete|ensure|fix|handle|implement|include|"
-    r"move|remove|rename|replace|resolve|revert|update|use)\b",
-    re.IGNORECASE,
-)
-_EXPLANATORY_QUESTION_RE = re.compile(
-    r"\b(?:clarify|explain|how|necessary|needed|reason|what|why)\b",
-    re.IGNORECASE,
-)
-
-
-def _is_question_only_comment(fields: dict) -> bool:
-    """Return True when a comment asks only for an answer, not code changes."""
-    text = str(
-        fields.get("comment_body")
-        or fields.get("review_body")
-        or ""
-    ).strip()
-    if "?" not in text:
-        return False
-    for part in re.split(r"(?<=[.!?])\s+", text):
-        part = part.strip()
-        if not part:
-            continue
-        if part.endswith("?"):
-            if _DIRECT_REQUEST_QUESTION_RE.search(part):
-                return False
-            if not _EXPLANATORY_QUESTION_RE.search(part):
-                return False
-        elif _ACTIONABLE_COMMENT_RE.search(part):
-            return False
-    return True
 
 
 @dataclass
@@ -84,17 +38,15 @@ class AutoDispatchRule:
     # rare rule that deliberately reacts to the bot's own action (e.g. pr-closed
     # worktree cleanup on a bot-merged PR) opts back in with allow_self_authored.
     allow_self_authored: bool = False  # opt-in: DO dispatch on the bot's own events
-    # Let question-only comments reach the director, whose standing instruction
-    # is to answer questions directly instead of treating them as change requests.
-    skip_question_only: bool = False
+    # Track stable ids without launching a workflow. The first delivery reaches
+    # the director; redeliveries are dropped by the drain loop.
+    dedup_only: bool = False
 
     def matches(self, event: dict) -> bool:
         """Return True if the event matches this rule's type and field conditions."""
         if event.get("type") != self.event:
             return False
         fields = event.get("fields", {})
-        if self.skip_question_only and _is_question_only_comment(fields):
-            return False
         if not self.match:
             return True
         return all(fields.get(k) == v for k, v in self.match.items())
@@ -201,7 +153,7 @@ class EventReactor:
                 cooldown=entry.get("cooldown", DEFAULT_COOLDOWN),
                 suppress=entry.get("suppress", False),
                 allow_self_authored=entry.get("allow_self_authored", False),
-                skip_question_only=entry.get("skip_question_only", False),
+                dedup_only=entry.get("dedup_only", False),
             ))
         return cls(rules=rules, cwd=cwd, self_login=self_login)
 
@@ -213,6 +165,8 @@ class EventReactor:
             ``"suppressed"`` if the event matched a suppress rule (no
             workflow launched, but the event should be annotated as
             handled so the LLM doesn't act on it),
+            ``"deduped"`` if the event is a duplicate delivery that should
+            not be delivered to the LLM,
             or ``None`` if no rule matched.
         """
         for rule in self.rules:
@@ -231,10 +185,14 @@ class EventReactor:
             now = time.monotonic()
             if key in self._dispatched and now - self._dispatched[key] < rule.cooldown:
                 log.info("Auto-dispatch skipped (cooldown): %s", key)
-                return None
+                return "deduped" if rule.dedup_only else None
 
             self._dispatched[key] = now
             self._prune_dispatched(now)
+
+            if rule.dedup_only:
+                log.info("Auto-dispatch recorded dedup key only: %s", key)
+                return None
 
             if rule.suppress:
                 log.info("Auto-dispatch suppressed (no workflow): %s", key)

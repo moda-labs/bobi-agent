@@ -1,9 +1,7 @@
 """Tests for event reactor — deterministic auto-dispatch of workflows on event match."""
 
 import time
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import patch
 
 from bobi.events.reactor import AutoDispatchRule, EventReactor
 
@@ -99,152 +97,6 @@ class TestAutoDispatchRule:
             "type": "github.pull_request_review_comment",
             "fields": {"number": 10, "sender": "reviewer"},
         }
-        assert rule.matches(event) is True
-
-    def test_question_only_comment_does_not_match_when_guard_enabled(self):
-        rule = AutoDispatchRule(
-            event="github.issue_comment",
-            workflow="pr-feedback",
-            match={"is_pull_request": True},
-            skip_question_only=True,
-        )
-        event = {
-            "type": "github.issue_comment",
-            "fields": {
-                "is_pull_request": True,
-                "comment_body": "@Bobi-Agent why is this necessary?",
-            },
-        }
-
-        assert rule.matches(event) is False
-
-    def test_polite_question_only_comment_does_not_match(self):
-        rule = AutoDispatchRule(
-            event="github.issue_comment",
-            workflow="pr-feedback",
-            match={"is_pull_request": True},
-            skip_question_only=True,
-        )
-        event = {
-            "type": "github.issue_comment",
-            "fields": {
-                "is_pull_request": True,
-                "comment_body": "Could you please explain why this is needed?",
-            },
-        }
-
-        assert rule.matches(event) is False
-
-    def test_direct_request_question_matches(self):
-        rule = AutoDispatchRule(
-            event="github.issue_comment",
-            workflow="pr-feedback",
-            match={"is_pull_request": True},
-            skip_question_only=True,
-        )
-        event = {
-            "type": "github.issue_comment",
-            "fields": {
-                "is_pull_request": True,
-                "comment_body": "Could you please add a regression test?",
-            },
-        }
-
-        assert rule.matches(event) is True
-
-    @pytest.mark.parametrize("body", [
-        "Can we add a regression test?",
-        "Should this handle null?",
-        "Please add a test?",
-        "Can this use a guard clause instead?",
-        "Could it update the caller too?",
-        "Can you make sure this handles null?",
-        "Could you include a regression test?",
-        "Please avoid this pattern?",
-    ])
-    def test_common_actionable_question_requests_match(self, body):
-        rule = AutoDispatchRule(
-            event="github.issue_comment",
-            workflow="pr-feedback",
-            match={"is_pull_request": True},
-            skip_question_only=True,
-        )
-        event = {
-            "type": "github.issue_comment",
-            "fields": {
-                "is_pull_request": True,
-                "comment_body": body,
-            },
-        }
-
-        assert rule.matches(event) is True
-
-    def test_ambiguous_question_dispatches_for_human_triage(self):
-        rule = AutoDispatchRule(
-            event="github.issue_comment",
-            workflow="pr-feedback",
-            match={"is_pull_request": True},
-            skip_question_only=True,
-        )
-        event = {
-            "type": "github.issue_comment",
-            "fields": {
-                "is_pull_request": True,
-                "comment_body": "Should we keep this?",
-            },
-        }
-
-        assert rule.matches(event) is True
-
-    def test_explanatory_use_question_does_not_match(self):
-        rule = AutoDispatchRule(
-            event="github.issue_comment",
-            workflow="pr-feedback",
-            match={"is_pull_request": True},
-            skip_question_only=True,
-        )
-        event = {
-            "type": "github.issue_comment",
-            "fields": {
-                "is_pull_request": True,
-                "comment_body": "Can you explain how to use this?",
-            },
-        }
-
-        assert rule.matches(event) is False
-
-    def test_actionable_comment_matches_when_question_guard_enabled(self):
-        rule = AutoDispatchRule(
-            event="github.issue_comment",
-            workflow="pr-feedback",
-            match={"is_pull_request": True},
-            skip_question_only=True,
-        )
-        event = {
-            "type": "github.issue_comment",
-            "fields": {
-                "is_pull_request": True,
-                "comment_body": "Can you explain this? Also please add a test.",
-            },
-        }
-
-        assert rule.matches(event) is True
-
-    def test_plain_change_request_matches_when_question_guard_enabled(self):
-        rule = AutoDispatchRule(
-            event="github.issue_comment",
-            workflow="pr-feedback",
-            match={"is_pull_request": True},
-            skip_question_only=True,
-        )
-        event = {
-            "type": "github.issue_comment",
-            "fields": {
-                "is_pull_request": True,
-                "comment_body": "Please add a regression test before merging.",
-            },
-        }
-
         assert rule.matches(event) is True
 
     def test_field_condition_missing_field_does_not_match(self):
@@ -746,18 +598,17 @@ class TestEventReactorFromConfig:
         reactor = EventReactor.from_config(config, cwd="/tmp/project")
         assert reactor.rules[0].allow_self_authored is True
 
-    def test_from_config_parses_question_only_guard(self):
-        """skip_question_only lets question-only comments reach the director."""
+    def test_from_config_parses_dedup_only(self):
+        """dedup_only tracks duplicate deliveries without dispatching."""
         config = [
             {
                 "event": "github.issue_comment",
-                "match": {"is_pull_request": True},
-                "workflow": "pr-feedback",
-                "skip_question_only": True,
+                "workflow": "comment-dedup",
+                "dedup_only": True,
             },
         ]
         reactor = EventReactor.from_config(config, cwd="/tmp/project")
-        assert reactor.rules[0].skip_question_only is True
+        assert reactor.rules[0].dedup_only is True
 
     def test_from_config_hygiene_flags_default(self):
         """Self-author skip is on by default (allow_self_authored defaults
@@ -777,6 +628,38 @@ class TestEventReactorFromConfig:
         reactor = EventReactor.from_config(config, cwd="/tmp/project",
                                            self_login="bobi")
         assert reactor.self_login == "bobi"
+
+    @patch("bobi.subagent.launch_agent")
+    def test_dedup_only_records_first_and_dedups_redelivery(self, mock_launch):
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="comment-dedup",
+            match={"is_pull_request": True},
+            cooldown=1800,
+            dedup_only=True,
+            allow_self_authored=True,
+        )
+        reactor = EventReactor(rules=[rule], cwd="/tmp/project",
+                               self_login="bobi")
+        first = {
+            "type": "github.issue_comment",
+            "id": "delivery-1",
+            "topics": ["github:moda-labs/test"],
+            "fields": {
+                "number": 42,
+                "is_pull_request": True,
+                "comment_id": 123,
+                "sender": "bobi",
+            },
+        }
+        redelivery = {
+            **first,
+            "id": "delivery-2",
+        }
+
+        assert reactor.process(first) is None
+        assert reactor.process(redelivery) == "deduped"
+        mock_launch.assert_not_called()
 
 
 class TestConfigAutoDispatch:
@@ -842,7 +725,6 @@ class TestPrFeedbackDispatchHygiene:
                 workflow="pr-feedback",
                 match={"is_pull_request": True},
                 cooldown=cooldown,
-                skip_question_only=True,
             ),
         ]
 
@@ -877,20 +759,6 @@ class TestPrFeedbackDispatchHygiene:
         result = reactor.process(event)
 
         assert result is None
-        time.sleep(0.05)
-        mock_launch.assert_not_called()
-
-    @patch("bobi.subagent.launch_agent")
-    def test_skips_question_only_pr_comment(self, mock_launch):
-        """Question-only PR comments must reach the director answer path."""
-        reactor = EventReactor(rules=self._pr_feedback_rules(), cwd="/tmp",
-                               self_login="bobi")
-        event = self._issue_comment_event(
-            sender="zach",
-            comment_body="@Bobi-Agent can you explain why this change is necessary?",
-        )
-
-        assert reactor.process(event) is None
         time.sleep(0.05)
         mock_launch.assert_not_called()
 

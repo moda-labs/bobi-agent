@@ -124,6 +124,40 @@ class TestDrainAutoDispatch:
         mock_launch.assert_not_called()
 
     @patch("bobi.subagent.launch_agent")
+    def test_deduped_event_is_not_delivered(self, mock_launch):
+        """dedup_only lets first delivery through and drops redeliveries."""
+        reactor = EventReactor(
+            rules=[
+                AutoDispatchRule(
+                    event="github.issue_comment",
+                    workflow="comment-dedup",
+                    match={"is_pull_request": True},
+                    dedup_only=True,
+                    allow_self_authored=True,
+                ),
+            ],
+            cwd="/tmp/proj",
+        )
+        first = {
+            "type": "github.issue_comment",
+            "id": "delivery-1",
+            "text": "[org/repo] comment PR #1",
+            "delivery": "bulk",
+            "topics": ["github:org/repo"],
+            "fields": {"is_pull_request": True, "number": 1, "comment_id": 123},
+        }
+        redelivery = {
+            **first,
+            "id": "delivery-2",
+            "text": "[org/repo] duplicate comment PR #1",
+        }
+
+        delivered = self._run_drain_one_batch([first, redelivery], reactor=reactor)
+
+        assert delivered == ["[org/repo] comment PR #1"]
+        mock_launch.assert_not_called()
+
+    @patch("bobi.subagent.launch_agent")
     def test_suppressed_event_gets_suppressed_annotation(self, mock_launch):
         """Suppressed events get a SUPPRESSED annotation, not AUTO-DISPATCHED."""
         rules = [
