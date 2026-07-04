@@ -160,7 +160,7 @@ clients subscribe to both, for cross-version compatibility.
 
 Resolved in `bobi/events/subscriptions.py` + `adapters.py`:
 
-1. **Explicit** - `agent.yaml` top-level `subscribe:` (used verbatim if present).
+1. **Explicit** - `agent.yaml` top-level `subscribe:` after environment interpolation.
 2. **Auto-detected** from `services:` entries with `events: true`:
    - **github** from the project's `git remote` (`owner/repo`); for a director over
      many repos with no root remote, from each immediate child repo.

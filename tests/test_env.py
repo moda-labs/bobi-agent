@@ -181,6 +181,31 @@ class TestChildAgentEnv:
         assert env["VENN_API_KEY"] == "from-file"
         assert os.environ.get("VENN_API_KEY") is None
 
+    def test_child_env_replaces_dotenv_value_loaded_by_another_runtime(
+        self, tmp_path, monkeypatch,
+    ):
+        from bobi.config import Config
+        from bobi.env import child_agent_env
+
+        monkeypatch.delenv("SHARED_CHILD_TOKEN", raising=False)
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        for root, token in [(first, "first-token"), (second, "second-token")]:
+            paths.package_dir(root).mkdir(parents=True)
+            paths.agent_yaml_path(root).write_text(
+                "services:\n"
+                "  - name: slack\n"
+                "    credentials:\n"
+                "      bot_token: ${SHARED_CHILD_TOKEN}\n"
+            )
+            paths.env_path(root).write_text(f"SHARED_CHILD_TOKEN={token}\n")
+
+        assert Config.load(first).credential("slack", "bot_token") == "first-token"
+
+        env = child_agent_env(second)
+
+        assert env["SHARED_CHILD_TOKEN"] == "second-token"
+
     def test_uses_same_path_normalization_as_spawn_env(self, tmp_path, monkeypatch):
         from bobi.env import agent_spawn_env, child_agent_env
 
