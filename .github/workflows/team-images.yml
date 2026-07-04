@@ -4,9 +4,10 @@ name: Team images
 # image (team-flavored images; docs/CONTAINERIZED_DEPLOYMENT.md §2.6). A team that
 # declares `build:` needs its host tools (node, codex, gstack, …) baked in — the
 # generic base ships none, and a dark container has no TTY to install them. CI
-# renders the team-deps hook (bobi.build_render) and builds the ONE
-# Dockerfile with --build-arg TEAM_DEPS; the hook's final step re-runs the team's
-# requires[].check, so a missing tool fails THIS build, not production dispatch.
+# drives `bobi build` (#610) per team: it renders the team-deps hook and builds
+# the ONE Dockerfile with --build-arg TEAM_DEPS; the hook's final step re-runs
+# the team's requires[].check, so a missing tool fails THIS build, not
+# production dispatch.
 #
 # This is a BUILD-ONLY verify gate. The team-flavored image is built on Fly's
 # remote builder during `bobi deploy` (deploy.py renders TEAM_DEPS into the
@@ -33,6 +34,12 @@ on:
       # --render), which pulls in the harness + the brain registry. (#428 Stage 3)
       - "bobi/dep_bootstrap.py"
       - "bobi/brain/**"
+      # The wrapper drives `bobi build` (#610), which routes through the
+      # deploy asset/team-resolution helpers and the CLI.
+      - "bobi/build.py"
+      - "bobi/deploy.py"
+      - "bobi/registry.py"
+      - "bobi/cli.py"
       - "scripts/build-team-images.sh"
       - ".github/workflows/team-images.yml"
   pull_request:
