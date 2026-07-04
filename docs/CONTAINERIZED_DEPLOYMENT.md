@@ -667,7 +667,8 @@ GHCR base image:
   QEMU) from the same wheel and the same resolved claude pin, then stitches
   `ghcr.io/moda-labs/bobi:<version>`; `:latest` moves only when the version is
   the repo's latest non-prerelease release.
-- **update-homebrew** — `needs: publish`. Bumps the tap and smokes bottle URLs.
+- **update-homebrew** — `needs: [publish, build-wheel]`. Bumps the tap from the
+  wheel-derived version and smokes bottle URLs after PyPI publish.
 
 Production fleet rollout is deliberately outside this workflow. Fleet repos bump
 their pinned `bobi` version and run their own deployment reconcile.
