@@ -1714,3 +1714,226 @@ class TestIntro:
         r = c.post("/api/rename", json={"name": "taken"})
         assert r.status_code == 409
         assert (paths.home_dir() / "bobi" / "old").exists()  # original untouched
+
+
+class TestWorkflowYaml:
+    def test_yaml_preview(self, project):
+        s = SetupState(stage=Stage.DESIGN)
+        s.spec.roles = [{"name": "lead", "responsibility": "runs it"}]
+        s.spec.workflows = [{"name": "triage", "trigger": "an issue lands",
+                             "steps": [{"name": "look", "role": "lead",
+                                        "prompt": "Look at it.",
+                                        "hitl": True}]}]
+        c = _client(s, project)
+        r = c.get("/api/workflow/yaml", params={"index": 0})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["path"] == "workflows/triage.yaml"
+        wf = yaml.safe_load(data["yaml"])
+        assert [st["name"] for st in wf["steps"]] == ["look", "look-approval"]
+
+    def test_bad_or_missing_index(self, project):
+        c = _client(SetupState(), project)
+        assert c.get("/api/workflow/yaml",
+                     params={"index": "x"}).status_code == 400
+        assert c.get("/api/workflow/yaml",
+                     params={"index": 3}).status_code == 404
+
+    def test_state_serializes_workflows(self, project):
+        s = SetupState()
+        s.spec.workflows = [{"name": "w"}]
+        s.spec.workflows_confirmed = True
+        c = _client(s, project)
+        spec = c.get("/api/state").json()["spec"]
+        assert spec["workflows"] == [{"name": "w"}]
+        assert spec["workflows_confirmed"] is True
+
+
+class TestAutomationTrigger:
+    def test_update_accepts_trigger(self, project):
+        s = SetupState(stage=Stage.DESIGN)
+        s.spec.autonomous = [{"description": "d", "leash": "notify"}]
+        c = _client(s, project)
+        r = c.post("/api/automation/update",
+                   json={"index": 0, "fields": {"trigger": "event",
+                                                "cadence": "when a PR opens"}})
+        assert r.status_code == 200
+        assert s.spec.autonomous[0]["trigger"] == "event"
+        assert s.spec.autonomous[0]["cadence"] == "when a PR opens"
+
+    def test_bogus_trigger_is_ignored(self, project):
+        s = SetupState(stage=Stage.DESIGN)
+        s.spec.autonomous = [{"description": "d"}]
+        c = _client(s, project)
+        r = c.post("/api/automation/update",
+                   json={"index": 0, "fields": {"trigger": "banana"}})
+        assert r.status_code == 200
+        assert "trigger" not in s.spec.autonomous[0]
+
+
+class TestSlackFinalize:
+    @pytest.fixture(autouse=True)
+    def _no_host_slack_env(self):
+        # A real SLACK_BOT_TOKEN exported on the dev machine must not leak in
+        # (it would turn the name-rejection test into a live Slack call).
+        # _isolate_environ restores the host environment afterwards.
+        import os
+        os.environ.pop("SLACK_BOT_TOKEN", None)
+        os.environ.pop("SLACK_CHANNELS", None)
+
+    def test_channel_id_saves_without_token(self, project):
+        from bobi.setup import actions
+        s = SetupState()
+        c = _client(s, project)
+        r = c.post("/api/slack/channel", json={"channel": "C0ABC123"})
+        assert r.status_code == 200
+        assert r.json()["channel"] == "C0ABC123"
+        assert actions.read_env(project)["SLACK_CHANNELS"] == "C0ABC123"
+        assert "SLACK_CHANNELS" in s.credentials_saved
+
+    def test_channel_name_without_token_is_rejected(self, project):
+        c = _client(SetupState(), project)
+        r = c.post("/api/slack/channel", json={"channel": "#general"})
+        assert r.status_code == 400
+        assert "token" in r.json()["error"]
+
+    def test_empty_channel_rejected(self, project):
+        c = _client(SetupState(), project)
+        assert c.post("/api/slack/channel",
+                      json={"channel": " "}).status_code == 400
+
+    def test_test_requires_token_then_channel(self, project):
+        import os
+        c = _client(SetupState(), project)
+        assert c.post("/api/slack/test").status_code == 400
+        os.environ["SLACK_BOT_TOKEN"] = "xoxb-test"
+        r = c.post("/api/slack/test")
+        assert r.status_code == 400
+        assert "channel" in r.json()["error"]
+
+    def test_test_posts_to_first_channel(self, project, monkeypatch):
+        import os
+        os.environ["SLACK_BOT_TOKEN"] = "xoxb-test"
+        os.environ["SLACK_CHANNELS"] = "C111, C222"
+        calls = []
+        import bobi.slack
+
+        def fake_post(token, channel, text, *a, **kw):
+            calls.append((token, channel, text))
+            return {"ok": True}
+        monkeypatch.setattr(bobi.slack, "post_slack_message", fake_post)
+        c = _client(SetupState(team_name="crew"), project)
+        r = c.post("/api/slack/test")
+        assert r.status_code == 200
+        assert calls[0][1] == "C111"
+        assert "crew" in calls[0][2]
+
+
+class TestShutdown:
+    def test_shutdown_flips_should_exit(self, project):
+        app = server.build_app(SetupState(), project, nonce=NONCE)
+
+        class Srv:
+            should_exit = False
+        app.state.uvicorn_server = Srv()
+        c = _testclient(app)
+        c.headers.update({server.NONCE_HEADER: NONCE})
+        assert c.post("/api/shutdown").json()["ok"] is True
+        assert app.state.uvicorn_server.should_exit is True
+
+    def test_shutdown_without_server_is_noop(self, project):
+        c = _client(SetupState(), project)
+        assert c.post("/api/shutdown").status_code == 200
+
+
+class TestSlackFinalizeHardening:
+    @pytest.fixture(autouse=True)
+    def _no_host_slack_env(self):
+        import os
+        os.environ.pop("SLACK_BOT_TOKEN", None)
+        os.environ.pop("SLACK_CHANNELS", None)
+
+    def test_resolution_failure_is_redacted(self, project, monkeypatch):
+        import os
+
+        import bobi.slack
+        secret = "xoxb-" + "supersecrettoken" + "value123"
+        os.environ["SLACK_BOT_TOKEN"] = secret
+
+        def boom(token, name, **kw):
+            raise RuntimeError(f"slack said no for {token}")
+        monkeypatch.setattr(bobi.slack, "resolve_channel_id", boom)
+        c = _client(SetupState(), project)
+        r = c.post("/api/slack/channel", json={"channel": "#general"})
+        assert r.status_code == 502
+        assert secret not in r.json()["error"]
+
+    def test_name_resolves_and_saves_id(self, project, monkeypatch):
+        import os
+
+        import bobi.slack
+        from bobi.setup import actions
+        os.environ["SLACK_BOT_TOKEN"] = "xoxb-test"
+        monkeypatch.setattr(bobi.slack, "resolve_channel_id",
+                            lambda token, name, **kw: "C0RESOLVED")
+        s = SetupState()
+        c = _client(s, project)
+        r = c.post("/api/slack/channel", json={"channel": "#general"})
+        assert r.status_code == 200
+        assert r.json()["channel"] == "C0RESOLVED"
+        assert actions.read_env(project)["SLACK_CHANNELS"] == "C0RESOLVED"
+
+    def test_plain_word_without_token_is_not_saved_verbatim(self, project):
+        # "Customers" starts with C and is alnum, but it's a NAME — saving it
+        # as an ID would scope the adapter to a channel that doesn't exist.
+        c = _client(SetupState(), project)
+        r = c.post("/api/slack/channel", json={"channel": "Customers"})
+        assert r.status_code == 400
+
+    def test_message_failure_is_redacted(self, project, monkeypatch):
+        import os
+
+        import bobi.slack
+        secret = "xoxb-" + "supersecrettoken" + "value123"
+        os.environ["SLACK_BOT_TOKEN"] = secret
+        os.environ["SLACK_CHANNELS"] = "C111"
+
+        def boom(token, channel, text, *a, **kw):
+            raise RuntimeError(f"boom {token}")
+        monkeypatch.setattr(bobi.slack, "post_slack_message", boom)
+        c = _client(SetupState(), project)
+        r = c.post("/api/slack/test")
+        assert r.status_code == 502
+        assert secret not in r.json()["error"]
+
+    def test_exported_env_wins_over_stale_dotenv(self, project, monkeypatch):
+        import os
+
+        import bobi.slack
+        from bobi.setup import actions
+        env = actions.read_env(project)
+        env["SLACK_BOT_TOKEN"] = "xoxb-" + "staletoken" + "000000"
+        actions.write_env(project, env)
+        fresh = "xoxb-" + "freshtoken" + "000000"
+        os.environ["SLACK_BOT_TOKEN"] = fresh
+        calls = []
+
+        def fake(token, name, **kw):
+            calls.append(token)
+            return "C0RESOLVED"
+        monkeypatch.setattr(bobi.slack, "resolve_channel_id", fake)
+        c = _client(SetupState(), project)
+        assert c.post("/api/slack/channel",
+                      json={"channel": "#g"}).status_code == 200
+        assert calls == [fresh]
+
+
+class TestBuildGoalFloor:
+    def test_build_refuses_empty_goal(self, project):
+        # The one hard floor holds even on a direct /api/build call — no
+        # placeholder team from an empty spec.
+        s = SetupState(stage=Stage.BUILD)
+        c = _client(s, project)
+        r = c.post("/api/build")
+        assert "goal is still empty" in r.text
+        assert "file_start" not in r.text

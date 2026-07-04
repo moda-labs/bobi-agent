@@ -222,6 +222,72 @@ class TestDigestTurn:
         assert s.spec.goal == ""
 
 
+class TestWorkflowDeltas:
+    def test_workflows_route_and_confirm(self):
+        s = SetupState()
+        r = DigestionResult(
+            reply="ok",
+            deltas={"workflows": [
+                {"name": "issue-flow", "trigger": "an issue lands",
+                 "steps": [{"name": "triage", "role": "lead",
+                            "prompt": "look", "hitl": True}]},
+                "junk-non-dict"]},
+            workflows_confirmed=True)
+        apply_deltas(s, r)
+        assert [w["name"] for w in s.spec.workflows] == ["issue-flow"]
+        assert s.spec.workflows_confirmed is True
+
+    def test_absent_workflow_keys_leave_state_alone(self):
+        s = SetupState()
+        s.spec.workflows = [{"name": "keep"}]
+        s.spec.workflows_confirmed = True
+        apply_deltas(s, DigestionResult(reply="ok"))
+        assert s.spec.workflows == [{"name": "keep"}]
+        assert s.spec.workflows_confirmed is True
+
+    def test_parse_carries_workflows_confirmed(self):
+        text = "reply\n" + _payload(deltas={}, workflows_confirmed=True,
+                                    phase="workflows", summary="s",
+                                    readiness={})
+        res = parse_digestion(text)
+        assert res.workflows_confirmed is True
+        assert res.phase == "workflows"
+
+    def test_context_snapshot_includes_workflows(self):
+        s = SetupState()
+        s.spec.workflows = [{"name": "flow"}]
+        ctx = assemble_context(s)
+        assert '"workflows"' in ctx and '"flow"' in ctx
+
+    def test_malformed_workflow_shapes_are_normalized(self):
+        # The brain can emit garbage — steps as a string, name as a number.
+        # The trust boundary coerces shape so the panel render never crashes.
+        s = SetupState()
+        r = DigestionResult(reply="ok", deltas={"workflows": [
+            {"name": 7, "trigger": None, "steps": "triage then fix"},
+            {"name": "ok-flow", "steps": [{"name": "a", "prompt": "p"},
+                                          "junk-step"]},
+        ]})
+        apply_deltas(s, r)
+        first, second = s.spec.workflows
+        assert first["name"] == "7" and first["steps"] == []
+        assert first["trigger"] == ""   # None coerces to empty, not "None"
+        assert second["steps"] == [{"name": "a", "prompt": "p", "hitl": False}]
+
+    def test_step_hitl_strings_become_real_bools(self):
+        # "hitl": "false" is truthy — left alone it would author an
+        # unintended approval gate and stall the workflow.
+        s = SetupState()
+        r = DigestionResult(reply="ok", deltas={"workflows": [
+            {"name": "f", "steps": [
+                {"name": "a", "prompt": "p", "hitl": "false"},
+                {"name": "b", "prompt": "p", "hitl": "true"},
+                {"name": "c", "prompt": "p"}]}]})
+        apply_deltas(s, r)
+        steps = s.spec.workflows[0]["steps"]
+        assert [x["hitl"] for x in steps] == [False, True, False]
+
+
 class TestServicesRewritePreservesDeclaredVars:
     def test_credential_vars_survive_llm_services_replacement(self):
         # reverse_fill attaches pack-declared credential vars; the digestion

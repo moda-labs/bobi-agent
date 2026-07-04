@@ -44,6 +44,9 @@ def serve_local(
 
     app = app_factory(secret)
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
+    # Let the app end its own process cleanly (e.g. setup's "Close & end
+    # setup" button posts /api/shutdown, which flips should_exit).
+    app.state.uvicorn_server = server
 
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()

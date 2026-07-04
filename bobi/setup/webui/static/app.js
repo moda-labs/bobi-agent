@@ -319,7 +319,7 @@
           ? `Log in so your agents can run. In your terminal:`
           : `Install the Claude Code CLI, then log in. In your terminal:`}</p>
         <div class="cmd"><span class="pr">$</span> <span class="cmd-text">${esc(hs.login_command)}</span>
-          <button class="cmd-copy" id="harness-copy" title="Copy">Copy</button></div>
+          <button class="cmd-copy" data-copycmd title="Copy">Copy</button></div>
       </div>`;
     return `
       <div class="harness-rows">
@@ -347,11 +347,7 @@
     }
     card.classList.toggle("harness-warn", !hs.authenticated);
     card.innerHTML = harnessCardHTML(hs);
-    const copy = $("#harness-copy");
-    if (copy) copy.addEventListener("click", async () => {
-      try { await navigator.clipboard.writeText(hs.login_command); toast("Copied."); }
-      catch { toast("Copy failed — select the command manually."); }
-    });
+    // Copy goes through the delegated [data-copycmd] handler — one code path.
     $("#harness-recheck").addEventListener("click", loadHarness);
   }
 
@@ -582,11 +578,14 @@
     // The Connections slot counts only when every implied service is truly
     // connected (not merely "named") — the brain's readiness can't see live auth.
     const connOk = servicesSettled(sp);
-    const cards = [goalCard(sp), rolesCard(sp), automationsCard(sp),
-                   connectionsCard(sp), chatCard()];
-    const keys = ["goal", "roles", "autonomous", "services", "chat"];
+    // Workflows is an OPTIONAL card — it renders and celebrates like the
+    // others but never counts toward the N/5 gathered meter.
+    const cards = [goalCard(sp), rolesCard(sp), workflowsCard(sp),
+                   automationsCard(sp), connectionsCard(sp), chatCard()];
+    const keys = ["goal", "roles", "workflows", "autonomous", "services", "chat"];
     const doneNow = {
       goal: sp.readiness.goal === "enough", roles: sp.readiness.roles === "enough",
+      workflows: !!(sp.workflows || []).length || !!sp.workflows_confirmed,
       autonomous: sp.readiness.autonomous === "enough", services: connOk, chat: !!S.chat,
     };
     // Reconcile per card: only re-create the cards whose markup actually changed,
@@ -634,10 +633,43 @@
     }
     _prevGathered = gathered;
     const ready = gathered === 5;
+    // Finish is a soft gate: always clickable, but an incomplete spec gets a
+    // "you sure?" confirmation instead of a grayed-out button. The only hard
+    // floor left is server-side (the goal must be non-empty to build).
     const foot = $("#uni-foot");
-    if (foot) foot.innerHTML = ready
-      ? `<button class="btn primary" data-go="build">Finish →</button>`
-      : `<span class="uni-note">bobi is gathering goal, roles, automations, connections, and chat</span>`;
+    if (foot) {
+      const html = (ready ? ""
+        : `<span class="uni-note">bobi is gathering goal, roles, automations, connections, and chat</span>`)
+        + `<button class="btn primary" id="uni-finish">Finish →</button>`;
+      // Rebuild only on change — SSE-driven re-renders must not recreate the
+      // button mid-press (killing focus and eating the click).
+      if (foot.innerHTML !== html) {
+        foot.innerHTML = html;
+        $("#uni-finish").addEventListener("click", () =>
+          _lastReady ? go("build") : confirmFinish(_lastGathered));
+      }
+      _lastReady = ready; _lastGathered = gathered;
+    }
+  }
+  let _lastReady = false, _lastGathered = 0;
+  // The not-everything-gathered confirmation before an early Finish.
+  function confirmFinish(gathered) {
+    const ov = document.createElement("div");
+    ov.className = "secret-ov"; ov.id = "finish-ov";
+    ov.innerHTML = `<div class="secret-panel">
+      <div class="sp-head"><b>Finish early?</b><button class="btn ghost sm" id="fin-close">Close</button></div>
+      <div class="sp-body">
+        <p class="pd">You haven't completed all the agent setup — ${gathered} of 5 gathered so far. bobi fills reasonable gaps at build, and you can reopen the team to keep editing anytime. Are you sure you want to move on?</p>
+        <div class="sp-actions">
+          <button class="btn ghost sm" id="fin-stay">Keep setting up</button>
+          <button class="btn primary sm" id="fin-go">Move on →</button>
+        </div>
+      </div></div>`;
+    document.body.appendChild(ov);
+    ov.addEventListener("click", e => {
+      if (e.target.id === "fin-close" || e.target.id === "fin-stay" || e.target === ov) { ov.remove(); return; }
+      if (e.target.id === "fin-go") { ov.remove(); go("build"); }
+    });
   }
   // The current interview phase, shown so the user always knows where bobi is
   // and that it's moving methodically. S.phase is "goal" | "role:<name>" |
@@ -654,7 +686,8 @@
       label = "interviewing · " + name;
       if (roles.length) sub = `role ${(idx < 0 ? roles.length : idx + 1)} of ${roles.length}`;
     } else {
-      label = ({ goal: "setting the goal", automations: "automations",
+      label = ({ goal: "setting the goal", workflows: "designing workflows",
+                 automations: "automations",
                  connections: "connections", wrap: "wrapping up" }[p]) || p;
     }
     el.innerHTML = `<span class="ph-dot"></span><span class="ph-lab">${esc(label)}</span>${sub ? `<span class="ph-sub">${esc(sub)}</span>` : ""}`;
@@ -706,12 +739,34 @@
       <div class="ud">${body}</div>
       <div class="uadd"><button class="lnk add" data-addrole>+ add a role</button></div></div>`;
   }
+  // Workflows — optional, proposed by bobi once the roles settle. Click a
+  // flow to read its generated YAML (the dark-slab popup); refinements go
+  // through the conversation, so there's no structured editor here.
+  function workflowsCard(sp) {
+    const items = sp.workflows || [];
+    const settled = !!items.length || !!sp.workflows_confirmed;
+    const body = items.length
+      ? items.map((w, i) => {
+          const hitl = (w.steps || []).some(s => s && s.hitl);
+          const n = (w.steps || []).length;
+          return `<div class="urole click" data-wfopen="${i}">
+            <div class="urow"><b>${esc(w.name || "workflow")}</b>${hitl ? `<span class="wf-hitl" title="pauses for human approval">human gate</span>` : ""}</div>
+            <span>${esc(w.trigger || w.description || "")}${n ? ` · ${n} step${n === 1 ? "" : "s"}` : ""}</span></div>`;
+        }).join("")
+      : (sp.workflows_confirmed
+          ? `<span class="ph">no set flows — bobi handles work ad hoc</span>`
+          : `<span class="ph">bobi proposes repeatable flows once the roles are set</span>`);
+    return `<div class="ucard ${settled ? "filled" : "empty"}">
+      <div class="ut">Workflows <span class="ut-opt">optional</span></div>
+      <div class="ud">${body}</div>
+      <div class="uadd"><button class="lnk add" data-addwf>+ add a workflow</button></div></div>`;
+  }
   function automationsCard(sp) {
     const items = sp.autonomous || [];
     const body = items.length
       ? items.map((a, i) => `<div class="urole click" data-autoopen="${i}">
           <div class="urow"><b>${esc(a.description || "behavior")}</b></div>
-          <span>${esc(a.leash || "")}${a.cadence ? " · " + esc(a.cadence) : ""}${a.role ? " · " + esc(a.role) : ""}</span></div>`).join("")
+          <span>${esc(a.leash || "")}${a.trigger === "event" ? " · on event" : ""}${a.cadence ? " · " + esc(a.cadence) : ""}${a.role ? " · " + esc(a.role) : ""}</span></div>`).join("")
       : (sp.autonomous_confirmed
           ? `<span class="ph">nothing proactive — bobi acts only when asked</span>`
           : `<span class="ph">anything bobi should do on its own?</span>`);
@@ -1469,9 +1524,9 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
     });
     $("#fd-finish").addEventListener("click", async () => {
       const b = $("#fd-finish"); b.disabled = true;
-      // Hosted in the unified app (BASE set), finish also launches the team
-      // before returning — say so while the request runs.
-      b.textContent = BASE ? "Launching…" : "Finishing…";
+      // Finish marks the state complete; launching stays a deliberate action
+      // in both modes (the hosted on_finish redirects, it does not launch).
+      b.textContent = "Finishing…";
       let r = null;
       try { r = await postJSON("/api/finish", {}); } catch { /* ignore */ }
       const d = (r && r.data) || {};
@@ -1517,53 +1572,191 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
     });
   }
 
-  // Final screen after Finish. The server now stays alive (the homepage is a
-  // re-entrant hub), so its buttons can talk to it: copy/run the start command,
-  // link to cloud docs, and head to the homepage.
+  // Final screen after Finish: "All set" on one line, then a next-steps
+  // carousel — one full card per step (test locally / deploy / finalize
+  // Slack), cycled forward and back. The server stays alive through this
+  // screen (the Slack step saves a channel and sends a real test message);
+  // "Close & end setup" is what actually stops it, via /api/shutdown.
+  let nsIndex = 0;
+  let nsSlackDraft = "";   // unsaved channel input, kept across carousel nav
+  function cmdRow(label, cmd) {
+    return `<div class="cmd-item">${label ? `<span class="cmd-k">${esc(label)}</span>` : ""}
+      <div class="cmd"><span class="pr">$</span> <span class="cmd-text">${esc(cmd)}</span>
+        <button class="cmd-copy" data-copycmd title="Copy">Copy</button></div></div>`;
+  }
+  // A paste-into-your-agent prompt (Claude Code / Codex), styled like a command.
+  function promptRow(text) {
+    return `<div class="cmd prompt"><span class="cmd-text">${esc(text)}</span>
+      <button class="cmd-copy" data-copycmd title="Copy">Copy</button></div>`;
+  }
+  // Keep in lockstep with bobi/templates/slack-app.manifest.yaml (scopes.bot)
+  // — the manifest is the source of truth that create-slack-bot prefills.
+  const SLACK_SCOPES = ["app_mentions:read", "channels:history",
+    "channels:read", "chat:write", "files:read", "files:write",
+    "groups:history", "groups:read", "im:history", "im:read", "im:write",
+    "mpim:history", "users:read"];
+  function nsSteps() {
+    const name = agentCommandName();
+    const teamSlug = slugify(S.team_name) || "your-team";
+    const steps = [{
+      key: "test", label: "Test locally",
+      title: "Take it for a spin in your terminal",
+      html: `
+        <p class="ns-lede">Your team runs on this machine with one command. Open a fresh terminal and work through these:</p>
+        <div class="cmdlist">
+          ${cmdRow("turn it on", `bobi agent ${name} start`)}
+          ${cmdRow("check its health", `bobi agent ${name} status`)}
+          ${cmdRow("ask it a question", `bobi agent ${name} ask "what can you do?"`)}
+          ${cmdRow("give it a task", `bobi agent ${name} message "introduce yourself and list your roles"`)}
+          ${cmdRow("watch what it's doing", `bobi agent ${name} events`)}
+          ${cmdRow("stop / restart anytime", `bobi agent ${name} restart`)}
+        </div>`,
+    }, {
+      key: "deploy", label: "Deploy",
+      title: "Deploy it somewhere that stays awake",
+      html: `
+        <p class="ns-lede">Two good homes. Either way, ask Claude Code or Codex to do the wiring — copy a prompt below and paste it into your coding agent.</p>
+        <div class="deploy">
+          <div class="deploy-opt">
+            <div class="deploy-head"><span class="deploy-tag">Local</span><span class="deploy-sub">this machine, a Mac mini, or a server you own</span></div>
+            <p class="deploy-lede">Reuses the Claude Code login you already have.</p>
+            ${promptRow(`Help me run my bobi agent team "${name}" as an always-on service on this machine: configure its event server so it can receive webhooks, and make "bobi agent ${name} start" survive reboots. The framework docs are at https://github.com/moda-labs/bobi-agent (see docs/EVENT_SERVER.md).`)}
+          </div>
+          <div class="deploy-opt">
+            <div class="deploy-head"><span class="deploy-tag">Cloud</span><span class="deploy-sub">always-on, on Fly.io</span></div>
+            <p class="deploy-lede">A dedicated container + volume + secrets; the instance needs its own <span class="mono">ANTHROPIC_API_KEY</span>.</p>
+            ${promptRow(`Read ${DOCS_CLOUD_URL} and deploy my bobi agent team "${teamSlug}" to Fly.io using scripts/provision-instance.sh. Walk me through the env file and secrets it needs.`)}
+            <p class="deploy-note"><a class="exlink" href="${DOCS_CLOUD_URL}" target="_blank" rel="noopener">Full runbook →</a></p>
+          </div>
+        </div>`,
+    }];
+    if (S.chat === "slack") {
+      const savedCh = (S.credentials_saved || []).includes("SLACK_CHANNELS");
+      // A verified non-local ingress (the ingress wizard) already IS the
+      // event server Slack calls — show the concrete Request URL instead of
+      // the contradictory "deploy first" placeholder copy.
+      const ing = S.ingress || {};
+      const ingUrl = (ing.verified && ing.mode !== "local" && ing.url)
+        ? ing.url.replace(/\/+$/, "") + "/webhooks/slack" : "";
+      const urlSteps = ingUrl
+        ? `<li>Your event server is already verified. At <a class="exlink" href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a> → your app → <b>Event Subscriptions</b>, set the Request URL to <span class="mono">${esc(ingUrl)}</span>.</li>`
+        : `<li>Deploy first (previous step) — your event server's public URL is what Slack calls.</li>
+            <li>At <a class="exlink" href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a> → your app → <b>Event Subscriptions</b>, set the Request URL to <span class="mono">&lt;your event server&gt;/webhooks/slack</span>.</li>`;
+      steps.push({
+        key: "slack", label: "Finalize Slack",
+        title: "Finish wiring Slack",
+        html: `
+          <p class="ns-lede">${ingUrl ? "" : "After you deploy, "}Slack needs to know where to send events — then your team is reachable in your workspace.</p>
+          <ol class="ns-list">
+            ${urlSteps}
+            <li>Install the app to your workspace with the scopes below (the <span class="mono">bobi create-slack-bot</span> manifest prefills them).</li>
+            <li>Invite the bot to a dedicated channel (<span class="mono">/invite @your-bot</span>), then save that channel here.</li>
+          </ol>
+          <div class="scopes">${SLACK_SCOPES.map(s => `<b>${esc(s)}</b>`).join("")}</div>
+          <div class="slackrow">
+            <input id="ns-slackch" aria-label="Slack channel" placeholder="#channel or channel ID (C…)" autocomplete="off" value="${esc(nsSlackDraft)}">
+            <button class="btn ghost xs" id="ns-slacksave">Save</button>
+            <button class="btn primary xs" id="ns-slacktest">Send a test message</button>
+          </div>
+          <div class="ns-slackstatus${savedCh ? " ok" : ""}" id="ns-slackstatus">${savedCh ? "✓ channel saved" : ""}</div>`,
+      });
+    }
+    return steps;
+  }
   function renderFinished() {
     setPanes("1fr");
-    const agentName = agentCommandName();
-    const startCmd = `bobi agent ${agentName} start`;
+    nsIndex = 0;
+    const where = S.source_dir || "$BOBI_HOME/agents/" + agentCommandName() + "/src";
     $("#main").innerHTML = `<main class="done-wrap">
-      <div class="seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L19 7"/></svg></div>
-      <div class="eyebrow">All set</div>
-      <h1>${esc(S.team_name || "your team")} is ready</h1>
-      <p class="lede">Installed into <code>run/package/</code>.</p>
-
-      <p class="done-h">Run it — pick where</p>
-      <p class="lede">Your team needs an agent harness wherever it runs. Locally it reuses the Claude Code login you already have; in the cloud the instance gets its own.</p>
-
-      <div class="deploy">
-        <div class="deploy-opt">
-          <div class="deploy-head"><span class="deploy-tag">Local</span><span class="deploy-sub">on this machine</span></div>
-          <p class="deploy-lede">Open a fresh terminal and turn your team on.</p>
-          <div class="cmd"><span class="pr">$</span> <span class="cmd-text">${esc(startCmd)}</span>
-            <button class="cmd-copy" id="copy-start" title="Copy">Copy</button></div>
-        </div>
-        <div class="deploy-opt">
-          <div class="deploy-head"><span class="deploy-tag">Cloud</span><span class="deploy-sub">always-on, on Fly</span></div>
-          <p class="deploy-lede">Provision a dedicated instance (container + volume + secrets).</p>
-          <div class="cmd"><span class="pr">$</span> <span class="cmd-text">scripts/provision-instance.sh --app you-bobi --team ${esc(slugify(S.team_name) || "your-team")} --env-file ./instance.env</span>
-            <button class="cmd-copy" id="copy-deploy" title="Copy">Copy</button></div>
-          <p class="deploy-note">The instance needs its own <span class="mono">ANTHROPIC_API_KEY</span> (or a subscription login) in <span class="mono">instance.env</span>. <a class="exlink" href="${DOCS_CLOUD_URL}" target="_blank" rel="noopener">Full runbook →</a></p>
+      <div class="done-head">
+        <div class="seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L19 7"/></svg></div>
+        <div class="done-head-copy"><div class="eyebrow">All set</div>
+          <h1>${esc(S.team_name || "your team")} is ready</h1></div>
+      </div>
+      <p class="lede">Your agent team is created on this machine — source at <code>${esc(where)}</code>, installed into its <code>run/package/</code>. Two things left: try it, then deploy it.</p>
+      <div class="ns-bar">
+        <div class="ns-dots" id="ns-dots"></div>
+        <div class="ns-nav">
+          <button class="btn ghost xs" id="ns-prev">← Previous</button>
+          <button class="btn primary xs" id="ns-next">Next →</button>
         </div>
       </div>
-
-      <div class="actions" style="margin-top:26px"><button class="btn primary" id="done-home">Done →</button></div>
+      <section class="ns-step" id="ns-step"></section>
+      <div class="ns-exit">
+        <button class="btn ghost" id="ns-home">${HOSTED ? "Go to dashboard" : "Go to homepage"}</button>
+        ${HOSTED ? "" : `<button class="btn ghost" id="ns-close">Close &amp; end setup</button>`}
+      </div>
     </main>`;
-    $("#copy-start").addEventListener("click", async () => {
-      try { await navigator.clipboard.writeText(startCmd); toast("Copied."); }
-      catch { toast("Copy failed — select the command manually."); }
+    drawNsStep();
+    $("#ns-prev").addEventListener("click", () => { if (nsIndex > 0) { nsIndex--; drawNsStep(); } });
+    $("#ns-next").addEventListener("click", () => {
+      if (nsIndex < nsSteps().length - 1) { nsIndex++; drawNsStep(); }
+      else { goHome(); }
     });
-    $("#copy-deploy").addEventListener("click", async () => {
-      const cmd = $(".cmd-text", $("#copy-deploy").closest(".cmd")).textContent;
-      try { await navigator.clipboard.writeText(cmd); toast("Copied."); }
-      catch { toast("Copy failed — select the command manually."); }
+    $("#ns-home").addEventListener("click", goHome);
+    const nsClose = $("#ns-close");
+    if (nsClose) nsClose.addEventListener("click", endSession);
+  }
+  function drawNsStep() {
+    const steps = nsSteps();
+    const s = steps[nsIndex];
+    $("#ns-dots").innerHTML = steps.map((st, i) =>
+      `<button class="ns-dot ${i === nsIndex ? "on" : ""}" data-nsgo="${i}">
+        <span class="ns-dot-n">${i + 1}</span>${esc(st.label)}</button>`).join("");
+    $("#ns-step").innerHTML = `
+      <div class="ns-eyebrow">Step ${nsIndex + 1} of ${steps.length}</div>
+      <h2>${esc(s.title)}</h2>${s.html}`;
+    $("#ns-prev").disabled = nsIndex === 0;
+    $("#ns-next").textContent = nsIndex === steps.length - 1 ? "Done →" : "Next →";
+    if (s.key === "slack") wireSlackStep();
+  }
+  function wireSlackStep() {
+    // kind: "ok" (confirmed success, green) | "err" (red) | "busy" (muted) —
+    // in-flight copy must not pre-announce success in green.
+    const status = (msg, kind) => { const el = $("#ns-slackstatus");
+      if (el) { el.textContent = msg;
+        el.classList.toggle("err", kind === "err");
+        el.classList.toggle("ok", kind === "ok"); } };
+    $("#ns-slackch").addEventListener("input",
+      e => { nsSlackDraft = e.target.value; });
+    // Disable the pressed button while its request is in flight — a double
+    // click must not post two test messages or race two saves.
+    const oneShot = (btn, fn) => btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try { await fn(); } finally { btn.disabled = false; }
     });
-    $("#done-home").addEventListener("click", () => {
-      if (HOSTED) { location.href = "/#/"; return; }
-      atHome = true; renderHome();
+    oneShot($("#ns-slacksave"), async () => {
+      const ch = ($("#ns-slackch").value || "").trim();
+      if (!ch) { status("enter a #channel or channel ID first", "err"); return; }
+      status("saving…", "busy");
+      const r = await postJSON("/api/slack/channel", { channel: ch });
+      if (!r.ok) { status(r.data.error || "couldn't save", "err"); return; }
+      if (r.data.state) S = r.data.state;
+      status(`✓ channel saved (${r.data.channel})`, "ok");
     });
+    oneShot($("#ns-slacktest"), async () => {
+      status("sending…", "busy");
+      const r = await postJSON("/api/slack/test", {});
+      status(r.ok ? "✓ test message sent — check the channel"
+                  : (r.data.error || "test failed"), r.ok ? "ok" : "err");
+    });
+  }
+  // Close & end setup: stop the local server and leave a static goodbye —
+  // nothing left on screen depends on it. Standalone only: hosted in the
+  // unified app the dashboard owns the server's lifecycle (the Close button
+  // isn't rendered there).
+  async function endSession() {
+    _finished = true;   // suppress the disconnect overlay; this exit is chosen
+    try { await postJSON("/api/shutdown", {}); } catch { /* it's exiting */ }
+    setPanes("1fr");
+    $("#main").innerHTML = `<main class="done-wrap ns-bye">
+      <div class="done-head">
+        <div class="seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L19 7"/></svg></div>
+        <div class="done-head-copy"><div class="eyebrow">Setup ended</div>
+          <h1>${esc(S.team_name || "Your team")} is installed</h1></div>
+      </div>
+      <p class="lede">The setup server has stopped — you can close this tab. Start the team anytime with <code>bobi agent ${esc(agentCommandName())} start</code>, or run <code>bobi setup</code> again to keep editing.</p>
+    </main>`;
   }
 
   // --- homepage (the re-entrant team hub) --------------------------------
@@ -1642,6 +1835,7 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
       roles.map(r => `<option value="${esc(r.name)}" ${a.role === r.name ? "selected" : ""}>${esc(r.name)}</option>`)).join("");
     const leashOpts = [["notify", "notify · just tells you"], ["ask", "ask first · waits for approval"], ["act", "act · does it, reports"]]
       .map(([v, l]) => `<option value="${v}" ${a.leash === v ? "selected" : ""}>${esc(l)}</option>`).join("");
+    const trig = a.trigger === "event" ? "event" : "schedule";
     const ov = document.createElement("div");
     ov.className = "secret-ov"; ov.id = "auto-ov";
     ov.innerHTML = `<div class="secret-panel">
@@ -1651,8 +1845,13 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
           <textarea id="a-desc" rows="2">${esc(a.description || "")}</textarea></label>
         <label class="fld"><span class="flab">role <span class="fhelp inline">which agent runs it</span></span>
           <select id="a-role">${roleOpts}</select></label>
-        <label class="fld"><span class="flab">when <span class="fhelp inline">a schedule (1d, 15m) or an event</span></span>
-          <input id="a-when" value="${esc(a.cadence || "")}" placeholder="e.g. 1d, 9am daily, when a PR opens" autocomplete="off"></label>
+        <div class="fld"><span class="flab">fires <span class="fhelp inline">on a schedule, or reacting to an event</span></span>
+          <div class="seg" id="a-trigger">
+            <button type="button" class="seg-btn ${trig === "schedule" ? "on" : ""}" data-trig="schedule">on a schedule</button>
+            <button type="button" class="seg-btn ${trig === "event" ? "on" : ""}" data-trig="event">on an event</button>
+          </div></div>
+        <label class="fld"><span class="flab">when <span class="fhelp inline" id="a-when-help"></span></span>
+          <input id="a-when" value="${esc(a.cadence || "")}" autocomplete="off"></label>
         <label class="fld"><span class="flab">leash</span>
           <select id="a-leash">${leashOpts}</select></label>
         <label class="fld"><span class="flab">command <span class="fhelp inline">what the agent is told to do</span></span>
@@ -1660,25 +1859,65 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
         <div class="sp-actions"><button class="btn primary sm" id="a-save">Save automation</button></div>
       </div></div>`;
     document.body.appendChild(ov);
+    // The trigger segment reshapes the "when" field's hint + placeholder:
+    // schedule = an interval; event = what it reacts to (a webhook-fed event).
+    const syncTrig = () => {
+      const on = ov.querySelector("#a-trigger .seg-btn.on");
+      const isEvent = on && on.dataset.trig === "event";
+      $("#a-when-help").textContent = isEvent
+        ? "the event it reacts to" : "an interval or time";
+      $("#a-when").placeholder = isEvent
+        ? "e.g. when an email arrives, when a PR opens"
+        : "e.g. 1d, 15m, 9am daily";
+    };
+    ov.querySelectorAll("#a-trigger .seg-btn").forEach(b =>
+      b.addEventListener("click", () => {
+        ov.querySelectorAll("#a-trigger .seg-btn").forEach(x =>
+          x.classList.toggle("on", x === b));
+        syncTrig();
+      }));
+    syncTrig();
     ov.addEventListener("click", e => { if (e.target.id === "auto-close" || e.target === ov) ov.remove(); });
     $("#a-save").addEventListener("click", async () => {
+      const on = ov.querySelector("#a-trigger .seg-btn.on");
       const fields = {
         description: $("#a-desc").value, role: $("#a-role").value,
         cadence: $("#a-when").value, leash: $("#a-leash").value,
         command: $("#a-cmd").value,
+        trigger: on ? on.dataset.trig : "schedule",
       };
       const res = await postJSON("/api/automation/update", { index: i, fields });
       if (!res.ok) { toast(res.data.error || "couldn't save"); return; }
       S = res.data; ov.remove(); renderUniCards(); toast("automation saved");
     });
   }
-  // Add a role / automation / connection by describing it — the description is
+  // A workflow's generated YAML, read-only in the dark slab — the machine
+  // writes in the dark. Refinements go through the conversation.
+  async function openWorkflowModal(i) {
+    const w = (S.spec.workflows || [])[i]; if (!w) return;
+    const ov = document.createElement("div");
+    ov.className = "secret-ov"; ov.id = "wf-ov";
+    ov.innerHTML = `<div class="secret-panel wf-panel">
+      <div class="sp-head"><b id="wf-path">${esc("workflows/" + (slugify(w.name) || "workflow") + ".yaml")}</b><button class="btn ghost sm" id="wf-close">Close</button></div>
+      <div class="wf-slab"><div class="code" id="wf-code">loading…</div></div>
+      <div class="wf-foot">Written at build, exactly like this. To change it, just tell bobi in the chat.</div></div>`;
+    document.body.appendChild(ov);
+    ov.addEventListener("click", e => { if (e.target.id === "wf-close" || e.target === ov) ov.remove(); });
+    const d = await getJSON("/api/workflow/yaml?index=" + i);
+    const code = $("#wf-code");
+    if (!code) return;   // closed while fetching
+    if (d.error) { code.textContent = d.error; return; }
+    code.textContent = d.yaml || "";
+    if (d.path) $("#wf-path").textContent = d.path;
+  }
+  // Add a role / automation / workflow by describing it — the description is
   // routed into the conversation so the brain ingests it. Connections also offer
   // the custom "build an integration on the fly" placeholder.
   function openDescribeModal(kind) {
     const meta = {
       role: { title: "Add a role", ph: "Describe the role — what it does, what a good job looks like, what it needs to access.", lead: "Tell bobi about the role and it'll add it to the team." },
-      auto: { title: "Add an automation", ph: "Describe something the team should do on its own — e.g. 'post a daily digest at 9am'.", lead: "Describe the proactive behavior; bobi wires it up." },
+      auto: { title: "Add an automation", ph: "Describe something the team should do on its own — e.g. 'post a daily digest at 9am' or 'when an email arrives, triage it'.", lead: "Describe the proactive behavior; bobi wires it up." },
+      wf: { title: "Add a workflow", ph: "Describe the flow step by step — e.g. 'when an issue lands: triage it, write a fix, wait for my approval, open a PR'.", lead: "Describe the repeatable flow and where you want to approve; bobi codifies it as a workflow." },
     }[kind];
     const ov = document.createElement("div");
     ov.className = "secret-ov"; ov.id = "describe-ov";
@@ -1921,6 +2160,17 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
   }
 
   document.addEventListener("click", (e) => {
+    // Copy the command/prompt text sitting next to any [data-copycmd] button.
+    const cc = e.target.closest("[data-copycmd]");
+    if (cc) {
+      const t = cc.closest(".cmd") && $(".cmd-text", cc.closest(".cmd"));
+      if (t) navigator.clipboard.writeText(t.textContent)
+        .then(() => toast("Copied."))
+        .catch(() => toast("Copy failed — select the text manually."));
+      return;
+    }
+    const nsgo = e.target.closest("[data-nsgo]");
+    if (nsgo) { nsIndex = +nsgo.dataset.nsgo; drawNsStep(); return; }
     if (e.target.closest("[data-home]")) { goHome(); return; }
     if (e.target.closest("[data-back]")) { goBack(); return; }
     const go_ = e.target.closest("[data-go]");
@@ -1970,8 +2220,11 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
     if (ro) { openRoleModal(+ro.dataset.roleopen); return; }
     const ao = e.target.closest("[data-autoopen]");
     if (ao) { openAutoModal(+ao.dataset.autoopen); return; }
+    const wo = e.target.closest("[data-wfopen]");
+    if (wo) { openWorkflowModal(+wo.dataset.wfopen); return; }
     if (e.target.closest("[data-addrole]")) { openDescribeModal("role"); return; }
     if (e.target.closest("[data-addauto]")) { openDescribeModal("auto"); return; }
+    if (e.target.closest("[data-addwf]")) { openDescribeModal("wf"); return; }
     if (e.target.closest("[data-addconn]")) { openMcpModal(); return; }
     const addmcp = e.target.closest("[data-addmcp]");
     if (addmcp) { openMcpModal(addmcp.dataset.addmcp); return; }

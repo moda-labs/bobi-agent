@@ -8,6 +8,12 @@ events to `<event-server>/webhooks/slack`, and bobi replies via the Web API.
 **Time:** ~2 minutes — the app is stamped out from a manifest, so you don't
 hand-pick scopes or wire the event URL yourself.
 
+Built the team with `bobi setup` and chose Slack as its chat? The setup
+completion screen walks this whole flow for you: it shows the required scopes,
+links the app-creation walkthrough, saves the team's dedicated channel, and
+posts a test message end to end. This page is the manual/CLI path and the
+reference.
+
 ## 1. Generate a manifest and create the app
 
 ```bash
@@ -97,6 +103,12 @@ The bot only sees (and posts to) channels it's a member of. In each channel:
 ```
 
 DMs work out of the box — the manifest enables the Messages tab.
+
+To scope the bot to one dedicated channel, save it as `SLACK_CHANNELS` in the
+agent's `run/.env`. Setup-authored `agent.yaml` files read it via
+`channels: ${SLACK_CHANNELS:-}` (unset means no scoping); the setup completion
+screen saves it for you, resolving a `#name` to its channel ID via the bot
+token, and can post a test message to prove token + channel + membership.
 
 ## Create with the Slack CLI
 

@@ -72,6 +72,8 @@ def serialize_state(state: SetupState) -> dict:
         "spec": {
             "goal": spec.goal,
             "roles": spec.roles,
+            "workflows": spec.workflows,
+            "workflows_confirmed": spec.workflows_confirmed,
             "autonomous": spec.autonomous,
             "autonomous_confirmed": spec.autonomous_confirmed,
             "services": spec.services,
@@ -790,11 +792,31 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 item[k] = fields[k].strip()
         if fields.get("leash") in ("notify", "ask", "act"):
             item["leash"] = fields["leash"]
+        if fields.get("trigger") in ("schedule", "event"):
+            item["trigger"] = fields["trigger"]
         items[idx] = item
         state.spec.autonomous_confirmed = True
         state.validated = False
         state.save(project)
         return JSONResponse(serialize_state(state))
+
+    @app.get("/api/workflow/yaml")
+    def workflow_yaml(request: Request) -> JSONResponse:
+        # Read-only preview of the YAML a spec workflow will be codified as
+        # at build — shown in the Workflows card's dark-slab popup. Editing
+        # happens through the conversation, not here.
+        from bobi.setup import authoring
+        try:
+            idx = int(request.query_params.get("index", ""))
+        except ValueError:
+            return JSONResponse({"error": "bad index"}, status_code=400)
+        wfs = state.spec.workflows
+        if not (0 <= idx < len(wfs)) or not isinstance(wfs[idx], dict):
+            return JSONResponse({"error": "no such workflow"}, status_code=404)
+        wf = wfs[idx]
+        path = f"workflows/{authoring.workflow_slug(wf)}.yaml"
+        return JSONResponse({"path": path,
+                             "yaml": authoring.build_workflow_yaml(state, wf)})
 
     @app.post("/api/service/remove")
     def service_remove(payload: dict) -> JSONResponse:
@@ -1074,6 +1096,93 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         state.save(project)
         return JSONResponse(serialize_state(state))
 
+    # --- slack finalization (the post-install next-steps screen) --------
+    def _env_value(var: str) -> str:
+        # Same precedence as runtime resolution (config.load_dotenv and
+        # venn_key): an exported environment variable wins over .env.
+        import os
+        from bobi.setup import actions
+        return os.environ.get(var) or actions.read_env(project).get(var, "")
+
+    @app.post("/api/slack/channel")
+    def slack_channel(payload: dict) -> JSONResponse:
+        """Save the team's dedicated Slack channel as SLACK_CHANNELS in
+        run/.env (the `channels:` scoping knob in agent.yaml resolves it).
+        Accepts a channel ID (C…/G…) directly, or a #name resolved live via
+        the saved bot token."""
+        from bobi.setup import actions
+        raw = (payload.get("channel") or "").strip()
+        if not raw:
+            return JSONResponse({"error": "enter a channel ID (C…) or #name"},
+                                status_code=400)
+        token = _env_value("SLACK_BOT_TOKEN")
+        if token:
+            # One code path: resolve_channel_id owns the ID-vs-name decision
+            # (a literal C…/G…/D… ID passes through without a network call).
+            from bobi.slack import resolve_channel_id
+            try:
+                value = resolve_channel_id(token, raw)
+            except Exception as e:
+                return JSONResponse(
+                    {"error": actions.redact_secrets(str(e))[0]},
+                    status_code=502)
+        else:
+            # No token yet: only a literal channel ID can be trusted verbatim
+            # (same shape rule resolve_channel_id uses); a name needs the
+            # token to look up — a bare word saved as-is would silently scope
+            # the adapter to a channel that doesn't exist.
+            import re as _re
+            if raw.startswith("#") or not _re.fullmatch(r"[CGD][A-Z0-9]{6,}",
+                                                        raw):
+                return JSONResponse(
+                    {"error": "save the Slack bot token first so the name "
+                     "can be looked up — or paste the channel ID (C…)"},
+                    status_code=400)
+            value = raw
+        try:
+            actions.save_credential(state, project, "SLACK_CHANNELS", "slack",
+                                    "", prompt_fn=lambda *_: value)
+        except actions.ActionError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "channel": value,
+                             "state": serialize_state(state)})
+
+    @app.post("/api/slack/test")
+    def slack_test() -> JSONResponse:
+        """Post a test message to the saved channel — proves token + channel
+        + membership end-to-end, from the finalize-Slack step."""
+        from bobi.setup import actions
+        token = _env_value("SLACK_BOT_TOKEN")
+        if not token:
+            return JSONResponse({"error": "no Slack bot token saved yet"},
+                                status_code=400)
+        channel = _env_value("SLACK_CHANNELS").split(",")[0].strip()
+        if not channel:
+            return JSONResponse({"error": "save a channel first"},
+                                status_code=400)
+        from bobi.slack import post_slack_message
+        team = state.team_name or "your bobi team"
+        try:
+            post_slack_message(
+                token, channel,
+                f"Test message from bobi setup — {team} can post here. "
+                "You're wired up.")
+        except Exception as e:
+            return JSONResponse({"error": actions.redact_secrets(str(e))[0]},
+                                status_code=502)
+        return JSONResponse({"ok": True, "channel": channel})
+
+    @app.post("/api/shutdown")
+    def shutdown() -> dict:
+        """End the setup session: the page shows a static goodbye and the
+        server process exits once this response is sent. The uvicorn server
+        is attached by serve_local; absent (tests), this is a no-op."""
+        state.save(project)
+        server = getattr(app.state, "uvicorn_server", None)
+        if server is not None:
+            server.should_exit = True
+        return {"ok": True}
+
     @app.get("/api/credential/value")
     def credential_value(request: Request) -> JSONResponse:
         # Copy-to-clipboard support: returns a saved credential value to the
@@ -1104,6 +1213,13 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     @app.post("/api/build")
     async def build() -> StreamingResponse:
         async def gen() -> AsyncIterator[str]:
+            # The one hard floor, enforced here too (not just /api/advance)
+            # so a direct build call can't author a placeholder team.
+            if not state.spec.goal.strip():
+                yield _sse("error", {"message": "tell bobi what the team "
+                           "should do — the goal is still empty"})
+                yield _sse("state", serialize_state(state))
+                return
             from bobi.setup import authoring
             try:
                 async for event in authoring.author_pack(

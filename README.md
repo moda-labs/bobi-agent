@@ -211,6 +211,10 @@ Slack app and point it at your agent:
 bobi create-slack-bot --app-name "Bobi"
 ```
 
+If you built the team with `bobi setup` and picked Slack as its chat, the
+setup completion screen walks you through this - scopes on-screen, a dedicated
+channel saved for the team, and a test message to prove the wiring.
+
 Full walkthrough: **[Slack setup](skills/slack-setup.md)**.
 
 ## Under the hood
