@@ -1197,6 +1197,7 @@ class TestSchedulerEndToEnd:
 
     def test_native_check_finding_delivered_to_subscriber(
             self, event_server, bobi_env):
+        from bobi.config import bubble_state_path
         from bobi.events import publish as publish_mod
         from bobi.events.server import ensure_bubble
         from bobi.events.subscriptions import monitor_subscription_keys
@@ -1211,6 +1212,15 @@ class TestSchedulerEndToEnd:
         original = agent_yaml.read_text()
         agent_yaml.write_text(original + f"\nevent_server_url: {base_url}\n")
         publish_mod._es_url_cache.clear()
+        # The session-scoped project may carry a bubble minted against the
+        # session event server. ensure_bubble returns any on-disk bubble
+        # as-is, and THIS test's server has never seen it, so the signed
+        # JOIN would 403 (production recovers via force_remint_of; the test
+        # helper does not). Isolate bubble state both ways too.
+        bubble_path = bubble_state_path(bobi_env.project_path)
+        original_bubble = (bubble_path.read_bytes()
+                          if bubble_path.exists() else None)
+        bubble_path.unlink(missing_ok=True)
         try:
             m = Monitor(name="pr-conflict-check",
                         event="monitor/pr.conflict_detected",
@@ -1257,6 +1267,10 @@ class TestSchedulerEndToEnd:
             assert sched.state["pr-conflict-check"]["active"] == ["repo#7"]
         finally:
             agent_yaml.write_text(original)
+            if original_bubble is None:
+                bubble_path.unlink(missing_ok=True)
+            else:
+                bubble_path.write_bytes(original_bubble)
             publish_mod._es_url_cache.clear()
 
 
