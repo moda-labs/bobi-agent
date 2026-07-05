@@ -13,15 +13,12 @@ import {
 	namespaceSubKey,
 	admittedDeploymentIds,
 	handleAuthorizeResource,
-	verifyGitHubSignature,
-	verifySlackSignature,
 	readBubbleAuthHeaders,
 	hasBubbleSignature,
 	hasPartialBubbleSignature,
 	authenticateBubble,
-	handleGitHubWebhook,
-	handleLinearWebhook,
-	handleSlackWebhook,
+	handleWebhookRequest,
+	matchWebhookSource,
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
 	handleDeregisterDeployment,
@@ -32,7 +29,6 @@ import {
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
 	handleTestSeedResourceGrants,
-	slackSigningSecretFor,
 	getAuthRejectionCounters,
 } from "./core";
 import {
@@ -89,6 +85,7 @@ const resourceGrants = new Map<string, ResourceGrant>();
 
 const webhookSecret = process.env.BOBI_ES_WEBHOOK_SECRET || "";
 const slackSigningSecret = process.env.BOBI_ES_SLACK_SIGNING_SECRET || "";
+const linearWebhookSecret = process.env.BOBI_ES_LINEAR_WEBHOOK_SECRET || "";
 const testGrantsSecret = process.env.BOBI_ES_TEST_GRANTS_SECRET || "";
 
 // ---------------------------------------------------------------------------
@@ -376,63 +373,21 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		});
 	}
 
-	if (method === "POST" && path === "/webhooks/github") {
+	// Inbound webhooks — one pipeline for every source (#639), shared with the
+	// Worker: the core matches the route, verifies the exact wire bytes (the
+	// verify slot is structural), normalizes, and delivers. matchWebhookSource
+	// returns null for an unregistered path, which 404s below WITHOUT
+	// consuming the request body.
+	const webhookSource = method === "POST" ? matchWebhookSource(path) : null;
+	if (webhookSource) {
 		const body = await readBody(req);
-
-		if (webhookSecret) {
-			const sigHeader = (req.headers["x-hub-signature-256"] as string) || "";
-			const valid = await verifyGitHubSignature(webhookSecret, new TextEncoder().encode(body), sigHeader);
-			if (!valid) return json(res, { error: "invalid signature" }, 401);
-		}
-
-		const payload = parseJson(body);
-		if (!payload) return json(res, { error: "invalid JSON" }, 400);
-
-		const eventHeader = (req.headers["x-github-event"] as string) || "unknown";
-		const deliveryId = (req.headers["x-github-delivery"] as string) || crypto.randomUUID();
-
-		return respond(res, await handleGitHubWebhook(storage, eventHeader, deliveryId, payload));
-	}
-
-	if (method === "POST" && path === "/webhooks/linear") {
-		const body = await readBody(req);
-		const payload = parseJson(body);
-		if (!payload) return json(res, { error: "invalid JSON" }, 400);
-		return respond(res, await handleLinearWebhook(storage, payload));
-	}
-
-	if (method === "POST" && (path === "/webhooks/slack" || path === "/webhooks/slack/")) {
-		const body = await readBody(req);
-		const payload = parseJson(body);
-		if (!payload) return json(res, { error: "invalid JSON" }, 400);
-
-		// url_verification must be handled before BOTH the retry short-circuit
-		// and the signature check: it carries no signing headers, and Slack
-		// retries a failed handshake with x-slack-retry-num set — so swallowing
-		// retries here would leave the request URL permanently unverified.
-		if ((payload as Record<string, unknown>).type === "url_verification") {
-			return json(res, { challenge: (payload as Record<string, unknown>).challenge });
-		}
-
-		// Dedup retried EVENT deliveries so the agent doesn't double-process.
-		if (req.headers["x-slack-retry-num"]) {
-			return json(res, { ok: true });
-		}
-
-		// Per-app signing secret (by api_app_id), falling back to the global one.
-		const appSecret = await slackSigningSecretFor(
+		const result = await handleWebhookRequest(
 			storage,
-			payload as Record<string, unknown>,
-			slackSigningSecret,
+			webhookSource,
+			{ rawBody: body, header: (n) => (req.headers[n.toLowerCase()] as string) || "" },
+			{ github: webhookSecret, slack: slackSigningSecret, linear: linearWebhookSecret },
 		);
-		if (appSecret) {
-			const timestamp = (req.headers["x-slack-request-timestamp"] as string) || "";
-			const signature = (req.headers["x-slack-signature"] as string) || "";
-			const valid = await verifySlackSignature(appSecret, timestamp, body, signature);
-			if (!valid) return json(res, { error: "invalid signature" }, 401);
-		}
-
-		return respond(res, await handleSlackWebhook(storage, body, payload));
+		if (result) return respond(res, result);
 	}
 
 	if (method === "POST" && path === "/deployments") {

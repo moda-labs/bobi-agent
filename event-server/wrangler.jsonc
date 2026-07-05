@@ -7,7 +7,13 @@
 	},
 	// Required Cloudflare Worker secret:
 	//   wrangler secret put INTERNAL_DO_SECRET
-	// Do not store this value in wrangler.jsonc, .env, Fly, Bubble, or agent-team env.
+	// Inbound webhook verification secrets (#639) - unset admits that provider
+	// unverified (counted on /health as webhook_unverified); set all three on a
+	// shared/public server:
+	//   wrangler secret put WEBHOOK_SECRET          (github X-Hub-Signature-256)
+	//   wrangler secret put SLACK_SIGNING_SECRET    (global fallback; per-app secrets register via /slack/workspaces)
+	//   wrangler secret put LINEAR_WEBHOOK_SECRET   (Linear-Signature)
+	// Do not store these values in wrangler.jsonc, .env, Fly, Bubble, or agent-team env.
 	"kv_namespaces": [
 		{
 			"binding": "EVENTS",

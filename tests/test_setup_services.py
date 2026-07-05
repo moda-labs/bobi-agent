@@ -99,6 +99,12 @@ class TestConnectorModel:
         assert services.CATALOG["slack"].credential_var == "SLACK_BOT_TOKEN"
         assert services.CATALOG["linear"].credential_var == "LINEAR_API_KEY"
 
+    def test_linear_captures_optional_webhook_secret(self):
+        method = services.CATALOG["linear"].methods[0]
+        assert [s.var for s in method.secrets] == [
+            "LINEAR_API_KEY", "LINEAR_WEBHOOK_SECRET"]
+        assert method.secrets[1].optional is True
+
     def test_github_offers_token_and_app_methods(self):
         keys = {m.key for m in services.CATALOG["github"].methods}
         assert keys == {"token", "app"}
@@ -239,6 +245,16 @@ class TestCardsForSpec:
         method = cards[0]["methods"][0]
         assert [s["var"] for s in method["secrets"]] == [
             "MY_SLACK_BOT", "MY_SLACK_SIGNING"]
+
+    def test_declared_vars_map_linear_webhook_secret_by_key(self, tmp_path):
+        cards = services.cards_for(
+            [{"name": "linear",
+              "credential_vars": {"api_key": "MY_LINEAR_API",
+                                  "webhook_secret": "MY_LINEAR_WEBHOOK"}}],
+            tmp_path)
+        method = cards[0]["methods"][0]
+        assert [s["var"] for s in method["secrets"]] == [
+            "MY_LINEAR_API", "MY_LINEAR_WEBHOOK"]
 
     def test_declared_vars_flow_into_status(self, tmp_path, monkeypatch):
         # A credential saved under the DECLARED name flips the card to

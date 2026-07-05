@@ -128,21 +128,43 @@ them; the agent never assembles platform routing fields.
 
 ## Ingestion: getting events in
 
-**Webhooks** (`event-server/src/adapters/`). Each adapter turns a raw provider
-payload into a `NormalizedEvent`, deriving the routing key **from the signed body,
-never from client input**:
+**Webhooks** (the unified pipeline, #639). Every inbound webhook runs through one
+pipeline in the shared core, identical on the Worker and the local server:
+
+```
+route (/webhooks/<source>) -> verifier -> normalizer -> deliver()
+```
+
+A source registers a **required** verify slot plus a normalizer in
+`WEBHOOK_SOURCES` (`event-server/src/core.ts`); the verify field is non-optional
+by type, so a route cannot exist without verification by construction. Transports
+never stitch verification per-route. Verifiers run over the exact wire bytes; an
+unconfigured provider secret admits that provider unverified (zero-config local
+development; counted on `/health` as `webhook_unverified` so a public server
+running unverified is visible), and a configured one rejects bad or missing
+signatures with 401 (counted as `webhook_bad_signature`).
+Normalizers (`event-server/src/adapters/`) derive the routing key **from the
+signed body, never from client input**:
 
 - **GitHub** (`POST /webhooks/github`): `type = github.<event>`, key
   `github:<owner>/<repo>` from `repository.full_name`. Signature
-  (`X-Hub-Signature-256`, HMAC-SHA256) is verified when `WEBHOOK_SECRET` is set.
-- **Slack** (`POST /webhooks/slack`): handles the `url_verification` challenge and
-  retry dedup; verifies the `v0=` signature within a ±300s window, with the signing
-  secret resolved per authoring app (`api_app_id`). Normalization runs through the
-  Chat SDK bridge (`adapters/chat-sdk-slack.ts`, #628). Maps to `slack.mention` /
-  `slack.dm` / `slack.thread_reply` and filters our own bots' messages.
+  (`X-Hub-Signature-256`, HMAC-SHA256) is verified when `WEBHOOK_SECRET`
+  (local: `BOBI_ES_WEBHOOK_SECRET`) is set.
+- **Slack** (`POST /webhooks/slack`): the pipeline's pre-verify stage handles the
+  `url_verification` challenge and retry dedup (both must run before the signature
+  check); then verifies the `v0=` signature within a ±300s window, with the signing
+  secret resolved per authoring app (`api_app_id`), falling back to
+  `SLACK_SIGNING_SECRET` (local: `BOBI_ES_SLACK_SIGNING_SECRET`). Normalization
+  runs through the Chat SDK bridge (`adapters/chat-sdk-slack.ts`, #628); the
+  hand-rolled `adapters/slack.ts` normalizer remains as the golden parity
+  reference until the bridge has soaked. Maps to `slack.mention` / `slack.dm` /
+  `slack.thread_reply` and filters our own bots' messages.
 - **Linear** (`POST /webhooks/linear`): `type = linear.<type>.<action>`, key
-  `linear:<TEAM_KEY>`. No HTTP-layer signature check - inbound Linear relies on a
-  secret webhook URL plus the delivery-time grant filter.
+  `linear:<TEAM_KEY>`. Signature (`Linear-Signature`, HMAC-SHA256 of the raw body)
+  is verified when `LINEAR_WEBHOOK_SECRET` (local: `BOBI_ES_LINEAR_WEBHOOK_SECRET`)
+  is set, with replay rejection via the signed `webhookTimestamp` (±300s;
+  fail-closed - a signed payload without a numeric `webhookTimestamp` is
+  rejected, since it would otherwise be replayable forever).
 
 **Generic topic endpoint** (`POST /events/{topic}`). Monitors, lifecycle emits,
 inter-agent inbox/reply, and any agent-emitted event publish here. It is
@@ -342,12 +364,13 @@ to every granted bubble, and a `linear:<TEAM>` key can collide across two Linear
 webhooks to a specific account is the multi-tenant hardening tracked in **#239**.
 
 Running a shared or public event server is a deliberate step with prerequisites:
-serve over TLS, set `WEBHOOK_SECRET` and the Slack signing secret, and keep the
-Linear webhook URL secret.
+serve over TLS and set all three provider webhook secrets (`WEBHOOK_SECRET`,
+`SLACK_SIGNING_SECRET`, `LINEAR_WEBHOOK_SECRET`) so every inbound route verifies.
 
 ## Key files
 
-- `event-server/src/core.ts` - shared handlers, routing, HMAC auth, grant filter.
+- `event-server/src/core.ts` - shared handlers, the unified webhook pipeline,
+  routing, HMAC auth, grant filter.
 - `event-server/src/index.ts` - Cloudflare Worker entry (KV storage, DO fan-out).
 - `event-server/src/local.ts` - local Node entry (in-memory store, direct sockets).
 - `event-server/src/deployment-session.ts` - the per-deployment Durable Object.

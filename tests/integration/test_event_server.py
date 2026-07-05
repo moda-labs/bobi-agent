@@ -10,6 +10,8 @@ delivered via the WebSocket subscription API.  All state is isolated to
 the bobi_env temp install.
 """
 
+import hashlib
+import hmac
 import json
 import os
 import signal
@@ -1363,3 +1365,97 @@ class TestBindAddress:
             assert "loopback-only" in log_text
         finally:
             self._stop(proc, lf)
+
+
+@pytest.mark.local_only
+class TestWebhookSignatureVerification:
+    """#639: every /webhooks/<source> route verifies through the unified
+    pipeline's structural verify slot. This drives the REAL local server
+    process with per-provider secrets set and proves bad/missing signatures
+    are rejected while valid ones deliver - including linear, whose route
+    previously had no signature check at all."""
+
+    GITHUB_SECRET = "gh-int-secret"
+    SLACK_SECRET = "sl-int-secret"
+    LINEAR_SECRET = "ln-int-secret"
+
+    @pytest.fixture()
+    def secured_server(self, bobi_env):
+        port = _free_port()
+        proc, _log_path, lf = TestBindAddress._start_server(bobi_env, port, {
+            "BOBI_ES_WEBHOOK_SECRET": self.GITHUB_SECRET,
+            "BOBI_ES_SLACK_SIGNING_SECRET": self.SLACK_SECRET,
+            "BOBI_ES_LINEAR_WEBHOOK_SECRET": self.LINEAR_SECRET,
+        })
+        try:
+            assert TestBindAddress._wait_healthy(f"http://127.0.0.1:{port}")
+            yield f"http://127.0.0.1:{port}"
+        finally:
+            TestBindAddress._stop(proc, lf)
+
+    @staticmethod
+    def _post(url: str, body: bytes, headers: dict) -> int:
+        req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json", **headers})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status
+        except urllib.error.HTTPError as err:
+            return err.code
+
+    def test_github_signature_enforced(self, secured_server):
+        body = json.dumps({"action": "opened",
+                           "repository": {"full_name": "org/repo"}}).encode()
+        url = f"{secured_server}/webhooks/github"
+        headers = {"x-github-event": "issues", "x-github-delivery": "d1"}
+
+        assert self._post(url, body, headers) == 401
+        assert self._post(
+            url, body, {**headers, "x-hub-signature-256": "sha256=bad"}) == 401
+
+        sig = "sha256=" + hmac.new(
+            self.GITHUB_SECRET.encode(), body, hashlib.sha256).hexdigest()
+        assert self._post(
+            url, body, {**headers, "x-hub-signature-256": sig}) == 200
+
+    def test_linear_signature_enforced(self, secured_server):
+        body = json.dumps({"action": "update", "type": "Issue",
+                           "data": {"title": "t", "team": {"key": "ENG"}},
+                           "webhookTimestamp": int(time.time() * 1000)}).encode()
+        url = f"{secured_server}/webhooks/linear"
+
+        assert self._post(url, body, {}) == 401
+        assert self._post(url, body, {"linear-signature": "deadbeef"}) == 401
+
+        sig = hmac.new(self.LINEAR_SECRET.encode(), body, hashlib.sha256).hexdigest()
+        assert self._post(url, body, {"linear-signature": sig}) == 200
+
+    def test_linear_replay_rejected(self, secured_server):
+        stale = json.dumps({"action": "update", "type": "Issue",
+                            "data": {"title": "t", "team": {"key": "ENG"}},
+                            "webhookTimestamp": int(time.time() * 1000) - 3_600_000}).encode()
+        sig = hmac.new(self.LINEAR_SECRET.encode(), stale, hashlib.sha256).hexdigest()
+        assert self._post(
+            f"{secured_server}/webhooks/linear", stale, {"linear-signature": sig}) == 401
+
+    def test_slack_signature_enforced(self, secured_server):
+        body = json.dumps({"type": "event_callback",
+                           "event": {"type": "message", "user": "U1", "channel": "D1",
+                                     "channel_type": "im", "text": "hi",
+                                     "ts": "1700000000.000001"}}).encode()
+        url = f"{secured_server}/webhooks/slack"
+
+        assert self._post(url, body, {}) == 401
+
+        ts = str(int(time.time()))
+        sig = "v0=" + hmac.new(
+            self.SLACK_SECRET.encode(), f"v0:{ts}:".encode() + body,
+            hashlib.sha256).hexdigest()
+        assert self._post(url, body, {"x-slack-request-timestamp": ts,
+                                      "x-slack-signature": sig}) == 200
+
+    def test_slack_url_verification_passes_unsigned(self, secured_server):
+        """The handshake carries no signing headers; the pipeline's preVerify
+        stage must short-circuit it before the signature check."""
+        body = json.dumps({"type": "url_verification", "challenge": "c1"}).encode()
+        assert self._post(f"{secured_server}/webhooks/slack", body, {}) == 200
