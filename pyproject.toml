@@ -107,7 +107,7 @@ markers = [
     "claude: test requires a real Claude CLI session (deselected in integration-fast)",
     "local_only: test only runs against the local Node.js event server backend",
     "docker: test builds/runs the instance container image (needs a docker daemon; deselected in integration-fast)",
-    "live: test makes a real Claude API call + hits a live event server (gated to nightly/push, not PRs)",
+    "live: test hits a live external API (Claude, Slack, ...); gated by credentials/env, not run on PRs",
 ]
 
 [build-system]
