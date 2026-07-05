@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.39.0 - 2026-07-05
+
+Minor release: the channel gateway lands (Slack rebuilt on the Chat SDK, inbound
+and outbound), the unified `bobi app` web app, per-role and gateway-brain model
+flexibility, scoped webhook ingest, and release-owned GHCR base images.
+
+### Added
+- **Channel gateway (#190).** Phase 1: durable conversation refs, a signed
+  `/channels/send` API, and `bobi reply` (#620). Phase 2: Slack inbound and
+  outbound moved onto the Chat SDK with placeholder/typing UX and capability
+  degradation (#636). Over-budget sends now chunk at natural boundaries
+  (#660), and a gated live-Slack soak suite guards the path (#644).
+- **Unified web app (#525).** `bobi app` serves a dashboard, hosted
+  onboarding, and chat from one place (#587).
+- **Per-role model selection (#617).** `roles.<role>.model` picks the model
+  per role, with a cross-model resume guard (#619).
+- **Brain-level session continuation (#642).** Sessions continue across model
+  switches instead of restarting cold (#646).
+- **`kind: gateway` brain (#655).** Run a team on a local SLM through an
+  Anthropic-compatible gateway (#659).
+- **Scoped ingest tokens (#640, #641).** Mint per-topic tokens for
+  `/webhooks/ingest/<topic>` plus an `ingest-token` CLI (#657); the client
+  rides the shared signed transport (#663).
+- **Signed event publish CLI (#606).** Publish arbitrary events from the CLI
+  with bubble signing (#626).
+- **`bobi build` (#610).** Render an agent team into a ready-to-run container
+  image (#624).
+- **GHCR base image on release (#609).** Releases publish
+  `ghcr.io/moda-labs/bobi:<version>` (#631, #632).
+- **Setup wizard growth.** Ingress wizard (#593); workflows card, event
+  automations, and a next-steps finish flow (#627).
+- **Two-tier semantic gate (#630)** for relevance-gated poll monitors (#633).
+- **Manager health probe configuration (#604)** (#623).
+- **`auto_dispatch` task templates** (#621).
+- **Quickstart guide and concepts overview** docs (#594).
+
+### Changed
+- **One verified inbound-webhook pipeline (#639).** All inbound webhooks share
+  a single verification path (#645).
+- **One signed-request transport (#653).** Every Python event-server client
+  signs and sends through `signed_request` (#658).
+- **Slack parity normalizer deleted (#647)** after the Chat SDK soak completed
+  clean (#648).
+
+### Fixed
+- **Queued session messages survive reconnect (#588)** (#589).
+- **Passive Slack thread placeholders suppressed (#567)** (#616).
+- **Workflow loop re-entry bounded (MOD-250)** (#597).
+- **Question-only PR comments get answered** (#613).
+- **MCP preflight timeout configurable** (#622).
+- **Explicit subscriptions interpolate config refs (#607)** (#625).
+- **Template-built teams appear on the setup home screen** (#595).
+
 ## 0.38.0 — 2026-07-02
 
 Patch/minor release: fixes a production Codex OAuth device-login flood, plus
