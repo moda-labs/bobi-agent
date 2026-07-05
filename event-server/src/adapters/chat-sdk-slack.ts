@@ -1,27 +1,40 @@
 /**
- * Spike #191 — Chat SDK bridge adapter for Slack
+ * Chat SDK adapter for Slack inbound webhooks (#191, #628).
  *
  * Wraps the Chat SDK's Slack webhook parser to produce our NormalizedEvent
- * envelope. This adapter is a drop-in replacement for our hand-rolled
- * normalizeSlackWebhook — same input, same output shape.
- *
- * Benefits over the hand-rolled version:
- * - AST-based markdown conversion (no regex)
- * - Full Slack event type coverage (reactions, file shares, etc.)
- * - Signature verification via Web Crypto API (edge-compatible)
- * - Streaming/placeholder support for outbound (not used here)
+ * envelope. This is the only Slack inbound normalizer; it replaced the
+ * hand-rolled normalizeSlackWebhook once the bridge soaked (#629, #647).
  */
 import { parseSlackWebhookBody } from "@chat-adapter/slack/webhook";
 import type { NormalizedEvent, SlackNormalizationResult } from "../core";
 import { slackConversation } from "../conversation";
-import { mentionsAnySelfUser } from "./slack";
 
 export type ChatSdkBridgeResult = SlackNormalizationResult;
 
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Whether *text* @-mentions any of OUR bot users (`<@Uxxx>` or `<@Uxxx|label>`).
+ * Accepts a bare string for single-bot callers/tests.
+ */
+export function mentionsAnySelfUser(
+	text: string,
+	selfBotUserIds?: string | Iterable<string>,
+): boolean {
+	const ids =
+		typeof selfBotUserIds === "string"
+			? new Set([selfBotUserIds])
+			: new Set(selfBotUserIds ?? []);
+	return ids.size > 0
+		&& [...ids].some((id) =>
+			new RegExp(`<@${escapeRegExp(id)}(?:\\|[^>]+)?>`).test(text));
+}
+
 /**
  * Bridge the Chat SDK's Slack webhook parsing into our NormalizedEvent
- * envelope. This function replaces normalizeSlackWebhook from
- * adapters/slack.ts with the Chat SDK's parser as the frontend.
+ * envelope.
  *
  * @param body - Raw JSON string from the Slack webhook POST body
  * @param selfBotId - Our bot's ID, used to filter self-loop messages
@@ -30,9 +43,8 @@ export type ChatSdkBridgeResult = SlackNormalizationResult;
  */
 export function bridgeSlackWebhook(
 	body: string,
-	// Same shapes as normalizeSlackWebhook: a workspace may host several of
-	// our bots, so both filters take a set (bare string accepted for
-	// single-bot callers/tests).
+	// A workspace may host several of our bots, so both filters take a set
+	// (bare string accepted for single-bot callers/tests).
 	selfBotIds?: string | Iterable<string>,
 	selfBotUserIds?: string | Iterable<string>,
 	payload?: Record<string, unknown>,
@@ -71,8 +83,9 @@ export function bridgeSlackWebhook(
 		return { event: null, skip: true };
 	}
 
-	// Self-loop filter: skip messages authored by ANY of our bots, matching
-	// normalizeSlackWebhook's multi-bot set semantics.
+	// Self-loop filter: skip messages authored by ANY of our bots - both to
+	// stop a bot looping on itself and to stop two of our bots looping on
+	// each other. Messages from third-party bots (not ours) pass through.
 	const selfSet =
 		typeof selfBotIds === "string"
 			? new Set([selfBotIds])
@@ -81,15 +94,15 @@ export function bridgeSlackWebhook(
 		return { event: null, skip: true };
 	}
 
-	// Classify event type — matches our existing normalizer's categories
+	// Classify event type
 	const eventType = innerEvent.type as string;
 	const channelType = (innerEvent.channel_type as string) || "";
 	const threadTs = (innerEvent.thread_ts as string) || "";
 	const rawText = ((innerEvent.text as string) || "").slice(0, 4000);
 
-	// Mention/message dedup, identical to normalizeSlackWebhook: a channel
-	// @mention arrives as both app_mention and message.* with the same ts;
-	// drop the message copy so one human message yields one event.
+	// Mention/message dedup: a channel @mention arrives as both app_mention
+	// and message.* with the same ts; drop the message copy so one human
+	// message yields one event.
 	const mentionsSelfUser = mentionsAnySelfUser(rawText, selfBotUserIds);
 
 	let slackEventType: string;
@@ -105,7 +118,6 @@ export function bridgeSlackWebhook(
 		return { event: null, skip: true };
 	}
 
-	// Extract fields — identical to our existing normalizer
 	const teamId = (raw.team_id as string) || "";
 	const appId = (raw.api_app_id as string) || "";
 	const channel = (innerEvent.channel as string) || "";
@@ -113,10 +125,10 @@ export function bridgeSlackWebhook(
 	const ts = (innerEvent.ts as string) || "";
 	const isDm = channelType === "im" || channelType === "mpim";
 
-	// Topic emission matches normalizeSlackWebhook: legacy workspace/channel
-	// topics ONLY when Slack omits api_app_id. Emitting both app-qualified and
-	// legacy topics lets stale legacy subscriptions cross-deliver events
-	// between two apps in the same workspace.
+	// Legacy workspace/channel topics are emitted ONLY when Slack omits
+	// api_app_id. Emitting both app-qualified and legacy topics lets stale
+	// legacy subscriptions cross-deliver events between two apps in the same
+	// workspace.
 	const topics: string[] = [];
 	if (teamId) {
 		if (appId) {
@@ -135,8 +147,8 @@ export function bridgeSlackWebhook(
 
 	const botId = (innerEvent.bot_id as string) || "";
 
-	// Extract file attachments (images, documents, etc.) — same shape as
-	// normalizeSlackWebhook so the agent's fields.files contract holds.
+	// Extract file attachments (images, documents, etc.) from the event.
+	// Slack includes a `files` array on messages with shared files.
 	const rawFiles = innerEvent.files as Array<Record<string, unknown>> | undefined;
 	const files: Array<Record<string, string>> = [];
 	if (Array.isArray(rawFiles)) {
@@ -166,7 +178,7 @@ export function bridgeSlackWebhook(
 	if (files.length > 0) fields.files = JSON.stringify(files);
 
 	// Channel-agnostic reply address (#618). Anchoring policy lives in
-	// slackConversation so both normalizers cannot diverge.
+	// slackConversation.
 	const conversation = slackConversation(teamId, channel, channelType, ts, threadTs);
 
 	return {

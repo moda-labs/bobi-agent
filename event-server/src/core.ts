@@ -282,7 +282,6 @@ import { parseConversation, type Conversation } from "./conversation";
 
 export { normalizeGitHubWebhook as normalizeGitHubPayload } from "./adapters/github";
 export { normalizeLinearWebhook as normalizeLinearPayload } from "./adapters/linear";
-export { normalizeSlackWebhook as normalizeSlackPayload } from "./adapters/slack";
 
 // ---------------------------------------------------------------------------
 // Routing — topics-based (v2)
@@ -645,9 +644,7 @@ export async function handleLinearWebhook(
 
 // `body` is the raw webhook JSON string; `payload` its parsed form (parsed
 // here when the caller has not already done so for the signature check).
-// Normalization runs through the Chat SDK bridge (#628) — the hand-rolled
-// normalizeSlackWebhook remains only as the golden parity reference until
-// the bridge has soaked (#629).
+// Normalization runs through the Chat SDK bridge (#628).
 export async function handleSlackWebhook(
 	storage: StorageAdapter,
 	body: string,

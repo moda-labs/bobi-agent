@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
 	type NormalizedEvent,
 	createTopicEvent,
-	normalizeSlackPayload,
 } from "../src/core";
+import { bridgeSlackWebhook } from "../src/adapters/chat-sdk-slack";
 import {
 	isExemptFromBreaker,
 	conversationKey,
@@ -409,13 +409,13 @@ describe("circuit-breaker", () => {
 		});
 
 		// Regression (Slack self-spam incident 2026-06-24): the breaker must
-		// detect bot authorship on the event shape the REAL normalizer emits —
+		// detect bot authorship on the event shape the Chat SDK bridge emits -
 		// a FLAT payload with bot_id, not the fictional nested `payload.event.bot_id`
 		// the other helpers hand-craft. Before the fix the normalizer stripped
 		// bot_id entirely, so every Slack event read as human and the breaker
 		// could never trip on a loop.
 		it("detects bot authorship on a real normalized slack event (flat payload bot_id)", () => {
-			const result = normalizeSlackPayload({
+			const result = bridgeSlackWebhook(JSON.stringify({
 				type: "event_callback",
 				team_id: "T123",
 				event: {
@@ -428,7 +428,7 @@ describe("circuit-breaker", () => {
 					text: "from another bot",
 					ts: "1700000001.000100",
 				},
-			}); // no selfBotId → not skipped, becomes a real normalized event
+			})); // no selfBotId → not skipped, becomes a real normalized event
 			expect(result.event).not.toBeNull();
 			expect(isBotAuthored(result.event!)).toBe(true);
 		});
@@ -436,7 +436,7 @@ describe("circuit-breaker", () => {
 		it("trips the breaker on repeated real normalized slack bot events", () => {
 			const depId = "dep-loop";
 			const make = () =>
-				normalizeSlackPayload({
+				bridgeSlackWebhook(JSON.stringify({
 					type: "event_callback",
 					team_id: "T123",
 					event: {
@@ -449,7 +449,7 @@ describe("circuit-breaker", () => {
 						text: "spam",
 						ts: "1700000001.000100",
 					},
-				}).event!;
+				})).event!;
 			let tripped = false;
 			for (let i = 0; i < BREAKER_THRESHOLD; i++) {
 				const v = recordDelivery(depId, make());

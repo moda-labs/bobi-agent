@@ -131,6 +131,13 @@ jobs:
         with:
           node-version: "20"
 
+      # test_login_bootstrap_smoke.py bundles chat-sdk-slack.ts with esbuild,
+      # which needs @chat-adapter/slack resolvable from event-server/ (the
+      # test skips without it, silently losing coverage).
+      - name: Install event-server Node dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: event-server
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"

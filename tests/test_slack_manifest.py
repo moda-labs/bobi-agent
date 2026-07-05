@@ -1,7 +1,7 @@
 """Tests for slack_manifest — manifest rendering, JSON conversion, deep link.
 
 The manifest is the one source of truth for the scopes + events the bobi
-Slack adapter (event-server/src/adapters/slack.ts) consumes. These tests pin
+Slack adapter (event-server/src/adapters/chat-sdk-slack.ts) consumes. These tests pin
 that the rendered manifest stays wired to the event server's /webhooks/slack
 path and carries every event the adapter normalizes.
 """
