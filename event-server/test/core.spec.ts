@@ -30,6 +30,7 @@ import {
 	handleLinearWebhook,
 	handleSlackWebhook,
 	handleWebhookRequest,
+	matchWebhookSource,
 	verifyLinearSignature,
 	type InboundWebhookRequest,
 	handleRegisterDeployment,
@@ -43,13 +44,15 @@ import {
 	handleSlackWorkspaceRegister,
 	resolveSlackSigningSecret,
 } from "../src/core";
+import { hmacHex } from "./helpers";
 
 afterEach(() => vi.unstubAllGlobals());
 
-// handleSlackWebhook takes the raw webhook body (the Chat SDK bridge parses
-// it); tests build payload objects, so stringify at the call boundary.
+// handleSlackWebhook takes the raw webhook body plus its parsed form (the
+// pipeline parses once before verification); tests build payload objects, so
+// stringify at the call boundary.
 function slackWebhook(store: StorageAdapter, payload: Record<string, unknown>) {
-	return handleSlackWebhook(store, JSON.stringify(payload));
+	return handleSlackWebhook(store, JSON.stringify(payload), payload);
 }
 
 // The Chat SDK api module form-encodes Slack Web API calls; decode a stubbed
@@ -607,18 +610,7 @@ describe("verifyGitHubSignature", () => {
 	const secret = "test-webhook-secret";
 
 	async function sign(body: string): Promise<string> {
-		const key = await crypto.subtle.importKey(
-			"raw",
-			new TextEncoder().encode(secret),
-			{ name: "HMAC", hash: "SHA-256" },
-			false,
-			["sign"],
-		);
-		const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
-		const hex = Array.from(new Uint8Array(sig))
-			.map((b) => b.toString(16).padStart(2, "0"))
-			.join("");
-		return `sha256=${hex}`;
+		return `sha256=${await hmacHex(secret, body)}`;
 	}
 
 	it("accepts a valid signature", async () => {
@@ -1179,20 +1171,6 @@ describe("handleGitHubWebhook", () => {
 // function, so these tests ARE the shared verification coverage for both.
 // ---------------------------------------------------------------------------
 describe("handleWebhookRequest (unified pipeline)", () => {
-	async function hmacHex(secret: string, data: string): Promise<string> {
-		const key = await crypto.subtle.importKey(
-			"raw",
-			new TextEncoder().encode(secret),
-			{ name: "HMAC", hash: "SHA-256" },
-			false,
-			["sign"],
-		);
-		const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
-		return Array.from(new Uint8Array(sig))
-			.map((b) => b.toString(16).padStart(2, "0"))
-			.join("");
-	}
-
 	function req(rawBody: string, headers: Record<string, string> = {}): InboundWebhookRequest {
 		const lower = Object.fromEntries(
 			Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]),
@@ -1279,6 +1257,25 @@ describe("handleWebhookRequest (unified pipeline)", () => {
 		expect(result?.status).toBe(401);
 	});
 
+	it("linear: fails closed on a signed payload with no numeric webhookTimestamp", async () => {
+		// The replay guard must not be skippable: a validly-signed body that
+		// omits webhookTimestamp (or carries it as a string) would otherwise be
+		// replayable forever.
+		const store = createMockStorage();
+		for (const extra of [{}, { webhookTimestamp: String(Date.now()) }]) {
+			const body = JSON.stringify({
+				action: "update", type: "Issue",
+				data: { title: "t", team: { key: "ENG" } },
+				...extra,
+			});
+			const result = await handleWebhookRequest(
+				store, "linear",
+				req(body, { "linear-signature": await hmacHex("ln-secret", body) }),
+				{ linear: "ln-secret" });
+			expect(result?.status).toBe(401);
+		}
+	});
+
 	it("linear: admits unverified when no secret is configured (legacy contract)", async () => {
 		const store = createMockStorage();
 		const body = JSON.stringify({ action: "update", type: "Issue", data: { team: { key: "ENG" } } });
@@ -1312,20 +1309,41 @@ describe("handleWebhookRequest (unified pipeline)", () => {
 	});
 });
 
-describe("verifyLinearSignature", () => {
-	it("accepts the exact-body HMAC and rejects everything else", async () => {
-		const body = '{"a":1}';
-		const key = await crypto.subtle.importKey(
-			"raw", new TextEncoder().encode("s"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-		const sig = Array.from(new Uint8Array(
-			await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body))))
-			.map((b) => b.toString(16).padStart(2, "0")).join("");
+describe("matchWebhookSource", () => {
+	it("matches registered sources, with or without a trailing slash", () => {
+		expect(matchWebhookSource("/webhooks/github")).toBe("github");
+		expect(matchWebhookSource("/webhooks/linear")).toBe("linear");
+		expect(matchWebhookSource("/webhooks/slack/")).toBe("slack");
+	});
 
-		expect(await verifyLinearSignature("s", body, sig)).toBe(true);
-		expect(await verifyLinearSignature("s", body, "")).toBe(false);
-		expect(await verifyLinearSignature("s", body, "deadbeef")).toBe(false);
-		expect(await verifyLinearSignature("s", body + " ", sig)).toBe(false);
-		expect(await verifyLinearSignature("other", body, sig)).toBe(false);
+	it("returns null for unregistered sources and non-webhook paths", () => {
+		expect(matchWebhookSource("/webhooks/telegram")).toBeNull();
+		expect(matchWebhookSource("/webhooks/github/extra")).toBeNull();
+		expect(matchWebhookSource("/webhooks/")).toBeNull();
+		expect(matchWebhookSource("/events/foo")).toBeNull();
+	});
+});
+
+describe("verifyLinearSignature", () => {
+	it("accepts the exact-body HMAC with a fresh timestamp, rejects everything else", async () => {
+		const body = '{"a":1}';
+		const now = Date.now();
+		const sig = await hmacHex("s", body);
+
+		expect(await verifyLinearSignature("s", body, sig, now)).toBe(true);
+		expect(await verifyLinearSignature("s", body, "", now)).toBe(false);
+		expect(await verifyLinearSignature("s", body, "deadbeef", now)).toBe(false);
+		expect(await verifyLinearSignature("s", body + " ", sig, now)).toBe(false);
+		expect(await verifyLinearSignature("other", body, sig, now)).toBe(false);
+	});
+
+	it("owns the replay window and fails closed on a missing timestamp", async () => {
+		const body = '{"a":1}';
+		const sig = await hmacHex("s", body);
+
+		expect(await verifyLinearSignature("s", body, sig, Date.now() - 3600_000)).toBe(false);
+		expect(await verifyLinearSignature("s", body, sig, undefined)).toBe(false);
+		expect(await verifyLinearSignature("s", body, sig, String(Date.now()))).toBe(false);
 	});
 });
 

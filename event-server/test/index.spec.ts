@@ -2,6 +2,7 @@ import { SELF, env } from "cloudflare:test";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import worker from "../src/index";
 import { buildBubbleSignature, parseGlobalTopic } from "../src/core";
+import { hmacHex } from "./helpers";
 import {
 	INTERNAL_HEADER,
 	INTERNAL_WS_QUERY_PARAM,
@@ -478,18 +479,7 @@ describe("github webhook signature verification", () => {
 	const secret = "test-webhook-secret";
 
 	async function sign(body: string): Promise<string> {
-		const key = await crypto.subtle.importKey(
-			"raw",
-			new TextEncoder().encode(secret),
-			{ name: "HMAC", hash: "SHA-256" },
-			false,
-			["sign"],
-		);
-		const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
-		const hex = Array.from(new Uint8Array(sig))
-			.map((b) => b.toString(16).padStart(2, "0"))
-			.join("");
-		return `sha256=${hex}`;
+		return `sha256=${await hmacHex(secret, body)}`;
 	}
 
 	it("rejects github webhook with invalid signature when WEBHOOK_SECRET is set", async () => {
@@ -549,18 +539,8 @@ describe("github webhook signature verification", () => {
 describe("linear webhook signature verification", () => {
 	const secret = "test-linear-secret";
 
-	async function sign(body: string, withSecret = secret): Promise<string> {
-		const key = await crypto.subtle.importKey(
-			"raw",
-			new TextEncoder().encode(withSecret),
-			{ name: "HMAC", hash: "SHA-256" },
-			false,
-			["sign"],
-		);
-		const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
-		return Array.from(new Uint8Array(sig))
-			.map((b) => b.toString(16).padStart(2, "0"))
-			.join("");
+	function sign(body: string): Promise<string> {
+		return hmacHex(secret, body);
 	}
 
 	function linearPayload(webhookTimestamp = Date.now()): string {
@@ -626,22 +606,7 @@ describe("slack webhook signature verification", () => {
 	const secret = "test-slack-secret";
 
 	async function signSlack(timestamp: string, body: string): Promise<string> {
-		const key = await crypto.subtle.importKey(
-			"raw",
-			new TextEncoder().encode(secret),
-			{ name: "HMAC", hash: "SHA-256" },
-			false,
-			["sign"],
-		);
-		const sig = await crypto.subtle.sign(
-			"HMAC",
-			key,
-			new TextEncoder().encode(`v0:${timestamp}:${body}`),
-		);
-		const hex = Array.from(new Uint8Array(sig))
-			.map((b) => b.toString(16).padStart(2, "0"))
-			.join("");
-		return `v0=${hex}`;
+		return `v0=${await hmacHex(secret, `v0:${timestamp}:${body}`)}`;
 	}
 
 	const eventBody = JSON.stringify({

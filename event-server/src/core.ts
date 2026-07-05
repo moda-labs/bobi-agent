@@ -484,16 +484,30 @@ export async function verifyGitHubSignature(
 	return constantTimeEqual(expected, signatureHeader);
 }
 
+// Linear replay window for the signed webhookTimestamp (ms since epoch),
+// matching the ±300s the slack and bubble verifiers use.
+const LINEAR_REPLAY_WINDOW_MS = 300_000;
+
 // Linear signs the raw body with HMAC-SHA256 (hex) in the `linear-signature`
-// header. Replay protection comes from the signed `webhookTimestamp` payload
-// field, checked in the linear source's verify stage (the signature makes it
-// tamper-proof, so a stale timestamp always means a replayed request).
+// header. `webhookTimestamp` is the payload's signed timestamp field; like
+// verifySlackSignature, the freshness window lives INSIDE the verifier so a
+// direct caller cannot get signature validation without replay protection.
+// FAIL CLOSED on a missing or non-numeric timestamp: the signature covers the
+// body, so its absence in a signed payload still leaves the request replayable
+// forever if admitted.
 export async function verifyLinearSignature(
 	secret: string,
 	body: string,
 	signatureHeader: string,
+	webhookTimestamp: unknown,
 ): Promise<boolean> {
 	if (!signatureHeader) return false;
+	if (
+		typeof webhookTimestamp !== "number" ||
+		Math.abs(Date.now() - webhookTimestamp) > LINEAR_REPLAY_WINDOW_MS
+	) {
+		return false;
+	}
 	const expected = await hmacSha256Hex(secret, body);
 	return constantTimeEqual(expected, signatureHeader);
 }
@@ -559,12 +573,20 @@ export interface AuthRejectionCounters {
 	bad_signature: number;
 	stale_timestamp: number;
 	unknown_bubble: number;
+	// Inbound webhook pipeline (#639): requests admitted because the provider's
+	// secret is unconfigured, and requests rejected by a source's verify slot.
+	// Both surface on /health so a provider silently running unverified — or a
+	// rotated secret 401-flooding — is visible without grepping logs.
+	webhook_unverified: number;
+	webhook_bad_signature: number;
 }
 
 const _rejectionCounters: AuthRejectionCounters = {
 	bad_signature: 0,
 	stale_timestamp: 0,
 	unknown_bubble: 0,
+	webhook_unverified: 0,
+	webhook_bad_signature: 0,
 };
 
 export function getAuthRejectionCounters(): AuthRejectionCounters {
@@ -575,6 +597,8 @@ export function resetAuthRejectionCounters(): void {
 	_rejectionCounters.bad_signature = 0;
 	_rejectionCounters.stale_timestamp = 0;
 	_rejectionCounters.unknown_bubble = 0;
+	_rejectionCounters.webhook_unverified = 0;
+	_rejectionCounters.webhook_bad_signature = 0;
 }
 
 // Resolve and verify the bubble that signed a request. Returns the bubble on a
@@ -657,23 +681,16 @@ export async function handleLinearWebhook(
 	return { status: 200, body: { delivered_to: delivered } };
 }
 
-// `body` is the raw webhook JSON string; `payload` its parsed form (parsed
-// here when the caller has not already done so for the signature check).
-// Normalization runs through the Chat SDK bridge (#628) — the hand-rolled
+// `body` is the raw webhook JSON string; `payload` its parsed form (the
+// pipeline parses once before verification and passes both). Normalization
+// runs through the Chat SDK bridge (#628) — the hand-rolled
 // normalizeSlackWebhook remains only as the golden parity reference until
 // the bridge has soaked (#629).
 export async function handleSlackWebhook(
 	storage: StorageAdapter,
 	body: string,
-	payload?: Record<string, unknown>,
+	payload: Record<string, unknown>,
 ): Promise<HandlerResult> {
-	if (!payload) {
-		try {
-			payload = JSON.parse(body) as Record<string, unknown>;
-		} catch {
-			return { status: 400, body: { error: "invalid JSON" } };
-		}
-	}
 	const teamId = (payload.team_id as string) || "";
 	const apiAppId = (payload.api_app_id as string) || "";
 	let selfBotIds: Set<string> | undefined;
@@ -725,9 +742,11 @@ export interface InboundWebhookRequest {
 }
 
 // Provider verification secrets, resolved by the transport (Worker env vars /
-// BOBI_ES_* process env). An empty secret means verification is not configured
-// for that provider and its webhooks are admitted unverified — the pre-#639
-// contract for github and slack, kept for zero-config local development.
+// BOBI_ES_* process env), keyed by source name. An empty secret means
+// verification is not configured for that provider and its webhooks are
+// admitted unverified — the pre-#639 contract for github and slack, kept for
+// zero-config local development. Unverified admission is counted on /health
+// (webhook_unverified) so a misconfigured public server is visible.
 export interface WebhookSecrets {
 	github?: string;
 	slack?: string;
@@ -744,12 +763,14 @@ interface WebhookSource {
 		payload: Record<string, unknown>,
 	): HandlerResult | null;
 	// REQUIRED verification slot — null admits the request, a HandlerResult
-	// rejects it. Runs over the exact wire bytes.
+	// rejects it. Runs over the exact wire bytes. `secret` is the source's own
+	// entry from WebhookSecrets, resolved by the pipeline so a verifier can
+	// never read another provider's key.
 	verify(
 		storage: StorageAdapter,
 		req: InboundWebhookRequest,
 		payload: Record<string, unknown>,
-		secrets: WebhookSecrets,
+		secret: string,
 	): Promise<HandlerResult | null>;
 	// Normalize + deliver.
 	handle(
@@ -760,17 +781,14 @@ interface WebhookSource {
 }
 
 const INVALID_SIGNATURE: HandlerResult = { status: 401, body: { error: "invalid signature" } };
-
-// Linear replay window for the signed webhookTimestamp (ms since epoch),
-// matching the ±300s the slack and bubble verifiers use.
-const LINEAR_REPLAY_WINDOW_MS = 300_000;
+const INVALID_JSON: HandlerResult = { status: 400, body: { error: "invalid JSON" } };
 
 const WEBHOOK_SOURCES: Record<string, WebhookSource> = {
 	github: {
-		async verify(_storage, req, _payload, secrets) {
-			if (!secrets.github) return null;
+		async verify(_storage, req, _payload, secret) {
+			if (!secret) return unverifiedAdmission();
 			const valid = await verifyGitHubSignature(
-				secrets.github,
+				secret,
 				new TextEncoder().encode(req.rawBody),
 				req.header("x-hub-signature-256"),
 			);
@@ -787,21 +805,15 @@ const WEBHOOK_SOURCES: Record<string, WebhookSource> = {
 	},
 
 	linear: {
-		async verify(_storage, req, payload, secrets) {
-			if (!secrets.linear) return null;
+		async verify(_storage, req, payload, secret) {
+			if (!secret) return unverifiedAdmission();
 			const valid = await verifyLinearSignature(
-				secrets.linear,
+				secret,
 				req.rawBody,
 				req.header("linear-signature"),
+				payload.webhookTimestamp,
 			);
-			if (!valid) return INVALID_SIGNATURE;
-			// The signature covers webhookTimestamp, so a stale value can only be
-			// a replayed request. Real Linear payloads always carry it.
-			const ts = payload.webhookTimestamp;
-			if (typeof ts === "number" && Math.abs(Date.now() - ts) > LINEAR_REPLAY_WINDOW_MS) {
-				return INVALID_SIGNATURE;
-			}
-			return null;
+			return valid ? null : INVALID_SIGNATURE;
 		},
 		handle(storage, _req, payload) {
 			return handleLinearWebhook(storage, payload);
@@ -823,13 +835,13 @@ const WEBHOOK_SOURCES: Record<string, WebhookSource> = {
 			}
 			return null;
 		},
-		async verify(storage, req, payload, secrets) {
+		async verify(storage, req, payload, secret) {
 			// Verify against the AUTHORING app's signing secret (resolved by
 			// api_app_id), falling back to the global secret for legacy single-app
 			// deployments. A second app in the workspace signs with its OWN secret;
 			// validating only the global one 401'd it (and dropped its login DM).
-			const signingSecret = await slackSigningSecretFor(storage, payload, secrets.slack || "");
-			if (!signingSecret) return null;
+			const signingSecret = await slackSigningSecretFor(storage, payload, secret);
+			if (!signingSecret) return unverifiedAdmission();
 			const valid = await verifySlackSignature(
 				signingSecret,
 				req.header("x-slack-request-timestamp"),
@@ -844,8 +856,28 @@ const WEBHOOK_SOURCES: Record<string, WebhookSource> = {
 	},
 };
 
+// An admit-without-verification, counted so /health surfaces a provider
+// running unverified (the misconfiguration class this pipeline exists to
+// close). Returns null — the pipeline admits the request.
+function unverifiedAdmission(): null {
+	_rejectionCounters.webhook_unverified++;
+	return null;
+}
+
+// Match a request path against the registered webhook routes. Returns the
+// source name for a registered `/webhooks/<source>` path (with or without a
+// trailing slash), else null. The single route grammar both transports use —
+// they gate the body read on this, so an unregistered path 404s without ever
+// consuming the request body.
+export function matchWebhookSource(path: string): string | null {
+	const m = path.match(/^\/webhooks\/([^/]+)\/?$/);
+	if (!m) return null;
+	return m[1] in WEBHOOK_SOURCES ? m[1] : null;
+}
+
 // Run an inbound webhook through the pipeline. Returns null for an
-// unregistered source (the transport falls through to its native 404).
+// unregistered source (the transport falls through to its native 404;
+// transports that gate on matchWebhookSource never hit this).
 export async function handleWebhookRequest(
 	storage: StorageAdapter,
 	source: string,
@@ -859,18 +891,22 @@ export async function handleWebhookRequest(
 	try {
 		payload = JSON.parse(req.rawBody);
 	} catch {
-		return { status: 400, body: { error: "invalid JSON" } };
+		return INVALID_JSON;
 	}
 	if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-		return { status: 400, body: { error: "invalid JSON" } };
+		return INVALID_JSON;
 	}
 	const body = payload as Record<string, unknown>;
 
 	const early = def.preVerify?.(req, body);
 	if (early) return early;
 
-	const rejected = await def.verify(storage, req, body, secrets);
-	if (rejected) return rejected;
+	const secret = secrets[source as keyof WebhookSecrets] || "";
+	const rejected = await def.verify(storage, req, body, secret);
+	if (rejected) {
+		_rejectionCounters.webhook_bad_signature++;
+		return rejected;
+	}
 
 	return def.handle(storage, req, body);
 }

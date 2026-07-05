@@ -140,7 +140,9 @@ A source registers a **required** verify slot plus a normalizer in
 by type, so a route cannot exist without verification by construction. Transports
 never stitch verification per-route. Verifiers run over the exact wire bytes; an
 unconfigured provider secret admits that provider unverified (zero-config local
-development), and a configured one rejects bad or missing signatures with 401.
+development; counted on `/health` as `webhook_unverified` so a public server
+running unverified is visible), and a configured one rejects bad or missing
+signatures with 401 (counted as `webhook_bad_signature`).
 Normalizers (`event-server/src/adapters/`) derive the routing key **from the
 signed body, never from client input**:
 
@@ -160,7 +162,9 @@ signed body, never from client input**:
 - **Linear** (`POST /webhooks/linear`): `type = linear.<type>.<action>`, key
   `linear:<TEAM_KEY>`. Signature (`Linear-Signature`, HMAC-SHA256 of the raw body)
   is verified when `LINEAR_WEBHOOK_SECRET` (local: `BOBI_ES_LINEAR_WEBHOOK_SECRET`)
-  is set, with replay rejection via the signed `webhookTimestamp` (±300s).
+  is set, with replay rejection via the signed `webhookTimestamp` (±300s;
+  fail-closed - a signed payload without a numeric `webhookTimestamp` is
+  rejected, since it would otherwise be replayable forever).
 
 **Generic topic endpoint** (`POST /events/{topic}`). Monitors, lifecycle emits,
 inter-agent inbox/reply, and any agent-emitted event publish here. It is

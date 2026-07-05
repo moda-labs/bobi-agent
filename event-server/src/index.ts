@@ -16,6 +16,7 @@ import {
 	hasPartialBubbleSignature,
 	authenticateBubble,
 	handleWebhookRequest,
+	matchWebhookSource,
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
 	handleDeregisterDeployment,
@@ -294,15 +295,16 @@ export default {
 		}
 
 		// Inbound webhooks — one pipeline for every source (#639): the shared
-		// core resolves the source, verifies the exact wire bytes (the verify
+		// core matches the route, verifies the exact wire bytes (the verify
 		// slot is structural — no source registers without one), normalizes,
-		// and delivers. An unregistered source falls through to 404.
-		const webhookMatch = method === "POST" && path.match(/^\/webhooks\/([^/]+)\/?$/);
-		if (webhookMatch) {
+		// and delivers. matchWebhookSource returns null for an unregistered
+		// path, which 404s below WITHOUT consuming the request body.
+		const webhookSource = method === "POST" ? matchWebhookSource(path) : null;
+		if (webhookSource) {
 			const rawBody = await request.text();
 			const result = await handleWebhookRequest(
 				storage,
-				webhookMatch[1],
+				webhookSource,
 				{ rawBody, header: (n) => request.headers.get(n) || "" },
 				{
 					github: env.WEBHOOK_SECRET,

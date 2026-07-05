@@ -18,6 +18,7 @@ import {
 	hasPartialBubbleSignature,
 	authenticateBubble,
 	handleWebhookRequest,
+	matchWebhookSource,
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
 	handleDeregisterDeployment,
@@ -373,15 +374,16 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	}
 
 	// Inbound webhooks — one pipeline for every source (#639), shared with the
-	// Worker: the core resolves the source, verifies the exact wire bytes (the
-	// verify slot is structural), normalizes, and delivers. An unregistered
-	// source falls through to 404.
-	const webhookMatch = method === "POST" && path.match(/^\/webhooks\/([^/]+)\/?$/);
-	if (webhookMatch) {
+	// Worker: the core matches the route, verifies the exact wire bytes (the
+	// verify slot is structural), normalizes, and delivers. matchWebhookSource
+	// returns null for an unregistered path, which 404s below WITHOUT
+	// consuming the request body.
+	const webhookSource = method === "POST" ? matchWebhookSource(path) : null;
+	if (webhookSource) {
 		const body = await readBody(req);
 		const result = await handleWebhookRequest(
 			storage,
-			webhookMatch[1],
+			webhookSource,
 			{ rawBody: body, header: (n) => (req.headers[n.toLowerCase()] as string) || "" },
 			{ github: webhookSecret, slack: slackSigningSecret, linear: linearWebhookSecret },
 		);
