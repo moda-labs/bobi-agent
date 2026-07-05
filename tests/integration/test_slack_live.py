@@ -21,6 +21,7 @@ API acceptance and content round-trip, not that the markdown looks right.
 
 import json
 import os
+import re
 import signal
 import socket
 import time
@@ -71,6 +72,14 @@ def live_env(tmp_path_factory):
     tests in this module post into."""
     token = os.environ["SLACK_BOT_TOKEN"]
     channel = os.environ["SLACK_TEST_CHANNEL"]
+    # Must be the channel ID, not a #name: conversation refs always carry IDs
+    # (they come from webhooks), and chat.update rejects names with the
+    # misleading error channel_not_found even though chat.postMessage resolves
+    # them.
+    assert re.fullmatch(r"[CG][A-Z0-9]+", channel), (
+        f"SLACK_TEST_CHANNEL must be a channel ID (C...), got {channel!r} - "
+        "copy it from the channel's About tab in Slack"
+    )
 
     # Token present but invalid must FAIL, not skip.
     auth = httpx.post(
