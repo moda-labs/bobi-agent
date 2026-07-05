@@ -180,14 +180,14 @@ class TestReplyCommand:
 
         def handler(request):
             return httpx.Response(
-                400, json={"error": "unsupported channel: whatsapp"})
+                400, json={"error": "unsupported channel: telegram"})
 
         with patch.object(pooled, '_client', _mock_client(handler)):
             runner = CliRunner()
             result = runner.invoke(
-                main, ["reply", "whatsapp:747:dm:15550001111", "hi"])
+                main, ["reply", "telegram:12345:dm:67890", "hi"])
         assert result.exit_code == 1
-        assert "unsupported channel: whatsapp" in result.output
+        assert "unsupported channel: telegram" in result.output
 
     def test_rejects_empty_text(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)

@@ -321,7 +321,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
     kept: list[str] = []
     for sub in subscribe:
         service = sub.split(":", 1)[0] if ":" in sub else ""
-        if service in ("github", "linear", "slack") and ":" in sub:
+        if service in ("github", "linear", "slack", "whatsapp") and ":" in sub:
             resource = sub.split(":", 1)[1]
             try:
                 if _seed_test_resource_grant(base_url, service, resource, bubble_id, bubble_key):
@@ -330,7 +330,8 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
             except Exception as e:
                 log.debug("Test resource-grant seed failed for %r: %s", sub, e)
         if service not in _RESOURCE_CRED_KEYS:
-            kept.append(sub)  # non-global, or slack (granted via workspace reg)
+            # Non-global, or slack/whatsapp (granted via their registrations).
+            kept.append(sub)
             continue
         resource = sub.split(":", 1)[1]
         cfg_service, cred_key = _RESOURCE_CRED_KEYS[service]
@@ -631,4 +632,42 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
         return [team_id]
     except Exception as e:
         log.warning("Slack workspace registration failed for %s: %s", team_id, e)
+        return []
+
+
+def register_whatsapp_numbers(base_url: str, cfg, bubble_id: str = "",
+                              bubble_key: str = "") -> list[str]:
+    """Register the agent's WhatsApp number with the event server (#656).
+
+    Signed-only mirror of :func:`register_slack_workspaces`: the server
+    verifies the access token against the Meta Graph API, stores the
+    bubble-scoped send credential ``/channels/send`` resolves, and writes the
+    ``whatsapp:<phone_number_id>`` resource grant that lets this bubble
+    subscribe to the number's inbound topic. Without a bubble key there is
+    nothing to register (no unsigned/global use case), so this is a no-op.
+    Best-effort: logs and continues on any failure so a registration hiccup
+    never blocks startup. Returns the phone number ids registered.
+    """
+    try:
+        token = cfg.credential("whatsapp", "access_token")
+        pnid = cfg.credential("whatsapp", "phone_number_id")
+    except Exception:
+        return []
+    if not (token and pnid and bubble_id and bubble_key):
+        return []
+    try:
+        from bobi.events.signing import signed_request
+        resp = signed_request(
+            base_url, "POST", "/whatsapp/numbers",
+            {"phone_number_id": pnid, "access_token": token},
+            bubble_id, bubble_key, timeout=10.0,
+        )
+        if resp.status_code != 200:
+            log.warning("WhatsApp number registration rejected for %s: HTTP %d",
+                        pnid, resp.status_code)
+            return []
+        log.info("Registered WhatsApp number %s with event server", pnid)
+        return [pnid]
+    except Exception as e:
+        log.warning("WhatsApp number registration failed for %s: %s", pnid, e)
         return []

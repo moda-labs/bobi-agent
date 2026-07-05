@@ -231,6 +231,23 @@ def _detect_slack(project_path: Path, cfg: "Config") -> list[str]:
     return []
 
 
+def _detect_whatsapp(project_path: Path, cfg: "Config") -> list[str]:
+    """Detect the WhatsApp subscription key from the configured number (#656).
+
+    The topic is ``whatsapp:<phone_number_id>`` - the id is configuration, not
+    an API lookup, so detection needs no network call. Requires the access
+    token too: a number id without a send credential cannot register, so
+    subscribing would only produce undeliverable replies.
+    """
+    pnid = cfg.credential("whatsapp", "phone_number_id")
+    token = cfg.credential("whatsapp", "access_token")
+    if not (pnid and token):
+        return []
+    key = f"whatsapp:{pnid}"
+    log.info(f"Auto-detected WhatsApp number {pnid}; subscribing: [{key!r}]")
+    return [key]
+
+
 def _detect_linear(project_path: Path, cfg: "Config") -> list[str]:
     """Detect linear:TEAM from the Linear API."""
     api_key = cfg.credential("linear", "api_key")
@@ -263,3 +280,4 @@ def _detect_linear(project_path: Path, cfg: "Config") -> list[str]:
 register("github", _detect_github)
 register("slack", _detect_slack)
 register("linear", _detect_linear)
+register("whatsapp", _detect_whatsapp)

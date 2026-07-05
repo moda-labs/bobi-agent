@@ -16,6 +16,7 @@ import {
 	hasPartialBubbleSignature,
 	authenticateBubble,
 	handleWebhookRequest,
+	handleWebhookHandshake,
 	matchWebhookSource,
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
@@ -26,6 +27,7 @@ import {
 	handleChannelsHistory,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
+	handleWhatsAppNumberRegister,
 	handleTestSeedResourceGrants,
 	getAuthRejectionCounters,
 } from "./core";
@@ -45,6 +47,8 @@ interface Env {
 	WEBHOOK_SECRET?: string;
 	SLACK_SIGNING_SECRET?: string;
 	LINEAR_WEBHOOK_SECRET?: string;
+	WHATSAPP_APP_SECRET?: string;
+	WHATSAPP_VERIFY_TOKEN?: string;
 	TEST_GRANTS_SECRET?: string;
 }
 
@@ -202,6 +206,15 @@ function createKVStorage(env: Env): StorageAdapter {
 			await env.EVENTS.put(`slack_workspace:${workspaceId}`, JSON.stringify(record));
 		},
 
+		async getChannelState(key: string): Promise<Record<string, unknown> | null> {
+			const data = await env.EVENTS.get(`channel_state:${key}`);
+			return data ? JSON.parse(data) : null;
+		},
+
+		async putChannelState(key: string, value: Record<string, unknown>): Promise<void> {
+			await env.EVENTS.put(`channel_state:${key}`, JSON.stringify(value));
+		},
+
 		async initDeploymentSession(deploymentId: string, subscriptions: string[]): Promise<void> {
 			const doId = env.DEPLOYMENT_SESSION.idFromName(deploymentId);
 			const stub = env.DEPLOYMENT_SESSION.get(doId);
@@ -299,6 +312,31 @@ export default {
 		// slot is structural — no source registers without one), normalizes,
 		// and delivers. matchWebhookSource returns null for an unregistered
 		// path, which 404s below WITHOUT consuming the request body.
+		const webhookSecrets = {
+			github: env.WEBHOOK_SECRET,
+			slack: env.SLACK_SIGNING_SECRET,
+			linear: env.LINEAR_WEBHOOK_SECRET,
+			whatsapp: env.WHATSAPP_APP_SECRET,
+			whatsappVerifyToken: env.WHATSAPP_VERIFY_TOKEN,
+		};
+
+		// Provider GET handshakes (#656): Meta verifies a webhook URL with a
+		// GET whose challenge must echo back as RAW text (JSON-quoting breaks
+		// its byte comparison), so this responds outside respond()/JSON.
+		if (method === "GET") {
+			const handshakeSource = matchWebhookSource(path);
+			if (handshakeSource) {
+				const h = handleWebhookHandshake(
+					handshakeSource, (n) => url.searchParams.get(n) || "", webhookSecrets);
+				if (h) {
+					return new Response(h.text, {
+						status: h.status,
+						headers: { "Content-Type": "text/plain" },
+					});
+				}
+			}
+		}
+
 		const webhookSource = method === "POST" ? matchWebhookSource(path) : null;
 		if (webhookSource) {
 			const rawBody = await request.text();
@@ -306,11 +344,7 @@ export default {
 				storage,
 				webhookSource,
 				{ rawBody, header: (n) => request.headers.get(n) || "" },
-				{
-					github: env.WEBHOOK_SECRET,
-					slack: env.SLACK_SIGNING_SECRET,
-					linear: env.LINEAR_WEBHOOK_SECRET,
-				},
+				webhookSecrets,
 			);
 			if (result) return respond(result);
 		}
@@ -501,6 +535,30 @@ export default {
 				return Response.json({ error: "forbidden" }, { status: 403 });
 			}
 			return respond(await handleSlackWorkspaceRegister(storage, data, bubbleId));
+		}
+
+		if (method === "POST" && path === "/whatsapp/numbers") {
+			// Signed-only (#656): unlike Slack there is no unsigned global-record
+			// use case, so an unauthenticated registration is rejected outright.
+			const raw = await request.text();
+			let data: Record<string, unknown>;
+			try {
+				data = JSON.parse(raw);
+			} catch {
+				return Response.json({ error: "invalid JSON" }, { status: 400 });
+			}
+			const ctx = readBubbleAuthHeaders(
+				(n) => request.headers.get(n),
+				method,
+				url.pathname + url.search,
+				raw,
+			);
+			if (!hasBubbleSignature(ctx)) {
+				return Response.json({ error: "forbidden" }, { status: 403 });
+			}
+			const bubble = await authenticateBubble(storage, ctx);
+			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
+			return respond(await handleWhatsAppNumberRegister(storage, data, bubble.id));
 		}
 
 		return new Response("Not Found", { status: 404 });

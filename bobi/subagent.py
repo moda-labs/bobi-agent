@@ -1138,7 +1138,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     from bobi.events.drain import drain_loop
     from bobi.events.server import (
         ensure_running, ensure_bubble, register, register_slack_workspaces,
-        authorize_resources, BubbleRejected,
+        register_whatsapp_numbers, authorize_resources, BubbleRejected,
     )
 
     cfg = Config.load(project_path)
@@ -1153,23 +1153,35 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     es_deployment = state.get("deployment_id", "")
     cursor_path = session_cursor_path(project_path, session_name)
 
+    def _register_channel_credentials(url: str, bubble: dict) -> None:
+        """Signed chat-channel registrations (#487/#656): write the
+        bubble-scoped send credentials (and, for WhatsApp, the resource
+        grant). Best-effort - a registration hiccup must not block startup.
+        Slack keeps an unsigned fallback (the global self-reply record);
+        WhatsApp is signed-only, no unsigned use case exists."""
+        try:
+            register_slack_workspaces(
+                url, cfg,
+                bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+            )
+        except Exception as e:
+            log.info("Signed Slack registration unavailable (%s) — unsigned", e)
+            register_slack_workspaces(url, cfg)
+        register_whatsapp_numbers(
+            url, cfg,
+            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+        )
+
     def _authorize_subscriptions(url: str, bubble: dict) -> list[str]:
         """#488: obtain resource grants BEFORE register/PUT so the server's grant
-        check passes. The signed Slack registration writes BOTH the bubble-scoped
-        outbound record (#487) and the slack resource grant; github/linear are
-        authorized via /resources/authorize. Returns ``subscribe`` filtered to
-        drop any global topic we could not authorize (so register/PUT is never
-        hard-rejected for a topic we already know is unbacked)."""
+        check passes. The signed Slack/WhatsApp registrations write BOTH the
+        bubble-scoped outbound records (#487/#656) and their resource grants;
+        github/linear are authorized via /resources/authorize. Returns
+        ``subscribe`` filtered to drop any global topic we could not authorize
+        (so register/PUT is never hard-rejected for a topic we already know is
+        unbacked)."""
         if has_external:
-            # Best-effort: a Slack registration hiccup must not block the rest.
-            try:
-                register_slack_workspaces(
-                    url, cfg,
-                    bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
-                )
-            except Exception as e:
-                log.info("Signed Slack registration unavailable (%s) — unsigned", e)
-                register_slack_workspaces(url, cfg)
+            _register_channel_credentials(url, bubble)
         return authorize_resources(
             url, cfg, subscribe, bubble["bubble_id"], bubble["bubble_key"],
         )
@@ -1249,15 +1261,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
             try:
                 _bubble = ensure_bubble(es_url, project_path)
                 if has_external:
-                    try:
-                        register_slack_workspaces(
-                            es_url, cfg,
-                            bubble_id=_bubble["bubble_id"],
-                            bubble_key=_bubble["bubble_key"],
-                        )
-                    except Exception as e:
-                        log.info("Signed Slack registration unavailable (%s) — unsigned", e)
-                        register_slack_workspaces(es_url, cfg)
+                    _register_channel_credentials(es_url, _bubble)
                 authorized = authorize_resources(
                     es_url, cfg, subscribe,
                     _bubble["bubble_id"], _bubble["bubble_key"],
@@ -1299,14 +1303,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         try:
             _bubble = ensure_bubble(es_url, project_path)
             if has_external:
-                try:
-                    register_slack_workspaces(
-                        es_url, cfg,
-                        bubble_id=_bubble["bubble_id"], bubble_key=_bubble["bubble_key"],
-                    )
-                except Exception as e:
-                    log.info("Signed Slack registration unavailable (%s) — unsigned", e)
-                    register_slack_workspaces(es_url, cfg)
+                _register_channel_credentials(es_url, _bubble)
             authorized = authorize_resources(
                 es_url, cfg, subscribe,
                 _bubble["bubble_id"], _bubble["bubble_key"],
