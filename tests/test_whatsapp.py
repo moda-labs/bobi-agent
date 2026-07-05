@@ -6,6 +6,7 @@ registration client, and the setup connector card. The event-server side
 event-server/test/; the end-to-end loop in tests/integration/.
 """
 
+import json
 from unittest.mock import patch
 
 from bobi import http as pooled
@@ -66,22 +67,29 @@ class TestRegisterWhatsAppNumbers:
     def test_signed_registration_posts_and_returns_pnid(self):
         captured = {}
 
-        def _post(url, *, content=None, headers=None, timeout=None):
+        def _request(method, url, *, content=None, headers=None, timeout=None):
+            captured.update(method=method, content=content)
             captured.update(url=url, headers=headers)
             return _Resp(200)
 
-        with patch.object(pooled, "post", side_effect=_post):
+        with patch.object(pooled, "request", side_effect=_request):
             result = register_whatsapp_numbers(
                 "http://localhost:8080", _cfg(), "bub_x", "bkey_x")
 
         assert result == [PNID]
+        assert captured["method"] == "POST"
         assert captured["url"].endswith("/whatsapp/numbers")
+        body = json.loads(captured["content"])
+        assert body["phone_number_id"] == PNID
+        assert body["access_token"] == "EAAG-tok"
         # Signed-only: the bubble signature must be present.
-        assert "x-moda-signature" in captured["headers"]
+        assert captured["headers"]["x-moda-bubble"] == "bub_x"
+        assert captured["headers"]["x-moda-algo"] == "hmac-sha256"
+        assert captured["headers"]["x-moda-signature"]
 
     def test_noop_without_bubble_credentials_or_config(self):
         calls = []
-        with patch.object(pooled, "post",
+        with patch.object(pooled, "request",
                           side_effect=lambda *a, **k: calls.append(1)):
             # No bubble key: nothing to register (signed-only endpoint).
             assert register_whatsapp_numbers(
@@ -92,7 +100,7 @@ class TestRegisterWhatsAppNumbers:
         assert calls == [], "must not POST without creds + bubble"
 
     def test_rejected_registration_returns_empty(self):
-        with patch.object(pooled, "post", side_effect=lambda *a, **k: _Resp(403)):
+        with patch.object(pooled, "request", side_effect=lambda *a, **k: _Resp(403)):
             assert register_whatsapp_numbers(
                 "http://localhost:8080", _cfg(), "bub_x", "bkey_x") == []
 
