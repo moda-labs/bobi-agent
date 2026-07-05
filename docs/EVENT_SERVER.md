@@ -138,10 +138,8 @@ never from client input**:
 - **Slack** (`POST /webhooks/slack`): handles the `url_verification` challenge and
   retry dedup; verifies the `v0=` signature within a ±300s window, with the signing
   secret resolved per authoring app (`api_app_id`). Normalization runs through the
-  Chat SDK bridge (`adapters/chat-sdk-slack.ts`, #628); the hand-rolled
-  `adapters/slack.ts` normalizer remains as the golden parity reference until the
-  bridge has soaked. Maps to `slack.mention` / `slack.dm` / `slack.thread_reply` and
-  filters our own bots' messages.
+  Chat SDK bridge (`adapters/chat-sdk-slack.ts`, #628). Maps to `slack.mention` /
+  `slack.dm` / `slack.thread_reply` and filters our own bots' messages.
 - **Linear** (`POST /webhooks/linear`): `type = linear.<type>.<action>`, key
   `linear:<TEAM_KEY>`. No HTTP-layer signature check - inbound Linear relies on a
   secret webhook URL plus the delivery-time grant filter.

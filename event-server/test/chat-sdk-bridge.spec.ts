@@ -13,9 +13,9 @@ import { slackMrkdwnToMarkdown } from "@chat-adapter/slack/format";
 
 import {
 	bridgeSlackWebhook,
+	mentionsAnySelfUser,
 	type ChatSdkBridgeResult,
 } from "../src/adapters/chat-sdk-slack";
-import { normalizeSlackWebhook } from "../src/adapters/slack";
 
 // ---------------------------------------------------------------------------
 // Fixtures — Slack event payloads
@@ -218,10 +218,10 @@ describe("bridgeSlackWebhook → NormalizedEvent", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Q2 continued: field-level parity with our existing normalizer
+// Q2 continued: field-level normalization contracts
 // ---------------------------------------------------------------------------
 
-describe("bridge parity with existing normalizeSlackWebhook", () => {
+describe("bridge normalization behavior", () => {
 	it("produces identical topic routing keys", () => {
 		const result = bridgeSlackWebhook(mentionPayload());
 		expect(result.event!.topics).toEqual(["slack:T0952RZRZ0X", "slack:T0952RZRZ0X:C456CHAN"]);
@@ -245,7 +245,7 @@ describe("bridge parity with existing normalizeSlackWebhook", () => {
 		const result = bridgeSlackWebhook(body);
 		// App-qualified ONLY - emitting the legacy workspace topic alongside
 		// would let stale legacy subscriptions cross-deliver events between
-		// two apps in one workspace (matches normalizeSlackWebhook).
+		// two apps in one workspace.
 		expect(result.event!.topics).toEqual([
 			"slack:T0952RZRZ0X:app:A0952APP",
 		]);
@@ -308,9 +308,9 @@ describe("bridge parity with existing normalizeSlackWebhook", () => {
 		expect(result.event!.text.length).toBeLessThanOrEqual(4000);
 	});
 
-	// #628: file attachments survive the flip — same fields.files JSON and
-	// payload.files shape as the hand-rolled normalizer.
-	it("extracts file attachments identically to normalizeSlackWebhook", () => {
+	// #628: fields.files carries JSON and payload.files the parsed array,
+	// with sizes stringified - the fields contract agents depend on.
+	it("extracts file attachments onto fields and payload", () => {
 		const slackFiles = [{
 			id: "F0AB12CD34",
 			name: "screenshot.png",
@@ -322,9 +322,6 @@ describe("bridge parity with existing normalizeSlackWebhook", () => {
 		}];
 		const body = dmPayload({ files: slackFiles });
 		const bridged = bridgeSlackWebhook(body);
-		const handRolled = normalizeSlackWebhook(JSON.parse(body));
-		expect(bridged.event!.fields!.files).toBe(handRolled.event!.fields!.files);
-		expect(bridged.event!.payload.files).toEqual(handRolled.event!.payload.files);
 		const parsed = JSON.parse(bridged.event!.fields!.files as string);
 		expect(parsed).toEqual([{
 			id: "F0AB12CD34",
@@ -335,6 +332,83 @@ describe("bridge parity with existing normalizeSlackWebhook", () => {
 			url_private_download: "https://files.slack.com/files-pri/T-F/download/screenshot.png",
 			size: "12345",
 		}]);
+		expect(bridged.event!.payload.files).toEqual(parsed);
+	});
+
+	it("keeps thread replies that mention someone other than our bot user", () => {
+		const result = bridgeSlackWebhook(
+			threadReplyPayload({ text: "<@UOTHER> can you check this?" }),
+			undefined,
+			new Set(["UBOT"]),
+		);
+		expect(result.skip).toBe(false);
+		expect(result.event!.type).toBe("slack.thread_reply");
+	});
+
+	it("normalizes group DM (mpim) as slack.dm", () => {
+		const result = bridgeSlackWebhook(
+			dmPayload({ channel: "G789", channel_type: "mpim", text: "hello group" }),
+		);
+		expect(result.event!.type).toBe("slack.dm");
+	});
+
+	it("keeps DM topics workspace-level", () => {
+		const result = bridgeSlackWebhook(dmPayload());
+		expect(result.event!.type).toBe("slack.dm");
+		expect(result.event!.delivery).toBe("chat");
+		// a DM is not a real channel - it stays workspace-level only
+		expect(result.event!.topics).toEqual(["slack:T0952RZRZ0X"]);
+	});
+
+	it("passes through a third-party bot not in the self set, preserving bot_id", () => {
+		const result = bridgeSlackWebhook(
+			threadReplyPayload({ bot_id: "B_OTHER", text: "third party" }),
+			new Set(["B1", "B2"]),
+		);
+		expect(result.skip).toBe(false);
+		expect(result.event).not.toBeNull();
+		// bot_id must survive onto the normalized event so the circuit breaker
+		// can recognise bot authorship (it reads payload.bot_id).
+		expect((result.event!.payload as Record<string, unknown>).bot_id).toBe("B_OTHER");
+		expect(result.event!.fields!.bot_id).toBe("B_OTHER");
+	});
+
+	it("skips non-threaded channel messages", () => {
+		const body = JSON.stringify({
+			type: "event_callback",
+			team_id: "T0952RZRZ0X",
+			event: {
+				type: "message",
+				user: "U123USER",
+				channel: "C456CHAN",
+				channel_type: "channel",
+				text: "hello",
+				ts: "1718100006.000700",
+			},
+		});
+		const result = bridgeSlackWebhook(body);
+		expect(result.skip).toBe(true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// mentionsAnySelfUser — the mention-dedup grammar the bridge relies on
+// ---------------------------------------------------------------------------
+
+describe("mentionsAnySelfUser", () => {
+	it("matches Slack's labeled mention form", () => {
+		expect(mentionsAnySelfUser("<@UBOT|eng-bot> can you check this?", new Set(["UBOT"])))
+			.toBe(true);
+		expect(mentionsAnySelfUser("<@UBOT> can you check this?", new Set(["UBOT"])))
+			.toBe(true);
+	});
+
+	it("matches bot user ids literally, not as regex", () => {
+		// "UBOT." must not behave as the regex "UBOT<any>".
+		expect(mentionsAnySelfUser("<@UBOTX> should not match", new Set(["UBOT."])))
+			.toBe(false);
+		expect(mentionsAnySelfUser("<@UBOT.> should match", new Set(["UBOT."])))
+			.toBe(true);
 	});
 });
 
@@ -395,8 +469,8 @@ describe("bridge result feeds into existing event server", () => {
 		expect(payload.thread_ts).toBe("1718100000.000100");
 	});
 
-	// #618: the bridge emits the same conversation ref as adapters/slack.ts.
-	it("emits a conversation ref matching the hand-rolled normalizer", () => {
+	// #618: every chat event carries a channel-agnostic conversation ref.
+	it("emits a conversation ref threaded on the originating message", () => {
 		const mention = bridgeSlackWebhook(mentionPayload());
 		expect(mention.event!.conversation)
 			.toBe("slack:T0952RZRZ0X:channel:C456CHAN:thread:1718100000.000100");

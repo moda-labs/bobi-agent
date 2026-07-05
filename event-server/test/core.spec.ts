@@ -16,7 +16,6 @@ import {
 	createTopicEvent,
 	normalizeGitHubPayload,
 	normalizeLinearPayload,
-	normalizeSlackPayload,
 	subscriptionKeysForEvent,
 	verifyGitHubSignature,
 	constantTimeEqual,
@@ -40,6 +39,7 @@ import {
 	handleSlackWorkspaceRegister,
 	resolveSlackSigningSecret,
 } from "../src/core";
+import { bridgeSlackWebhook } from "../src/adapters/chat-sdk-slack";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -251,355 +251,6 @@ describe("normalizeLinearPayload", () => {
 	});
 });
 
-describe("normalizeSlackPayload", () => {
-	it("handles url_verification", () => {
-		const result = normalizeSlackPayload({
-			type: "url_verification",
-			challenge: "abc123",
-		});
-		expect(result.skip).toBe(true);
-		expect(result.challenge).toBe("abc123");
-		expect(result.event).toBeNull();
-	});
-
-	it("normalizes app_mention with v2 envelope", () => {
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event_id: "Ev01",
-			event: {
-				type: "app_mention",
-				user: "U123",
-				channel: "C456",
-				channel_type: "channel",
-				text: "<@U99> hello",
-				ts: "1234.5678",
-			},
-		});
-		expect(result.skip).toBe(false);
-		expect(result.event!.v).toBe(2);
-		expect(result.event!.type).toBe("slack.mention");
-		// workspace topic + channel-scoped topic (for per-channel team routing)
-		expect(result.event!.topics).toEqual(["slack:T123", "slack:T123:C456"]);
-		expect(result.event!.delivery).toBe("chat");
-		expect(result.event!.text).toBe("<@U99> hello");
-		expect(result.event!.fields!.user_id).toBe("U123");
-		expect(result.event!.fields!.channel).toBe("C456");
-		// payload preserved for backward compat
-		expect(result.event!.payload).toMatchObject({
-			user_id: "U123",
-			channel: "C456",
-			text: "<@U99> hello",
-		});
-	});
-
-	it("emits a channel-scoped topic so teams can split one workspace by channel", () => {
-		const mk = (channel: string) =>
-			normalizeSlackPayload({
-				type: "event_callback",
-				team_id: "T123",
-				event: { type: "app_mention", user: "U1", channel, text: "hi", ts: "1.2" },
-			}).event!.topics;
-		// a message in C_ENG carries the eng channel topic but not the support one
-		expect(mk("C_ENG")).toContain("slack:T123:C_ENG");
-		expect(mk("C_ENG")).not.toContain("slack:T123:C_SUPPORT");
-		// the workspace-level topic is always present (backward compat)
-		expect(mk("C_ENG")).toContain("slack:T123");
-	});
-
-	it("normalizes DM with chat delivery", () => {
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: {
-				type: "message",
-				user: "U123",
-				channel: "D789",
-				channel_type: "im",
-				text: "hello",
-				ts: "123",
-			},
-		});
-		expect(result.event!.type).toBe("slack.dm");
-		expect(result.event!.delivery).toBe("chat");
-		// a DM is not a real channel — it stays workspace-level only
-		expect(result.event!.topics).toEqual(["slack:T123"]);
-	});
-
-	it("normalizes group DM (mpim)", () => {
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: {
-				type: "message",
-				user: "U123",
-				channel: "G789",
-				channel_type: "mpim",
-				text: "hello group",
-				ts: "123",
-			},
-		});
-		expect(result.event!.type).toBe("slack.dm");
-	});
-
-	it("normalizes thread reply", () => {
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: {
-				type: "message",
-				user: "U123",
-				channel: "C456",
-				channel_type: "channel",
-				text: "reply",
-				ts: "123.456",
-				thread_ts: "123.000",
-			},
-		});
-		expect(result.event!.type).toBe("slack.thread_reply");
-		expect(result.event!.fields!.thread_ts).toBe("123.000");
-	});
-
-	// #618: every chat event carries a channel-agnostic conversation ref the
-	// agent echoes back to `bobi reply` / POST /channels/send.
-	it("emits a conversation ref threaded on the originating message", () => {
-		const mention = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: { type: "app_mention", user: "U1", channel: "C456",
-				channel_type: "channel", text: "hi", ts: "1234.5678" },
-		});
-		// A top-level message anchors its own thread (ts) - matching where the
-		// placeholder handler already posts.
-		expect(mention.event!.conversation).toBe("slack:T123:channel:C456:thread:1234.5678");
-
-		const threadReply = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: { type: "message", user: "U1", channel: "C456",
-				channel_type: "channel", text: "re", ts: "123.456", thread_ts: "123.000" },
-		});
-		expect(threadReply.event!.conversation).toBe("slack:T123:channel:C456:thread:123.000");
-
-		const dm = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: { type: "message", user: "U1", channel: "D789",
-				channel_type: "im", text: "yo", ts: "9.1" },
-		});
-		expect(dm.event!.conversation).toBe("slack:T123:dm:D789:thread:9.1");
-	});
-
-	it("skips message-channel duplicate when thread reply mentions our bot user", () => {
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: {
-				type: "message",
-				user: "U123",
-				channel: "C456",
-				channel_type: "channel",
-				text: "<@UBOT> can you check this?",
-				ts: "123.456",
-				thread_ts: "123.000",
-			},
-		}, undefined, new Set(["UBOT"]));
-		expect(result.skip).toBe(true);
-		expect(result.event).toBeNull();
-	});
-
-	it("skips message-channel duplicate with Slack's labeled mention form", () => {
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: {
-				type: "message",
-				user: "U123",
-				channel: "C456",
-				channel_type: "channel",
-				text: "<@UBOT|eng-bot> can you check this?",
-				ts: "123.456",
-				thread_ts: "123.000",
-			},
-		}, undefined, new Set(["UBOT"]));
-		expect(result.skip).toBe(true);
-		expect(result.event).toBeNull();
-	});
-
-	it("matches bot user mentions literally", () => {
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: {
-				type: "message",
-				user: "U123",
-				channel: "C456",
-				channel_type: "channel",
-				text: "<@UBOTX> should not match",
-				ts: "123.456",
-				thread_ts: "123.000",
-			},
-		}, undefined, new Set(["UBOT."]));
-		expect(result.skip).toBe(false);
-		expect(result.event!.type).toBe("slack.thread_reply");
-	});
-
-	it("keeps thread replies that mention someone other than our bot user", () => {
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: {
-				type: "message",
-				user: "U123",
-				channel: "C456",
-				channel_type: "channel",
-				text: "<@UOTHER> can you check this?",
-				ts: "123.456",
-				thread_ts: "123.000",
-			},
-		}, undefined, new Set(["UBOT"]));
-		expect(result.skip).toBe(false);
-		expect(result.event!.type).toBe("slack.thread_reply");
-	});
-
-	it("skips own bot messages when selfBotId matches", () => {
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: {
-				type: "app_mention",
-				user: "U123",
-				bot_id: "B123",
-				channel: "C456",
-				channel_type: "channel",
-				text: "bot",
-				ts: "123",
-			},
-		}, "B123");
-		expect(result.skip).toBe(true);
-		expect(result.event).toBeNull();
-	});
-
-	it("passes through other bot messages", () => {
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: {
-				type: "app_mention",
-				user: "U123",
-				bot_id: "B_OTHER",
-				channel: "C456",
-				channel_type: "channel",
-				text: "from another bot",
-				ts: "123",
-			},
-		}, "B_SELF");
-		expect(result.skip).toBe(false);
-		expect(result.event).not.toBeNull();
-		expect(result.event!.type).toBe("slack.mention");
-	});
-
-	// Multi-bot workspace (Slack self-spam incident 2026-06-24): the self-filter
-	// must accept a SET of our own bot ids, not a single id — two bots can share
-	// one workspace, each serving a different team.
-	it("skips own bot when bot_id is one of several self ids", () => {
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: {
-				type: "message",
-				user: "U123",
-				bot_id: "B2",
-				channel: "C456",
-				channel_type: "channel",
-				thread_ts: "100.000",
-				text: "bot two",
-				ts: "123",
-			},
-		}, new Set(["B1", "B2"]));
-		expect(result.skip).toBe(true);
-		expect(result.event).toBeNull();
-	});
-
-	it("passes through a third-party bot not in the self set, preserving bot_id", () => {
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: {
-				type: "message",
-				user: "U123",
-				bot_id: "B_OTHER",
-				channel: "C456",
-				channel_type: "channel",
-				thread_ts: "100.000",
-				text: "third party",
-				ts: "123",
-			},
-		}, new Set(["B1", "B2"]));
-		expect(result.skip).toBe(false);
-		expect(result.event).not.toBeNull();
-		// bot_id must survive onto the normalized event so the circuit breaker
-		// can recognise bot authorship (it reads payload.bot_id).
-		expect((result.event!.payload as Record<string, unknown>).bot_id).toBe("B_OTHER");
-		expect(result.event!.fields!.bot_id).toBe("B_OTHER");
-	});
-
-	it("skips non-threaded channel messages", () => {
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: {
-				type: "message",
-				user: "U123",
-				channel: "C456",
-				channel_type: "channel",
-				text: "hello",
-				ts: "123",
-			},
-		});
-		expect(result.skip).toBe(true);
-	});
-
-	it("skips non-event_callback types", () => {
-		const result = normalizeSlackPayload({ type: "app_rate_limited" });
-		expect(result.skip).toBe(true);
-	});
-
-	it("truncates long text to 4000 chars", () => {
-		const longText = "a".repeat(5000);
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: {
-				type: "app_mention",
-				user: "U123",
-				channel: "C456",
-				channel_type: "channel",
-				text: longText,
-				ts: "123",
-			},
-		});
-		expect(result.event!.text.length).toBe(4000);
-	});
-
-	it("drops legacy top-level workspace/channel (v2 hard cutover)", () => {
-		const result = normalizeSlackPayload({
-			type: "event_callback",
-			team_id: "T123",
-			event: {
-				type: "app_mention",
-				user: "U123",
-				channel: "C456",
-				channel_type: "channel",
-				text: "hi",
-				ts: "123",
-			},
-		});
-		expect((result.event as any).workspace).toBeUndefined();
-		expect((result.event as any).channel).toBeUndefined();
-	});
-});
-
 describe("verifyGitHubSignature", () => {
 	const secret = "test-webhook-secret";
 
@@ -798,7 +449,7 @@ describe("subscriptionKeysForEvent", () => {
 	});
 
 	it("subscription keys match existing shapes for slack", () => {
-		const result = normalizeSlackPayload({
+		const result = bridgeSlackWebhook(JSON.stringify({
 			type: "event_callback",
 			team_id: "T123",
 			event: {
@@ -806,7 +457,7 @@ describe("subscriptionKeysForEvent", () => {
 				channel: "C456", channel_type: "channel",
 				text: "hi", ts: "123",
 			},
-		});
+		}));
 		const keys = subscriptionKeysForEvent(result.event!);
 		expect(keys).toEqual(["slack:T123", "slack:T123:C456"]);
 	});
@@ -2808,10 +2459,10 @@ describe("resource-grant delivery filter (admittedDeploymentIds — tests 6/7)",
 		await store.addSubscription("slack:T1:C9", "depStale");
 		store.seedGrant("slack", "T1", "bubGranted"); // grant keyed on the TEAM id
 
-		const event = normalizeSlackPayload({
+		const event = bridgeSlackWebhook(JSON.stringify({
 			type: "event_callback", team_id: "T1",
 			event: { type: "app_mention", channel: "C9", channel_type: "channel", user: "U1", text: "hi", ts: "1.0" },
-		}).event!;
+		})).event!;
 		const admitted = await admit(store, event);
 		expect([...admitted]).toEqual(["depGranted"]);
 	});

@@ -75,19 +75,27 @@ jobs:
   #   * NO Slack / event-server network — the Slack post and event-bus wait are
   #     stubbed; the code is the synthetic one we feed in.
   # The mock auth-code event uses the REAL Slack adapter output shape, generated
-  # from event-server/src/adapters/slack.ts (so adapter + bootstrap can't drift),
-  # exactly as tests/integration/test_login_bootstrap_smoke.py does.
+  # from event-server/src/adapters/chat-sdk-slack.ts (so adapter + bootstrap
+  # can't drift), exactly as tests/integration/test_login_bootstrap_smoke.py does.
   subscription-login-smoke:
     name: Subscription-login smoke (mock code, no creds)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Node is needed only to GENERATE the auth-code event from slack.ts via
-      # the adapter's own logic (esbuild type-erasure). No event-server deploy.
+      # Node is needed only to GENERATE the auth-code event from
+      # chat-sdk-slack.ts via the adapter's own logic (esbuild bundle).
+      # No event-server deploy.
       - uses: actions/setup-node@v5
         with:
           node-version: "20"
+
+      # chat-sdk-slack.ts imports @chat-adapter/slack; the smoke bundles the
+      # adapter with esbuild, so the event-server deps must be installed
+      # (otherwise the test skips and the gate is meaningless).
+      - name: Install event-server Node dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: event-server
 
       - uses: actions/setup-python@v5
         with:
