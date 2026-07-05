@@ -158,8 +158,11 @@ def continuation_token(
     (#642): the workflow orchestrator's resume and mid-run model switches, and
     ``load_resumable_session_id`` for subagents. Same model always continues;
     a cross-model continuation requires the brain's ``cross_model_resume``
-    capability. An empty *session_id* never continues. ``""`` as a model means
-    "the provider default" and is a real value for mismatch purposes.
+    capability AND a concrete target model - resuming "onto the provider
+    default" cannot be expressed to the CLI (no --model to pass), so the
+    session would silently keep its old model while the record says default.
+    An empty *session_id* never continues. ``""`` as a model means "the
+    provider default" and is a real value for mismatch purposes.
 
     An empty return means the caller must start fresh and re-inject whatever
     context it can reconstruct.
@@ -168,6 +171,8 @@ def continuation_token(
         return ""
     if (from_model or "") == (to_model or ""):
         return session_id
+    if not to_model:
+        return ""
     caps = getattr(brain, "capabilities", None)
     if caps is not None and getattr(caps, "cross_model_resume", False):
         return session_id

@@ -370,22 +370,27 @@ async def _run_agent_supervised(
     hooks = _make_defer_hook() if on_input_needed else None
 
     label = role or "agent"
-    client = get_brain().make_session(
-        cwd=cwd,
-        system_prompt={
-            "type": "preset",
-            "preset": "claude_code",
-            "append": (
-                f"You are a {label} agent working on issue #{run_key}, "
-                f"phase: {phase}. Follow the skill file instructions exactly."
-            ),
-        },
-        resume=saved_id or None,
-        options={
-            "max_turns": max_turns, "hooks": hooks, "skills": "all",
-            **({"model": model} if model else {}),
-        },
-    )
+
+    def _build_client(resume_id: str):
+        return get_brain().make_session(
+            cwd=cwd,
+            system_prompt={
+                "type": "preset",
+                "preset": "claude_code",
+                "append": (
+                    f"You are a {label} agent working on issue #{run_key}, "
+                    f"phase: {phase}. Follow the skill file instructions "
+                    "exactly."
+                ),
+            },
+            resume=resume_id or None,
+            options={
+                "max_turns": max_turns, "hooks": hooks, "skills": "all",
+                **({"model": model} if model else {}),
+            },
+        )
+
+    client = _build_client(saved_id)
     registry.update(name, status="running", phase=phase, session_id=saved_id or "")
 
     result = AgentResult(
@@ -393,10 +398,29 @@ async def _run_agent_supervised(
     )
 
     try:
-        connect_prompt = prompt if not saved_id else None
-        await client.connect(connect_prompt)
-        if saved_id:
-            await client.query(prompt)
+        try:
+            connect_prompt = prompt if not saved_id else None
+            await client.connect(connect_prompt)
+            if saved_id:
+                await client.query(prompt)
+        except Exception as e:
+            if not saved_id:
+                raise
+            # Stale/unresumable saved session: clear it and retry fresh once,
+            # matching Session._run and the workflow orchestrator. Without
+            # this, a bad token fails every subsequent monitor interval.
+            log.warning(
+                "Resume failed for '%s' (stale session?), retrying fresh: %s",
+                name, e,
+            )
+            save_session_id(name, "")
+            saved_id = ""
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            client = _build_client("")
+            await client.connect(prompt)
 
         while True:
             result_msg = None

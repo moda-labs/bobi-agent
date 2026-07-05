@@ -127,8 +127,13 @@ Model changes are prompt-step boundaries. When a workflow reaches a prompt
 step whose model differs from the session's current model, the engine
 continues the same session natively on the new model when the brain supports
 it (Claude does), keeping the full conversation. On brains without that
-capability it falls back to a fresh session seeded with the accumulated
-workflow context, so the handoff chain remains intact either way.
+capability, when the step switches back to the provider default, or when the
+step also changes `agent:` (a new agent never inherits another agent's
+transcript), it falls back to a fresh session seeded with the accumulated
+workflow context, so the handoff chain remains intact either way. Note that
+native continuation carries the full transcript into the new model's context,
+so a step that switches a long conversation onto a pricier model pays for
+that history in input tokens.
 
 ### Route step
 

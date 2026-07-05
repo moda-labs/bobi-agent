@@ -461,20 +461,19 @@ async def _run_workflow_async(
         dict(runtime_scope.get("visits", {}) or {})
         if isinstance(runtime_scope, dict) else {}
     )
-    current_model = saved_session_model if saved_session_model else first_prompt_model
-    fresh_resume_step = None
+    # A fresh session always runs the next step's model; only a genuinely
+    # resumable session stays on the one it was suspended under.
+    current_model = (
+        saved_session_model if (saved_id and saved_session_model)
+        else first_prompt_model
+    )
 
-    if saved_id:
+    if saved_id and (saved_session_model or start_step > 0):
         # The model the saved session ran under: the recorded one, else (for
         # a run suspended before models were tracked) the process default it
         # must have used. A start_step=0 run with no record has nothing to
         # guard against.
-        if saved_session_model:
-            resume_from_model = saved_session_model
-        elif start_step > 0:
-            resume_from_model = get_process_brain_model()
-        else:
-            resume_from_model = first_prompt_model
+        resume_from_model = saved_session_model or get_process_brain_model()
         token = continuation_token(
             _brain, session_id=saved_id,
             from_model=resume_from_model, to_model=first_prompt_model,
@@ -488,7 +487,6 @@ async def _run_workflow_async(
             )
             saved_id = ""
             current_model = first_prompt_model
-            fresh_resume_step = first_prompt_step
         elif resume_from_model != first_prompt_model:
             log.info(
                 "Saved workflow session continues natively from model %r "
@@ -520,12 +518,11 @@ async def _run_workflow_async(
         try:
             if resume_id:
                 initial_prompt = None
-            elif fresh_resume_step is not None:
-                initial_prompt = _continuation_prompt(fresh_resume_step)
-            elif attempt > 0 and start_step > 0 and first_prompt_step is not None:
-                # A resumed run whose native resume failed (stale session):
-                # re-inject the persisted scopes rather than starting with
-                # the bare "Resuming workflow" task.
+            elif start_step > 0 and first_prompt_step is not None:
+                # Any fresh session on a RESUMED run (model guard, cleared
+                # session id, or a stale-resume retry) re-injects the
+                # persisted scopes rather than starting with the bare
+                # "Resuming workflow" task.
                 initial_prompt = _continuation_prompt(first_prompt_step)
             else:
                 initial_prompt = task
@@ -554,8 +551,10 @@ async def _run_workflow_async(
         if run_failed:
             return False
 
-        registry.update(session_name, status="running",
-                        session_id=saved_id or "")
+        # save_session_id inside the drain already recorded the session id
+        # the run actually got (resume mints a fresh id; a retry-fresh start
+        # replaces the stale one) - do not write the pre-resume id back.
+        registry.update(session_name, status="running")
 
         step_idx = start_step
         failed_step = ""
@@ -695,11 +694,20 @@ async def _run_workflow_async(
             if step_model != current_model:
                 # Continue the live session natively on the new model when
                 # the brain supports it (#642); otherwise fresh + re-inject
-                # the workflow scopes as YAML (lossy fallback).
-                token = continuation_token(
-                    _brain, session_id=load_session_id(session_name),
-                    from_model=current_model, to_model=step_model,
+                # the workflow scopes as YAML (lossy fallback). An agent
+                # change always starts fresh: the new agent must not inherit
+                # the previous agent's transcript under its system prompt
+                # (e.g. a reviewer step contaminated by the builder's
+                # reasoning).
+                next_agent = (
+                    current_agent if role else (step.agent or current_agent)
                 )
+                token = ""
+                if next_agent == current_agent:
+                    token = continuation_token(
+                        _brain, session_id=load_session_id(session_name),
+                        from_model=current_model, to_model=step_model,
+                    )
                 log.info(
                     "Step %s: switching model from %r to %r (%s)",
                     step.name, current_model or "<default>",
@@ -711,15 +719,32 @@ async def _run_workflow_async(
                 except Exception:
                     pass
                 current_model = step_model
-                if not role:
-                    current_agent = step.agent or current_agent
-                client = _make_session(
-                    resume_id=token or None, agent_name=current_agent,
-                    model=current_model,
-                )
+                current_agent = next_agent
                 if token:
-                    await client.connect(None)
-                else:
+                    client = _make_session(
+                        resume_id=token, agent_name=current_agent,
+                        model=current_model,
+                    )
+                    try:
+                        await client.connect(None)
+                    except Exception as e:
+                        # Stale/unresumable session: fall back to the fresh
+                        # path below instead of failing the whole run.
+                        log.warning(
+                            "Native resume failed at step %s (stale "
+                            "session?), retrying fresh: %s", step.name, e,
+                        )
+                        save_session_id(session_name, "")
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
+                        token = ""
+                if not token:
+                    client = _make_session(
+                        resume_id=None, agent_name=current_agent,
+                        model=current_model,
+                    )
                     await client.connect(_continuation_prompt(step))
                     _, drain_error = await _drain_response(
                         client, session_name, run_key, model=current_model,
@@ -854,13 +879,13 @@ async def _run_workflow_async(
 
 
 async def _drain_response(
-    client, session_name: str, run_key: str, model: str | None = None,
+    client, session_name: str, run_key: str, *, model: str,
 ) -> tuple[str | None, str]:
     """Drain one turn. Returns ``(final_text, error)``.
 
-    ``model`` is the model the session currently runs under; passing it keeps
-    the session store's model record in step with mid-run switches (#642).
-    ``None`` leaves any existing record untouched.
+    ``model`` is required: it is the model the session currently runs under,
+    and every save must record it so the store's model record stays in step
+    with mid-run switches (#642).
     """
     from bobi.brain import AssistantText, TurnResult
 

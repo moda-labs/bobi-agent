@@ -1,4 +1,4 @@
-"""Unit tests for the workflow orchestrator — schema parsing, handoff
+"""Unit tests for the workflow orchestrator - schema parsing, handoff
 validation, route evaluation, step sequencing, and event emission."""
 
 import asyncio
@@ -331,7 +331,7 @@ class TestBuildStepPrompt:
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
         """Prompt building reads handoffs via the session registry, which
-        needs a bound root — bind explicitly, don't rely on leakage from
+        needs a bound root - bind explicitly, don't rely on leakage from
         earlier tests."""
         _bind_runtime_root(tmp_path, monkeypatch)
 
@@ -764,9 +764,105 @@ class TestRunWorkflow:
         assert saved_models[0] == "haiku"
         assert saved_models[-1] == "sonnet"
 
+    def test_agent_change_at_model_switch_starts_fresh(self, monkeypatch):
+        """A step with a different agent never resumes the previous agent's
+        transcript, even on a capable brain (#642 isolation rule)."""
+        from bobi.brain import BrainCapabilities
+
+        calls = []
+        clients = []
+
+        class FakeBrain:
+            capabilities = BrainCapabilities(cross_model_resume=True)
+
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                client = FakeBrainClient()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        for role_name in ("builder", "scorer"):
+            role_md = paths.roles_dir() / role_name / "ROLE.md"
+            role_md.parent.mkdir(parents=True, exist_ok=True)
+            role_md.write_text(f"PROMPT {role_name}")
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="haiku",
+                    agent="builder"),
+            StepDef(name="score", prompt="score", model="sonnet",
+                    agent="scorer"),
+        ])
+
+        cwd = "/tmp"
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="live-session"), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
+
+        assert result is True
+        # Fresh session for the new agent, with the YAML reinject turn.
+        assert calls[1]["resume"] is None
+        assert any("Continue workflow" in q for q in clients[1].queries)
+
+    def test_native_switch_falls_back_to_fresh_on_stale_resume(
+            self, monkeypatch):
+        """A connect failure on the native-resume path retries the fresh +
+        reinject fallback instead of failing the whole run (#642)."""
+        from bobi.brain import BrainCapabilities
+
+        calls = []
+        clients = []
+
+        class StaleResumeClient(FakeBrainClient):
+            async def connect(self, prompt=None):
+                raise RuntimeError("No conversation found")
+
+        class FakeBrain:
+            capabilities = BrainCapabilities(cross_model_resume=True)
+
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                cls = (StaleResumeClient if kwargs.get("resume") == "stale-id"
+                       and kwargs["options"].get("model") == "sonnet"
+                       else FakeBrainClient)
+                client = cls()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="haiku"),
+            StepDef(name="score", prompt="score", model="sonnet"),
+        ])
+
+        cwd = "/tmp"
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="stale-id"), \
+             patch("bobi.workflow.orchestrator.save_session_id") as save_mock, \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
+
+        assert result is True
+        # resume attempt on haiku (initial), native switch attempt, then the
+        # fresh fallback session.
+        assert calls[-1]["resume"] is None
+        assert calls[-1]["options"]["model"] == "sonnet"
+        assert any("Continue workflow" in q for q in clients[-1].queries)
+        # The stale id was cleared from the store.
+        assert call("wf-t-r-1", "") in save_mock.call_args_list
+
 
 class FailingClient:
-    """ClaudeSDKClient mock whose turn yields no ResultMessage — _drain_response
+    """ClaudeSDKClient mock whose turn yields no ResultMessage - _drain_response
     returns None, driving the orchestrator's failure path."""
 
     def __init__(self):
@@ -819,7 +915,7 @@ class ErrorOnStepClient(FakeClient):
 
 
 class TestHonestTerminalEmit:
-    """MDS-65 RC#2/RC#4 — the orchestrator must emit the HONEST terminal session
+    """MDS-65 RC#2/RC#4 - the orchestrator must emit the HONEST terminal session
     event (session.failed on failure, never session.completed after a failure)
     and carry requested_by so the launcher can route it to the requester."""
 
@@ -922,7 +1018,7 @@ class TestHonestTerminalEmit:
 
     def test_suspend_does_not_emit_terminal_session_event(self, tmp_path, monkeypatch):
         """An await/suspend is dormant, not terminal: it must emit
-        workflow.suspended but NEITHER session.completed NOR session.failed —
+        workflow.suspended but NEITHER session.completed NOR session.failed -
         else the (now-subscribed) manager is told the agent finished while it
         waits for the external event."""
         root = _bind_runtime_root(tmp_path / "_r", monkeypatch)

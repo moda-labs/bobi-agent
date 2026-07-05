@@ -505,12 +505,17 @@ def test_claude_supports_cross_model_resume():
     ("sid", "haiku", "opus", True, "sid"),
     ("sid", "haiku", "opus", False, ""),
     # '' is the provider default and a real model for mismatch purposes
+    ("sid", "", "haiku", True, "sid"),
     ("sid", "", "haiku", False, ""),
-    ("sid", "haiku", "", True, "sid"),
+    # cross-model continuation needs a CONCRETE target: "onto the provider
+    # default" cannot be expressed to the CLI, so it goes fresh even when
+    # the brain is capable
+    ("sid", "haiku", "", True, ""),
     # no session never continues
     ("", "haiku", "haiku", True, ""),
 ], ids=["same-model", "same-default", "cross-capable", "cross-incapable",
-        "default-to-named", "named-to-default-capable", "empty-id"])
+        "default-to-named-capable", "default-to-named-incapable",
+        "named-to-default-goes-fresh", "empty-id"])
 def test_continuation_token_matrix(session_id, frm, to, capable, expected):
     from bobi.brain import BrainCapabilities, continuation_token
 

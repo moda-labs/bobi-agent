@@ -1433,18 +1433,20 @@ class TestModelAwareSessionResume:
         from bobi.brain import BrainCapabilities
 
         class Incapable:
+            name = "claude"
             capabilities = BrainCapabilities()
 
         return Incapable()
 
     def test_cross_model_continues_on_capable_brain(self):
         """The default brain (Claude) supports cross-model resume, so a model
-        change keeps the session."""
+        change to a concrete target keeps the session; a switch back to the
+        provider default has no target to pass and goes fresh."""
         from bobi.sdk import load_resumable_session_id, save_session_id
         save_session_id("s1", "sess-abc", model="haiku")
         assert load_resumable_session_id("s1", "haiku") == "sess-abc"
         assert load_resumable_session_id("s1", "opus") == "sess-abc"
-        assert load_resumable_session_id("s1", "") == "sess-abc"
+        assert load_resumable_session_id("s1", "") == ""
 
     def test_guard_blocks_resume_without_capability(self):
         from bobi.sdk import load_resumable_session_id, save_session_id
@@ -1461,6 +1463,72 @@ class TestModelAwareSessionResume:
         with patch("bobi.brain.get_brain", self._incapable_brain):
             assert load_resumable_session_id("s2", "") == "sess-abc"
             assert load_resumable_session_id("s2", "haiku") == ""
+
+    def test_cross_brain_record_starts_fresh(self):
+        """A resume token is only meaningful to the brain that minted it:
+        a session saved under another brain kind never resumes (#642)."""
+        from bobi.brain import BrainCapabilities
+        from bobi.sdk import load_resumable_session_id, save_session_id
+        save_session_id("s6", "codex-thread-id", model="gpt-5")
+
+        class OtherBrain:
+            name = "claude"
+            capabilities = BrainCapabilities(cross_model_resume=True)
+
+        # Recorded under the default (claude) brain; simulate a brain switch
+        # by rewriting the provenance record.
+        from bobi.sdk import _sessions_dir
+        (_sessions_dir() / "s6.brain").write_text("codex")
+        with patch("bobi.brain.get_brain", lambda kind=None: OtherBrain()):
+            assert load_resumable_session_id("s6", "gpt-5") == ""
+            assert load_resumable_session_id("s6", "sonnet") == ""
+
+    def test_pre642_record_without_brain_blocks_cross_model(self):
+        """A record with no brain provenance (saved before #642) keeps the
+        old conservative guard: same model resumes, cross-model goes fresh
+        even on a capable brain."""
+        from bobi.sdk import _sessions_dir, load_resumable_session_id, \
+            save_session_id
+        save_session_id("s7", "sess-abc", model="haiku")
+        (_sessions_dir() / "s7.brain").unlink()
+        assert load_resumable_session_id("s7", "haiku") == "sess-abc"
+        assert load_resumable_session_id("s7", "opus") == ""
+
+    @pytest.mark.asyncio
+    async def test_supervised_retries_fresh_on_stale_resume(self):
+        """A saved id that fails to connect is cleared and retried fresh
+        instead of crashing the run (#642) - a stale token must not fail
+        every subsequent monitor interval."""
+        calls = []
+
+        class StaleResumeSession(_CapturingBrainSession):
+            async def connect(self, prompt=None):
+                raise RuntimeError("No conversation found")
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                cls = (StaleResumeSession if kwargs.get("resume")
+                       else _CapturingBrainSession)
+                return cls()
+
+        with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
+             patch(f"{SDK_PATCH}.load_resumable_session_id",
+                   return_value="stale-id"), \
+             patch(f"{SDK_PATCH}.save_session_id") as save_mock, \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = await _run_agent_supervised(
+                prompt="check", cwd="/tmp", run_key="k", phase="check",
+                timeout=5,
+            )
+
+        assert result.success is True
+        assert calls[0]["resume"] == "stale-id"
+        assert calls[1]["resume"] is None
+        cleared = [c for c in save_mock.call_args_list
+                   if len(c.args) > 1 and c.args[1] == ""]
+        assert cleared, "stale id was not cleared from the store"
 
     def test_missing_record_resumes_unconditionally(self):
         from bobi.sdk import load_resumable_session_id, save_session_id
@@ -1486,6 +1554,8 @@ class TestModelAwareSessionResume:
         captured: dict = {}
 
         class FakeBrain:
+            name = "claude"
+
             def make_session(self, **kwargs):
                 captured.update(kwargs)
                 return _CapturingBrainSession()
