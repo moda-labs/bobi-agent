@@ -62,7 +62,7 @@ def _post_topic(topic: str, source: str, data: dict,
     the body ``source`` (``createTopicEvent`` in event-server/src/core.ts).
 
     The publish is signed with the instance's bubble key so the server routes
-    it within the bubble. An unsigned publish is rejected (403) — namespacing
+    it within the bubble. An unsigned publish is rejected (403) - namespacing
     is not authentication. Any in-instance process can sign (the key lives in
     bubble.json); a missing bubble means the instance isn't started.
     """
@@ -79,26 +79,34 @@ def _post_topic(topic: str, source: str, data: dict,
         log.debug("No bubble credential yet — skipping publish to %s", topic)
         return False
 
+    # Only transport failures are best-effort; a serialization error from an
+    # unserializable payload is a caller bug and propagates (signed_request
+    # serializes before sending).
     try:
         resp = signed_request(
             es_url, "POST", f"/events/{topic}",
             {"source": source, "payload": data},
             bubble_id, bubble_key, timeout=10.0,
         )
-        # A 403 (e.g. the server forgot the bubble after a restart, or
-        # bubble.json is stale) returns a JSON error body — do NOT treat that
-        # as success and silently drop the event. The next session
-        # registration re-mints the bubble; a transient publish failure is
-        # surfaced, not swallowed.
-        if resp.status_code >= 400:
-            log.warning("Publish to %s rejected (%d): %s",
-                        topic, resp.status_code, resp.text[:200])
-            return False
-        resp.json()
-        return True
-    except (httpx.HTTPError, OSError, TimeoutError, ValueError) as e:
+    except (httpx.HTTPError, OSError, TimeoutError) as e:
         log.warning(f"Failed to post event {source}/{topic}: {e}")
         return False
+
+    # A 403 (e.g. the server forgot the bubble after a restart, or
+    # bubble.json is stale) returns a JSON error body — do NOT treat that
+    # as success and silently drop the event. The next session
+    # registration re-mints the bubble; a transient publish failure is
+    # surfaced, not swallowed.
+    if resp.status_code >= 400:
+        log.warning("Publish to %s rejected (%d): %s",
+                    topic, resp.status_code, resp.text[:200])
+        return False
+    try:
+        resp.json()
+    except ValueError as e:
+        log.warning(f"Failed to post event {source}/{topic}: {e}")
+        return False
+    return True
 
 
 def post_event(event_type: str, data: dict,

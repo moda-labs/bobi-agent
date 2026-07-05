@@ -375,12 +375,8 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
 def _post_register(base_url: str, name: str, subscriptions: list[str],
                    bubble_id: str = "", bubble_key: str = "") -> dict:
     """POST /deployments. MINT when no bubble_key (server generates a bubble +
-    returns its key once); JOIN when signed with an existing bubble's key.
-
-    Signs over the exact transmitted bytes (content=, not json=) so the
-    server's HMAC verification reproduces the signature; ``signed_request``
-    sends the MINT case unsigned. Raises BubbleRejected on a 403 join so
-    callers can re-mint.
+    returns its key once, sent unsigned); JOIN when signed with an existing
+    bubble's key. Raises BubbleRejected on a 403 join so callers can re-mint.
     """
     from bobi.events.signing import signed_request
 

@@ -27,7 +27,7 @@ from click.testing import CliRunner
 
 from bobi.config import save_bubble_state
 from bobi.events.server import _post_register, ensure_running
-from bobi.events.signing import serialize_body, sign_headers
+from bobi.events.signing import signed_request
 
 
 def _free_port() -> int:
@@ -153,14 +153,11 @@ def gateway_env(tmp_path_factory):
 
     # Signed workspace registration — the server verifies the token against
     # (stubbed) auth.test and stores the bubble-scoped send credential.
-    body = serialize_body({"workspace_id": "T_GW", "bot_token": "xoxb-gw-test"})
-    headers = {"Content-Type": "application/json"}
-    headers.update(sign_headers(
-        minted["bubble_id"], minted["bubble_key"],
-        "POST", "/slack/workspaces", body,
-    ))
-    resp = httpx.post(f"{es_url}/slack/workspaces", content=body,
-                      headers=headers, timeout=10)
+    resp = signed_request(
+        es_url, "POST", "/slack/workspaces",
+        {"workspace_id": "T_GW", "bot_token": "xoxb-gw-test"},
+        minted["bubble_id"], minted["bubble_key"], timeout=10,
+    )
     assert resp.status_code == 200, resp.text
 
     yield project, stub, es_url, minted
@@ -289,15 +286,11 @@ class TestInboundMentionEndToEnd:
         # JOIN a deployment on the instance bubble, subscribed to the
         # workspace topic. The /slack/workspaces registration in the fixture
         # already granted slack:T_GW to this bubble.
-        body = serialize_body(
-            {"name": "gateway-inbound", "subscriptions": ["slack:T_GW"]})
-        headers = {"Content-Type": "application/json"}
-        headers.update(sign_headers(
-            bubble["bubble_id"], bubble["bubble_key"],
-            "POST", "/deployments", body,
-        ))
-        resp = httpx.post(f"{es_url}/deployments", content=body,
-                          headers=headers, timeout=10)
+        resp = signed_request(
+            es_url, "POST", "/deployments",
+            {"name": "gateway-inbound", "subscriptions": ["slack:T_GW"]},
+            bubble["bubble_id"], bubble["bubble_key"], timeout=10,
+        )
         assert resp.status_code == 201, resp.text
         dep = resp.json()
 

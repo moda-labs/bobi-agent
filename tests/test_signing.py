@@ -10,12 +10,17 @@ path/query inclusion), one of the two suites fails instead of producing silent
 
 import hashlib
 import hmac
+from unittest.mock import patch
 
+import pytest
+
+from bobi import http as pooled
 from bobi.events.signing import (
     ALGO,
     canonical_string,
     serialize_body,
     sign_headers,
+    signed_request,
 )
 
 # GOLDEN VECTOR — keep identical to core.spec.ts.
@@ -74,29 +79,17 @@ class _Resp:
     status_code = 200
 
 
-def _capture_post(captured):
-    def _post(url, *, content=None, headers=None, timeout=None):
-        captured.update(url=url, content=content, headers=headers,
-                        timeout=timeout)
+def _capture(captured):
+    """Record any pooled get/post call and return a canned 200."""
+    def _call(url, **kwargs):
+        captured.update(url=url, **kwargs)
         return _Resp()
-    return _post
-
-
-def _capture_get(captured):
-    def _get(url, *, headers=None, timeout=None):
-        captured.update(url=url, headers=headers, timeout=timeout)
-        return _Resp()
-    return _get
+    return _call
 
 
 def test_signed_request_posts_canonical_bytes_with_verifiable_signature():
-    from unittest.mock import patch
-
-    from bobi import http as pooled
-    from bobi.events.signing import signed_request
-
     captured: dict = {}
-    with patch.object(pooled, "post", side_effect=_capture_post(captured)):
+    with patch.object(pooled, "post", side_effect=_capture(captured)):
         resp = signed_request("http://es:8080", "POST", GOLDEN_PATH,
                               GOLDEN_PAYLOAD, "bub_x", GOLDEN_KEY, timeout=7.0)
 
@@ -116,14 +109,9 @@ def test_signed_request_posts_canonical_bytes_with_verifiable_signature():
 
 
 def test_signed_request_get_signs_empty_body_and_query_path():
-    from unittest.mock import patch
-
-    from bobi import http as pooled
-    from bobi.events.signing import signed_request
-
     path = "/channels/history?conversation=slack%3AT1%3Achannel%3AC1&limit=5"
     captured: dict = {}
-    with patch.object(pooled, "get", side_effect=_capture_get(captured)):
+    with patch.object(pooled, "get", side_effect=_capture(captured)):
         signed_request("http://es:8080", "GET", path, None,
                        "bub_x", GOLDEN_KEY, timeout=30.0)
 
@@ -139,13 +127,8 @@ def test_signed_request_get_signs_empty_body_and_query_path():
 
 def test_signed_request_unsigned_when_no_bubble_key():
     """The /deployments MINT flow sends unsigned; no x-moda-* headers leak."""
-    from unittest.mock import patch
-
-    from bobi import http as pooled
-    from bobi.events.signing import signed_request
-
     captured: dict = {}
-    with patch.object(pooled, "post", side_effect=_capture_post(captured)):
+    with patch.object(pooled, "post", side_effect=_capture(captured)):
         signed_request("http://es:8080", "POST", "/deployments",
                        {"name": "s"}, "", "", timeout=5.0)
 
@@ -154,13 +137,8 @@ def test_signed_request_unsigned_when_no_bubble_key():
 
 
 def test_signed_request_merges_extra_headers():
-    from unittest.mock import patch
-
-    from bobi import http as pooled
-    from bobi.events.signing import signed_request
-
     captured: dict = {}
-    with patch.object(pooled, "post", side_effect=_capture_post(captured)):
+    with patch.object(pooled, "post", side_effect=_capture(captured)):
         signed_request("http://es:8080", "POST", "/__test/resource-grants",
                        {"grants": []}, "bub_x", GOLDEN_KEY, timeout=5.0,
                        extra_headers={"x-moda-test-secret": "shh"})
@@ -168,3 +146,14 @@ def test_signed_request_merges_extra_headers():
     headers = captured["headers"]
     assert headers["x-moda-test-secret"] == "shh"
     assert "x-moda-signature" in headers  # extra headers never displace signing
+
+
+def test_signed_request_rejects_unsignable_combinations():
+    """Combinations whose signed bytes would never reach the wire fail loudly
+    at the caller instead of as an opaque server-side 403."""
+    with pytest.raises(ValueError, match="GET/POST"):
+        signed_request("http://es:8080", "DELETE", "/deployments/d1", None,
+                       "bub_x", GOLDEN_KEY, timeout=5.0)
+    with pytest.raises(ValueError, match="cannot be signed"):
+        signed_request("http://es:8080", "GET", "/channels/history",
+                       {"limit": 5}, "bub_x", GOLDEN_KEY, timeout=5.0)

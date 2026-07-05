@@ -25,10 +25,10 @@ import hmac
 import json
 import time
 import uuid
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import httpx
+import httpx
+
+from bobi import http as pooled
 
 ALGO = "hmac-sha256"
 
@@ -77,7 +77,13 @@ def signed_request(base_url: str, method: str, path: str, payload: dict | None,
     Transport and HTTP errors propagate; callers own the failure semantics
     (raise vs best-effort).
     """
-    from bobi import http as pooled
+    method = method.upper()
+    # Fail loudly on combinations that would sign bytes the wire never
+    # carries - the server would 403 with no hint at the real cause.
+    if method not in ("GET", "POST"):
+        raise ValueError(f"signed_request supports GET/POST, got {method}")
+    if method == "GET" and payload is not None:
+        raise ValueError("a GET body is never transmitted, so it cannot be signed")
 
     body = serialize_body(payload) if payload is not None else ""
     headers = {"Content-Type": "application/json"}
@@ -86,6 +92,6 @@ def signed_request(base_url: str, method: str, path: str, payload: dict | None,
     if bubble_key:
         headers.update(sign_headers(bubble_id, bubble_key, method, path, body))
     url = f"{base_url}{path}"
-    if method.upper() == "GET":
+    if method == "GET":
         return pooled.get(url, headers=headers, timeout=timeout)
     return pooled.post(url, content=body, headers=headers, timeout=timeout)
