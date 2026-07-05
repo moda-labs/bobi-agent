@@ -77,6 +77,21 @@ export interface ResourceGrant {
 	expires_at: string | null; // null = no expiry in MVP (not enforced yet)
 }
 
+// A scoped ingest token (#640): a revocable credential bound to one
+// (bubble, topic) pair, minted by the instance for external systems that can
+// only send static headers (alerting, CI, SaaS webhooks). The server stores
+// ONLY the SHA-256 hash of the token — the token itself transits exactly once,
+// in the mint response, over TLS. A leaked token exposes one topic's ingress
+// in one bubble, never bubble membership or the bubble key.
+export interface IngestTokenRecord {
+	id: string;
+	bubble_id: string;
+	topic: string;
+	token_hash: string;
+	name?: string;
+	created_at: string;
+}
+
 export interface SlackBotRecord {
 	bot_token: string;
 	bot_id?: string;
@@ -209,6 +224,14 @@ export interface StorageAdapter {
 	putResourceGrant(grant: ResourceGrant): Promise<void>;
 	hasResourceGrant(service: string, resource: string, bubbleId: string): Promise<boolean>;
 	getDeploymentById(id: string): Promise<DeploymentRecord | null>;
+	// Scoped ingest tokens (#640). Lookup at request time is by token HASH —
+	// the store never sees a plaintext token. Listing is per-bubble (revoke
+	// resolves the id inside the caller's own list, so one bubble can never
+	// address another bubble's tokens).
+	putIngestToken(record: IngestTokenRecord): Promise<void>;
+	getIngestTokenByHash(hash: string): Promise<IngestTokenRecord | null>;
+	listIngestTokens(bubbleId: string): Promise<IngestTokenRecord[]>;
+	deleteIngestToken(record: IngestTokenRecord): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +392,18 @@ async function hmacSha256Hex(secret: string, data: Uint8Array | string): Promise
 	);
 	const sig = await crypto.subtle.sign("HMAC", key, bytes);
 	return Array.from(new Uint8Array(sig))
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+}
+
+// SHA-256 hex digest — the one-way transform between a plaintext ingest token
+// (on the wire) and the stored token_hash. Lookup by digest also gives a
+// constant-time-safe comparison for free: the attacker-controlled token is
+// hashed before any store access, so no stored byte is ever compared
+// positionally against attacker input.
+export async function sha256Hex(data: string): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(data));
+	return Array.from(new Uint8Array(digest))
 		.map((b) => b.toString(16).padStart(2, "0"))
 		.join("");
 }
@@ -752,7 +787,21 @@ export interface WebhookSecrets {
 	linear?: string;
 }
 
+// Per-request pipeline context. `subpath` is the path segment after the
+// source for topic routes (`/webhooks/ingest/<topic>` → "alert/firing"),
+// always "" for exact-match provider routes. The ingest verifier stashes the
+// verified token here so its handler delivers on the token's binding — never
+// on anything re-derived from the request.
+export interface WebhookRequestContext {
+	subpath: string;
+	ingestToken?: IngestTokenRecord;
+}
+
 interface WebhookSource {
+	// Registered route shape: exact (`/webhooks/<source>`, the default) or
+	// topic (`/webhooks/<source>/<topic>` with a required, slash-bearing
+	// remainder). Part of the single route grammar in matchWebhookSource.
+	topicRoute?: true;
 	// Short-circuit responses that must run BEFORE signature verification.
 	// Slack needs this: url_verification carries no signing headers (and its
 	// retries must still answer the challenge), and retried event deliveries
@@ -770,17 +819,85 @@ interface WebhookSource {
 		req: InboundWebhookRequest,
 		payload: Record<string, unknown>,
 		secret: string,
+		ctx: WebhookRequestContext,
 	): Promise<HandlerResult | null>;
 	// Normalize + deliver.
 	handle(
 		storage: StorageAdapter,
 		req: InboundWebhookRequest,
 		payload: Record<string, unknown>,
+		ctx: WebhookRequestContext,
 	): Promise<HandlerResult>;
 }
 
 const INVALID_SIGNATURE: HandlerResult = { status: 401, body: { error: "invalid signature" } };
 const INVALID_JSON: HandlerResult = { status: 400, body: { error: "invalid JSON" } };
+// Ingest rejections are an opaque 403 (per #640 acceptance): missing, unknown,
+// revoked, and wrong-topic tokens are indistinguishable to the caller.
+const INGEST_FORBIDDEN: HandlerResult = { status: 403, body: { error: "forbidden" } };
+
+// Ingest request-size cap. Generic publishes have no explicit byte cap today
+// (they are bubble-signed, so the publisher is trusted); ingest is the first
+// surface where the sender holds only a topic-scoped credential, so it gets
+// an explicit one. Sized for alerting/CI/SaaS webhook payloads with headroom.
+export const INGEST_MAX_BODY_BYTES = 256 * 1024;
+
+// Per-token fixed-window rate limit. In-memory: authoritative on the local
+// server (single process); per-isolate on the Worker, where it still bounds
+// abuse per point of presence — a shared Durable Object limiter is deliberate
+// non-scope for #640.
+export const INGEST_RATE_LIMIT = 60;
+export const INGEST_RATE_WINDOW_MS = 60_000;
+const _ingestRateWindows = new Map<string, { start: number; count: number }>();
+
+function ingestRateAllow(tokenId: string): boolean {
+	const now = Date.now();
+	const win = _ingestRateWindows.get(tokenId);
+	if (!win || now - win.start >= INGEST_RATE_WINDOW_MS) {
+		_ingestRateWindows.set(tokenId, { start: now, count: 1 });
+		return true;
+	}
+	win.count++;
+	return win.count <= INGEST_RATE_LIMIT;
+}
+
+export function resetIngestRateLimiter(): void {
+	_ingestRateWindows.clear();
+}
+
+// Build the event an ingest request delivers: the raw JSON body rides as the
+// payload with its top-level primitives mirrored into `fields`, on exactly the
+// token's bound topic (bubble-scoped). Deliberately NOT createTopicEvent: that
+// helper trusts routing fields in the body (repo/team_key/workspace → global
+// topics), and an ingest body is attacker-adjacent external input that must
+// never influence routing beyond the token's binding.
+export function createIngestEvent(
+	topic: string,
+	body: Record<string, unknown>,
+	bubbleId: string,
+): NormalizedEvent {
+	const fields: Record<string, string | number | boolean> = {};
+	for (const [k, v] of Object.entries(body)) {
+		if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+			fields[k] = v;
+		}
+	}
+	return {
+		v: 2,
+		id: crypto.randomUUID(),
+		source: "ingest",
+		type: topic,
+		timestamp: new Date().toISOString(),
+		// Bare topic plus the source-qualified form, mirroring createTopicEvent's
+		// fallback (#235), so both subscription spellings match.
+		topics: [topic, `ingest/${topic}`],
+		delivery: "bulk",
+		text: typeof body.text === "string" ? body.text : "",
+		fields,
+		payload: body,
+		bubble_id: bubbleId,
+	};
+}
 
 const WEBHOOK_SOURCES: Record<string, WebhookSource> = {
 	github: {
@@ -853,6 +970,39 @@ const WEBHOOK_SOURCES: Record<string, WebhookSource> = {
 			return handleSlackWebhook(storage, req.rawBody, payload);
 		},
 	},
+
+	// Generic ingress (#640): POST /webhooks/ingest/<topic> with
+	// `Authorization: Bearer <ingest token>`. The verify slot is the token
+	// check itself — existence, topic binding, rate limit, size cap — so the
+	// structural guarantee (#639) holds: this route cannot exist unverified.
+	ingest: {
+		topicRoute: true,
+		async verify(storage, req, _payload, _secret, ctx) {
+			const auth = req.header("authorization");
+			const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+			if (!token) return INGEST_FORBIDDEN;
+			const record = await storage.getIngestTokenByHash(await sha256Hex(token));
+			// One opaque 403 for unknown/revoked AND wrong-topic: a topic-A token
+			// probing topic B learns nothing beyond "not authorized here".
+			if (!record || record.topic !== ctx.subpath) return INGEST_FORBIDDEN;
+			if (new TextEncoder().encode(req.rawBody).byteLength > INGEST_MAX_BODY_BYTES) {
+				return { status: 413, body: { error: "payload too large" } };
+			}
+			if (!ingestRateAllow(record.id)) {
+				return { status: 429, body: { error: "rate limited" } };
+			}
+			ctx.ingestToken = record;
+			return null;
+		},
+		async handle(storage, _req, payload, ctx) {
+			// The verified token is the ONLY routing input — topic and bubble come
+			// from its binding, never from the path or body.
+			const record = ctx.ingestToken!;
+			const event = createIngestEvent(record.topic, payload, record.bubble_id);
+			const delivered = await storage.deliver(event);
+			return { status: 200, body: { delivered_to: delivered } };
+		},
+	},
 };
 
 // An admit-without-verification, counted so /health surfaces a provider
@@ -863,15 +1013,31 @@ function unverifiedAdmission(): null {
 	return null;
 }
 
-// Match a request path against the registered webhook routes. Returns the
-// source name for a registered `/webhooks/<source>` path (with or without a
-// trailing slash), else null. The single route grammar both transports use —
-// they gate the body read on this, so an unregistered path 404s without ever
-// consuming the request body.
-export function matchWebhookSource(path: string): string | null {
-	const m = path.match(/^\/webhooks\/([^/]+)\/?$/);
+// A matched webhook route: the registered source plus, for topic routes, the
+// slash-bearing remainder of the path (`/webhooks/ingest/alert/firing` →
+// subpath "alert/firing"). Exact provider routes always carry subpath "".
+export interface WebhookRouteMatch {
+	source: string;
+	subpath: string;
+}
+
+// Match a request path against the registered webhook routes — the single
+// route grammar both transports use; they gate the body read on this, so an
+// unregistered path 404s without ever consuming the request body. Exact
+// sources match `/webhooks/<source>` only (a trailing slash is tolerated, a
+// deeper path is not); topic sources REQUIRE a non-empty remainder, which may
+// itself contain slashes.
+export function matchWebhookSource(path: string): WebhookRouteMatch | null {
+	const m = path.match(/^\/webhooks\/([^/]+)(?:\/(.*))?$/);
 	if (!m) return null;
-	return m[1] in WEBHOOK_SOURCES ? m[1] : null;
+	const source = m[1];
+	const def = WEBHOOK_SOURCES[source];
+	if (!def) return null;
+	const rest = (m[2] ?? "").replace(/\/+$/, "");
+	if (def.topicRoute) {
+		return rest ? { source, subpath: rest } : null;
+	}
+	return rest ? null : { source, subpath: "" };
 }
 
 // Run an inbound webhook through the pipeline. Returns null for an
@@ -882,6 +1048,7 @@ export async function handleWebhookRequest(
 	source: string,
 	req: InboundWebhookRequest,
 	secrets: WebhookSecrets,
+	subpath = "",
 ): Promise<HandlerResult | null> {
 	const def = WEBHOOK_SOURCES[source];
 	if (!def) return null;
@@ -900,14 +1067,15 @@ export async function handleWebhookRequest(
 	const early = def.preVerify?.(req, body);
 	if (early) return early;
 
+	const ctx: WebhookRequestContext = { subpath };
 	const secret = secrets[source as keyof WebhookSecrets] || "";
-	const rejected = await def.verify(storage, req, body, secret);
+	const rejected = await def.verify(storage, req, body, secret, ctx);
 	if (rejected) {
 		_rejectionCounters.webhook_bad_signature++;
 		return rejected;
 	}
 
-	return def.handle(storage, req, body);
+	return def.handle(storage, req, body, ctx);
 }
 
 // Register a deployment into a bubble — MINT or JOIN.
@@ -1115,6 +1283,107 @@ export async function handleTopicEvent(
 	}
 	const delivered = await storage.deliver(event);
 	return { status: 200, body: { delivered_to: delivered } };
+}
+
+// ---------------------------------------------------------------------------
+// Scoped ingest tokens (#640) — mint / list / revoke. Every handler takes the
+// AUTHENTICATED bubble id (entry files reject unsigned or bad-signature
+// requests with an opaque 403 before calling these, mirroring
+// /resources/authorize), so a token is only ever visible to — and only ever
+// binds — the bubble that minted it.
+// ---------------------------------------------------------------------------
+
+// An ingest topic in the token store: `source/type` form like a CLI publish
+// topic (e.g. "alert/firing"), from a charset that never URL-encodes so the
+// wire path and the stored binding compare byte-for-byte. The first segment
+// must not impersonate a webhook provider, and the `:` exclusion structurally
+// rules out every global (github:/linear:/slack:) routing key.
+const INGEST_TOPIC_SEGMENT_RE = /^[A-Za-z0-9_.-]+$/;
+const INGEST_TOPIC_MAX_LENGTH = 200;
+const INGEST_RESERVED_SOURCES = new Set(["github", "linear", "slack"]);
+
+export function validateIngestTopic(topic: string): string | null {
+	if (!topic || topic.length > INGEST_TOPIC_MAX_LENGTH) {
+		return "topic must be 1-200 characters";
+	}
+	const segments = topic.split("/");
+	if (segments.length < 2) {
+		return "topic must use source/type form, e.g. alert/firing";
+	}
+	if (!segments.every((s) => INGEST_TOPIC_SEGMENT_RE.test(s))) {
+		return "topic segments must be non-empty [A-Za-z0-9_.-]";
+	}
+	if (INGEST_RESERVED_SOURCES.has(segments[0])) {
+		return "github, linear, and slack sources are reserved for webhooks";
+	}
+	return null;
+}
+
+export async function handleIngestTokenCreate(
+	storage: StorageAdapter,
+	body: Record<string, unknown>,
+	bubbleId: string,
+): Promise<HandlerResult> {
+	const topic = typeof body.topic === "string" ? body.topic.trim() : "";
+	const name = typeof body.name === "string" && body.name ? body.name : undefined;
+	const invalid = validateIngestTopic(topic);
+	if (invalid) return { status: 400, body: { error: invalid } };
+
+	const token = randomToken("ingt");
+	const record: IngestTokenRecord = {
+		id: crypto.randomUUID(),
+		bubble_id: bubbleId,
+		topic,
+		token_hash: await sha256Hex(token),
+		...(name ? { name } : {}),
+		created_at: new Date().toISOString(),
+	};
+	await storage.putIngestToken(record);
+
+	// The plaintext token appears here and nowhere else — it is never stored
+	// and never recoverable from list.
+	return {
+		status: 201,
+		body: {
+			id: record.id,
+			topic: record.topic,
+			...(name ? { name } : {}),
+			token,
+			created_at: record.created_at,
+		},
+	};
+}
+
+export async function handleIngestTokenList(
+	storage: StorageAdapter,
+	bubbleId: string,
+): Promise<HandlerResult> {
+	const records = await storage.listIngestTokens(bubbleId);
+	return {
+		status: 200,
+		body: {
+			tokens: records.map((r) => ({
+				id: r.id,
+				topic: r.topic,
+				...(r.name ? { name: r.name } : {}),
+				created_at: r.created_at,
+			})),
+		},
+	};
+}
+
+export async function handleIngestTokenRevoke(
+	storage: StorageAdapter,
+	tokenId: string,
+	bubbleId: string,
+): Promise<HandlerResult> {
+	// Resolve the id inside the caller's OWN token list — another bubble's
+	// token id yields the same 404 as a nonexistent one.
+	const records = await storage.listIngestTokens(bubbleId);
+	const record = records.find((r) => r.id === tokenId);
+	if (!record) return { status: 404, body: { error: "not found" } };
+	await storage.deleteIngestToken(record);
+	return { status: 200, body: { ok: true } };
 }
 
 // ---------------------------------------------------------------------------

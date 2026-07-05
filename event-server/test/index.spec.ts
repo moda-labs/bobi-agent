@@ -1275,3 +1275,120 @@ describe("#488 resource-grant authorization (route + delivery)", () => {
 		expect(depRes.status).toBe(400);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// #640 — scoped ingest tokens over the real Worker transport: signed
+// mint/list/revoke routes plus the /webhooks/ingest/<topic> ingress. The
+// behavioral matrix lives in core.spec.ts; these prove the KV storage adapter
+// and route wiring end to end.
+// ---------------------------------------------------------------------------
+describe("ingest tokens over HTTP (#640)", () => {
+	async function signedFetch(
+		b: MintedBubble,
+		method: string,
+		path: string,
+		body = "",
+	): Promise<Response> {
+		const headers = await bubbleHeaders(b.bubble_id, b.bubble_key, method, path, body);
+		return SELF.fetch(`https://example.com${path}`, {
+			method,
+			headers: body ? { "content-type": "application/json", ...headers } : headers,
+			...(body ? { body } : {}),
+		});
+	}
+
+	it("rejects unsigned and badly-signed token management requests", async () => {
+		const unsigned = await SELF.fetch("https://example.com/ingest-tokens", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ topic: "alert/firing" }),
+		});
+		expect(unsigned.status).toBe(403);
+
+		const b = await mintBubble(["alert/firing"]);
+		const body = JSON.stringify({ topic: "alert/firing" });
+		const headers = await bubbleHeaders(b.bubble_id, "bkey_wrong", "POST", "/ingest-tokens", body);
+		const badKey = await SELF.fetch("https://example.com/ingest-tokens", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...headers },
+			body,
+		});
+		expect(badKey.status).toBe(403);
+	});
+
+	it("mint → ingest → list → revoke → 403, end to end through KV", async () => {
+		// The minting bubble also subscribes to the bound topic, so a delivered
+		// ingest fans out within the bubble (delivered_to >= 1).
+		const b = await mintBubble(["alert/firing"]);
+
+		const mint = await signedFetch(b, "POST", "/ingest-tokens",
+			JSON.stringify({ topic: "alert/firing", name: "oncall" }));
+		expect(mint.status).toBe(201);
+		const minted = await mint.json() as { id: string; token: string; topic: string };
+		expect(minted.token).toMatch(/^ingt_/);
+		expect(minted.topic).toBe("alert/firing");
+
+		const ok = await SELF.fetch("https://example.com/webhooks/ingest/alert/firing", {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${minted.token}` },
+			body: JSON.stringify({ title: "disk full" }),
+		});
+		expect(ok.status).toBe(200);
+		expect(await ok.json()).toMatchObject({ delivered_to: 1 });
+
+		// Bound to alert/firing only — a different topic is an opaque 403.
+		const crossTopic = await SELF.fetch("https://example.com/webhooks/ingest/alert/resolved", {
+			method: "POST",
+			headers: { authorization: `Bearer ${minted.token}` },
+			body: "{}",
+		});
+		expect(crossTopic.status).toBe(403);
+
+		const list = await signedFetch(b, "GET", "/ingest-tokens");
+		expect(list.status).toBe(200);
+		const listed = await list.json() as { tokens: Record<string, unknown>[] };
+		expect(listed.tokens).toHaveLength(1);
+		expect(listed.tokens[0]).toMatchObject({ id: minted.id, topic: "alert/firing", name: "oncall" });
+		expect(listed.tokens[0]).not.toHaveProperty("token");
+		expect(listed.tokens[0]).not.toHaveProperty("token_hash");
+
+		const revoke = await signedFetch(b, "DELETE", `/ingest-tokens/${minted.id}`);
+		expect(revoke.status).toBe(200);
+
+		const afterRevoke = await SELF.fetch("https://example.com/webhooks/ingest/alert/firing", {
+			method: "POST",
+			headers: { authorization: `Bearer ${minted.token}` },
+			body: "{}",
+		});
+		expect(afterRevoke.status).toBe(403);
+	});
+
+	it("missing token 403s and a topicless ingest path 404s", async () => {
+		const noToken = await SELF.fetch("https://example.com/webhooks/ingest/alert/firing", {
+			method: "POST",
+			body: "{}",
+		});
+		expect(noToken.status).toBe(403);
+
+		const noTopic = await SELF.fetch("https://example.com/webhooks/ingest", {
+			method: "POST",
+			body: "{}",
+		});
+		expect(noTopic.status).toBe(404);
+	});
+
+	it("one bubble cannot list or revoke another bubble's tokens", async () => {
+		const owner = await mintBubble(["alert/firing"]);
+		const other = await mintBubble(["alert/firing"]);
+
+		const mint = await signedFetch(owner, "POST", "/ingest-tokens",
+			JSON.stringify({ topic: "alert/firing" }));
+		const minted = await mint.json() as { id: string };
+
+		const list = await signedFetch(other, "GET", "/ingest-tokens");
+		expect((await list.json() as { tokens: unknown[] }).tokens).toHaveLength(0);
+
+		const revoke = await signedFetch(other, "DELETE", `/ingest-tokens/${minted.id}`);
+		expect(revoke.status).toBe(404);
+	});
+});

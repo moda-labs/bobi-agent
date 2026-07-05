@@ -2407,6 +2407,71 @@ def events_publish(topic, json_payload):
     click.echo(f"Published {topic}")
 
 
+@events.group("ingest-token")
+def ingest_token():
+    """Manage scoped ingest tokens for POST /webhooks/ingest/<topic>.
+
+    An ingest token lets an external system that can only send static
+    headers (alerting, CI, SaaS webhooks) publish plain JSON to one topic
+    in this instance's bubble. The server stores only a hash; the token is
+    shown once at creation.
+    """
+
+
+@ingest_token.command("create")
+@click.argument("topic")
+@click.option("--name", default=None, help="Optional label shown in list output.")
+def ingest_token_create(topic, name):
+    """Mint a token bound to TOPIC (source/type form, e.g. alert/firing)."""
+    project_path = _detect_project_root()
+    topic = _validate_event_publish_topic(topic)
+
+    from bobi.events.ingest_tokens import IngestTokenError, create_token
+    try:
+        minted = create_token(topic, name=name, project_path=project_path)
+    except IngestTokenError as e:
+        raise click.ClickException(str(e))
+
+    click.echo(f"Ingest token for {minted.get('topic', topic)} "
+               f"(id {minted.get('id', '?')}):")
+    click.echo(f"\n  {minted.get('token', '')}\n")
+    click.echo("Shown once - store it in the external system now. Send events with:")
+    click.echo(f'  curl -H "Authorization: Bearer <token>" -d \'{{"title":"..."}}\' '
+               f"<event-server>/webhooks/ingest/{topic}")
+
+
+@ingest_token.command("list")
+def ingest_token_list():
+    """List this instance's ingest tokens (never shows the tokens themselves)."""
+    project_path = _detect_project_root()
+
+    from bobi.events.ingest_tokens import IngestTokenError, list_tokens
+    try:
+        tokens = list_tokens(project_path=project_path)
+    except IngestTokenError as e:
+        raise click.ClickException(str(e))
+
+    if not tokens:
+        click.echo("No ingest tokens.")
+        return
+    for t in tokens:
+        label = f"  ({t['name']})" if t.get("name") else ""
+        click.echo(f"{t.get('id', '?')}  {t.get('topic', '?')}{label}  "
+                   f"created {t.get('created_at', '?')}")
+
+
+@ingest_token.command("revoke")
+@click.argument("token_id")
+def ingest_token_revoke(token_id):
+    """Revoke an ingest token by id. Takes effect immediately."""
+    project_path = _detect_project_root()
+
+    from bobi.events.ingest_tokens import IngestTokenError, revoke_token
+    try:
+        revoke_token(token_id, project_path=project_path)
+    except IngestTokenError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"Revoked {token_id}")
 
 
 
