@@ -299,14 +299,16 @@ def _fixed_now():
 
 
 def _scheduler(tmp_path, monitors, check_results=None, spawned=None,
-               publish=None):
+               publish=None, gates=None):
     """Build a scheduler over a hand-built registry and capture published events.
 
     `published` records {"event": ..., "data": ...} for every publish — the
     single path all monitor flavors fire through. Pass `publish` to override
     (e.g. to simulate event-server failures). `spawned` (if a list) captures
     (monitor, cwd, on_verdict) tuples from spawn_check so description-only
-    monitors don't launch real subprocesses in tests.
+    monitors don't launch real subprocesses in tests. `gates` (if a list)
+    likewise captures (monitor, cwd, items, on_verdict) from spawn_gate for
+    relevance-gated monitors.
     """
     published = []
 
@@ -328,6 +330,9 @@ def _scheduler(tmp_path, monitors, check_results=None, spawned=None,
         registry_loader=lambda: FakeRegistry(),
         spawn_check=(lambda mon, cwd, on_verdict: spawned.append((mon, cwd, on_verdict)))
         if spawned is not None else (lambda mon, cwd, on_verdict: None),
+        spawn_gate=(lambda mon, cwd, items, on_verdict:
+                    gates.append((mon, cwd, items, on_verdict)))
+        if gates is not None else (lambda mon, cwd, items, on_verdict: None),
     )
     return sched, published
 
@@ -935,3 +940,372 @@ class TestParseVerdict:
         out = ('{"finding": false}\n'
                '{"success": true, "finding": true, "summary": "s"}\n')
         assert _parse_verdict(out)["finding"] is True
+
+
+# === Relevance gate (two-tier semantic gate, #630) ===
+
+class TestRelevanceSchema:
+    def test_relevance_parses_and_roundtrips(self):
+        m = Monitor.from_dict({"name": "x", "check": "venn_poll",
+                               "relevance": "about billing"})
+        assert m.relevance == "about billing"
+        assert "relevance" not in m.extra
+        assert m.to_dict()["relevance"] == "about billing"
+
+    def test_absent_relevance_not_serialized(self):
+        m = Monitor.from_dict({"name": "x", "command": "echo"})
+        assert m.relevance == ""
+        assert "relevance" not in m.to_dict()
+
+    def test_gated_predicate_single_source_of_truth(self):
+        """Monitor.gated is the one predicate both the scheduler routing and
+        validate consult - it must gate exactly the mechanical detectors."""
+        gated = dict(relevance="about x")
+        assert Monitor(name="a", command="echo", **gated).gated
+        assert Monitor(name="b", check="venn_poll", **gated).gated
+        # run_monitor's elif chain hits command/check before curator, so a
+        # command+curator combo IS gated at runtime - gated must agree.
+        assert Monitor(name="c", command="echo", curator=True, **gated).gated
+        assert not Monitor(name="d", **gated).gated              # description-only
+        assert not Monitor(name="e", notify=True, command="echo", **gated).gated
+        assert not Monitor(name="f", curator=True, **gated).gated
+        assert not Monitor(name="g", command="echo").gated       # no criterion
+
+
+def _gated_monitor(**overrides):
+    """A command monitor with a relevance criterion (the gated shape)."""
+    fields = dict(name="billing", command="echo '[]'",
+                  relevance="emails about billing",
+                  event="monitor/email.billing")
+    fields.update(overrides)
+    return Monitor(**fields)
+
+
+class TestRelevanceGateScheduling:
+    def test_new_conditions_go_to_gate_not_publish(self, tmp_path):
+        m = _gated_monitor()
+        gates = []
+        sched, published = _scheduler(tmp_path, [m], gates=gates)
+        sched._reconcile_gated(m, [Condition(key="m1", data={"subject": "refund"})],
+                               [Path("/repo")])
+        assert published == []          # nothing publishes before the verdict
+        assert len(gates) == 1
+        mon, cwd, items, _cb = gates[0]
+        assert mon is m
+        assert cwd == "/repo"
+        assert [c.key for c in items] == ["m1"]
+
+    def test_no_new_items_spawns_no_gate(self, tmp_path):
+        m = _gated_monitor()
+        gates = []
+        sched, published = _scheduler(tmp_path, [m], gates=gates)
+        sched.state["billing"] = {"active": ["m1"]}
+        sched._reconcile_gated(m, [Condition(key="m1", data={})], [])
+        assert gates == []              # still-active item: zero LLM calls
+        assert published == []
+        assert sched.state["billing"]["active"] == ["m1"]
+
+    def test_only_new_keys_reach_the_gate(self, tmp_path):
+        m = _gated_monitor()
+        gates = []
+        sched, _ = _scheduler(tmp_path, [m], gates=gates)
+        sched.state["billing"] = {"active": ["m1"]}
+        sched._reconcile_gated(m, [Condition(key="m1", data={}),
+                                   Condition(key="m2", data={})], [])
+        assert [c.key for c in gates[0][2]] == ["m2"]
+
+    def test_relevant_publishes_and_records_irrelevant_records_silently(self, tmp_path):
+        m = _gated_monitor()
+        gates = []
+        sched, published = _scheduler(tmp_path, [m], gates=gates)
+        conditions = [Condition(key="m1", data={"subject": "refund"}),
+                      Condition(key="m2", data={"subject": "lunch"})]
+        sched._reconcile_gated(m, conditions, [])
+        _, _, items, on_verdict = gates[0]
+        on_verdict({"success": True, "relevant": ["m1"]})
+
+        assert len(published) == 1
+        ev = published[0]
+        assert ev["event"] == "monitor/email.billing"
+        assert ev["data"]["subject"] == "refund"
+        assert ev["data"]["finding_key"] == "m1"
+        # Both keys recorded: neither is ever re-judged.
+        assert set(sched.state["billing"]["active"]) == {"m1", "m2"}
+
+        # Next tick with the same items: no gate, no publish.
+        sched._reconcile_gated(m, conditions, [])
+        assert len(gates) == 1
+        assert len(published) == 1
+
+    def test_indeterminate_gate_records_nothing_and_retries(self, tmp_path):
+        m = _gated_monitor()
+        gates = []
+        sched, published = _scheduler(tmp_path, [m], gates=gates)
+        conditions = [Condition(key="m1", data={})]
+        sched._reconcile_gated(m, conditions, [])
+        gates[0][3](None)               # gate process died / no verdict
+
+        assert published == []
+        assert sched.state["billing"]["active"] == []
+        # The item is still new - the next tick re-gates it.
+        sched._reconcile_gated(m, conditions, [])
+        assert len(gates) == 2
+
+    def test_gate_success_false_is_indeterminate(self, tmp_path):
+        m = _gated_monitor()
+        gates = []
+        sched, published = _scheduler(tmp_path, [m], gates=gates)
+        sched._reconcile_gated(m, [Condition(key="m1", data={})], [])
+        gates[0][3]({"success": False, "relevant": []})
+        assert published == []
+        assert sched.state["billing"]["active"] == []
+
+    def test_failed_publish_retries_mechanically_without_regating(self, tmp_path):
+        """A judged-relevant item whose publish failed must NOT go back to
+        the model (a second opinion on a borderline item could flip and
+        silently drop the finding). It parks in pending_publish and the next
+        tick retries only the publish, at $0."""
+        m = _gated_monitor()
+        gates = []
+        published = []
+        ok = {"value": False}
+
+        def publish(event, data):
+            published.append({"event": event, "data": data})
+            return ok["value"]
+
+        sched, _ = _scheduler(tmp_path, [m], gates=gates, publish=publish)
+        conditions = [Condition(key="m1", data={"subject": "refund"})]
+        sched._reconcile_gated(m, conditions, [])
+        gates[0][3]({"success": True, "relevant": ["m1"]})
+
+        # Publish failed: parked as pending, not active, judged exactly once.
+        assert sched.state["billing"]["active"] == []
+        assert sched.state["billing"]["pending_publish"] == {
+            "m1": {"subject": "refund"}}
+
+        # Next tick: no second gate call, one mechanical publish retry.
+        ok["value"] = True
+        sched._reconcile_gated(m, conditions, [])
+        assert len(gates) == 1
+        assert [p["data"]["finding_key"] for p in published] == ["m1", "m1"]
+        assert sched.state["billing"]["active"] == ["m1"]
+        assert "pending_publish" not in sched.state["billing"]
+
+    def test_in_flight_guard_prevents_concurrent_gates(self, tmp_path):
+        m = _gated_monitor()
+        gates = []
+        sched, _ = _scheduler(tmp_path, [m], gates=gates)
+        conditions = [Condition(key="m1", data={})]
+        sched._reconcile_gated(m, conditions, [])
+        sched._reconcile_gated(m, conditions, [])   # verdict still pending
+        assert len(gates) == 1
+        # After the verdict lands the guard lifts.
+        gates[0][3](None)
+        sched._reconcile_gated(m, conditions, [])
+        assert len(gates) == 2
+
+    def test_batch_capped_at_gate_max_items(self, tmp_path):
+        from bobi.monitors.scheduler import GATE_MAX_ITEMS
+        m = _gated_monitor()
+        gates = []
+        sched, _ = _scheduler(tmp_path, [m], gates=gates)
+        conditions = [Condition(key=f"k{i}", data={}) for i in range(GATE_MAX_ITEMS + 5)]
+        sched._reconcile_gated(m, conditions, [])
+        assert len(gates[0][2]) == GATE_MAX_ITEMS
+        # Overflow items were not recorded - they stay new for the next tick.
+        gates[0][3]({"success": True, "relevant": []})
+        assert len(sched.state["billing"]["active"]) == GATE_MAX_ITEMS
+
+    def test_disappeared_keys_clear_in_gated_path(self, tmp_path):
+        m = _gated_monitor()
+        gates = []
+        sched, _ = _scheduler(tmp_path, [m], gates=gates)
+        sched.state["billing"] = {"active": ["gone"]}
+        sched._reconcile_gated(m, [], [])
+        assert sched.state["billing"]["active"] == []
+        assert gates == []
+
+    def test_hallucinated_verdict_keys_ignored(self, tmp_path):
+        m = _gated_monitor()
+        gates = []
+        sched, published = _scheduler(tmp_path, [m], gates=gates)
+        sched._reconcile_gated(m, [Condition(key="m1", data={})], [])
+        gates[0][3]({"success": True, "relevant": ["made-up"]})
+        assert published == []                       # unknown key never fires
+        assert sched.state["billing"]["active"] == ["m1"]  # judged irrelevant
+
+    def test_run_monitor_routes_gated_command_monitor(self, tmp_path):
+        m = _gated_monitor(command="echo '[{\"id\": \"m1\", \"subject\": \"hi\"}]'")
+        gates = []
+        sched, published = _scheduler(tmp_path, [m], gates=gates)
+        sched.run_monitor(m, sched._registry_loader(), _fixed_now())
+        assert published == []
+        assert len(gates) == 1
+        assert [c.key for c in gates[0][2]] == ["m1"]
+
+    def test_run_monitor_notify_with_relevance_stays_ungated(self, tmp_path):
+        m = Monitor(name="roundup", notify=True, relevance="whatever",
+                    event="monitor/roundup", description="ping")
+        gates = []
+        sched, published = _scheduler(tmp_path, [m], gates=gates)
+        sched.run_monitor(m, sched._registry_loader(), _fixed_now())
+        assert gates == []
+        assert len(published) == 1
+
+
+class TestParseGateOutput:
+    def test_extracts_trailing_gate_verdict(self):
+        from bobi.monitors.scheduler import _parse_gate_output
+        out = 'Launching gate...\n{"success": true, "relevant": ["m1"]}\n'
+        assert _parse_gate_output(out) == {"success": True, "relevant": ["m1"]}
+
+    def test_ignores_non_gate_json(self):
+        from bobi.monitors.scheduler import _parse_gate_output
+        assert _parse_gate_output('{"finding": true}\n') is None
+
+    def test_no_output_is_none(self):
+        from bobi.monitors.scheduler import _parse_gate_output
+        assert _parse_gate_output("") is None
+        assert _parse_gate_output(None) is None
+
+
+class TestDefaultSpawnGate:
+    def test_request_file_and_command_shape(self, tmp_path, monkeypatch):
+        """The gate subprocess gets criterion + items via a request file and
+        runs the `monitors gate` plumbing command."""
+        import json as json_mod
+        import bobi.sdk as sdk_mod
+        from bobi.monitors.scheduler import _default_spawn_gate
+
+        project = tmp_path / "proj"
+        paths.state_dir(project)
+        paths.package_dir(project).mkdir(parents=True)
+        paths.agent_yaml_path(project).write_text("agent: test-pack\n")
+        monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
+        paths.bind_root(project)
+
+        captured = {}
+
+        class FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured["cmd"] = cmd
+                req_idx = cmd.index("--request")
+                captured["request"] = json_mod.loads(
+                    Path(cmd[req_idx + 1]).read_text())
+
+            def communicate(self, timeout=None):
+                return ('{"success": true, "relevant": ["m1"]}\n', "")
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr("subprocess.Popen", FakePopen)
+
+        import threading
+        got = {}
+        done = threading.Event()
+
+        def on_verdict(v):
+            got["verdict"] = v
+            done.set()
+
+        m = _gated_monitor()
+        items = [Condition(key="m1", data={"subject": "refund"})]
+        _default_spawn_gate(m, str(project), items, on_verdict)
+
+        assert done.wait(timeout=5), "waiter thread never delivered a verdict"
+        cmd = captured["cmd"]
+        assert "monitors" in cmd and "gate" in cmd
+        assert captured["request"]["criterion"] == "emails about billing"
+        assert captured["request"]["items"] == [
+            {"key": "m1", "data": {"subject": "refund"}}]
+        assert got["verdict"] == {"success": True, "relevant": ["m1"]}
+
+    def test_spawn_failure_reports_indeterminate(self, tmp_path, monkeypatch):
+        import bobi.sdk as sdk_mod
+        from bobi.monitors.scheduler import _default_spawn_gate
+
+        project = tmp_path / "proj"
+        paths.state_dir(project)
+        paths.package_dir(project).mkdir(parents=True)
+        paths.agent_yaml_path(project).write_text("agent: test-pack\n")
+        monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
+        paths.bind_root(project)
+
+        def _boom(*a, **kw):
+            raise OSError("no exec")
+
+        monkeypatch.setattr("subprocess.Popen", _boom)
+
+        got = {}
+        m = _gated_monitor()
+        _default_spawn_gate(m, str(project),
+                            [Condition(key="m1", data={})],
+                            lambda v: got.setdefault("verdict", v))
+        # Synchronous failure path: indeterminate, never silently dropped.
+        assert got["verdict"] is None
+        # The request file must not leak when the spawn failed.
+        assert list((paths.state_dir(project) / "gates").glob("*.json")) == []
+
+
+class TestWriteGateRequest:
+    def _bind(self, tmp_path, monkeypatch):
+        import bobi.sdk as sdk_mod
+        project = tmp_path / "proj"
+        paths.state_dir(project)
+        paths.package_dir(project).mkdir(parents=True)
+        paths.agent_yaml_path(project).write_text("agent: test-pack\n")
+        monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
+        paths.bind_root(project)
+        return project
+
+    def test_non_json_safe_payload_is_stringified(self, tmp_path, monkeypatch):
+        """A check plugin may return datetimes/Decimals in Condition.data;
+        the request writer must stringify, not raise every tick."""
+        import json as json_mod
+        from datetime import datetime as dt
+        from bobi.monitors.scheduler import _write_gate_request
+
+        project = self._bind(tmp_path, monkeypatch)
+        m = _gated_monitor()
+        path = _write_gate_request(
+            m, [Condition(key="m1", data={"at": dt(2026, 7, 4)})])
+        assert path is not None
+        request = json_mod.loads(Path(path).read_text())
+        assert "2026-07-04" in request["items"][0]["data"]["at"]
+
+    def test_oversized_payload_truncated_at_write_time(self, tmp_path, monkeypatch):
+        """The gate prompt truncates per item anyway - large payloads must
+        not be written and re-parsed in full per gate call."""
+        import json as json_mod
+        from bobi.monitors.scheduler import _write_gate_request
+        from bobi.subagent import GATE_ITEM_CHARS
+
+        project = self._bind(tmp_path, monkeypatch)
+        m = _gated_monitor()
+        path = _write_gate_request(
+            m, [Condition(key="m1", data={"body": "x" * (GATE_ITEM_CHARS * 3)})])
+        request = json_mod.loads(Path(path).read_text())
+        data = request["items"][0]["data"]
+        assert len(data["truncated_payload"]) == GATE_ITEM_CHARS
+
+    def test_orphaned_request_files_swept(self, tmp_path, monkeypatch):
+        """A manager that died mid-gate leaves its request file (raw item
+        payloads) behind; the next gate write sweeps stale ones."""
+        import os
+        import time as time_mod
+        from bobi.monitors.scheduler import (_GATE_REQUEST_MAX_AGE,
+                                             _write_gate_request)
+
+        project = self._bind(tmp_path, monkeypatch)
+        gates_dir = paths.state_dir(project) / "gates"
+        gates_dir.mkdir(parents=True, exist_ok=True)
+        orphan = gates_dir / "dead-manager.json"
+        orphan.write_text("{}")
+        stale = time_mod.time() - _GATE_REQUEST_MAX_AGE - 60
+        os.utime(orphan, (stale, stale))
+
+        m = _gated_monitor()
+        _write_gate_request(m, [Condition(key="m1", data={})])
+        assert not orphan.exists()

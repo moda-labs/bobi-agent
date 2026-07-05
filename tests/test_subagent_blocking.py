@@ -30,10 +30,14 @@ def bound_root(tmp_path, monkeypatch):
 
 
 from bobi.subagent import (
+    GATE_ITEM_CHARS,
+    GATE_MAX_TURNS,
     AgentResult,
     CheckResult,
+    GateResult,
     InputHandler,
     _build_check_prompt,
+    _build_gate_prompt,
     _build_prompt,
     _emit_lifecycle_event,
     _emit_session_finished,
@@ -41,10 +45,12 @@ from bobi.subagent import (
     _make_defer_hook,
     _parse_check_output,
     _parse_check_verdict,
+    _parse_gate_verdict,
     _run_agent_supervised,
     _session_name,
     _summarize_output,
     run_check_blocking,
+    run_gate_blocking,
     run_phase_blocking,
     spawn_adhoc,
 )
@@ -1476,3 +1482,155 @@ class TestModelAwareSessionResume:
         # roles.monitor.model=haiku differs from the recorded default: fresh.
         assert captured["resume"] is None
         assert captured["options"]["model"] == "haiku"
+
+
+# ---------------------------------------------------------------------------
+# Tests: relevance gate (two-tier semantic gate, #630)
+# ---------------------------------------------------------------------------
+
+_GATE_ITEMS = [
+    {"key": "m1", "data": {"subject": "Refund request", "from": "a@x.test"}},
+    {"key": "m2", "data": {"subject": "Lunch?", "from": "b@x.test"}},
+]
+
+
+class TestBuildGatePrompt:
+    def test_includes_criterion_keys_and_payloads(self):
+        prompt = _build_gate_prompt("emails about billing", _GATE_ITEMS)
+        assert "emails about billing" in prompt
+        assert "m1" in prompt and "m2" in prompt
+        assert "Refund request" in prompt
+        assert '{"relevant": ["<key>", ...]}' in prompt
+        # Judge-only: must tell the agent not to act.
+        assert "do not" in prompt.lower()
+
+    def test_truncates_oversized_payloads(self):
+        big = [{"key": "k", "data": {"body": "x" * (GATE_ITEM_CHARS * 2)}}]
+        prompt = _build_gate_prompt("about y", big)
+        assert "...[truncated]" in prompt
+        assert len(prompt) < GATE_ITEM_CHARS * 2
+
+    def test_unserializable_payload_falls_back_to_str(self):
+        prompt = _build_gate_prompt("about y", [{"key": "k", "data": {"o": object()}}])
+        assert "k" in prompt
+
+
+class TestParseGateVerdict:
+    """A missing verdict must be distinguishable from an explicit no-match:
+    None is indeterminate (retry), [] is a successful 'nothing matched'."""
+
+    def test_relevant_keys_returned(self):
+        out = 'thinking...\n{"relevant": ["m1"]}'
+        assert _parse_gate_verdict(out, {"m1", "m2"}) == ["m1"]
+
+    def test_hallucinated_keys_filtered(self):
+        out = '{"relevant": ["m1", "made-up"]}'
+        assert _parse_gate_verdict(out, {"m1", "m2"}) == ["m1"]
+
+    def test_explicit_empty_is_success(self):
+        assert _parse_gate_verdict('{"relevant": []}', {"m1"}) == []
+
+    def test_no_json_returns_none(self):
+        assert _parse_gate_verdict("just prose", {"m1"}) is None
+
+    def test_empty_returns_none(self):
+        assert _parse_gate_verdict("", {"m1"}) is None
+
+    def test_non_list_relevant_returns_none(self):
+        assert _parse_gate_verdict('{"relevant": "m1"}', {"m1"}) is None
+
+    def test_picks_last_verdict(self):
+        out = '{"relevant": []}\nreconsidering\n{"relevant": ["m2"]}'
+        assert _parse_gate_verdict(out, {"m1", "m2"}) == ["m2"]
+
+    def test_non_string_keys_coerced(self):
+        assert _parse_gate_verdict('{"relevant": [42]}', {"42"}) == ["42"]
+
+
+class TestRunGateBlocking:
+    def test_relevant_parsed_from_agent_output(self):
+        agent_result = AgentResult(
+            session_id="s", run_key="gate-x", phase="gate", success=True,
+            duration_ms=800, total_cost_usd=0.001,
+            final_text='{"relevant": ["m1"]}',
+        )
+
+        async def _mock(*a, **kw):
+            return agent_result
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_gate_blocking("about billing", _GATE_ITEMS, cwd="/tmp")
+
+        assert isinstance(result, GateResult)
+        assert result.success is True
+        assert result.relevant == ["m1"]
+        assert result.duration_ms == 800
+
+    def test_runs_as_monitor_role_with_gate_turn_cap(self):
+        captured: dict = {}
+
+        async def _mock(prompt, cwd, run_key, phase, timeout, **kw):
+            captured.update(kw, phase=phase)
+            return AgentResult(session_id="s", run_key=run_key, phase=phase,
+                               success=True, final_text='{"relevant": []}')
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_gate_blocking("about y", _GATE_ITEMS, cwd="/tmp")
+
+        assert result.success is True
+        assert result.relevant == []
+        assert captured["role"] == "monitor"
+        assert captured["max_turns"] == GATE_MAX_TURNS
+        assert captured["phase"] == "gate"
+        # A gate is a stateless judgment: it must never resume the previous
+        # batch's transcript (cost growth + stale-item verdict pollution).
+        assert captured["fresh"] is True
+
+    def test_missing_verdict_retries_then_succeeds(self):
+        calls = []
+
+        async def _mock(prompt, cwd, run_key, *a, **kw):
+            calls.append(run_key)
+            text = "no verdict here" if len(calls) == 1 else '{"relevant": ["m2"]}'
+            return AgentResult(session_id="s", run_key=run_key, phase="gate",
+                               success=True, final_text=text)
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_gate_blocking("about y", _GATE_ITEMS, cwd="/tmp",
+                                       attempts=2)
+
+        assert result.success is True
+        assert result.relevant == ["m2"]
+        assert len(calls) == 2
+        # Fresh run_key on retry - never resume the botched transcript.
+        assert calls[0] != calls[1]
+
+    def test_exhausted_attempts_is_indeterminate(self):
+        async def _mock(prompt, cwd, run_key, *a, **kw):
+            return AgentResult(session_id="s", run_key=run_key, phase="gate",
+                               success=True, final_text="still no verdict")
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_gate_blocking("about y", _GATE_ITEMS, cwd="/tmp",
+                                       attempts=2)
+
+        assert result.success is False
+        assert result.relevant == []
+        assert "verdict" in result.error
+
+    def test_agent_error_is_indeterminate(self):
+        async def _mock(prompt, cwd, run_key, *a, **kw):
+            return AgentResult(session_id="s", run_key=run_key, phase="gate",
+                               success=False, error="boom")
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_gate_blocking("about y", _GATE_ITEMS, cwd="/tmp",
+                                       attempts=2)
+
+        assert result.success is False
+        assert result.error == "boom"

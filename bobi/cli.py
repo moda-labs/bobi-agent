@@ -2911,6 +2911,44 @@ def monitor_approve_script(name):
         raise SystemExit(1)
 
 
+@monitors.command("gate", hidden=True)
+@click.option("--request", "request_path", required=True,
+              help="Path to the gate request JSON written by the scheduler.")
+def monitor_gate(request_path):
+    """Internal: judge new monitor items against a relevance criterion (#630).
+
+    Scheduler plumbing, launched out-of-band by _default_spawn_gate. Reads
+    {"criterion": ..., "name": ..., "items": [{"key": ..., "data": ...}]}
+    from the request file, runs the cheap-model gate agent, and prints the
+    verdict as a single JSON line: {"success": ..., "relevant": [...]}.
+    """
+    from .subagent import run_gate_blocking
+
+    project_path = _detect_project_root()
+    try:
+        request = json.loads(Path(request_path).read_text())
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        click.echo(f"Bad gate request file: {e}", err=True)
+        raise SystemExit(1)
+
+    criterion = str(request.get("criterion", ""))
+    items = request.get("items") or []
+    if not criterion or not isinstance(items, list) or not items:
+        click.echo("Gate request needs a criterion and a non-empty items list.",
+                   err=True)
+        raise SystemExit(1)
+
+    result = run_gate_blocking(
+        criterion, items, cwd=str(project_path),
+        name=request.get("name") or None,
+    )
+    click.echo(json.dumps({"success": result.success,
+                           "relevant": result.relevant}))
+    if not result.success:
+        click.echo(f"Gate failed: {result.error}", err=True)
+        raise SystemExit(1)
+
+
 main.add_command(monitors)
 
 

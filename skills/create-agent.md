@@ -285,6 +285,27 @@ monitors:
 
 Monitors without `check:` are executed by a short-lived agent that
 evaluates the description and posts an event only if something is found.
+That costs an LLM call every interval, so reserve it for checks that
+cannot be pulled mechanically.
+
+For "items about X" needs, prefer a mechanical poll (`check: tool_poll`
+or `venn_poll`, or a `command:`) plus a `relevance:` criterion - the
+two-tier semantic gate. The poll runs at $0 per interval; only genuinely
+new items are judged by a short cheap-model gate, and only relevant ones
+publish the event:
+
+```yaml
+monitors:
+  - name: billing-emails
+    check: venn_poll
+    interval: 5m
+    service: work-gmail
+    tool: list_messages
+    query: '{"maxResults": 10, "q": "is:unread"}'
+    id_field: id
+    relevance: "emails about billing problems, refunds, or payment failures"
+    event: monitor/email.billing
+```
 
 ### Context files (context/*.md)
 

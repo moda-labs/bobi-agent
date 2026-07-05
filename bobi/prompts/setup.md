@@ -105,10 +105,13 @@ through `venn_cli`:
 A good `command:` monitor returns a flat JSON list of items with stable
 `id` fields — the scheduler diffs by id across runs. Test the exact
 command line, confirm the output is diffable, then commit it with
-`record_monitor`. When a tool's output needs interpretation instead
-(nested, paginated, judgment-dependent), record a description-only
-monitor — an agent evaluates it per interval; note that this costs an
-LLM call each time.
+`record_monitor`. When the need is "items *about X*" (relevance is a
+judgment call but the pull itself is mechanical), keep the diffable
+poll and add a `relevance:` criterion - a cheap-model gate judges only
+the new items each interval and only relevant ones publish the event.
+Reserve a description-only monitor for output that cannot be pulled
+mechanically at all (nested, paginated, no stable ids) - an agent
+evaluates it per interval; note that this costs an LLM call each time.
 
 Native services (github, slack, linear) push webhooks — they need no
 monitors for ordinary events. Monitors fill webhook gaps (stale PRs,

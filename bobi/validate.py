@@ -111,6 +111,7 @@ def validate_config(project_path: Path) -> ValidationResult:
 
     checks.append(_check_entry_point(cfg, project_path))
     checks.extend(_check_roles(cfg, project_path))
+    checks.extend(_check_monitor_relevance(project_path))
     checks.extend(_check_service_credentials(cfg))
     checks.extend(_check_venn_services(cfg))
     checks.extend(_check_mcp_servers(cfg, project_path))
@@ -182,6 +183,34 @@ def _check_roles(cfg, project_path: Path) -> list[CheckResult]:
                 detail="unknown role name; its model override will never apply",
                 hint=f"known roles: {', '.join(sorted(known))}",
             ))
+    return checks
+
+
+def _check_monitor_relevance(project_path: Path) -> list[CheckResult]:
+    """Warn when `relevance:` is set on a monitor flavor it cannot gate (#630).
+
+    The relevance gate only applies to mechanical detectors (`command:` or
+    `check:`); on flavors without one (notify, description-only, curator-only)
+    the key is silently ignored at runtime, so surface it here as a warning.
+    """
+    try:
+        from bobi.monitors.registry import MonitorRegistry
+        monitors = MonitorRegistry.load(project_path=project_path).effective_monitors()
+    except Exception:
+        return []  # monitor config problems surface through their own paths
+
+    checks = []
+    for m in monitors:
+        # Monitor.gated is the same predicate the scheduler routes on, so
+        # validate can never drift from the runtime.
+        if not m.relevance or m.gated:
+            continue
+        checks.append(CheckResult(
+            f"monitors.{m.name}", ok=False, required=False,
+            detail="relevance: is ignored on this flavor",
+            hint="the relevance gate needs a mechanical detector "
+                 "(command: or check:, e.g. tool_poll/venn_poll)",
+        ))
     return checks
 
 
