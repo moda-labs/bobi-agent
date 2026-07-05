@@ -34,7 +34,7 @@ from click.testing import CliRunner
 from bobi.config import save_bubble_state
 from bobi.events.gateway import channels_history, channels_send
 from bobi.events.server import _post_register, ensure_running
-from bobi.events.signing import serialize_body, sign_headers
+from bobi.events.signing import signed_request
 
 pytestmark = [
     pytest.mark.live,
@@ -109,14 +109,11 @@ def live_env(tmp_path_factory):
 
     # Real registration: the server verifies the token against live auth.test
     # and stores the bubble-scoped send credential.
-    body = serialize_body({"workspace_id": team_id, "bot_token": token})
-    headers = {"Content-Type": "application/json"}
-    headers.update(sign_headers(
-        minted["bubble_id"], minted["bubble_key"],
-        "POST", "/slack/workspaces", body,
-    ))
-    resp = httpx.post(f"{es_url}/slack/workspaces", content=body,
-                      headers=headers, timeout=30)
+    resp = signed_request(
+        es_url, "POST", "/slack/workspaces",
+        {"workspace_id": team_id, "bot_token": token},
+        minted["bubble_id"], minted["bubble_key"], timeout=30,
+    )
     assert resp.status_code == 200, resp.text
 
     # One labeled thread per run keeps the sacrificial channel browsable.

@@ -182,14 +182,6 @@ class _ReplyChannel:
             log.debug("Reply channel events-log cleanup failed", exc_info=True)
 
 
-def _event_server_url(project_path: Path) -> str:
-    try:
-        from bobi.config import Config
-        return Config.load(project_path).event_server_url or "http://localhost:8080"
-    except Exception:
-        return "http://localhost:8080"
-
-
 def _open_reply_channel(project_path: Path) -> "_ReplyChannel | None":
     """Subscribe to a fresh ``reply/<uuid>`` topic and return its channel.
 
@@ -199,6 +191,7 @@ def _open_reply_channel(project_path: Path) -> "_ReplyChannel | None":
     """
     from bobi import paths
     from bobi.events.client import EventServerClient
+    from bobi.events.publish import _event_server_url
     from bobi.events.server import BubbleRejected, ensure_bubble, register
 
     token = secrets.token_hex(8)

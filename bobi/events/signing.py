@@ -26,6 +26,10 @@ import json
 import time
 import uuid
 
+import httpx
+
+from bobi import http as pooled
+
 ALGO = "hmac-sha256"
 
 
@@ -58,3 +62,36 @@ def sign_headers(bubble_id: str, bubble_key: str, method: str,
         "x-moda-nonce": nonce,
         "x-moda-signature": sig,
     }
+
+
+def signed_request(base_url: str, method: str, path: str, payload: dict | None,
+                   bubble_id: str, bubble_key: str, *, timeout: float,
+                   extra_headers: dict[str, str] | None = None) -> httpx.Response:
+    """Send one bubble-signed request to the event server.
+
+    The single client-side transport for the scheme above: serializes
+    ``payload`` ONCE with :func:`serialize_body` and signs the exact
+    transmitted bytes and path (query string included). ``payload=None``
+    sends no body (GET) and signs the empty string. When ``bubble_key`` is
+    empty the request goes out unsigned (the ``/deployments`` mint flow).
+    Transport and HTTP errors propagate; callers own the failure semantics
+    (raise vs best-effort).
+    """
+    method = method.upper()
+    # Fail loudly on combinations that would sign bytes the wire never
+    # carries - the server would 403 with no hint at the real cause.
+    if method not in ("GET", "POST"):
+        raise ValueError(f"signed_request supports GET/POST, got {method}")
+    if method == "GET" and payload is not None:
+        raise ValueError("a GET body is never transmitted, so it cannot be signed")
+
+    body = serialize_body(payload) if payload is not None else ""
+    headers = {"Content-Type": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
+    if bubble_key:
+        headers.update(sign_headers(bubble_id, bubble_key, method, path, body))
+    url = f"{base_url}{path}"
+    if method == "GET":
+        return pooled.get(url, headers=headers, timeout=timeout)
+    return pooled.post(url, content=body, headers=headers, timeout=timeout)

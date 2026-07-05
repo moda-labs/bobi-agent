@@ -12,8 +12,6 @@ from pathlib import Path
 
 import httpx
 
-from bobi import http as pooled
-
 log = logging.getLogger(__name__)
 
 # Resolved event-server URL per project root. Loading config re-reads .env
@@ -36,12 +34,12 @@ def _event_server_url(project_path: Path) -> str:
     return url
 
 
-def _post_topic(topic: str, source: str, data: dict,
-                project_path: Path | None) -> bool:
-    """POST a v2 event to ``/events/{topic}`` with the given source.
+def bubble_context(project_path: Path | None) -> tuple[str, str, str]:
+    """Resolve (event_server_url, bubble_id, bubble_key) for this instance.
 
-    The server builds the event's routing topics from the URL ``topic`` and
-    the body ``source`` (``createTopicEvent`` in event-server/src/core.ts).
+    Shared by every signed client path (publish, channel gateway). The
+    credentials are empty strings when no bubble has been minted yet; callers
+    own that failure mode (skip vs raise).
     """
     if project_path is None:
         from bobi.paths import bobi_root
@@ -49,17 +47,29 @@ def _post_topic(topic: str, source: str, data: dict,
     else:
         project_path = Path(project_path)
 
-    es_url = _event_server_url(project_path)
-
-    # Sign the publish with the instance's bubble key so the server routes it
-    # within the bubble. An unsigned publish is rejected (403) — namespacing is
-    # not authentication. Any in-instance process can sign (the key lives in
-    # bubble.json); a missing bubble means the instance isn't started.
     from bobi.config import load_bubble_state
-    from bobi.events.signing import serialize_body, sign_headers
 
     bubble = load_bubble_state(project_path)
-    if not (bubble.get("bubble_id") and bubble.get("bubble_key")):
+    return (_event_server_url(project_path),
+            bubble.get("bubble_id", ""), bubble.get("bubble_key", ""))
+
+
+def _post_topic(topic: str, source: str, data: dict,
+                project_path: Path | None) -> bool:
+    """POST a v2 event to ``/events/{topic}`` with the given source.
+
+    The server builds the event's routing topics from the URL ``topic`` and
+    the body ``source`` (``createTopicEvent`` in event-server/src/core.ts).
+
+    The publish is signed with the instance's bubble key so the server routes
+    it within the bubble. An unsigned publish is rejected (403) - namespacing
+    is not authentication. Any in-instance process can sign (the key lives in
+    bubble.json); a missing bubble means the instance isn't started.
+    """
+    from bobi.events.signing import signed_request
+
+    es_url, bubble_id, bubble_key = bubble_context(project_path)
+    if not (bubble_id and bubble_key):
         # No bubble credential yet. An unsigned publish is rejected (403)
         # unconditionally — namespacing is not authentication — so a POST here
         # can only ever 403; skip the doomed round-trip. This is the normal
@@ -69,34 +79,34 @@ def _post_topic(topic: str, source: str, data: dict,
         log.debug("No bubble credential yet — skipping publish to %s", topic)
         return False
 
-    body = serialize_body({"source": source, "payload": data})
-    headers = {"Content-Type": "application/json"}
-    headers.update(sign_headers(
-        bubble["bubble_id"], bubble["bubble_key"],
-        "POST", f"/events/{topic}", body,
-    ))
-
+    # Only transport failures are best-effort; a serialization error from an
+    # unserializable payload is a caller bug and propagates (signed_request
+    # serializes before sending).
     try:
-        resp = pooled.post(
-            f"{es_url}/events/{topic}",
-            content=body,
-            headers=headers,
-            timeout=10.0,
+        resp = signed_request(
+            es_url, "POST", f"/events/{topic}",
+            {"source": source, "payload": data},
+            bubble_id, bubble_key, timeout=10.0,
         )
-        # A 403 (e.g. the server forgot the bubble after a restart, or
-        # bubble.json is stale) returns a JSON error body — do NOT treat that
-        # as success and silently drop the event. The next session
-        # registration re-mints the bubble; a transient publish failure is
-        # surfaced, not swallowed.
-        if resp.status_code >= 400:
-            log.warning("Publish to %s rejected (%d): %s",
-                        topic, resp.status_code, resp.text[:200])
-            return False
-        resp.json()
-        return True
-    except (httpx.HTTPError, OSError, TimeoutError, ValueError) as e:
+    except (httpx.HTTPError, OSError, TimeoutError) as e:
         log.warning(f"Failed to post event {source}/{topic}: {e}")
         return False
+
+    # A 403 (e.g. the server forgot the bubble after a restart, or
+    # bubble.json is stale) returns a JSON error body — do NOT treat that
+    # as success and silently drop the event. The next session
+    # registration re-mints the bubble; a transient publish failure is
+    # surfaced, not swallowed.
+    if resp.status_code >= 400:
+        log.warning("Publish to %s rejected (%d): %s",
+                    topic, resp.status_code, resp.text[:200])
+        return False
+    try:
+        resp.json()
+    except ValueError as e:
+        log.warning(f"Failed to post event {source}/{topic}: {e}")
+        return False
+    return True
 
 
 def post_event(event_type: str, data: dict,
