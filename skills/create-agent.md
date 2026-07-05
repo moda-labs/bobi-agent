@@ -232,6 +232,26 @@ brain:
   model: gpt-5-codex   # optional provider-specific model or alias
 ```
 
+To run a team on local or self-hosted models, point the Claude CLI at an
+Anthropic-compatible gateway (LiteLLM, Ollama's Anthropic-compat API):
+
+```yaml
+brain:
+  kind: gateway
+  base_url: ${LLM_GATEWAY_URL}   # required; the /v1/messages-compatible endpoint
+  model: qwen3:14b               # gateway-native model id
+  small_model: qwen3:4b          # optional; background/fast tasks (defaults to model)
+```
+
+Gateway auth is `ANTHROPIC_AUTH_TOKEN` in the runtime `.env`, and it is
+optional - Ollama serves unauthenticated; LiteLLM typically wants its master
+key. An ambient real `ANTHROPIC_API_KEY` is never sent to a gateway. Model
+names are the backend's own: the Claude aliases below only mean something if
+the gateway serves models by those names. Cross-model session continuation is
+disabled for gateways (a model switch starts fresh and re-injects context),
+and costs reported through a gateway are nominal, attributed to provider
+`gateway` in `bobi agent <name> costs`.
+
 Individual roles can declare their own model, applied whenever an agent
 launches with that role (subagents, workflow steps, monitor checks):
 

@@ -12,42 +12,57 @@ shell yet fail to spawn under the daemon's stripped PATH.
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 
-_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
+def _configured_brain(
+    root: Path, env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Return the team's interpolated ``brain`` mapping from the installation
+    root, or ``{}`` when absent/unreadable.
 
-def _configured_brain_kind(root: Path, env: dict[str, str] | None = None) -> str:
-    """Return the team's configured brain kind from the installation root."""
-    return _configured_brain_value(root, "kind", env)
-
-
-def _configured_brain_model(root: Path, env: dict[str, str] | None = None) -> str:
-    """Return the team's configured brain model from the installation root."""
-    return _configured_brain_value(root, "model", env)
-
-
-def _configured_brain_value(
-    root: Path, key: str, env: dict[str, str] | None = None,
-) -> str:
-    """Return one interpolated ``brain`` value from the installation root."""
+    Interpolation is ``bobi.config._interpolate_env`` - the same resolver
+    ``Config.load`` applies to this mapping - so ``${VAR:-default}`` resolves
+    identically here and in the validate/manager paths (a divergence would
+    pass validate yet pin an empty gateway base URL into every child).
+    """
     try:
         import yaml
         from bobi import paths
+        from bobi.config import _interpolate_env
         raw = yaml.safe_load(
             paths.agent_yaml_path(root).read_text()
         ) or {}
     except Exception:
-        return ""
+        return {}
     brain = raw.get("brain", {})
     if not isinstance(brain, dict):
-        return ""
-    value = str(brain.get(key, "") or "")
-    if not value:
-        return ""
-    lookup = os.environ if env is None else env
-    return _ENV_VAR_RE.sub(lambda m: lookup.get(m.group(1), ""), value)
+        return {}
+    lookup = dict(os.environ) if env is None else env
+    return {
+        str(key): _interpolate_env(str(value or ""), lookup)
+        for key, value in brain.items()
+    }
+
+
+def pin_brain_from_root(
+    root: Path, env: dict[str, str] | None = None,
+) -> None:
+    """Pin the installed team's brain selection from *root* into *env*.
+
+    The single place agent.yaml ``brain.*`` becomes process env (``BOBI_BRAIN``
+    / ``BOBI_BRAIN_MODEL`` / the gateway pins, #655), shared by
+    ``child_agent_env`` and the spawned child's own re-pin at startup
+    (``subagent.py``).
+    """
+    from bobi.brain import pin_process_brain
+
+    brain = _configured_brain(root, env)
+    pin_process_brain(
+        brain.get("kind", ""), brain.get("model", ""), env,
+        gateway_base_url=brain.get("base_url", ""),
+        gateway_small_model=brain.get("small_model", ""),
+    )
 
 
 def _load_dotenv_into(env: dict[str, str], root: Path) -> None:
@@ -125,10 +140,5 @@ def child_agent_env(root: Path, base: dict[str, str] | None = None) -> dict[str,
     env = agent_spawn_env(base)
     _load_dotenv_into(env, resolved_root)
     env["BOBI_ROOT"] = str(resolved_root)
-
-    from bobi.brain import pin_process_brain
-
-    brain_kind = _configured_brain_kind(resolved_root, env)
-    brain_model = _configured_brain_model(resolved_root, env)
-    pin_process_brain(brain_kind, brain_model, env)
+    pin_brain_from_root(resolved_root, env)
     return env

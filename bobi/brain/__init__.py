@@ -30,12 +30,18 @@ from bobi.brain.base import (
 )
 from bobi.brain.claude import ClaudeBrain
 from bobi.brain.codex import CodexBrain
+from bobi.brain.gateway import (
+    GATEWAY_BASE_URL_ENV,
+    GATEWAY_SMALL_MODEL_ENV,
+    GatewayBrain,
+)
 
 # Registry of available brains by kind. Gemini/Grok adapters register here as
 # they land (#485 phase 4).
 _BRAINS: dict[str, BrainFactory] = {
     "claude": ClaudeBrain(),
     "codex": CodexBrain(),
+    "gateway": GatewayBrain(),
 }
 
 DEFAULT_BRAIN = "claude"
@@ -69,11 +75,7 @@ def _set_process_brain_model(
     selection contract from being reimplemented across brain adapters and
     launch paths.
     """
-    target = os.environ if env is None else env
-    if model:
-        target[_BRAIN_MODEL_ENV] = model
-    else:
-        target.pop(_BRAIN_MODEL_ENV, None)
+    _pin_env(os.environ if env is None else env, _BRAIN_MODEL_ENV, model)
 
 
 def with_default_model_option(options: dict | None) -> dict:
@@ -109,21 +111,47 @@ def resolve_model(cfg, role: str | None = None, explicit: str | None = None) -> 
     return resolve_model_option(chosen)
 
 
+def _pin_env(
+    target: MutableMapping[str, str], key: str, value: str | None,
+) -> None:
+    """Set *key* in *target*, or clear it for an empty value."""
+    if value:
+        target[key] = value
+    else:
+        target.pop(key, None)
+
+
 def pin_process_brain(
     kind: str | None,
     model: str | None,
     env: MutableMapping[str, str] | None = None,
+    *,
+    gateway_base_url: str = "",
+    gateway_small_model: str = "",
 ) -> None:
-    """Pin the process brain kind and model into *env*, clearing stale values."""
+    """Pin the process brain kind and model into *env*, clearing stale values.
+
+    The gateway pins carry ``brain.base_url`` / ``brain.small_model`` for a
+    ``kind: gateway`` team (#655); for any other kind they are cleared so a
+    stale parent gateway endpoint never leaks into another team's sessions.
+    """
     target = os.environ if env is None else env
-    if kind:
-        target[BRAIN_ENV] = kind
-    else:
-        target.pop(BRAIN_ENV, None)
+    _pin_env(target, BRAIN_ENV, kind)
     _set_process_brain_model(model, env=target)
+    is_gateway = kind == "gateway"
+    _pin_env(target, GATEWAY_BASE_URL_ENV,
+             gateway_base_url if is_gateway else "")
+    _pin_env(target, GATEWAY_SMALL_MODEL_ENV,
+             gateway_small_model if is_gateway else "")
 
 
-def set_process_brain(kind: str | None, model: str | None = None) -> None:
+def set_process_brain(
+    kind: str | None,
+    model: str | None = None,
+    *,
+    gateway_base_url: str = "",
+    gateway_small_model: str = "",
+) -> None:
     """Record the team's brain kind for the current process.
 
     A no-op for an empty/None kind (keeps the framework default). At top-level
@@ -137,12 +165,40 @@ def set_process_brain(kind: str | None, model: str | None = None) -> None:
     if kind and not existing_kind:
         os.environ[BRAIN_ENV] = kind
         existing_kind = kind
-    model_matches_active_brain = (
+    # The model and gateway pins only apply when the configured brain IS the
+    # active one - a model-only config tunes the default brain, but neither it
+    # nor a gateway endpoint may cross onto an operator-overridden brain.
+    # Within the active brain, first writer wins (an existing NON-EMPTY value
+    # is an operator override; an empty string is treated as unset).
+    config_matches_active_brain = (
         (kind and existing_kind == kind)
         or (not kind and existing_kind in ("", DEFAULT_BRAIN))
     )
-    if model and model_matches_active_brain and not get_process_brain_model():
+    if not config_matches_active_brain:
+        return
+    if model and not get_process_brain_model():
         _set_process_brain_model(model)
+    if kind == "gateway":
+        for var, value in ((GATEWAY_BASE_URL_ENV, gateway_base_url),
+                           (GATEWAY_SMALL_MODEL_ENV, gateway_small_model)):
+            if value and not os.environ.get(var):
+                os.environ[var] = value
+
+
+def set_process_brain_from_config(cfg) -> None:
+    """``set_process_brain`` from a loaded team Config.
+
+    The one config-to-pins expansion, shared by every process-startup site
+    (CLI agent binding, the manager service, ``spawn_team``'s in-process
+    preflight) so a new brain config field cannot be threaded into one site
+    and missed in another. *cfg* is duck-typed (``brain_kind`` etc.) so this
+    module stays import-free of ``bobi.config``.
+    """
+    set_process_brain(
+        cfg.brain_kind, cfg.brain_model,
+        gateway_base_url=cfg.brain_base_url,
+        gateway_small_model=cfg.brain_small_model,
+    )
 
 
 def continuation_token(
@@ -208,11 +264,14 @@ __all__ = [
     "BrainSession",
     "ClaudeBrain",
     "CodexBrain",
+    "GatewayBrain",
     "DeferredTool",
     "StreamDelta",
     "TurnResult",
     "DEFAULT_BRAIN",
     "BRAIN_ENV",
+    "GATEWAY_BASE_URL_ENV",
+    "GATEWAY_SMALL_MODEL_ENV",
     "continuation_token",
     "get_brain",
     "get_process_brain_model",
@@ -220,5 +279,6 @@ __all__ = [
     "resolve_model",
     "resolve_model_option",
     "set_process_brain",
+    "set_process_brain_from_config",
     "with_default_model_option",
 ]

@@ -135,6 +135,41 @@ class TestCheckRoles:
         assert self._check(Config(), tmp_path) == []
 
 
+class TestCheckBrain:
+    """kind: gateway without a resolvable base_url fails every session at its
+    first turn, so validate must block it (#655)."""
+
+    def _check(self, cfg):
+        from bobi.validate import _check_brain
+        return _check_brain(cfg)
+
+    def test_gateway_with_base_url_passes(self):
+        cfg = Config(brain={"kind": "gateway",
+                            "base_url": "http://localhost:4000"})
+        results = self._check(cfg)
+        assert len(results) == 1
+        assert results[0].ok
+
+    def test_gateway_without_base_url_blocks(self):
+        cfg = Config(brain={"kind": "gateway", "model": "qwen3:14b"})
+        results = self._check(cfg)
+        assert len(results) == 1
+        assert not results[0].ok
+        assert results[0].required  # blocking, not a warning
+        assert "base_url" in results[0].detail
+
+    def test_uninterpolated_base_url_blocks(self):
+        # Config interpolation turns an unset ${VAR} into "" - same failure.
+        cfg = Config(brain={"kind": "gateway", "base_url": ""})
+        assert not self._check(cfg)[0].ok
+
+    def test_other_brains_are_not_checked(self):
+        assert self._check(Config()) == []
+        assert self._check(Config(brain={"kind": "codex"})) == []
+        # unknown kinds fail loud at get_brain(), not here
+        assert self._check(Config(brain={"kind": "gemini"})) == []
+
+
 class TestCheckMonitorRelevance:
     """relevance: on an ungateable monitor flavor is silently ignored at
     runtime, so validate must surface it (#630)."""

@@ -317,6 +317,73 @@ def test_brain_api_key_mapping():
     assert D._brain_api_key("codex") == "OPENAI_API_KEY"
     assert D._brain_api_key("claude") == "ANTHROPIC_API_KEY"
     assert D._brain_api_key("") == "ANTHROPIC_API_KEY"  # default
+    assert D._brain_api_key("gateway") == ""  # no provider key (#655)
+
+
+def _gateway_team(repo):
+    pkg = repo / "agents" / "local-team"
+    pkg.mkdir(parents=True)
+    pkg.joinpath("agent.yaml").write_text(
+        "agent: local-team\n"
+        "brain:\n  kind: gateway\n  base_url: ${LLM_GATEWAY_URL}\n"
+        "slack_token: ${SLACK_BOT_TOKEN}\n"
+    )
+    (repo / "deployments" / "lt.yaml").write_text("team: local-team\n")
+
+
+def test_gateway_brain_is_a_valid_kind(repo):
+    _gateway_team(repo)
+    cfg = D.load_deploy_config(repo, "lt")
+    assert cfg.brain == "gateway"
+
+
+def test_gateway_subscription_is_an_error(repo):
+    _gateway_team(repo)
+    (repo / "deployments" / "lt.yaml").write_text(
+        "team: local-team\nauth: subscription\n"
+    )
+    with pytest.raises(D.DeployError, match="gateway"):
+        D.load_deploy_config(repo, "lt")
+
+
+def test_gateway_requires_no_provider_key(repo, tmp_path, monkeypatch):
+    """api_key mode demands no ANTHROPIC_API_KEY for a gateway team - its
+    auth token is optional (Ollama serves unauthenticated)."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb")
+    monkeypatch.setenv("LLM_GATEWAY_URL", "http://localhost:4000")
+    _gateway_team(repo)
+    cfg = D.load_deploy_config(repo, "lt")
+    out = D.resolve_env_file(cfg, repo, tmp_path)  # must NOT raise
+    assert "ANTHROPIC_API_KEY" not in out.read_text()
+
+
+def test_gateway_auth_token_is_declared_not_required(repo, tmp_path, monkeypatch):
+    """ANTHROPIC_AUTH_TOKEN reaches the instance when supplied (declared),
+    without ever being demanded (required)."""
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb")
+    monkeypatch.setenv("LLM_GATEWAY_URL", "http://localhost:4000")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "litellm-master")
+    _gateway_team(repo)
+    cfg = D.load_deploy_config(repo, "lt")
+    out = D.resolve_env_file(cfg, repo, tmp_path)
+    vals = dict(l.split("=", 1) for l in out.read_text().splitlines())
+    assert vals["ANTHROPIC_AUTH_TOKEN"] == "litellm-master"
+
+
+def test_gateway_team_url_backfills_auth_token(repo, tmp_path, monkeypatch):
+    """A team-url gateway deployment has no local refs to scan, but its
+    ANTHROPIC_AUTH_TOKEN must still backfill from the CI env or the deployed
+    instance's sessions 401 at the gateway (#655 review finding)."""
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "litellm-master")
+    (repo / "deployments" / "gw.yaml").write_text(
+        "team-url: https://r/gw.tgz\nbrain: gateway\n"
+    )
+    cfg = D.load_deploy_config(repo, "gw")
+    out = D.resolve_env_file(cfg, repo, tmp_path)
+    vals = dict(l.split("=", 1) for l in out.read_text().splitlines())
+    assert vals["ANTHROPIC_AUTH_TOKEN"] == "litellm-master"
 
 
 def test_brain_kind_resolved_from_team_agent_yaml(repo):

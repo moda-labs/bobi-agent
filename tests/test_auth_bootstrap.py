@@ -230,6 +230,19 @@ def test_run_bootstrap_refuses_with_api_key_set(slack_config, monkeypatch):
         ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
 
 
+def test_run_bootstrap_refuses_gateway_brain(slack_config, monkeypatch):
+    """A gateway team has no subscription login; the claude-spec fallback
+    would silently drive a real `claude auth login` for it (#655)."""
+    from bobi import paths
+
+    paths.agent_yaml_path(slack_config).write_text(
+        paths.agent_yaml_path(slack_config).read_text()
+        + "brain:\n  kind: gateway\n  base_url: http://localhost:4000\n"
+    )
+    with pytest.raises(RuntimeError, match="gateway"):
+        ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
+
+
 def test_run_bootstrap_requires_channel(slack_config, monkeypatch):
     monkeypatch.delenv(ab.LOGIN_CHANNEL_ENV, raising=False)
     with pytest.raises(RuntimeError, match="BOBI_LOGIN_CHANNEL"):
