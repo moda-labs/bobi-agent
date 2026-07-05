@@ -10,6 +10,7 @@ Containerized instances (#336) must never start Node when
 """
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -80,9 +81,11 @@ def test_existing_node_modules_without_esbuild_uses_npm_exec(tmp_path, monkeypat
 def test_setup_webhook_secrets_are_forwarded_to_local_server(tmp_path, monkeypatch):
     es_dir = tmp_path / "event-server"
     (es_dir / "dist").mkdir(parents=True)
-    (es_dir / "dist" / "local.js").write_text("console.log('ok')\n")
+    dist = es_dir / "dist" / "local.js"
+    dist.write_text("console.log('ok')\n")
     (es_dir / "src").mkdir()
     (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
+    os.utime(dist, (dist.stat().st_atime, dist.stat().st_mtime + 1))
     (es_dir / "node_modules").mkdir()
     (es_dir / "package.json").write_text("{}")
     paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
@@ -121,9 +124,11 @@ def test_setup_webhook_secrets_are_forwarded_to_local_server(tmp_path, monkeypat
 def test_explicit_webhook_secrets_override_setup_env(tmp_path, monkeypatch):
     es_dir = tmp_path / "event-server"
     (es_dir / "dist").mkdir(parents=True)
-    (es_dir / "dist" / "local.js").write_text("console.log('ok')\n")
+    dist = es_dir / "dist" / "local.js"
+    dist.write_text("console.log('ok')\n")
     (es_dir / "src").mkdir()
     (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
+    os.utime(dist, (dist.stat().st_atime, dist.stat().st_mtime + 1))
     (es_dir / "node_modules").mkdir()
     (es_dir / "package.json").write_text("{}")
     paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
