@@ -32,6 +32,7 @@ from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
     AssistantText,
+    BrainCapabilities,
     BrainCost,
     BrainMessage,
     BrainSession,
@@ -267,6 +268,13 @@ class CodexBrain:
 
     name = "codex"
     provider = "openai"
+    # ``codex exec resume <thread> -m <other-model>`` genuinely switches the
+    # thread's model with the transcript intact - verified 2026-07-04 on
+    # codex-cli 0.142.2 (#649): the rollout records turn_context model
+    # gpt-5.4 then gpt-5.5, and the resumed turn recalled conversation-only
+    # state. Note the usable model set depends on the account's auth mode
+    # (ChatGPT-plan auth rejects some models with a 400 at turn start).
+    capabilities = BrainCapabilities(cross_model_resume=True)
 
     def make_session(
         self,

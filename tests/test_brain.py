@@ -485,3 +485,61 @@ async def test_claude_stream_once_retries_initialize_timeout_before_output(
 
     assert calls == 2
     assert isinstance(out[-1], TurnResult)
+
+
+# --- capabilities + continuation (#642) --------------------------------------
+
+
+def test_brains_support_cross_model_resume():
+    from bobi.brain import CodexBrain
+    assert ClaudeBrain.capabilities.cross_model_resume is True
+    # Verified live: `codex exec resume -m` switches the thread's model
+    # (#649; see tests/integration/test_cross_model_resume.py).
+    assert CodexBrain.capabilities.cross_model_resume is True
+
+
+@pytest.mark.parametrize("session_id,frm,to,capable,expected", [
+    # same model always continues, capability irrelevant
+    ("sid", "haiku", "haiku", False, "sid"),
+    ("sid", "", "", False, "sid"),
+    # cross-model requires the capability
+    ("sid", "haiku", "opus", True, "sid"),
+    ("sid", "haiku", "opus", False, ""),
+    # '' is the provider default and a real model for mismatch purposes
+    ("sid", "", "haiku", True, "sid"),
+    ("sid", "", "haiku", False, ""),
+    # cross-model continuation needs a CONCRETE target: "onto the provider
+    # default" cannot be expressed to the CLI, so it goes fresh even when
+    # the brain is capable
+    ("sid", "haiku", "", True, ""),
+    # no session never continues
+    ("", "haiku", "haiku", True, ""),
+], ids=["same-model", "same-default", "cross-capable", "cross-incapable",
+        "default-to-named-capable", "default-to-named-incapable",
+        "named-to-default-goes-fresh", "empty-id"])
+def test_continuation_token_matrix(session_id, frm, to, capable, expected):
+    from bobi.brain import BrainCapabilities, continuation_token
+
+    class Brain:
+        capabilities = BrainCapabilities(cross_model_resume=capable)
+
+    got = continuation_token(
+        Brain(), session_id=session_id, from_model=frm, to_model=to,
+    )
+    assert got == expected
+
+
+def test_continuation_token_tolerates_capability_less_factory():
+    """Test fakes and older factories without a ``capabilities`` attribute
+    behave as not-capable, never as capable."""
+    from bobi.brain import continuation_token
+
+    class Bare:
+        pass
+
+    assert continuation_token(
+        Bare(), session_id="sid", from_model="a", to_model="b",
+    ) == ""
+    assert continuation_token(
+        Bare(), session_id="sid", from_model="a", to_model="a",
+    ) == "sid"

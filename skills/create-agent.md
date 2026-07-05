@@ -257,7 +257,18 @@ steps:
 
 For Claude-backed teams, `model` can be an alias such as `haiku`, `sonnet`, or
 `opus`, or a full Claude model ID. Bobi passes provider-native model strings to
-the selected backend; it does not translate model names across providers.
+the selected backend; it does not translate model names across providers, and
+it does not verify them: a wrong or unavailable model fails at runtime when
+the session starts its first turn, not at validate. Availability can depend
+on the deployment's account and auth mode (Codex ChatGPT-plan auth, for
+example, rejects models an API key would accept), so prefer the provider's
+well-known names and the aliases above over exotic IDs.
+
+When consecutive prompt steps use different models, the session continues
+natively across the switch where the brain supports it (Claude and Codex
+both do), carrying the full transcript into the new model's context. A step
+that moves a long conversation onto a pricier model pays for that history in
+input tokens; a step that also changes `agent:` always starts fresh instead.
 
 Always include `adhoc.yaml`:
 ```yaml

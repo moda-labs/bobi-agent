@@ -85,6 +85,22 @@ class StreamDelta:
 BrainMessage = Union[AssistantText, TurnResult, StreamDelta]
 
 
+# --- capabilities -----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BrainCapabilities:
+    """Static capability advertisement for one brain kind (#642).
+
+    ``cross_model_resume``: the brain can resume an existing session under a
+    different model, keeping the full transcript. When False, callers that
+    need to continue context on another model must start a fresh session and
+    re-inject whatever context they can reconstruct.
+    """
+
+    cross_model_resume: bool = False
+
+
 # --- the session + factory protocols --------------------------------------
 
 
@@ -116,6 +132,7 @@ class BrainFactory(Protocol):
 
     name: str
     provider: str
+    capabilities: BrainCapabilities
 
     def make_session(
         self,
