@@ -504,17 +504,22 @@ const whatsappAdapter: ChannelAdapter = {
 
 	// Two-step Cloud API upload: POST the bytes to /{pnid}/media, then send a
 	// document message referencing the media id. Sent as `document` for any
-	// mime type - it preserves the filename and works for all content.
+	// mime type - it preserves the filename and works for all content. The
+	// media endpoint validates the declared MIME, so it is inferred from the
+	// filename (octet-stream is not on Meta's supported list).
 	async uploadFiles(token, conv, files, comment) {
+		let delivered = 0;
 		try {
 			let lastId = "";
 			for (const [i, f] of files.entries()) {
+				const mime = mimeForFilename(f.name);
 				const form = new FormData();
 				form.append("messaging_product", "whatsapp");
-				form.append("file", new Blob([f.data]), f.name);
+				form.append("type", mime);
+				form.append("file", new Blob([f.data], { type: mime }), f.name);
 				const uploaded = await whatsappApi(token, `${conv.scope}/media`, { form });
 				const mediaId = uploaded.id as string;
-				if (!mediaId) return { ok: false, error: whatsappError(uploaded) };
+				if (!mediaId) return { ok: false, error: partialUploadError(whatsappError(uploaded), i, files.length) };
 
 				const caption = i === 0 ? comment || f.title || "" : f.title || "";
 				const sent = await whatsappApi(token, `${conv.scope}/messages`, {
@@ -530,15 +535,50 @@ const whatsappAdapter: ChannelAdapter = {
 					},
 				});
 				const id = (sent.messages as Array<Record<string, unknown>>)?.[0]?.id as string;
-				if (!id) return { ok: false, error: whatsappError(sent) };
+				if (!id) return { ok: false, error: partialUploadError(whatsappError(sent), i, files.length) };
 				lastId = id;
+				delivered = i + 1;
 			}
 			return { ok: true, ts: lastId };
 		} catch (err) {
-			return { ok: false, error: String(err) };
+			return { ok: false, error: partialUploadError(String(err), delivered, files.length) };
 		}
 	},
 };
+
+// Mirror the chunk path's partial-delivery contract: once any file reached
+// the user, the error must tell the caller not to blind-retry the batch.
+function partialUploadError(error: string, delivered: number, total: number): string {
+	if (delivered === 0) return error;
+	return `file ${delivered + 1}/${total} failed after partial delivery `
+		+ `(do not resend; ${delivered} file(s) are already visible): ${error}`;
+}
+
+// Minimal extension map for the document types agents actually send. Meta's
+// media endpoint rejects MIME types outside its supported list
+// (application/octet-stream is not on it), so unknowns go out as text/plain.
+const MIME_BY_EXT: Record<string, string> = {
+	pdf: "application/pdf",
+	txt: "text/plain",
+	md: "text/plain",
+	csv: "text/csv",
+	png: "image/png",
+	jpg: "image/jpeg",
+	jpeg: "image/jpeg",
+	webp: "image/webp",
+	mp4: "video/mp4",
+	doc: "application/msword",
+	docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	xls: "application/vnd.ms-excel",
+	xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+	zip: "application/zip",
+};
+
+function mimeForFilename(name: string): string {
+	const ext = name.toLowerCase().split(".").pop() || "";
+	return MIME_BY_EXT[ext] || "text/plain";
+}
 
 const CHANNEL_ADAPTERS: Record<string, ChannelAdapter> = {
 	slack: slackAdapter,

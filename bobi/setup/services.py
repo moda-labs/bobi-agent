@@ -205,8 +205,8 @@ _NATIVE = [
                     Secret("WHATSAPP_PHONE_NUMBER_ID", "Phone number ID",
                            "digits only"),
                     Secret("WHATSAPP_APP_SECRET", "Meta app secret", "",
-                           "Optional locally; verifies inbound webhooks on "
-                           "the event server.", optional=True),
+                           "Required to receive events - the server rejects "
+                           "unverified WhatsApp webhooks.", optional=True),
                     Secret("WHATSAPP_VERIFY_TOKEN", "Webhook verify token", "",
                            "Any string you choose; must match the Meta "
                            "webhook config.", optional=True),

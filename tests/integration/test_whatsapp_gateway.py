@@ -274,13 +274,16 @@ class TestReplyWindow:
             "type": "text", "text": {"body": "hola *back*"},
         }
 
-    def test_reply_outside_window_returns_typed_error(self, whatsapp):
+    def test_reply_with_no_window_record_passes_through(self, whatsapp):
+        """A user with no recorded inbound sends anyway: a missing record can
+        be KV replication lag on the Worker, so only a KNOWN-stale window
+        raises the typed outside_message_window error (unit-covered); the
+        platform is the authoritative enforcer for the rest."""
         _project, stub, es_url, _bubble = whatsapp
-        # A user who never messaged us: no window record exists.
         from bobi.cli import main
         result = CliRunner().invoke(main, [
-            "reply", f"whatsapp:{PNID}:dm:19998887777", "cold outreach",
+            "reply", f"whatsapp:{PNID}:dm:19998887777", "first contact",
         ])
-        assert result.exit_code == 1
-        assert "outside_message_window" in result.output
-        assert stub.sends() == []
+        assert result.exit_code == 0, result.output
+        assert len(stub.sends()) == 1
+        assert stub.sends()[0]["body"]["to"] == "19998887777"

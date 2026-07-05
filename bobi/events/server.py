@@ -211,6 +211,13 @@ def ensure_running(port: int, webhook_secret: str | None = None,
         env["BOBI_ES_SLACK_SIGNING_SECRET"] = resolved_slack_signing_secret
     if resolved_linear_webhook_secret:
         env["BOBI_ES_LINEAR_WEBHOOK_SECRET"] = resolved_linear_webhook_secret
+    # WhatsApp inbound verification (#656): the runtime .env carries the
+    # unprefixed vars (the connector card captures them); the local server
+    # reads only BOBI_ES_*.
+    if env.get("WHATSAPP_APP_SECRET"):
+        env["BOBI_ES_WHATSAPP_APP_SECRET"] = env["WHATSAPP_APP_SECRET"]
+    if env.get("WHATSAPP_VERIFY_TOKEN"):
+        env["BOBI_ES_WHATSAPP_VERIFY_TOKEN"] = env["WHATSAPP_VERIFY_TOKEN"]
     if bind:
         env["BOBI_ES_BIND"] = bind
     if extra_env:

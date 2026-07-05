@@ -296,7 +296,7 @@ describe("event-server", () => {
 		});
 		expect(response.status).toBe(400);
 		const data = await response.json() as { error: string };
-		expect(data.error).toContain("bot token");
+		expect(data.error).toContain("no send credential");
 	});
 
 	it("rejects unsigned channels history with 403", async () => {
@@ -317,7 +317,7 @@ describe("event-server", () => {
 		const response = await SELF.fetch(`https://example.com${path}`, { headers });
 		expect(response.status).toBe(400);
 		const data = await response.json() as { error: string };
-		expect(data.error).toContain("bot token");
+		expect(data.error).toContain("no send credential");
 	});
 });
 

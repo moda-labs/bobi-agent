@@ -207,13 +207,13 @@ class TestReplyCommand:
         _setup_project(tmp_path, monkeypatch)
 
         def handler(request):
-            return httpx.Response(400, json={"error": "no bot token for workspace"})
+            return httpx.Response(400, json={"error": "no send credential registered for slack:T1"})
 
         with patch.object(pooled, '_client', _mock_client(handler)):
             runner = CliRunner()
             result = runner.invoke(main, ["reply", "slack:T1:dm:D1", "hi"])
         assert result.exit_code == 1
-        assert "no bot token for workspace" in result.output
+        assert "no send credential registered for slack:T1" in result.output
         assert "channel gateway" in result.output
 
     def test_server_unreachable(self, tmp_path, monkeypatch):

@@ -902,14 +902,25 @@ const WEBHOOK_SOURCES: Record<string, WebhookSource> = {
 			if (
 				token
 				&& query("hub.mode") === "subscribe"
-				&& query("hub.verify_token") === token
+				&& constantTimeEqual(token, query("hub.verify_token"))
 			) {
 				return { status: 200, text: query("hub.challenge") };
 			}
 			return { status: 403, text: "forbidden" };
 		},
 		async verify(_storage, req, _payload, secret) {
-			if (!secret) return unverifiedAdmission();
+			// FAIL CLOSED, unlike github/slack: an unverified WhatsApp event is
+			// not a read-only notification - it injects a chat message that
+			// drives an outbound reply through the operator's real number and
+			// opens the conversation's 24h send window. Meta always signs, and
+			// there is no legacy-unverified deployment base to stay compatible
+			// with, so a missing secret rejects instead of admitting.
+			if (!secret) {
+				return {
+					status: 401,
+					body: { error: "whatsapp webhook verification not configured (set the app secret)" },
+				};
+			}
 			// Meta signs exactly like GitHub: HMAC-SHA256 over the raw body in
 			// x-hub-signature-256 - one verifier serves both.
 			const valid = await verifyGitHubSignature(
@@ -937,13 +948,14 @@ export async function handleWhatsAppWebhook(
 	storage: StorageAdapter,
 	payload: Record<string, unknown>,
 ): Promise<HandlerResult> {
-	const { events, conversations } = normalizeWhatsAppWebhook(payload);
+	const { events } = normalizeWhatsAppWebhook(payload);
 
 	// Record the customer-service window: each inbound message re-opens 24h of
 	// free-form replies for its conversation (checked at send time).
 	const seen = new Set<string>();
-	for (const ref of conversations) {
-		if (seen.has(ref)) continue;
+	for (const event of events) {
+		const ref = event.conversation;
+		if (!ref || seen.has(ref)) continue;
 		seen.add(ref);
 		const conv = parseConversation(ref);
 		if (!conv) continue;
@@ -1533,7 +1545,7 @@ export async function handleWhatsAppNumberRegister(
 			headers: { Authorization: `Bearer ${accessToken}` },
 		});
 		const data = (await resp.json()) as Record<string, unknown>;
-		if (data.id !== phoneNumberId) {
+		if (String(data.id ?? "") !== phoneNumberId) {
 			return { status: 403, body: { error: "forbidden" } };
 		}
 	} catch {
@@ -1699,24 +1711,27 @@ export async function handleChannelsSend(
 
 	const botToken = await resolveChannelSendToken(storage, bubbleId, conv, body);
 	if (!botToken) {
-		return { status: 400, body: { error: "no bot token for workspace" } };
+		return { status: 400, body: { error: `no send credential registered for ${conv.source}:${conv.scope}` } };
 	}
 
 	const caps = adapter.descriptor.capabilities;
 
 	// Message-window enforcement (#656): a windowed channel (WhatsApp's 24h
 	// customer-service window) only accepts free-form replies for N hours
-	// after the user's last inbound message. Outside it, fail with a TYPED
-	// error so the agent can report the situation instead of a mystery
-	// platform rejection. Template messaging (the outside-window escape
-	// hatch) is a follow-up.
+	// after the user's last inbound message. A KNOWN-stale window fails with
+	// a TYPED error so the agent can report the situation instead of a
+	// mystery platform rejection. A MISSING record passes through: it can
+	// mean KV replication lag right after a fresh inbound (Workers), so
+	// rejecting would break the most common flow - the platform itself is
+	// the authoritative enforcer and its rejection surfaces as a send error.
+	// Template messaging (the outside-window escape hatch) is a follow-up.
 	if (caps.messageWindow) {
 		const state = await storage.getChannelState(
 			channelWindowKey(conv.source, conv.scope, conv.chatId),
 		);
 		const last = Date.parse((state?.last_inbound as string) || "");
-		const ageMs = Number.isNaN(last) ? Infinity : Date.now() - last;
-		if (ageMs > caps.messageWindow.hours * 3600_000) {
+		if (!Number.isNaN(last)
+			&& Date.now() - last > caps.messageWindow.hours * 3600_000) {
 			return {
 				status: 400,
 				body: {
@@ -1845,7 +1860,7 @@ export async function handleChannelsTyping(
 	}
 	const botToken = await resolveChannelSendToken(storage, bubbleId, conv, body);
 	if (!botToken) {
-		return { status: 400, body: { error: "no bot token for workspace" } };
+		return { status: 400, body: { error: `no send credential registered for ${conv.source}:${conv.scope}` } };
 	}
 	await adapter.typing(botToken, conv, body.on);
 	return { status: 200, body: { ok: true, supported: true } };
@@ -1876,7 +1891,7 @@ export async function handleChannelsHistory(
 	}
 	const botToken = await resolveChannelSendToken(storage, bubbleId, conv, {});
 	if (!botToken) {
-		return { status: 400, body: { error: "no bot token for workspace" } };
+		return { status: 400, body: { error: `no send credential registered for ${conv.source}:${conv.scope}` } };
 	}
 	const capped = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 1000) : 100;
 	let messages;

@@ -343,6 +343,9 @@ the grant, never the credential:
   not just the org).
 - **Slack**: the bubble-signed `/slack/workspaces` registration (proving the bot
   token + signing secret via `auth.test`) doubles as the grant.
+- **WhatsApp**: the bubble-signed `/whatsapp/numbers` registration (proving the
+  Cloud API token can read the phone-number node on the Graph API) doubles as
+  the grant, and stores the bubble-scoped send credential.
 
 Unknown services are default-deny (only `github:` / `linear:` / `slack:` / `whatsapp:` are global).
 The grant is enforced at **three points**, all sharing one parser so they cannot

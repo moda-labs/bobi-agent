@@ -503,21 +503,11 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	}
 
 	if (method === "POST" && path === "/whatsapp/numbers") {
-		// Signed-only (#656): no unsigned global-record use case exists, so an
-		// unauthenticated registration is rejected outright.
-		const body = await readBody(req);
-		const data = parseJson(body);
-		if (!data) return json(res, { error: "invalid JSON" }, 400);
-		const ctx = readBubbleAuthHeaders(
-			(n) => req.headers[n] as string | undefined,
-			method,
-			url.pathname + url.search,
-			body,
-		);
-		if (!hasBubbleSignature(ctx)) return json(res, { error: "forbidden" }, 403);
-		const bubble = await authenticateBubble(storage, ctx);
-		if (!bubble) return json(res, { error: "forbidden" }, 403);
-		return respond(res, await handleWhatsAppNumberRegister(storage, data, bubble.id));
+		// Signed-only (#656): no unsigned global-record use case exists, so
+		// the mandatory bubble-auth prologue applies.
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleWhatsAppNumberRegister(storage, auth.data, auth.bubble.id));
 	}
 
 	if (method === "POST" && path === "/slack/send") {

@@ -234,14 +234,39 @@ def _detect_slack(project_path: Path, cfg: "Config") -> list[str]:
 def _detect_whatsapp(project_path: Path, cfg: "Config") -> list[str]:
     """Detect the WhatsApp subscription key from the configured number (#656).
 
-    The topic is ``whatsapp:<phone_number_id>`` - the id is configuration, not
-    an API lookup, so detection needs no network call. Requires the access
-    token too: a number id without a send credential cannot register, so
-    subscribing would only produce undeliverable replies.
+    Validates the credential upstream before subscribing, same contract as
+    ``_detect_slack``'s auth.test: the ``whatsapp:<pnid>`` grant is written by
+    the signed number registration, so subscribing with a credential the
+    registration will reject would hard-fail the WHOLE deployment
+    registration (#488 rejects unauthorized global topics atomically) and
+    take every other subscription down with it.
     """
+    import os
+
     pnid = cfg.credential("whatsapp", "phone_number_id")
     token = cfg.credential("whatsapp", "access_token")
     if not (pnid and token):
+        return []
+    from bobi import http as pooled
+
+    graph = os.environ.get(
+        "BOBI_ES_WHATSAPP_API_URL", "https://graph.facebook.com/v23.0/")
+    if not graph.endswith("/"):
+        graph += "/"
+    try:
+        resp = pooled.get(
+            f"{graph}{pnid}?fields=id",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5.0,
+        )
+        if str(resp.json().get("id", "")) != pnid:
+            log.warning(
+                "WhatsApp credential rejected by the Graph API for number %s "
+                "- not subscribing (check WHATSAPP_ACCESS_TOKEN / "
+                "WHATSAPP_PHONE_NUMBER_ID)", pnid)
+            return []
+    except Exception as e:
+        log.warning("WhatsApp auto-detection failed for %s: %s", pnid, e)
         return []
     key = f"whatsapp:{pnid}"
     log.info(f"Auto-detected WhatsApp number {pnid}; subscribing: [{key!r}]")

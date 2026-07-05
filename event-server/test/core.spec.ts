@@ -1926,7 +1926,7 @@ describe("handleChannelsSend", () => {
 		const result = await handleChannelsSend(
 			store, { conversation: "slack:T1:dm:D1", text: "hi" }, "bubA");
 		expect(result.status).toBe(400);
-		expect((result.body as Record<string, string>).error).toContain("bot token");
+		expect((result.body as Record<string, string>).error).toContain("no send credential");
 	});
 
 	it("posts into the thread encoded in the conversation ref as native markdown", async () => {
@@ -2764,25 +2764,46 @@ describe("whatsapp number registration and outbound send", () => {
 		expect(sends).toHaveLength(1); // a new post, never an update call
 	});
 
-	it("returns the typed outside_message_window error beyond 24h or with no inbound", async () => {
+	it("returns the typed outside_message_window error for a KNOWN-stale window", async () => {
 		const store = createMockStorage();
 		stubGraphApi(WA_PNID);
 		await register(store);
 
-		// No inbound recorded at all.
-		let res = await handleChannelsSend(
-			store, { conversation: WA_CONV, text: "hi" }, "bubA");
-		expect(res.status).toBe(400);
-		expect((res.body as Record<string, string>).error).toBe("outside_message_window");
-
-		// Stale window (25h old).
+		// Stale window (25h old) - the helpful typed error.
 		store.channelState.set(channelWindowKey("whatsapp", WA_PNID, WA_USER), {
 			last_inbound: new Date(Date.now() - 25 * 3600_000).toISOString(),
 		});
-		res = await handleChannelsSend(
+		const res = await handleChannelsSend(
 			store, { conversation: WA_CONV, text: "hi" }, "bubA");
 		expect(res.status).toBe(400);
 		expect((res.body as Record<string, string>).error).toBe("outside_message_window");
+	});
+
+	it("a MISSING window record passes through (KV lag must not false-reject)", async () => {
+		const store = createMockStorage();
+		const sends = stubGraphApi(WA_PNID);
+		await register(store);
+		// No inbound recorded: the record may simply not have replicated yet
+		// (Workers KV), and Meta is the authoritative window enforcer.
+		const res = await handleChannelsSend(
+			store, { conversation: WA_CONV, text: "hi" }, "bubA");
+		expect(res.status).toBe(200);
+		expect(sends).toHaveLength(1);
+	});
+
+	it("fails closed when no app secret is configured (unlike github/slack)", async () => {
+		const store = createMockStorage();
+		const body = JSON.stringify(metaWebhook([{
+			from: WA_USER, id: "wamid.F1", type: "text", text: { body: "forged" },
+		}]));
+		const result = await handleWebhookRequest(
+			store, "whatsapp",
+			{ rawBody: body, header: () => "" },
+			{}, // no whatsapp secret configured
+		);
+		expect(result?.status).toBe(401);
+		expect(store.delivered).toHaveLength(0);
+		expect(store.channelState.size).toBe(0); // no window state written
 	});
 
 	it("does not read another bubble's number registration", async () => {
@@ -2793,7 +2814,7 @@ describe("whatsapp number registration and outbound send", () => {
 		const res = await handleChannelsSend(
 			store, { conversation: WA_CONV, text: "hi" }, "bubA");
 		expect(res.status).toBe(400);
-		expect((res.body as Record<string, string>).error).toContain("bot token");
+		expect((res.body as Record<string, string>).error).toContain("no send credential");
 	});
 
 	it("typing is a silent no-op and history is a clean 400", async () => {

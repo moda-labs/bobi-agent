@@ -30,13 +30,36 @@ class _Resp:
         self.status_code = status_code
 
 
+class _GraphResp:
+    def __init__(self, payload):
+        self._payload = payload
+        self.status_code = 200
+
+    def json(self):
+        return self._payload
+
+
 class TestDetectWhatsApp:
-    def test_detects_topic_from_configured_number(self):
-        assert detect("whatsapp", None, _cfg()) == [f"whatsapp:{PNID}"]
+    def test_detects_topic_after_upstream_validation(self):
+        with patch.object(pooled, "get",
+                          side_effect=lambda *a, **k: _GraphResp({"id": PNID})):
+            assert detect("whatsapp", None, _cfg()) == [f"whatsapp:{PNID}"]
 
     def test_requires_both_credentials(self):
-        assert detect("whatsapp", None, _cfg(access_token="")) == []
-        assert detect("whatsapp", None, _cfg(phone_number_id="")) == []
+        calls = []
+        with patch.object(pooled, "get",
+                          side_effect=lambda *a, **k: calls.append(1)):
+            assert detect("whatsapp", None, _cfg(access_token="")) == []
+            assert detect("whatsapp", None, _cfg(phone_number_id="")) == []
+        assert calls == [], "must not hit the Graph API without creds"
+
+    def test_rejected_credential_does_not_subscribe(self):
+        """A bad token must NOT yield the topic: the #488 grant check rejects
+        the whole deployment registration atomically, so subscribing with an
+        unregistrable credential would take down every other subscription."""
+        with patch.object(pooled, "get", side_effect=lambda *a, **k: _GraphResp(
+                {"error": {"message": "bad token"}})):
+            assert detect("whatsapp", None, _cfg()) == []
 
 
 class TestRegisterWhatsAppNumbers:

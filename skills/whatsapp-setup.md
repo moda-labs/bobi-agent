@@ -51,8 +51,9 @@ token for anything real:
 4. Under **Webhook fields**, subscribe to `messages`.
 5. Copy the app's **App secret** (App settings → Basic) to the event server
    (`WHATSAPP_APP_SECRET` / `BOBI_ES_WHATSAPP_APP_SECRET`) so inbound events
-   are signature-verified. Without it, events are admitted unverified (and
-   counted on /health).
+   are signature-verified. WhatsApp fails closed: without the secret the
+   server REJECTS inbound events (a forged message would otherwise drive an
+   outbound reply through your real number).
 
 ## 4. Configure the team
 
@@ -95,6 +96,6 @@ the agent to keep replies short and conversational.
 | Meta rejects the Callback URL | Verify token mismatch or server unreachable - set `WHATSAPP_VERIFY_TOKEN` on the event server first, and use a public URL |
 | Inbound events `401`/ignored | `WHATSAPP_APP_SECRET` on the event server doesn't match the app's App secret |
 | Replies fail with `outside_message_window` | The user hasn't messaged within 24h - free-form replies are closed; wait for their next message |
-| Replies fail with `no bot token for workspace` | The number isn't registered for this instance - restart the agent so registration runs, and check the token/number id |
+| Replies fail with `no send credential registered` | The number isn't registered for this instance - restart the agent so registration runs, and check the token/number id |
 | Sends fail with an OAuth error | Token expired (temporary tokens last 24h) - generate a permanent System User token |
 | Test number can't message a recipient | Add the recipient under WhatsApp → API Setup → To (test numbers have an allowlist) |

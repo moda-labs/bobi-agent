@@ -15,8 +15,6 @@ import { buildConversation } from "../conversation";
 
 export interface WhatsAppNormalization {
 	events: NormalizedEvent[];
-	/** Conversation refs seen, for message-window bookkeeping (#656). */
-	conversations: string[];
 }
 
 /** Human-readable fallback text for non-text message types. */
@@ -41,7 +39,6 @@ export function normalizeWhatsAppWebhook(
 	payload: Record<string, unknown>,
 ): WhatsAppNormalization {
 	const events: NormalizedEvent[] = [];
-	const conversations: string[] = [];
 
 	const entries = Array.isArray(payload.entry) ? payload.entry : [];
 	for (const entry of entries as Array<Record<string, unknown>>) {
@@ -57,7 +54,9 @@ export function normalizeWhatsAppWebhook(
 			const messages = Array.isArray(value.messages) ? value.messages : [];
 			const contacts = Array.isArray(value.contacts) ? value.contacts : [];
 			for (const msg of messages as Array<Record<string, unknown>>) {
-				const waId = (msg.from as string) || "";
+				// Runtime type check, not a cast: a numeric `from` would throw
+				// on .includes and turn the webhook into a retried 5xx.
+				const waId = typeof msg.from === "string" ? msg.from : "";
 				if (!waId || waId.includes(":")) continue;
 				const text = messageText(msg).slice(0, 4000);
 				const contact = (contacts as Array<Record<string, unknown>>).find(
@@ -74,7 +73,6 @@ export function normalizeWhatsAppWebhook(
 				} catch {
 					continue; // an id carrying ":" cannot be addressed - drop, never 500
 				}
-				conversations.push(conversation);
 
 				const fields: Record<string, string | number | boolean> = {
 					user_id: waId,
@@ -109,5 +107,5 @@ export function normalizeWhatsAppWebhook(
 			}
 		}
 	}
-	return { events, conversations };
+	return { events };
 }
