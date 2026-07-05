@@ -1,12 +1,18 @@
 """Live tests for cross-model session continuation (#642).
 
-Proves the ClaudeBrain capability claim (``cross_model_resume=True``) against
-the real CLI: a session started under one model resumes under another with its
+Proves the brain capability claims (``cross_model_resume=True``) against the
+real CLIs: a session started under one model resumes under another with its
 transcript intact, and a workflow spanning a model switch keeps conversation
 state the fresh+reinject fallback would lose.
 
-Requires the ``claude`` CLI. Skipped in CI.
+The Claude tests require the ``claude`` CLI. The Codex test (#649)
+additionally needs ``BOBI_CODEX_XMODEL=<modelA>,<modelB>`` naming two models
+the local account may use (e.g. ``gpt-5.4,gpt-5.5``) - the usable set depends
+on the account's auth mode, so it cannot be hardcoded. All skipped in CI.
 """
+
+import os
+import shutil
 
 import pytest
 import yaml
@@ -136,3 +142,74 @@ class TestWorkflowCrossModelContinuation:
             SessionRegistry.handoff_path(session_name, "recall").read_text()
         )
         assert "PANGOLIN" in str(handoff.get("word", "")).upper(), handoff
+
+
+_codex_models = os.environ.get("BOBI_CODEX_XMODEL", "")
+
+requires_codex_xmodel = pytest.mark.skipif(
+    not shutil.which("codex") or "," not in _codex_models,
+    reason="needs the codex CLI and BOBI_CODEX_XMODEL=<modelA>,<modelB>",
+)
+
+
+@requires_codex_xmodel
+@pytest.mark.asyncio
+@pytest.mark.timeout(240)
+class TestCodexCrossModelResume:
+    """`codex exec resume -m` switches the thread's model (#649)."""
+
+    async def test_resume_under_different_model_keeps_transcript(self, tmp_path):
+        from bobi.brain import get_brain
+
+        model_a, model_b = (m.strip() for m in _codex_models.split(",", 1))
+        brain = get_brain("codex")
+        assert brain.capabilities.cross_model_resume is True
+
+        first = brain.make_session(
+            cwd=str(tmp_path),
+            system_prompt="You are a test assistant. Reply concisely.",
+            options={"model": model_a},
+        )
+        await first.connect(
+            "Remember the code word: PANGOLIN. Reply with just: OK"
+        )
+        _, result = await _drain(first)
+        await first.disconnect()
+        assert result is not None and not result.is_error
+        thread_id = result.session_id
+        assert thread_id
+
+        second = brain.make_session(
+            cwd=str(tmp_path),
+            system_prompt="You are a test assistant. Reply concisely.",
+            resume=thread_id,
+            options={"model": model_b},
+        )
+        await second.connect(None)
+        await second.query(
+            "What was the code word? Reply with just the word."
+        )
+        text, result = await _drain(second)
+        await second.disconnect()
+
+        assert result is not None and not result.is_error
+        assert "PANGOLIN" in text.upper(), (
+            f"transcript lost across the model switch: {text!r}"
+        )
+        # Ground truth that the switch happened: the rollout records the
+        # model per turn_context.
+        import json
+        from pathlib import Path
+        rollouts = sorted(
+            Path.home().glob(f".codex/sessions/**/*{thread_id}*.jsonl")
+        )
+        assert rollouts, "no codex rollout found for the thread"
+        models = []
+        for line in rollouts[-1].read_text().splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "turn_context":
+                models.append(event.get("payload", {}).get("model"))
+        assert model_a in models and model_b in models, models
