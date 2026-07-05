@@ -407,9 +407,12 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		const result = await handleWebhookRequest(
 			storage,
 			webhookRoute.source,
-			{ rawBody: body, header: (n) => (req.headers[n.toLowerCase()] as string) || "" },
+			{
+				rawBody: body,
+				header: (n) => (req.headers[n.toLowerCase()] as string) || "",
+				subpath: webhookRoute.subpath,
+			},
 			{ github: webhookSecret, slack: slackSigningSecret, linear: linearWebhookSecret },
-			webhookRoute.subpath,
 		);
 		if (result) return respond(res, result);
 	}

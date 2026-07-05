@@ -3,7 +3,9 @@
 Mint / list / revoke tokens bound to (bubble, topic). Every call is
 bubble-signed (the same auth as a generic publish - see signing.py); the
 plaintext token appears only in the mint response and is never persisted
-by either side.
+by either side. Instance context (event-server URL, bubble credential)
+resolves through the gateway's shared helper so all signed clients agree
+on where the server is and how the bubble loads.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from pathlib import Path
 import httpx
 
 from bobi import http as pooled
-from bobi.events.publish import DEFAULT_URL
+from bobi.events.gateway import GatewayError, _gateway_context
 
 log = logging.getLogger(__name__)
 
@@ -25,31 +27,18 @@ class IngestTokenError(Exception):
 
 def _signed_request(method: str, path: str, body: str,
                     project_path: Path | None) -> dict:
-    if project_path is None:
-        from bobi.paths import bobi_root
-        project_path = bobi_root()
-    else:
-        project_path = Path(project_path)
-
-    from bobi.config import Config, load_bubble_state
     from bobi.events.signing import sign_headers
 
-    bubble = load_bubble_state(project_path)
-    if not (bubble.get("bubble_id") and bubble.get("bubble_key")):
+    try:
+        es_url, bubble_id, bubble_key = _gateway_context(project_path)
+    except GatewayError as e:
         raise IngestTokenError(
             "No bubble credential found. Start the agent first - ingest "
             "tokens are minted with the instance's bubble identity."
-        )
-
-    try:
-        es_url = Config.load(project_path).event_server_url or DEFAULT_URL
-    except Exception:
-        es_url = DEFAULT_URL
+        ) from e
 
     headers = {"Content-Type": "application/json"} if body else {}
-    headers.update(sign_headers(
-        bubble["bubble_id"], bubble["bubble_key"], method, path, body,
-    ))
+    headers.update(sign_headers(bubble_id, bubble_key, method, path, body))
 
     try:
         resp = pooled.request(
@@ -63,13 +52,14 @@ def _signed_request(method: str, path: str, body: str,
         data = resp.json()
     except ValueError:
         data = {}
+    if not isinstance(data, dict):
+        data = {}
     if resp.status_code >= 400:
-        reason = data.get("error") if isinstance(data, dict) else None
         raise IngestTokenError(
             f"Server rejected {method} {path} ({resp.status_code}): "
-            f"{reason or resp.text[:200]}"
+            f"{data.get('error') or resp.text[:200]}"
         )
-    return data if isinstance(data, dict) else {}
+    return data
 
 
 def create_token(topic: str, name: str | None = None,

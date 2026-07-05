@@ -840,19 +840,25 @@ describe("handleGitHubWebhook", () => {
 	});
 });
 
+// Shared inbound-request fixture for pipeline tests: case-insensitive headers
+// plus the matched route's subpath ("" for exact provider routes).
+function req(
+	rawBody: string,
+	headers: Record<string, string> = {},
+	subpath = "",
+): InboundWebhookRequest {
+	const lower = Object.fromEntries(
+		Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]),
+	);
+	return { rawBody, header: (n) => lower[n.toLowerCase()] || "", subpath };
+}
+
 // ---------------------------------------------------------------------------
 // #639 — the unified inbound webhook pipeline. Both transports (Worker and
 // local server) route every /webhooks/<source> request through this one
 // function, so these tests ARE the shared verification coverage for both.
 // ---------------------------------------------------------------------------
 describe("handleWebhookRequest (unified pipeline)", () => {
-	function req(rawBody: string, headers: Record<string, string> = {}): InboundWebhookRequest {
-		const lower = Object.fromEntries(
-			Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]),
-		);
-		return { rawBody, header: (n) => lower[n.toLowerCase()] || "" };
-	}
-
 	it("returns null for an unregistered source (transport falls through to 404)", async () => {
 		const store = createMockStorage();
 		const result = await handleWebhookRequest(store, "nope", req("{}"), {});
@@ -1011,6 +1017,12 @@ describe("matchWebhookSource", () => {
 		expect(matchWebhookSource("/webhooks/ingest")).toBeNull();
 		expect(matchWebhookSource("/webhooks/ingest/")).toBeNull();
 	});
+
+	it("multiple trailing slashes never match (pre-#640 grammar preserved)", () => {
+		expect(matchWebhookSource("/webhooks/github//")).toBeNull();
+		expect(matchWebhookSource("/webhooks/slack///")).toBeNull();
+		expect(matchWebhookSource("/webhooks/ingest/alert/firing//")).toBeNull();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1021,20 +1033,12 @@ describe("matchWebhookSource", () => {
 describe("ingest tokens (#640)", () => {
 	beforeEach(() => resetIngestRateLimiter());
 
-	function req(rawBody: string, headers: Record<string, string> = {}): InboundWebhookRequest {
-		const lower = Object.fromEntries(
-			Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]),
-		);
-		return { rawBody, header: (n) => lower[n.toLowerCase()] || "" };
-	}
-
 	function ingest(store: StorageAdapter, topic: string, body: string, token?: string) {
 		return handleWebhookRequest(
 			store,
 			"ingest",
-			req(body, token ? { authorization: `Bearer ${token}` } : {}),
+			req(body, token ? { authorization: `Bearer ${token}` } : {}, topic),
 			{},
-			topic,
 		);
 	}
 
@@ -1162,7 +1166,8 @@ describe("ingest tokens (#640)", () => {
 				await ingest(store, "alert/firing", body),
 				await ingest(store, "alert/firing", body, "wrong-token"),
 				await handleWebhookRequest(
-					store, "ingest", req(body, { authorization: "ingt_notbearer" }), {}, "alert/firing"),
+					store, "ingest",
+					req(body, { authorization: "ingt_notbearer" }, "alert/firing"), {}),
 			]) {
 				expect(result?.status).toBe(403);
 				expect(result?.body).toEqual({ error: "forbidden" });
@@ -1203,7 +1208,16 @@ describe("ingest tokens (#640)", () => {
 			expect(store.delivered[0].topics).toEqual(["alert/firing", "ingest/alert/firing"]);
 		});
 
-		it("rate-limits per token with 429", async () => {
+		it("accepts a lowercase 'bearer' scheme (RFC 7235 case-insensitivity)", async () => {
+			const store = createMockStorage();
+			const { token } = await mintToken(store, "alert/firing");
+			const result = await handleWebhookRequest(
+				store, "ingest",
+				req("{}", { authorization: `bearer ${token}` }, "alert/firing"), {});
+			expect(result?.status).toBe(200);
+		});
+
+		it("rate-limits per token with 429, without polluting the signature counter", async () => {
 			const store = createMockStorage();
 			const { token } = await mintToken(store, "alert/firing");
 			const other = await mintToken(store, "alert/resolved");
@@ -1211,16 +1225,23 @@ describe("ingest tokens (#640)", () => {
 			for (let i = 0; i < INGEST_RATE_LIMIT; i++) {
 				expect((await ingest(store, "alert/firing", "{}", token))?.status).toBe(200);
 			}
+			resetAuthRejectionCounters();
 			expect((await ingest(store, "alert/firing", "{}", token))?.status).toBe(429);
+			// A policy rejection from a VALID token must not read as a provider
+			// signature misconfiguration on /health.
+			expect(getAuthRejectionCounters().webhook_bad_signature).toBe(0);
 			// The window is per token — a different token is unaffected.
 			expect((await ingest(store, "alert/resolved", "{}", other.token))?.status).toBe(200);
 		});
 
-		it("rejects an oversize body with 413", async () => {
+		it("rejects an oversize body with 413 BEFORE parsing, token or not", async () => {
 			const store = createMockStorage();
 			const { token } = await mintToken(store, "alert/firing");
-			const body = JSON.stringify({ blob: "x".repeat(INGEST_MAX_BODY_BYTES) });
+			// Oversize AND invalid JSON: the 413 proves the size gate ran before
+			// JSON.parse — a parse-first pipeline would return 400.
+			const body = `{${"x".repeat(INGEST_MAX_BODY_BYTES)}`;
 			expect((await ingest(store, "alert/firing", body, token))?.status).toBe(413);
+			expect((await ingest(store, "alert/firing", body))?.status).toBe(413);
 			expect(store.delivered).toHaveLength(0);
 		});
 

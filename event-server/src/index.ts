@@ -93,18 +93,18 @@ function createKVStorage(env: Env): StorageAdapter {
 			return data !== null;
 		},
 
-		// Ingest tokens (#640). Two keys per token: the hash-keyed record (the
-		// hot-path lookup) and a per-bubble array of records for list/revoke.
-		// Records are immutable after mint, so the duplication cannot skew.
+		// Ingest tokens (#640). Two keys per token, both holding the (immutable)
+		// record: hash-keyed for the hot-path lookup, and a per-bubble composite
+		// key for list/revoke. Deliberately NO shared index blob: KV is
+		// last-write-wins, and a read-modify-write index loses entries under
+		// concurrent mints — a token that authenticates but can never be listed
+		// or revoked. Independent puts/deletes cannot race that way.
 		async putIngestToken(record: IngestTokenRecord): Promise<void> {
-			await env.EVENTS.put(`ingest_token:${record.token_hash}`, JSON.stringify(record));
-			const idxKey = `ingest_tokens_for_bubble:${record.bubble_id}`;
-			const existing = await env.EVENTS.get(idxKey);
-			const records: IngestTokenRecord[] = existing ? JSON.parse(existing) : [];
-			if (!records.some((r) => r.id === record.id)) {
-				records.push(record);
-				await env.EVENTS.put(idxKey, JSON.stringify(records));
-			}
+			const json = JSON.stringify(record);
+			await Promise.all([
+				env.EVENTS.put(`ingest_token:${record.token_hash}`, json),
+				env.EVENTS.put(`ingest_token_by_id:${record.bubble_id}:${record.id}`, json),
+			]);
 		},
 
 		async getIngestTokenByHash(hash: string): Promise<IngestTokenRecord | null> {
@@ -113,22 +113,18 @@ function createKVStorage(env: Env): StorageAdapter {
 		},
 
 		async listIngestTokens(bubbleId: string): Promise<IngestTokenRecord[]> {
-			const data = await env.EVENTS.get(`ingest_tokens_for_bubble:${bubbleId}`);
-			return data ? JSON.parse(data) : [];
+			// One list page (1000 keys) is far beyond any real per-bubble token
+			// count; values fetched in parallel.
+			const listed = await env.EVENTS.list({ prefix: `ingest_token_by_id:${bubbleId}:` });
+			const values = await Promise.all(listed.keys.map((k) => env.EVENTS.get(k.name)));
+			return values.filter((v): v is string => v !== null).map((v) => JSON.parse(v));
 		},
 
 		async deleteIngestToken(record: IngestTokenRecord): Promise<void> {
-			await env.EVENTS.delete(`ingest_token:${record.token_hash}`);
-			const idxKey = `ingest_tokens_for_bubble:${record.bubble_id}`;
-			const existing = await env.EVENTS.get(idxKey);
-			if (!existing) return;
-			const records: IngestTokenRecord[] = JSON.parse(existing);
-			const filtered = records.filter((r) => r.id !== record.id);
-			if (filtered.length === 0) {
-				await env.EVENTS.delete(idxKey);
-			} else {
-				await env.EVENTS.put(idxKey, JSON.stringify(filtered));
-			}
+			await Promise.all([
+				env.EVENTS.delete(`ingest_token:${record.token_hash}`),
+				env.EVENTS.delete(`ingest_token_by_id:${record.bubble_id}:${record.id}`),
+			]);
 		},
 
 		async putDeployment(deployment: DeploymentRecord): Promise<void> {
@@ -347,13 +343,16 @@ export default {
 			const result = await handleWebhookRequest(
 				storage,
 				webhookRoute.source,
-				{ rawBody, header: (n) => request.headers.get(n) || "" },
+				{
+					rawBody,
+					header: (n) => request.headers.get(n) || "",
+					subpath: webhookRoute.subpath,
+				},
 				{
 					github: env.WEBHOOK_SECRET,
 					slack: env.SLACK_SIGNING_SECRET,
 					linear: env.LINEAR_WEBHOOK_SECRET,
 				},
-				webhookRoute.subpath,
 			);
 			if (result) return respond(result);
 		}

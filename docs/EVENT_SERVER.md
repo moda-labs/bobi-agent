@@ -174,10 +174,10 @@ signed body, never from client input**:
   top-level primitives mirrored into `fields`, on exactly the token's bound topic,
   bubble-scoped to the minting bubble. Body fields never influence routing (unlike
   `createTopicEvent`, routing fields such as `repo` are inert here). Requests are
-  capped at 256 KiB (413) and rate-limited per token at 60/min (429; in-memory -
-  authoritative locally, per-isolate on the Worker). This is the only webhook
-  route whose path has a slash-bearing remainder; provider routes stay
-  exact-match.
+  capped at 256 KiB, rejected with 413 before the body is ever parsed, and
+  rate-limited per token at 60/min (429; in-memory - authoritative locally,
+  per-isolate on the Worker). This is the only webhook route whose path has a
+  slash-bearing remainder; provider routes stay exact-match.
 
 **Generic topic endpoint** (`POST /events/{topic}`). Monitors, lifecycle emits,
 inter-agent inbox/reply, and any agent-emitted event publish here. It is
@@ -356,11 +356,15 @@ Properties:
   never exposes bubble membership or the bubble key, which stays inside the
   instance.
 - **Revocable.** `DELETE /ingest-tokens/<id>` (CLI: `ingest-token revoke`)
-  takes effect immediately. Management routes are bubble-signed, and ids
-  resolve only within the caller's own bubble.
-- **Bounded.** 256 KiB body cap, 60 requests/min per token. Rejections are
-  opaque 403s (missing, unknown, revoked, and wrong-topic are
-  indistinguishable) and count into `webhook_bad_signature` on `/health`.
+  takes effect immediately on the local server; on the Worker it is subject
+  to KV propagation (typically seconds, up to ~60s across points of
+  presence). Management routes are bubble-signed, and ids resolve only
+  within the caller's own bubble.
+- **Bounded.** 256 KiB body cap enforced before the body is parsed, 60
+  requests/min per token. Auth rejections are opaque 403s (missing, unknown,
+  revoked, and wrong-topic are indistinguishable) and count into
+  `webhook_bad_signature` on `/health`; 413/429 policy rejections do not
+  pollute that counter.
 - **Topic shape.** `source/type` form from `[A-Za-z0-9_.-]` segments; the
   `github`/`linear`/`slack` sources and `:`-style global keys are rejected at
   mint, so an ingest token can never reach a provider or global topic.

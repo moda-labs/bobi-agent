@@ -2422,9 +2422,13 @@ def ingest_token():
 @click.argument("topic")
 @click.option("--name", default=None, help="Optional label shown in list output.")
 def ingest_token_create(topic, name):
-    """Mint a token bound to TOPIC (source/type form, e.g. alert/firing)."""
+    """Mint a token bound to TOPIC (source/type form, e.g. alert/firing).
+
+    Topic rules are enforced server-side (validateIngestTopic in
+    event-server/src/core.ts, the single source of truth); a rejection
+    surfaces its reason verbatim.
+    """
     project_path = _detect_project_root()
-    topic = _validate_event_publish_topic(topic)
 
     from bobi.events.ingest_tokens import IngestTokenError, create_token
     try:

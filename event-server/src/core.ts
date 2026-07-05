@@ -244,6 +244,18 @@ export interface HandlerResult {
 	body: unknown;
 }
 
+// The bare topic plus its source-qualified spelling (e.g. "monitor/support.email")
+// so subscriptions written either way match (#235). The single helper both
+// createTopicEvent and createIngestEvent route through, so the two spellings
+// can never drift between the signed-publish and token-ingest paths.
+export function sourceQualifiedTopics(topic: string, source?: string): string[] {
+	const topics = [topic];
+	if (source && !topic.startsWith(`${source}/`)) {
+		topics.push(`${source}/${topic}`);
+	}
+	return topics;
+}
+
 export function createTopicEvent(
 	topic: string,
 	body: Record<string, unknown>,
@@ -262,11 +274,7 @@ export function createTopicEvent(
 	// to the body when POSTing (see the Python event publisher) — without
 	// this, "source/type" subscriptions silently never match (#235).
 	if (topics.length === 0) {
-		topics.push(topic);
-		const source = body.source as string | undefined;
-		if (source && !topic.startsWith(`${source}/`)) {
-			topics.push(`${source}/${topic}`);
-		}
+		topics.push(...sourceQualifiedTopics(topic, body.source as string | undefined));
 	}
 
 	const text = (body.text as string) || "";
@@ -381,6 +389,12 @@ export function subscriptionKeysForEvent(event: NormalizedEvent): string[] {
 // Signature verification
 // ---------------------------------------------------------------------------
 
+function bytesToHex(buffer: ArrayBuffer): string {
+	return Array.from(new Uint8Array(buffer))
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+}
+
 async function hmacSha256Hex(secret: string, data: Uint8Array | string): Promise<string> {
 	const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
 	const key = await crypto.subtle.importKey(
@@ -390,10 +404,7 @@ async function hmacSha256Hex(secret: string, data: Uint8Array | string): Promise
 		false,
 		["sign"],
 	);
-	const sig = await crypto.subtle.sign("HMAC", key, bytes);
-	return Array.from(new Uint8Array(sig))
-		.map((b) => b.toString(16).padStart(2, "0"))
-		.join("");
+	return bytesToHex(await crypto.subtle.sign("HMAC", key, bytes));
 }
 
 // SHA-256 hex digest — the one-way transform between a plaintext ingest token
@@ -402,10 +413,7 @@ async function hmacSha256Hex(secret: string, data: Uint8Array | string): Promise
 // hashed before any store access, so no stored byte is ever compared
 // positionally against attacker input.
 export async function sha256Hex(data: string): Promise<string> {
-	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(data));
-	return Array.from(new Uint8Array(digest))
-		.map((b) => b.toString(16).padStart(2, "0"))
-		.join("");
+	return bytesToHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(data)));
 }
 
 // Constant-time string compare. Portable across Node and the Cloudflare
@@ -769,10 +777,13 @@ export async function handleSlackWebhook(
 
 // Transport-neutral view of the inbound request. `rawBody` is the exact wire
 // bytes (signatures cover them — never a re-serialization); `header` is a
-// case-insensitive lookup returning "" when absent.
+// case-insensitive lookup returning "" when absent; `subpath` is the matched
+// route's topic remainder from matchWebhookSource ("" for exact provider
+// routes). Required — a transport cannot forget to thread it.
 export interface InboundWebhookRequest {
 	rawBody: string;
 	header(name: string): string;
+	subpath: string;
 }
 
 // Provider verification secrets, resolved by the transport (Worker env vars /
@@ -787,13 +798,11 @@ export interface WebhookSecrets {
 	linear?: string;
 }
 
-// Per-request pipeline context. `subpath` is the path segment after the
-// source for topic routes (`/webhooks/ingest/<topic>` → "alert/firing"),
-// always "" for exact-match provider routes. The ingest verifier stashes the
-// verified token here so its handler delivers on the token's binding — never
-// on anything re-derived from the request.
+// Per-request pipeline context: the seam a verify slot uses to hand its
+// verified principal to the handler. The ingest verifier stashes the token
+// record here so its handler delivers on the token's binding — never on
+// anything re-derived from the request.
 export interface WebhookRequestContext {
-	subpath: string;
 	ingestToken?: IngestTokenRecord;
 }
 
@@ -802,6 +811,12 @@ interface WebhookSource {
 	// topic (`/webhooks/<source>/<topic>` with a required, slash-bearing
 	// remainder). Part of the single route grammar in matchWebhookSource.
 	topicRoute?: true;
+	// Reject bodies longer than this BEFORE JSON.parse (413). Measured in
+	// UTF-16 code units of the raw body — a lower bound on bytes, so nothing
+	// under the cap is ever falsely rejected and any parse-scale attack body
+	// is caught. Set for sources whose senders are untrusted at request time
+	// (ingest); provider bodies are bounded upstream by their platforms.
+	maxBodyBytes?: number;
 	// Short-circuit responses that must run BEFORE signature verification.
 	// Slack needs this: url_verification carries no signing headers (and its
 	// retries must still answer the challenge), and retried event deliveries
@@ -850,8 +865,18 @@ export const INGEST_RATE_LIMIT = 60;
 export const INGEST_RATE_WINDOW_MS = 60_000;
 const _ingestRateWindows = new Map<string, { start: number; count: number }>();
 
+// Entries for tokens that stop sending (revoked, retired CI tokens) would
+// otherwise accrete forever in this long-lived process; sweep expired windows
+// once the map is large. O(n) only when the sweep fires.
+const INGEST_RATE_SWEEP_THRESHOLD = 1024;
+
 function ingestRateAllow(tokenId: string): boolean {
 	const now = Date.now();
+	if (_ingestRateWindows.size > INGEST_RATE_SWEEP_THRESHOLD) {
+		for (const [id, w] of _ingestRateWindows) {
+			if (now - w.start >= INGEST_RATE_WINDOW_MS) _ingestRateWindows.delete(id);
+		}
+	}
 	const win = _ingestRateWindows.get(tokenId);
 	if (!win || now - win.start >= INGEST_RATE_WINDOW_MS) {
 		_ingestRateWindows.set(tokenId, { start: now, count: 1 });
@@ -973,21 +998,22 @@ const WEBHOOK_SOURCES: Record<string, WebhookSource> = {
 
 	// Generic ingress (#640): POST /webhooks/ingest/<topic> with
 	// `Authorization: Bearer <ingest token>`. The verify slot is the token
-	// check itself — existence, topic binding, rate limit, size cap — so the
-	// structural guarantee (#639) holds: this route cannot exist unverified.
+	// check itself — existence, topic binding, rate limit — so the structural
+	// guarantee (#639) holds: this route cannot exist unverified. The body
+	// size cap is declared here but enforced by the pipeline BEFORE the body
+	// is parsed.
 	ingest: {
 		topicRoute: true,
+		maxBodyBytes: INGEST_MAX_BODY_BYTES,
 		async verify(storage, req, _payload, _secret, ctx) {
-			const auth = req.header("authorization");
-			const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-			if (!token) return INGEST_FORBIDDEN;
-			const record = await storage.getIngestTokenByHash(await sha256Hex(token));
+			// RFC 7235: the auth scheme is case-insensitive; several webhook
+			// senders emit "bearer".
+			const m = req.header("authorization").match(/^Bearer\s+(\S+)\s*$/i);
+			if (!m) return INGEST_FORBIDDEN;
+			const record = await storage.getIngestTokenByHash(await sha256Hex(m[1]));
 			// One opaque 403 for unknown/revoked AND wrong-topic: a topic-A token
 			// probing topic B learns nothing beyond "not authorized here".
-			if (!record || record.topic !== ctx.subpath) return INGEST_FORBIDDEN;
-			if (new TextEncoder().encode(req.rawBody).byteLength > INGEST_MAX_BODY_BYTES) {
-				return { status: 413, body: { error: "payload too large" } };
-			}
+			if (!record || record.topic !== req.subpath) return INGEST_FORBIDDEN;
 			if (!ingestRateAllow(record.id)) {
 				return { status: 429, body: { error: "rate limited" } };
 			}
@@ -996,8 +1022,11 @@ const WEBHOOK_SOURCES: Record<string, WebhookSource> = {
 		},
 		async handle(storage, _req, payload, ctx) {
 			// The verified token is the ONLY routing input — topic and bubble come
-			// from its binding, never from the path or body.
-			const record = ctx.ingestToken!;
+			// from its binding, never from the path or body. The verify slot set
+			// it; a missing record here is a pipeline invariant violation, not a
+			// client error.
+			const record = ctx.ingestToken;
+			if (!record) return { status: 500, body: { error: "internal error" } };
 			const event = createIngestEvent(record.topic, payload, record.bubble_id);
 			const delivered = await storage.deliver(event);
 			return { status: 200, body: { delivered_to: delivered } };
@@ -1024,20 +1053,25 @@ export interface WebhookRouteMatch {
 // Match a request path against the registered webhook routes — the single
 // route grammar both transports use; they gate the body read on this, so an
 // unregistered path 404s without ever consuming the request body. Exact
-// sources match `/webhooks/<source>` only (a trailing slash is tolerated, a
-// deeper path is not); topic sources REQUIRE a non-empty remainder, which may
-// itself contain slashes.
+// sources match `/webhooks/<source>` only (AT MOST one trailing slash, the
+// pre-#640 grammar — `/webhooks/github//` stays a 404); topic sources REQUIRE
+// a non-empty remainder, which may itself contain slashes, again with at most
+// one trailing slash tolerated.
 export function matchWebhookSource(path: string): WebhookRouteMatch | null {
 	const m = path.match(/^\/webhooks\/([^/]+)(?:\/(.*))?$/);
 	if (!m) return null;
 	const source = m[1];
 	const def = WEBHOOK_SOURCES[source];
 	if (!def) return null;
-	const rest = (m[2] ?? "").replace(/\/+$/, "");
 	if (def.topicRoute) {
-		return rest ? { source, subpath: rest } : null;
+		// A remainder that still ends in "/" after stripping one had multiple
+		// trailing slashes — malformed, and no mintable topic could match it.
+		const rest = (m[2] ?? "").replace(/\/$/, "");
+		return rest && !rest.endsWith("/") ? { source, subpath: rest } : null;
 	}
-	return rest ? null : { source, subpath: "" };
+	// Exact route: the remainder must be absent (`/webhooks/github`) or empty
+	// (`/webhooks/github/`) on the wire — anything else, including `//`, 404s.
+	return m[2] === undefined || m[2] === "" ? { source, subpath: "" } : null;
 }
 
 // Run an inbound webhook through the pipeline. Returns null for an
@@ -1048,10 +1082,16 @@ export async function handleWebhookRequest(
 	source: string,
 	req: InboundWebhookRequest,
 	secrets: WebhookSecrets,
-	subpath = "",
 ): Promise<HandlerResult | null> {
 	const def = WEBHOOK_SOURCES[source];
 	if (!def) return null;
+
+	// Size gate BEFORE parse: for a capped source, an oversize body must never
+	// reach JSON.parse — the cap exists to bound work done for an untrusted
+	// sender, and parsing is the work.
+	if (def.maxBodyBytes && req.rawBody.length > def.maxBodyBytes) {
+		return { status: 413, body: { error: "payload too large" } };
+	}
 
 	let payload: unknown;
 	try {
@@ -1067,11 +1107,16 @@ export async function handleWebhookRequest(
 	const early = def.preVerify?.(req, body);
 	if (early) return early;
 
-	const ctx: WebhookRequestContext = { subpath };
+	const ctx: WebhookRequestContext = {};
 	const secret = secrets[source as keyof WebhookSecrets] || "";
 	const rejected = await def.verify(storage, req, body, secret, ctx);
 	if (rejected) {
-		_rejectionCounters.webhook_bad_signature++;
+		// Only auth failures feed the /health signature counter — policy
+		// rejections from a VALID credential (429 rate limit) must not read as
+		// a provider secret misconfiguration.
+		if (rejected.status === 401 || rejected.status === 403) {
+			_rejectionCounters.webhook_bad_signature++;
+		}
 		return rejected;
 	}
 
