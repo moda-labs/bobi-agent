@@ -76,23 +76,29 @@ including:
 - release wheel build
 - canary build/smoke
 - PyPI publish
-- GHCR base image publish (`ghcr.io/moda-labs/bobi:<version>` + `:latest`)
+- GHCR base image publish (`ghcr.io/moda-labs/bobi:<version>`; `:latest` moves
+  when this version is the repo's latest non-prerelease release)
 - event server deploy
 - fleet roll jobs
 
 If PyPI was just published, allow a short propagation delay before installing
 the new version from another repo.
 
-Spot-check the published base image (built from the same wheel the canary
-proved; the full run contract is in `docs/CONTAINERIZED_DEPLOYMENT.md`):
+One-time setup (first release only): the first push creates the GHCR package
+as private. Make it public in the package settings
+(github.com/orgs/moda-labs/packages) so consumers can pull without a token;
+visibility persists across releases.
+
+Spot-check the published base image AS A CONSUMER - log out of GHCR first so
+the pull proves anonymous access works (a logged-in maintainer pull succeeds
+even while the package is still private):
 
 ```bash
+docker logout ghcr.io
 docker run --rm --entrypoint bobi ghcr.io/moda-labs/bobi:<version> --version
 ```
 
-One-time setup: the first push creates the GHCR package as private. Make it
-public in the package settings (github.com/orgs/moda-labs/packages) so
-consumers can pull without a token; visibility persists across releases.
+The full run contract is in `docs/CONTAINERIZED_DEPLOYMENT.md`.
 
 ## 3. Bump `moda-agents`
 

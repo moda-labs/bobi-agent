@@ -196,7 +196,19 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Install event-server Node dependencies
-        run: npm ci --no-audit --no-fund
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if npm ci --no-audit --no-fund; then
+              exit 0
+            fi
+            echo "::warning::npm ci attempt ${attempt} failed; retrying after clearing install state"
+            rm -rf node_modules
+            npm cache clean --force
+            sleep 5
+          done
+          echo "::error::npm ci failed after 3 attempts"
+          exit 1
         working-directory: event-server
 
       - name: Run event-server integration tests against wrangler dev

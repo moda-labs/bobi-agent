@@ -1,13 +1,8 @@
-from pathlib import Path
-
-import yaml
-
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from tests.workflow_utils import load_workflow
 
 
 def _ci_workflow() -> dict:
-    return yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    return load_workflow("ci.yml")
 
 
 def test_integration_fast_model_download_is_bounded_without_hf_xet():
@@ -33,3 +28,21 @@ def test_integration_fast_model_download_is_bounded_without_hf_xet():
     assert "embedding model download failed after 3 attempts" in run
     assert "embedding model cache is empty after warmup" in run
     assert "FASTEMBED_CACHE_PATH" not in pytest_step.get("env", {})
+
+
+def test_wrangler_event_server_install_retries_transient_npm_failures():
+    workflow = _ci_workflow()
+    job = workflow["jobs"]["integration-wrangler"]
+    step = next(
+        step
+        for step in job["steps"]
+        if step.get("name") == "Install event-server Node dependencies"
+    )
+
+    assert step["working-directory"] == "event-server"
+    run = step["run"]
+    assert "for attempt in 1 2 3" in run
+    assert "npm ci --no-audit --no-fund" in run
+    assert "rm -rf node_modules" in run
+    assert "npm cache clean --force" in run
+    assert "npm ci failed after 3 attempts" in run

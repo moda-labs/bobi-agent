@@ -104,7 +104,8 @@ Build args: `CLAUDE_VERSION` (default `stable`), `BOBI_UID` (default `10001`).
 ### Or pull the released image (GHCR)
 
 Every release also publishes this image to GHCR (#609), built from the exact
-wheel released to PyPI, multi-arch (amd64/arm64):
+wheel released to PyPI, multi-arch (amd64/arm64, each built natively).
+`:latest` tracks the repo's latest non-prerelease release:
 
 ```bash
 docker pull ghcr.io/moda-labs/bobi:<version>   # or :latest
@@ -576,8 +577,9 @@ publish a GitHub Release   ─▶ release.yml  (the single gated pipeline)
    │                                 ci-codex-smoke Codex): build image FROM the
    │                                 wheel + `ask` it -> assert CANARY-OK e2e
    │                                 ├──────────────┐
-   │                              publish
-   │                              same wheel -> PyPI + Homebrew
+   │                              publish              publish-image + publish-manifest
+   │                              same wheel ->        same wheel -> ghcr.io/moda-labs/bobi:<ver>
+   │                              PyPI + Homebrew      (+ :latest when newest release)
    │
 fleet repo deploy tag / dispatch ─▶ deploy-agent-teams.yml   (standalone, NO framework release)
           plan   : list ACTIVE deployments/<name>.yaml (defaults excluded) + tenant
@@ -591,7 +593,8 @@ you cut a release to ship the framework. **One functional gate guards the
 framework artifact**: `release.yml` builds the wheel once, builds both brain
 canaries (`ci-canary` Claude + `ci-codex-smoke` Codex) *from that wheel* and
 smokes each (`CANARY-OK`), and only then publishes the same wheel to PyPI and
-Homebrew. Codex is a hard gate at parity with Claude (#428); its instance is
+Homebrew and the base image built from it to GHCR (#609). Codex is a hard gate
+at parity with Claude (#428); its instance is
 `bootstrap`-tolerant in `release.yml` (warn+skip until first provisioned, then a
 hard gate). Production agent rollout is owned by fleet repos
 such as `moda-agents`; they bump their pinned `bobi` version and run their own
@@ -645,7 +648,8 @@ when a deployment uses `team-url:`; pure ssh-push (`team:`) deployments ignore i
 
 ### release.yml — the release pipeline
 Triggered by **`release: published`**. One gated pipeline; the canary, running the
-exact wheel we publish, is the single functional gate for PyPI/Homebrew:
+exact wheel we publish, is the single functional gate for PyPI, Homebrew, and the
+GHCR base image:
 - **subscription-login-smoke** — gate the release on a verified subscription-login
   bootstrap (a hermetic mock-code smoke; #388).
 - **build-wheel** — `python -m build` the wheel/sdist **once** and upload it, so the
@@ -658,7 +662,13 @@ exact wheel we publish, is the single functional gate for PyPI/Homebrew:
   asserts `CANARY-OK` end-to-end. **This is the gate** - both brains at parity.
 - **publish** — `needs: build-canary`. Uploads the **same** wheel to PyPI via
   trusted publishing (`environment: pypi`).
-- **update-homebrew** — `needs: publish`. Bumps the tap and smokes bottle URLs.
+- **publish-image / publish-manifest** - needs a canary that actually **ran**
+  (`build-canary.outputs.smoked`). Builds the base image per arch natively (no
+  QEMU) from the same wheel and the same resolved claude pin, then stitches
+  `ghcr.io/moda-labs/bobi:<version>`; `:latest` moves only when the version is
+  the repo's latest non-prerelease release.
+- **update-homebrew** — `needs: [publish, build-wheel]`. Bumps the tap from the
+  wheel-derived version and smokes bottle URLs after PyPI publish.
 
 Production fleet rollout is deliberately outside this workflow. Fleet repos bump
 their pinned `bobi` version and run their own deployment reconcile.
