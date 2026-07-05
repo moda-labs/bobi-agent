@@ -689,6 +689,81 @@ class TestRunWorkflow:
         assert all("PROMPT forced" in prompt for prompt in prompts), prompts
         assert all("PROMPT scorer" not in prompt for prompt in prompts)
 
+    def test_model_change_resumes_natively_on_capable_brain(self, monkeypatch):
+        """A brain with cross_model_resume continues the SAME session on the
+        new model instead of fresh + YAML reinject (#642)."""
+        from bobi.brain import BrainCapabilities
+
+        calls = []
+        clients = []
+
+        class FakeBrain:
+            capabilities = BrainCapabilities(cross_model_resume=True)
+
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                client = FakeBrainClient()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="haiku"),
+            StepDef(name="score", prompt="score", model="sonnet"),
+        ])
+
+        cwd = "/tmp"
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="live-session"), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
+
+        assert result is True
+        assert [c["options"].get("model") for c in calls] == ["haiku", "sonnet"]
+        # The switch session resumes the live session id natively.
+        assert calls[1]["resume"] == "live-session"
+        assert len(clients) == 2
+        # No reinject turn: the new session's first message is the step prompt.
+        assert all("Continue workflow" not in q for q in clients[1].queries)
+        assert "score" in clients[1].queries[0]
+
+    def test_model_change_records_new_model_on_save(self, monkeypatch):
+        """Post-turn saves carry the model the session currently runs under,
+        so the store record follows a mid-run switch (#642 stale-record fix)."""
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="haiku"),
+            StepDef(name="score", prompt="score", model="sonnet"),
+        ])
+
+        cwd = "/tmp"
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id") as save_mock, \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
+
+        assert result is True
+        saved_models = [c.kwargs.get("model") for c in save_mock.call_args_list
+                        if c.args[1]]
+        assert saved_models[0] == "haiku"
+        assert saved_models[-1] == "sonnet"
+
 
 class FailingClient:
     """ClaudeSDKClient mock whose turn yields no ResultMessage — _drain_response
@@ -1001,6 +1076,65 @@ class TestAwaitStep:
         assert calls[0]["options"]["model"] == "sonnet"
         assert "Continue workflow `t`" in clients[0].queries[0]
         assert "_runtime" not in clients[0].queries[0]
+
+    def test_resume_model_change_continues_natively_on_capable_brain(
+            self, tmp_path, monkeypatch):
+        """A suspended run whose resolved model changed continues its saved
+        session natively when the brain supports cross-model resume (#642)."""
+        from bobi.brain import BrainCapabilities
+
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+
+        run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {
+            "input": {"task": "t", "repo": "r", "run_key": "1"},
+            "_runtime": {"model": "haiku"},
+        }
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.run_key = "1"
+        run.save()
+
+        calls = []
+        clients = []
+
+        class FakeBrain:
+            capabilities = BrainCapabilities(cross_model_resume=True)
+
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                client = FakeBrainClient()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it", model="sonnet"),
+        ])
+
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="old-session"), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            success = resume_workflow(run, wf)
+
+        assert success is True
+        # Native continuation: the saved session resumes ON the new model.
+        assert calls[0]["resume"] == "old-session"
+        assert calls[0]["options"]["model"] == "sonnet"
+        # No YAML reinject turn.
+        assert all("Continue workflow" not in q for q in clients[0].queries)
 
     def test_resume_preserves_launch_model(self, tmp_path, monkeypatch):
         """A launch --model override survives suspension: the resume re-applies

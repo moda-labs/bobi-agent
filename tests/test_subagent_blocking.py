@@ -1425,21 +1425,42 @@ class TestLaunchModelResolution:
 
 
 class TestModelAwareSessionResume:
-    """A session recorded under one model must not resume under another
-    (#617 review findings 2-3)."""
+    """Cross-model resume follows the brain's capability: native continuation
+    when supported (#642), a fresh session otherwise (#617 findings 2-3)."""
 
-    def test_guard_blocks_resume_on_model_change(self):
+    @staticmethod
+    def _incapable_brain(kind=None):
+        from bobi.brain import BrainCapabilities
+
+        class Incapable:
+            capabilities = BrainCapabilities()
+
+        return Incapable()
+
+    def test_cross_model_continues_on_capable_brain(self):
+        """The default brain (Claude) supports cross-model resume, so a model
+        change keeps the session."""
         from bobi.sdk import load_resumable_session_id, save_session_id
         save_session_id("s1", "sess-abc", model="haiku")
         assert load_resumable_session_id("s1", "haiku") == "sess-abc"
-        assert load_resumable_session_id("s1", "opus") == ""
-        assert load_resumable_session_id("s1", "") == ""
+        assert load_resumable_session_id("s1", "opus") == "sess-abc"
+        assert load_resumable_session_id("s1", "") == "sess-abc"
+
+    def test_guard_blocks_resume_without_capability(self):
+        from bobi.sdk import load_resumable_session_id, save_session_id
+        save_session_id("s1", "sess-abc", model="haiku")
+        with patch("bobi.brain.get_brain", self._incapable_brain):
+            assert load_resumable_session_id("s1", "haiku") == "sess-abc"
+            assert load_resumable_session_id("s1", "opus") == ""
+            assert load_resumable_session_id("s1", "") == ""
 
     def test_empty_recorded_model_still_guards(self):
+        """'' means 'provider default' and is a real model for the guard."""
         from bobi.sdk import load_resumable_session_id, save_session_id
         save_session_id("s2", "sess-abc", model="")
-        assert load_resumable_session_id("s2", "") == "sess-abc"
-        assert load_resumable_session_id("s2", "haiku") == ""
+        with patch("bobi.brain.get_brain", self._incapable_brain):
+            assert load_resumable_session_id("s2", "") == "sess-abc"
+            assert load_resumable_session_id("s2", "haiku") == ""
 
     def test_missing_record_resumes_unconditionally(self):
         from bobi.sdk import load_resumable_session_id, save_session_id

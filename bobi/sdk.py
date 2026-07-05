@@ -453,14 +453,18 @@ def load_session_id(name: str) -> str:
 
 
 def load_resumable_session_id(name: str, model: str) -> str:
-    """The saved session id, unless it was recorded under a different model.
+    """The saved session id, if the active brain can continue it under *model*.
 
-    A session created under one model must not be resumed under another - the
-    same rule the workflow orchestrator applies with a fresh session on model
-    change. An empty recorded model means "ran under the provider default" and
-    still guards; only sessions with no record at all (saved before #617)
-    resume unconditionally, and they get a model record on their next save.
+    Same-model sessions always resume. A session recorded under a different
+    model continues natively only when the brain supports cross-model resume
+    (#642); otherwise it starts fresh - the same rule the workflow
+    orchestrator applies. An empty recorded model means "ran under the
+    provider default" and still counts as a model; only sessions with no
+    record at all (saved before #617) resume unconditionally, and they get a
+    model record on their next save.
     """
+    from bobi.brain import continuation_token, get_brain
+
     saved_id = load_session_id(name)
     if not saved_id:
         return ""
@@ -468,14 +472,22 @@ def load_resumable_session_id(name: str, model: str) -> str:
     if not model_path.exists():
         return saved_id
     recorded = model_path.read_text().strip()
-    if recorded != (model or ""):
+    token = continuation_token(
+        get_brain(), session_id=saved_id,
+        from_model=recorded, to_model=model or "",
+    )
+    if not token:
         log.info(
             "Session %s was recorded under model %r but %r is now resolved; "
             "starting fresh.", name, recorded or "<default>",
             model or "<default>",
         )
-        return ""
-    return saved_id
+    elif recorded != (model or ""):
+        log.info(
+            "Session %s continues natively from model %r to %r.",
+            name, recorded or "<default>", model or "<default>",
+        )
+    return token
 
 
 def log_activity(event: str, data: dict | None = None, session: str = "") -> None:

@@ -19,6 +19,7 @@ from collections.abc import MutableMapping
 
 from bobi.brain.base import (
     AssistantText,
+    BrainCapabilities,
     BrainCost,
     BrainFactory,
     BrainMessage,
@@ -144,6 +145,35 @@ def set_process_brain(kind: str | None, model: str | None = None) -> None:
         _set_process_brain_model(model)
 
 
+def continuation_token(
+    brain: BrainFactory,
+    *,
+    session_id: str,
+    from_model: str,
+    to_model: str,
+) -> str:
+    """The resume token for continuing *session_id* under *to_model*, or "".
+
+    The single place that decides continue-vs-fresh for every resume site
+    (#642): the workflow orchestrator's resume and mid-run model switches, and
+    ``load_resumable_session_id`` for subagents. Same model always continues;
+    a cross-model continuation requires the brain's ``cross_model_resume``
+    capability. An empty *session_id* never continues. ``""`` as a model means
+    "the provider default" and is a real value for mismatch purposes.
+
+    An empty return means the caller must start fresh and re-inject whatever
+    context it can reconstruct.
+    """
+    if not session_id:
+        return ""
+    if (from_model or "") == (to_model or ""):
+        return session_id
+    caps = getattr(brain, "capabilities", None)
+    if caps is not None and getattr(caps, "cross_model_resume", False):
+        return session_id
+    return ""
+
+
 def get_brain(kind: str | None = None) -> BrainFactory:
     """Resolve a brain kind to its factory.
 
@@ -166,6 +196,7 @@ def get_brain(kind: str | None = None) -> BrainFactory:
 
 __all__ = [
     "AssistantText",
+    "BrainCapabilities",
     "BrainCost",
     "BrainFactory",
     "BrainMessage",
@@ -177,6 +208,7 @@ __all__ = [
     "TurnResult",
     "DEFAULT_BRAIN",
     "BRAIN_ENV",
+    "continuation_token",
     "get_brain",
     "get_process_brain_model",
     "pin_process_brain",

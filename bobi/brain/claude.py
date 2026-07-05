@@ -21,6 +21,7 @@ from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
     AssistantText,
+    BrainCapabilities,
     BrainCost,
     BrainMessage,
     BrainSession,
@@ -232,6 +233,10 @@ class ClaudeBrain:
 
     name = "claude"
     provider = "anthropic"
+    # The Claude CLI accepts --resume together with a different --model, so a
+    # session's transcript continues under the new model (#642; verified live
+    # by tests/integration/test_cross_model_resume.py).
+    capabilities = BrainCapabilities(cross_model_resume=True)
 
     def make_session(
         self,

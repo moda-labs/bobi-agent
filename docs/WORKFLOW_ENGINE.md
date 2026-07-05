@@ -123,10 +123,12 @@ steps:
     prompt: "Find companies matching the wedge..."
 ```
 
-Model changes are prompt-step boundaries. If a resumed workflow reaches a
-prompt step whose model differs from the saved session's model, the engine
-starts a fresh session for that step and injects the accumulated workflow
-context so the handoff chain remains intact.
+Model changes are prompt-step boundaries. When a workflow reaches a prompt
+step whose model differs from the session's current model, the engine
+continues the same session natively on the new model when the brain supports
+it (Claude does), keeping the full conversation. On brains without that
+capability it falls back to a fresh session seeded with the accumulated
+workflow context, so the handoff chain remains intact either way.
 
 ### Route step
 

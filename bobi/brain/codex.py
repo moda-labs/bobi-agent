@@ -32,6 +32,7 @@ from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
     AssistantText,
+    BrainCapabilities,
     BrainCost,
     BrainMessage,
     BrainSession,
@@ -267,6 +268,10 @@ class CodexBrain:
 
     name = "codex"
     provider = "openai"
+    # ``codex exec resume`` accepts ``-m``, but whether it actually switches
+    # the thread's model is unverified (#485 Phase 0 only established the
+    # narrower resume flag set). Stays off until a spike proves it (#642).
+    capabilities = BrainCapabilities()
 
     def make_session(
         self,
