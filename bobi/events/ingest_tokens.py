@@ -16,7 +16,7 @@ from pathlib import Path
 import httpx
 
 from bobi import http as pooled
-from bobi.events.gateway import GatewayError, _gateway_context
+from bobi.events.publish import bubble_context
 
 log = logging.getLogger(__name__)
 
@@ -29,13 +29,12 @@ def _signed_request(method: str, path: str, body: str,
                     project_path: Path | None) -> dict:
     from bobi.events.signing import sign_headers
 
-    try:
-        es_url, bubble_id, bubble_key = _gateway_context(project_path)
-    except GatewayError as e:
+    es_url, bubble_id, bubble_key = bubble_context(project_path)
+    if not (bubble_id and bubble_key):
         raise IngestTokenError(
             "No bubble credential found. Start the agent first - ingest "
             "tokens are minted with the instance's bubble identity."
-        ) from e
+        )
 
     headers = {"Content-Type": "application/json"} if body else {}
     headers.update(sign_headers(bubble_id, bubble_key, method, path, body))
