@@ -28,3 +28,4 @@ worktrees/
 
 # Local session handoff notes (never committed)
 handoffs/
+.bobi-dogfood.env
