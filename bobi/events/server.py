@@ -82,7 +82,10 @@ def _build_local(es_dir: Path) -> None:
         "--platform=node",
         "--target=node20",
         "--outfile=dist/local.js",
-        "--packages=external",
+        # Bundle everything except ws: the Chat SDK packages are ESM-only,
+        # which a CJS bundle cannot require() at runtime. ws stays external
+        # for its optional native addons (bufferutil, utf-8-validate).
+        "--external:ws",
     ], es_dir)
 
 

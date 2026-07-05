@@ -6,7 +6,7 @@
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
-		"build:local": "esbuild src/local.ts --bundle --platform=node --target=node20 --outfile=dist/local.js --packages=external",
+		"build:local": "esbuild src/local.ts --bundle --platform=node --target=node20 --outfile=dist/local.js --external:ws",
 		"start:local": "node dist/local.js",
 		"test": "vitest",
 		"cf-typegen": "wrangler types"

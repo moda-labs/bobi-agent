@@ -34,12 +34,30 @@ import {
 	handleDeregisterDeployment,
 	handleTopicEvent,
 	handleChannelsSend,
+	handleChannelsTyping,
+	handleChannelsHistory,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
 	resolveSlackSigningSecret,
 } from "../src/core";
 
 afterEach(() => vi.unstubAllGlobals());
+
+// handleSlackWebhook takes the raw webhook body (the Chat SDK bridge parses
+// it); tests build payload objects, so stringify at the call boundary.
+function slackWebhook(store: StorageAdapter, payload: Record<string, unknown>) {
+	return handleSlackWebhook(store, JSON.stringify(payload));
+}
+
+// The Chat SDK api module form-encodes Slack Web API calls; decode a stubbed
+// fetch's request body (form or JSON) back into an object for assertions.
+function decodeSlackBody(init?: RequestInit): Record<string, unknown> {
+	const raw = String(init?.body ?? "");
+	if (raw.startsWith("{")) {
+		return JSON.parse(raw || "{}");
+	}
+	return Object.fromEntries(new URLSearchParams(raw));
+}
 
 function stubSlackAuth(teamId: string, botId = "B1", appId = "A1") {
 	vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
@@ -1171,7 +1189,7 @@ describe("handleLinearWebhook", () => {
 describe("handleSlackWebhook", () => {
 	it("delivers a v2 slack mention event with chat delivery", async () => {
 		const store = createMockStorage();
-		const result = await handleSlackWebhook(store, {
+		const result = await slackWebhook(store, {
 			type: "event_callback",
 			team_id: "T123",
 			event: {
@@ -1196,7 +1214,7 @@ describe("handleSlackWebhook", () => {
 		await store.addSubscription("slack:T123:app:A_BOBBERS", "bobbers");
 		await store.addSubscription("slack:T123:app:A_ENG_TEAM", "eng-team");
 
-		const result = await handleSlackWebhook(store, {
+		const result = await slackWebhook(store, {
 			type: "event_callback",
 			team_id: "T123",
 			api_app_id: "A_BOBBERS",
@@ -1221,7 +1239,7 @@ describe("handleSlackWebhook", () => {
 		await store.addSubscription("slack:T123:app:A_ENG_TEAM:CENG", "eng-team");
 		await store.addSubscription("slack:T123:app:A_BOBBERS:CENG", "bobbers");
 
-		const result = await handleSlackWebhook(store, {
+		const result = await slackWebhook(store, {
 			type: "event_callback",
 			team_id: "T123",
 			api_app_id: "A_ENG_TEAM",
@@ -1250,7 +1268,7 @@ describe("handleSlackWebhook", () => {
 		await store.addSubscription("slack:T123:CENG", "bobbers-stale-channel");
 		await store.addSubscription("slack:T123:app:A_ENG_TEAM:CENG", "eng-team");
 
-		const result = await handleSlackWebhook(store, {
+		const result = await slackWebhook(store, {
 			type: "event_callback",
 			team_id: "T123",
 			api_app_id: "A_ENG_TEAM",
@@ -1275,7 +1293,7 @@ describe("handleSlackWebhook", () => {
 
 	it("returns ok for non-event_callback types without delivering", async () => {
 		const store = createMockStorage();
-		const result = await handleSlackWebhook(store, { type: "app_rate_limited" });
+		const result = await slackWebhook(store, { type: "app_rate_limited" });
 		expect(result.status).toBe(200);
 		expect(store.delivered).toHaveLength(0);
 	});
@@ -1284,7 +1302,7 @@ describe("handleSlackWebhook", () => {
 		const store = createMockStorage();
 		store.slackWorkspaces.set("T123", { bot_token: "xoxb-test", bot_id: "BSELF" });
 
-		const result = await handleSlackWebhook(store, {
+		const result = await slackWebhook(store, {
 			type: "event_callback",
 			team_id: "T123",
 			event: {
@@ -1315,7 +1333,7 @@ describe("handleSlackWebhook", () => {
 			},
 		});
 		// B_new authored it, but it arrives via A_old's webhook (api_app_id=A_old).
-		const result = await handleSlackWebhook(store, {
+		const result = await slackWebhook(store, {
 			type: "event_callback",
 			team_id: "T1",
 			api_app_id: "A_old",
@@ -1375,8 +1393,8 @@ describe("handleSlackWebhook", () => {
 			},
 		};
 
-		const mention = await handleSlackWebhook(store, mentionPayload);
-		const message = await handleSlackWebhook(store, messagePayload);
+		const mention = await slackWebhook(store, mentionPayload);
+		const message = await slackWebhook(store, messagePayload);
 
 		expect(mention.status).toBe(200);
 		expect(message.status).toBe(200);
@@ -1403,7 +1421,7 @@ describe("handleSlackWebhook", () => {
 			},
 		});
 
-		await handleSlackWebhook(store, {
+		await slackWebhook(store, {
 			type: "event_callback",
 			team_id: "T123",
 			api_app_id: "A_ENG",
@@ -1434,7 +1452,7 @@ describe("handleSlackWebhook", () => {
 			},
 		});
 
-		await handleSlackWebhook(store, {
+		await slackWebhook(store, {
 			type: "event_callback",
 			team_id: "T123",
 			api_app_id: "A_UNKNOWN",
@@ -1454,7 +1472,7 @@ describe("handleSlackWebhook", () => {
 
 	it("returns challenge for url_verification payload", async () => {
 		const store = createMockStorage();
-		const result = await handleSlackWebhook(store, {
+		const result = await slackWebhook(store, {
 			type: "url_verification",
 			challenge: "test-challenge",
 		});
@@ -1475,7 +1493,7 @@ describe("handleSlackWebhook", () => {
 		});
 
 		const fromBot = async (appId: string, bid: string) =>
-			handleSlackWebhook(store, {
+			slackWebhook(store, {
 				type: "event_callback",
 				team_id: "T123",
 				api_app_id: appId,
@@ -1982,7 +2000,8 @@ describe("handleSlackSend", () => {
 
 describe("handleChannelsSend", () => {
 	// Stub fetch capturing Slack Web API calls; auth.test succeeds so a signed
-	// workspace registration can seed the bubble-scoped token record.
+	// workspace registration can seed the bubble-scoped token record. Send
+	// traffic now flows through the Chat SDK api module, which form-encodes.
 	function stubSlackApi(teamId: string) {
 		const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
 		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
@@ -1993,7 +2012,7 @@ describe("handleChannelsSend", () => {
 			if (u.includes("/bots.info")) {
 				return fetchOk(200, { ok: true, bot: { app_id: "A1" } });
 			}
-			calls.push({ url: u, body: JSON.parse(String(init?.body ?? "{}")) });
+			calls.push({ url: u, body: decodeSlackBody(init) });
 			return fetchOk(200, { ok: true, ts: "99.1" });
 		}));
 		return calls;
@@ -2067,18 +2086,23 @@ describe("handleChannelsSend", () => {
 		expect((result.body as Record<string, string>).error).toContain("bot token");
 	});
 
-	it("posts into the thread encoded in the conversation ref", async () => {
+	it("posts into the thread encoded in the conversation ref as native markdown", async () => {
 		const store = createMockStorage();
 		const calls = stubSlackApi("T1");
 		await seedWorkspace(store, "bubA");
 		const result = await handleChannelsSend(store, {
-			conversation: "slack:T1:channel:C9:thread:12.34", text: "hello",
+			conversation: "slack:T1:channel:C9:thread:12.34", text: "**hello**",
 		}, "bubA");
 		expect(result.status).toBe(200);
 		expect((result.body as Record<string, unknown>).ts).toBe("99.1");
 		expect(calls).toHaveLength(1);
 		expect(calls[0].url).toContain("chat.postMessage");
-		expect(calls[0].body).toMatchObject({ channel: "C9", text: "hello", thread_ts: "12.34" });
+		// Raw markdown goes out via markdown_text — formatting is the
+		// gateway's job now, never the client's (#629).
+		expect(calls[0].body).toMatchObject({
+			channel: "C9", markdown_text: "**hello**", thread_ts: "12.34",
+		});
+		expect(calls[0].body.text).toBeUndefined();
 	});
 
 	it("posts without thread_ts when the ref has no thread", async () => {
@@ -2104,11 +2128,129 @@ describe("handleChannelsSend", () => {
 		expect(result.status).toBe(200);
 		expect(calls).toHaveLength(2);
 		expect(calls[0].url).toContain("chat.update");
-		expect(calls[0].body).toMatchObject({ channel: "C9", ts: "12.99", text: "final answer" });
+		expect(calls[0].body).toMatchObject({ channel: "C9", ts: "12.99", markdown_text: "final answer" });
 		// Replacing a placeholder clears the "is thinking..." indicator,
 		// matching the CLI edit path.
 		expect(calls[1].url).toContain("assistant.threads.setStatus");
 		expect(calls[1].body).toMatchObject({ channel_id: "C9", thread_ts: "12.34", status: "" });
+	});
+
+	it("mode final posts when no edit_ref and clears thread status", async () => {
+		const store = createMockStorage();
+		const calls = stubSlackApi("T1");
+		await seedWorkspace(store, "bubA");
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34",
+			text: "done", mode: "final",
+		}, "bubA");
+		expect(result.status).toBe(200);
+		expect(calls).toHaveLength(2);
+		expect(calls[0].url).toContain("chat.postMessage");
+		expect(calls[1].url).toContain("assistant.threads.setStatus");
+		expect(calls[1].body).toMatchObject({ status: "" });
+	});
+
+	it("mode final with edit_ref edits like update", async () => {
+		const store = createMockStorage();
+		const calls = stubSlackApi("T1");
+		await seedWorkspace(store, "bubA");
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34",
+			text: "done", mode: "final", edit_ref: "12.99",
+		}, "bubA");
+		expect(result.status).toBe(200);
+		expect(calls[0].url).toContain("chat.update");
+		expect(calls[0].body).toMatchObject({ ts: "12.99" });
+	});
+
+	it("truncates text beyond the channel's declared budget", async () => {
+		const store = createMockStorage();
+		const calls = stubSlackApi("T1");
+		await seedWorkspace(store, "bubA");
+		const long = "x".repeat(13000);
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:dm:D7", text: long,
+		}, "bubA");
+		expect(result.status).toBe(200);
+		const sent = String(calls[0].body.markdown_text);
+		// maxLength is the channel's HARD limit — the marker must fit inside
+		// it, or Slack rejects the whole truncated send (msg_too_long).
+		expect(sent.length).toBeLessThanOrEqual(12000);
+		expect(sent.endsWith("_(truncated)_")).toBe(true);
+	});
+
+	it("files with edit_ref replace the placeholder text, then attach", async () => {
+		const store = createMockStorage();
+		const calls: Array<{ url: string; body: string }> = [];
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes("/auth.test")) return fetchOk(200, { ok: true, team_id: "T1", bot_id: "B1" });
+			if (u.includes("/bots.info")) return fetchOk(200, { ok: true, bot: { app_id: "A1" } });
+			calls.push({ url: u, body: String(init?.body ?? "") });
+			if (u.includes("getUploadURLExternal")) {
+				return fetchOk(200, { ok: true, upload_url: "https://slack.test/upload", file_id: "F1" });
+			}
+			return fetchOk(200, { ok: true, ts: "12.99", files: [{ id: "F1" }] });
+		}));
+		await seedWorkspace(store, "bubA");
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34",
+			text: "done - see attached", mode: "final", edit_ref: "12.99",
+			files: [{ name: "out.png", content_b64: btoa("png") }],
+		}, "bubA");
+		expect(result.status).toBe(200);
+		const urls = calls.map((c) => c.url).join(" ");
+		// Placeholder resolved first, then the file attached (no dup comment).
+		expect(calls[0].url).toContain("chat.update");
+		expect(String(calls[0].body)).toContain("12.99");
+		expect(urls).toContain("completeUploadExternal");
+	});
+
+	it("rejects files with edit_ref but no text", async () => {
+		const store = createMockStorage();
+		stubSlackApi("T1");
+		await seedWorkspace(store, "bubA");
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34",
+			mode: "final", edit_ref: "12.99",
+			files: [{ name: "out.png", content_b64: btoa("png") }],
+		}, "bubA");
+		expect(result.status).toBe(400);
+		expect((result.body as Record<string, string>).error).toContain("text required");
+	});
+
+	it("uploads files via the channel adapter", async () => {
+		const store = createMockStorage();
+		const calls: Array<{ url: string; body: string }> = [];
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes("/auth.test")) return fetchOk(200, { ok: true, team_id: "T1", bot_id: "B1" });
+			if (u.includes("/bots.info")) return fetchOk(200, { ok: true, bot: { app_id: "A1" } });
+			calls.push({ url: u, body: String(init?.body ?? "") });
+			if (u.includes("getUploadURLExternal")) {
+				return fetchOk(200, { ok: true, upload_url: "https://slack.test/upload", file_id: "F1" });
+			}
+			return fetchOk(200, { ok: true, files: [{ id: "F1" }] });
+		}));
+		await seedWorkspace(store, "bubA");
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34",
+			text: "here you go",
+			files: [{ name: "report.txt", content_b64: btoa("hello world"), title: "Report" }],
+		}, "bubA");
+		expect(result.status).toBe(200);
+		const urls = calls.map((c) => c.url).join(" ");
+		expect(urls).toContain("getUploadURLExternal");
+		expect(urls).toContain("completeUploadExternal");
+	});
+
+	it("rejects malformed files", async () => {
+		const store = createMockStorage();
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:dm:D1", files: [{ name: "x" }],
+		}, "bubA");
+		expect(result.status).toBe(400);
+		expect((result.body as Record<string, string>).error).toContain("files");
 	});
 
 	it("surfaces a Slack API error as 502", async () => {
@@ -2125,6 +2267,131 @@ describe("handleChannelsSend", () => {
 		}, "bubA");
 		expect(result.status).toBe(502);
 		expect((result.body as Record<string, string>).error).toBe("channel_not_found");
+	});
+});
+
+describe("handleChannelsTyping", () => {
+	function stubSlackApi(teamId: string) {
+		const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes("/auth.test")) return fetchOk(200, { ok: true, team_id: teamId, bot_id: "B1" });
+			if (u.includes("/bots.info")) return fetchOk(200, { ok: true, bot: { app_id: "A1" } });
+			calls.push({ url: u, body: decodeSlackBody(init) });
+			return fetchOk(200, { ok: true });
+		}));
+		return calls;
+	}
+
+	async function seedWorkspace(store: ReturnType<typeof createMockStorage>, bubbleId: string) {
+		await handleSlackWorkspaceRegister(
+			store, { workspace_id: "T1", bot_token: "xoxb-A", bot_id: "B1" }, bubbleId,
+		);
+	}
+
+	it("rejects missing conversation or non-boolean on", async () => {
+		const store = createMockStorage();
+		let result = await handleChannelsTyping(store, { on: true }, "bubA");
+		expect(result.status).toBe(400);
+		result = await handleChannelsTyping(store, { conversation: "slack:T1:dm:D1", on: "yes" }, "bubA");
+		expect(result.status).toBe(400);
+	});
+
+	it("sets and clears the thread status", async () => {
+		const store = createMockStorage();
+		const calls = stubSlackApi("T1");
+		await seedWorkspace(store, "bubA");
+		let result = await handleChannelsTyping(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34", on: true,
+		}, "bubA");
+		expect(result.status).toBe(200);
+		expect((result.body as Record<string, unknown>).supported).toBe(true);
+		expect(calls[0].url).toContain("assistant.threads.setStatus");
+		expect(calls[0].body).toMatchObject({
+			channel_id: "C9", thread_ts: "12.34", status: "is thinking…",
+		});
+		result = await handleChannelsTyping(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34", on: false,
+		}, "bubA");
+		expect(result.status).toBe(200);
+		expect(calls[1].body).toMatchObject({ status: "" });
+	});
+
+	it("keeps the tenancy boundary: no token for another bubble's workspace", async () => {
+		const store = createMockStorage();
+		stubSlackApi("T1");
+		await seedWorkspace(store, "bubB");
+		const result = await handleChannelsTyping(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34", on: true,
+		}, "bubA");
+		expect(result.status).toBe(400);
+	});
+});
+
+describe("handleChannelsHistory", () => {
+	function stubReplies(teamId: string, pages: Array<Record<string, unknown>>) {
+		let page = 0;
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes("/auth.test")) return fetchOk(200, { ok: true, team_id: teamId, bot_id: "B1" });
+			if (u.includes("/bots.info")) return fetchOk(200, { ok: true, bot: { app_id: "A1" } });
+			return fetchOk(200, pages[Math.min(page++, pages.length - 1)]);
+		}));
+	}
+
+	async function seedWorkspace(store: ReturnType<typeof createMockStorage>, bubbleId: string) {
+		await handleSlackWorkspaceRegister(
+			store, { workspace_id: "T1", bot_token: "xoxb-A", bot_id: "B1" }, bubbleId,
+		);
+	}
+
+	it("returns the thread messages with file metadata", async () => {
+		const store = createMockStorage();
+		stubReplies("T1", [{
+			ok: true,
+			messages: [
+				{ user: "U1", text: "question", ts: "12.34" },
+				{
+					user: "U2", text: "answer", ts: "12.35",
+					files: [{ id: "F1", name: "a.png", mimetype: "image/png", url_private: "https://x" }],
+				},
+			],
+		}]);
+		await seedWorkspace(store, "bubA");
+		const result = await handleChannelsHistory(
+			store, "slack:T1:channel:C9:thread:12.34", 100, "bubA");
+		expect(result.status).toBe(200);
+		const body = result.body as { messages: Array<Record<string, unknown>> };
+		expect(body.messages).toHaveLength(2);
+		expect(body.messages[0]).toMatchObject({ user: "U1", text: "question", ts: "12.34" });
+		expect(body.messages[1].files).toEqual([
+			{ id: "F1", name: "a.png", mimetype: "image/png", url_private: "https://x" },
+		]);
+	});
+
+	it("reads channel history (oldest-first) for a ref without a thread anchor", async () => {
+		const store = createMockStorage();
+		// conversations.history returns newest-first; the gateway reverses it.
+		stubReplies("T1", [{
+			ok: true,
+			messages: [
+				{ user: "U2", text: "newest", ts: "2.0" },
+				{ user: "U1", text: "oldest", ts: "1.0" },
+			],
+		}]);
+		await seedWorkspace(store, "bubA");
+		const result = await handleChannelsHistory(store, "slack:T1:dm:D1", 100, "bubA");
+		expect(result.status).toBe(200);
+		const body = result.body as { messages: Array<Record<string, unknown>> };
+		expect(body.messages.map((m) => m.ts)).toEqual(["1.0", "2.0"]);
+	});
+
+	it("rejects missing/invalid conversation", async () => {
+		const store = createMockStorage();
+		let result = await handleChannelsHistory(store, "", 100, "bubA");
+		expect(result.status).toBe(400);
+		result = await handleChannelsHistory(store, "slack:T1:D1", 100, "bubA");
+		expect(result.status).toBe(400);
 	});
 });
 
@@ -2212,7 +2479,7 @@ describe("handleSlackWorkspaceRegister", () => {
 		expect(ws?.bots?.A2?.signing_secret).toBe("sec-2");
 
 		// The first bot's own messages are still filtered after the second registers.
-		const result = await handleSlackWebhook(store, {
+		const result = await slackWebhook(store, {
 			type: "event_callback",
 			team_id: "T1",
 			api_app_id: "A1",

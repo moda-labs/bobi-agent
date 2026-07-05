@@ -313,7 +313,7 @@ fill in before starting the team.
 ## Built-in CLI tools
 
 Every agent has access to the full `bobi` CLI — messaging
-(`agent <name> message`, `agent <name> ask`, `slack-reply`), sub-agent
+(`agent <name> message`, `agent <name> ask`, `reply`), sub-agent
 management (`agent <name> subagents launch`, `list`, `cancel`), and
 observability (`agent <name> status`, `events`, `transcript`). Reference
 these in role prompts so agents know how to

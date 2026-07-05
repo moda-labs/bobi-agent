@@ -15,17 +15,30 @@ Event: github/github.issues
 
 ```
 Event: slack/slack.mention
-  workspace: T0952RZRZ0X
+  Can you check the deploy?
+  conversation: slack:T0952RZRZ0X:channel:C0PROJFOO:thread:171.42
   channel: C0PROJFOO
   user_id: U0952RZRZ0X
-  text: Can you check the deploy?
 ```
 
 `user_id` is the stable Slack identity (survives display name changes).
 
-### Slack placeholder messages
+### Replying to chat events
 
-When a Slack mention or DM arrives, the framework automatically posts an
+Chat events carry a `conversation:` line - the reply address. Echo it
+back verbatim with `bobi reply`; never assemble platform addressing
+yourself:
+
+```bash
+bobi reply <conversation> "message"
+```
+
+Write plain markdown. The gateway converts it for the channel - do not
+pre-convert to Slack mrkdwn.
+
+### Placeholder messages
+
+When a chat mention or DM arrives, the framework automatically posts an
 "Evaluating…" placeholder and sets a "is thinking…" typing indicator.
 Those `slack.mention` and `slack.dm` events include a `placeholder_ts`
 field with the placeholder's message timestamp. Passive
@@ -34,7 +47,7 @@ field with the placeholder's message timestamp. Passive
 **Use `--edit` to replace the placeholder with your actual response:**
 
 ```bash
-bobi slack-reply -w <workspace> -c <channel> -t <thread_ts> --edit <placeholder_ts> "message"
+bobi reply <conversation> --edit <placeholder_ts> "message"
 ```
 
 This edits the placeholder in-place (no orphaned "Evaluating…") and
@@ -43,11 +56,13 @@ is present in the event. If no `placeholder_ts` exists, reply normally
 without `--edit`. Subsequent replies in the same thread should also be
 posted normally (no `--edit`).
 
-Chat events may also carry a `conversation:` line (e.g.
-`conversation: slack:T123:channel:C456:thread:171.42`). It is a reply
-address for the upcoming channel-agnostic `bobi reply` command. Ignore
-it for now and keep replying with `bobi slack-reply` as described above;
-do not pass the conversation reference to `slack-reply`.
+To share a file, add `--file <path>`; it combines with `--edit`: the
+TEXT replaces the placeholder and the file is attached after it. To
+read the conversation's history, use
+`bobi read-conversation <conversation>`.
+
+The `slack-reply`, `slack-upload-file`, and `slack-read-thread` commands
+are deprecated shims over the same path - do not use them in new work.
 
 ## CLI tools
 

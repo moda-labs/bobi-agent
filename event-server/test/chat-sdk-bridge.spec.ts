@@ -15,6 +15,7 @@ import {
 	bridgeSlackWebhook,
 	type ChatSdkBridgeResult,
 } from "../src/adapters/chat-sdk-slack";
+import { normalizeSlackWebhook } from "../src/adapters/slack";
 
 // ---------------------------------------------------------------------------
 // Fixtures — Slack event payloads
@@ -305,6 +306,35 @@ describe("bridge parity with existing normalizeSlackWebhook", () => {
 			mentionPayload({ text: longText }),
 		);
 		expect(result.event!.text.length).toBeLessThanOrEqual(4000);
+	});
+
+	// #628: file attachments survive the flip — same fields.files JSON and
+	// payload.files shape as the hand-rolled normalizer.
+	it("extracts file attachments identically to normalizeSlackWebhook", () => {
+		const slackFiles = [{
+			id: "F0AB12CD34",
+			name: "screenshot.png",
+			mimetype: "image/png",
+			filetype: "png",
+			url_private: "https://files.slack.com/files-pri/T-F/screenshot.png",
+			url_private_download: "https://files.slack.com/files-pri/T-F/download/screenshot.png",
+			size: 12345,
+		}];
+		const body = dmPayload({ files: slackFiles });
+		const bridged = bridgeSlackWebhook(body);
+		const handRolled = normalizeSlackWebhook(JSON.parse(body));
+		expect(bridged.event!.fields!.files).toBe(handRolled.event!.fields!.files);
+		expect(bridged.event!.payload.files).toEqual(handRolled.event!.payload.files);
+		const parsed = JSON.parse(bridged.event!.fields!.files as string);
+		expect(parsed).toEqual([{
+			id: "F0AB12CD34",
+			name: "screenshot.png",
+			mimetype: "image/png",
+			filetype: "png",
+			url_private: "https://files.slack.com/files-pri/T-F/screenshot.png",
+			url_private_download: "https://files.slack.com/files-pri/T-F/download/screenshot.png",
+			size: "12345",
+		}]);
 	});
 });
 

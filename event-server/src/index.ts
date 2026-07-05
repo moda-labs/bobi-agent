@@ -25,6 +25,8 @@ import {
 	handleDeregisterDeployment,
 	handleTopicEvent,
 	handleChannelsSend,
+	handleChannelsTyping,
+	handleChannelsHistory,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
 	handleTestSeedResourceGrants,
@@ -247,6 +249,35 @@ async function readJson(request: Request): Promise<Record<string, unknown> | nul
 	}
 }
 
+// Shared prologue of every mandatory bubble-signed route: read the exact wire
+// bytes (the signature covers them — never a re-serialization), parse JSON,
+// and authenticate. Returns a ready error Response on failure. A GET carries
+// an empty body, which verifies and parses as {}.
+async function bubbleAuthedJson(
+	request: Request,
+	url: URL,
+	storage: StorageAdapter,
+): Promise<{ bubble: BubbleRecord; data: Record<string, unknown> } | Response> {
+	const raw = await request.text();
+	let data: Record<string, unknown> = {};
+	if (raw) {
+		try {
+			data = JSON.parse(raw) as Record<string, unknown>;
+		} catch {
+			return Response.json({ error: "invalid JSON" }, { status: 400 });
+		}
+	}
+	const ctx = readBubbleAuthHeaders(
+		(n) => request.headers.get(n),
+		request.method,
+		url.pathname + url.search,
+		raw,
+	);
+	const bubble = await authenticateBubble(storage, ctx);
+	if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
+	return { bubble, data };
+}
+
 // ---------------------------------------------------------------------------
 // Routing table
 // ---------------------------------------------------------------------------
@@ -331,7 +362,7 @@ export default {
 				}
 			}
 
-			return respond(await handleSlackWebhook(storage, payload));
+			return respond(await handleSlackWebhook(storage, body, payload));
 		}
 
 		if (method === "POST" && path === "/deployments") {
@@ -430,67 +461,43 @@ export default {
 		}
 
 		if (method === "POST" && path === "/slack/send") {
-			// Raw text so the bubble signature verifies over the exact wire bytes.
-			const raw = await request.text();
-			let data: Record<string, unknown>;
-			try {
-				data = JSON.parse(raw);
-			} catch {
-				return Response.json({ error: "invalid JSON" }, { status: 400 });
-			}
-			const ctx = readBubbleAuthHeaders(
-				(n) => request.headers.get(n),
-				method,
-				url.pathname + url.search,
-				raw,
-			);
-			const bubble = await authenticateBubble(storage, ctx);
-			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
-			return respond(await handleSlackSend(storage, data, bubble.id));
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleSlackSend(storage, auth.data, auth.bubble.id));
 		}
 
 		if (method === "POST" && path === "/channels/send") {
 			// Channel-agnostic send (#618) - same mandatory bubble auth as
-			// /slack/send. Raw text so the signature verifies over the wire bytes.
-			const raw = await request.text();
-			let data: Record<string, unknown>;
-			try {
-				data = JSON.parse(raw);
-			} catch {
-				return Response.json({ error: "invalid JSON" }, { status: 400 });
-			}
-			const ctx = readBubbleAuthHeaders(
-				(n) => request.headers.get(n),
-				method,
-				url.pathname + url.search,
-				raw,
-			);
-			const bubble = await authenticateBubble(storage, ctx);
-			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
-			return respond(await handleChannelsSend(storage, data, bubble.id));
+			// /slack/send.
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleChannelsSend(storage, auth.data, auth.bubble.id));
+		}
+
+		if (method === "POST" && path === "/channels/typing") {
+			// Set/clear a channel's thinking indicator (#629).
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleChannelsTyping(storage, auth.data, auth.bubble.id));
+		}
+
+		if (method === "GET" && path === "/channels/history") {
+			// Read a conversation's messages (#629). The signature covers the
+			// full path INCLUDING the query string, with an empty body.
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			const conversation = url.searchParams.get("conversation") || "";
+			const limit = parseInt(url.searchParams.get("limit") || "100", 10);
+			return respond(await handleChannelsHistory(storage, conversation, limit, auth.bubble.id));
 		}
 
 		if (method === "POST" && path === "/resources/authorize") {
-			// Raw text so the bubble signature verifies over the exact wire bytes.
 			// Auth is MANDATORY (no legacy unsigned caller) — mirror /slack/send.
 			// The credential in the body is verified once and never persisted; the
 			// route is deliberately excluded from any body logging.
-			const raw = await request.text();
-			let data: Record<string, unknown>;
-			try {
-				data = JSON.parse(raw);
-			} catch {
-				return Response.json({ error: "invalid JSON" }, { status: 400 });
-			}
-			const ctx = readBubbleAuthHeaders(
-				(n) => request.headers.get(n),
-				method,
-				url.pathname + url.search,
-				raw,
-			);
-			const bubble = await authenticateBubble(storage, ctx);
-			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
-			return respond(await handleAuthorizeResource(storage, data, bubble.id));
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleAuthorizeResource(storage, auth.data, auth.bubble.id));
 		}
 
 		if (method === "POST" && path === "/__test/resource-grants" && env.TEST_GRANTS_SECRET) {

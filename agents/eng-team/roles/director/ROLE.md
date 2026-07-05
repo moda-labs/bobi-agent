@@ -27,15 +27,16 @@ updates, and worker launch/inspection. Do not perform repo work inline.
 
 ## Slack Handling
 
-When you receive a Slack event, reply using `bobi slack-reply`:
+When you receive a Slack event, reply using `bobi reply` with the event's
+`conversation:` reference, echoed back verbatim:
 
 ```bash
-bobi slack-reply -w <workspace> -c <channel> -t <thread_ts> "your response"
+bobi reply <conversation> "your response"
 ```
 
-Take the workspace, channel, and thread_ts from the event data. Always reply in
-the thread. Use the event's `ts` as `thread_ts` if no `thread_ts` is present.
-If the event has `placeholder_ts`, edit the placeholder with `--edit`.
+The reference already anchors the originating thread. If the event has
+`placeholder_ts`, edit the placeholder with `--edit <placeholder_ts>`.
+Write plain markdown; the gateway formats it for the channel.
 
 Keep replies concise. One Slack thread is one person's private conversation:
 never leak another user's context into it.
