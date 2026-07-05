@@ -8,6 +8,7 @@ import {
 	type BubbleRecord,
 	type SlackWorkspaceRecord,
 	type ResourceGrant,
+	type IngestTokenRecord,
 	type HandlerResult,
 	subscriptionKeysForEvent,
 	namespaceSubKey,
@@ -24,6 +25,9 @@ import {
 	handleUpdateSubscriptions,
 	handleDeregisterDeployment,
 	handleTopicEvent,
+	handleIngestTokenCreate,
+	handleIngestTokenList,
+	handleIngestTokenRevoke,
 	handleChannelsSend,
 	handleChannelsTyping,
 	handleChannelsHistory,
@@ -86,6 +90,9 @@ const channelState = new Map<string, Record<string, unknown>>();
 // Resource grants (#488), keyed `service:resource:bubbleId`. In-memory and
 // strongly consistent, so the Worker's KV-propagation race never applies here.
 const resourceGrants = new Map<string, ResourceGrant>();
+// Scoped ingest tokens (#640), keyed by token HASH (the only lookup the hot
+// path needs); list/revoke scan per bubble — token counts are tiny.
+const ingestTokens = new Map<string, IngestTokenRecord>();
 
 const webhookSecret = process.env.BOBI_ES_WEBHOOK_SECRET || "";
 const slackSigningSecret = process.env.BOBI_ES_SLACK_SIGNING_SECRET || "";
@@ -154,6 +161,22 @@ const storage: StorageAdapter = {
 
 	async hasResourceGrant(service: string, resource: string, bubbleId: string): Promise<boolean> {
 		return resourceGrants.has(`${service}:${resource}:${bubbleId}`);
+	},
+
+	async putIngestToken(record: IngestTokenRecord): Promise<void> {
+		ingestTokens.set(record.token_hash, record);
+	},
+
+	async getIngestTokenByHash(hash: string): Promise<IngestTokenRecord | null> {
+		return ingestTokens.get(hash) || null;
+	},
+
+	async listIngestTokens(bubbleId: string): Promise<IngestTokenRecord[]> {
+		return [...ingestTokens.values()].filter((r) => r.bubble_id === bubbleId);
+	},
+
+	async deleteIngestToken(record: IngestTokenRecord): Promise<void> {
+		ingestTokens.delete(record.token_hash);
 	},
 
 	async putDeployment(record: DeploymentRecord): Promise<void> {
@@ -404,10 +427,10 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	// whose challenge must echo back as RAW text (JSON-quoting breaks its
 	// byte comparison), so this responds outside respond()/JSON.
 	if (method === "GET") {
-		const handshakeSource = matchWebhookSource(path);
-		if (handshakeSource) {
+		const handshakeRoute = matchWebhookSource(path);
+		if (handshakeRoute) {
 			const h = handleWebhookHandshake(
-				handshakeSource, (n) => url.searchParams.get(n) || "", webhookSecrets);
+				handshakeRoute.source, (n) => url.searchParams.get(n) || "", webhookSecrets);
 			if (h) {
 				res.writeHead(h.status, { "Content-Type": "text/plain" });
 				res.end(h.text);
@@ -416,13 +439,17 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		}
 	}
 
-	const webhookSource = method === "POST" ? matchWebhookSource(path) : null;
-	if (webhookSource) {
+	const webhookRoute = method === "POST" ? matchWebhookSource(path) : null;
+	if (webhookRoute) {
 		const body = await readBody(req);
 		const result = await handleWebhookRequest(
 			storage,
-			webhookSource,
-			{ rawBody: body, header: (n) => (req.headers[n.toLowerCase()] as string) || "" },
+			webhookRoute.source,
+			{
+				rawBody: body,
+				header: (n) => (req.headers[n.toLowerCase()] as string) || "",
+				subpath: webhookRoute.subpath,
+			},
 			webhookSecrets,
 		);
 		if (result) return respond(res, result);
@@ -546,6 +573,28 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		const auth = await bubbleAuthedJson(req, res, url);
 		if (!auth) return;
 		return respond(res, await handleAuthorizeResource(storage, auth.data, auth.bubble.id));
+	}
+
+	// Scoped ingest tokens (#640) — mint/list/revoke, mandatory bubble auth
+	// (mirrors /resources/authorize). The mint response is the only place the
+	// plaintext token ever appears.
+	if (method === "POST" && path === "/ingest-tokens") {
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleIngestTokenCreate(storage, auth.data, auth.bubble.id));
+	}
+
+	if (method === "GET" && path === "/ingest-tokens") {
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleIngestTokenList(storage, auth.bubble.id));
+	}
+
+	const ingestTokenMatch = path.match(/^\/ingest-tokens\/([^/]+)$/);
+	if (method === "DELETE" && ingestTokenMatch) {
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleIngestTokenRevoke(storage, ingestTokenMatch[1], auth.bubble.id));
 	}
 
 	if (method === "POST" && path === "/__test/resource-grants" && testGrantsSecret) {

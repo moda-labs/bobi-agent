@@ -67,6 +67,13 @@ bobi agent <name> compact
 bobi agent <name> events
 bobi agent <name> events publish alert/firing --json '{"title":"x"}'
 
+# Scoped ingest tokens: let an external system (alerting, CI, SaaS webhooks)
+# POST plain JSON to one topic via /webhooks/ingest/<topic>. The token is
+# shown once at creation; the server stores only a hash.
+bobi agent <name> events ingest-token create alert/firing --name oncall
+bobi agent <name> events ingest-token list
+bobi agent <name> events ingest-token revoke <id>
+
 bobi agent <name> transcript show manager
 bobi agent <name> transcript search "query"
 bobi agent <name> costs
