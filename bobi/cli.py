@@ -177,19 +177,19 @@ def _pin_team_brain(root: Path) -> None:
     verdict agents) must use the team's configured brain, not the framework
     default - a gateway team's check would otherwise hit real Anthropic with
     the gateway's token. Detached children don't rely on this: their env is
-    rewritten by ``child_agent_env()``.
+    rewritten by ``child_agent_env()``. Config.load also brings the runtime
+    .env (the gateway auth token, ${VAR} values) into this process.
     """
-    from bobi.brain import set_process_brain
+    from bobi.brain import set_process_brain_from_config
     from bobi.config import Config
     try:
         cfg = Config.load(root)
-    except Exception:
+    except Exception as e:  # noqa: BLE001 — `stop`/`status` must still work
+        logging.getLogger(__name__).warning(
+            "Could not load team config from %s to select its brain (%s); "
+            "sessions run by this command use the framework default.", root, e)
         return
-    set_process_brain(
-        cfg.brain_kind, cfg.brain_model,
-        gateway_base_url=cfg.brain_base_url,
-        gateway_small_model=cfg.brain_small_model,
-    )
+    set_process_brain_from_config(cfg)
 
 
 def _attach_runtime_log(root: Path) -> None:

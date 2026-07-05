@@ -313,6 +313,11 @@ def spawn_team(
     """Spawn the manager detached and return without waiting for registration."""
     project_path = _bind(project_path)
     cfg = _load_config_or_raise(project_path)
+    # Select the team's brain before the in-process preflight below: the MCP
+    # probe builds a real brain session in THIS process (#655), which may be
+    # the webapp daemon or another host that never ran the CLI agent binding.
+    from bobi.brain import set_process_brain_from_config
+    set_process_brain_from_config(cfg)
     validation = _validate_or_raise(project_path)
 
     pid_path = paths.manager_pid_path(project_path)
@@ -437,6 +442,9 @@ def run_team_foreground(
     """Run the selected manager in the current process."""
     project_path = _bind(project_path)
     cfg = _load_config_or_raise(project_path)
+    # Pin before the preflight: the MCP probe builds a brain session here.
+    from bobi.brain import set_process_brain_from_config
+    set_process_brain_from_config(cfg)
     _validate_or_raise(project_path)
     _check_nested_runtime(project_path)
     if fresh:
@@ -464,13 +472,9 @@ def run_manager_from_config(
 
     set_project_root(project_path)
 
-    from bobi.brain import set_process_brain
+    from bobi.brain import set_process_brain_from_config
 
-    set_process_brain(
-        cfg.brain_kind, cfg.brain_model,
-        gateway_base_url=cfg.brain_base_url,
-        gateway_small_model=cfg.brain_small_model,
-    )
+    set_process_brain_from_config(cfg)
 
     agent_name = cfg.agent
     role = cfg.entry_point or "manager"

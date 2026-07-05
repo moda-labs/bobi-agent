@@ -234,6 +234,30 @@ class TestChildAgentEnv:
         assert env["BOBI_GATEWAY_BASE_URL"] == "http://localhost:4000"
         assert env["BOBI_GATEWAY_SMALL_MODEL"] == "qwen3:4b"
 
+    def test_brain_interpolation_matches_config_semantics(
+        self, tmp_path, monkeypatch,
+    ):
+        """`${VAR:-default}` must resolve the same here as in Config.load -
+        a divergence passes validate yet pins an empty gateway base URL into
+        every child (#655 review finding)."""
+        from bobi.env import child_agent_env
+
+        root = tmp_path / "install"
+        config_dir = paths.package_dir(root)
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text(
+            "agent: local-team\n"
+            "brain:\n"
+            "  kind: gateway\n"
+            "  base_url: ${UNSET_GATEWAY_URL:-http://localhost:11434}\n"
+            "  model: qwen3:14b\n"
+        )
+        monkeypatch.delenv("UNSET_GATEWAY_URL", raising=False)
+
+        env = child_agent_env(root)
+
+        assert env["BOBI_GATEWAY_BASE_URL"] == "http://localhost:11434"
+
     def test_clears_stale_parent_gateway_pins_for_other_team(
         self, tmp_path, monkeypatch,
     ):

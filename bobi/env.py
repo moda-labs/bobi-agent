@@ -12,20 +12,24 @@ shell yet fail to spawn under the daemon's stripped PATH.
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
-
-_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
 
 def _configured_brain(
     root: Path, env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Return the team's interpolated ``brain`` mapping from the installation
-    root, or ``{}`` when absent/unreadable."""
+    root, or ``{}`` when absent/unreadable.
+
+    Interpolation is ``bobi.config._interpolate_env`` - the same resolver
+    ``Config.load`` applies to this mapping - so ``${VAR:-default}`` resolves
+    identically here and in the validate/manager paths (a divergence would
+    pass validate yet pin an empty gateway base URL into every child).
+    """
     try:
         import yaml
         from bobi import paths
+        from bobi.config import _interpolate_env
         raw = yaml.safe_load(
             paths.agent_yaml_path(root).read_text()
         ) or {}
@@ -34,11 +38,9 @@ def _configured_brain(
     brain = raw.get("brain", {})
     if not isinstance(brain, dict):
         return {}
-    lookup = os.environ if env is None else env
+    lookup = dict(os.environ) if env is None else env
     return {
-        str(key): _ENV_VAR_RE.sub(
-            lambda m: lookup.get(m.group(1), ""), str(value or ""),
-        )
+        str(key): _interpolate_env(str(value or ""), lookup)
         for key, value in brain.items()
     }
 

@@ -293,6 +293,14 @@ def run_bootstrap(
     # all the right ones. Loading cfg here also seeds BOBI_BRAIN for the
     # spec lookups below (and the spawned login subprocess).
     cfg = Config.load(project_path)
+    if cfg.brain_kind == "gateway":
+        # No spec fallback: _active_spec would silently drive the CLAUDE
+        # subscription login for a team that authenticates with
+        # ANTHROPIC_AUTH_TOKEN (or nothing) - mirror the DeployError (#655).
+        raise RuntimeError(
+            "subscription login does not apply to a gateway team - a gateway "
+            "authenticates with ANTHROPIC_AUTH_TOKEN in the runtime .env."
+        )
     set_process_brain(cfg.brain_kind)
     spec = _active_spec()
 

@@ -372,6 +372,20 @@ def test_gateway_auth_token_is_declared_not_required(repo, tmp_path, monkeypatch
     assert vals["ANTHROPIC_AUTH_TOKEN"] == "litellm-master"
 
 
+def test_gateway_team_url_backfills_auth_token(repo, tmp_path, monkeypatch):
+    """A team-url gateway deployment has no local refs to scan, but its
+    ANTHROPIC_AUTH_TOKEN must still backfill from the CI env or the deployed
+    instance's sessions 401 at the gateway (#655 review finding)."""
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "litellm-master")
+    (repo / "deployments" / "gw.yaml").write_text(
+        "team-url: https://r/gw.tgz\nbrain: gateway\n"
+    )
+    cfg = D.load_deploy_config(repo, "gw")
+    out = D.resolve_env_file(cfg, repo, tmp_path)
+    vals = dict(l.split("=", 1) for l in out.read_text().splitlines())
+    assert vals["ANTHROPIC_AUTH_TOKEN"] == "litellm-master"
+
+
 def test_brain_kind_resolved_from_team_agent_yaml(repo):
     _codex_team(repo)
     (repo / "deployments" / "ct.yaml").write_text("team: codex-team\n")

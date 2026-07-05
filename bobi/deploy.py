@@ -162,7 +162,7 @@ class DeployConfig:
         if self.brain == "gateway" and self.auth == "subscription":
             raise DeployError(
                 f"deployment '{self.name}' is auth=subscription with a gateway "
-                "brain — a gateway authenticates with ANTHROPIC_AUTH_TOKEN "
+                "brain - a gateway authenticates with ANTHROPIC_AUTH_TOKEN "
                 "(or nothing); there is no subscription login to bootstrap."
             )
 
@@ -278,20 +278,26 @@ def load_deploy_config(project_path: Path, name: str,
 
 # --- brain / auth-key resolution --------------------------------------------
 
-# The provider API key that authenticates a brain in api_key mode (and that
-# would silently shadow subscription OAuth, so it's forbidden there). A gateway
-# has none: its optional ANTHROPIC_AUTH_TOKEN is declared, never required
+# Per-brain auth secrets: (the provider API key that authenticates the brain
+# in api_key mode - and would silently shadow subscription OAuth, so it's
+# forbidden there; extra keys that are DECLARED but never required). A gateway
+# has no provider key: its optional ANTHROPIC_AUTH_TOKEN is declared-only
 # (Ollama serves unauthenticated), and the sessions blank ANTHROPIC_API_KEY.
-_BRAIN_API_KEY = {
-    "claude": "ANTHROPIC_API_KEY",
-    "codex": "OPENAI_API_KEY",
-    "gateway": "",
+_BRAIN_AUTH = {
+    "claude": ("ANTHROPIC_API_KEY", frozenset()),
+    "codex": ("OPENAI_API_KEY", frozenset()),
+    "gateway": ("", frozenset({"ANTHROPIC_AUTH_TOKEN"})),
 }
+
+
+def _brain_auth(kind: str) -> tuple[str, frozenset[str]]:
+    """(api-key name or "", declared-only keys) for a brain kind."""
+    return _BRAIN_AUTH.get(kind or "claude", _BRAIN_AUTH["claude"])
 
 
 def _brain_api_key(kind: str) -> str:
     """The auth/shadow API-key name for a brain kind (defaults to Claude's)."""
-    return _BRAIN_API_KEY.get(kind or "claude", "ANTHROPIC_API_KEY")
+    return _brain_auth(kind)[0]
 
 
 def _team_brain_kind(project_path: Path, cfg: "DeployConfig") -> str:
@@ -576,19 +582,14 @@ def _secret_sets(cfg: DeployConfig,
     BOBI_* refs are instance identity the provisioner stamps into [env] from
     flags — never secrets — so they're excluded from both sets.
     """
-    auth_key = _brain_api_key(cfg.brain)
+    auth_key, brain_declared = _brain_auth(cfg.brain)
     auth_req = [auth_key] if cfg.auth == "api_key" and auth_key else []
-    # A gateway team's auth token is declared (may reach the instance) but
-    # never required — Ollama-style gateways take no token at all.
-    gateway_declared = (
-        {"ANTHROPIC_AUTH_TOKEN"} if cfg.brain == "gateway" else set()
-    )
     if not cfg.team:
         return (auth_req, None)  # team-url: package not local
     y = resolve_team_dir(project_path, cfg.team) / "agent.yaml"
     keep = lambda vs: [v for v in vs if not v.startswith("BOBI_")]
     required = keep(scan_required_vars(y)) + auth_req
-    declared = set(keep(scan_declared_vars(y))) | set(auth_req) | gateway_declared
+    declared = set(keep(scan_declared_vars(y))) | set(auth_req) | set(brain_declared)
     return (required, declared)
 
 
@@ -641,9 +642,13 @@ def resolve_secret_values(cfg: DeployConfig, project_path: Path,
 
     required, declared = _secret_sets(cfg, project_path)
 
-    # Backfill declared keys (or, for a team-url, the auth overlay) from the
-    # process env — the CI seam. Only known keys, never the whole environment.
-    for var in (declared if declared is not None else set(required)):
+    # Backfill declared keys (or, for a team-url, the auth overlay plus the
+    # brain's declared-only keys - a gateway team-url still needs its
+    # ANTHROPIC_AUTH_TOKEN to reach the instance) from the process env — the
+    # CI seam. Only known keys, never the whole environment.
+    backfill = (declared if declared is not None
+                else set(required) | set(_brain_auth(cfg.brain)[1]))
+    for var in backfill:
         if var not in values and var in os.environ:
             values[var] = os.environ[var]
 

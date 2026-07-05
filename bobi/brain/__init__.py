@@ -75,11 +75,7 @@ def _set_process_brain_model(
     selection contract from being reimplemented across brain adapters and
     launch paths.
     """
-    target = os.environ if env is None else env
-    if model:
-        target[_BRAIN_MODEL_ENV] = model
-    else:
-        target.pop(_BRAIN_MODEL_ENV, None)
+    _pin_env(os.environ if env is None else env, _BRAIN_MODEL_ENV, model)
 
 
 def with_default_model_option(options: dict | None) -> dict:
@@ -172,17 +168,37 @@ def set_process_brain(
     # The model and gateway pins only apply when the configured brain IS the
     # active one - a model-only config tunes the default brain, but neither it
     # nor a gateway endpoint may cross onto an operator-overridden brain.
+    # Within the active brain, first writer wins (an existing NON-EMPTY value
+    # is an operator override; an empty string is treated as unset).
     config_matches_active_brain = (
         (kind and existing_kind == kind)
         or (not kind and existing_kind in ("", DEFAULT_BRAIN))
     )
-    if model and config_matches_active_brain and not get_process_brain_model():
+    if not config_matches_active_brain:
+        return
+    if model and not get_process_brain_model():
         _set_process_brain_model(model)
-    if kind == "gateway" and config_matches_active_brain:
-        if gateway_base_url and GATEWAY_BASE_URL_ENV not in os.environ:
-            os.environ[GATEWAY_BASE_URL_ENV] = gateway_base_url
-        if gateway_small_model and GATEWAY_SMALL_MODEL_ENV not in os.environ:
-            os.environ[GATEWAY_SMALL_MODEL_ENV] = gateway_small_model
+    if kind == "gateway":
+        for var, value in ((GATEWAY_BASE_URL_ENV, gateway_base_url),
+                           (GATEWAY_SMALL_MODEL_ENV, gateway_small_model)):
+            if value and not os.environ.get(var):
+                os.environ[var] = value
+
+
+def set_process_brain_from_config(cfg) -> None:
+    """``set_process_brain`` from a loaded team Config.
+
+    The one config-to-pins expansion, shared by every process-startup site
+    (CLI agent binding, the manager service, ``spawn_team``'s in-process
+    preflight) so a new brain config field cannot be threaded into one site
+    and missed in another. *cfg* is duck-typed (``brain_kind`` etc.) so this
+    module stays import-free of ``bobi.config``.
+    """
+    set_process_brain(
+        cfg.brain_kind, cfg.brain_model,
+        gateway_base_url=cfg.brain_base_url,
+        gateway_small_model=cfg.brain_small_model,
+    )
 
 
 def continuation_token(
@@ -263,5 +279,6 @@ __all__ = [
     "resolve_model",
     "resolve_model_option",
     "set_process_brain",
+    "set_process_brain_from_config",
     "with_default_model_option",
 ]
