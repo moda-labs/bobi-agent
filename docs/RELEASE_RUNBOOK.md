@@ -7,7 +7,7 @@ Fly-hosted agents.
 ## 1. Sync `bobi`
 
 ```bash
-cd ~/dev/bobi
+cd ~/dev/bobi-agent
 git switch main
 git pull --ff-only
 git status --short
@@ -199,7 +199,7 @@ Known failure signatures:
 Use the local Venn CLI and the repo `.env` without printing secrets:
 
 ```bash
-cd ~/dev/bobi
+cd ~/dev/bobi-agent
 set -a; source .env; set +a
 ```
 
