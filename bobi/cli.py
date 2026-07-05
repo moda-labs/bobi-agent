@@ -166,7 +166,30 @@ def _bind_agent_runtime(name: str) -> Path:
         raise click.UsageError(str(e))
     paths.bind_root(root)
     _attach_runtime_log(root)
+    _pin_team_brain(root)
     return root
+
+
+def _pin_team_brain(root: Path) -> None:
+    """Select the team's brain for the CLI process itself (#655).
+
+    Sessions this process runs directly (the `--wait` completion check, ad-hoc
+    verdict agents) must use the team's configured brain, not the framework
+    default - a gateway team's check would otherwise hit real Anthropic with
+    the gateway's token. Detached children don't rely on this: their env is
+    rewritten by ``child_agent_env()``.
+    """
+    from bobi.brain import set_process_brain
+    from bobi.config import Config
+    try:
+        cfg = Config.load(root)
+    except Exception:
+        return
+    set_process_brain(
+        cfg.brain_kind, cfg.brain_model,
+        gateway_base_url=cfg.brain_base_url,
+        gateway_small_model=cfg.brain_small_model,
+    )
 
 
 def _attach_runtime_log(root: Path) -> None:
@@ -282,155 +305,6 @@ def _run_from_config(project_path: Path, cfg: "Config",
     from bobi.service import run_manager_from_config
     return run_manager_from_config(
         project_path, cfg, extra_subscribe=extra_subscribe, foreground=foreground
-    )
-
-    import atexit
-    import signal
-    import threading
-
-    from bobi.sdk import set_project_root
-    set_project_root(project_path)
-
-    # Select the team's agent brain (#485) for this process and its subagents.
-    from bobi.brain import set_process_brain
-    set_process_brain(
-        cfg.brain_kind, cfg.brain_model,
-        gateway_base_url=cfg.brain_base_url,
-        gateway_small_model=cfg.brain_small_model,
-    )
-
-    agent_name = cfg.agent
-    role = cfg.entry_point or "manager"
-
-    from bobi.events.subscriptions import discover_subscriptions
-    subscribe = discover_subscriptions(project_path)
-    subscribe += [s for s in (extra_subscribe or []) if s not in subscribe]
-
-    # Subscribe to every effective monitor's event topic so the coordinator
-    # receives monitor findings regardless of adapter configuration. Current
-    # event servers route a posted finding onto both the bare type and the
-    # source-qualified "monitor/<type>" topic; monitor_subscription_keys
-    # subscribes to both forms.
-    from bobi.events.subscriptions import monitor_subscription_keys
-    from bobi.monitors.registry import MonitorRegistry
-    monitor_events = [
-        m.event for m in MonitorRegistry.load(project_path=project_path).effective_monitors()
-    ]
-    for key in monitor_subscription_keys(monitor_events):
-        if key not in subscribe:
-            subscribe.append(key)
-
-    # Subscribe to sub-agent lifecycle topics so a detached agent's
-    # completion/failure is delivered back to this entry point (MDS-65 RC#1).
-    # Without this, _emit_session_finished posts session.completed/failed that
-    # nothing consumes — completions reach the launcher only via blocking
-    # --wait, which pins a concurrency slot. Lifecycle events are delivered to
-    # the inbox like monitor findings; they are never an auto-dispatch trigger.
-    from bobi.events.subscriptions import lifecycle_subscription_keys
-    for key in lifecycle_subscription_keys():
-        if key not in subscribe:
-            subscribe.append(key)
-
-    state_dir = paths.state_dir(project_path)
-
-    from bobi.state_version import ensure_state_version
-    ensure_state_version(project_path)
-
-    pid_str = str(os.getpid())
-    (state_dir / "manager.pid").write_text(pid_str)
-
-    def _cleanup():
-        pid_file = state_dir / "manager.pid"
-        try:
-            if pid_file.exists() and pid_file.read_text().strip() == pid_str:
-                pid_file.unlink(missing_ok=True)
-        except OSError:
-            pass
-        from bobi import manager_health
-        manager_health.stop()
-        from bobi import http as pooled_http
-        pooled_http.close()
-    atexit.register(_cleanup)
-
-    log = logging.getLogger(__name__)
-
-    def _handle_term(signum, frame):
-        log.info("Received SIGTERM — shutting down gracefully")
-        _cleanup()
-        raise SystemExit(0)
-    signal.signal(signal.SIGTERM, _handle_term)
-
-    # --- Health endpoint (always started; essential in foreground/container
-    # mode for liveness probes, useful in daemon mode for doctor checks) ---
-    from bobi import manager_health
-    health_port = manager_health.start(
-        state_dir, paths.agent_name_for_root(project_path),
-        manager_session=_manager_session_name(project_path, role),
-    )
-    log.info("Manager health endpoint on port %d", health_port)
-
-    # --- Agent UI (opt-in via BOBI_UI) — a daemon-thread web dashboard
-    # for chatting with the live team. Binds the Fly 6PN address so an operator
-    # reaches it with `fly proxy`; never started unless explicitly enabled, so
-    # a plain local start opens no extra port. ---
-    if os.environ.get("BOBI_UI"):
-        try:
-            from bobi.agentui import server as agentui_server
-            ui_port = agentui_server.start_in_thread(project_path,
-                                                     state_dir=state_dir)
-            log.info("Agent UI on port %d (reach it with `fly proxy`)", ui_port)
-        except Exception as e:  # never let the UI take down the manager
-            log.warning("Agent UI failed to start: %s", e)
-
-    log.info("Bobi starting for %s (role=%s)",
-             paths.agent_name_for_root(project_path), role)
-
-    has_monitors = (
-        paths.monitors_dir(project_path).is_dir()
-        or cfg.monitors
-    )
-    if has_monitors:
-        from bobi.monitors.scheduler import MonitorScheduler
-        monitor_scheduler = MonitorScheduler(project_path=project_path)
-        monitor_scheduler.start()
-        log.info("Monitor scheduler started")
-
-    from bobi.prompts.resolver import build_startup_prompt
-    from bobi.subagent import spawn_adhoc
-
-    session_name = _manager_session_name(project_path, role)
-    task = build_startup_prompt(role, project_path, agent_name=agent_name,
-                                session_name=session_name)
-
-    # Dead-man reconcile on wake (MDS-65 §4.6): close any run stranded while no
-    # manager was alive — a crash recorded with no terminal event, a swallowed
-    # completion POST, or a run past its deadline. Each closed run re-emits an
-    # honest agent/session.{completed,failed} that the manager (subscribed just
-    # above) receives in its inbox, so the requester's thread is closed instead
-    # of hanging. Best-effort: a reconcile failure must never block startup.
-    try:
-        from bobi.reconcile import reconcile_sessions
-        # Exclude this manager's own session: the previous manager process's
-        # exit is not a sub-agent failure, and the new manager re-claims the
-        # entry just below.
-        reconciled = reconcile_sessions(exclude_names={session_name})
-        if reconciled:
-            log.info("Reconciled %d stranded run(s) on startup: %s",
-                     len(reconciled), [r["name"] for r in reconciled])
-    except Exception:
-        log.debug("Startup reconcile failed", exc_info=True)
-
-    log.info("Bobi running for %s", paths.agent_name_for_root(project_path))
-    # The manager Session subscribes to inbox/<self> (always-on) plus the
-    # discovered external resource + monitor topics. One deployment, one cursor.
-    spawn_adhoc(
-        cwd=str(project_path),
-        task=task,
-        name=session_name,
-        persistent=True,
-        role=role,
-        mcp_servers=cfg.mcp_servers or None,
-        subscribe=subscribe,
     )
 
 

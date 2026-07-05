@@ -46,6 +46,30 @@ def test_agent_help_lists_runtime_commands(bobi_install):
         assert cmd in result.output
 
 
+def test_agent_group_pins_team_brain_for_cli_process(bobi_install, monkeypatch):
+    """`bobi agent <name> ...` must select the team's brain for sessions the
+    CLI process itself runs - a gateway team's `--wait` completion check
+    otherwise hits real Anthropic with the gateway's token (#655)."""
+    import os
+    import yaml
+
+    for var in ("BOBI_BRAIN", "BOBI_BRAIN_MODEL",
+                "BOBI_GATEWAY_BASE_URL", "BOBI_GATEWAY_SMALL_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    agent_yaml = bobi_install.repo_path / "package" / "agent.yaml"
+    cfg = yaml.safe_load(agent_yaml.read_text())
+    cfg["brain"] = {"kind": "gateway", "base_url": "http://localhost:4000",
+                    "model": "qwen3:14b"}
+    agent_yaml.write_text(yaml.dump(cfg))
+
+    result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "status"])
+
+    assert result.exit_code == 0, result.output
+    assert os.environ.get("BOBI_BRAIN") == "gateway"
+    assert os.environ.get("BOBI_BRAIN_MODEL") == "qwen3:14b"
+    assert os.environ.get("BOBI_GATEWAY_BASE_URL") == "http://localhost:4000"
+
+
 def test_missing_agent_errors_without_cwd_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     result = CliRunner().invoke(main, ["agent", "missing", "status"])
