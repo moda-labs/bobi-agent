@@ -277,7 +277,7 @@ export function createTopicEvent(
 import { normalizeGitHubWebhook } from "./adapters/github";
 import { normalizeLinearWebhook } from "./adapters/linear";
 import { bridgeSlackWebhook } from "./adapters/chat-sdk-slack";
-import { getChannelAdapter, slackApiUrl, truncateForChannel, type OutboundFile } from "./channels";
+import { chunkForChannel, getChannelAdapter, slackApiUrl, truncateForChannel, type OutboundFile } from "./channels";
 import { parseConversation, type Conversation } from "./conversation";
 
 export { normalizeGitHubWebhook as normalizeGitHubPayload } from "./adapters/github";
@@ -1528,11 +1528,14 @@ export async function handleChannelsSend(
 	}
 
 	const caps = adapter.descriptor.capabilities;
-	const outText = truncateForChannel((text as string) || "", caps);
+	const rawText = (text as string) || "";
 
 	let result;
 	try {
 		if (files.length > 0) {
+			// File sends stay single-message: the text is a comment or a
+			// placeholder replacement, so over-budget text truncates.
+			const outText = truncateForChannel(rawText, caps);
 			if (!adapter.uploadFiles || !caps.files) {
 				return { status: 400, body: { error: `channel ${conv.source} does not support files` } };
 			}
@@ -1553,13 +1556,40 @@ export async function handleChannelsSend(
 			} else {
 				result = await adapter.uploadFiles(botToken, conv, files, outText || undefined);
 			}
-		} else if (editRef && (mode === "update" || mode === "final")) {
+		} else if (editRef && mode === "update") {
+			// Streaming rewrite of one message: chunking would post a new
+			// message on every tick, so the budget stays truncation-enforced
+			// until the final send.
+			const outText = truncateForChannel(rawText, caps);
 			// Degrade to a follow-up post on a channel without edit support.
 			result = adapter.update && caps.edit
 				? await adapter.update(botToken, conv, editRef, outText, { markdown: true })
 				: await adapter.send(botToken, conv, outText, { markdown: true });
 		} else {
-			result = await adapter.send(botToken, conv, outText, { markdown: true });
+			// Terminal send (post, or final resolving a placeholder):
+			// over-budget text goes out whole as natural-boundary chunks. The
+			// first chunk carries the message identity (placeholder edit,
+			// returned ts); later chunks are follow-up posts in the same
+			// conversation.
+			const chunks = chunkForChannel(rawText, caps);
+			if (editRef && mode === "final") {
+				result = adapter.update && caps.edit
+					? await adapter.update(botToken, conv, editRef, chunks[0], { markdown: true })
+					: await adapter.send(botToken, conv, chunks[0], { markdown: true });
+			} else {
+				result = await adapter.send(botToken, conv, chunks[0], { markdown: true });
+			}
+			if (result.ok) {
+				const first = result;
+				for (const chunk of chunks.slice(1)) {
+					const follow = await adapter.send(botToken, conv, chunk, { markdown: true });
+					if (!follow.ok) {
+						result = follow;
+						break;
+					}
+				}
+				if (result.ok) result = first;
+			}
 		}
 	} catch (err) {
 		return { status: 502, body: { ok: false, error: String(err) } };
