@@ -282,7 +282,6 @@ import { parseConversation, type Conversation } from "./conversation";
 
 export { normalizeGitHubWebhook as normalizeGitHubPayload } from "./adapters/github";
 export { normalizeLinearWebhook as normalizeLinearPayload } from "./adapters/linear";
-export { normalizeSlackWebhook as normalizeSlackPayload } from "./adapters/slack";
 
 // ---------------------------------------------------------------------------
 // Routing — topics-based (v2)

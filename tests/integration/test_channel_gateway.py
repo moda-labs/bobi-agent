@@ -163,7 +163,7 @@ def gateway_env(tmp_path_factory):
                       headers=headers, timeout=10)
     assert resp.status_code == 200, resp.text
 
-    yield project, stub, es_url
+    yield project, stub, es_url, minted
 
     stub.stop()
     pid_file = project / "state" / "event-server.pid"
@@ -176,15 +176,15 @@ def gateway_env(tmp_path_factory):
 
 @pytest.fixture
 def gateway(gateway_env, monkeypatch):
-    project, stub, es_url = gateway_env
+    project, stub, es_url, bubble = gateway_env
     monkeypatch.setenv("BOBI_ROOT", str(project))
     stub.calls.clear()
-    return project, stub, es_url
+    return project, stub, es_url, bubble
 
 
 class TestReplyEndToEnd:
     def test_reply_delivers_markdown_and_clears_typing(self, gateway):
-        _project, stub, _es_url = gateway
+        _project, stub, _es_url, _bubble = gateway
         from bobi.cli import main
 
         result = CliRunner().invoke(main, [
@@ -209,7 +209,7 @@ class TestReplyEndToEnd:
         assert statuses[0]["body"]["thread_ts"] == "100.000"
 
     def test_reply_edit_updates_placeholder(self, gateway):
-        _project, stub, _es_url = gateway
+        _project, stub, _es_url, _bubble = gateway
         from bobi.cli import main
 
         result = CliRunner().invoke(main, [
@@ -224,7 +224,7 @@ class TestReplyEndToEnd:
         assert not stub.named("chat.postMessage")
 
     def test_reply_file_uploads_through_gateway(self, gateway, tmp_path):
-        _project, stub, _es_url = gateway
+        _project, stub, _es_url, _bubble = gateway
         from bobi.cli import main
 
         f = tmp_path / "report.txt"
@@ -246,7 +246,7 @@ class TestReplyEndToEnd:
     def test_read_conversation_signed_get(self, gateway):
         """The GET signature covers path + query with an empty body — this
         proves the Python signer and Node verifier agree on the encoded URL."""
-        _project, stub, _es_url = gateway
+        _project, stub, _es_url, _bubble = gateway
         from bobi.cli import main
 
         result = CliRunner().invoke(main, [
@@ -261,7 +261,7 @@ class TestReplyEndToEnd:
         assert replies[0]["body"]["ts"] == "100.000"
 
     def test_deprecated_slack_reply_shim(self, gateway):
-        _project, stub, _es_url = gateway
+        _project, stub, _es_url, _bubble = gateway
         from bobi.cli import main
 
         result = CliRunner().invoke(main, [
@@ -274,11 +274,97 @@ class TestReplyEndToEnd:
         assert posts[0]["body"]["markdown_text"] == "legacy"
 
 
+class TestInboundMentionEndToEnd:
+    def test_webhook_to_placeholder_full_loop(self, gateway, monkeypatch):
+        """The full inbound loop minus the agent: a raw app_mention webhook
+        hits the real server, the Chat SDK bridge normalizes it, a subscribed
+        deployment receives it over WebSocket, and that REAL delivered event
+        (not a hand-built one) drives the drain loop's placeholder/typing
+        policy back out through the gateway to the Slack stub."""
+        import websocket
+
+        project, stub, es_url, bubble = gateway
+        from bobi.events.drain import _prepare_chat_events
+
+        # JOIN a deployment on the instance bubble, subscribed to the
+        # workspace topic. The /slack/workspaces registration in the fixture
+        # already granted slack:T_GW to this bubble.
+        body = serialize_body(
+            {"name": "gateway-inbound", "subscriptions": ["slack:T_GW"]})
+        headers = {"Content-Type": "application/json"}
+        headers.update(sign_headers(
+            bubble["bubble_id"], bubble["bubble_key"],
+            "POST", "/deployments", body,
+        ))
+        resp = httpx.post(f"{es_url}/deployments", content=body,
+                          headers=headers, timeout=10)
+        assert resp.status_code == 201, resp.text
+        dep = resp.json()
+
+        received: list[dict] = []
+
+        def _subscribe():
+            ws = websocket.create_connection(
+                f"{es_url.replace('http://', 'ws://')}"
+                f"/deployments/{dep['deployment_id']}/subscribe?last_seen=0",
+                header=[f"Authorization: Bearer {dep['api_key']}"], timeout=10)
+            try:
+                while True:
+                    msg = json.loads(ws.recv())
+                    if msg.get("type") in ("event", "replay"):
+                        received.append(msg["data"])
+                        return
+            finally:
+                ws.close()
+
+        listener = threading.Thread(target=_subscribe, daemon=True)
+        listener.start()
+
+        resp = httpx.post(f"{es_url}/webhooks/slack", json={
+            "type": "event_callback", "team_id": "T_GW",
+            "event": {"type": "app_mention", "user": "U_HUMAN",
+                      "channel": "C_GW", "channel_type": "channel",
+                      "text": "<@U_BOTGW> ship the report",
+                      "ts": "1700000000.000100"},
+        }, timeout=10)
+        assert resp.status_code == 200, resp.text
+        assert resp.json().get("delivered_to", 0) >= 1
+
+        listener.join(timeout=10)
+        assert received, "subscribed deployment never received the event"
+        event = received[0]
+
+        # The bridge-normalized contract the drain loop depends on.
+        assert event["source"] == "slack"
+        assert event["type"] == "slack.mention"
+        assert event["delivery"] == "chat"
+        assert event["conversation"] == \
+            "slack:T_GW:channel:C_GW:thread:1700000000.000100"
+        assert event["fields"]["channel"] == "C_GW"
+        assert event["fields"]["ts"] == "1700000000.000100"
+
+        monkeypatch.setattr(
+            "bobi.events.drain._get_project_root", lambda: project)
+        stub.calls.clear()
+        prepared = _prepare_chat_events([event])
+        assert prepared[0]["fields"]["placeholder_ts"] == "100.001"
+
+        posts = stub.named("chat.postMessage")
+        assert len(posts) == 1
+        assert posts[0]["body"]["channel"] == "C_GW"
+        assert posts[0]["body"]["thread_ts"] == "1700000000.000100"
+        statuses = stub.named("assistant.threads.setStatus")
+        assert statuses and statuses[-1]["body"]["status"] == "is thinking…"
+
+        from bobi.events.channels import stop_all_refresh_loops
+        stop_all_refresh_loops()
+
+
 class TestPlaceholderFlowEndToEnd:
     def test_drain_placeholder_via_gateway(self, gateway, monkeypatch):
         """The drain loop's input channel posts the placeholder and sets the
         typing indicator through the gateway, then injects placeholder_ts."""
-        project, stub, _es_url = gateway
+        project, stub, _es_url, _bubble = gateway
         from bobi.events.drain import _prepare_chat_events
 
         monkeypatch.setattr(
