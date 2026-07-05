@@ -247,12 +247,13 @@ class _StubCfg:
 
 
 def _capture_post(monkeypatch):
-    """Patch pooled.post + Slack lookups; return a dict the call records into."""
+    """Patch pooled.request + Slack lookups; return a dict the call records into."""
     import bobi.http as pooled
 
     captured: dict = {}
 
-    def fake_post(url, **kwargs):
+    def fake_request(method, url, **kwargs):
+        captured["method"] = method
         captured["url"] = url
         captured["kwargs"] = kwargs
 
@@ -264,7 +265,7 @@ def _capture_post(monkeypatch):
 
         return _Resp()
 
-    monkeypatch.setattr(pooled, "post", fake_post)
+    monkeypatch.setattr(pooled, "request", fake_request)
     monkeypatch.setattr(es, "_slack_auth_info", lambda token: ("T_TEAM", "B_BOT", "U_BOT"))
     monkeypatch.setattr(es, "_slack_app_id", lambda token, bot_id: "A_APP")
     return captured

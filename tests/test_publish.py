@@ -27,7 +27,7 @@ def test_post_topic_skips_doomed_publish_when_no_bubble(tmp_path, monkeypatch):
     monkeypatch.setattr(pub, "_event_server_url", lambda p: "http://localhost:8080")
 
     calls = []
-    with patch.object(pooled, "post",
+    with patch.object(pooled, "request",
                       side_effect=lambda *a, **k: calls.append((a, k))):
         ok = pub._post_topic("session.started", "agent", {"x": 1}, project)
 
@@ -51,12 +51,12 @@ def test_post_topic_signs_and_posts_when_bubble_present(tmp_path, monkeypatch):
 
     captured = {}
 
-    def _fake_post(url, content=None, headers=None, timeout=None):
+    def _fake_request(method, url, content=None, headers=None, timeout=None):
         captured["url"] = url
         captured["headers"] = headers
         return _Resp()
 
-    with patch.object(pooled, "post", side_effect=_fake_post):
+    with patch.object(pooled, "request", side_effect=_fake_request):
         ok = pub._post_topic("session.started", "agent", {"x": 1}, project)
 
     assert ok is True

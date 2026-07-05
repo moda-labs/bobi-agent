@@ -35,8 +35,12 @@ def test_no_bubble_fails_fast_without_network(tmp_path):
     project = _project(tmp_path)
 
     calls = []
-    with patch.object(pooled, "request",
-                      side_effect=lambda *a, **k: calls.append((a, k))):
+
+    def _record(*a, **k):
+        calls.append((a, k))
+        return _Resp(200, {})
+
+    with patch.object(pooled, "request", side_effect=_record):
         with pytest.raises(it.IngestTokenError, match="bubble"):
             it.create_token("alert/firing", project_path=project)
 
@@ -49,7 +53,7 @@ def test_create_signs_and_posts(tmp_path):
 
     captured = {}
 
-    def _fake_request(method, url, content=None, headers=None, timeout=None):
+    def _fake_request(method, url, *, content=None, headers=None, timeout=None):
         captured.update(method=method, url=url, content=content, headers=headers)
         return _Resp(201, {"id": "tok1", "topic": "alert/firing",
                            "token": "ingt_abc", "created_at": "now"})
@@ -71,7 +75,7 @@ def test_list_and_revoke_sign_empty_bodies(tmp_path):
 
     calls = []
 
-    def _fake_request(method, url, content=None, headers=None, timeout=None):
+    def _fake_request(method, url, *, content=None, headers=None, timeout=None):
         calls.append((method, url, content, headers))
         if method == "GET":
             return _Resp(200, {"tokens": [{"id": "tok1", "topic": "alert/firing"}]})
@@ -88,6 +92,25 @@ def test_list_and_revoke_sign_empty_bodies(tmp_path):
     # Both are signed even with empty bodies - the signature covers method+path.
     for call in calls:
         assert "x-moda-signature" in {k.lower() for k in call[3]}
+
+
+def test_revoke_quotes_token_id_into_signed_path(tmp_path):
+    """The signature covers the exact wire path, so ids are percent-encoded
+    before signing - otherwise httpx re-encodes the URL and the server's HMAC
+    check fails with an opaque 403."""
+    project = _project(tmp_path)
+    save_bubble_state(project, "bub_test", "bkey_test")
+
+    captured = {}
+
+    def _fake_request(method, url, *, content=None, headers=None, timeout=None):
+        captured.update(method=method, url=url)
+        return _Resp(200, {"ok": True})
+
+    with patch.object(pooled, "request", side_effect=_fake_request):
+        it.revoke_token("tok 1/../x", project_path=project)
+
+    assert captured["url"].endswith("/ingest-tokens/tok%201%2F..%2Fx")
 
 
 def test_server_rejection_surfaces_reason(tmp_path):
