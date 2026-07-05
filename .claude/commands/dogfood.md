@@ -192,8 +192,9 @@ test channel). When skipped, report live Slack as **not covered**.
 
 This is the recurring soak for the channel gateway (#190/#643): it proves the
 real Slack API accepts what the gateway sends (`markdown_text` on postMessage
-AND chat.update, placeholder edits, file uploads, truncation). The assertions
-live in pytest so shell runs, dogfood, and future CI share one code path.
+AND chat.update, placeholder edits, file uploads, over-budget chunking). The
+assertions live in pytest so shell runs, dogfood, and future CI share one
+code path.
 
 ```
 TEST 3c.1: set -a; source "$REPO/.bobi-dogfood.env"; set +a
@@ -201,7 +202,8 @@ TEST 3c.1: set -a; source "$REPO/.bobi-dogfood.env"; set +a
 TEST 3c.2: open the test channel in Slack and eyeball the thread this run
            created (root message is labeled "Live gateway soak `soak-<ts>`"):
            the edited placeholder renders headers/bold/code as markdown, the
-           files are attached, and the long message ends with _(truncated)_.
+           files are attached, and the over-budget reply arrives as several
+           messages with no _(truncated)_ marker and no broken code fences.
            Rendering fidelity is the one thing the pytest file cannot assert.
 ```
 

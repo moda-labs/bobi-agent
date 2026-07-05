@@ -104,17 +104,140 @@ export interface ChannelAdapter {
 }
 
 /**
- * Truncate outbound text at the channel's declared budget. Matches the
- * behavior the Python client applied before conversion moved server-side;
- * natural-boundary chunking is a deliberate follow-up (epic #190).
+ * Outbound budget enforcement (#651). Terminal sends (post / final) go out
+ * whole as natural-boundary chunks via chunkForChannel; streaming updates
+ * rewrite one message in place, so they stay on truncateForChannel - chunking
+ * a rewrite would post a new message on every tick.
  */
 const TRUNCATION_MARKER = "\n_(truncated)_";
+/** Runaway guard: past this many chunks the tail is truncated with the marker. */
+const MAX_CHUNKS = 8;
+/** Appended to a chunk that splits inside a code fence, so it renders closed. */
+const FENCE_CLOSE = "\n```";
+
+/** Length of `s` in the channel's declared unit. */
+function unitLength(s: string, caps: ChannelCapabilities): number {
+	if (caps.lengthUnit === "utf16") return s.length;
+	let n = 0;
+	for (const _ch of s) n++;
+	return n;
+}
+
+/**
+ * UTF-16 index covering at most `units` of `s` in the channel's unit, never
+ * splitting a surrogate pair.
+ */
+function unitIndex(s: string, units: number, caps: ChannelCapabilities): number {
+	if (units <= 0) return 0;
+	let idx: number;
+	if (caps.lengthUnit === "utf16") {
+		idx = Math.min(units, s.length);
+	} else {
+		idx = 0;
+		let counted = 0;
+		for (const ch of s) {
+			if (counted >= units) break;
+			idx += ch.length;
+			counted++;
+		}
+	}
+	// Never split a surrogate pair: if the boundary lands between a high and
+	// low surrogate, step back one unit.
+	if (idx > 0 && idx < s.length) {
+		const cc = s.charCodeAt(idx - 1);
+		if (cc >= 0xd800 && cc <= 0xdbff) idx--;
+	}
+	return idx;
+}
 
 export function truncateForChannel(text: string, caps: ChannelCapabilities): string {
-	if (text.length <= caps.maxLength) return text;
+	if (unitLength(text, caps) <= caps.maxLength) return text;
 	// The marker must fit INSIDE the budget - maxLength is the channel's hard
 	// limit, and overshooting it fails the whole send (msg_too_long).
-	return text.slice(0, caps.maxLength - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;
+	const keep = unitIndex(text, caps.maxLength - TRUNCATION_MARKER.length, caps);
+	return text.slice(0, keep) + TRUNCATION_MARKER;
+}
+
+/**
+ * Fence state after scanning `s`. `open` is "" outside a fence, else the
+ * fence header to reopen with (e.g. "```python"). Fence lines toggle; an
+ * opening line's info string is preserved for reopening. The info string may
+ * not contain backticks (per CommonMark), which keeps a line-leading inline
+ * span like ```cmd``` from reading as an opener; an implausibly long "info
+ * string" (a one-line blob that happens to start with backticks) reopens as
+ * a bare fence so the carried prefix can never blow the chunk budget.
+ */
+const MAX_FENCE_HEADER = 24;
+
+function fenceStateAfter(s: string, open: string): string {
+	for (const line of s.split("\n")) {
+		const m = line.match(/^\s*(`{3,})([^`]*)$/);
+		if (!m) continue;
+		if (open) {
+			open = "";
+		} else {
+			const info = m[2].trim();
+			open = info.length > MAX_FENCE_HEADER ? m[1] : m[1] + info;
+		}
+	}
+	return open;
+}
+
+/**
+ * Split over-budget text into channel-sized chunks at natural boundaries:
+ * paragraph break, then line break, then a hard (surrogate-safe) cut. A split
+ * inside a code fence closes the fence at the chunk end and reopens it (with
+ * its info string) at the start of the next chunk, so every chunk renders.
+ * Within-budget text comes back as a single chunk, byte-identical.
+ */
+export function chunkForChannel(text: string, caps: ChannelCapabilities): string[] {
+	if (unitLength(text, caps) <= caps.maxLength) return [text];
+
+	const chunks: string[] = [];
+	let remaining = text;
+	let reopen = ""; // fence header carried into the next chunk
+
+	while (chunks.length < MAX_CHUNKS - 1) {
+		const prefix = reopen ? reopen + "\n" : "";
+		if (unitLength(prefix, caps) + unitLength(remaining, caps) <= caps.maxLength) {
+			chunks.push(prefix + remaining);
+			return chunks;
+		}
+		// Reserve room for the prefix and a possible fence close so the chunk
+		// never overshoots the hard limit (over-reserving costs a few chars).
+		const avail = Math.max(
+			1, caps.maxLength - unitLength(prefix, caps) - unitLength(FENCE_CLOSE, caps));
+		const windowEnd = unitIndex(remaining, avail, caps);
+		const window = remaining.slice(0, windowEnd);
+
+		// Natural boundaries, but never a blank chunk: a cut that leaves only
+		// whitespace (e.g. leading newlines) would fail the whole send.
+		let cut = window.lastIndexOf("\n\n");
+		if (cut <= 0 || !window.slice(0, cut).trim()) cut = window.lastIndexOf("\n");
+		if (cut <= 0 || !window.slice(0, cut).trim()) cut = windowEnd; // hard split, surrogate-safe
+
+		const head = remaining.slice(0, cut);
+		remaining = remaining.slice(cut).replace(/^\n+/, "");
+
+		reopen = fenceStateAfter(head, reopen);
+		let chunk = prefix + head;
+		if (reopen) chunk += FENCE_CLOSE;
+		chunks.push(chunk);
+	}
+
+	// Chunk-count guard hit: truncate the tail instead of posting unbounded
+	// follow-ups for pathological input, keeping any open fence closed so the
+	// final chunk still renders.
+	const prefix = reopen ? reopen + "\n" : "";
+	let tail = truncateForChannel(prefix + remaining, caps);
+	if (fenceStateAfter(tail, "")) {
+		tail = truncateForChannel(
+			prefix + remaining,
+			{ ...caps, maxLength: caps.maxLength - unitLength(FENCE_CLOSE, caps) },
+		) + FENCE_CLOSE;
+	}
+	chunks.push(tail);
+	return chunks;
 }
 
 function slackError(err: unknown): string {
@@ -161,9 +284,11 @@ const slackAdapter: ChannelAdapter = {
 			threads: true,
 			files: true,
 			// Slack's markdown_text limit; plain text allows ~40k but the
-			// gateway sends markdown, so the stricter budget applies.
+			// gateway sends markdown, so the stricter budget applies. The
+			// budget has always been enforced in UTF-16 units (JS .length);
+			// declare that unit so chunking keeps the proven behavior.
 			maxLength: 12000,
-			lengthUnit: "chars",
+			lengthUnit: "utf16",
 		},
 		credentials: [
 			{ env: "SLACK_BOT_TOKEN", secret: true, label: "Bot User OAuth Token" },

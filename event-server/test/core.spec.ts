@@ -1991,20 +1991,93 @@ describe("handleChannelsSend", () => {
 		expect(calls[0].body).toMatchObject({ ts: "12.99" });
 	});
 
-	it("truncates text beyond the channel's declared budget", async () => {
+	it("chunks an over-budget post into multiple sends, nothing truncated (#651)", async () => {
+		const store = createMockStorage();
+		const calls = stubSlackApi("T1");
+		await seedWorkspace(store, "bubA");
+		const long = Array.from({ length: 130 }, (_, i) => `paragraph ${i} ` + "x".repeat(100)).join("\n\n");
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:dm:D7", text: long,
+		}, "bubA");
+		expect(result.status).toBe(200);
+		const posts = calls.filter((c) => c.url.includes("chat.postMessage"));
+		expect(posts.length).toBeGreaterThan(1);
+		let joined = "";
+		for (const p of posts) {
+			const sent = String(p.body.markdown_text);
+			// maxLength is the channel's HARD limit; every chunk must fit or
+			// Slack rejects that send (msg_too_long).
+			expect(sent.length).toBeLessThanOrEqual(12000);
+			expect(sent).not.toContain("_(truncated)_");
+			expect(p.body.channel).toBe("D7");
+			joined += sent + "\n\n";
+		}
+		// Natural-boundary splits: the full text arrives across the posts.
+		expect(joined).toContain("paragraph 0 ");
+		expect(joined).toContain("paragraph 129 ");
+	});
+
+	it("returns the FIRST chunk's ts as the message identity", async () => {
+		const store = createMockStorage();
+		let n = 0;
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes("/auth.test")) return fetchOk(200, { ok: true, team_id: "T1", bot_id: "B1" });
+			if (u.includes("/bots.info")) return fetchOk(200, { ok: true, bot: { app_id: "A1" } });
+			void decodeSlackBody(init);
+			n++;
+			return fetchOk(200, { ok: true, ts: `100.${n}` });
+		}));
+		await seedWorkspace(store, "bubA");
+		const long = Array.from({ length: 130 }, () => "y".repeat(100)).join("\n\n");
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:dm:D7", text: long,
+		}, "bubA");
+		expect(result.status).toBe(200);
+		expect((result.body as Record<string, unknown>).ts).toBe("100.1");
+	});
+
+	it("mode final with edit_ref chunks: placeholder edit first, follow-up posts after, one status clear", async () => {
+		const store = createMockStorage();
+		const calls = stubSlackApi("T1");
+		await seedWorkspace(store, "bubA");
+		const long = Array.from({ length: 130 }, (_, i) => `part ${i} ` + "z".repeat(100)).join("\n\n");
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34",
+			text: long, mode: "final", edit_ref: "12.99",
+		}, "bubA");
+		expect(result.status).toBe(200);
+		// First chunk replaces the placeholder, the rest post into the thread.
+		expect(calls[0].url).toContain("chat.update");
+		expect(calls[0].body).toMatchObject({ ts: "12.99" });
+		const posts = calls.filter((c) => c.url.includes("chat.postMessage"));
+		expect(posts.length).toBeGreaterThan(0);
+		for (const p of posts) {
+			expect(p.body.thread_ts).toBe("12.34");
+			expect(String(p.body.markdown_text)).not.toContain("_(truncated)_");
+		}
+		// Typing/status cleared exactly once, after the last chunk.
+		const status = calls.filter((c) => c.url.includes("assistant.threads.setStatus"));
+		expect(status).toHaveLength(1);
+		expect(calls[calls.length - 1].url).toContain("assistant.threads.setStatus");
+	});
+
+	it("mode update (streaming rewrite) still truncates instead of chunking", async () => {
 		const store = createMockStorage();
 		const calls = stubSlackApi("T1");
 		await seedWorkspace(store, "bubA");
 		const long = "x".repeat(13000);
 		const result = await handleChannelsSend(store, {
-			conversation: "slack:T1:dm:D7", text: long,
+			conversation: "slack:T1:dm:D7", text: long, mode: "update", edit_ref: "12.99",
 		}, "bubA");
 		expect(result.status).toBe(200);
-		const sent = String(calls[0].body.markdown_text);
-		// maxLength is the channel's HARD limit — the marker must fit inside
-		// it, or Slack rejects the whole truncated send (msg_too_long).
+		const updates = calls.filter((c) => c.url.includes("chat.update"));
+		expect(updates).toHaveLength(1);
+		const sent = String(updates[0].body.markdown_text);
 		expect(sent.length).toBeLessThanOrEqual(12000);
 		expect(sent.endsWith("_(truncated)_")).toBe(true);
+		// No follow-up posts: a streaming tick must never multiply messages.
+		expect(calls.filter((c) => c.url.includes("chat.postMessage"))).toHaveLength(0);
 	});
 
 	it("files with edit_ref replace the placeholder text, then attach", async () => {

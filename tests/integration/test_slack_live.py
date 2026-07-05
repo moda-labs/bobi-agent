@@ -241,22 +241,30 @@ class TestLiveSlackGateway:
             f"{json.dumps(_thread_messages(live), indent=2)}"
         )
 
-    def test_over_budget_reply_truncates_with_marker(self, live):
-        token = f"trunc-{live.marker}"
+    def test_over_budget_reply_arrives_whole_across_chunks(self, live):
+        """A >12k reply goes out as multiple real Slack messages with nothing
+        truncated (#651): the head and the tail sentinel both arrive, no chunk
+        carries the truncation marker, and every chunk clears Slack's limit."""
+        token = f"chunk-{live.marker}"
         sentinel = "TAIL-BEYOND-BUDGET"
-        long_text = f"Truncation soak {token}\n" + ("x" * 12500) + sentinel
+        paragraphs = "\n\n".join(
+            f"paragraph {i} " + ("x" * 300) for i in range(45))
+        long_text = f"Chunking soak {token}\n\n{paragraphs}\n\n{sentinel}"
+        assert len(long_text) > 12000
 
         from bobi.cli import main
         result = CliRunner().invoke(main, ["reply", live.thread, long_text])
         assert result.exit_code == 0, result.output
 
-        def truncated():
-            for msg in _thread_messages(live):
-                if token in msg["text"]:
-                    return msg
-            return None
+        def delivered():
+            msgs = [m for m in _thread_messages(live)
+                    if token in m["text"] or sentinel in m["text"]
+                    or "paragraph " in m["text"]]
+            joined = "\n".join(m["text"] for m in msgs)
+            return msgs if (token in joined and sentinel in joined) else None
 
-        msg = _wait_for(truncated)
-        assert msg, f"truncated message {token} never appeared"
-        assert "(truncated)" in msg["text"]
-        assert sentinel not in msg["text"]
+        msgs = _wait_for(delivered, timeout=30)
+        assert msgs, f"chunked message {token} never fully appeared"
+        assert len(msgs) > 1, "over-budget reply should span multiple messages"
+        for m in msgs:
+            assert "(truncated)" not in m["text"]
