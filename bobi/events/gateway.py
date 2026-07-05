@@ -21,8 +21,6 @@ from urllib.parse import urlencode
 
 import httpx
 
-from bobi import http as pooled
-
 log = logging.getLogger(__name__)
 
 
@@ -30,50 +28,27 @@ class GatewayError(RuntimeError):
     """A gateway request failed - carries a human-readable reason."""
 
 
-def _gateway_context(project_path: Path | None) -> tuple[str, str, str]:
-    """Resolve (event_server_url, bubble_id, bubble_key) for this instance."""
-    if project_path is None:
-        from bobi.paths import bobi_root
-        project_path = bobi_root()
-    else:
-        project_path = Path(project_path)
-
-    from bobi.config import load_bubble_state
-    from bobi.events.publish import _event_server_url
-
-    es_url = _event_server_url(project_path)
-    bubble = load_bubble_state(project_path)
-    bubble_id = bubble.get("bubble_id", "")
-    bubble_key = bubble.get("bubble_key", "")
-    if not (bubble_id and bubble_key):
-        raise GatewayError(
-            "No bubble credential found - is the agent started? The channel "
-            "gateway only accepts requests signed with the instance's bubble key."
-        )
-    return es_url, bubble_id, bubble_key
-
-
 def _request(project_path: Path | None, method: str, path: str,
-             body: str = "", *, timeout: float = 30.0) -> dict:
+             payload: dict | None = None, *, timeout: float = 30.0) -> dict:
     """Send a bubble-signed request to the gateway and return the JSON body.
 
     ``path`` includes the query string when present; the signature covers the
     exact path and body bytes transmitted. Raises :class:`GatewayError` with
     the server's error message on any failure.
     """
-    from bobi.events.signing import sign_headers
+    from bobi.events.publish import bubble_context
+    from bobi.events.signing import signed_request
 
-    es_url, bubble_id, bubble_key = _gateway_context(project_path)
-    headers = {"Content-Type": "application/json"}
-    headers.update(sign_headers(bubble_id, bubble_key, method, path, body))
+    es_url, bubble_id, bubble_key = bubble_context(project_path)
+    if not (bubble_id and bubble_key):
+        raise GatewayError(
+            "No bubble credential found - is the agent started? The channel "
+            "gateway only accepts requests signed with the instance's bubble key."
+        )
 
     try:
-        if method == "GET":
-            resp = pooled.get(f"{es_url}{path}", headers=headers, timeout=timeout)
-        else:
-            resp = pooled.post(
-                f"{es_url}{path}", content=body, headers=headers, timeout=timeout,
-            )
+        resp = signed_request(es_url, method, path, payload,
+                              bubble_id, bubble_key, timeout=timeout)
     except (httpx.HTTPError, OSError, TimeoutError) as exc:
         raise GatewayError(
             f"Event server unreachable at {es_url}: {exc}"
@@ -100,8 +75,6 @@ def channels_send(project_path: Path | None, conversation: str, text: str = "",
     ``{name, content_b64, title?}``. Returns the response dict (``ts`` is the
     posted/updated message id).
     """
-    from bobi.events.signing import serialize_body
-
     payload: dict = {"conversation": conversation, "mode": mode}
     if text:
         payload["text"] = text
@@ -109,19 +82,17 @@ def channels_send(project_path: Path | None, conversation: str, text: str = "",
         payload["edit_ref"] = edit_ref
     if files:
         payload["files"] = files
-    body = serialize_body(payload)
-    return _request(project_path, "POST", "/channels/send", body, timeout=timeout)
+    return _request(project_path, "POST", "/channels/send", payload,
+                    timeout=timeout)
 
 
 def channels_typing(project_path: Path | None, conversation: str,
                     on: bool) -> bool:
     """POST /channels/typing. Best-effort: returns False instead of raising,
     so a typing hiccup never breaks event delivery or a reply."""
-    from bobi.events.signing import serialize_body
-
-    body = serialize_body({"conversation": conversation, "on": bool(on)})
     try:
-        _request(project_path, "POST", "/channels/typing", body, timeout=10.0)
+        _request(project_path, "POST", "/channels/typing",
+                 {"conversation": conversation, "on": bool(on)}, timeout=10.0)
         return True
     except GatewayError as exc:
         log.debug("channels/typing failed for %s: %s", conversation, exc)

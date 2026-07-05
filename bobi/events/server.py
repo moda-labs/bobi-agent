@@ -262,17 +262,12 @@ def _authorize_one_resource(base_url: str, service: str, resource: str,
     """POST /resources/authorize for a single resource. Returns True iff the
     server granted (200). The credential is signed-over and transmitted but is
     NEVER logged here (the server stores only the grant)."""
-    from bobi import http as pooled
-    from bobi.events.signing import serialize_body, sign_headers
+    from bobi.events.signing import signed_request
 
-    body = serialize_body({"service": service, "resource": resource, "credential": credential})
-    headers = {"Content-Type": "application/json"}
-    headers.update(sign_headers(bubble_id, bubble_key, "POST", "/resources/authorize", body))
-    resp = pooled.post(
-        f"{base_url}/resources/authorize",
-        content=body,
-        headers=headers,
-        timeout=10.0,
+    resp = signed_request(
+        base_url, "POST", "/resources/authorize",
+        {"service": service, "resource": resource, "credential": credential},
+        bubble_id, bubble_key, timeout=10.0,
     )
     return resp.status_code == 200
 
@@ -285,20 +280,16 @@ def _seed_test_resource_grant(base_url: str, service: str, resource: str,
     without live GitHub/Linear/Slack credentials. The server route is disabled
     unless it was started with a matching test secret.
     """
-    from bobi import http as pooled
-    from bobi.events.signing import serialize_body, sign_headers
+    from bobi.events.signing import signed_request
 
     secret = os.environ.get("BOBI_ES_TEST_GRANTS_SECRET", "")
     if not secret:
         return False
-    body = serialize_body({"grants": [{"service": service, "resource": resource}]})
-    headers = {"Content-Type": "application/json", "x-moda-test-secret": secret}
-    headers.update(sign_headers(bubble_id, bubble_key, "POST", "/__test/resource-grants", body))
-    resp = pooled.post(
-        f"{base_url}/__test/resource-grants",
-        content=body,
-        headers=headers,
-        timeout=5.0,
+    resp = signed_request(
+        base_url, "POST", "/__test/resource-grants",
+        {"grants": [{"service": service, "resource": resource}]},
+        bubble_id, bubble_key, timeout=5.0,
+        extra_headers={"x-moda-test-secret": secret},
     )
     return resp.status_code == 200
 
@@ -387,22 +378,16 @@ def _post_register(base_url: str, name: str, subscriptions: list[str],
     returns its key once); JOIN when signed with an existing bubble's key.
 
     Signs over the exact transmitted bytes (content=, not json=) so the
-    server's HMAC verification reproduces the signature. Raises BubbleRejected
-    on a 403 join so callers can re-mint.
+    server's HMAC verification reproduces the signature; ``signed_request``
+    sends the MINT case unsigned. Raises BubbleRejected on a 403 join so
+    callers can re-mint.
     """
-    from bobi import http as pooled
-    from bobi.events.signing import serialize_body, sign_headers
+    from bobi.events.signing import signed_request
 
-    body = serialize_body({"name": name, "subscriptions": subscriptions})
-    headers = {"Content-Type": "application/json"}
-    if bubble_key:
-        headers.update(sign_headers(bubble_id, bubble_key, "POST", "/deployments", body))
-
-    resp = pooled.post(
-        f"{base_url}/deployments",
-        content=body,
-        headers=headers,
-        timeout=REGISTER_TIMEOUT,
+    resp = signed_request(
+        base_url, "POST", "/deployments",
+        {"name": name, "subscriptions": subscriptions},
+        bubble_id, bubble_key, timeout=REGISTER_TIMEOUT,
     )
     if resp.status_code == 403:
         raise BubbleRejected(f"join rejected for bubble {bubble_id}")
@@ -605,8 +590,6 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
     through its own Slack bot. The global record (inbound self-reply loop
     prevention) is written either way, so an unsigned call still works.
     """
-    from bobi import http as pooled
-
     try:
         token = cfg.credential("slack", "bot_token")
     except Exception:
@@ -637,22 +620,13 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
             record["app_id"] = app_id
         if signing_secret:
             record["signing_secret"] = signing_secret
-        # Sign over the EXACT transmitted bytes (content=, not json=) when we
-        # hold a bubble key, so the server reproduces the HMAC and writes the
-        # bubble-scoped record outbound /slack/send requires. Unsigned otherwise
-        # (still writes the global self-reply record).
-        from bobi.events.signing import serialize_body, sign_headers
-        body = serialize_body(record)
-        headers = {"Content-Type": "application/json"}
-        if bubble_key:
-            headers.update(
-                sign_headers(bubble_id, bubble_key, "POST", "/slack/workspaces", body)
-            )
-        pooled.post(
-            f"{base_url}/slack/workspaces",
-            content=body,
-            headers=headers,
-            timeout=10.0,
+        # Signed when we hold a bubble key, so the server writes the
+        # bubble-scoped record outbound /slack/send requires. Unsigned
+        # otherwise (still writes the global self-reply record).
+        from bobi.events.signing import signed_request
+        signed_request(
+            base_url, "POST", "/slack/workspaces", record,
+            bubble_id, bubble_key, timeout=10.0,
         )
         log.info(
             "Registered Slack workspace %s (app %s) with event server "
