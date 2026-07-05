@@ -544,6 +544,155 @@ describe("github webhook signature verification", () => {
 	});
 });
 
+// #639: the linear route verifies through the pipeline's structural verify
+// slot — before it, linear webhooks were delivered with no signature check.
+describe("linear webhook signature verification", () => {
+	const secret = "test-linear-secret";
+
+	async function sign(body: string, withSecret = secret): Promise<string> {
+		const key = await crypto.subtle.importKey(
+			"raw",
+			new TextEncoder().encode(withSecret),
+			{ name: "HMAC", hash: "SHA-256" },
+			false,
+			["sign"],
+		);
+		const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+		return Array.from(new Uint8Array(sig))
+			.map((b) => b.toString(16).padStart(2, "0"))
+			.join("");
+	}
+
+	function linearPayload(webhookTimestamp = Date.now()): string {
+		return JSON.stringify({
+			action: "update",
+			type: "Issue",
+			data: { title: "t", team: { key: "ENG" } },
+			webhookTimestamp,
+		});
+	}
+
+	async function post(body: string, signature: string | null): Promise<Response> {
+		const envWithSecret = { ...env, LINEAR_WEBHOOK_SECRET: secret };
+		return worker.fetch(
+			new Request("https://example.com/webhooks/linear", {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					...(signature !== null ? { "linear-signature": signature } : {}),
+				},
+				body,
+			}),
+			envWithSecret,
+			{} as ExecutionContext,
+		);
+	}
+
+	it("rejects linear webhook with an invalid signature when LINEAR_WEBHOOK_SECRET is set", async () => {
+		const response = await post(linearPayload(), "deadbeef");
+		expect(response.status).toBe(401);
+	});
+
+	it("rejects linear webhook with no signature header when LINEAR_WEBHOOK_SECRET is set", async () => {
+		const response = await post(linearPayload(), null);
+		expect(response.status).toBe(401);
+	});
+
+	it("rejects a replayed linear webhook (stale signed webhookTimestamp)", async () => {
+		const body = linearPayload(Date.now() - 3600_000);
+		const response = await post(body, await sign(body));
+		expect(response.status).toBe(401);
+	});
+
+	it("accepts linear webhook with a valid signature", async () => {
+		const body = linearPayload();
+		const response = await post(body, await sign(body));
+		expect(response.status).toBe(200);
+	});
+
+	it("accepts linear webhook without signature when LINEAR_WEBHOOK_SECRET is not set", async () => {
+		const response = await SELF.fetch("https://example.com/webhooks/linear", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: linearPayload(),
+		});
+		expect(response.status).toBe(200);
+	});
+});
+
+// #639: transport-level proof the slack route rejects a bad signature (the
+// per-app secret resolution itself is unit-tested in core.spec.ts).
+describe("slack webhook signature verification", () => {
+	const secret = "test-slack-secret";
+
+	async function signSlack(timestamp: string, body: string): Promise<string> {
+		const key = await crypto.subtle.importKey(
+			"raw",
+			new TextEncoder().encode(secret),
+			{ name: "HMAC", hash: "SHA-256" },
+			false,
+			["sign"],
+		);
+		const sig = await crypto.subtle.sign(
+			"HMAC",
+			key,
+			new TextEncoder().encode(`v0:${timestamp}:${body}`),
+		);
+		const hex = Array.from(new Uint8Array(sig))
+			.map((b) => b.toString(16).padStart(2, "0"))
+			.join("");
+		return `v0=${hex}`;
+	}
+
+	const eventBody = JSON.stringify({
+		type: "event_callback",
+		event: { type: "message", user: "U1", channel: "D1", channel_type: "im", text: "hi", ts: "1.1" },
+	});
+
+	async function post(headers: Record<string, string>, body = eventBody): Promise<Response> {
+		const envWithSecret = { ...env, SLACK_SIGNING_SECRET: secret };
+		return worker.fetch(
+			new Request("https://example.com/webhooks/slack", {
+				method: "POST",
+				headers: { "content-type": "application/json", ...headers },
+				body,
+			}),
+			envWithSecret,
+			{} as ExecutionContext,
+		);
+	}
+
+	it("rejects slack event with an invalid signature when a signing secret is set", async () => {
+		const response = await post({
+			"x-slack-request-timestamp": String(Math.floor(Date.now() / 1000)),
+			"x-slack-signature": "v0=deadbeef",
+		});
+		expect(response.status).toBe(401);
+	});
+
+	it("rejects slack event with no signature headers when a signing secret is set", async () => {
+		const response = await post({});
+		expect(response.status).toBe(401);
+	});
+
+	it("accepts slack event with a valid signature", async () => {
+		const timestamp = String(Math.floor(Date.now() / 1000));
+		const response = await post({
+			"x-slack-request-timestamp": timestamp,
+			"x-slack-signature": await signSlack(timestamp, eventBody),
+		});
+		expect(response.status).toBe(200);
+	});
+
+	it("answers url_verification unsigned even when a signing secret is set", async () => {
+		// The handshake carries no signing headers; the pipeline's preVerify
+		// stage must short-circuit it before the signature check.
+		const response = await post({}, JSON.stringify({ type: "url_verification", challenge: "c1" }));
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ challenge: "c1" });
+	});
+});
+
 describe("cloudflare deployment deregistration", () => {
 	it("DELETE removes deployment from KV and returns 200", async () => {
 		// Register a deployment to get credentials (grant-backed global topic).

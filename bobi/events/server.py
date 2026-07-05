@@ -140,6 +140,7 @@ def _run_npm(args: list[str], es_dir: Path) -> None:
 
 def ensure_running(port: int, webhook_secret: str = "",
                    slack_signing_secret: str = "",
+                   linear_webhook_secret: str = "",
                    bind: str = "",
                    project_path: Path | None = None,
                    extra_env: dict[str, str] | None = None) -> str:
@@ -199,6 +200,8 @@ def ensure_running(port: int, webhook_secret: str = "",
         env["BOBI_ES_WEBHOOK_SECRET"] = webhook_secret
     if slack_signing_secret:
         env["BOBI_ES_SLACK_SIGNING_SECRET"] = slack_signing_secret
+    if linear_webhook_secret:
+        env["BOBI_ES_LINEAR_WEBHOOK_SECRET"] = linear_webhook_secret
     if bind:
         env["BOBI_ES_BIND"] = bind
     if extra_env:

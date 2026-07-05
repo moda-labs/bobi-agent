@@ -29,6 +29,9 @@ import {
 	handleGitHubWebhook,
 	handleLinearWebhook,
 	handleSlackWebhook,
+	handleWebhookRequest,
+	verifyLinearSignature,
+	type InboundWebhookRequest,
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
 	handleDeregisterDeployment,
@@ -1167,6 +1170,162 @@ describe("handleGitHubWebhook", () => {
 		const store = createMockStorage();
 		const result = await handleGitHubWebhook(store, "push", "del-1", { action: "opened" });
 		expect(result.status).toBe(400);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #639 — the unified inbound webhook pipeline. Both transports (Worker and
+// local server) route every /webhooks/<source> request through this one
+// function, so these tests ARE the shared verification coverage for both.
+// ---------------------------------------------------------------------------
+describe("handleWebhookRequest (unified pipeline)", () => {
+	async function hmacHex(secret: string, data: string): Promise<string> {
+		const key = await crypto.subtle.importKey(
+			"raw",
+			new TextEncoder().encode(secret),
+			{ name: "HMAC", hash: "SHA-256" },
+			false,
+			["sign"],
+		);
+		const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+		return Array.from(new Uint8Array(sig))
+			.map((b) => b.toString(16).padStart(2, "0"))
+			.join("");
+	}
+
+	function req(rawBody: string, headers: Record<string, string> = {}): InboundWebhookRequest {
+		const lower = Object.fromEntries(
+			Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]),
+		);
+		return { rawBody, header: (n) => lower[n.toLowerCase()] || "" };
+	}
+
+	it("returns null for an unregistered source (transport falls through to 404)", async () => {
+		const store = createMockStorage();
+		const result = await handleWebhookRequest(store, "nope", req("{}"), {});
+		expect(result).toBeNull();
+	});
+
+	it("rejects invalid JSON with 400", async () => {
+		const store = createMockStorage();
+		const result = await handleWebhookRequest(store, "github", req("not json"), {});
+		expect(result?.status).toBe(400);
+	});
+
+	it("rejects non-object JSON with 400", async () => {
+		const store = createMockStorage();
+		for (const raw of ["null", "[1,2]", '"str"']) {
+			const result = await handleWebhookRequest(store, "linear", req(raw), {});
+			expect(result?.status).toBe(400);
+		}
+	});
+
+	it("github: verifies and delivers through the pipeline", async () => {
+		const store = createMockStorage();
+		await store.addSubscription("github:org/repo", "sub1");
+		const body = JSON.stringify({ action: "opened", repository: { full_name: "org/repo" } });
+		const secrets = { github: "gh-secret" };
+
+		const bad = await handleWebhookRequest(
+			store, "github", req(body, { "x-hub-signature-256": "sha256=bad" }), secrets);
+		expect(bad?.status).toBe(401);
+
+		const sig = "sha256=" + (await hmacHex("gh-secret", body));
+		const ok = await handleWebhookRequest(
+			store, "github",
+			req(body, { "x-hub-signature-256": sig, "x-github-event": "issues", "x-github-delivery": "d1" }),
+			secrets);
+		expect(ok?.status).toBe(200);
+		expect(store.delivered).toHaveLength(1);
+		expect(store.delivered[0].type).toBe("github.issues");
+	});
+
+	it("linear: rejects a bad or missing signature and accepts a valid one", async () => {
+		const store = createMockStorage();
+		await store.addSubscription("linear:ENG", "sub1");
+		const body = JSON.stringify({
+			action: "update", type: "Issue",
+			data: { title: "t", team: { key: "ENG" } },
+			webhookTimestamp: Date.now(),
+		});
+		const secrets = { linear: "ln-secret" };
+
+		const missing = await handleWebhookRequest(store, "linear", req(body), secrets);
+		expect(missing?.status).toBe(401);
+
+		const bad = await handleWebhookRequest(
+			store, "linear", req(body, { "linear-signature": "deadbeef" }), secrets);
+		expect(bad?.status).toBe(401);
+
+		const ok = await handleWebhookRequest(
+			store, "linear",
+			req(body, { "linear-signature": await hmacHex("ln-secret", body) }), secrets);
+		expect(ok?.status).toBe(200);
+		expect(store.delivered).toHaveLength(1);
+		expect(store.delivered[0].topics).toEqual(["linear:ENG"]);
+	});
+
+	it("linear: rejects a replayed request via the signed webhookTimestamp", async () => {
+		const store = createMockStorage();
+		const body = JSON.stringify({
+			action: "update", type: "Issue",
+			data: { title: "t", team: { key: "ENG" } },
+			webhookTimestamp: Date.now() - 3600_000,
+		});
+		const result = await handleWebhookRequest(
+			store, "linear",
+			req(body, { "linear-signature": await hmacHex("ln-secret", body) }),
+			{ linear: "ln-secret" });
+		expect(result?.status).toBe(401);
+	});
+
+	it("linear: admits unverified when no secret is configured (legacy contract)", async () => {
+		const store = createMockStorage();
+		const body = JSON.stringify({ action: "update", type: "Issue", data: { team: { key: "ENG" } } });
+		const result = await handleWebhookRequest(store, "linear", req(body), {});
+		expect(result?.status).toBe(200);
+	});
+
+	it("slack: url_verification short-circuits before the signature check", async () => {
+		const store = createMockStorage();
+		const body = JSON.stringify({ type: "url_verification", challenge: "c1" });
+		// Secret configured + no signing headers: only preVerify lets this pass.
+		const result = await handleWebhookRequest(store, "slack", req(body), { slack: "sl-secret" });
+		expect(result?.status).toBe(200);
+		expect(result?.body).toEqual({ challenge: "c1" });
+	});
+
+	it("slack: retried event deliveries dedup before the signature check", async () => {
+		const store = createMockStorage();
+		const body = JSON.stringify({ type: "event_callback", event: { type: "message" } });
+		const result = await handleWebhookRequest(
+			store, "slack", req(body, { "x-slack-retry-num": "1" }), { slack: "sl-secret" });
+		expect(result?.status).toBe(200);
+		expect(result?.body).toEqual({ ok: true });
+	});
+
+	it("slack: rejects an unsigned event when a signing secret is configured", async () => {
+		const store = createMockStorage();
+		const body = JSON.stringify({ type: "event_callback", event: { type: "message", ts: "1.1" } });
+		const result = await handleWebhookRequest(store, "slack", req(body), { slack: "sl-secret" });
+		expect(result?.status).toBe(401);
+	});
+});
+
+describe("verifyLinearSignature", () => {
+	it("accepts the exact-body HMAC and rejects everything else", async () => {
+		const body = '{"a":1}';
+		const key = await crypto.subtle.importKey(
+			"raw", new TextEncoder().encode("s"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+		const sig = Array.from(new Uint8Array(
+			await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body))))
+			.map((b) => b.toString(16).padStart(2, "0")).join("");
+
+		expect(await verifyLinearSignature("s", body, sig)).toBe(true);
+		expect(await verifyLinearSignature("s", body, "")).toBe(false);
+		expect(await verifyLinearSignature("s", body, "deadbeef")).toBe(false);
+		expect(await verifyLinearSignature("s", body + " ", sig)).toBe(false);
+		expect(await verifyLinearSignature("other", body, sig)).toBe(false);
 	});
 });
 
