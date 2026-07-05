@@ -76,7 +76,10 @@ Connect every service from the interview through one of three
 mechanisms:
 
 - **Native** (github, slack, linear): github auto-detects from the git
-  remote; slack needs `SLACK_BOT_TOKEN`; linear needs `LINEAR_API_KEY`.
+  remote; slack needs `SLACK_BOT_TOKEN` and can also capture
+  `SLACK_SIGNING_SECRET` for inbound verification; linear needs
+  `LINEAR_API_KEY` and can also capture `LINEAR_WEBHOOK_SECRET` for inbound
+  verification.
 - **Venn** (everything OAuth: email, calendar, CRM, docs, …): the user
   connects services at venn.ai once, then a single `VENN_API_KEY`
   covers all of them. After saving the key, `check_venn` confirms which

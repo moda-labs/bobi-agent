@@ -77,6 +77,94 @@ def test_existing_node_modules_without_esbuild_uses_npm_exec(tmp_path, monkeypat
     ]
 
 
+def test_setup_webhook_secrets_are_forwarded_to_local_server(tmp_path, monkeypatch):
+    es_dir = tmp_path / "event-server"
+    (es_dir / "dist").mkdir(parents=True)
+    (es_dir / "dist" / "local.js").write_text("console.log('ok')\n")
+    (es_dir / "src").mkdir()
+    (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
+    (es_dir / "node_modules").mkdir()
+    (es_dir / "package.json").write_text("{}")
+    paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+
+    captured: dict = {}
+    health_calls = {"count": 0}
+
+    def fake_health(*args, **kwargs):
+        health_calls["count"] += 1
+        if health_calls["count"] == 1:
+            return None
+        return {"status": "ok"}
+
+    class FakePopen:
+        pid = 12345
+
+    def fake_popen(*args, **kwargs):
+        captured["env"] = kwargs["env"]
+        return FakePopen()
+
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "slack-secret")
+    monkeypatch.setenv("LINEAR_WEBHOOK_SECRET", "linear-secret")
+    monkeypatch.setattr(es.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
+    monkeypatch.setattr(es, "health", fake_health)
+
+    result = es.ensure_running(8080, project_path=tmp_path)
+
+    assert result == "started"
+    env = captured["env"]
+    assert "BOBI_ES_WEBHOOK_SECRET" not in env
+    assert env["BOBI_ES_SLACK_SIGNING_SECRET"] == "slack-secret"
+    assert env["BOBI_ES_LINEAR_WEBHOOK_SECRET"] == "linear-secret"
+
+
+def test_explicit_webhook_secrets_override_setup_env(tmp_path, monkeypatch):
+    es_dir = tmp_path / "event-server"
+    (es_dir / "dist").mkdir(parents=True)
+    (es_dir / "dist" / "local.js").write_text("console.log('ok')\n")
+    (es_dir / "src").mkdir()
+    (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
+    (es_dir / "node_modules").mkdir()
+    (es_dir / "package.json").write_text("{}")
+    paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+
+    captured: dict = {}
+    health_calls = {"count": 0}
+
+    def fake_health(*args, **kwargs):
+        health_calls["count"] += 1
+        if health_calls["count"] == 1:
+            return None
+        return {"status": "ok"}
+
+    class FakePopen:
+        pid = 12345
+
+    def fake_popen(*args, **kwargs):
+        captured["env"] = kwargs["env"]
+        return FakePopen()
+
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "ambient-slack")
+    monkeypatch.setenv("LINEAR_WEBHOOK_SECRET", "ambient-linear")
+    monkeypatch.setattr(es.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
+    monkeypatch.setattr(es, "health", fake_health)
+
+    result = es.ensure_running(
+        8080,
+        webhook_secret="explicit-github",
+        slack_signing_secret="",
+        linear_webhook_secret="explicit-linear",
+        project_path=tmp_path,
+    )
+
+    assert result == "started"
+    env = captured["env"]
+    assert env["BOBI_ES_WEBHOOK_SECRET"] == "explicit-github"
+    assert "BOBI_ES_SLACK_SIGNING_SECRET" not in env
+    assert env["BOBI_ES_LINEAR_WEBHOOK_SECRET"] == "explicit-linear"
+
+
 # ── Remote-URL guard (containerized-6) ──────────────────────────────
 
 

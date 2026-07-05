@@ -193,9 +193,15 @@ _NATIVE = [
                     "New key.",
                     "Copy the key and paste it below.",
                     "For webhooks: Settings → API → Webhooks → point one at "
-                    "your event server (optional).",
+                    "your event server, then copy its signing secret below "
+                    "(optional).",
                 ),
-                secrets=(Secret("LINEAR_API_KEY", "API key", "lin_api_…"),),
+                secrets=(
+                    Secret("LINEAR_API_KEY", "API key", "lin_api_…"),
+                    Secret("LINEAR_WEBHOOK_SECRET", "Webhook signing secret", "",
+                           "Optional; only to verify Linear events via the "
+                           "event server.", optional=True),
+                ),
                 docs_url="https://linear.app/settings/api",
             ),
         ),

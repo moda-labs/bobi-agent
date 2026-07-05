@@ -138,9 +138,9 @@ def _run_npm(args: list[str], es_dir: Path) -> None:
         )
 
 
-def ensure_running(port: int, webhook_secret: str = "",
-                   slack_signing_secret: str = "",
-                   linear_webhook_secret: str = "",
+def ensure_running(port: int, webhook_secret: str | None = None,
+                   slack_signing_secret: str | None = None,
+                   linear_webhook_secret: str | None = None,
                    bind: str = "",
                    project_path: Path | None = None,
                    extra_env: dict[str, str] | None = None) -> str:
@@ -196,12 +196,21 @@ def ensure_running(port: int, webhook_secret: str = "",
 
     env = dict(os.environ)
     env["BOBI_ES_PORT"] = str(port)
-    if webhook_secret:
-        env["BOBI_ES_WEBHOOK_SECRET"] = webhook_secret
-    if slack_signing_secret:
-        env["BOBI_ES_SLACK_SIGNING_SECRET"] = slack_signing_secret
-    if linear_webhook_secret:
-        env["BOBI_ES_LINEAR_WEBHOOK_SECRET"] = linear_webhook_secret
+    resolved_webhook_secret = webhook_secret or ""
+    resolved_slack_signing_secret = (
+        env.get("SLACK_SIGNING_SECRET", "")
+        if slack_signing_secret is None else slack_signing_secret
+    )
+    resolved_linear_webhook_secret = (
+        env.get("LINEAR_WEBHOOK_SECRET", "")
+        if linear_webhook_secret is None else linear_webhook_secret
+    )
+    if resolved_webhook_secret:
+        env["BOBI_ES_WEBHOOK_SECRET"] = resolved_webhook_secret
+    if resolved_slack_signing_secret:
+        env["BOBI_ES_SLACK_SIGNING_SECRET"] = resolved_slack_signing_secret
+    if resolved_linear_webhook_secret:
+        env["BOBI_ES_LINEAR_WEBHOOK_SECRET"] = resolved_linear_webhook_secret
     if bind:
         env["BOBI_ES_BIND"] = bind
     if extra_env:
