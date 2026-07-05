@@ -110,6 +110,7 @@ def validate_config(project_path: Path) -> ValidationResult:
     checks: list[CheckResult] = []
 
     checks.append(_check_entry_point(cfg, project_path))
+    checks.extend(_check_brain(cfg))
     checks.extend(_check_roles(cfg, project_path))
     checks.extend(_check_monitor_relevance(project_path))
     checks.extend(_check_service_credentials(cfg))
@@ -142,6 +143,29 @@ def _check_entry_point(cfg, project_path: Path) -> CheckResult:
         )
 
     return CheckResult("entry_point", ok=True, detail=cfg.entry_point)
+
+
+def _check_brain(cfg) -> list[CheckResult]:
+    """Validate the `brain:` block where a bad value fails mid-session (#655).
+
+    Unknown kinds already fail loud at session construction (``get_brain``
+    raises), so only `kind: gateway` needs a validate-time check: without a
+    resolvable `base_url` every session would 404/hang at its first turn.
+    A `${VAR}` that didn't resolve interpolates to "" and lands here too.
+    The auth token (``ANTHROPIC_AUTH_TOKEN``) is deliberately not required -
+    Ollama serves unauthenticated.
+    """
+    if cfg.brain_kind != "gateway":
+        return []
+    if not cfg.brain_base_url:
+        return [CheckResult(
+            "brain.gateway", ok=False,
+            detail="kind: gateway requires brain.base_url",
+            hint="set brain.base_url to the Anthropic-compatible endpoint "
+                 "(e.g. http://localhost:4000 or ${LLM_GATEWAY_URL} with the "
+                 "variable in the runtime .env)",
+        )]
+    return [CheckResult("brain.gateway", ok=True, detail=cfg.brain_base_url)]
 
 
 # Roles the runtime uses without a roles/ prompt directory. Monitor checks

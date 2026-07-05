@@ -154,10 +154,16 @@ class DeployConfig:
                 f"deployment '{self.name}' has auth='{self.auth}' "
                 "(expected api_key or subscription)."
             )
-        if self.brain not in ("", "claude", "codex"):
+        if self.brain not in ("", "claude", "codex", "gateway"):
             raise DeployError(
                 f"deployment '{self.name}' has brain='{self.brain}' "
-                "(expected claude or codex)."
+                "(expected claude, codex, or gateway)."
+            )
+        if self.brain == "gateway" and self.auth == "subscription":
+            raise DeployError(
+                f"deployment '{self.name}' is auth=subscription with a gateway "
+                "brain — a gateway authenticates with ANTHROPIC_AUTH_TOKEN "
+                "(or nothing); there is no subscription login to bootstrap."
             )
 
 
@@ -273,8 +279,14 @@ def load_deploy_config(project_path: Path, name: str,
 # --- brain / auth-key resolution --------------------------------------------
 
 # The provider API key that authenticates a brain in api_key mode (and that
-# would silently shadow subscription OAuth, so it's forbidden there).
-_BRAIN_API_KEY = {"claude": "ANTHROPIC_API_KEY", "codex": "OPENAI_API_KEY"}
+# would silently shadow subscription OAuth, so it's forbidden there). A gateway
+# has none: its optional ANTHROPIC_AUTH_TOKEN is declared, never required
+# (Ollama serves unauthenticated), and the sessions blank ANTHROPIC_API_KEY.
+_BRAIN_API_KEY = {
+    "claude": "ANTHROPIC_API_KEY",
+    "codex": "OPENAI_API_KEY",
+    "gateway": "",
+}
 
 
 def _brain_api_key(kind: str) -> str:
@@ -564,13 +576,19 @@ def _secret_sets(cfg: DeployConfig,
     BOBI_* refs are instance identity the provisioner stamps into [env] from
     flags — never secrets — so they're excluded from both sets.
     """
-    auth_req = [_brain_api_key(cfg.brain)] if cfg.auth == "api_key" else []
+    auth_key = _brain_api_key(cfg.brain)
+    auth_req = [auth_key] if cfg.auth == "api_key" and auth_key else []
+    # A gateway team's auth token is declared (may reach the instance) but
+    # never required — Ollama-style gateways take no token at all.
+    gateway_declared = (
+        {"ANTHROPIC_AUTH_TOKEN"} if cfg.brain == "gateway" else set()
+    )
     if not cfg.team:
         return (auth_req, None)  # team-url: package not local
     y = resolve_team_dir(project_path, cfg.team) / "agent.yaml"
     keep = lambda vs: [v for v in vs if not v.startswith("BOBI_")]
     required = keep(scan_required_vars(y)) + auth_req
-    declared = set(keep(scan_declared_vars(y))) | set(auth_req)
+    declared = set(keep(scan_declared_vars(y))) | set(auth_req) | gateway_declared
     return (required, declared)
 
 
@@ -632,7 +650,7 @@ def resolve_secret_values(cfg: DeployConfig, project_path: Path,
     # Subscription mode: the provider API key silently outranks the OAuth creds
     # and bills the API instead — it must be entirely absent (§6.1).
     auth_key = _brain_api_key(cfg.brain)
-    if cfg.auth == "subscription" and values.get(auth_key):
+    if cfg.auth == "subscription" and auth_key and values.get(auth_key):
         raise DeployError(
             f"deployment '{cfg.name}' is auth=subscription but {auth_key} "
             "is present in its secrets — remove it (it overrides subscription auth)."

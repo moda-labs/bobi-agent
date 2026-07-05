@@ -116,6 +116,18 @@ class TestDeterministicBodies:
         assert "roles" not in merged
         assert merged["brain"] == {"kind": "codex"}
 
+    def test_merge_skips_monitor_default_for_gateway_brain(self):
+        # A gateway backend serves its own model names; `haiku` would only
+        # work by coincidence (#655).
+        from bobi.setup.authoring import merge_agent_yaml
+        existing = (
+            "agent: triage-bot\nentry_point: triage-lead\n"
+            "brain:\n  kind: gateway\n  base_url: http://localhost:4000\n"
+        )
+        merged = yaml.safe_load(merge_agent_yaml(existing, _spec_state()))
+        assert "roles" not in merged
+        assert merged["brain"]["kind"] == "gateway"
+
     def test_venn_services_declare_the_shared_key(self):
         # A team using Venn-backed services must declare venn_api_key so
         # Named start resolves it from the env / .env (else preflight

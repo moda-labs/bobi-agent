@@ -466,7 +466,11 @@ def run_manager_from_config(
 
     from bobi.brain import set_process_brain
 
-    set_process_brain(cfg.brain_kind)
+    set_process_brain(
+        cfg.brain_kind, cfg.brain_model,
+        gateway_base_url=cfg.brain_base_url,
+        gateway_small_model=cfg.brain_small_model,
+    )
 
     agent_name = cfg.agent
     role = cfg.entry_point or "manager"

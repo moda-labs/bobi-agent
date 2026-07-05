@@ -57,8 +57,11 @@ class _ClaudeSession:
 
     provider = "anthropic"
 
-    def __init__(self, options: Any) -> None:
+    def __init__(self, options: Any, provider: str = "anthropic") -> None:
         self._options = options
+        # Instance label follows the factory (GatewayBrain sessions attribute
+        # their costs to "gateway", not real Anthropic spend).
+        self.provider = provider
         self._client = self._new_client()
 
     def _new_client(self) -> Any:
@@ -261,7 +264,7 @@ class ClaudeBrain:
         # the SDK's own default.
         if system_prompt is not None:
             kwargs["system_prompt"] = system_prompt
-        return _ClaudeSession(ClaudeAgentOptions(**kwargs))
+        return _ClaudeSession(ClaudeAgentOptions(**kwargs), provider=self.provider)
 
     async def stream_once(
         self,

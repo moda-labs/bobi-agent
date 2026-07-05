@@ -159,6 +159,20 @@ Make sure the matching CLI is installed and authenticated (see
 For Claude-backed teams, `model` can be an alias such as `haiku`, `sonnet`, or
 `opus`, or a full Claude model ID.
 
+To run a team on **local or self-hosted models**, use `kind: gateway` - it
+drives the Claude CLI against any Anthropic-compatible endpoint (LiteLLM,
+Ollama's Anthropic-compat API):
+
+```yaml
+brain:
+  kind: gateway
+  base_url: ${LLM_GATEWAY_URL}   # the /v1/messages-compatible endpoint
+  model: qwen3:14b               # gateway-native model id
+```
+
+If the gateway needs auth, put `ANTHROPIC_AUTH_TOKEN` in the team's runtime
+`.env`. See `skills/create-agent.md` for the details.
+
 Workflow steps can override the team default for that step:
 
 ```yaml
@@ -229,7 +243,9 @@ Full walkthrough: **[Slack setup](skills/slack-setup.md)**.
   Cloudflare account) ingests webhooks from GitHub, Slack, Linear, and anything
   else, then fans them out to the agents subscribed to each topic.
 - **Runtime-agnostic brains.** Each agent is a Claude Code or OpenAI Codex
-  session; choose per agent with `brain: {kind: claude|codex}`.
+  session; choose per agent with `brain: {kind: claude|codex}`, or point a
+  team at local models via an Anthropic-compatible gateway with
+  `brain: {kind: gateway}`.
 - **Deterministic workflows.** YAML DAGs force multi-step work through a fixed
   recipe with role routing - code review before merge, CI before PRs - instead of
   trusting the model to remember.
