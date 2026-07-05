@@ -1480,6 +1480,11 @@ function decodeOutboundFiles(raw: unknown): OutboundFile[] | null {
 // Capability degradation happens here: update on a channel without edit
 // support becomes a follow-up post; typing on a channel without indicators
 // is a silent no-op.
+// Spacing between follow-up chunk posts (#651): chunked sends fire several
+// posts into one channel back-to-back, and chat platforms rate-limit sustained
+// per-channel posting (Slack: ~1/sec with burst allowance).
+const CHUNK_SPACING_MS = 300;
+
 export async function handleChannelsSend(
 	storage: StorageAdapter,
 	body: Record<string, unknown>,
@@ -1556,39 +1561,50 @@ export async function handleChannelsSend(
 			} else {
 				result = await adapter.uploadFiles(botToken, conv, files, outText || undefined);
 			}
-		} else if (editRef && mode === "update") {
-			// Streaming rewrite of one message: chunking would post a new
-			// message on every tick, so the budget stays truncation-enforced
-			// until the final send.
-			const outText = truncateForChannel(rawText, caps);
-			// Degrade to a follow-up post on a channel without edit support.
-			result = adapter.update && caps.edit
-				? await adapter.update(botToken, conv, editRef, outText, { markdown: true })
-				: await adapter.send(botToken, conv, outText, { markdown: true });
 		} else {
-			// Terminal send (post, or final resolving a placeholder):
-			// over-budget text goes out whole as natural-boundary chunks. The
-			// first chunk carries the message identity (placeholder edit,
-			// returned ts); later chunks are follow-up posts in the same
-			// conversation.
-			const chunks = chunkForChannel(rawText, caps);
-			if (editRef && mode === "final") {
-				result = adapter.update && caps.edit
-					? await adapter.update(botToken, conv, editRef, chunks[0], { markdown: true })
-					: await adapter.send(botToken, conv, chunks[0], { markdown: true });
+			// Editing a placeholder degrades to a follow-up post on a channel
+			// without edit support - one degradation rule for update and final.
+			// mode "post" always posts, even if a stray edit_ref is present.
+			const wantsEdit = Boolean(editRef) && (mode === "update" || mode === "final");
+			const editOrSend = (txt: string) =>
+				wantsEdit && adapter.update && caps.edit
+					? adapter.update(botToken, conv, editRef, txt, { markdown: true })
+					: adapter.send(botToken, conv, txt, { markdown: true });
+
+			if (editRef && mode === "update") {
+				// Streaming rewrite of one message: chunking would post a new
+				// message on every tick, so the budget stays truncation-enforced
+				// until the final send.
+				result = await editOrSend(truncateForChannel(rawText, caps));
 			} else {
-				result = await adapter.send(botToken, conv, chunks[0], { markdown: true });
-			}
-			if (result.ok) {
-				const first = result;
-				for (const chunk of chunks.slice(1)) {
-					const follow = await adapter.send(botToken, conv, chunk, { markdown: true });
+				// Terminal send (post, or final resolving a placeholder):
+				// over-budget text goes out whole as natural-boundary chunks.
+				// The first chunk carries the message identity (placeholder
+				// edit, returned ts); later chunks are follow-up posts in the
+				// same conversation, lightly paced for channel rate limits.
+				const chunks = chunkForChannel(rawText, caps);
+				result = await editOrSend(chunks[0]);
+				for (let i = 1; result.ok && i < chunks.length; i++) {
+					await new Promise((r) => setTimeout(r, CHUNK_SPACING_MS));
+					const follow = await adapter.send(botToken, conv, chunks[i], { markdown: true });
 					if (!follow.ok) {
-						result = follow;
-						break;
+						// Chunks 1..i are already visible: clear the typing
+						// indicator (the reply IS partially delivered) and
+						// surface an error a caller will not blindly retry.
+						if ((mode === "update" || mode === "final") && adapter.typing && caps.typing) {
+							await adapter.typing(botToken, conv, false);
+						}
+						return {
+							status: 502,
+							body: {
+								ok: false,
+								ts: result.ts,
+								error: `chunk ${i + 1}/${chunks.length} failed after partial delivery `
+									+ `(do not resend; the reply is partially visible): ${follow.error}`,
+							},
+						};
 					}
 				}
-				if (result.ok) result = first;
 			}
 		}
 	} catch (err) {

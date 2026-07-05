@@ -160,14 +160,25 @@ export function truncateForChannel(text: string, caps: ChannelCapabilities): str
 
 /**
  * Fence state after scanning `s`. `open` is "" outside a fence, else the
- * fence header to reopen with (e.g. "```python"). Triple-backtick lines
- * toggle; an opening line's info string is preserved for reopening.
+ * fence header to reopen with (e.g. "```python"). Fence lines toggle; an
+ * opening line's info string is preserved for reopening. The info string may
+ * not contain backticks (per CommonMark), which keeps a line-leading inline
+ * span like ```cmd``` from reading as an opener; an implausibly long "info
+ * string" (a one-line blob that happens to start with backticks) reopens as
+ * a bare fence so the carried prefix can never blow the chunk budget.
  */
+const MAX_FENCE_HEADER = 24;
+
 function fenceStateAfter(s: string, open: string): string {
 	for (const line of s.split("\n")) {
-		const m = line.match(/^\s*(```+)(.*)$/);
+		const m = line.match(/^\s*(`{3,})([^`]*)$/);
 		if (!m) continue;
-		open = open ? "" : m[1] + m[2].trim();
+		if (open) {
+			open = "";
+		} else {
+			const info = m[2].trim();
+			open = info.length > MAX_FENCE_HEADER ? m[1] : m[1] + info;
+		}
 	}
 	return open;
 }
@@ -188,7 +199,7 @@ export function chunkForChannel(text: string, caps: ChannelCapabilities): string
 
 	while (chunks.length < MAX_CHUNKS - 1) {
 		const prefix = reopen ? reopen + "\n" : "";
-		if (unitLength(prefix + remaining, caps) <= caps.maxLength) {
+		if (unitLength(prefix, caps) + unitLength(remaining, caps) <= caps.maxLength) {
 			chunks.push(prefix + remaining);
 			return chunks;
 		}
@@ -199,9 +210,11 @@ export function chunkForChannel(text: string, caps: ChannelCapabilities): string
 		const windowEnd = unitIndex(remaining, avail, caps);
 		const window = remaining.slice(0, windowEnd);
 
+		// Natural boundaries, but never a blank chunk: a cut that leaves only
+		// whitespace (e.g. leading newlines) would fail the whole send.
 		let cut = window.lastIndexOf("\n\n");
-		if (cut <= 0) cut = window.lastIndexOf("\n");
-		if (cut <= 0) cut = windowEnd; // hard split, already surrogate-safe
+		if (cut <= 0 || !window.slice(0, cut).trim()) cut = window.lastIndexOf("\n");
+		if (cut <= 0 || !window.slice(0, cut).trim()) cut = windowEnd; // hard split, surrogate-safe
 
 		const head = remaining.slice(0, cut);
 		remaining = remaining.slice(cut).replace(/^\n+/, "");
@@ -213,9 +226,17 @@ export function chunkForChannel(text: string, caps: ChannelCapabilities): string
 	}
 
 	// Chunk-count guard hit: truncate the tail instead of posting unbounded
-	// follow-ups for pathological input.
+	// follow-ups for pathological input, keeping any open fence closed so the
+	// final chunk still renders.
 	const prefix = reopen ? reopen + "\n" : "";
-	chunks.push(truncateForChannel(prefix + remaining, caps));
+	let tail = truncateForChannel(prefix + remaining, caps);
+	if (fenceStateAfter(tail, "")) {
+		tail = truncateForChannel(
+			prefix + remaining,
+			{ ...caps, maxLength: caps.maxLength - unitLength(FENCE_CLOSE, caps) },
+		) + FENCE_CLOSE;
+	}
+	chunks.push(tail);
 	return chunks;
 }
 

@@ -101,6 +101,46 @@ describe("chunkForChannel", () => {
 		expect(chunks[chunks.length - 1].endsWith("_(truncated)_")).toBe(true);
 		for (const c of chunks) expect(c.length).toBeLessThanOrEqual(100);
 	});
+
+	it("closes the fence on a guard-truncated tail", () => {
+		const code = Array.from({ length: 400 }, (_, i) => `line ${i}`).join("\n");
+		const text = "```python\n" + code; // never closed, way past 7 chunks
+		const chunks = chunkForChannel(text, caps(100));
+		const last = chunks[chunks.length - 1];
+		expect(last).toContain("_(truncated)_");
+		expect(last.endsWith("```")).toBe(true);
+		for (const c of chunks) expect(c.length).toBeLessThanOrEqual(100);
+	});
+
+	it("does not read a line-leading inline backtick span as a fence opener", () => {
+		const text = "```pip install foo```\n" + "prose line\n".repeat(30);
+		const chunks = chunkForChannel(text, caps(90));
+		// The inline span must not be duplicated as a reopen header.
+		expect(chunks.filter((c) => c.includes("pip install foo")).length).toBe(1);
+		for (const c of chunks.slice(1)) expect(c.startsWith("```")).toBe(false);
+	});
+
+	it("reopens with a bare fence when the opener's info string is a giant blob", () => {
+		const blob = "```" + "j".repeat(500); // one-line 'fence' with a 500-char info string
+		const text = blob + "\n" + "content line\n".repeat(40);
+		const chunks = chunkForChannel(text, caps(120));
+		for (const c of chunks) expect(c.length).toBeLessThanOrEqual(120);
+		// Continuations reopen bare (the blob content still flows through as
+		// fence body, but never as a budget-blowing reopen header line).
+		for (const c of chunks.slice(1)) {
+			if (c.startsWith("```")) expect(c.startsWith("```\n")).toBe(true);
+		}
+	});
+
+	it("never emits a blank chunk for text with leading newlines", () => {
+		const text = "\n\n" + "z".repeat(300);
+		const chunks = chunkForChannel(text, caps(100));
+		for (const c of chunks) {
+			expect(c.trim().length).toBeGreaterThan(0);
+			expect(c.length).toBeLessThanOrEqual(100);
+		}
+		expect(chunks.join("")).toContain("z".repeat(90));
+	});
 });
 
 describe("truncateForChannel", () => {
