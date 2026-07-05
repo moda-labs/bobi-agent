@@ -1459,3 +1459,135 @@ class TestWebhookSignatureVerification:
         stage must short-circuit it before the signature check."""
         body = json.dumps({"type": "url_verification", "challenge": "c1"}).encode()
         assert self._post(f"{secured_server}/webhooks/slack", body, {}) == 200
+
+
+class TestIngestTokens:
+    """#640: scoped ingest tokens end to end on BOTH backends. Mints a token
+    bound to (bubble, alert/firing) over the signed management API, then
+    drives the acceptance matrix: a plain curl-style POST with the bearer
+    token delivers to a bubble subscriber; missing/wrong/revoked tokens and
+    cross-topic use are opaque 403s; list never exposes token material."""
+
+    @staticmethod
+    def _signed(base_url: str, method: str, path: str, body: str,
+                bubble_id: str, bubble_key: str) -> tuple[int, dict]:
+        from bobi.events.signing import sign_headers
+
+        headers = {"Content-Type": "application/json"} if body else {}
+        headers.update(sign_headers(bubble_id, bubble_key, method, path, body))
+        req = urllib.request.Request(
+            base_url + path, data=body.encode() if body else None,
+            headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as err:
+            try:
+                return err.code, json.loads(err.read())
+            except ValueError:
+                return err.code, {}
+
+    @staticmethod
+    def _ingest(base_url: str, topic: str, payload: dict,
+                token: str | None = None) -> int:
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(
+            f"{base_url}/webhooks/ingest/{topic}",
+            data=json.dumps(payload).encode(), headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                json.loads(resp.read())
+                return resp.status
+        except urllib.error.HTTPError as err:
+            return err.code
+
+    def test_unsigned_token_mint_rejected(self, event_server):
+        base_url, *_ = event_server
+        req = urllib.request.Request(
+            f"{base_url}/ingest-tokens",
+            data=json.dumps({"topic": "alert/firing"}).encode(),
+            headers={"Content-Type": "application/json"})
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(req, timeout=5)
+        assert exc.value.code == 403
+
+    def test_ingest_token_lifecycle(self, event_server):
+        base_url, *_ = event_server
+        from bobi.events.signing import serialize_body
+
+        boot = _register(base_url, "ingest-bootstrap", ["_bootstrap"])
+        bub, key = boot["bubble_id"], boot["bubble_key"]
+        dep = _register(base_url, "ingest-subscriber", ["alert/firing"], bub, key)
+
+        # Mint - the token appears here and only here.
+        status, minted = self._signed(
+            base_url, "POST", "/ingest-tokens",
+            serialize_body({"name": "oncall", "topic": "alert/firing"}), bub, key)
+        assert status == 201
+        token = minted["token"]
+        assert token.startswith("ingt_")
+
+        # The exact acceptance flow: a static-header POST of plain JSON
+        # reaches a subscriber of the bound topic in the bound bubble.
+        events = _send_and_drain(
+            base_url, dep["deployment_id"], dep["api_key"],
+            lambda: self._ingest(base_url, "alert/firing",
+                                 {"title": "disk full", "severity": "critical"}, token))
+        matching = [e for e in events
+                    if e.get("source") == "ingest" and e.get("type") == "alert/firing"]
+        assert len(matching) == 1
+        assert matching[0]["fields"]["title"] == "disk full"
+        assert matching[0]["payload"] == {"title": "disk full", "severity": "critical"}
+
+        # Missing, wrong, and cross-topic tokens: opaque 403.
+        assert self._ingest(base_url, "alert/firing", {"t": 1}) == 403
+        assert self._ingest(base_url, "alert/firing", {"t": 1}, "ingt_wrong") == 403
+        assert self._ingest(base_url, "alert/resolved", {"t": 1}, token) == 403
+
+        # List shows metadata, never token material.
+        status, listed = self._signed(base_url, "GET", "/ingest-tokens", "", bub, key)
+        assert status == 200
+        assert [t["id"] for t in listed["tokens"]] == [minted["id"]]
+        assert all("token" not in t and "token_hash" not in t for t in listed["tokens"])
+
+        # Revoke takes effect immediately.
+        status, _ = self._signed(
+            base_url, "DELETE", f"/ingest-tokens/{minted['id']}", "", bub, key)
+        assert status == 200
+        assert self._ingest(base_url, "alert/firing", {"t": 1}, token) == 403
+
+    def test_token_is_bubble_scoped(self, event_server):
+        """A second bubble cannot see or revoke the first bubble's tokens, and
+        the ingested event stays inside the minting bubble."""
+        base_url, *_ = event_server
+        from bobi.events.signing import serialize_body
+
+        owner = _register(base_url, "ingest-owner", ["_bootstrap"])
+        other = _register(base_url, "ingest-other", ["_bootstrap"])
+        # A subscriber to the SAME topic in the OTHER bubble must not receive.
+        other_dep = _register(base_url, "ingest-other-sub", ["alert/firing"],
+                              other["bubble_id"], other["bubble_key"])
+
+        status, minted = self._signed(
+            base_url, "POST", "/ingest-tokens",
+            serialize_body({"topic": "alert/firing"}),
+            owner["bubble_id"], owner["bubble_key"])
+        assert status == 201
+
+        events = _send_and_drain(
+            base_url, other_dep["deployment_id"], other_dep["api_key"],
+            lambda: self._ingest(base_url, "alert/firing", {"title": "x"},
+                                 minted["token"]),
+            timeout=3)
+        assert [e for e in events if e.get("source") == "ingest"] == []
+
+        status, listed = self._signed(
+            base_url, "GET", "/ingest-tokens", "",
+            other["bubble_id"], other["bubble_key"])
+        assert status == 200 and listed["tokens"] == []
+        status, _ = self._signed(
+            base_url, "DELETE", f"/ingest-tokens/{minted['id']}", "",
+            other["bubble_id"], other["bubble_key"])
+        assert status == 404

@@ -6,6 +6,7 @@ import {
 	type BubbleAuthContext,
 	type SlackWorkspaceRecord,
 	type ResourceGrant,
+	type IngestTokenRecord,
 	type NormalizedEvent,
 	namespaceSubKey,
 	parseGlobalTopic,
@@ -42,6 +43,14 @@ import {
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
 	resolveSlackSigningSecret,
+	handleIngestTokenCreate,
+	handleIngestTokenList,
+	handleIngestTokenRevoke,
+	validateIngestTopic,
+	createIngestEvent,
+	resetIngestRateLimiter,
+	INGEST_RATE_LIMIT,
+	INGEST_MAX_BODY_BYTES,
 } from "../src/core";
 import { hmacHex } from "./helpers";
 import { bridgeSlackWebhook } from "../src/adapters/chat-sdk-slack";
@@ -615,6 +624,7 @@ function createMockStorage(): StorageAdapter & {
 	bubbles: Map<string, BubbleRecord>;
 	slackWorkspaces: Map<string, SlackWorkspaceRecord>;
 	resourceGrants: Map<string, ResourceGrant>;
+	ingestTokens: Map<string, IngestTokenRecord>;
 	delivered: NormalizedEvent[];
 	deliveredTo: Array<{ event: NormalizedEvent; ids: string[] }>;
 	initCalls: Array<{ deploymentId: string; subscriptions: string[] }>;
@@ -627,6 +637,7 @@ function createMockStorage(): StorageAdapter & {
 	const bubbles = new Map<string, BubbleRecord>();
 	const slackWorkspaces = new Map<string, SlackWorkspaceRecord>();
 	const resourceGrants = new Map<string, ResourceGrant>();
+	const ingestTokens = new Map<string, IngestTokenRecord>();
 	const delivered: NormalizedEvent[] = [];
 	const deliveredTo: Array<{ event: NormalizedEvent; ids: string[] }> = [];
 	const initCalls: Array<{ deploymentId: string; subscriptions: string[] }> = [];
@@ -638,6 +649,7 @@ function createMockStorage(): StorageAdapter & {
 		bubbles,
 		slackWorkspaces,
 		resourceGrants,
+		ingestTokens,
 		delivered,
 		deliveredTo,
 		initCalls,
@@ -675,6 +687,18 @@ function createMockStorage(): StorageAdapter & {
 		},
 		async hasResourceGrant(service: string, resource: string, bubbleId: string) {
 			return resourceGrants.has(`${service}:${resource}:${bubbleId}`);
+		},
+		async putIngestToken(record: IngestTokenRecord) {
+			ingestTokens.set(record.token_hash, record);
+		},
+		async getIngestTokenByHash(hash: string) {
+			return ingestTokens.get(hash) || null;
+		},
+		async listIngestTokens(bubbleId: string) {
+			return [...ingestTokens.values()].filter((r) => r.bubble_id === bubbleId);
+		},
+		async deleteIngestToken(record: IngestTokenRecord) {
+			ingestTokens.delete(record.token_hash);
 		},
 		async putDeployment(dep: DeploymentRecord) {
 			deployments.set(dep.id, { ...dep });
@@ -816,19 +840,25 @@ describe("handleGitHubWebhook", () => {
 	});
 });
 
+// Shared inbound-request fixture for pipeline tests: case-insensitive headers
+// plus the matched route's subpath ("" for exact provider routes).
+function req(
+	rawBody: string,
+	headers: Record<string, string> = {},
+	subpath = "",
+): InboundWebhookRequest {
+	const lower = Object.fromEntries(
+		Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]),
+	);
+	return { rawBody, header: (n) => lower[n.toLowerCase()] || "", subpath };
+}
+
 // ---------------------------------------------------------------------------
 // #639 — the unified inbound webhook pipeline. Both transports (Worker and
 // local server) route every /webhooks/<source> request through this one
 // function, so these tests ARE the shared verification coverage for both.
 // ---------------------------------------------------------------------------
 describe("handleWebhookRequest (unified pipeline)", () => {
-	function req(rawBody: string, headers: Record<string, string> = {}): InboundWebhookRequest {
-		const lower = Object.fromEntries(
-			Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]),
-		);
-		return { rawBody, header: (n) => lower[n.toLowerCase()] || "" };
-	}
-
 	it("returns null for an unregistered source (transport falls through to 404)", async () => {
 		const store = createMockStorage();
 		const result = await handleWebhookRequest(store, "nope", req("{}"), {});
@@ -962,9 +992,9 @@ describe("handleWebhookRequest (unified pipeline)", () => {
 
 describe("matchWebhookSource", () => {
 	it("matches registered sources, with or without a trailing slash", () => {
-		expect(matchWebhookSource("/webhooks/github")).toBe("github");
-		expect(matchWebhookSource("/webhooks/linear")).toBe("linear");
-		expect(matchWebhookSource("/webhooks/slack/")).toBe("slack");
+		expect(matchWebhookSource("/webhooks/github")).toEqual({ source: "github", subpath: "" });
+		expect(matchWebhookSource("/webhooks/linear")).toEqual({ source: "linear", subpath: "" });
+		expect(matchWebhookSource("/webhooks/slack/")).toEqual({ source: "slack", subpath: "" });
 	});
 
 	it("returns null for unregistered sources and non-webhook paths", () => {
@@ -972,6 +1002,270 @@ describe("matchWebhookSource", () => {
 		expect(matchWebhookSource("/webhooks/github/extra")).toBeNull();
 		expect(matchWebhookSource("/webhooks/")).toBeNull();
 		expect(matchWebhookSource("/events/foo")).toBeNull();
+	});
+
+	it("ingest is a topic route: requires a slash-bearing remainder", () => {
+		expect(matchWebhookSource("/webhooks/ingest/alert/firing")).toEqual({
+			source: "ingest",
+			subpath: "alert/firing",
+		});
+		expect(matchWebhookSource("/webhooks/ingest/alert/firing/")).toEqual({
+			source: "ingest",
+			subpath: "alert/firing",
+		});
+		// A bare /webhooks/ingest (with or without slash) has no topic — 404.
+		expect(matchWebhookSource("/webhooks/ingest")).toBeNull();
+		expect(matchWebhookSource("/webhooks/ingest/")).toBeNull();
+	});
+
+	it("multiple trailing slashes never match (pre-#640 grammar preserved)", () => {
+		expect(matchWebhookSource("/webhooks/github//")).toBeNull();
+		expect(matchWebhookSource("/webhooks/slack///")).toBeNull();
+		expect(matchWebhookSource("/webhooks/ingest/alert/firing//")).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #640 — scoped ingest tokens: mint/list/revoke handlers plus the ingest
+// source on the unified pipeline. Both transports route through these, so
+// this is the shared acceptance coverage for the local server AND the Worker.
+// ---------------------------------------------------------------------------
+describe("ingest tokens (#640)", () => {
+	beforeEach(() => resetIngestRateLimiter());
+
+	function ingest(store: StorageAdapter, topic: string, body: string, token?: string) {
+		return handleWebhookRequest(
+			store,
+			"ingest",
+			req(body, token ? { authorization: `Bearer ${token}` } : {}, topic),
+			{},
+		);
+	}
+
+	async function mintToken(
+		store: ReturnType<typeof createMockStorage>,
+		topic: string,
+		bubbleId = "bub_test",
+	): Promise<{ id: string; token: string }> {
+		const result = await handleIngestTokenCreate(store, { topic }, bubbleId);
+		expect(result.status).toBe(201);
+		return result.body as { id: string; token: string };
+	}
+
+	describe("validateIngestTopic", () => {
+		it("accepts source/type topics and rejects malformed ones", () => {
+			expect(validateIngestTopic("alert/firing")).toBeNull();
+			expect(validateIngestTopic("ci/build.failed")).toBeNull();
+			expect(validateIngestTopic("a/b/c")).toBeNull();
+
+			expect(validateIngestTopic("")).not.toBeNull();
+			expect(validateIngestTopic("alert")).not.toBeNull(); // no source/type form
+			expect(validateIngestTopic("alert/")).not.toBeNull(); // empty segment
+			expect(validateIngestTopic("/firing")).not.toBeNull();
+			expect(validateIngestTopic("alert//firing")).not.toBeNull();
+			expect(validateIngestTopic("alert/fir ing")).not.toBeNull(); // charset
+			expect(validateIngestTopic("github:org/repo")).not.toBeNull(); // global key
+			expect(validateIngestTopic("a".repeat(201) + "/b")).not.toBeNull();
+		});
+
+		it("rejects webhook-reserved sources", () => {
+			for (const s of ["github", "linear", "slack"]) {
+				expect(validateIngestTopic(`${s}/thing`)).not.toBeNull();
+			}
+		});
+	});
+
+	describe("mint / list / revoke handlers", () => {
+		it("mint returns the plaintext token once and stores only its hash", async () => {
+			const store = createMockStorage();
+			const minted = await mintToken(store, "alert/firing");
+			expect(minted.token).toMatch(/^ingt_/);
+
+			const records = [...store.ingestTokens.values()];
+			expect(records).toHaveLength(1);
+			expect(records[0].topic).toBe("alert/firing");
+			expect(records[0].bubble_id).toBe("bub_test");
+			// The stored hash is not the token, and the token is not derivable
+			// from a list response.
+			expect(records[0].token_hash).not.toBe(minted.token);
+			const list = await handleIngestTokenList(store, "bub_test");
+			const tokens = (list.body as { tokens: Record<string, unknown>[] }).tokens;
+			expect(tokens).toHaveLength(1);
+			expect(tokens[0].id).toBe(minted.id);
+			expect(tokens[0]).not.toHaveProperty("token");
+			expect(tokens[0]).not.toHaveProperty("token_hash");
+		});
+
+		it("rejects an invalid topic with 400", async () => {
+			const store = createMockStorage();
+			for (const topic of ["", "alert", "github/push", "github:org/repo"]) {
+				const result = await handleIngestTokenCreate(store, { topic }, "bub_test");
+				expect(result.status).toBe(400);
+			}
+			expect(store.ingestTokens.size).toBe(0);
+		});
+
+		it("list is bubble-scoped", async () => {
+			const store = createMockStorage();
+			await mintToken(store, "alert/firing", "bub_a");
+			await mintToken(store, "ci/failed", "bub_b");
+			const list = await handleIngestTokenList(store, "bub_a");
+			const tokens = (list.body as { tokens: { topic: string }[] }).tokens;
+			expect(tokens).toHaveLength(1);
+			expect(tokens[0].topic).toBe("alert/firing");
+		});
+
+		it("revoke deletes own tokens; another bubble's id yields the same 404 as a bogus one", async () => {
+			const store = createMockStorage();
+			const minted = await mintToken(store, "alert/firing", "bub_a");
+
+			const foreign = await handleIngestTokenRevoke(store, minted.id, "bub_b");
+			expect(foreign.status).toBe(404);
+			const bogus = await handleIngestTokenRevoke(store, "nope", "bub_a");
+			expect(bogus.status).toBe(404);
+			expect(store.ingestTokens.size).toBe(1);
+
+			const own = await handleIngestTokenRevoke(store, minted.id, "bub_a");
+			expect(own.status).toBe(200);
+			expect(store.ingestTokens.size).toBe(0);
+		});
+	});
+
+	describe("ingest pipeline (POST /webhooks/ingest/<topic>)", () => {
+		it("a valid token delivers the body to a subscriber of the bound topic in the bound bubble", async () => {
+			const store = createMockStorage();
+			await store.addSubscription(namespaceSubKey("bub_test", "alert/firing"), "sub1");
+			// Same topic in ANOTHER bubble must not receive (bubble-scoped routing).
+			await store.addSubscription(namespaceSubKey("bub_other", "alert/firing"), "sub2");
+			const { token } = await mintToken(store, "alert/firing");
+
+			const result = await ingest(
+				store, "alert/firing",
+				JSON.stringify({ title: "disk full", severity: "critical", count: 3 }),
+				token,
+			);
+			expect(result?.status).toBe(200);
+			expect((result?.body as { delivered_to: number }).delivered_to).toBe(1);
+			expect(store.deliveredTo[0].ids).toEqual(["sub1"]);
+
+			const event = store.delivered[0];
+			expect(event.source).toBe("ingest");
+			expect(event.type).toBe("alert/firing");
+			expect(event.bubble_id).toBe("bub_test");
+			expect(event.topics).toEqual(["alert/firing", "ingest/alert/firing"]);
+			expect(event.fields).toEqual({ title: "disk full", severity: "critical", count: 3 });
+			expect(event.payload).toEqual({ title: "disk full", severity: "critical", count: 3 });
+		});
+
+		it("missing, malformed, and unknown tokens are an opaque 403", async () => {
+			const store = createMockStorage();
+			await mintToken(store, "alert/firing");
+			const body = JSON.stringify({ title: "x" });
+
+			for (const result of [
+				await ingest(store, "alert/firing", body),
+				await ingest(store, "alert/firing", body, "wrong-token"),
+				await handleWebhookRequest(
+					store, "ingest",
+					req(body, { authorization: "ingt_notbearer" }, "alert/firing"), {}),
+			]) {
+				expect(result?.status).toBe(403);
+				expect(result?.body).toEqual({ error: "forbidden" });
+			}
+			expect(store.delivered).toHaveLength(0);
+		});
+
+		it("a token bound to topic A cannot publish topic B", async () => {
+			const store = createMockStorage();
+			await store.addSubscription(namespaceSubKey("bub_test", "alert/resolved"), "sub1");
+			const { token } = await mintToken(store, "alert/firing");
+
+			const result = await ingest(store, "alert/resolved", JSON.stringify({ a: 1 }), token);
+			expect(result?.status).toBe(403);
+			expect(store.delivered).toHaveLength(0);
+		});
+
+		it("a revoked token is rejected", async () => {
+			const store = createMockStorage();
+			const { id, token } = await mintToken(store, "alert/firing");
+			expect((await ingest(store, "alert/firing", "{}", token))?.status).toBe(200);
+
+			await handleIngestTokenRevoke(store, id, "bub_test");
+			expect((await ingest(store, "alert/firing", "{}", token))?.status).toBe(403);
+		});
+
+		it("routing fields in the body cannot escape the token's binding", async () => {
+			// createTopicEvent would turn body.repo into a GLOBAL github: topic;
+			// ingest must never route on attacker-controlled body fields.
+			const store = createMockStorage();
+			const { token } = await mintToken(store, "alert/firing");
+			const result = await ingest(
+				store, "alert/firing",
+				JSON.stringify({ repo: "org/repo", team_key: "ENG", workspace: "T1" }),
+				token,
+			);
+			expect(result?.status).toBe(200);
+			expect(store.delivered[0].topics).toEqual(["alert/firing", "ingest/alert/firing"]);
+		});
+
+		it("accepts a lowercase 'bearer' scheme (RFC 7235 case-insensitivity)", async () => {
+			const store = createMockStorage();
+			const { token } = await mintToken(store, "alert/firing");
+			const result = await handleWebhookRequest(
+				store, "ingest",
+				req("{}", { authorization: `bearer ${token}` }, "alert/firing"), {});
+			expect(result?.status).toBe(200);
+		});
+
+		it("rate-limits per token with 429, without polluting the signature counter", async () => {
+			const store = createMockStorage();
+			const { token } = await mintToken(store, "alert/firing");
+			const other = await mintToken(store, "alert/resolved");
+
+			for (let i = 0; i < INGEST_RATE_LIMIT; i++) {
+				expect((await ingest(store, "alert/firing", "{}", token))?.status).toBe(200);
+			}
+			resetAuthRejectionCounters();
+			expect((await ingest(store, "alert/firing", "{}", token))?.status).toBe(429);
+			// A policy rejection from a VALID token must not read as a provider
+			// signature misconfiguration on /health.
+			expect(getAuthRejectionCounters().webhook_bad_signature).toBe(0);
+			// The window is per token — a different token is unaffected.
+			expect((await ingest(store, "alert/resolved", "{}", other.token))?.status).toBe(200);
+		});
+
+		it("rejects an oversize body with 413 BEFORE parsing, token or not", async () => {
+			const store = createMockStorage();
+			const { token } = await mintToken(store, "alert/firing");
+			// Oversize AND invalid JSON: the 413 proves the size gate ran before
+			// JSON.parse — a parse-first pipeline would return 400.
+			const body = `{${"x".repeat(INGEST_MAX_BODY_BYTES)}`;
+			expect((await ingest(store, "alert/firing", body, token))?.status).toBe(413);
+			expect((await ingest(store, "alert/firing", body))?.status).toBe(413);
+			expect(store.delivered).toHaveLength(0);
+		});
+
+		it("rejects invalid JSON with 400", async () => {
+			const store = createMockStorage();
+			const { token } = await mintToken(store, "alert/firing");
+			expect((await ingest(store, "alert/firing", "not json", token))?.status).toBe(400);
+		});
+	});
+
+	describe("createIngestEvent", () => {
+		it("mirrors top-level primitives into fields and keeps the full body as payload", () => {
+			const body = {
+				title: "t", count: 2, ok: true,
+				nested: { deep: 1 }, list: [1, 2], nil: null,
+				text: "alert text",
+			};
+			const event = createIngestEvent("alert/firing", body, "bub_1");
+			expect(event.fields).toEqual({ title: "t", count: 2, ok: true, text: "alert text" });
+			expect(event.payload).toEqual(body);
+			expect(event.text).toBe("alert text");
+			expect(event.delivery).toBe("bulk");
+			expect(event.v).toBe(2);
+		});
 	});
 });
 

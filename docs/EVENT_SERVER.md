@@ -9,10 +9,11 @@ runs - plus a Python client (`bobi/events/`) that every agent session uses.
 ## Mental model
 
 ```
-       external webhooks
-      (GitHub, Slack, Linear)
-                │
-                ▼
+       external webhooks                  generic ingress
+      (GitHub, Slack, Linear)      (alerting, CI, SaaS webhooks,
+                │                   via scoped ingest tokens)
+                │                               │
+                ▼                               ▼
          ┌──────────────┐    routed by topic, delivered over
          │ event server │    each agent's outbound WebSocket
          │ Worker/local │ ───────────────────────────────────▶  agent sessions
@@ -165,6 +166,18 @@ signed body, never from client input**:
   is set, with replay rejection via the signed `webhookTimestamp` (±300s;
   fail-closed - a signed payload without a numeric `webhookTimestamp` is
   rejected, since it would otherwise be replayable forever).
+- **Generic ingest** (`POST /webhooks/ingest/<topic>`, #640): the escape hatch for
+  external systems that cannot compute per-request signatures (alerting, CI, SaaS
+  webhooks - most can only set static headers). The verify slot checks a **scoped
+  ingest token** sent as `Authorization: Bearer <token>` (see Security); the
+  default normalizer delivers the raw JSON body as the event's `payload` with its
+  top-level primitives mirrored into `fields`, on exactly the token's bound topic,
+  bubble-scoped to the minting bubble. Body fields never influence routing (unlike
+  `createTopicEvent`, routing fields such as `repo` are inert here). Requests are
+  capped at 256 KiB, rejected with 413 before the body is ever parsed, and
+  rate-limited per token at 60/min (429; in-memory - authoritative locally,
+  per-isolate on the Worker). This is the only webhook route whose path has a
+  slash-bearing remainder; provider routes stay exact-match.
 
 **Generic topic endpoint** (`POST /events/{topic}`). Monitors, lifecycle emits,
 inter-agent inbox/reply, and any agent-emitted event publish here. It is
@@ -312,6 +325,8 @@ concurrent first-registrations converge on a single bubble.
 | Join / register | `POST /deployments` (signed) | bubble signature |
 | Publish | `POST /events/{topic}` | bubble signature |
 | Authorize resource | `POST /resources/authorize` | bubble signature |
+| Ingest token mint / list / revoke | `POST` / `GET /ingest-tokens`, `DELETE /ingest-tokens/{id}` | bubble signature |
+| Generic ingest | `POST /webhooks/ingest/{topic}` | bearer ingest token (topic-bound) |
 | Slack send | `POST /slack/send` | bubble signature (bubble-scoped to its own workspace) |
 | Channel send | `POST /channels/send` | bubble signature (same tenancy boundary as `/slack/send`) |
 | Channel typing | `POST /channels/typing` | bubble signature |
@@ -320,6 +335,39 @@ concurrent first-registrations converge on a single bubble.
 
 The bubble key authenticates *membership*; the per-deployment `api_key`
 authenticates a *specific deployment's transport*.
+
+### Scoped ingest tokens
+
+Generic publishes require a bubble signature, but external systems (alerting,
+CI, SaaS webhooks) can rarely compute one - most can only set a static header.
+A **scoped ingest token** (#640) is the credential for that case: the instance
+mints it bound to one `(bubble, topic)` pair
+(`bobi agent <name> events ingest-token create alert/firing`), and the external
+system sends it as `Authorization: Bearer <token>` on
+`POST /webhooks/ingest/<topic>`.
+
+Properties:
+
+- **Hash-only storage.** The server stores the SHA-256 of the token; the
+  plaintext transits exactly once, in the mint response. `list` shows metadata
+  only.
+- **Scoped blast radius.** A leaked token allows publishing spurious events on
+  its one bound topic in its one bubble - a 403 on every other topic - and
+  never exposes bubble membership or the bubble key, which stays inside the
+  instance.
+- **Revocable.** `DELETE /ingest-tokens/<id>` (CLI: `ingest-token revoke`)
+  takes effect immediately on the local server; on the Worker it is subject
+  to KV propagation (typically seconds, up to ~60s across points of
+  presence). Management routes are bubble-signed, and ids resolve only
+  within the caller's own bubble.
+- **Bounded.** 256 KiB body cap enforced before the body is parsed, 60
+  requests/min per token. Auth rejections are opaque 403s (missing, unknown,
+  revoked, and wrong-topic are indistinguishable) and count into
+  `webhook_bad_signature` on `/health`; 413/429 policy rejections do not
+  pollute that counter.
+- **Topic shape.** `source/type` form from `[A-Za-z0-9_.-]` segments; the
+  `github`/`linear`/`slack` sources and `:`-style global keys are rejected at
+  mint, so an ingest token can never reach a provider or global topic.
 
 ### Proof-of-access: resource grants
 

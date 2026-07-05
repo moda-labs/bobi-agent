@@ -5,6 +5,7 @@ import {
 	type BubbleRecord,
 	type SlackWorkspaceRecord,
 	type ResourceGrant,
+	type IngestTokenRecord,
 	type NormalizedEvent,
 	type HandlerResult,
 	authenticateDeployment,
@@ -21,6 +22,9 @@ import {
 	handleUpdateSubscriptions,
 	handleDeregisterDeployment,
 	handleTopicEvent,
+	handleIngestTokenCreate,
+	handleIngestTokenList,
+	handleIngestTokenRevoke,
 	handleChannelsSend,
 	handleChannelsTyping,
 	handleChannelsHistory,
@@ -87,6 +91,40 @@ function createKVStorage(env: Env): StorageAdapter {
 		async hasResourceGrant(service: string, resource: string, bubbleId: string): Promise<boolean> {
 			const data = await env.EVENTS.get(`resource_grant:${service}:${resource}:${bubbleId}`);
 			return data !== null;
+		},
+
+		// Ingest tokens (#640). Two keys per token, both holding the (immutable)
+		// record: hash-keyed for the hot-path lookup, and a per-bubble composite
+		// key for list/revoke. Deliberately NO shared index blob: KV is
+		// last-write-wins, and a read-modify-write index loses entries under
+		// concurrent mints — a token that authenticates but can never be listed
+		// or revoked. Independent puts/deletes cannot race that way.
+		async putIngestToken(record: IngestTokenRecord): Promise<void> {
+			const json = JSON.stringify(record);
+			await Promise.all([
+				env.EVENTS.put(`ingest_token:${record.token_hash}`, json),
+				env.EVENTS.put(`ingest_token_by_id:${record.bubble_id}:${record.id}`, json),
+			]);
+		},
+
+		async getIngestTokenByHash(hash: string): Promise<IngestTokenRecord | null> {
+			const data = await env.EVENTS.get(`ingest_token:${hash}`);
+			return data ? JSON.parse(data) : null;
+		},
+
+		async listIngestTokens(bubbleId: string): Promise<IngestTokenRecord[]> {
+			// One list page (1000 keys) is far beyond any real per-bubble token
+			// count; values fetched in parallel.
+			const listed = await env.EVENTS.list({ prefix: `ingest_token_by_id:${bubbleId}:` });
+			const values = await Promise.all(listed.keys.map((k) => env.EVENTS.get(k.name)));
+			return values.filter((v): v is string => v !== null).map((v) => JSON.parse(v));
+		},
+
+		async deleteIngestToken(record: IngestTokenRecord): Promise<void> {
+			await Promise.all([
+				env.EVENTS.delete(`ingest_token:${record.token_hash}`),
+				env.EVENTS.delete(`ingest_token_by_id:${record.bubble_id}:${record.id}`),
+			]);
 		},
 
 		async putDeployment(deployment: DeploymentRecord): Promise<void> {
@@ -299,13 +337,17 @@ export default {
 		// slot is structural — no source registers without one), normalizes,
 		// and delivers. matchWebhookSource returns null for an unregistered
 		// path, which 404s below WITHOUT consuming the request body.
-		const webhookSource = method === "POST" ? matchWebhookSource(path) : null;
-		if (webhookSource) {
+		const webhookRoute = method === "POST" ? matchWebhookSource(path) : null;
+		if (webhookRoute) {
 			const rawBody = await request.text();
 			const result = await handleWebhookRequest(
 				storage,
-				webhookSource,
-				{ rawBody, header: (n) => request.headers.get(n) || "" },
+				webhookRoute.source,
+				{
+					rawBody,
+					header: (n) => request.headers.get(n) || "",
+					subpath: webhookRoute.subpath,
+				},
 				{
 					github: env.WEBHOOK_SECRET,
 					slack: env.SLACK_SIGNING_SECRET,
@@ -448,6 +490,28 @@ export default {
 			const auth = await bubbleAuthedJson(request, url, storage);
 			if (auth instanceof Response) return auth;
 			return respond(await handleAuthorizeResource(storage, auth.data, auth.bubble.id));
+		}
+
+		// Scoped ingest tokens (#640) — mint/list/revoke, mandatory bubble auth
+		// (mirrors /resources/authorize). The mint response is the only place
+		// the plaintext token ever appears.
+		if (method === "POST" && path === "/ingest-tokens") {
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleIngestTokenCreate(storage, auth.data, auth.bubble.id));
+		}
+
+		if (method === "GET" && path === "/ingest-tokens") {
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleIngestTokenList(storage, auth.bubble.id));
+		}
+
+		const ingestTokenMatch = method === "DELETE" && path.match(/^\/ingest-tokens\/([^/]+)$/);
+		if (ingestTokenMatch) {
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleIngestTokenRevoke(storage, ingestTokenMatch[1], auth.bubble.id));
 		}
 
 		if (method === "POST" && path === "/__test/resource-grants" && env.TEST_GRANTS_SECRET) {
