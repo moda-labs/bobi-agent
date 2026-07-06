@@ -1,7 +1,7 @@
 """Signed client for the event server's channel gateway endpoints (#190).
 
 The gateway owns all outbound chat delivery: formatting (markdown goes out
-raw and is rendered by the channel), placeholder/typing UX, credentials, and
+raw and is rendered by the channel), typing UX, credentials, and
 capability degradation. This module is the only Python path that talks to
 ``/channels/*`` - the CLI (``bobi reply``, ``bobi read-conversation``) and
 the drain loop's input channel policy both call through here.

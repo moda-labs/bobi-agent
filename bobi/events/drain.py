@@ -51,14 +51,6 @@ def _is_policy_update(event: dict) -> bool:
     return etype == "policy.updated" or etype.endswith("/policy.updated")
 
 
-def _thread_key(event: dict) -> tuple[str, str, str]:
-    """Return (source, channel, thread_ts) for placeholder dedup."""
-    fields = event.get("fields", {})
-    channel = fields.get("channel", "")
-    thread_ts = fields.get("thread_ts", "") or fields.get("ts", "")
-    return (event.get("source", ""), channel, thread_ts)
-
-
 def _is_passive_slack_thread_reply(event: dict) -> bool:
     """Whether a Slack event should be delivered without placeholder UX."""
     return (
@@ -77,21 +69,14 @@ def _without_placeholder_fields(event: dict) -> dict:
 def _prepare_chat_events(events: list[dict]) -> list[dict]:
     """Run input channel handlers on chat events, returning augmented copies.
 
-    Each handler may post placeholders, set typing status, or inject
-    fields (e.g. ``placeholder_ts``) into the event before delivery.
-    Handlers talk to the channel gateway (#190), so no credential is
-    resolved here - the event server holds the channel tokens.
-
-    When multiple events in a batch target the same thread, only the
-    first triggers a placeholder — subsequent events reuse the same
-    ``placeholder_ts`` to avoid duplicate "Evaluating…" messages (#232).
+    Each handler may set typing status or make other source-specific
+    adjustments before delivery. Handlers talk to the channel gateway (#190),
+    so no credential is resolved here - the event server holds the channel
+    tokens.
     """
     from bobi.events.channels import get_channel_handler
 
     project_root = _get_project_root()
-
-    # Track placeholder_ts per thread so we post at most one per batch.
-    seen_threads: dict[tuple[str, str, str], str] = {}
 
     result: list[dict] = []
     for event in events:
@@ -105,20 +90,7 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
             result.append(event)
             continue
 
-        key = _thread_key(event)
-        existing_ts = seen_threads.get(key)
-
-        if existing_ts is not None:
-            # Reuse the placeholder from the first event in this thread.
-            fields = dict(event.get("fields", {}))
-            fields["placeholder_ts"] = existing_ts
-            result.append(dict(event, fields=fields))
-        else:
-            prepared = handler.prepare(event, project_root)
-            placeholder_ts = prepared.get("fields", {}).get("placeholder_ts", "")
-            if placeholder_ts:
-                seen_threads[key] = placeholder_ts
-            result.append(prepared)
+        result.append(handler.prepare(event, project_root))
 
     return result
 
@@ -248,7 +220,7 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
             target = chat_events if e.get("delivery") == "chat" else bulk_events
             target.append((reactor_result, e))
 
-        # Run input channel handlers on chat events (placeholder, typing, etc.).
+        # Run input channel handlers on chat events (typing, cleanup, etc.).
         if chat_events:
             raw = [ev for _, ev in chat_events]
             prepared = _prepare_chat_events(raw)
