@@ -1295,7 +1295,7 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
         <p class="pd">Paste your Venn API key. bobi pulls in the services
         you've connected in Venn — pick which ones this team should use.</p>
         <ol class="steps">
-          <li>Sign in at app.venn.ai and create an API key (Settings → API).</li>
+          <li>Sign in at <a class="doclink" href="https://app.venn.ai" target="_blank" rel="noopener">app.venn.ai</a> and create an API key (Settings → API).</li>
           <li>Connect the services you want in Venn (one-click OAuth).</li>
           <li>Paste the key below.</li>
         </ol>

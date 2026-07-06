@@ -219,6 +219,7 @@ def test_venn_is_an_account_connection_with_per_service_rows(page, bobi_url):
     expect(ov.locator("#venn-key")).to_be_visible()             # paste the key
     expect(ov.locator("[data-vennconnect]")).to_be_visible()    # connect button
     expect(ov.locator(".steps li").first).to_be_visible()
+    expect(ov.locator(".steps li").first.locator("a[href='https://app.venn.ai']")).to_have_text("app.venn.ai")
 
 
 def test_chat_card_select_and_slack_setup(page, bobi_url):
