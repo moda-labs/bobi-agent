@@ -9,7 +9,7 @@ delivers through the Chat SDK Slack adapter to a stubbed Slack Web API
   format (including the GET signature over path + query),
 - server-side markdown delivery (markdown_text, no client conversion),
 - the response-context contract (mode final clears the typing indicator),
-- the placeholder flow the drain loop runs (SlackInputChannel via gateway),
+- the typing flow the drain loop runs (SlackInputChannel via gateway),
 - the workspace registration that seeds the bubble-scoped send credential.
 """
 
@@ -142,6 +142,7 @@ def gateway_env(tmp_path_factory):
     status = ensure_running(
         port,
         project_path=project,
+        slack_signing_secret="",
         extra_env={"BOBI_ES_SLACK_API_URL": f"http://127.0.0.1:{stub.port}/api/"},
     )
     assert status in ("started", "connected")
@@ -272,11 +273,11 @@ class TestReplyEndToEnd:
 
 
 class TestInboundMentionEndToEnd:
-    def test_webhook_to_placeholder_full_loop(self, gateway, monkeypatch):
+    def test_webhook_to_typing_full_loop(self, gateway, monkeypatch):
         """The full inbound loop minus the agent: a raw app_mention webhook
         hits the real server, the Chat SDK bridge normalizes it, a subscribed
         deployment receives it over WebSocket, and that REAL delivered event
-        (not a hand-built one) drives the drain loop's placeholder/typing
+        (not a hand-built one) drives the drain loop's typing-only
         policy back out through the gateway to the Slack stub."""
         import websocket
 
@@ -340,12 +341,10 @@ class TestInboundMentionEndToEnd:
             "bobi.events.drain._get_project_root", lambda: project)
         stub.calls.clear()
         prepared = _prepare_chat_events([event])
-        assert prepared[0]["fields"]["placeholder_ts"] == "100.001"
+        assert "placeholder_ts" not in prepared[0]["fields"]
 
         posts = stub.named("chat.postMessage")
-        assert len(posts) == 1
-        assert posts[0]["body"]["channel"] == "C_GW"
-        assert posts[0]["body"]["thread_ts"] == "1700000000.000100"
+        assert posts == []
         statuses = stub.named("assistant.threads.setStatus")
         assert statuses and statuses[-1]["body"]["status"] == "is thinking…"
 
@@ -353,10 +352,10 @@ class TestInboundMentionEndToEnd:
         stop_all_refresh_loops()
 
 
-class TestPlaceholderFlowEndToEnd:
-    def test_drain_placeholder_via_gateway(self, gateway, monkeypatch):
-        """The drain loop's input channel posts the placeholder and sets the
-        typing indicator through the gateway, then injects placeholder_ts."""
+class TestTypingFlowEndToEnd:
+    def test_drain_typing_via_gateway(self, gateway, monkeypatch):
+        """The drain loop's input channel sets typing through the gateway
+        without posting a placeholder or injecting placeholder_ts."""
         project, stub, _es_url, _bubble = gateway
         from bobi.events.drain import _prepare_chat_events
 
@@ -369,14 +368,17 @@ class TestPlaceholderFlowEndToEnd:
             "delivery": "chat",
             "text": "hello bot",
             "conversation": "slack:T_GW:channel:C_GW:thread:100.000",
-            "fields": {"channel": "C_GW", "ts": "100.000"},
+            "fields": {
+                "channel": "C_GW",
+                "ts": "100.000",
+                "placeholder_ts": "stale",
+            },
         }
         prepared = _prepare_chat_events([event])
-        assert prepared[0]["fields"]["placeholder_ts"] == "100.001"
+        assert "placeholder_ts" not in prepared[0]["fields"]
 
         posts = stub.named("chat.postMessage")
-        assert len(posts) == 1
-        assert posts[0]["body"]["markdown_text"] == "Evaluating…"
+        assert posts == []
         statuses = stub.named("assistant.threads.setStatus")
         assert statuses and statuses[-1]["body"]["status"] == "is thinking…"
 

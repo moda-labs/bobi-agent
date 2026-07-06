@@ -191,8 +191,8 @@ Known failure signatures:
   canary smoke.
 - `Separator is not found/found, and chunk is longer than limit`: Codex JSON
   stream reader limit regression.
-- Slack placeholder stays at `Evaluating...`: event reached Slack, but the
-  brain/session has not completed the turn.
+- Slack typing indicator stays active: event reached Slack, but the
+  brain/session has not completed the turn or did not clear typing on reply.
 
 ## 5. Validate Slack E2E with Venn
 

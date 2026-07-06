@@ -1534,8 +1534,8 @@ def reply(conversation, text, edit_ref, file_path, title):
         click.echo("No text to send (pass TEXT or pipe via stdin)", err=True)
         sys.exit(1)
     if edit_ref and file_path and not text:
-        # The gateway replaces the placeholder with TEXT, then attaches the
-        # file - without text there is nothing to resolve the placeholder with.
+        # The gateway edits the target message with TEXT, then attaches the
+        # file - without text there is nothing to put in the edited message.
         click.echo("--edit with --file requires TEXT", err=True)
         sys.exit(1)
 

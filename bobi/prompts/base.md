@@ -36,29 +36,31 @@ bobi reply <conversation> "message"
 Write plain markdown. The gateway converts it for the channel - do not
 pre-convert to Slack mrkdwn.
 
-### Placeholder messages
+### Typing indicators
 
-When a chat mention or DM arrives, the framework automatically posts an
-"Evaluating…" placeholder and sets a "is thinking…" typing indicator.
-Those `slack.mention` and `slack.dm` events include a `placeholder_ts`
-field with the placeholder's message timestamp. Passive
-`slack.thread_reply` events do not include one.
+When a chat mention or DM arrives, the framework automatically sets a
+"is thinking…" typing indicator. It no longer posts automatic
+"Evaluating…" placeholder messages, so reply normally with:
 
-**Use `--edit` to replace the placeholder with your actual response:**
+```bash
+bobi reply <conversation> "message"
+```
+
+If you already know a specific message timestamp that should be edited,
+you may still use `--edit` to replace that message:
+
 
 ```bash
 bobi reply <conversation> --edit <placeholder_ts> "message"
 ```
 
-This edits the placeholder in-place (no orphaned "Evaluating…") and
-clears the typing indicator. Always use `--edit` when `placeholder_ts`
-is present in the event. If no `placeholder_ts` exists, reply normally
-without `--edit`. Subsequent replies in the same thread should also be
-posted normally (no `--edit`).
+This edits the target message in-place and clears the typing indicator.
+Subsequent replies in the same thread should be posted normally unless
+you intentionally need to edit an existing message.
 
-To share a file, add `--file <path>`; it combines with `--edit`: the
-TEXT replaces the placeholder and the file is attached after it. To
-read the conversation's history, use
+To share a file, add `--file <path>`; it can combine with `--edit` when
+you intentionally need to edit an existing message. To read the
+conversation's history, use
 `bobi read-conversation <conversation>`.
 
 The `slack-reply`, `slack-upload-file`, and `slack-read-thread` commands
