@@ -296,7 +296,7 @@ describe("event-server", () => {
 		});
 		expect(response.status).toBe(400);
 		const data = await response.json() as { error: string };
-		expect(data.error).toContain("bot token");
+		expect(data.error).toContain("no send credential");
 	});
 
 	it("rejects unsigned channels history with 403", async () => {
@@ -317,7 +317,7 @@ describe("event-server", () => {
 		const response = await SELF.fetch(`https://example.com${path}`, { headers });
 		expect(response.status).toBe(400);
 		const data = await response.json() as { error: string };
-		expect(data.error).toContain("bot token");
+		expect(data.error).toContain("no send credential");
 	});
 });
 
@@ -519,6 +519,35 @@ describe("github webhook signature verification", () => {
 			{} as ExecutionContext,
 		);
 		expect(response.status).toBe(200);
+	});
+
+	it("serves Meta's GET subscribe handshake as raw text on the Worker (#656)", async () => {
+		const envWithToken = { ...env, WHATSAPP_VERIFY_TOKEN: "vt-worker" };
+		const ok = await worker.fetch(
+			new Request("https://example.com/webhooks/whatsapp"
+				+ "?hub.mode=subscribe&hub.verify_token=vt-worker&hub.challenge=987654"),
+			envWithToken,
+			{} as ExecutionContext,
+		);
+		expect(ok.status).toBe(200);
+		// RAW text, never JSON-quoted - Meta compares the echo byte-for-byte.
+		expect(await ok.text()).toBe("987654");
+
+		const bad = await worker.fetch(
+			new Request("https://example.com/webhooks/whatsapp"
+				+ "?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=987654"),
+			envWithToken,
+			{} as ExecutionContext,
+		);
+		expect(bad.status).toBe(403);
+
+		// GET on a source without a handshake still 404s.
+		const github = await worker.fetch(
+			new Request("https://example.com/webhooks/github?x=1"),
+			envWithToken,
+			{} as ExecutionContext,
+		);
+		expect(github.status).toBe(404);
 	});
 
 	it("accepts github webhook without signature when WEBHOOK_SECRET is not set", async () => {

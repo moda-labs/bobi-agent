@@ -181,6 +181,42 @@ _NATIVE = [
         aliases=("slackbot",),
     ),
     Connector(
+        key="whatsapp", name="WhatsApp", kind="native",
+        summary="Chat with the agent over WhatsApp (Meta Cloud API).",
+        scopes=("send and receive messages",
+                "reply within Meta's 24h customer-service window"),
+        methods=(
+            AuthMethod(
+                key="token", label="Cloud API token",
+                summary="A Meta app with the WhatsApp product; the agent "
+                        "replies to users who message it.",
+                steps=(
+                    "Create a Meta app at developers.facebook.com and add "
+                    "the WhatsApp product; note the Phone number ID.",
+                    "Create a permanent System User access token with the "
+                    "whatsapp_business_messaging permission.",
+                    "Point the app's webhook at your event server's "
+                    "/webhooks/whatsapp with a verify token of your choice.",
+                    "Full walkthrough: skills/whatsapp-setup.md.",
+                ),
+                secrets=(
+                    Secret("WHATSAPP_ACCESS_TOKEN", "Cloud API access token",
+                           "EAAG…"),
+                    Secret("WHATSAPP_PHONE_NUMBER_ID", "Phone number ID",
+                           "digits only"),
+                    Secret("WHATSAPP_APP_SECRET", "Meta app secret", "",
+                           "Required to receive events - the server rejects "
+                           "unverified WhatsApp webhooks.", optional=True),
+                    Secret("WHATSAPP_VERIFY_TOKEN", "Webhook verify token", "",
+                           "Any string you choose; must match the Meta "
+                           "webhook config.", optional=True),
+                ),
+                docs_url="https://developers.facebook.com/docs/whatsapp/cloud-api",
+            ),
+        ),
+        aliases=("meta-whatsapp", "wa"),
+    ),
+    Connector(
         key="linear", name="Linear", kind="native",
         summary="Read and update issues, projects, and cycles.",
         scopes=("read/write issues", "receive webhooks"),

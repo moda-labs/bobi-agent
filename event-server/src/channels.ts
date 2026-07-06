@@ -46,6 +46,20 @@ export function slackApiUrl(): string {
 	return slackApiUrlOverride ?? DEFAULT_SLACK_API_URL;
 }
 
+// Meta Graph API base for WhatsApp Cloud API calls. Overridable so tests can
+// stub the Graph API with a local server (local.ts wires
+// BOBI_ES_WHATSAPP_API_URL); production always uses the default.
+const DEFAULT_WHATSAPP_API_URL = "https://graph.facebook.com/v23.0/";
+let whatsappApiUrlOverride: string | undefined;
+
+export function setWhatsAppApiUrl(url: string | undefined): void {
+	whatsappApiUrlOverride = url ? (url.endsWith("/") ? url : `${url}/`) : undefined;
+}
+
+export function whatsappApiUrl(): string {
+	return whatsappApiUrlOverride ?? DEFAULT_WHATSAPP_API_URL;
+}
+
 export interface ChannelCapabilities {
 	edit: boolean;
 	typing: boolean;
@@ -403,8 +417,178 @@ const slackAdapter: ChannelAdapter = {
 	},
 };
 
+// --- WhatsApp (Meta Cloud API) - #656, epic #190 Phase 3 ---
+
+// One Graph API call. Returns the parsed JSON body; throws on transport
+// errors; a Graph error body ({error: {message}}) is surfaced by callers.
+export async function whatsappApi(
+	token: string,
+	path: string,
+	init: { method?: string; json?: unknown; form?: FormData },
+): Promise<Record<string, unknown>> {
+	const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+	let body: BodyInit | undefined;
+	if (init.json !== undefined) {
+		headers["Content-Type"] = "application/json";
+		body = JSON.stringify(init.json);
+	} else if (init.form) {
+		body = init.form; // fetch sets the multipart boundary itself
+	}
+	const resp = await fetch(`${whatsappApiUrl()}${path}`, {
+		method: init.method ?? "POST",
+		headers,
+		...(body !== undefined ? { body } : {}),
+	});
+	return (await resp.json()) as Record<string, unknown>;
+}
+
+// Meta's cap for media/document captions, distinct from the 4096 text limit.
+const WHATSAPP_CAPTION_LIMIT = 1024;
+
+function whatsappError(data: Record<string, unknown>): string {
+	const err = data.error as Record<string, unknown> | undefined;
+	return (err?.message as string) || "whatsapp api error";
+}
+
+const whatsappAdapter: ChannelAdapter = {
+	descriptor: {
+		name: "whatsapp",
+		topicShape: "whatsapp:<phone_number_id>",
+		transport: "webhook",
+		capabilities: {
+			// No message editing on WhatsApp - the gateway degrades placeholder
+			// edits to follow-up posts. No typing indicator, no threads, no
+			// native streaming: reactive-only replies (epic #190 Phase 3).
+			edit: false,
+			typing: false,
+			streaming: "none",
+			threads: false,
+			files: true,
+			// Cloud API text body limit, counted in characters (code points) -
+			// the unit-aware budget #651 wired in.
+			maxLength: 4096,
+			lengthUnit: "chars",
+			// Meta's customer-service window: replies are free-form for 24h
+			// after the user's last inbound message; outside it only template
+			// messages send (template support is a follow-up - the gateway
+			// returns a typed error so the agent can report the situation).
+			messageWindow: { hours: 24, outsideWindow: "template" },
+		},
+		credentials: [
+			{ env: "WHATSAPP_ACCESS_TOKEN", secret: true, label: "Cloud API access token" },
+			{ env: "WHATSAPP_PHONE_NUMBER_ID", secret: false, label: "Phone number ID" },
+			{ env: "WHATSAPP_APP_SECRET", secret: true, label: "Meta app secret (webhook signatures)" },
+			{ env: "WHATSAPP_VERIFY_TOKEN", secret: true, label: "Webhook verify token (your choice)" },
+		],
+		promptHint:
+			"WhatsApp renders its own light formatting (*bold*, _italic_, "
+			+ "```monospace```), not full markdown. Keep replies short and "
+			+ "conversational; avoid headers and tables.",
+		setupSkill: "skills/whatsapp-setup.md",
+	},
+
+	async send(token, conv, text) {
+		try {
+			const data = await whatsappApi(token, `${conv.scope}/messages`, {
+				json: {
+					messaging_product: "whatsapp",
+					to: conv.chatId,
+					type: "text",
+					text: { body: text },
+				},
+			});
+			const id = (data.messages as Array<Record<string, unknown>>)?.[0]?.id as string;
+			if (!id) return { ok: false, error: whatsappError(data) };
+			return { ok: true, ts: id };
+		} catch (err) {
+			return { ok: false, error: String(err) };
+		}
+	},
+
+	// Two-step Cloud API upload: POST the bytes to /{pnid}/media, then send a
+	// document message referencing the media id. Sent as `document` for any
+	// mime type - it preserves the filename and works for all content. The
+	// media endpoint validates the declared MIME, so it is inferred from the
+	// filename (octet-stream is not on Meta's supported list).
+	async uploadFiles(token, conv, files, comment) {
+		let delivered = 0;
+		try {
+			let lastId = "";
+			for (const [i, f] of files.entries()) {
+				const mime = mimeForFilename(f.name);
+				const form = new FormData();
+				form.append("messaging_product", "whatsapp");
+				form.append("type", mime);
+				form.append("file", new Blob([f.data], { type: mime }), f.name);
+				const uploaded = await whatsappApi(token, `${conv.scope}/media`, { form });
+				const mediaId = uploaded.id as string;
+				if (!mediaId) return { ok: false, error: partialUploadError(whatsappError(uploaded), i, files.length) };
+
+				// Media captions have their own Cloud API limit (1024 chars),
+				// well below the 4096 text-body cap the gateway budget uses.
+				const caption = (i === 0 ? comment || f.title || "" : f.title || "")
+					.slice(0, WHATSAPP_CAPTION_LIMIT);
+				const sent = await whatsappApi(token, `${conv.scope}/messages`, {
+					json: {
+						messaging_product: "whatsapp",
+						to: conv.chatId,
+						type: "document",
+						document: {
+							id: mediaId,
+							filename: f.name,
+							...(caption ? { caption } : {}),
+						},
+					},
+				});
+				const id = (sent.messages as Array<Record<string, unknown>>)?.[0]?.id as string;
+				if (!id) return { ok: false, error: partialUploadError(whatsappError(sent), i, files.length) };
+				lastId = id;
+				delivered = i + 1;
+			}
+			return { ok: true, ts: lastId };
+		} catch (err) {
+			return { ok: false, error: partialUploadError(String(err), delivered, files.length) };
+		}
+	},
+};
+
+// Mirror the chunk path's partial-delivery contract: once any file reached
+// the user, the error must tell the caller not to blind-retry the batch.
+function partialUploadError(error: string, delivered: number, total: number): string {
+	if (delivered === 0) return error;
+	return `file ${delivered + 1}/${total} failed after partial delivery `
+		+ `(do not resend; ${delivered} file(s) are already visible): ${error}`;
+}
+
+// Minimal extension map for the document types agents actually send. Meta's
+// media endpoint rejects MIME types outside its supported list
+// (application/octet-stream is not on it), so unknowns go out as text/plain.
+const MIME_BY_EXT: Record<string, string> = {
+	pdf: "application/pdf",
+	txt: "text/plain",
+	md: "text/plain",
+	csv: "text/csv",
+	png: "image/png",
+	jpg: "image/jpeg",
+	jpeg: "image/jpeg",
+	webp: "image/webp",
+	mp4: "video/mp4",
+	doc: "application/msword",
+	docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	xls: "application/vnd.ms-excel",
+	xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+	zip: "application/zip",
+};
+
+function mimeForFilename(name: string): string {
+	const ext = name.toLowerCase().split(".").pop() || "";
+	return MIME_BY_EXT[ext] || "text/plain";
+}
+
 const CHANNEL_ADAPTERS: Record<string, ChannelAdapter> = {
 	slack: slackAdapter,
+	whatsapp: whatsappAdapter,
 };
 
 export function getChannelAdapter(source: string): ChannelAdapter | undefined {

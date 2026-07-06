@@ -211,6 +211,13 @@ def ensure_running(port: int, webhook_secret: str | None = None,
         env["BOBI_ES_SLACK_SIGNING_SECRET"] = resolved_slack_signing_secret
     if resolved_linear_webhook_secret:
         env["BOBI_ES_LINEAR_WEBHOOK_SECRET"] = resolved_linear_webhook_secret
+    # WhatsApp inbound verification (#656): the runtime .env carries the
+    # unprefixed vars (the connector card captures them); the local server
+    # reads only BOBI_ES_*.
+    if env.get("WHATSAPP_APP_SECRET"):
+        env["BOBI_ES_WHATSAPP_APP_SECRET"] = env["WHATSAPP_APP_SECRET"]
+    if env.get("WHATSAPP_VERIFY_TOKEN"):
+        env["BOBI_ES_WHATSAPP_VERIFY_TOKEN"] = env["WHATSAPP_VERIFY_TOKEN"]
     if bind:
         env["BOBI_ES_BIND"] = bind
     if extra_env:
@@ -296,7 +303,8 @@ def _seed_test_resource_grant(base_url: str, service: str, resource: str,
 
 def authorize_resources(base_url: str, cfg, subscribe: list[str],
                         bubble_id: str, bubble_key: str,
-                        *, filter_unauthorized: bool = True) -> list[str]:
+                        *, filter_unauthorized: bool = True,
+                        whatsapp_registered: list[str] | None = None) -> list[str]:
     """Obtain a bubble-scoped resource grant for each global ``github:``/``linear:``
     topic in ``subscribe`` so the subsequent ``register`` / ``update_subscriptions``
     passes the server's #488 grant check.
@@ -307,6 +315,14 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
     we successfully authorized. A topic whose credential is MISSING or REJECTED
     by the upstream is logged LOUDLY and DROPPED, so it never triggers the
     server's hard-reject during fresh registration.
+
+    ``whatsapp_registered`` is the pnid list :func:`register_whatsapp_numbers`
+    returned when the caller just ran it (``None`` means no registration was
+    attempted). A ``whatsapp:<pnid>`` topic the registration did not back is
+    treated exactly like a rejected github/linear credential: the grant the
+    server checks is written BY that registration, so keeping the topic would
+    hard-reject the whole atomic register/PUT (#488) and stall delivery for
+    every channel, not just WhatsApp.
 
     When ``filter_unauthorized`` is false, authorization is still attempted, but
     unverified topics are kept. This is used for saved deployments: the server
@@ -321,7 +337,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
     kept: list[str] = []
     for sub in subscribe:
         service = sub.split(":", 1)[0] if ":" in sub else ""
-        if service in ("github", "linear", "slack") and ":" in sub:
+        if service in ("github", "linear", "slack", "whatsapp") and ":" in sub:
             resource = sub.split(":", 1)[1]
             try:
                 if _seed_test_resource_grant(base_url, service, resource, bubble_id, bubble_key):
@@ -329,8 +345,20 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                     continue
             except Exception as e:
                 log.debug("Test resource-grant seed failed for %r: %s", sub, e)
+        if service == "whatsapp" and whatsapp_registered is not None and ":" in sub:
+            if sub.split(":", 1)[1] not in whatsapp_registered:
+                action = "dropping it from" if filter_unauthorized else "keeping it in"
+                log.warning(
+                    "WhatsApp registration did not back %r — %s this session's "
+                    "subscriptions (a resource grant is required, #488)",
+                    sub, action,
+                )
+                if not filter_unauthorized:
+                    kept.append(sub)
+                continue
         if service not in _RESOURCE_CRED_KEYS:
-            kept.append(sub)  # non-global, or slack (granted via workspace reg)
+            # Non-global, or slack/whatsapp (granted via their registrations).
+            kept.append(sub)
             continue
         resource = sub.split(":", 1)[1]
         cfg_service, cred_key = _RESOURCE_CRED_KEYS[service]
@@ -631,4 +659,42 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
         return [team_id]
     except Exception as e:
         log.warning("Slack workspace registration failed for %s: %s", team_id, e)
+        return []
+
+
+def register_whatsapp_numbers(base_url: str, cfg, bubble_id: str = "",
+                              bubble_key: str = "") -> list[str]:
+    """Register the agent's WhatsApp number with the event server (#656).
+
+    Signed-only mirror of :func:`register_slack_workspaces`: the server
+    verifies the access token against the Meta Graph API, stores the
+    bubble-scoped send credential ``/channels/send`` resolves, and writes the
+    ``whatsapp:<phone_number_id>`` resource grant that lets this bubble
+    subscribe to the number's inbound topic. Without a bubble key there is
+    nothing to register (no unsigned/global use case), so this is a no-op.
+    Best-effort: logs and continues on any failure so a registration hiccup
+    never blocks startup. Returns the phone number ids registered.
+    """
+    try:
+        token = cfg.credential("whatsapp", "access_token")
+        pnid = cfg.credential("whatsapp", "phone_number_id")
+    except Exception:
+        return []
+    if not (token and pnid and bubble_id and bubble_key):
+        return []
+    try:
+        from bobi.events.signing import signed_request
+        resp = signed_request(
+            base_url, "POST", "/whatsapp/numbers",
+            {"phone_number_id": pnid, "access_token": token},
+            bubble_id, bubble_key, timeout=10.0,
+        )
+        if resp.status_code != 200:
+            log.warning("WhatsApp number registration rejected for %s: HTTP %d",
+                        pnid, resp.status_code)
+            return []
+        log.info("Registered WhatsApp number %s with event server", pnid)
+        return [pnid]
+    except Exception as e:
+        log.warning("WhatsApp number registration failed for %s: %s", pnid, e)
         return []
