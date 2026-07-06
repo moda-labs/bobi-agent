@@ -303,7 +303,8 @@ def _seed_test_resource_grant(base_url: str, service: str, resource: str,
 
 def authorize_resources(base_url: str, cfg, subscribe: list[str],
                         bubble_id: str, bubble_key: str,
-                        *, filter_unauthorized: bool = True) -> list[str]:
+                        *, filter_unauthorized: bool = True,
+                        whatsapp_registered: list[str] | None = None) -> list[str]:
     """Obtain a bubble-scoped resource grant for each global ``github:``/``linear:``
     topic in ``subscribe`` so the subsequent ``register`` / ``update_subscriptions``
     passes the server's #488 grant check.
@@ -314,6 +315,14 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
     we successfully authorized. A topic whose credential is MISSING or REJECTED
     by the upstream is logged LOUDLY and DROPPED, so it never triggers the
     server's hard-reject during fresh registration.
+
+    ``whatsapp_registered`` is the pnid list :func:`register_whatsapp_numbers`
+    returned when the caller just ran it (``None`` means no registration was
+    attempted). A ``whatsapp:<pnid>`` topic the registration did not back is
+    treated exactly like a rejected github/linear credential: the grant the
+    server checks is written BY that registration, so keeping the topic would
+    hard-reject the whole atomic register/PUT (#488) and stall delivery for
+    every channel, not just WhatsApp.
 
     When ``filter_unauthorized`` is false, authorization is still attempted, but
     unverified topics are kept. This is used for saved deployments: the server
@@ -336,6 +345,17 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                     continue
             except Exception as e:
                 log.debug("Test resource-grant seed failed for %r: %s", sub, e)
+        if service == "whatsapp" and whatsapp_registered is not None and ":" in sub:
+            if sub.split(":", 1)[1] not in whatsapp_registered:
+                action = "dropping it from" if filter_unauthorized else "keeping it in"
+                log.warning(
+                    "WhatsApp registration did not back %r — %s this session's "
+                    "subscriptions (a resource grant is required, #488)",
+                    sub, action,
+                )
+                if not filter_unauthorized:
+                    kept.append(sub)
+                continue
         if service not in _RESOURCE_CRED_KEYS:
             # Non-global, or slack/whatsapp (granted via their registrations).
             kept.append(sub)

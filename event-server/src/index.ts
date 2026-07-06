@@ -603,26 +603,11 @@ export default {
 
 		if (method === "POST" && path === "/whatsapp/numbers") {
 			// Signed-only (#656): unlike Slack there is no unsigned global-record
-			// use case, so an unauthenticated registration is rejected outright.
-			const raw = await request.text();
-			let data: Record<string, unknown>;
-			try {
-				data = JSON.parse(raw);
-			} catch {
-				return Response.json({ error: "invalid JSON" }, { status: 400 });
-			}
-			const ctx = readBubbleAuthHeaders(
-				(n) => request.headers.get(n),
-				method,
-				url.pathname + url.search,
-				raw,
-			);
-			if (!hasBubbleSignature(ctx)) {
-				return Response.json({ error: "forbidden" }, { status: 403 });
-			}
-			const bubble = await authenticateBubble(storage, ctx);
-			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
-			return respond(await handleWhatsAppNumberRegister(storage, data, bubble.id));
+			// use case, so an unauthenticated registration is rejected outright
+			// (bubbleAuthedJson fails closed on unsigned requests).
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleWhatsAppNumberRegister(storage, auth.data, auth.bubble.id));
 		}
 
 		return new Response("Not Found", { status: 404 });

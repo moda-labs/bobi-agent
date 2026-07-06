@@ -115,3 +115,32 @@ class TestConnectorCard:
         assert {"WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID",
                 "WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN"} <= secret_vars
         assert card.credential_var == "WHATSAPP_ACCESS_TOKEN"
+
+
+class TestGatewayTypedErrorDetail:
+    def test_gateway_error_surfaces_typed_detail(self):
+        """The typed outside_message_window error carries human-readable
+        guidance in `detail`; the client must surface it, not just the code
+        (the server includes it specifically so the agent can report the
+        situation)."""
+        import pytest
+
+        from bobi.events import gateway
+
+        class _ErrResp:
+            status_code = 400
+
+            def json(self):
+                return {
+                    "error": "outside_message_window",
+                    "detail": "no inbound message from this user in the last 24h",
+                }
+
+        with patch("bobi.events.publish.bubble_context",
+                   return_value=("http://localhost:8080", "bub_x", "bkey_x")), \
+             patch("bobi.events.signing.signed_request",
+                   return_value=_ErrResp()):
+            with pytest.raises(gateway.GatewayError) as ei:
+                gateway._request(None, "POST", "/channels/send", {"text": "hi"})
+        assert "outside_message_window" in str(ei.value)
+        assert "no inbound message from this user" in str(ei.value)

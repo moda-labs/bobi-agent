@@ -314,7 +314,7 @@ import { normalizeGitHubWebhook } from "./adapters/github";
 import { normalizeLinearWebhook } from "./adapters/linear";
 import { bridgeSlackWebhook } from "./adapters/chat-sdk-slack";
 import { normalizeWhatsAppWebhook } from "./adapters/whatsapp";
-import { chunkForChannel, getChannelAdapter, slackApiUrl, truncateForChannel, whatsappApiUrl, type OutboundFile } from "./channels";
+import { chunkForChannel, getChannelAdapter, slackApiUrl, truncateForChannel, whatsappApi, type OutboundFile } from "./channels";
 import { parseConversation, type Conversation } from "./conversation";
 
 export { normalizeGitHubWebhook as normalizeGitHubPayload } from "./adapters/github";
@@ -1130,18 +1130,26 @@ export async function handleWhatsAppWebhook(
 	const { events } = normalizeWhatsAppWebhook(payload);
 
 	// Record the customer-service window: each inbound message re-opens 24h of
-	// free-form replies for its conversation (checked at send time).
-	const seen = new Set<string>();
+	// free-form replies for its conversation (checked at send time). Stamp the
+	// message's OWN timestamp (newest per conversation) and never regress an
+	// existing record - Meta redelivers failed webhooks for days, and a stale
+	// redelivery must not falsely reopen a closed window.
+	const latest = new Map<string, number>();
 	for (const event of events) {
 		const ref = event.conversation;
-		if (!ref || seen.has(ref)) continue;
-		seen.add(ref);
+		if (!ref) continue;
+		const ts = Date.parse(String(event.fields?.message_timestamp ?? ""));
+		const stamp = Number.isNaN(ts) ? Date.now() : ts;
+		if (stamp > (latest.get(ref) ?? 0)) latest.set(ref, stamp);
+	}
+	for (const [ref, stamp] of latest) {
 		const conv = parseConversation(ref);
 		if (!conv) continue;
-		await storage.putChannelState(
-			channelWindowKey(conv.source, conv.scope, conv.chatId),
-			{ last_inbound: new Date().toISOString() },
-		);
+		const key = channelWindowKey(conv.source, conv.scope, conv.chatId);
+		const existing = await storage.getChannelState(key);
+		const prev = Date.parse((existing?.last_inbound as string) || "");
+		if (!Number.isNaN(prev) && prev >= stamp) continue;
+		await storage.putChannelState(key, { last_inbound: new Date(stamp).toISOString() });
 	}
 
 	let delivered = 0;
@@ -1684,7 +1692,8 @@ export async function handleTestSeedResourceGrants(
 		const grant = raw as Record<string, unknown>;
 		const service = typeof grant.service === "string" ? grant.service : "";
 		const rawResource = typeof grant.resource === "string" ? grant.resource.trim() : "";
-		if ((service !== "github" && service !== "linear" && service !== "slack") || !rawResource) {
+		if ((service !== "github" && service !== "linear" && service !== "slack"
+			&& service !== "whatsapp") || !rawResource) {
 			return { status: 400, body: { error: "invalid_request" } };
 		}
 		const resource = normalizeResource(service, rawResource);
@@ -1855,10 +1864,11 @@ export async function handleWhatsAppNumberRegister(
 	}
 
 	try {
-		const resp = await fetch(`${whatsappApiUrl()}${encodeURIComponent(phoneNumberId)}?fields=id`, {
-			headers: { Authorization: `Bearer ${accessToken}` },
-		});
-		const data = (await resp.json()) as Record<string, unknown>;
+		const data = await whatsappApi(
+			accessToken,
+			`${encodeURIComponent(phoneNumberId)}?fields=id`,
+			{ method: "GET" },
+		);
 		if (String(data.id ?? "") !== phoneNumberId) {
 			return { status: 403, body: { error: "forbidden" } };
 		}
@@ -2023,12 +2033,19 @@ export async function handleChannelsSend(
 		return { status: 400, body: { error: "edit_ref required for mode: update" } };
 	}
 
-	const botToken = await resolveChannelSendToken(storage, bubbleId, conv, body);
+	const caps = adapter.descriptor.capabilities;
+
+	// The credential and window-state reads are independent; start both
+	// together and keep the credential error's precedence.
+	const [botToken, windowState] = await Promise.all([
+		resolveChannelSendToken(storage, bubbleId, conv, body),
+		caps.messageWindow
+			? storage.getChannelState(channelWindowKey(conv.source, conv.scope, conv.chatId))
+			: Promise.resolve(null),
+	]);
 	if (!botToken) {
 		return { status: 400, body: { error: `no send credential registered for ${conv.source}:${conv.scope}` } };
 	}
-
-	const caps = adapter.descriptor.capabilities;
 
 	// Message-window enforcement (#656): a windowed channel (WhatsApp's 24h
 	// customer-service window) only accepts free-form replies for N hours
@@ -2040,9 +2057,7 @@ export async function handleChannelsSend(
 	// the authoritative enforcer and its rejection surfaces as a send error.
 	// Template messaging (the outside-window escape hatch) is a follow-up.
 	if (caps.messageWindow) {
-		const state = await storage.getChannelState(
-			channelWindowKey(conv.source, conv.scope, conv.chatId),
-		);
+		const state = windowState;
 		const last = Date.parse((state?.last_inbound as string) || "");
 		if (!Number.isNaN(last)
 			&& Date.now() - last > caps.messageWindow.hours * 3600_000) {

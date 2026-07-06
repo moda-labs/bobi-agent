@@ -54,6 +54,10 @@ token for anything real:
    are signature-verified. WhatsApp fails closed: without the secret the
    server REJECTS inbound events (a forged message would otherwise drive an
    outbound reply through your real number).
+6. A local event server reads these variables ONCE at process start. If one
+   is already running from an earlier session, restart it
+   (`bobi agent <name> event-server restart`) after setting the secret and
+   verify token - restarting the agent alone does not restart the server.
 
 ## 4. Configure the team
 
@@ -94,7 +98,7 @@ the agent to keep replies short and conversational.
 | Problem | Fix |
 |---------|-----|
 | Meta rejects the Callback URL | Verify token mismatch or server unreachable - set `WHATSAPP_VERIFY_TOKEN` on the event server first, and use a public URL |
-| Inbound events `401`/ignored | `WHATSAPP_APP_SECRET` on the event server doesn't match the app's App secret |
+| Inbound events `401`/ignored | `WHATSAPP_APP_SECRET` on the event server doesn't match the app's App secret, or a local server started before the secret was set - `bobi agent <name> event-server restart` |
 | Replies fail with `outside_message_window` | The user hasn't messaged within 24h - free-form replies are closed; wait for their next message |
 | Replies fail with `no send credential registered` | The number isn't registered for this instance - restart the agent so registration runs, and check the token/number id |
 | Sends fail with an OAuth error | Token expired (temporary tokens last 24h) - generate a permanent System User token |

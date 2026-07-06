@@ -136,6 +136,69 @@ def test_authorize_resources_never_calls_for_slack_or_nonglobal():
     assert kept == ["slack:T1", "slack:T1:C9", "inbox/x", "monitor/y"]
 
 
+def test_authorize_resources_drops_whatsapp_topic_the_registration_did_not_back():
+    """A whatsapp:<pnid> topic is grant-backed only by register_whatsapp_numbers.
+    When the caller just ran it and the pnid is NOT in the returned list, the
+    topic is dropped - keeping it would hard-reject the whole atomic
+    register/PUT (#488) and stall delivery for every channel."""
+    transport = httpx.MockTransport(lambda req: (_ for _ in ()).throw(
+        AssertionError(f"unexpected authorize call: {req.url}")))
+    mock_http = httpx.Client(transport=transport)
+    with patch.object(pooled, "_client", mock_http):
+        kept = authorize_resources(
+            "https://es.invalid", _cfg(),
+            ["inbox/self", "whatsapp:747556541"],
+            "bub_test", "bkey_test",
+            whatsapp_registered=[],
+        )
+    assert kept == ["inbox/self"]
+
+
+def test_authorize_resources_keeps_registered_whatsapp_topic():
+    """A pnid the registration DID back passes through."""
+    mock_http = httpx.Client(transport=httpx.MockTransport(lambda req: (_ for _ in ()).throw(
+        AssertionError(f"unexpected authorize call: {req.url}"))))
+    with patch.object(pooled, "_client", mock_http):
+        kept = authorize_resources(
+            "https://es.invalid", _cfg(),
+            ["whatsapp:747556541", "inbox/self"],
+            "bub_test", "bkey_test",
+            whatsapp_registered=["747556541"],
+        )
+    assert kept == ["whatsapp:747556541", "inbox/self"]
+
+
+def test_authorize_resources_keeps_whatsapp_when_no_registration_ran():
+    """whatsapp_registered=None means no registration was attempted (e.g. an
+    inbox-only session) - keep the topic, matching the pre-#656 behavior."""
+    mock_http = httpx.Client(transport=httpx.MockTransport(lambda req: (_ for _ in ()).throw(
+        AssertionError(f"unexpected authorize call: {req.url}"))))
+    with patch.object(pooled, "_client", mock_http):
+        kept = authorize_resources(
+            "https://es.invalid", _cfg(),
+            ["whatsapp:747556541"],
+            "bub_test", "bkey_test",
+        )
+    assert kept == ["whatsapp:747556541"]
+
+
+def test_authorize_resources_keeps_unbacked_whatsapp_for_saved_deployment():
+    """filter_unauthorized=False (saved deployment): the server may hold a
+    no-expiry grant from an earlier start, so the topic is kept and the
+    server stays authoritative - same contract as github/linear."""
+    mock_http = httpx.Client(transport=httpx.MockTransport(lambda req: (_ for _ in ()).throw(
+        AssertionError(f"unexpected authorize call: {req.url}"))))
+    with patch.object(pooled, "_client", mock_http):
+        kept = authorize_resources(
+            "https://es.invalid", _cfg(),
+            ["whatsapp:747556541"],
+            "bub_test", "bkey_test",
+            filter_unauthorized=False,
+            whatsapp_registered=[],
+        )
+    assert kept == ["whatsapp:747556541"]
+
+
 def test_authorize_resources_noop_without_bubble_credential():
     """No bubble key (can't sign) → return subscribe unchanged, no calls."""
     transport = httpx.MockTransport(lambda req: (_ for _ in ()).throw(
@@ -205,7 +268,7 @@ def test_startup_authorizes_resources_before_register(tmp_path):
 
     order = []
 
-    def fake_authorize(url, cfg, subscribe, bubble_id, bubble_key):
+    def fake_authorize(url, cfg, subscribe, bubble_id, bubble_key, **kw):
         order.append("authorize")
         return list(subscribe)
 

@@ -83,6 +83,13 @@ export function normalizeWhatsAppWebhook(
 				};
 				if (msg.id) fields.message_id = String(msg.id);
 				if (profileName) fields.profile_name = profileName;
+				// Meta stamps each message with unix seconds. Carry it so the
+				// 24h-window bookkeeping records the message's own time, not
+				// our arrival time - redeliveries can arrive days late.
+				const tsSec = Number(msg.timestamp);
+				if (Number.isFinite(tsSec) && tsSec > 0) {
+					fields.message_timestamp = new Date(tsSec * 1000).toISOString();
+				}
 
 				events.push({
 					v: 2,

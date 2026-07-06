@@ -36,6 +36,7 @@ import {
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
 	handleDeregisterDeployment,
+	handleTestSeedResourceGrants,
 	handleTopicEvent,
 	handleChannelsSend,
 	handleChannelsTyping,
@@ -2972,6 +2973,28 @@ describe("whatsapp webhook pipeline", () => {
 		expect(store.delivered.map((e) => e.text)).toEqual(
 			["[image] the chart", "[voice message]"]);
 	});
+
+	it("stamps the window with the message's own timestamp, never regressing it", async () => {
+		const store = createMockStorage();
+		const key = channelWindowKey("whatsapp", WA_PNID, WA_USER);
+		const oldSec = Math.floor((Date.now() - 3 * 24 * 3600_000) / 1000);
+		const oldMsg = {
+			from: WA_USER, id: "wamid.old", type: "text",
+			text: { body: "hi" }, timestamp: String(oldSec),
+		};
+
+		// Meta redelivers failed webhooks for days: a day-old message must
+		// stamp its OWN time, not arrival time, or a closed window reopens.
+		await handleWhatsAppWebhook(store, metaWebhook([oldMsg]));
+		expect(store.channelState.get(key)?.last_inbound).toBe(
+			new Date(oldSec * 1000).toISOString());
+
+		// A fresher existing record survives a stale redelivery.
+		const fresh = new Date().toISOString();
+		store.channelState.set(key, { last_inbound: fresh });
+		await handleWhatsAppWebhook(store, metaWebhook([oldMsg]));
+		expect(store.channelState.get(key)?.last_inbound).toBe(fresh);
+	});
 });
 
 describe("whatsapp number registration and outbound send", () => {
@@ -3121,6 +3144,42 @@ describe("whatsapp number registration and outbound send", () => {
 		expect((typing.body as Record<string, unknown>).supported).toBe(false);
 		const history = await handleChannelsHistory(store, WA_CONV, 10, "bubA");
 		expect(history.status).toBe(400);
+	});
+
+	it("clamps document captions to the 1024-char Cloud API media limit", async () => {
+		const store = createMockStorage();
+		const sends: Array<Record<string, unknown>> = [];
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes(`/${WA_PNID}?fields=id`)) return fetchOk(200, { id: WA_PNID });
+			if (u.endsWith(`/${WA_PNID}/media`)) return fetchOk(200, { id: "media.1" });
+			if (u.endsWith(`/${WA_PNID}/messages`)) {
+				sends.push(JSON.parse(String(init?.body)));
+				return fetchOk(200, { messages: [{ id: `wamid.out.${sends.length}` }] });
+			}
+			return fetchOk(404, { error: { message: `unexpected ${u}` } });
+		}));
+		await register(store);
+		openWindow(store);
+
+		// A comment inside the 4096 text budget but over the 1024 caption cap:
+		// Graph rejects over-long captions AFTER the media upload succeeded.
+		const res = await handleChannelsSend(store, {
+			conversation: WA_CONV, text: "c".repeat(2000),
+			files: [{ name: "report.pdf", content_b64: btoa("pdf-bytes") }],
+		}, "bubA");
+		expect(res.status).toBe(200);
+		const doc = sends[0].document as Record<string, unknown>;
+		expect((doc.caption as string).length).toBe(1024);
+	});
+
+	it("test-seed grants accept the whatsapp service (matches the client seed tuple)", async () => {
+		const store = createMockStorage();
+		const res = await handleTestSeedResourceGrants(store, {
+			grants: [{ service: "whatsapp", resource: WA_PNID }],
+		}, "bubA");
+		expect(res.status).toBe(200);
+		expect(await store.hasResourceGrant("whatsapp", WA_PNID, "bubA")).toBe(true);
 	});
 });
 

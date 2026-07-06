@@ -60,6 +60,10 @@ def _request(project_path: Path | None, method: str, path: str,
         data = {}
     if resp.status_code >= 400 or not data.get("ok", True):
         detail = data.get("error") or f"HTTP {resp.status_code}"
+        # Typed errors (e.g. outside_message_window) carry human-readable
+        # guidance in `detail` - surface it so the agent can act on it.
+        if data.get("detail"):
+            detail = f"{detail}: {data['detail']}"
         raise GatewayError(f"Gateway {method} {path.split('?')[0]} failed: {detail}")
     return data
 

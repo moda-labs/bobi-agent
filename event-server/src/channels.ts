@@ -421,7 +421,7 @@ const slackAdapter: ChannelAdapter = {
 
 // One Graph API call. Returns the parsed JSON body; throws on transport
 // errors; a Graph error body ({error: {message}}) is surfaced by callers.
-async function whatsappApi(
+export async function whatsappApi(
 	token: string,
 	path: string,
 	init: { method?: string; json?: unknown; form?: FormData },
@@ -441,6 +441,9 @@ async function whatsappApi(
 	});
 	return (await resp.json()) as Record<string, unknown>;
 }
+
+// Meta's cap for media/document captions, distinct from the 4096 text limit.
+const WHATSAPP_CAPTION_LIMIT = 1024;
 
 function whatsappError(data: Record<string, unknown>): string {
 	const err = data.error as Record<string, unknown> | undefined;
@@ -521,7 +524,10 @@ const whatsappAdapter: ChannelAdapter = {
 				const mediaId = uploaded.id as string;
 				if (!mediaId) return { ok: false, error: partialUploadError(whatsappError(uploaded), i, files.length) };
 
-				const caption = i === 0 ? comment || f.title || "" : f.title || "";
+				// Media captions have their own Cloud API limit (1024 chars),
+				// well below the 4096 text-body cap the gateway budget uses.
+				const caption = (i === 0 ? comment || f.title || "" : f.title || "")
+					.slice(0, WHATSAPP_CAPTION_LIMIT);
 				const sent = await whatsappApi(token, `${conv.scope}/messages`, {
 					json: {
 						messaging_product: "whatsapp",
