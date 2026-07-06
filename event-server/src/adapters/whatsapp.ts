@@ -1,8 +1,10 @@
 /**
  * WhatsApp (Meta Cloud API) inbound normalizer (#656, epic #190 Phase 3).
  *
- * Hand-rolled: no @chat-adapter/whatsapp package exists, so unlike Slack
- * there is no Chat SDK parser to bridge. Meta POSTs webhook payloads shaped
+ * Hand-rolled: the Cloud API surface used here (webhook parse, text send,
+ * media upload) is small enough not to earn the @chat-adapter/whatsapp
+ * dependency; re-evaluate it when template messaging is built.
+ * Meta POSTs webhook payloads shaped
  * `{object, entry: [{changes: [{field, value}]}]}`; the `messages` field
  * carries user messages, `statuses` carries delivery receipts (skipped).
  *
