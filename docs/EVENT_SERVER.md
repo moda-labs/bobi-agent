@@ -10,7 +10,7 @@ runs - plus a Python client (`bobi/events/`) that every agent session uses.
 
 ```
        external webhooks                  generic ingress
-      (GitHub, Slack, Linear)      (alerting, CI, SaaS webhooks,
+ (GitHub, Slack, Linear, WhatsApp) (alerting, CI, SaaS webhooks,
                 │                   via scoped ingest tokens)
                 │                               │
                 ▼                               ▼
@@ -156,9 +156,8 @@ signed body, never from client input**:
   check); then verifies the `v0=` signature within a ±300s window, with the signing
   secret resolved per authoring app (`api_app_id`), falling back to
   `SLACK_SIGNING_SECRET` (local: `BOBI_ES_SLACK_SIGNING_SECRET`). Normalization
-  runs through the Chat SDK bridge (`adapters/chat-sdk-slack.ts`, #628); the
-  hand-rolled `adapters/slack.ts` normalizer remains as the golden parity
-  reference until the bridge has soaked. Maps to `slack.mention` / `slack.dm` /
+  runs through the Chat SDK bridge (`adapters/chat-sdk-slack.ts`, #628), the
+  only Slack inbound normalizer (#647). Maps to `slack.mention` / `slack.dm` /
   `slack.thread_reply` and filters our own bots' messages.
 - **Linear** (`POST /webhooks/linear`): `type = linear.<type>.<action>`, key
   `linear:<TEAM_KEY>`. Signature (`Linear-Signature`, HMAC-SHA256 of the raw body)
@@ -166,6 +165,16 @@ signed body, never from client input**:
   is set, with replay rejection via the signed `webhookTimestamp` (±300s;
   fail-closed - a signed payload without a numeric `webhookTimestamp` is
   rejected, since it would otherwise be replayable forever).
+- **WhatsApp** (`POST /webhooks/whatsapp`, #656): `type = whatsapp.message`, key
+  `whatsapp:<phone_number_id>`. Meta signs like GitHub (`X-Hub-Signature-256`),
+  verified when `WHATSAPP_APP_SECRET` (local: `BOBI_ES_WHATSAPP_APP_SECRET`) is
+  set. Meta additionally verifies the URL with a **GET subscribe handshake**
+  (`hub.challenge` echoed as raw text when `hub.verify_token` matches
+  `WHATSAPP_VERIFY_TOKEN` / `BOBI_ES_WHATSAPP_VERIFY_TOKEN`; rejected when the
+  token is unset, so a third party can never bind the URL). Inbound messages
+  also record the conversation's 24h customer-service window, which
+  `/channels/send` enforces (`outside_message_window` typed error). Delivery
+  receipts (`statuses`) are skipped.
 - **Generic ingest** (`POST /webhooks/ingest/<topic>`, #640): the escape hatch for
   external systems that cannot compute per-request signatures (alerting, CI, SaaS
   webhooks - most can only set static headers). The verify slot checks a **scoped
@@ -198,12 +207,13 @@ prefixed by the subscriber's bubble id for tenant isolation (see Security).
 | `linear:<TEAM_KEY>` | Linear webhook | `linear:MOD` |
 | `slack:<team>` | Slack webhook (no app id) | `slack:T0ABC` |
 | `slack:<team>:app:<app_id>[:<channel>]` | Slack webhook (app-qualified) | `slack:T0ABC:app:A123:C0XYZ` |
+| `whatsapp:<phone_number_id>` | WhatsApp webhook | `whatsapp:747556541` |
 | `inbox/<session>` | inter-agent fire-and-forget | `inbox/director` |
 | `reply/<uuid>` | transient ask-reply channel | `reply/9f3a...` |
 | `<type>` and `<source>/<type>` | monitors / agent publishes | `support.email`, `monitor/support.email` |
 | `agent/session.completed` (+ bare `session.completed`) | sub-agent lifecycle | |
 
-`github:`, `linear:`, and `slack:` are **global** topics (cross-bubble, gated by
+`github:`, `linear:`, `slack:`, and `whatsapp:` are **global** topics (cross-bubble, gated by
 resource grants). Everything else is **bubble-scoped**. Monitors and lifecycle
 events are published to both the bare `<type>` and the `<source>/<type>` form, and
 clients subscribe to both, for cross-version compatibility.
@@ -381,8 +391,11 @@ the grant, never the credential:
   not just the org).
 - **Slack**: the bubble-signed `/slack/workspaces` registration (proving the bot
   token + signing secret via `auth.test`) doubles as the grant.
+- **WhatsApp**: the bubble-signed `/whatsapp/numbers` registration (proving the
+  Cloud API token can read the phone-number node on the Graph API) doubles as
+  the grant, and stores the bubble-scoped send credential.
 
-Unknown services are default-deny (only `github:` / `linear:` / `slack:` are global).
+Unknown services are default-deny (only `github:` / `linear:` / `slack:` / `whatsapp:` are global).
 The grant is enforced at **three points**, all sharing one parser so they cannot
 diverge:
 
@@ -392,7 +405,7 @@ diverge:
    admitted to a subscriber only if its bubble currently holds the grant, so a stale
    index entry for a revoked bubble is dropped.
 
-The client authorizes its github/linear topics (and registers Slack workspaces)
+The client authorizes its github/linear topics (and registers Slack workspaces / WhatsApp numbers)
 before it registers subscriptions, dropping any topic whose credential is missing or
 rejected so it never trips the server's hard reject.
 

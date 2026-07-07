@@ -36,6 +36,7 @@ import {
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
 	handleDeregisterDeployment,
+	handleTestSeedResourceGrants,
 	handleTopicEvent,
 	handleChannelsSend,
 	handleChannelsTyping,
@@ -43,6 +44,11 @@ import {
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
 	resolveSlackSigningSecret,
+	handleWebhookHandshake,
+	handleWhatsAppWebhook,
+	handleWhatsAppNumberRegister,
+	channelWindowKey,
+	whatsappNumberKey,
 	handleIngestTokenCreate,
 	handleIngestTokenList,
 	handleIngestTokenRevoke,
@@ -54,6 +60,7 @@ import {
 } from "../src/core";
 import { hmacHex } from "./helpers";
 import { bridgeSlackWebhook } from "../src/adapters/chat-sdk-slack";
+import { setWhatsAppApiUrl } from "../src/channels";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -623,6 +630,7 @@ function createMockStorage(): StorageAdapter & {
 	subscriptions: Map<string, Set<string>>;
 	bubbles: Map<string, BubbleRecord>;
 	slackWorkspaces: Map<string, SlackWorkspaceRecord>;
+	channelState: Map<string, Record<string, unknown>>;
 	resourceGrants: Map<string, ResourceGrant>;
 	ingestTokens: Map<string, IngestTokenRecord>;
 	delivered: NormalizedEvent[];
@@ -636,6 +644,7 @@ function createMockStorage(): StorageAdapter & {
 	const subscriptions = new Map<string, Set<string>>();
 	const bubbles = new Map<string, BubbleRecord>();
 	const slackWorkspaces = new Map<string, SlackWorkspaceRecord>();
+	const channelState = new Map<string, Record<string, unknown>>();
 	const resourceGrants = new Map<string, ResourceGrant>();
 	const ingestTokens = new Map<string, IngestTokenRecord>();
 	const delivered: NormalizedEvent[] = [];
@@ -648,6 +657,7 @@ function createMockStorage(): StorageAdapter & {
 		subscriptions,
 		bubbles,
 		slackWorkspaces,
+		channelState,
 		resourceGrants,
 		ingestTokens,
 		delivered,
@@ -659,7 +669,7 @@ function createMockStorage(): StorageAdapter & {
 				id: `grant_${service}_${resource}_${bubbleId}`,
 				account_id: null,
 				bubble_id: bubbleId,
-				service: service as "github" | "linear" | "slack",
+				service: service as ResourceGrant["service"],
 				resource,
 				granted_by: "upstream_token_verification",
 				created_at: "2026-01-01T00:00:00Z",
@@ -741,6 +751,12 @@ function createMockStorage(): StorageAdapter & {
 		},
 		async putSlackWorkspace(workspaceId: string, record: SlackWorkspaceRecord) {
 			slackWorkspaces.set(workspaceId, record);
+		},
+		async getChannelState(key: string) {
+			return channelState.get(key) || null;
+		},
+		async putChannelState(key: string, value: Record<string, unknown>) {
+			channelState.set(key, value);
 		},
 		async initDeploymentSession(deploymentId: string, subs: string[]) {
 			initCalls.push({ deploymentId, subscriptions: subs });
@@ -2180,9 +2196,9 @@ describe("handleChannelsSend", () => {
 	it("rejects an unsupported channel", async () => {
 		const store = createMockStorage();
 		const result = await handleChannelsSend(
-			store, { conversation: "whatsapp:747:dm:15550001111", text: "hi" }, "bubA");
+			store, { conversation: "telegram:12345:dm:67890", text: "hi" }, "bubA");
 		expect(result.status).toBe(400);
-		expect((result.body as Record<string, string>).error).toContain("unsupported channel: whatsapp");
+		expect((result.body as Record<string, string>).error).toContain("unsupported channel: telegram");
 	});
 
 	it("rejects an invalid mode and update without edit_ref", async () => {
@@ -2205,7 +2221,7 @@ describe("handleChannelsSend", () => {
 		const result = await handleChannelsSend(
 			store, { conversation: "slack:T1:dm:D1", text: "hi" }, "bubA");
 		expect(result.status).toBe(400);
-		expect((result.body as Record<string, string>).error).toContain("bot token");
+		expect((result.body as Record<string, string>).error).toContain("no send credential");
 	});
 
 	it("posts into the thread encoded in the conversation ref as native markdown", async () => {
@@ -2841,6 +2857,331 @@ describe("parseGlobalTopic / normalizeResource", () => {
 function fetchOk(status: number, json: unknown = {}) {
 	return { ok: status >= 200 && status < 300, status, json: async () => json };
 }
+
+// --- WhatsApp gateway (#656, epic #190 Phase 3) -----------------------------
+
+const WA_PNID = "747556541";
+const WA_USER = "15551234567";
+const WA_CONV = `whatsapp:${WA_PNID}:dm:${WA_USER}`;
+
+function metaWebhook(messages: Array<Record<string, unknown>>,
+	extra: Record<string, unknown> = {}): Record<string, unknown> {
+	return {
+		object: "whatsapp_business_account",
+		entry: [{
+			id: "WABA1",
+			changes: [{
+				field: "messages",
+				value: {
+					messaging_product: "whatsapp",
+					metadata: { display_phone_number: "15550001111", phone_number_id: WA_PNID },
+					contacts: [{ profile: { name: "Ada" }, wa_id: WA_USER }],
+					messages,
+					...extra,
+				},
+			}],
+		}],
+	};
+}
+
+describe("whatsapp webhook pipeline", () => {
+	function req(rawBody: string, headers: Record<string, string> = {}): InboundWebhookRequest {
+		const lower = Object.fromEntries(
+			Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+		return { rawBody, header: (n) => lower[n.toLowerCase()] || "", subpath: "" };
+	}
+
+	it("GET handshake echoes the challenge only for the configured verify token", () => {
+		const secrets = { whatsappVerifyToken: "vt-1" };
+		const q = (params: Record<string, string>) => (n: string) => params[n] || "";
+
+		const ok = handleWebhookHandshake("whatsapp", q({
+			"hub.mode": "subscribe", "hub.verify_token": "vt-1", "hub.challenge": "12345",
+		}), secrets);
+		expect(ok).toEqual({ status: 200, text: "12345" });
+
+		const wrong = handleWebhookHandshake("whatsapp", q({
+			"hub.mode": "subscribe", "hub.verify_token": "nope", "hub.challenge": "12345",
+		}), secrets);
+		expect(wrong?.status).toBe(403);
+
+		// Unset verify token REJECTS: echoing for anyone would let a third
+		// party bind this URL to their Meta app.
+		const unset = handleWebhookHandshake("whatsapp", q({
+			"hub.mode": "subscribe", "hub.verify_token": "", "hub.challenge": "12345",
+		}), {});
+		expect(unset?.status).toBe(403);
+
+		// Sources without a handshake fall through to the transport 404.
+		expect(handleWebhookHandshake("github", q({}), secrets)).toBeNull();
+	});
+
+	it("verifies x-hub-signature-256 and delivers a normalized message", async () => {
+		const store = createMockStorage();
+		await store.addSubscription(`whatsapp:${WA_PNID}`, "sub1");
+		const body = JSON.stringify(metaWebhook([{
+			from: WA_USER, id: "wamid.A1", timestamp: "1783300000",
+			type: "text", text: { body: "hello bobi" },
+		}]));
+		const secrets = { whatsapp: "app-secret" };
+
+		const bad = await handleWebhookRequest(
+			store, "whatsapp", req(body, { "x-hub-signature-256": "sha256=bad" }), secrets);
+		expect(bad?.status).toBe(401);
+		expect(store.delivered).toHaveLength(0);
+
+		const sig = "sha256=" + (await hmacHex("app-secret", body));
+		const ok = await handleWebhookRequest(
+			store, "whatsapp", req(body, { "x-hub-signature-256": sig }), secrets);
+		expect(ok?.status).toBe(200);
+		expect(store.delivered).toHaveLength(1);
+		const event = store.delivered[0];
+		expect(event.source).toBe("whatsapp");
+		expect(event.type).toBe("whatsapp.message");
+		expect(event.id).toBe("wamid.A1");
+		expect(event.topics).toEqual([`whatsapp:${WA_PNID}`]);
+		expect(event.text).toBe("hello bobi");
+		expect(event.conversation).toBe(WA_CONV);
+		expect(event.fields?.profile_name).toBe("Ada");
+	});
+
+	it("records the message window per conversation and skips statuses", async () => {
+		const store = createMockStorage();
+		const receipts = metaWebhook([], {
+			statuses: [{ id: "wamid.X", status: "delivered", recipient_id: WA_USER }],
+		});
+		let res = await handleWhatsAppWebhook(store, receipts);
+		expect(res.status).toBe(200);
+		expect(store.delivered).toHaveLength(0);
+		expect(store.channelState.size).toBe(0);
+
+		res = await handleWhatsAppWebhook(store, metaWebhook([{
+			from: WA_USER, id: "wamid.A2", type: "text", text: { body: "hi" },
+		}]));
+		expect(res.status).toBe(200);
+		const windowState = store.channelState.get(
+			channelWindowKey("whatsapp", WA_PNID, WA_USER));
+		expect(typeof windowState?.last_inbound).toBe("string");
+	});
+
+	it("surfaces media messages as typed placeholders with captions", async () => {
+		const store = createMockStorage();
+		await handleWhatsAppWebhook(store, metaWebhook([
+			{ from: WA_USER, id: "wamid.I1", type: "image", image: { id: "m1", caption: "the chart" } },
+			{ from: WA_USER, id: "wamid.V1", type: "voice", voice: { id: "m2" } },
+		]));
+		expect(store.delivered.map((e) => e.text)).toEqual(
+			["[image] the chart", "[voice message]"]);
+	});
+
+	it("stamps the window with the message's own timestamp, never regressing it", async () => {
+		const store = createMockStorage();
+		const key = channelWindowKey("whatsapp", WA_PNID, WA_USER);
+		const oldSec = Math.floor((Date.now() - 3 * 24 * 3600_000) / 1000);
+		const oldMsg = {
+			from: WA_USER, id: "wamid.old", type: "text",
+			text: { body: "hi" }, timestamp: String(oldSec),
+		};
+
+		// Meta redelivers failed webhooks for days: a day-old message must
+		// stamp its OWN time, not arrival time, or a closed window reopens.
+		await handleWhatsAppWebhook(store, metaWebhook([oldMsg]));
+		expect(store.channelState.get(key)?.last_inbound).toBe(
+			new Date(oldSec * 1000).toISOString());
+
+		// A fresher existing record survives a stale redelivery.
+		const fresh = new Date().toISOString();
+		store.channelState.set(key, { last_inbound: fresh });
+		await handleWhatsAppWebhook(store, metaWebhook([oldMsg]));
+		expect(store.channelState.get(key)?.last_inbound).toBe(fresh);
+	});
+});
+
+describe("whatsapp number registration and outbound send", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		setWhatsAppApiUrl(undefined);
+	});
+
+	// Graph API stub: GET /<pnid>?fields=id verifies the token; POST
+	// /<pnid>/messages records sends.
+	function stubGraphApi(pnid: string) {
+		const sends: Array<Record<string, unknown>> = [];
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes(`/${pnid}?fields=id`)) return fetchOk(200, { id: pnid });
+			if (u.endsWith(`/${pnid}/messages`)) {
+				sends.push(JSON.parse(String(init?.body)));
+				return fetchOk(200, { messages: [{ id: `wamid.out.${sends.length}` }] });
+			}
+			return fetchOk(404, { error: { message: `unexpected ${u}` } });
+		}));
+		return sends;
+	}
+
+	async function register(store: ReturnType<typeof createMockStorage>, bubbleId = "bubA") {
+		return handleWhatsAppNumberRegister(
+			store, { phone_number_id: WA_PNID, access_token: "EAAG-token" }, bubbleId);
+	}
+
+	function openWindow(store: ReturnType<typeof createMockStorage>) {
+		store.channelState.set(channelWindowKey("whatsapp", WA_PNID, WA_USER), {
+			last_inbound: new Date().toISOString(),
+		});
+	}
+
+	it("verifies the token upstream, stores the credential, writes the grant", async () => {
+		const store = createMockStorage();
+		stubGraphApi(WA_PNID);
+		const res = await register(store);
+		expect(res.status).toBe(200);
+		expect(store.channelState.get(whatsappNumberKey("bubA", WA_PNID))).toEqual(
+			{ access_token: "EAAG-token" });
+		expect(await store.hasResourceGrant("whatsapp", WA_PNID, "bubA")).toBe(true);
+	});
+
+	it("rejects unsigned registration and a token the Graph API disowns", async () => {
+		const store = createMockStorage();
+		stubGraphApi(WA_PNID);
+		expect((await register(store, "")).status).toBe(403);
+
+		vi.stubGlobal("fetch", vi.fn(async () =>
+			fetchOk(401, { error: { message: "bad token" } })));
+		expect((await register(store)).status).toBe(403);
+		expect(store.channelState.size).toBe(0);
+	});
+
+	it("sends inside the window through the Graph API and returns the message id", async () => {
+		const store = createMockStorage();
+		const sends = stubGraphApi(WA_PNID);
+		await register(store);
+		openWindow(store);
+
+		const res = await handleChannelsSend(
+			store, { conversation: WA_CONV, text: "reply *text*" }, "bubA");
+		expect(res.status).toBe(200);
+		expect((res.body as Record<string, unknown>).ts).toBe("wamid.out.1");
+		expect(sends).toHaveLength(1);
+		expect(sends[0]).toMatchObject({
+			messaging_product: "whatsapp", to: WA_USER,
+			type: "text", text: { body: "reply *text*" },
+		});
+	});
+
+	it("mode final with edit_ref degrades to a post (no edit capability)", async () => {
+		const store = createMockStorage();
+		const sends = stubGraphApi(WA_PNID);
+		await register(store);
+		openWindow(store);
+
+		const res = await handleChannelsSend(store, {
+			conversation: WA_CONV, text: "final", mode: "final", edit_ref: "wamid.old",
+		}, "bubA");
+		expect(res.status).toBe(200);
+		expect(sends).toHaveLength(1); // a new post, never an update call
+	});
+
+	it("returns the typed outside_message_window error for a KNOWN-stale window", async () => {
+		const store = createMockStorage();
+		stubGraphApi(WA_PNID);
+		await register(store);
+
+		// Stale window (25h old) - the helpful typed error.
+		store.channelState.set(channelWindowKey("whatsapp", WA_PNID, WA_USER), {
+			last_inbound: new Date(Date.now() - 25 * 3600_000).toISOString(),
+		});
+		const res = await handleChannelsSend(
+			store, { conversation: WA_CONV, text: "hi" }, "bubA");
+		expect(res.status).toBe(400);
+		expect((res.body as Record<string, string>).error).toBe("outside_message_window");
+	});
+
+	it("a MISSING window record passes through (KV lag must not false-reject)", async () => {
+		const store = createMockStorage();
+		const sends = stubGraphApi(WA_PNID);
+		await register(store);
+		// No inbound recorded: the record may simply not have replicated yet
+		// (Workers KV), and Meta is the authoritative window enforcer.
+		const res = await handleChannelsSend(
+			store, { conversation: WA_CONV, text: "hi" }, "bubA");
+		expect(res.status).toBe(200);
+		expect(sends).toHaveLength(1);
+	});
+
+	it("fails closed when no app secret is configured (unlike github/slack)", async () => {
+		const store = createMockStorage();
+		const body = JSON.stringify(metaWebhook([{
+			from: WA_USER, id: "wamid.F1", type: "text", text: { body: "forged" },
+		}]));
+		const result = await handleWebhookRequest(
+			store, "whatsapp",
+			{ rawBody: body, header: () => "" },
+			{}, // no whatsapp secret configured
+		);
+		expect(result?.status).toBe(401);
+		expect(store.delivered).toHaveLength(0);
+		expect(store.channelState.size).toBe(0); // no window state written
+	});
+
+	it("does not read another bubble's number registration", async () => {
+		const store = createMockStorage();
+		stubGraphApi(WA_PNID);
+		await register(store, "bubB");
+		openWindow(store);
+		const res = await handleChannelsSend(
+			store, { conversation: WA_CONV, text: "hi" }, "bubA");
+		expect(res.status).toBe(400);
+		expect((res.body as Record<string, string>).error).toContain("no send credential");
+	});
+
+	it("typing is a silent no-op and history is a clean 400", async () => {
+		const store = createMockStorage();
+		stubGraphApi(WA_PNID);
+		await register(store);
+		const typing = await handleChannelsTyping(
+			store, { conversation: WA_CONV, on: true }, "bubA");
+		expect(typing.status).toBe(200);
+		expect((typing.body as Record<string, unknown>).supported).toBe(false);
+		const history = await handleChannelsHistory(store, WA_CONV, 10, "bubA");
+		expect(history.status).toBe(400);
+	});
+
+	it("clamps document captions to the 1024-char Cloud API media limit", async () => {
+		const store = createMockStorage();
+		const sends: Array<Record<string, unknown>> = [];
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes(`/${WA_PNID}?fields=id`)) return fetchOk(200, { id: WA_PNID });
+			if (u.endsWith(`/${WA_PNID}/media`)) return fetchOk(200, { id: "media.1" });
+			if (u.endsWith(`/${WA_PNID}/messages`)) {
+				sends.push(JSON.parse(String(init?.body)));
+				return fetchOk(200, { messages: [{ id: `wamid.out.${sends.length}` }] });
+			}
+			return fetchOk(404, { error: { message: `unexpected ${u}` } });
+		}));
+		await register(store);
+		openWindow(store);
+
+		// A comment inside the 4096 text budget but over the 1024 caption cap:
+		// Graph rejects over-long captions AFTER the media upload succeeded.
+		const res = await handleChannelsSend(store, {
+			conversation: WA_CONV, text: "c".repeat(2000),
+			files: [{ name: "report.pdf", content_b64: btoa("pdf-bytes") }],
+		}, "bubA");
+		expect(res.status).toBe(200);
+		const doc = sends[0].document as Record<string, unknown>;
+		expect((doc.caption as string).length).toBe(1024);
+	});
+
+	it("test-seed grants accept the whatsapp service (matches the client seed tuple)", async () => {
+		const store = createMockStorage();
+		const res = await handleTestSeedResourceGrants(store, {
+			grants: [{ service: "whatsapp", resource: WA_PNID }],
+		}, "bubA");
+		expect(res.status).toBe(200);
+		expect(await store.hasResourceGrant("whatsapp", WA_PNID, "bubA")).toBe(true);
+	});
+});
 
 describe("handleAuthorizeResource", () => {
 	afterEach(() => vi.unstubAllGlobals());

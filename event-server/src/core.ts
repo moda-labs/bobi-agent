@@ -66,7 +66,7 @@ export interface ResourceGrant {
 	id: string;
 	account_id: string | null; // null in MVP; account layer fills it later
 	bubble_id: string;
-	service: "github" | "linear" | "slack";
+	service: "github" | "linear" | "slack" | "whatsapp";
 	resource: string;
 	granted_by: "upstream_token_verification" | "test_seed";
 	// Linear: the team's organization id, recorded so a future fix can
@@ -224,6 +224,11 @@ export interface StorageAdapter {
 	putResourceGrant(grant: ResourceGrant): Promise<void>;
 	hasResourceGrant(service: string, resource: string, bubbleId: string): Promise<boolean>;
 	getDeploymentById(id: string): Promise<DeploymentRecord | null>;
+	// Generic per-channel state (#656): credential records and message-window
+	// bookkeeping for channels beyond Slack. One store so a new channel never
+	// adds storage methods (the Slack workspace store predates this).
+	getChannelState(key: string): Promise<Record<string, unknown> | null>;
+	putChannelState(key: string, value: Record<string, unknown>): Promise<void>;
 	// Scoped ingest tokens (#640). Lookup at request time is by token HASH —
 	// the store never sees a plaintext token. Listing is per-bubble (revoke
 	// resolves the id inside the caller's own list, so one bubble can never
@@ -308,7 +313,8 @@ export function createTopicEvent(
 import { normalizeGitHubWebhook } from "./adapters/github";
 import { normalizeLinearWebhook } from "./adapters/linear";
 import { bridgeSlackWebhook } from "./adapters/chat-sdk-slack";
-import { chunkForChannel, getChannelAdapter, slackApiUrl, truncateForChannel, type OutboundFile } from "./channels";
+import { normalizeWhatsAppWebhook } from "./adapters/whatsapp";
+import { chunkForChannel, getChannelAdapter, slackApiUrl, truncateForChannel, whatsappApi, type OutboundFile } from "./channels";
 import { parseConversation, type Conversation } from "./conversation";
 
 export { normalizeGitHubWebhook as normalizeGitHubPayload } from "./adapters/github";
@@ -323,7 +329,7 @@ export { normalizeLinearWebhook as normalizeLinearPayload } from "./adapters/lin
 // accepted cross-tenant read hole, to be closed by #239 (inbound subscription
 // auth). Slack inbound rides this path, so it keeps working. Everything else
 // (inbox/*, reply/*, monitor/*, agent/*, custom topics) is bubble-scoped.
-const GLOBAL_TOPIC_PREFIXES = ["github:", "linear:", "slack:"];
+const GLOBAL_TOPIC_PREFIXES = ["github:", "linear:", "slack:", "whatsapp:"];
 
 export function isGlobalTopic(key: string): boolean {
 	return GLOBAL_TOPIC_PREFIXES.some((p) => key.startsWith(p));
@@ -796,6 +802,10 @@ export interface WebhookSecrets {
 	github?: string;
 	slack?: string;
 	linear?: string;
+	/** Meta app secret - verifies X-Hub-Signature-256 on POSTed events. */
+	whatsapp?: string;
+	/** Operator-chosen token echoed back in Meta's GET subscribe handshake. */
+	whatsappVerifyToken?: string;
 }
 
 // Per-request pipeline context: the seam a verify slot uses to hand its
@@ -807,6 +817,14 @@ export interface WebhookRequestContext {
 }
 
 interface WebhookSource {
+	// GET subscription handshake (#656): some providers (Meta) verify the
+	// webhook URL with a GET carrying a challenge to echo back as RAW text.
+	// Registered here so both transports serve it from one definition; absent
+	// means the source has no GET surface (the transport 404s).
+	handshake?(
+		query: (name: string) => string,
+		secrets: WebhookSecrets,
+	): WebhookHandshakeResult;
 	// Registered route shape: exact (`/webhooks/<source>`, the default) or
 	// topic (`/webhooks/<source>/<topic>` with a required, slash-bearing
 	// remainder). Part of the single route grammar in matchWebhookSource.
@@ -924,6 +942,27 @@ export function createIngestEvent(
 	};
 }
 
+// A GET-handshake response. `text` is written as the RAW response body
+// (text/plain) - Meta compares the echoed challenge byte-for-byte, so it must
+// never be JSON-quoted.
+export interface WebhookHandshakeResult {
+	status: number;
+	text: string;
+}
+
+// Serve a provider's GET verification handshake, if it defines one. Returns
+// null when the source has no handshake (or is unregistered) - the transport
+// falls through to its native 404.
+export function handleWebhookHandshake(
+	source: string,
+	query: (name: string) => string,
+	secrets: WebhookSecrets,
+): WebhookHandshakeResult | null {
+	const def = WEBHOOK_SOURCES[source];
+	if (!def?.handshake) return null;
+	return def.handshake(query, secrets);
+}
+
 const WEBHOOK_SOURCES: Record<string, WebhookSource> = {
 	github: {
 		async verify(_storage, req, _payload, secret) {
@@ -996,6 +1035,48 @@ const WEBHOOK_SOURCES: Record<string, WebhookSource> = {
 		},
 	},
 
+	whatsapp: {
+		// Meta verifies the webhook URL with a GET subscribe handshake; the
+		// challenge must echo back as raw text. An unset verify token rejects:
+		// echoing for anyone would let a third party bind our URL to their app.
+		handshake(query, secrets) {
+			const token = secrets.whatsappVerifyToken || "";
+			if (
+				token
+				&& query("hub.mode") === "subscribe"
+				&& constantTimeEqual(token, query("hub.verify_token"))
+			) {
+				return { status: 200, text: query("hub.challenge") };
+			}
+			return { status: 403, text: "forbidden" };
+		},
+		async verify(_storage, req, _payload, secret) {
+			// FAIL CLOSED, unlike github/slack: an unverified WhatsApp event is
+			// not a read-only notification - it injects a chat message that
+			// drives an outbound reply through the operator's real number and
+			// opens the conversation's 24h send window. Meta always signs, and
+			// there is no legacy-unverified deployment base to stay compatible
+			// with, so a missing secret rejects instead of admitting.
+			if (!secret) {
+				return {
+					status: 401,
+					body: { error: "whatsapp webhook verification not configured (set the app secret)" },
+				};
+			}
+			// Meta signs exactly like GitHub: HMAC-SHA256 over the raw body in
+			// x-hub-signature-256 - one verifier serves both.
+			const valid = await verifyGitHubSignature(
+				secret,
+				new TextEncoder().encode(req.rawBody),
+				req.header("x-hub-signature-256"),
+			);
+			return valid ? null : INVALID_SIGNATURE;
+		},
+		handle(storage, _req, payload) {
+			return handleWhatsAppWebhook(storage, payload);
+		},
+	},
+
 	// Generic ingress (#640): POST /webhooks/ingest/<topic> with
 	// `Authorization: Bearer <ingest token>`. The verify slot is the token
 	// check itself — existence, topic binding, rate limit — so the structural
@@ -1033,6 +1114,50 @@ const WEBHOOK_SOURCES: Record<string, WebhookSource> = {
 		},
 	},
 };
+
+// Storage key for a conversation's message-window bookkeeping (#656). Written
+// on every inbound message; read by handleChannelsSend when the channel
+// declares a messageWindow. Channel-generic so future windowed channels reuse
+// it.
+export function channelWindowKey(source: string, scope: string, chatId: string): string {
+	return `window:${source}:${scope}:${chatId}`;
+}
+
+export async function handleWhatsAppWebhook(
+	storage: StorageAdapter,
+	payload: Record<string, unknown>,
+): Promise<HandlerResult> {
+	const { events } = normalizeWhatsAppWebhook(payload);
+
+	// Record the customer-service window: each inbound message re-opens 24h of
+	// free-form replies for its conversation (checked at send time). Stamp the
+	// message's OWN timestamp (newest per conversation) and never regress an
+	// existing record - Meta redelivers failed webhooks for days, and a stale
+	// redelivery must not falsely reopen a closed window.
+	const latest = new Map<string, number>();
+	for (const event of events) {
+		const ref = event.conversation;
+		if (!ref) continue;
+		const ts = Date.parse(String(event.fields?.message_timestamp ?? ""));
+		const stamp = Number.isNaN(ts) ? Date.now() : ts;
+		if (stamp > (latest.get(ref) ?? 0)) latest.set(ref, stamp);
+	}
+	for (const [ref, stamp] of latest) {
+		const conv = parseConversation(ref);
+		if (!conv) continue;
+		const key = channelWindowKey(conv.source, conv.scope, conv.chatId);
+		const existing = await storage.getChannelState(key);
+		const prev = Date.parse((existing?.last_inbound as string) || "");
+		if (!Number.isNaN(prev) && prev >= stamp) continue;
+		await storage.putChannelState(key, { last_inbound: new Date(stamp).toISOString() });
+	}
+
+	let delivered = 0;
+	for (const event of events) {
+		delivered += await storage.deliver(event);
+	}
+	return { status: 200, body: { ok: true, delivered_to: delivered } };
+}
 
 // An admit-without-verification, counted so /health surfaces a provider
 // running unverified (the misconfiguration class this pipeline exists to
@@ -1567,7 +1692,8 @@ export async function handleTestSeedResourceGrants(
 		const grant = raw as Record<string, unknown>;
 		const service = typeof grant.service === "string" ? grant.service : "";
 		const rawResource = typeof grant.resource === "string" ? grant.resource.trim() : "";
-		if ((service !== "github" && service !== "linear" && service !== "slack") || !rawResource) {
+		if ((service !== "github" && service !== "linear" && service !== "slack"
+			&& service !== "whatsapp") || !rawResource) {
 			return { status: 400, body: { error: "invalid_request" } };
 		}
 		const resource = normalizeResource(service, rawResource);
@@ -1701,7 +1827,73 @@ async function resolveChannelSendToken(
 			(body.bot_id as string) || "",
 		);
 	}
+	if (conv.source === "whatsapp") {
+		// Bubble-scoped lookup only, same tenancy boundary as Slack: a number
+		// registered by another bubble is indistinguishable from an unknown one.
+		const rec = await storage.getChannelState(whatsappNumberKey(bubbleId, conv.scope));
+		return (rec?.access_token as string) || "";
+	}
 	return "";
+}
+
+// Storage key for a bubble-scoped WhatsApp number registration (#656). There
+// is no global record: unlike Slack, our own sends never come back as inbound
+// message webhooks, so no self-reply loop prevention is needed.
+export function whatsappNumberKey(bubbleId: string, phoneNumberId: string): string {
+	return `whatsapp_number:${bubbleId}:${phoneNumberId}`;
+}
+
+// POST /whatsapp/numbers - registration mirror of handleSlackWorkspaceRegister,
+// but signed-only: there is no unsigned (global) use case, so an
+// unauthenticated registration is rejected outright. Verifies the access token
+// against the Graph API (the phone-number node must be readable with it), then
+// stores the bubble-scoped send credential and writes the whatsapp resource
+// grant that lets this bubble subscribe to `whatsapp:<pnid>` (#488).
+export async function handleWhatsAppNumberRegister(
+	storage: StorageAdapter,
+	body: Record<string, unknown>,
+	bubbleId?: string,
+): Promise<HandlerResult> {
+	const phoneNumberId = body.phone_number_id as string;
+	const accessToken = body.access_token as string;
+	if (!phoneNumberId || !accessToken) {
+		return { status: 400, body: { error: "phone_number_id and access_token required" } };
+	}
+	if (!bubbleId) {
+		return { status: 403, body: { error: "forbidden" } };
+	}
+
+	try {
+		const data = await whatsappApi(
+			accessToken,
+			`${encodeURIComponent(phoneNumberId)}?fields=id`,
+			{ method: "GET" },
+		);
+		if (String(data.id ?? "") !== phoneNumberId) {
+			return { status: 403, body: { error: "forbidden" } };
+		}
+	} catch {
+		return { status: 403, body: { error: "forbidden" } };
+	}
+
+	await storage.putChannelState(whatsappNumberKey(bubbleId, phoneNumberId), {
+		access_token: accessToken,
+	});
+	// Upstream token verification IS the proof of access, same convergence as
+	// Slack (#488 §6): the grant gates inbound `whatsapp:<pnid>` delivery.
+	await storage.putResourceGrant({
+		id: `whatsapp:${phoneNumberId}:${bubbleId}`,
+		account_id: null,
+		bubble_id: bubbleId,
+		service: "whatsapp",
+		resource: phoneNumberId,
+		granted_by: "upstream_token_verification",
+		organization_id: null,
+		created_at: new Date().toISOString(),
+		expires_at: null,
+	});
+
+	return { status: 200, body: { ok: true, phone_number_id: phoneNumberId } };
 }
 
 // `bubbleId` is the AUTHENTICATED bubble (the entry files reject an unsigned or
@@ -1841,12 +2033,48 @@ export async function handleChannelsSend(
 		return { status: 400, body: { error: "edit_ref required for mode: update" } };
 	}
 
-	const botToken = await resolveChannelSendToken(storage, bubbleId, conv, body);
+	const caps = adapter.descriptor.capabilities;
+
+	// The credential and window-state reads are independent; start both
+	// together and keep the credential error's precedence.
+	const [botToken, windowState] = await Promise.all([
+		resolveChannelSendToken(storage, bubbleId, conv, body),
+		caps.messageWindow
+			? storage.getChannelState(channelWindowKey(conv.source, conv.scope, conv.chatId))
+			: Promise.resolve(null),
+	]);
 	if (!botToken) {
-		return { status: 400, body: { error: "no bot token for workspace" } };
+		return { status: 400, body: { error: `no send credential registered for ${conv.source}:${conv.scope}` } };
 	}
 
-	const caps = adapter.descriptor.capabilities;
+	// Message-window enforcement (#656): a windowed channel (WhatsApp's 24h
+	// customer-service window) only accepts free-form replies for N hours
+	// after the user's last inbound message. A KNOWN-stale window fails with
+	// a TYPED error so the agent can report the situation instead of a
+	// mystery platform rejection. A MISSING record passes through: it can
+	// mean KV replication lag right after a fresh inbound (Workers), so
+	// rejecting would break the most common flow - the platform itself is
+	// the authoritative enforcer and its rejection surfaces as a send error.
+	// Template messaging (the outside-window escape hatch) is a follow-up.
+	if (caps.messageWindow) {
+		const state = windowState;
+		const last = Date.parse((state?.last_inbound as string) || "");
+		if (!Number.isNaN(last)
+			&& Date.now() - last > caps.messageWindow.hours * 3600_000) {
+			return {
+				status: 400,
+				body: {
+					error: "outside_message_window",
+					detail: `no inbound message from this user in the last `
+						+ `${caps.messageWindow.hours}h; free-form replies are closed`
+						+ (caps.messageWindow.outsideWindow === "template"
+							? " (template messages are not supported yet)"
+							: ""),
+				},
+			};
+		}
+	}
+
 	const rawText = (text as string) || "";
 
 	let result;
@@ -1961,7 +2189,7 @@ export async function handleChannelsTyping(
 	}
 	const botToken = await resolveChannelSendToken(storage, bubbleId, conv, body);
 	if (!botToken) {
-		return { status: 400, body: { error: "no bot token for workspace" } };
+		return { status: 400, body: { error: `no send credential registered for ${conv.source}:${conv.scope}` } };
 	}
 	await adapter.typing(botToken, conv, body.on);
 	return { status: 200, body: { ok: true, supported: true } };
@@ -1992,7 +2220,7 @@ export async function handleChannelsHistory(
 	}
 	const botToken = await resolveChannelSendToken(storage, bubbleId, conv, {});
 	if (!botToken) {
-		return { status: 400, body: { error: "no bot token for workspace" } };
+		return { status: 400, body: { error: `no send credential registered for ${conv.source}:${conv.scope}` } };
 	}
 	const capped = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 1000) : 100;
 	let messages;

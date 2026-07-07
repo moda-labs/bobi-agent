@@ -19,6 +19,7 @@ import {
 	hasPartialBubbleSignature,
 	authenticateBubble,
 	handleWebhookRequest,
+	handleWebhookHandshake,
 	matchWebhookSource,
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
@@ -32,6 +33,7 @@ import {
 	handleChannelsHistory,
 	handleSlackSend,
 	handleSlackWorkspaceRegister,
+	handleWhatsAppNumberRegister,
 	handleTestSeedResourceGrants,
 	getAuthRejectionCounters,
 } from "./core";
@@ -42,11 +44,12 @@ import {
 	conversationKey,
 	buildLoopDetectedEvent,
 } from "./circuit-breaker";
-import { setSlackApiUrl } from "./channels";
+import { setSlackApiUrl, setWhatsAppApiUrl } from "./channels";
 
-// Integration-test seam: point the Slack Web API at a local stub. Unset in
-// production, where the default (https://slack.com/api/) applies.
+// Integration-test seams: point the Slack Web API / Meta Graph API at local
+// stubs. Unset in production, where the platform defaults apply.
 setSlackApiUrl(process.env.BOBI_ES_SLACK_API_URL);
+setWhatsAppApiUrl(process.env.BOBI_ES_WHATSAPP_API_URL);
 
 const MAX_BUFFER = 10_000;
 
@@ -83,6 +86,7 @@ const apiKeyIndex = new Map<string, string>();
 const subscriptionIndex = new Map<string, Set<string>>();
 const bubbles = new Map<string, BubbleRecord>();
 const slackWorkspaces = new Map<string, SlackWorkspaceRecord>();
+const channelState = new Map<string, Record<string, unknown>>();
 // Resource grants (#488), keyed `service:resource:bubbleId`. In-memory and
 // strongly consistent, so the Worker's KV-propagation race never applies here.
 const resourceGrants = new Map<string, ResourceGrant>();
@@ -93,6 +97,16 @@ const ingestTokens = new Map<string, IngestTokenRecord>();
 const webhookSecret = process.env.BOBI_ES_WEBHOOK_SECRET || "";
 const slackSigningSecret = process.env.BOBI_ES_SLACK_SIGNING_SECRET || "";
 const linearWebhookSecret = process.env.BOBI_ES_LINEAR_WEBHOOK_SECRET || "";
+const whatsappAppSecret = process.env.BOBI_ES_WHATSAPP_APP_SECRET || "";
+const whatsappVerifyToken = process.env.BOBI_ES_WHATSAPP_VERIFY_TOKEN || "";
+
+const webhookSecrets = {
+	github: webhookSecret,
+	slack: slackSigningSecret,
+	linear: linearWebhookSecret,
+	whatsapp: whatsappAppSecret,
+	whatsappVerifyToken,
+};
 const testGrantsSecret = process.env.BOBI_ES_TEST_GRANTS_SECRET || "";
 
 // ---------------------------------------------------------------------------
@@ -308,6 +322,14 @@ const storage: StorageAdapter = {
 		slackWorkspaces.set(workspaceId, record);
 	},
 
+	async getChannelState(key: string): Promise<Record<string, unknown> | null> {
+		return channelState.get(key) || null;
+	},
+
+	async putChannelState(key: string, value: Record<string, unknown>): Promise<void> {
+		channelState.set(key, value);
+	},
+
 	async initDeploymentSession(): Promise<void> {
 		// no-op for local — deployment is fully initialized in putDeployment
 	},
@@ -401,6 +423,22 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	// verify slot is structural), normalizes, and delivers. matchWebhookSource
 	// returns null for an unregistered path, which 404s below WITHOUT
 	// consuming the request body.
+	// Provider GET handshakes (#656): Meta verifies a webhook URL with a GET
+	// whose challenge must echo back as RAW text (JSON-quoting breaks its
+	// byte comparison), so this responds outside respond()/JSON.
+	if (method === "GET") {
+		const handshakeRoute = matchWebhookSource(path);
+		if (handshakeRoute) {
+			const h = handleWebhookHandshake(
+				handshakeRoute.source, (n) => url.searchParams.get(n) || "", webhookSecrets);
+			if (h) {
+				res.writeHead(h.status, { "Content-Type": "text/plain" });
+				res.end(h.text);
+				return;
+			}
+		}
+	}
+
 	const webhookRoute = method === "POST" ? matchWebhookSource(path) : null;
 	if (webhookRoute) {
 		const body = await readBody(req);
@@ -412,7 +450,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 				header: (n) => (req.headers[n.toLowerCase()] as string) || "",
 				subpath: webhookRoute.subpath,
 			},
-			{ github: webhookSecret, slack: slackSigningSecret, linear: linearWebhookSecret },
+			webhookSecrets,
 		);
 		if (result) return respond(res, result);
 	}
@@ -489,6 +527,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 			return json(res, { error: "forbidden" }, 403);
 		}
 		return respond(res, await handleSlackWorkspaceRegister(storage, data, bubbleId));
+	}
+
+	if (method === "POST" && path === "/whatsapp/numbers") {
+		// Signed-only (#656): no unsigned global-record use case exists, so
+		// the mandatory bubble-auth prologue applies.
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleWhatsAppNumberRegister(storage, auth.data, auth.bubble.id));
 	}
 
 	if (method === "POST" && path === "/slack/send") {

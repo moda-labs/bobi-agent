@@ -180,14 +180,14 @@ class TestReplyCommand:
 
         def handler(request):
             return httpx.Response(
-                400, json={"error": "unsupported channel: whatsapp"})
+                400, json={"error": "unsupported channel: telegram"})
 
         with patch.object(pooled, '_client', _mock_client(handler)):
             runner = CliRunner()
             result = runner.invoke(
-                main, ["reply", "whatsapp:747:dm:15550001111", "hi"])
+                main, ["reply", "telegram:12345:dm:67890", "hi"])
         assert result.exit_code == 1
-        assert "unsupported channel: whatsapp" in result.output
+        assert "unsupported channel: telegram" in result.output
 
     def test_rejects_empty_text(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
@@ -207,13 +207,13 @@ class TestReplyCommand:
         _setup_project(tmp_path, monkeypatch)
 
         def handler(request):
-            return httpx.Response(400, json={"error": "no bot token for workspace"})
+            return httpx.Response(400, json={"error": "no send credential registered for slack:T1"})
 
         with patch.object(pooled, '_client', _mock_client(handler)):
             runner = CliRunner()
             result = runner.invoke(main, ["reply", "slack:T1:dm:D1", "hi"])
         assert result.exit_code == 1
-        assert "no bot token for workspace" in result.output
+        assert "no send credential registered for slack:T1" in result.output
         assert "channel gateway" in result.output
 
     def test_server_unreachable(self, tmp_path, monkeypatch):
