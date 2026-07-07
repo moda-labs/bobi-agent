@@ -80,6 +80,8 @@ class StartupInfo:
     package: str
     event_server_url: str
     event_server_label: str
+    ingress_warning: str
+    ingress_hint: str
     workflows: list[str]
     monitors: list[str]
     log_file: Path
@@ -152,7 +154,13 @@ def clear_manager_session(project_path: Path) -> None:
         shutil.rmtree(paths.state_path(project_path) / sub, ignore_errors=True)
 
 
-def build_startup_info(project_path: Path, pid: int, log_file: Path) -> StartupInfo:
+def build_startup_info(
+    project_path: Path,
+    pid: int,
+    log_file: Path,
+    *,
+    extra_subscriptions: Iterable[str] = (),
+) -> StartupInfo:
     """Collect the startup summary data a CLI or web adapter can format."""
     from bobi.config import Config
 
@@ -167,6 +175,21 @@ def build_startup_info(project_path: Path, pid: int, log_file: Path) -> StartupI
     else:
         event_server_url = "localhost:8080"
         event_server_label = "auto"
+
+    ingress_warning = ""
+    ingress_hint = ""
+    try:
+        from bobi.ingress import check_ingress_reachability
+
+        warning = check_ingress_reachability(
+            project_path,
+            extra_subscriptions=list(extra_subscriptions),
+        )
+        if warning:
+            ingress_warning = warning.detail
+            ingress_hint = warning.hint
+    except Exception as exc:
+        log.debug("Ingress reachability check skipped: %s", exc)
 
     workflows: list[str] = []
     try:
@@ -198,6 +221,8 @@ def build_startup_info(project_path: Path, pid: int, log_file: Path) -> StartupI
         package=cfg.agent,
         event_server_url=event_server_url,
         event_server_label=event_server_label,
+        ingress_warning=ingress_warning,
+        ingress_hint=ingress_hint,
         workflows=workflows,
         monitors=monitors,
         log_file=log_file,
@@ -372,7 +397,12 @@ def spawn_team(
         )
 
     return SpawnResult(
-        startup=build_startup_info(project_path, proc.pid, log_file),
+        startup=build_startup_info(
+            project_path,
+            proc.pid,
+            log_file,
+            extra_subscriptions=subscribe,
+        ),
         validation=validation,
         image_rotated=image_rotated,
         process=proc,
