@@ -263,6 +263,33 @@ describe("normalizeLinearPayload", () => {
 		expect(event.topics).toEqual([]);
 	});
 
+	it("normalizes a comment create with the team nested under the issue", () => {
+		const event = normalizeLinearPayload({
+			action: "create",
+			type: "Comment",
+			data: {
+				id: "comment-1",
+				body: "Looks good",
+				state: "comment-state",
+				issue: {
+					id: "issue-1",
+					identifier: "ENG-123",
+					title: "Fix webhook routing",
+					state: { name: "In Review" },
+					team: { key: "ENG" },
+					url: "https://linear.app/acme/issue/ENG-123/fix-webhook-routing",
+				},
+			},
+		});
+		expect(event.type).toBe("linear.Comment.create");
+		expect(event.topics).toEqual(["linear:ENG"]);
+		expect(event.text).toContain("ENG-123");
+		expect(event.fields!.identifier).toBe("ENG-123");
+		expect(event.fields!.title).toBe("Fix webhook routing");
+		expect(event.fields!.state).toBe("In Review");
+		expect(event.fields!.url).toBe("https://linear.app/acme/issue/ENG-123/fix-webhook-routing");
+	});
+
 	it("drops legacy top-level team_key (v2 hard cutover)", () => {
 		const event = normalizeLinearPayload({
 			action: "update",
@@ -1321,6 +1348,31 @@ describe("handleLinearWebhook", () => {
 		expect(store.delivered[0].type).toBe("linear.Issue.update");
 		expect(store.delivered[0].v).toBe(2);
 		expect(store.delivered[0].topics).toEqual(["linear:PROJ"]);
+	});
+
+	it("routes a comment event to subscribers for the issue team", async () => {
+		const store = createMockStorage();
+		await store.addSubscription("linear:ENG", "sub1");
+
+		const result = await handleLinearWebhook(store, {
+			action: "create",
+			type: "Comment",
+			data: {
+				id: "comment-1",
+				body: "Looks good",
+				issue: {
+					id: "issue-1",
+					identifier: "ENG-123",
+					title: "Fix webhook routing",
+					team: { key: "ENG" },
+				},
+			},
+		});
+
+		expect(result.status).toBe(200);
+		expect(result.body).toEqual({ delivered_to: 1 });
+		expect(store.delivered[0].topics).toEqual(["linear:ENG"]);
+		expect(store.deliveredTo[0].ids).toEqual(["sub1"]);
 	});
 });
 
@@ -3348,6 +3400,31 @@ describe("resource-grant delivery filter (admittedDeploymentIds — tests 6/7)",
 			type: "event_callback", team_id: "T1",
 			event: { type: "app_mention", channel: "C9", channel_type: "channel", user: "U1", text: "hi", ts: "1.0" },
 		})).event!;
+		const admitted = await admit(store, event);
+		expect([...admitted]).toEqual(["depGranted"]);
+	});
+
+	it("linear comments are grant-filtered by the nested issue team", async () => {
+		const store = createMockStorage();
+		depIn(store, "depGranted", "bubGranted");
+		depIn(store, "depStale", "bubStale");
+		await store.addSubscription("linear:ENG", "depGranted");
+		await store.addSubscription("linear:ENG", "depStale");
+		store.seedGrant("linear", "ENG", "bubGranted");
+
+		const event = normalizeLinearPayload({
+			action: "create",
+			type: "Comment",
+			data: {
+				id: "comment-1",
+				issue: {
+					id: "issue-1",
+					identifier: "ENG-123",
+					title: "Fix webhook routing",
+					team: { key: "ENG" },
+				},
+			},
+		});
 		const admitted = await admit(store, event);
 		expect([...admitted]).toEqual(["depGranted"]);
 	});
