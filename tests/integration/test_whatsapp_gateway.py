@@ -23,6 +23,7 @@ import os
 import signal
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
@@ -116,6 +117,7 @@ class _GraphStub:
 
 def _meta_webhook(text: str, wa_id: str = WA_USER,
                   msg_id: str = "wamid.in.1") -> dict:
+    timestamp = str(int(time.time()))
     return {
         "object": "whatsapp_business_account",
         "entry": [{
@@ -129,7 +131,7 @@ def _meta_webhook(text: str, wa_id: str = WA_USER,
                     "contacts": [{"profile": {"name": "Ada"}, "wa_id": wa_id}],
                     "messages": [{
                         "from": wa_id, "id": msg_id,
-                        "timestamp": "1783300000",
+                        "timestamp": timestamp,
                         "type": "text", "text": {"body": text},
                     }],
                 },
