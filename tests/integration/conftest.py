@@ -199,7 +199,7 @@ def cli_run(bobi_env):
         explicit_top_level = {
             "agent", "agents", "deploy", "destroy", "supervise", "version",
             "create-slack-bot", "skill", "login-bootstrap",
-            "slack-reply", "slack-upload-file", "slack-read-thread",
+            "reply", "read-conversation",
         }
         argv = list(args)
         if argv and argv[0] not in explicit_top_level:

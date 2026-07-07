@@ -258,18 +258,17 @@ class TestReplyEndToEnd:
         assert replies[0]["body"]["channel"] == "C_GW"
         assert replies[0]["body"]["ts"] == "100.000"
 
-    def test_deprecated_slack_reply_shim(self, gateway):
+    def test_reply_command_posts_via_gateway(self, gateway):
         _project, stub, _es_url, _bubble = gateway
         from bobi.cli import main
 
         result = CliRunner().invoke(main, [
-            "slack-reply", "-w", "T_GW", "-c", "C_GW", "-t", "100.000", "legacy",
+            "reply", "slack:T_GW:channel:C_GW:thread:100.000", "gateway",
         ])
         assert result.exit_code == 0, result.output
-        assert "deprecated" in result.output
         posts = stub.named("chat.postMessage")
         assert len(posts) == 1
-        assert posts[0]["body"]["markdown_text"] == "legacy"
+        assert posts[0]["body"]["markdown_text"] == "gateway"
 
 
 class TestInboundMentionEndToEnd:

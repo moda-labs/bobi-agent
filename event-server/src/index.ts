@@ -30,7 +30,6 @@ import {
 	handleChannelsSend,
 	handleChannelsTyping,
 	handleChannelsHistory,
-	handleSlackSend,
 	handleSlackWorkspaceRegister,
 	handleWhatsAppNumberRegister,
 	handleTestSeedResourceGrants,
@@ -502,15 +501,8 @@ export default {
 			return respond(await handleTopicEvent(storage, topicMatch[1], data, ctx));
 		}
 
-		if (method === "POST" && path === "/slack/send") {
-			const auth = await bubbleAuthedJson(request, url, storage);
-			if (auth instanceof Response) return auth;
-			return respond(await handleSlackSend(storage, auth.data, auth.bubble.id));
-		}
-
 		if (method === "POST" && path === "/channels/send") {
-			// Channel-agnostic send (#618) - same mandatory bubble auth as
-			// /slack/send.
+			// Channel-agnostic send (#618) - mandatory bubble auth.
 			const auth = await bubbleAuthedJson(request, url, storage);
 			if (auth instanceof Response) return auth;
 			return respond(await handleChannelsSend(storage, auth.data, auth.bubble.id));
@@ -534,7 +526,7 @@ export default {
 		}
 
 		if (method === "POST" && path === "/resources/authorize") {
-			// Auth is MANDATORY (no legacy unsigned caller) — mirror /slack/send.
+			// Auth is MANDATORY (no legacy unsigned caller).
 			// The credential in the body is verified once and never persisted; the
 			// route is deliberately excluded from any body logging.
 			const auth = await bubbleAuthedJson(request, url, storage);
@@ -604,7 +596,7 @@ export default {
 			// Auth is OPTIONAL here: an unsigned registration still writes the
 			// global record (inbound self-reply loop prevention, kept for legacy
 			// clients). A signed one ALSO writes the bubble-scoped record that
-			// outbound /slack/send reads. A present-but-invalid signature is a
+			// outbound channel sends read. A present-but-invalid signature is a
 			// malformed/forged request — reject rather than silently downgrade.
 			let bubbleId: string | undefined;
 			if (hasBubbleSignature(ctx)) {

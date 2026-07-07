@@ -27,7 +27,7 @@ oauth_config:
       - channels:read        # list public channels
       - chat:write           # post replies and status updates
       - files:read           # read files shared in events
-      - files:write          # upload files (bobi slack-upload-file)
+      - files:write          # upload files (bobi reply --file)
       - groups:history       # read + thread replies in private channels
       - groups:read          # list private channels (resolve a #name login channel)
       - im:history           # direct messages to the bot

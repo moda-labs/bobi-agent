@@ -43,7 +43,6 @@ import {
 	handleChannelsSend,
 	handleChannelsTyping,
 	handleChannelsHistory,
-	handleSlackSend,
 	handleSlackWorkspaceRegister,
 	resolveSlackSigningSecret,
 	handleWebhookHandshake,
@@ -2252,63 +2251,6 @@ describe("handleTopicEvent", () => {
 	});
 });
 
-describe("handleSlackSend", () => {
-	it("rejects missing channel", async () => {
-		const store = createMockStorage();
-		const result = await handleSlackSend(store, { text: "hi", workspace: "T1" }, "bubA");
-		expect(result.status).toBe(400);
-		expect((result.body as Record<string, string>).error).toContain("channel");
-	});
-
-	it("rejects missing text", async () => {
-		const store = createMockStorage();
-		const result = await handleSlackSend(store, { channel: "C1", workspace: "T1" }, "bubA");
-		expect(result.status).toBe(400);
-	});
-
-	it("rejects missing workspace", async () => {
-		const store = createMockStorage();
-		const result = await handleSlackSend(store, { channel: "C1", text: "hi" }, "bubA");
-		expect(result.status).toBe(400);
-	});
-
-	it("rejects unknown workspace", async () => {
-		const store = createMockStorage();
-		const result = await handleSlackSend(store, { channel: "C1", text: "hi", workspace: "T404" }, "bubA");
-		expect(result.status).toBe(400);
-		expect((result.body as Record<string, string>).error).toContain("bot token");
-	});
-
-	// #487 isolation: outbound send reads ONLY the bubble-scoped record. A
-	// workspace registered to bubble B must be invisible to bubble A, even
-	// though both name the same Slack workspace id.
-	it("does not read another bubble's workspace registration", async () => {
-		const store = createMockStorage();
-		stubSlackAuth("T1", "B_B", "A_B");
-		// Bubble B registers workspace T1 (scoped to B).
-		await handleSlackWorkspaceRegister(
-			store, { workspace_id: "T1", bot_token: "xoxb-B", bot_id: "B_B" }, "bubB",
-		);
-		// Bubble A tries to send through T1 — it has no scoped record → 400.
-		const result = await handleSlackSend(store, { channel: "C1", text: "hi", workspace: "T1" }, "bubA");
-		expect(result.status).toBe(400);
-		expect((result.body as Record<string, string>).error).toContain("bot token");
-	});
-
-	// The global self-reply record (written for every registration) must NOT
-	// satisfy outbound send — outbound must never fall back to global creds.
-	it("does not fall back to the global workspace record", async () => {
-		const store = createMockStorage();
-		// Unsigned registration → only the global `T1` record exists, no scoped one.
-		await handleSlackWorkspaceRegister(store, { workspace_id: "T1", bot_token: "xoxb-G", bot_id: "B_G" });
-		expect(store.slackWorkspaces.get("T1")).toBeTruthy();        // global written
-		expect(store.slackWorkspaces.get("bubA:T1")).toBeUndefined(); // no scoped record
-		const result = await handleSlackSend(store, { channel: "C1", text: "hi", workspace: "T1" }, "bubA");
-		expect(result.status).toBe(400);
-		expect((result.body as Record<string, string>).error).toContain("bot token");
-	});
-});
-
 describe("handleChannelsSend", () => {
 	// Stub fetch capturing Slack Web API calls; auth.test succeeds so a signed
 	// workspace registration can seed the bubble-scoped token record. Send
@@ -2386,7 +2328,7 @@ describe("handleChannelsSend", () => {
 		expect((result.body as Record<string, string>).error).toContain("edit_ref");
 	});
 
-	// Same tenancy boundary as handleSlackSend: bubble-scoped lookup only.
+	// Same tenancy boundary as all channel sends: bubble-scoped lookup only.
 	it("does not read another bubble's workspace registration", async () => {
 		const store = createMockStorage();
 		stubSlackApi("T1");
@@ -2835,9 +2777,9 @@ describe("handleSlackWorkspaceRegister", () => {
 		expect(global?.bots?.A_A?.bot_token).toBe("xoxb-A");
 		expect(scoped?.bots?.A_A?.bot_token).toBe("xoxb-A");
 
-		// The scoped record makes outbound send use the verified workspace token.
-		const send = await handleSlackSend(
-			store, { channel: "C1", text: "hi", workspace: "T1", app_id: "A_A" }, "bubA",
+		// The scoped record makes channel send use the verified workspace token.
+		const send = await handleChannelsSend(
+			store, { conversation: "slack:T1:channel:C1", text: "hi", app_id: "A_A" }, "bubA",
 		);
 		expect(send.status).toBe(200);
 	});

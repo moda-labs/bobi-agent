@@ -56,5 +56,3 @@ Parse with `json.loads(event.fields.files)`. To download a file, use the
 - For code snippets longer than one line, use triple-backtick blocks.
 - When receiving images, consider passing them to vision models for analysis.
 - File downloads require the bot token for authentication.
-- `slack-reply`, `slack-upload-file`, and `slack-read-thread` are deprecated
-  shims - do not use them in new work.

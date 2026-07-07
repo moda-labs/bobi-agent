@@ -337,8 +337,7 @@ concurrent first-registrations converge on a single bubble.
 | Authorize resource | `POST /resources/authorize` | bubble signature |
 | Ingest token mint / list / revoke | `POST` / `GET /ingest-tokens`, `DELETE /ingest-tokens/{id}` | bubble signature |
 | Generic ingest | `POST /webhooks/ingest/{topic}` | bearer ingest token (topic-bound) |
-| Slack send | `POST /slack/send` | bubble signature (bubble-scoped to its own workspace) |
-| Channel send | `POST /channels/send` | bubble signature (same tenancy boundary as `/slack/send`) |
+| Channel send | `POST /channels/send` | bubble signature (bubble-scoped to its own workspace) |
 | Channel typing | `POST /channels/typing` | bubble signature |
 | Channel history | `GET /channels/history` | bubble signature (covers path + query, empty body) |
 | WS subscribe / update subs / deregister | `/deployments/{id}/...` | bearer `api_key` (issued at register) |

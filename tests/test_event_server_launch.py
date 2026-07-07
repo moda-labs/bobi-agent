@@ -274,7 +274,7 @@ def _capture_post(monkeypatch):
 def test_slack_registration_signs_when_bubble_key_present(monkeypatch):
     """A bubble-keyed registration carries x-moda-* headers and sends raw bytes
     (content=), so the server reproduces the HMAC and writes the bubble-scoped
-    record outbound /slack/send needs (#487)."""
+    record outbound channel sends need (#487)."""
     captured = _capture_post(monkeypatch)
     cfg = _StubCfg({("slack", "bot_token"): "xoxb-tok",
                     ("slack", "signing_secret"): "sek"})
