@@ -56,6 +56,10 @@ def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     lines.append(
         f"  {'event server':<{W}}{info.event_server_url} ({info.event_server_label})"
     )
+    if info.ingress_warning:
+        lines.append(f"  {'ingress':<{W}}WARNING: {info.ingress_warning}")
+        if info.ingress_hint:
+            lines.append(f"  {'':<{W}}{info.ingress_hint}")
     if info.workflows:
         lines.append(f"  {'workflows':<{W}}{', '.join(info.workflows)}")
     if info.monitors:
