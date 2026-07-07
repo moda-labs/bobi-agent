@@ -15,9 +15,12 @@ from unittest.mock import patch
 import pytest
 
 from bobi import http as pooled
+from bobi.config import save_bubble_state
 from bobi.events.signing import (
     ALGO,
+    SignedJSONRequestError,
     canonical_string,
+    checked_signed_json_request,
     serialize_body,
     sign_headers,
     signed_request,
@@ -181,3 +184,151 @@ def test_signed_request_rejects_unsignable_combinations():
     with pytest.raises(ValueError, match="cannot be signed"):
         signed_request("http://es:8080", "DELETE", "/ingest-tokens/tok1",
                        {"id": "tok1"}, "bub_x", GOLDEN_KEY, timeout=5.0)
+
+
+# --- checked_signed_json_request: shared signed JSON response envelope ---
+
+class _JSONResp:
+    def __init__(self, status_code, body, *, text=""):
+        self.status_code = status_code
+        self._body = body
+        self.text = text
+
+    def json(self):
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+def _project_with_bubble(tmp_path):
+    (tmp_path / ".bobi").mkdir()
+    save_bubble_state(tmp_path, "bub_x", GOLDEN_KEY)
+    return tmp_path
+
+
+def test_checked_signed_json_request_returns_dict(tmp_path):
+    project = _project_with_bubble(tmp_path)
+
+    with patch.object(pooled, "request",
+                      return_value=_JSONResp(200, {"ok": True, "value": 1})):
+        data = checked_signed_json_request(
+            project, "GET", "/channels/history", None, timeout=10.0)
+
+    assert data == {"ok": True, "value": 1}
+
+
+def test_checked_signed_json_request_fails_fast_without_bubble(tmp_path):
+    (tmp_path / ".bobi").mkdir()
+    calls = []
+
+    def _record(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _JSONResp(200, {"ok": True})
+
+    with patch.object(pooled, "request", side_effect=_record):
+        with pytest.raises(SignedJSONRequestError) as excinfo:
+            checked_signed_json_request(
+                tmp_path, "GET", "/channels/history", None, timeout=10.0)
+
+    assert excinfo.value.kind == "missing_credentials"
+    assert calls == []
+
+
+def test_checked_signed_json_request_wraps_unreachable(tmp_path):
+    project = _project_with_bubble(tmp_path)
+
+    with patch.object(pooled, "request", side_effect=OSError("offline")):
+        with pytest.raises(SignedJSONRequestError) as excinfo:
+            checked_signed_json_request(
+                project, "GET", "/channels/history", None, timeout=10.0)
+
+    assert excinfo.value.kind == "unreachable"
+    assert "offline" in str(excinfo.value)
+
+
+def test_checked_signed_json_request_rejects_http_error_with_server_detail(tmp_path):
+    project = _project_with_bubble(tmp_path)
+
+    with patch.object(pooled, "request",
+                      return_value=_JSONResp(
+                          400, {"error": "bad topic", "detail": "use source/type"})):
+        with pytest.raises(SignedJSONRequestError) as excinfo:
+            checked_signed_json_request(
+                project, "POST", "/ingest-tokens", {"topic": "x"}, timeout=10.0)
+
+    assert excinfo.value.kind == "rejected"
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "bad topic: use source/type"
+
+
+def test_checked_signed_json_request_preserves_non_json_error_text(tmp_path):
+    project = _project_with_bubble(tmp_path)
+
+    with patch.object(pooled, "request",
+                      return_value=_JSONResp(502, ValueError("not JSON"),
+                                             text="bad gateway")):
+        with pytest.raises(SignedJSONRequestError) as excinfo:
+            checked_signed_json_request(
+                project, "POST", "/ingest-tokens", {"topic": "x"}, timeout=10.0)
+
+    assert excinfo.value.kind == "rejected"
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.detail == ""
+    assert excinfo.value.response_text == "bad gateway"
+
+
+def test_checked_signed_json_request_rejects_non_json_success(tmp_path):
+    project = _project_with_bubble(tmp_path)
+
+    with patch.object(pooled, "request",
+                      return_value=_JSONResp(200, ValueError("not JSON"),
+                                             text="not json")):
+        with pytest.raises(SignedJSONRequestError) as excinfo:
+            checked_signed_json_request(
+                project, "POST", "/channels/send", {}, timeout=10.0)
+
+    assert excinfo.value.kind == "invalid_response"
+    assert "JSON object" in excinfo.value.detail
+    assert excinfo.value.response_text == "not json"
+
+
+def test_checked_signed_json_request_treats_non_object_http_error_as_rejection(tmp_path):
+    project = _project_with_bubble(tmp_path)
+
+    with patch.object(pooled, "request",
+                      return_value=_JSONResp(500, ["server exploded"],
+                                             text='["server exploded"]')):
+        with pytest.raises(SignedJSONRequestError) as excinfo:
+            checked_signed_json_request(
+                project, "POST", "/channels/send", {}, timeout=10.0)
+
+    assert excinfo.value.kind == "rejected"
+    assert excinfo.value.status_code == 500
+    assert excinfo.value.response_text == '["server exploded"]'
+
+
+def test_checked_signed_json_request_rejects_ok_false_envelope(tmp_path):
+    project = _project_with_bubble(tmp_path)
+
+    with patch.object(pooled, "request",
+                      return_value=_JSONResp(200, {"ok": False, "error": "no token"})):
+        with pytest.raises(SignedJSONRequestError) as excinfo:
+            checked_signed_json_request(
+                project, "POST", "/channels/send", {}, timeout=10.0)
+
+    assert excinfo.value.kind == "rejected"
+    assert excinfo.value.status_code == 200
+    assert excinfo.value.detail == "no token"
+
+
+def test_checked_signed_json_request_rejects_non_dict_json(tmp_path):
+    project = _project_with_bubble(tmp_path)
+
+    with patch.object(pooled, "request",
+                      return_value=_JSONResp(200, [{"ok": True}], text='[{"ok":true}]')):
+        with pytest.raises(SignedJSONRequestError) as excinfo:
+            checked_signed_json_request(
+                project, "GET", "/channels/history", None, timeout=10.0)
+
+    assert excinfo.value.kind == "invalid_response"
+    assert "JSON object" in excinfo.value.detail

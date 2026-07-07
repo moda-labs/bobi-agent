@@ -19,8 +19,6 @@ import logging
 from pathlib import Path
 from urllib.parse import urlencode
 
-import httpx
-
 log = logging.getLogger(__name__)
 
 
@@ -36,37 +34,29 @@ def _request(project_path: Path | None, method: str, path: str,
     exact path and body bytes transmitted. Raises :class:`GatewayError` with
     the server's error message on any failure.
     """
-    from bobi.events.publish import bubble_context
-    from bobi.events.signing import signed_request
+    from bobi.events.signing import (
+        SignedJSONRequestError,
+        checked_signed_json_request,
+    )
 
-    es_url, bubble_id, bubble_key = bubble_context(project_path)
-    if not (bubble_id and bubble_key):
-        raise GatewayError(
-            "No bubble credential found - is the agent started? The channel "
-            "gateway only accepts requests signed with the instance's bubble key."
+    try:
+        return checked_signed_json_request(
+            project_path, method, path, payload, timeout=timeout)
+    except SignedJSONRequestError as exc:
+        if exc.kind == "missing_credentials":
+            raise GatewayError(
+                "No bubble credential found - is the agent started? The channel "
+                "gateway only accepts requests signed with the instance's bubble key."
+            ) from exc
+        if exc.kind == "unreachable":
+            raise GatewayError(str(exc)) from exc
+        detail = exc.detail or exc.response_text or (
+            f"HTTP {exc.status_code}" if exc.status_code is not None
+            else "invalid response"
         )
-
-    try:
-        resp = signed_request(es_url, method, path, payload,
-                              bubble_id, bubble_key, timeout=timeout)
-    except (httpx.HTTPError, OSError, TimeoutError) as exc:
         raise GatewayError(
-            f"Event server unreachable at {es_url}: {exc}"
+            f"Gateway {method} {path.split('?')[0]} failed: {detail}"
         ) from exc
-
-    try:
-        data = resp.json()
-    except ValueError:
-        data = {}
-    if resp.status_code >= 400 or not data.get("ok", True):
-        detail = data.get("error") or f"HTTP {resp.status_code}"
-        # Typed errors (e.g. outside_message_window) carry human-readable
-        # guidance in `detail` - surface it so the agent can act on it.
-        if data.get("detail"):
-            detail = f"{detail}: {data['detail']}"
-        raise GatewayError(f"Gateway {method} {path.split('?')[0]} failed: {detail}")
-    return data
-
 
 def channels_send(project_path: Path | None, conversation: str, text: str = "",
                   *, mode: str = "post", edit_ref: str = "",

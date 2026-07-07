@@ -22,12 +22,14 @@ def _project(tmp_path):
 
 
 class _Resp:
-    def __init__(self, status_code, body):
+    def __init__(self, status_code, body, *, text=None):
         self.status_code = status_code
         self._body = body
-        self.text = json.dumps(body)
+        self.text = json.dumps(body) if text is None else text
 
     def json(self):
+        if isinstance(self._body, Exception):
+            raise self._body
         return self._body
 
 
@@ -121,3 +123,14 @@ def test_server_rejection_surfaces_reason(tmp_path):
                       return_value=_Resp(400, {"error": "topic must use source/type form"})):
         with pytest.raises(it.IngestTokenError, match="source/type"):
             it.create_token("nope", project_path=project)
+
+
+def test_server_rejection_preserves_plain_text_error(tmp_path):
+    project = _project(tmp_path)
+    save_bubble_state(project, "bub_test", "bkey_test")
+
+    with patch.object(pooled, "request",
+                      return_value=_Resp(502, ValueError("not JSON"),
+                                         text="bad gateway")):
+        with pytest.raises(it.IngestTokenError, match="bad gateway"):
+            it.create_token("alert/firing", project_path=project)

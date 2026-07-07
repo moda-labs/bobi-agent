@@ -12,8 +12,6 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import quote
 
-import httpx
-
 
 class IngestTokenError(Exception):
     """A token operation the server rejected, with a printable reason."""
@@ -21,34 +19,29 @@ class IngestTokenError(Exception):
 
 def _request(method: str, path: str, payload: dict | None,
              project_path: Path | None) -> dict:
-    from bobi.events.publish import bubble_context
-    from bobi.events.signing import signed_request
-
-    es_url, bubble_id, bubble_key = bubble_context(project_path)
-    if not (bubble_id and bubble_key):
-        raise IngestTokenError(
-            "No bubble credential found. Start the agent first - ingest "
-            "tokens are minted with the instance's bubble identity."
-        )
+    from bobi.events.signing import (
+        SignedJSONRequestError,
+        checked_signed_json_request,
+    )
 
     try:
-        resp = signed_request(es_url, method, path, payload,
-                              bubble_id, bubble_key, timeout=10.0)
-    except (httpx.HTTPError, OSError, TimeoutError) as e:
-        raise IngestTokenError(f"Event server unreachable at {es_url}: {e}") from e
-
-    try:
-        data = resp.json()
-    except ValueError:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    if resp.status_code >= 400:
-        raise IngestTokenError(
-            f"Server rejected {method} {path} ({resp.status_code}): "
-            f"{data.get('error') or resp.text[:200]}"
+        return checked_signed_json_request(
+            project_path, method, path, payload, timeout=10.0)
+    except SignedJSONRequestError as exc:
+        if exc.kind == "missing_credentials":
+            raise IngestTokenError(
+                "No bubble credential found. Start the agent first - ingest "
+                "tokens are minted with the instance's bubble identity."
+            ) from exc
+        if exc.kind == "unreachable":
+            raise IngestTokenError(str(exc)) from exc
+        detail = exc.detail or exc.response_text or (
+            f"HTTP {exc.status_code}" if exc.status_code is not None
+            else "invalid response"
         )
-    return data
+        raise IngestTokenError(
+            f"Server rejected {method} {path} ({exc.status_code}): {detail}"
+        ) from exc
 
 
 def create_token(topic: str, name: str | None = None,
