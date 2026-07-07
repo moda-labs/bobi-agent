@@ -903,6 +903,44 @@ describe("#489 internal DeploymentSession auth", () => {
 		expect(event.status).toBe(200);
 	});
 
+	it("deduplicates direct DO /event posts by normalized event id", async () => {
+		const deploymentId = "direct-dedupe";
+		const stub = directStub(deploymentId);
+		const init = await stub.fetch(
+			new Request("https://internal/init", {
+				method: "POST",
+				headers: { [INTERNAL_HEADER]: env.INTERNAL_DO_SECRET },
+				body: JSON.stringify({ deployment_id: deploymentId, subscriptions: ["test:topic"] }),
+			}),
+		);
+		expect(init.status).toBe(200);
+
+		const event = {
+			v: 2,
+			id: "evt-duplicate",
+			source: "test",
+			type: "test.event",
+			topics: ["test:topic"],
+			delivery: "bulk",
+			text: "dedupe me",
+			timestamp: new Date().toISOString(),
+			payload: { ok: true },
+		};
+		for (let i = 0; i < 2; i++) {
+			const response = await stub.fetch(
+				new Request("https://internal/event", {
+					method: "POST",
+					headers: { [INTERNAL_HEADER]: env.INTERNAL_DO_SECRET },
+					body: JSON.stringify(event),
+				}),
+			);
+			expect(response.status).toBe(200);
+		}
+
+		expect(await env.EVENTS.get(`events:${deploymentId}:1`)).toBeTruthy();
+		expect(await env.EVENTS.get(`events:${deploymentId}:2`)).toBeNull();
+	});
+
 	it("accepts direct DO websocket upgrades with the internal subprotocol token", async () => {
 		const deploymentId = "direct-good-ws-protocol";
 		const stub = directStub(deploymentId);

@@ -92,6 +92,13 @@ export interface IngestTokenRecord {
 	created_at: string;
 }
 
+export interface WebhookDeliveryRecord {
+	source: string;
+	delivery_id: string;
+	delivery_key: string;
+	received_at: string;
+}
+
 export interface SlackBotRecord {
 	bot_token: string;
 	bot_id?: string;
@@ -237,6 +244,8 @@ export interface StorageAdapter {
 	getIngestTokenByHash(hash: string): Promise<IngestTokenRecord | null>;
 	listIngestTokens(bubbleId: string): Promise<IngestTokenRecord[]>;
 	deleteIngestToken(record: IngestTokenRecord): Promise<void>;
+	getWebhookDelivery(source: string, deliveryKey: string): Promise<WebhookDeliveryRecord | null>;
+	putWebhookDelivery(record: WebhookDeliveryRecord): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -723,9 +732,33 @@ export async function handleGitHubWebhook(
 export async function handleLinearWebhook(
 	storage: StorageAdapter,
 	payload: Record<string, unknown>,
+	deliveryId = "",
+	waitUntil?: (promise: Promise<unknown>) => void,
 ): Promise<HandlerResult> {
-	const event = normalizeLinearWebhook(payload);
-	const delivered = await storage.deliver(event);
+	const deliveryKey = deliveryId ? await sha256Hex(deliveryId) : "";
+	if (deliveryId) {
+		const existing = await storage.getWebhookDelivery("linear", deliveryKey);
+		if (existing) return { status: 200, body: { ok: true } };
+	}
+	const event = normalizeLinearWebhook(payload, deliveryId);
+	const delivery = storage.deliver(event).then(async (delivered) => {
+		if (deliveryId) {
+			await storage.putWebhookDelivery({
+				source: "linear",
+				delivery_id: deliveryId,
+				delivery_key: deliveryKey,
+				received_at: new Date().toISOString(),
+			});
+		}
+		return delivered;
+	});
+	if (waitUntil) {
+		waitUntil(delivery.then(() => undefined).catch((err: unknown) => {
+			console.error("linear webhook delivery failed", err);
+		}));
+		return { status: 200, body: { queued: true } };
+	}
+	const delivered = await delivery;
 	return { status: 200, body: { delivered_to: delivered } };
 }
 
@@ -814,6 +847,11 @@ export interface WebhookSecrets {
 // anything re-derived from the request.
 export interface WebhookRequestContext {
 	ingestToken?: IngestTokenRecord;
+	waitUntil?: (promise: Promise<unknown>) => void;
+}
+
+export interface WebhookRequestOptions {
+	waitUntil?: (promise: Promise<unknown>) => void;
 }
 
 interface WebhookSource {
@@ -995,8 +1033,13 @@ const WEBHOOK_SOURCES: Record<string, WebhookSource> = {
 			);
 			return valid ? null : INVALID_SIGNATURE;
 		},
-		handle(storage, _req, payload) {
-			return handleLinearWebhook(storage, payload);
+		handle(storage, req, payload, ctx) {
+			return handleLinearWebhook(
+				storage,
+				payload,
+				req.header("linear-delivery"),
+				ctx.waitUntil,
+			);
 		},
 	},
 
@@ -1207,6 +1250,7 @@ export async function handleWebhookRequest(
 	source: string,
 	req: InboundWebhookRequest,
 	secrets: WebhookSecrets,
+	options: WebhookRequestOptions = {},
 ): Promise<HandlerResult | null> {
 	const def = WEBHOOK_SOURCES[source];
 	if (!def) return null;
@@ -1232,7 +1276,7 @@ export async function handleWebhookRequest(
 	const early = def.preVerify?.(req, body);
 	if (early) return early;
 
-	const ctx: WebhookRequestContext = {};
+	const ctx: WebhookRequestContext = { waitUntil: options.waitUntil };
 	const secret = secrets[source as keyof WebhookSecrets] || "";
 	const rejected = await def.verify(storage, req, body, secret, ctx);
 	if (rejected) {

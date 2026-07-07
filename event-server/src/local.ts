@@ -9,6 +9,7 @@ import {
 	type SlackWorkspaceRecord,
 	type ResourceGrant,
 	type IngestTokenRecord,
+	type WebhookDeliveryRecord,
 	type HandlerResult,
 	subscriptionKeysForEvent,
 	namespaceSubKey,
@@ -93,6 +94,7 @@ const resourceGrants = new Map<string, ResourceGrant>();
 // Scoped ingest tokens (#640), keyed by token HASH (the only lookup the hot
 // path needs); list/revoke scan per bubble — token counts are tiny.
 const ingestTokens = new Map<string, IngestTokenRecord>();
+const webhookDeliveries = new Map<string, WebhookDeliveryRecord>();
 
 const webhookSecret = process.env.BOBI_ES_WEBHOOK_SECRET || "";
 const slackSigningSecret = process.env.BOBI_ES_SLACK_SIGNING_SECRET || "";
@@ -177,6 +179,14 @@ const storage: StorageAdapter = {
 
 	async deleteIngestToken(record: IngestTokenRecord): Promise<void> {
 		ingestTokens.delete(record.token_hash);
+	},
+
+	async getWebhookDelivery(source: string, deliveryKey: string): Promise<WebhookDeliveryRecord | null> {
+		return webhookDeliveries.get(`${source}:${deliveryKey}`) || null;
+	},
+
+	async putWebhookDelivery(record: WebhookDeliveryRecord): Promise<void> {
+		webhookDeliveries.set(`${record.source}:${record.delivery_key}`, record);
 	},
 
 	async putDeployment(record: DeploymentRecord): Promise<void> {

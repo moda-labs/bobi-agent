@@ -7,6 +7,7 @@ import {
 	type SlackWorkspaceRecord,
 	type ResourceGrant,
 	type IngestTokenRecord,
+	type WebhookDeliveryRecord,
 	type NormalizedEvent,
 	namespaceSubKey,
 	parseGlobalTopic,
@@ -20,6 +21,7 @@ import {
 	subscriptionKeysForEvent,
 	verifyGitHubSignature,
 	constantTimeEqual,
+	sha256Hex,
 	buildBubbleSignature,
 	verifyBubbleSignature,
 	authenticateDeployment,
@@ -660,6 +662,7 @@ function createMockStorage(): StorageAdapter & {
 	channelState: Map<string, Record<string, unknown>>;
 	resourceGrants: Map<string, ResourceGrant>;
 	ingestTokens: Map<string, IngestTokenRecord>;
+	webhookDeliveries: Map<string, WebhookDeliveryRecord>;
 	delivered: NormalizedEvent[];
 	deliveredTo: Array<{ event: NormalizedEvent; ids: string[] }>;
 	initCalls: Array<{ deploymentId: string; subscriptions: string[] }>;
@@ -674,6 +677,7 @@ function createMockStorage(): StorageAdapter & {
 	const channelState = new Map<string, Record<string, unknown>>();
 	const resourceGrants = new Map<string, ResourceGrant>();
 	const ingestTokens = new Map<string, IngestTokenRecord>();
+	const webhookDeliveries = new Map<string, WebhookDeliveryRecord>();
 	const delivered: NormalizedEvent[] = [];
 	const deliveredTo: Array<{ event: NormalizedEvent; ids: string[] }> = [];
 	const initCalls: Array<{ deploymentId: string; subscriptions: string[] }> = [];
@@ -687,6 +691,7 @@ function createMockStorage(): StorageAdapter & {
 		channelState,
 		resourceGrants,
 		ingestTokens,
+		webhookDeliveries,
 		delivered,
 		deliveredTo,
 		initCalls,
@@ -736,6 +741,12 @@ function createMockStorage(): StorageAdapter & {
 		},
 		async deleteIngestToken(record: IngestTokenRecord) {
 			ingestTokens.delete(record.token_hash);
+		},
+		async getWebhookDelivery(source: string, deliveryKey: string) {
+			return webhookDeliveries.get(`${source}:${deliveryKey}`) || null;
+		},
+		async putWebhookDelivery(record: WebhookDeliveryRecord) {
+			webhookDeliveries.set(`${record.source}:${record.delivery_key}`, record);
 		},
 		async putDeployment(dep: DeploymentRecord) {
 			deployments.set(dep.id, { ...dep });
@@ -1005,6 +1016,116 @@ describe("handleWebhookRequest (unified pipeline)", () => {
 		const body = JSON.stringify({ action: "update", type: "Issue", data: { team: { key: "ENG" } } });
 		const result = await handleWebhookRequest(store, "linear", req(body), {});
 		expect(result?.status).toBe(200);
+	});
+
+	it("linear: queues delivery in waitUntil and responds before fan-out completes", async () => {
+		const store = createMockStorage();
+		let resolveDelivery!: (value: number) => void;
+		let deliveryStarted = false;
+		store.deliver = async (event) => {
+			deliveryStarted = true;
+			store.delivered.push(event);
+			return new Promise<number>((resolve) => {
+				resolveDelivery = resolve;
+			});
+		};
+		const waitUntil: Promise<unknown>[] = [];
+		const body = JSON.stringify({
+			action: "update",
+			type: "Issue",
+			data: { team: { key: "ENG" } },
+			webhookTimestamp: Date.now(),
+		});
+
+		const result = await handleWebhookRequest(
+			store,
+			"linear",
+			req(body, { "linear-delivery": "lin-delivery-1" }),
+			{},
+			{ waitUntil: (promise) => waitUntil.push(promise) },
+		);
+
+		expect(result?.status).toBe(200);
+		expect(result?.body).toEqual({ queued: true });
+		expect(deliveryStarted).toBe(true);
+		expect(waitUntil).toHaveLength(1);
+		expect(store.delivered[0].id).toBe("lin-delivery-1");
+		expect(store.webhookDeliveries).toHaveLength(0);
+
+		resolveDelivery(1);
+		await expect(waitUntil[0]).resolves.toBeUndefined();
+		const deliveryKey = await sha256Hex("lin-delivery-1");
+		expect(store.webhookDeliveries.get(`linear:${deliveryKey}`)).toMatchObject({
+			source: "linear",
+			delivery_id: "lin-delivery-1",
+			delivery_key: deliveryKey,
+		});
+	});
+
+	it("linear: short-circuits duplicate Linear-Delivery retries after completed fan-out", async () => {
+		const store = createMockStorage();
+		let resolveDelivery!: (value: number) => void;
+		store.deliver = async (event) => {
+			store.delivered.push(event);
+			return new Promise<number>((resolve) => {
+				resolveDelivery = resolve;
+			});
+		};
+		const waitUntil: Promise<unknown>[] = [];
+		const body = JSON.stringify({
+			action: "update",
+			type: "Issue",
+			data: { team: { key: "ENG" } },
+			webhookTimestamp: Date.now(),
+		});
+		const request = req(body, { "linear-delivery": "lin-delivery-1" });
+
+		const first = await handleWebhookRequest(
+			store,
+			"linear",
+			request,
+			{},
+			{ waitUntil: (promise) => waitUntil.push(promise) },
+		);
+
+		expect(first?.status).toBe(200);
+		expect(first?.body).toEqual({ queued: true });
+		resolveDelivery(1);
+		await expect(waitUntil[0]).resolves.toBeUndefined();
+
+		const retry = await handleWebhookRequest(store, "linear", request, {});
+
+		expect(retry?.status).toBe(200);
+		expect(retry?.body).toEqual({ ok: true });
+		expect(store.delivered).toHaveLength(1);
+	});
+
+	it("linear: leaves failed background delivery retryable", async () => {
+		const store = createMockStorage();
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+		store.deliver = async () => {
+			throw new Error("fan-out failed");
+		};
+		const waitUntil: Promise<unknown>[] = [];
+		const body = JSON.stringify({
+			action: "update",
+			type: "Issue",
+			data: { team: { key: "ENG" } },
+			webhookTimestamp: Date.now(),
+		});
+
+		const result = await handleWebhookRequest(
+			store,
+			"linear",
+			req(body, { "linear-delivery": "lin-delivery-1" }),
+			{},
+			{ waitUntil: (promise) => waitUntil.push(promise) },
+		);
+
+		expect(result?.status).toBe(200);
+		await expect(waitUntil[0]).resolves.toBeUndefined();
+		expect(store.webhookDeliveries).toHaveLength(0);
+		expect(errorSpy).toHaveBeenCalledWith("linear webhook delivery failed", expect.any(Error));
 	});
 
 	it("slack: url_verification short-circuits before the signature check", async () => {
