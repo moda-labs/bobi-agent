@@ -373,9 +373,20 @@ def build_app(*, token: str) -> FastAPI:
 
                 old_dir = paths.agent_dir(name)
                 new_dir = paths.agent_dir(final)
-                if (safe_name(final) and old_dir.is_dir()
-                        and not new_dir.exists()):
-                    shutil.move(str(old_dir), str(new_dir))
+                if safe_name(final) and old_dir.is_dir():
+                    if not new_dir.exists():
+                        shutil.move(str(old_dir), str(new_dir))
+                    elif (paths.agent_source_dir(final).is_dir()
+                          and Path(state.source_dir or "").resolve()
+                          == paths.agent_source_dir(final).resolve()):
+                        old_run = old_dir / "run"
+                        new_run = new_dir / "run"
+                        if old_run.is_dir() and not new_run.exists():
+                            shutil.move(str(old_run), str(new_run))
+                        try:
+                            old_dir.rmdir()
+                        except OSError:
+                            pass
             return {"redirect": "/#/"}
 
         setup_host.app = build_setup_app(state, project, nonce=token,

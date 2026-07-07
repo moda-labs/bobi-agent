@@ -249,6 +249,54 @@ class TestSetupHosting:
         assert not paths.agent_dir("new-team").exists()
         assert paths.agent_run_root("eng-team").is_dir()
 
+    def test_create_rename_moves_placeholder_source_and_run_slot(
+            self, bobi_install, monkeypatch):
+        # The local web app starts a from-scratch team in a placeholder slot
+        # (usually new-agent). Renaming during setup should move the editable
+        # source out of that slot immediately, and Finish should move the
+        # run/ state beside it so the final folder is the chosen name.
+        from bobi import paths
+
+        c = _client()
+        self._open(c, monkeypatch, name="new-agent")
+        old_src = paths.agent_source_dir("new-agent")
+        r = c.post("/setup/api/start", json={"mode": "create",
+                                             "location": str(old_src)})
+        assert r.status_code == 200
+        old_src.mkdir(parents=True, exist_ok=True)
+        (old_src / "agent.yaml").write_text("agent: new-agent\n")
+        r = c.post("/setup/api/rename", json={"name": "Field Ops"})
+        assert r.status_code == 200
+        assert not old_src.exists()
+        assert paths.agent_source_dir("field-ops").is_dir()
+
+        body = c.post("/setup/api/finish").json()
+        assert body["redirect"] == "/#/"
+        assert not paths.agent_dir("new-agent").exists()
+        assert paths.agent_source_dir("field-ops").is_dir()
+        assert paths.agent_run_root("field-ops").is_dir()
+
+    def test_finish_does_not_merge_custom_source_into_existing_slot(
+            self, bobi_install, monkeypatch, tmp_path):
+        from bobi import paths
+
+        c = _client()
+        self._open(c, monkeypatch, name="new-agent")
+        custom_src = tmp_path / "field-ops-src"
+        existing_src = paths.agent_source_dir("field-ops")
+        existing_src.mkdir(parents=True)
+        (existing_src / "agent.yaml").write_text("agent: field-ops\n")
+        r = c.post("/setup/api/start", json={"mode": "create",
+                                             "location": str(custom_src)})
+        assert r.status_code == 200
+        r = c.post("/setup/api/rename", json={"name": "Field Ops"})
+        assert r.status_code == 200
+
+        body = c.post("/setup/api/finish").json()
+        assert body["redirect"] == "/#/"
+        assert paths.agent_run_root("new-agent").is_dir()
+        assert not paths.agent_run_root("field-ops").exists()
+
     def test_open_requires_claude(self, bobi_install, monkeypatch):
         monkeypatch.setattr(server, "_claude_available", lambda: False)
         r = _client().post("/api/setup/open", json={"name": "x"})

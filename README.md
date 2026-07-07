@@ -108,6 +108,11 @@ See [scripts/install.sh](scripts/install.sh) for what the installer does.
 
 `eng-team` is the ready-to-use engineering agent that ships with Bobi - install it
 to get a working team you can customize, or build your own for any domain (below).
+It is preconfigured for GitHub and Slack, so `bobi agents install` will ask for
+the required `GH_TOKEN`, `SLACK_BOT_TOKEN`, and `SLACK_SIGNING_SECRET` secrets
+(`SLACK_CHANNELS` is optional). Authenticate the GitHub CLI or provide a token
+with repo access, and see the [Slack setup guide](skills/slack-setup.md) for the
+bot token and signing secret.
 
 ```bash
 # Install the ready-to-use engineering agent and start it

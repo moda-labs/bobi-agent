@@ -1706,6 +1706,33 @@ class TestIntro:
         assert d["team_name"] == "triage-bot"
         assert d["source_dir"] == "bobi"
 
+    def test_rename_moves_default_placeholder_source_slot(self, project):
+        old_src = paths.agent_source_dir("new-agent")
+        old_src.mkdir(parents=True)
+        (old_src / "agent.yaml").write_text("agent: new-agent\n")
+        st = SetupState(stage=Stage.DESIGN, team_name="",
+                        source_dir=str(old_src))
+        c = _client(st, project, on_finish=lambda: {})
+        d = c.post("/api/rename", json={"name": "My Triage Team"}).json()
+        new_src = paths.agent_source_dir("my-triage-team")
+        assert d["team_name"] == "my-triage-team"
+        assert d["source_dir"] == str(new_src)
+        assert (new_src / "agent.yaml").is_file()
+        assert not old_src.exists()
+
+    def test_rename_keeps_standalone_placeholder_source_slot(self, project):
+        old_src = paths.agent_source_dir("new-agent")
+        old_src.mkdir(parents=True)
+        (old_src / "agent.yaml").write_text("agent: new-agent\n")
+        st = SetupState(stage=Stage.DESIGN, team_name="",
+                        source_dir=str(old_src))
+        c = _client(st, project)
+        d = c.post("/api/rename", json={"name": "My Triage Team"}).json()
+        assert d["team_name"] == "my-triage-team"
+        assert d["source_dir"] == str(old_src)
+        assert (old_src / "agent.yaml").is_file()
+        assert not paths.agent_source_dir("my-triage-team").exists()
+
     def test_rename_conflict_when_target_folder_exists(self, project):
         (paths.home_dir() / "bobi" / "old").mkdir(parents=True)
         (paths.home_dir() / "bobi" / "taken").mkdir(parents=True)
