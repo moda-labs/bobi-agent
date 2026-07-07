@@ -308,7 +308,10 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # When the working source folder is named after the team (modify and
         # registry default to <location>/<team-name>), rename the folder on disk
         # to match so it reflects the new name. Create's "bobi/" folder isn't
-        # team-named, so it's left as the user chose it.
+        # team-named, so it's left as the user chose it. The hosted web app's
+        # from-scratch flow starts in a placeholder slot
+        # agents/<old>/src; treat that canonical source as team-named too so a
+        # rename moves the editable source out of the placeholder slot.
         if old and state.source_dir and Path(state.source_dir).name == old:
             src = team_source_dir(project, state)
             dest = src.parent / new
@@ -322,6 +325,32 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 rel = Path(state.source_dir)
                 state.source_dir = (str(rel.parent / new)
                                     if str(rel.parent) not in (".", "") else new)
+                # the source tree moved — any prior validation is stale
+                state.validated = False
+                state.validated_hash = ""
+        elif on_finish is not None and state.source_dir:
+            src = team_source_dir(project, state)
+            try:
+                rel_src = src.resolve().relative_to(library.resolve())
+                slot = rel_src.parts[0] if rel_src.parts[1:] == ("src",) else ""
+            except (IndexError, ValueError):
+                slot = ""
+            old_default = library / (old or slot) / "src"
+            new_slot = library / new
+            new_default = new_slot / "src"
+            if src.resolve() == old_default.resolve():
+                if src.resolve() != new_default.resolve() and new_slot.exists():
+                    return JSONResponse(
+                        {"error": f"a team named '{new}' already exists"},
+                        status_code=409)
+                if src.is_dir() and src.resolve() != new_default.resolve():
+                    new_default.parent.mkdir(parents=True, exist_ok=True)
+                    src.rename(new_default)
+                    try:
+                        src.parent.rmdir()
+                    except OSError:
+                        pass
+                state.source_dir = str(new_default)
                 # the source tree moved — any prior validation is stale
                 state.validated = False
                 state.validated_hash = ""
