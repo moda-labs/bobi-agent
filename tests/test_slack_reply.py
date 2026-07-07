@@ -216,6 +216,33 @@ class TestReplyCommand:
         assert "no send credential registered for slack:T1" in result.output
         assert "channel gateway" in result.output
 
+    def test_non_object_gateway_json_is_surfaced_as_gateway_error(
+            self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+
+        def handler(request):
+            return httpx.Response(200, json=[{"ok": True}])
+
+        with patch.object(pooled, '_client', _mock_client(handler)):
+            runner = CliRunner()
+            result = runner.invoke(main, ["reply", "slack:T1:dm:D1", "hi"])
+        assert result.exit_code == 1
+        assert "JSON response" in result.output
+        assert "channel gateway" in result.output
+
+    def test_plain_text_gateway_error_is_surfaced(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+
+        def handler(request):
+            return httpx.Response(502, text="bad gateway")
+
+        with patch.object(pooled, '_client', _mock_client(handler)):
+            runner = CliRunner()
+            result = runner.invoke(main, ["reply", "slack:T1:dm:D1", "hi"])
+        assert result.exit_code == 1
+        assert "bad gateway" in result.output
+        assert "channel gateway" in result.output
+
     def test_server_unreachable(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)
 
