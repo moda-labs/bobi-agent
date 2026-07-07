@@ -196,7 +196,7 @@ class TestTranscript:
 class TestRemovedSlackShims:
 
     def test_slack_reply_command_is_removed(self, cli_run):
-        result = cli_run("slack-reply", "hello")
+        result = cli_run("slack-reply", "hello", timeout=30)
         assert result.returncode != 0
         assert "no such command" in result.stderr.lower()
 
