@@ -56,6 +56,14 @@ LINEAR_API_KEY=lin_api_... LINEAR_WEBHOOK_SECRET=... \
   bobi agents install <source> --name <name> --non-interactive
 ```
 
+For a Cloudflare Worker event server, store the same signing secret on the
+Worker:
+
+```bash
+cd event-server
+wrangler secret put LINEAR_WEBHOOK_SECRET
+```
+
 ## 5. Label issues for automation
 
 Create a label in Linear called `agent` (or whatever you set in `trigger_labels`). When you want dispatch to pick up an issue, add that label.

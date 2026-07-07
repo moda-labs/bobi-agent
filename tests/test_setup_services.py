@@ -105,6 +105,17 @@ class TestConnectorModel:
             "LINEAR_API_KEY", "LINEAR_WEBHOOK_SECRET"]
         assert method.secrets[1].optional is True
 
+    def test_linear_webhook_steps_include_event_server_path(self):
+        method = services.CATALOG["linear"].methods[0]
+        assert any("/webhooks/linear" in step for step in method.steps)
+
+    def test_linear_webhook_steps_include_worker_secret_command(self):
+        method = services.CATALOG["linear"].methods[0]
+        assert any(
+            "wrangler secret put LINEAR_WEBHOOK_SECRET" in step
+            for step in method.steps
+        )
+
     def test_github_offers_token_and_app_methods(self):
         keys = {m.key for m in services.CATALOG["github"].methods}
         assert keys == {"token", "app"}

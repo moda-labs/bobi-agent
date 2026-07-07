@@ -228,9 +228,12 @@ _NATIVE = [
                     "Open Linear → Settings → API → Personal API keys → "
                     "New key.",
                     "Copy the key and paste it below.",
-                    "For webhooks: Settings → API → Webhooks → point one at "
-                    "your event server, then copy its signing secret below "
-                    "(optional).",
+                    "For webhooks: Settings → API → Webhooks → New webhook → "
+                    "set the URL to <event-server>/webhooks/linear, then copy "
+                    "its signing secret below (optional).",
+                    "For a custom Cloudflare Worker event server, also run "
+                    "`wrangler secret put LINEAR_WEBHOOK_SECRET` with the same "
+                    "signing secret.",
                 ),
                 secrets=(
                     Secret("LINEAR_API_KEY", "API key", "lin_api_…"),
