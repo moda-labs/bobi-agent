@@ -1605,3 +1605,71 @@ class TestIngestTokens:
             base_url, "DELETE", f"/ingest-tokens/{minted['id']}", "",
             other["bubble_id"], other["bubble_key"])
         assert status == 404
+
+    @pytest.mark.local_only
+    def test_env_seeded_token_survives_local_restart(self, bobi_env):
+        """#661: local in-memory token state self-heals from env on restart."""
+        first_token = "ingt_static_restart_secret"
+        rotated_token = "ingt_rotated_restart_secret"
+        procs = []
+
+        def start(port: int, token: str):
+            proc, _log_path, lf = TestBindAddress._start_server(
+                bobi_env,
+                port,
+                {"BOBI_ES_INGEST_TOKENS": f"alert/firing={token}"},
+            )
+            procs.append((proc, lf))
+            base = f"http://127.0.0.1:{port}"
+            assert TestBindAddress._wait_healthy(base, timeout=30)
+            return base
+
+        def assert_delivers(base_url: str, suffix: str, token: str):
+            boot = _register(base_url, f"env-ingest-bootstrap-{suffix}", ["_bootstrap"])
+            bub, key = boot["bubble_id"], boot["bubble_key"]
+            dep = _register(base_url, f"env-ingest-subscriber-{suffix}",
+                            ["alert/firing"], bub, key)
+
+            status, listed = self._signed(base_url, "GET", "/ingest-tokens", "", bub, key)
+            assert status == 200
+            assert listed["tokens"][0]["env_managed"] is True
+            assert listed["tokens"][0]["name"] == "BOBI_ES_INGEST_TOKENS"
+
+            status, body = self._signed(
+                base_url, "DELETE", f"/ingest-tokens/{listed['tokens'][0]['id']}",
+                "", bub, key)
+            assert status == 400
+            assert "BOBI_ES_INGEST_TOKENS" in body["error"]
+
+            events = _send_and_drain(
+                base_url, dep["deployment_id"], dep["api_key"],
+                lambda: self._ingest(base_url, "alert/firing", {"title": suffix}, token),
+            )
+            matching = [e for e in events
+                        if e.get("source") == "ingest" and e.get("type") == "alert/firing"]
+            assert len(matching) == 1
+            assert matching[0]["fields"]["title"] == suffix
+
+            # Cross-topic behavior remains the same opaque 403 as minted tokens.
+            assert self._ingest(base_url, "alert/resolved", {"title": suffix}, token) == 403
+
+        try:
+            first = start(_free_port(), first_token)
+            assert_delivers(first, "before-restart", first_token)
+
+            proc, lf = procs.pop()
+            TestBindAddress._stop(proc, lf)
+
+            second = start(_free_port(), first_token)
+            assert_delivers(second, "after-restart", first_token)
+
+            proc, lf = procs.pop()
+            TestBindAddress._stop(proc, lf)
+
+            rotated = start(_free_port(), rotated_token)
+            assert self._ingest(rotated, "alert/firing", {"title": "old"}, first_token) == 403
+            assert_delivers(rotated, "after-rotation", rotated_token)
+        finally:
+            while procs:
+                proc, lf = procs.pop()
+                TestBindAddress._stop(proc, lf)

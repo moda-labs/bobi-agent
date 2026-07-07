@@ -89,6 +89,7 @@ export interface IngestTokenRecord {
 	topic: string;
 	token_hash: string;
 	name?: string;
+	env_managed?: boolean;
 	created_at: string;
 }
 
@@ -1533,6 +1534,43 @@ export function validateIngestTopic(topic: string): string | null {
 	return null;
 }
 
+export async function envIngestTokenRecords(
+	envValue: string,
+	bubbleId: string,
+	now = new Date().toISOString(),
+): Promise<IngestTokenRecord[]> {
+	const records: IngestTokenRecord[] = [];
+	for (const rawBinding of envValue.split(",")) {
+		const binding = rawBinding.trim();
+		if (!binding) continue;
+
+		const eq = binding.indexOf("=");
+		if (eq <= 0 || eq === binding.length - 1) {
+			throw new Error("BOBI_ES_INGEST_TOKENS entries must use topic=token");
+		}
+		const topic = binding.slice(0, eq).trim();
+		const token = binding.slice(eq + 1).trim();
+		const invalid = validateIngestTopic(topic);
+		if (invalid) {
+			throw new Error(`BOBI_ES_INGEST_TOKENS invalid topic ${JSON.stringify(topic)}: ${invalid}`);
+		}
+		if (!token) {
+			throw new Error(`BOBI_ES_INGEST_TOKENS token for ${JSON.stringify(topic)} must not be empty`);
+		}
+		const tokenHash = await sha256Hex(token);
+		records.push({
+			id: crypto.randomUUID(),
+			bubble_id: bubbleId,
+			topic,
+			token_hash: tokenHash,
+			name: "BOBI_ES_INGEST_TOKENS",
+			env_managed: true,
+			created_at: now,
+		});
+	}
+	return records;
+}
+
 export async function handleIngestTokenCreate(
 	storage: StorageAdapter,
 	body: Record<string, unknown>,
@@ -1580,6 +1618,7 @@ export async function handleIngestTokenList(
 				id: r.id,
 				topic: r.topic,
 				...(r.name ? { name: r.name } : {}),
+				...(r.env_managed ? { env_managed: true } : {}),
 				created_at: r.created_at,
 			})),
 		},
@@ -1596,6 +1635,14 @@ export async function handleIngestTokenRevoke(
 	const records = await storage.listIngestTokens(bubbleId);
 	const record = records.find((r) => r.id === tokenId);
 	if (!record) return { status: 404, body: { error: "not found" } };
+	if (record.env_managed) {
+		return {
+			status: 400,
+			body: {
+				error: "env-managed ingest tokens are rotated by changing BOBI_ES_INGEST_TOKENS and restarting",
+			},
+		};
+	}
 	await storage.deleteIngestToken(record);
 	return { status: 200, body: { ok: true } };
 }

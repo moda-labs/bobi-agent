@@ -54,6 +54,7 @@ import {
 	handleIngestTokenCreate,
 	handleIngestTokenList,
 	handleIngestTokenRevoke,
+	envIngestTokenRecords,
 	validateIngestTopic,
 	createIngestEvent,
 	resetIngestRateLimiter,
@@ -1292,6 +1293,58 @@ describe("ingest tokens (#640)", () => {
 			const own = await handleIngestTokenRevoke(store, minted.id, "bub_a");
 			expect(own.status).toBe(200);
 			expect(store.ingestTokens.size).toBe(0);
+		});
+
+		it("lists env-managed tokens and rejects revoke with rotation guidance", async () => {
+			const store = createMockStorage();
+			const [record] = await envIngestTokenRecords(
+				"alert/firing=ingt_seeded",
+				"bub_a",
+				"2026-01-01T00:00:00.000Z",
+			);
+			await store.putIngestToken(record);
+
+			const list = await handleIngestTokenList(store, "bub_a");
+			const tokens = (list.body as { tokens: Record<string, unknown>[] }).tokens;
+			expect(tokens).toEqual([{
+				id: record.id,
+				topic: "alert/firing",
+				name: "BOBI_ES_INGEST_TOKENS",
+				env_managed: true,
+				created_at: "2026-01-01T00:00:00.000Z",
+			}]);
+			expect(tokens[0]).not.toHaveProperty("token");
+			expect(tokens[0]).not.toHaveProperty("token_hash");
+
+			const revoke = await handleIngestTokenRevoke(store, record.id, "bub_a");
+			expect(revoke.status).toBe(400);
+			expect((revoke.body as { error: string }).error).toContain("BOBI_ES_INGEST_TOKENS");
+			expect(store.ingestTokens.size).toBe(1);
+		});
+	});
+
+	describe("envIngestTokenRecords", () => {
+		it("parses comma-separated topic/token bindings and stores only hashes", async () => {
+			const records = await envIngestTokenRecords(
+				"alert/firing=ingt_one, ci/build.failed = ingt_two ",
+				"bub_a",
+				"2026-01-01T00:00:00.000Z",
+			);
+			expect(records.map((r) => r.topic)).toEqual(["alert/firing", "ci/build.failed"]);
+			expect(records.every((r) => r.bubble_id === "bub_a")).toBe(true);
+			expect(records.every((r) => r.env_managed === true)).toBe(true);
+			expect(records[0].token_hash).toBe(await sha256Hex("ingt_one"));
+			expect(JSON.stringify(records)).not.toContain("ingt_one");
+			expect(JSON.stringify(records)).not.toContain("ingt_two");
+		});
+
+		it("fails loudly on malformed or invalid env bindings", async () => {
+			await expect(envIngestTokenRecords("alert/firing", "bub_a")).rejects.toThrow(
+				"topic=token",
+			);
+			await expect(envIngestTokenRecords("github/push=ingt_x", "bub_a")).rejects.toThrow(
+				"invalid topic",
+			);
 		});
 	});
 

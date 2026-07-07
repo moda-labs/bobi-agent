@@ -36,6 +36,7 @@ import {
 	handleSlackWorkspaceRegister,
 	handleWhatsAppNumberRegister,
 	handleTestSeedResourceGrants,
+	envIngestTokenRecords,
 	getAuthRejectionCounters,
 } from "./core";
 import {
@@ -95,6 +96,8 @@ const resourceGrants = new Map<string, ResourceGrant>();
 // path needs); list/revoke scan per bubble — token counts are tiny.
 const ingestTokens = new Map<string, IngestTokenRecord>();
 const webhookDeliveries = new Map<string, WebhookDeliveryRecord>();
+const ENV_PENDING_BUBBLE_ID = "__env_ingest_tokens_pending__";
+let envIngestTokensAttached = false;
 
 const webhookSecret = process.env.BOBI_ES_WEBHOOK_SECRET || "";
 const slackSigningSecret = process.env.BOBI_ES_SLACK_SIGNING_SECRET || "";
@@ -170,7 +173,9 @@ const storage: StorageAdapter = {
 	},
 
 	async getIngestTokenByHash(hash: string): Promise<IngestTokenRecord | null> {
-		return ingestTokens.get(hash) || null;
+		const record = ingestTokens.get(hash) || null;
+		if (record?.bubble_id === ENV_PENDING_BUBBLE_ID) return null;
+		return record;
 	},
 
 	async listIngestTokens(bubbleId: string): Promise<IngestTokenRecord[]> {
@@ -340,10 +345,37 @@ const storage: StorageAdapter = {
 		channelState.set(key, value);
 	},
 
-	async initDeploymentSession(): Promise<void> {
-		// no-op for local — deployment is fully initialized in putDeployment
+	async initDeploymentSession(deploymentId: string): Promise<void> {
+		// Deployment subscriptions have been indexed by now. Attach env-managed
+		// ingest tokens lazily to the first real local bubble so restarts preserve
+		// sender credentials without persisting plaintext.
+		if (!envIngestTokensAttached) {
+			const dep = deployments.get(deploymentId);
+			if (dep) attachEnvIngestTokens(dep.bubbleId);
+		}
 	},
 };
+
+async function seedEnvIngestTokens() {
+	const configured = process.env.BOBI_ES_INGEST_TOKENS || "";
+	if (!configured.trim()) return;
+	const records = await envIngestTokenRecords(configured, ENV_PENDING_BUBBLE_ID);
+	for (const record of records) {
+		await storage.putIngestToken(record);
+	}
+	console.log(`seeded ${records.length} env-managed ingest token(s) from BOBI_ES_INGEST_TOKENS`);
+}
+
+function attachEnvIngestTokens(bubbleId: string) {
+	let attached = 0;
+	for (const record of ingestTokens.values()) {
+		if (record.env_managed && record.bubble_id === ENV_PENDING_BUBBLE_ID) {
+			record.bubble_id = bubbleId;
+			attached++;
+		}
+	}
+	if (attached > 0) envIngestTokensAttached = true;
+}
 
 // ---------------------------------------------------------------------------
 // Node.js HTTP helpers
@@ -775,13 +807,21 @@ server.on("upgrade", (req, socket, head) => handleUpgrade(req, socket, head, wss
 const evictionTimer = setInterval(evictStaleDeployments, EVICTION_SWEEP_MS);
 evictionTimer.unref();
 
-server.listen(port, bind, () => {
-	if (bind === "127.0.0.1" || bind === "::1") {
-		console.log(
-			`bobi event server (local) listening on ${bind}:${port} ` +
-				`(loopback-only; set BOBI_ES_BIND to serve remotely)`,
-		);
-	} else {
-		console.log(`bobi event server (local) listening on ${bind}:${port}`);
-	}
+async function main() {
+	await seedEnvIngestTokens();
+	server.listen(port, bind, () => {
+		if (bind === "127.0.0.1" || bind === "::1") {
+			console.log(
+				`bobi event server (local) listening on ${bind}:${port} ` +
+					`(loopback-only; set BOBI_ES_BIND to serve remotely)`,
+			);
+		} else {
+			console.log(`bobi event server (local) listening on ${bind}:${port}`);
+		}
+	});
+}
+
+main().catch((err) => {
+	console.error("Failed to start local event server:", err);
+	process.exit(1);
 });
