@@ -2,6 +2,7 @@ import type { NormalizedEvent } from "../core";
 
 export function normalizeLinearWebhook(
 	payload: Record<string, unknown>,
+	deliveryId = "",
 ): NormalizedEvent {
 	const action = (payload.action as string) || "unknown";
 	const dataType = (payload.type as string) || "unknown";
@@ -30,7 +31,7 @@ export function normalizeLinearWebhook(
 
 	return {
 		v: 2,
-		id: crypto.randomUUID(),
+		id: deliveryId || crypto.randomUUID(),
 		source: "linear",
 		type: `linear.${dataType}.${action}`,
 		topics,

@@ -6,6 +6,7 @@ import {
 	type SlackWorkspaceRecord,
 	type ResourceGrant,
 	type IngestTokenRecord,
+	type WebhookDeliveryRecord,
 	type NormalizedEvent,
 	type HandlerResult,
 	authenticateDeployment,
@@ -129,6 +130,19 @@ function createKVStorage(env: Env): StorageAdapter {
 				env.EVENTS.delete(`ingest_token:${record.token_hash}`),
 				env.EVENTS.delete(`ingest_token_by_id:${record.bubble_id}:${record.id}`),
 			]);
+		},
+
+		async getWebhookDelivery(source: string, deliveryKey: string): Promise<WebhookDeliveryRecord | null> {
+			const data = await env.EVENTS.get(`webhook_delivery:${source}:${deliveryKey}`);
+			return data ? JSON.parse(data) : null;
+		},
+
+		async putWebhookDelivery(record: WebhookDeliveryRecord): Promise<void> {
+			await env.EVENTS.put(
+				`webhook_delivery:${record.source}:${record.delivery_key}`,
+				JSON.stringify(record),
+				{ expirationTtl: 7 * 24 * 60 * 60 },
+			);
 		},
 
 		async putDeployment(deployment: DeploymentRecord): Promise<void> {
@@ -331,7 +345,7 @@ async function bubbleAuthedJson(
 // ---------------------------------------------------------------------------
 
 export default {
-	async fetch(request: Request, env: Env): Promise<Response> {
+	async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 		const path = url.pathname;
 		const method = request.method;
@@ -378,6 +392,7 @@ export default {
 		const webhookRoute = method === "POST" ? matchWebhookSource(path) : null;
 		if (webhookRoute) {
 			const rawBody = await request.text();
+			const waitUntil = typeof ctx?.waitUntil === "function" ? ctx.waitUntil.bind(ctx) : undefined;
 			const result = await handleWebhookRequest(
 				storage,
 				webhookRoute.source,
@@ -387,6 +402,7 @@ export default {
 					subpath: webhookRoute.subpath,
 				},
 				webhookSecrets,
+				waitUntil ? { waitUntil } : {},
 			);
 			if (result) return respond(result);
 		}
