@@ -122,8 +122,18 @@ describe("event-server", () => {
 	it("health check returns ok", async () => {
 		const response = await SELF.fetch("https://example.com/health");
 		expect(response.status).toBe(200);
-		const body = await response.json() as { status: string };
+		const body = await response.json() as {
+			status: string;
+			auth: string;
+			release: { version: string; sha: string };
+			worker: { version_id: string | null; version_tag: string | null; version_timestamp: string | null };
+		};
 		expect(body.status).toBe("ok");
+		expect(body.auth).toBe("hmac");
+		expect(body.release).toEqual({ version: "test-version", sha: "test-sha" });
+		expect(typeof body.worker.version_id === "string" || body.worker.version_id === null).toBe(true);
+		expect(typeof body.worker.version_tag === "string" || body.worker.version_tag === null).toBe(true);
+		expect(typeof body.worker.version_timestamp === "string" || body.worker.version_timestamp === null).toBe(true);
 	});
 
 	it("returns 404 for unknown routes", async () => {

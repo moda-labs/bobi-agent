@@ -48,6 +48,13 @@ interface Env {
 	EVENTS: KVNamespace;
 	DEPLOYMENT_SESSION: DurableObjectNamespace;
 	INTERNAL_DO_SECRET: string;
+	BOBI_RELEASE_VERSION?: string;
+	BOBI_RELEASE_SHA?: string;
+	CF_VERSION_METADATA?: {
+		id?: string;
+		tag?: string;
+		timestamp?: string;
+	};
 	WEBHOOK_SECRET?: string;
 	SLACK_SIGNING_SECRET?: string;
 	LINEAR_WEBHOOK_SECRET?: string;
@@ -341,6 +348,15 @@ export default {
 			return Response.json({
 				status: "ok",
 				auth: "hmac",
+				release: {
+					version: env.BOBI_RELEASE_VERSION || "dev",
+					sha: env.BOBI_RELEASE_SHA || "dev",
+				},
+				worker: {
+					version_id: env.CF_VERSION_METADATA?.id || null,
+					version_tag: env.CF_VERSION_METADATA?.tag || null,
+					version_timestamp: env.CF_VERSION_METADATA?.timestamp || null,
+				},
 				rejections: getAuthRejectionCounters(),
 			});
 		}

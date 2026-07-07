@@ -108,6 +108,8 @@ const webhookSecrets = {
 	whatsappVerifyToken,
 };
 const testGrantsSecret = process.env.BOBI_ES_TEST_GRANTS_SECRET || "";
+const releaseVersion = process.env.BOBI_RELEASE_VERSION || "local";
+const releaseSha = process.env.BOBI_RELEASE_SHA || "local";
 
 // ---------------------------------------------------------------------------
 // Map-based storage adapter
@@ -413,6 +415,10 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 			mode: "local",
 			deployments: deployments.size,
 			auth: "hmac",
+			release: {
+				version: releaseVersion,
+				sha: releaseSha,
+			},
 			bubbles: bubbles.size,
 			rejections: getAuthRejectionCounters(),
 		});
