@@ -144,6 +144,10 @@ unconfigured provider secret admits that provider unverified (zero-config local
 development; counted on `/health` as `webhook_unverified` so a public server
 running unverified is visible), and a configured one rejects bad or missing
 signatures with 401 (counted as `webhook_bad_signature`).
+`/health` also reports the release stamp baked into the deployed Worker:
+`release.version`, `release.sha`, and Cloudflare Worker version metadata when
+available. The release workflow uses this to fail fast if the fleet
+`event_server` URL is still pointed at a different Worker after deploy.
 Normalizers (`event-server/src/adapters/`) derive the routing key **from the
 signed body, never from client input**:
 

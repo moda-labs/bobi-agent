@@ -135,6 +135,7 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       claude-version: ${{ steps.meta.outputs.claude-version }}
+      source-sha: ${{ steps.meta.outputs.source-sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -168,6 +169,7 @@ jobs:
           set -euo pipefail
           whl="$(basename dist/*.whl)"
           echo "version=$(echo "$whl" | cut -d- -f2)" >> "$GITHUB_OUTPUT"
+          echo "source-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           curl -fsSL https://claude.ai/install.sh | bash -s -- stable
           echo "claude-version=$("$HOME/.local/bin/claude" --version | awk '{print $1}')" \
             >> "$GITHUB_OUTPUT"
@@ -199,7 +201,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
+          ref: ${{ needs.build-wheel.outputs.source-sha }}
 
       - name: Stage the prebuilt wheel into the build context
         uses: actions/download-artifact@v4
@@ -360,7 +362,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
+          ref: ${{ needs.build-wheel.outputs.source-sha }}
 
       - name: Assert the ref matches the wheel version
         # The image tag always comes from the wheel (the released bytes). This
@@ -464,7 +466,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
+          ref: ${{ needs.build-wheel.outputs.source-sha }}
 
       - uses: actions/setup-node@v5
         with:
@@ -476,6 +478,36 @@ jobs:
 
       - run: npx vitest run
 
+      - name: Stamp event-server release metadata
+        run: |
+          set -euo pipefail
+          release_sha="${{ needs.build-wheel.outputs.source-sha }}"
+          {
+            echo "BOBI_RELEASE_VERSION=${{ needs.build-wheel.outputs.version }}"
+            echo "BOBI_RELEASE_SHA=$release_sha"
+          } >> "$GITHUB_ENV"
+          BOBI_RELEASE_VERSION="${{ needs.build-wheel.outputs.version }}" \
+          BOBI_RELEASE_SHA="$release_sha" \
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("wrangler.jsonc")
+          text = path.read_text()
+          replacements = {
+              '"BOBI_RELEASE_VERSION": "dev"':
+                  f'"BOBI_RELEASE_VERSION": {json.dumps(os.environ["BOBI_RELEASE_VERSION"])}',
+              '"BOBI_RELEASE_SHA": "dev"':
+                  f'"BOBI_RELEASE_SHA": {json.dumps(os.environ["BOBI_RELEASE_SHA"])}',
+          }
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f"missing release metadata placeholder: {old}")
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+
       - name: Deploy to Cloudflare
         uses: cloudflare/wrangler-action@v4
         with:
@@ -483,6 +515,68 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: event-server
           command: deploy
+
+      - name: Verify fleet event server is the deployed Worker
+        env:
+          FLEET_EVENT_SERVER_URL: ${{ vars.FLEET_EVENT_SERVER_URL }}
+        run: |
+          set -euo pipefail
+          event_server="${FLEET_EVENT_SERVER_URL:-}"
+          if [ -z "$event_server" ]; then
+            event_server="$(python3 - <<'PY'
+          from pathlib import Path
+
+          for raw in Path("../deployments/defaults.yaml").read_text().splitlines():
+              line = raw.split("#", 1)[0].strip()
+              if not line.startswith("event_server:"):
+                  continue
+              value = line.split(":", 1)[1].strip().strip('"').strip("'")
+              print(value)
+              break
+          PY
+            )"
+          fi
+          [ -n "$event_server" ] || { echo "::error::no event_server set in deployments/defaults.yaml"; exit 1; }
+          case "$event_server" in
+            http://*|https://*) ;;
+            *) echo "::error::event_server must resolve to an http(s) URL, got: $event_server"; exit 1;;
+          esac
+          event_server="${event_server%/}"
+
+          expected_version="${BOBI_RELEASE_VERSION:?}"
+          expected_sha="${BOBI_RELEASE_SHA:?}"
+          last_health=""
+
+          for attempt in {1..30}; do
+            if last_health="$(curl -fsS --max-time 10 "$event_server/health" 2>/dev/null)"; then
+              actual="$(HEALTH="$last_health" python3 - <<'PY'
+          import json
+          import os
+
+          try:
+              health = json.loads(os.environ["HEALTH"])
+              release = health.get("release") or {}
+              print(f"{release.get('version', '')}\t{release.get('sha', '')}")
+          except Exception:
+              print("\t")
+          PY
+              )"
+              actual_version="${actual%%$'\t'*}"
+              actual_sha="${actual#*$'\t'}"
+              if [ "$actual_version" = "$expected_version" ] && [ "$actual_sha" = "$expected_sha" ]; then
+                echo "Verified $event_server serves event-server $actual_version@$actual_sha"
+                exit 0
+              fi
+              echo "Waiting for $event_server to serve $expected_version@$expected_sha (attempt $attempt/30; got ${actual_version:-missing}@${actual_sha:-missing})"
+            else
+              echo "Waiting for $event_server/health to respond (attempt $attempt/30)"
+            fi
+            sleep 10
+          done
+
+          echo "::error::fleet event_server drift: $event_server/health did not report release $expected_version@$expected_sha after deploy"
+          echo "Last health payload: ${last_health:-<none>}"
+          exit 1
 
   # --------------------------------------------------------------------------
   # Bump the Homebrew formula to the freshly-published version.
@@ -496,7 +590,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
+          ref: ${{ needs.build-wheel.outputs.source-sha }}
 
       - name: Trigger Homebrew formula update
         uses: peter-evans/repository-dispatch@v4
