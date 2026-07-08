@@ -332,9 +332,9 @@ def _monitor_agent_role(monitor) -> str:
     """Resolve the role for an out-of-band monitor agent launch (#212, #695).
 
     `subagents launch` requires --role. Monitors rarely set one, so fall back
-    to the team's entry-point role, matching how named start resolves it.
-    Returns "" only when neither is available; callers must fail loud rather
-    than spawn a subprocess the CLI is guaranteed to reject.
+    to the team's entry-point role via Config.entry_role - the same resolution
+    named start uses, "manager" included, so a monitor never fails on a config
+    that `bobi start` accepts.
     """
     role = getattr(monitor, "role", "") or ""
     if role:
@@ -342,22 +342,11 @@ def _monitor_agent_role(monitor) -> str:
     try:
         from bobi.config import Config
         from bobi.paths import bound_root
-        root = bound_root()
-        if root:
-            return Config.load(root).entry_point or ""
+        return Config.load(bound_root()).entry_role
     except Exception:
-        log.exception("Failed to resolve entry_point for monitor %s",
+        log.exception("Failed to resolve entry role for monitor %s",
                       getattr(monitor, "name", "?"))
-    return ""
-
-
-def _publish_no_role_error(monitor_name: str, kind: str, publish=None) -> None:
-    detail = ("no role resolved: the monitor sets no role and the team "
-              "config has no entry_point")
-    log.error("Failed to spawn %s for monitor %s: %s", kind, monitor_name,
-              detail)
-    _publish_monitor_error(
-        monitor_name, kind, "spawn-failed", detail, publish=publish)
+        return "manager"
 
 
 def _default_spawn_check(monitor, cwd: str | None, on_verdict,
@@ -371,10 +360,6 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict,
     conditions, dedup, and publishing all happen in the scheduler.
     """
     role = _monitor_agent_role(monitor)
-    if not role:
-        _publish_no_role_error(monitor.name, "check", publish=publish)
-        on_verdict(None)
-        return
 
     from bobi import paths
     root = paths.bobi_root()
@@ -525,19 +510,16 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result,
                            publish=None) -> None:
     """Launch the out-of-band curator agent with a pre-rendered task (#456).
 
-    Mirrors _default_spawn_check, but the agent WRITES policy.md (its Write tool
-    is available because adhoc launches run permission_mode=bypassPermissions)
-    and prints a JSON summary instead of a verdict. The waiter thread hands the
-    parsed summary (or None) to ``on_result`` when the process exits. The
-    scheduler — not the agent — owns the cursor advance and the publish.
+    Mirrors _default_spawn_gate: the full rendered task rides in a request
+    file under run/state/curator/ (it can exceed argv limits) and the child
+    runs the dedicated `monitors curator` command - NOT `subagents launch`,
+    whose --wait path wraps the task in check-verdict semantics that swallow
+    the curator's summary (#695). The agent WRITES policy.md and prints a
+    JSON summary; the waiter thread hands the parsed summary (or None) to
+    ``on_result`` when the process exits. The scheduler - not the agent -
+    owns the cursor advance and the publish.
     """
     from bobi import paths
-
-    role = _monitor_agent_role(monitor)
-    if not role:
-        _publish_no_role_error(monitor.name, "curator", publish=publish)
-        on_result(None)
-        return
 
     task_path = _write_curator_task(monitor, task)
     if task_path is None:
@@ -548,20 +530,10 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result,
         return
 
     root = paths.bobi_root()
-    pointer_task = (
-        "Read the monitor task file at this absolute path and follow its "
-        f"instructions exactly:\n\n{task_path}\n\n"
-        "Do not treat this pointer as the full task; the full curator prompt, "
-        "current policy, transcript delta, and ingest notes are in the file."
-    )
     cmd = [
         sys.executable, "-m", "bobi.cli",
-        "agent", paths.agent_name_for_root(root), "subagents", "launch",
-        "-w", "adhoc",
-        "--role", role,
-        "--non-interactive",
-        "--wait",
-        "--task", pointer_task,
+        "agent", paths.agent_name_for_root(root), "monitors", "curator",
+        "--request", str(task_path),
     ]
 
     def _parse_curator(out: str):

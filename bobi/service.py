@@ -135,7 +135,7 @@ def manager_session_name(project_path: Path, role: str | None = None) -> str:
         from bobi.config import Config
 
         try:
-            role = Config.load(project_path).entry_point or "manager"
+            role = Config.load(project_path).entry_role
         except Exception:
             role = "manager"
     return f"bobi-{paths.agent_name_for_root(project_path)}-{role}"
@@ -420,7 +420,7 @@ def start_team(
     spawned = spawn_team(project_path, fresh=fresh, subscribe=subscribe)
     project_path = _bind(project_path)
     cfg = _load_config_or_raise(project_path)
-    role = cfg.entry_point or "manager"
+    role = cfg.entry_role
     manager_name = manager_session_name(project_path, role)
     deadline = time.monotonic() + wait_timeout
     try:
@@ -509,7 +509,7 @@ def run_manager_from_config(
     set_process_brain_from_config(cfg)
 
     agent_name = cfg.agent
-    role = cfg.entry_point or "manager"
+    role = cfg.entry_role
 
     from bobi.events.subscriptions import discover_subscriptions
 
@@ -729,8 +729,7 @@ def resolve_address(project_path: Path, to: str | None = None) -> str | None:
     if to is not None and to != "manager":
         return to
 
-    entry_point = Config.load(project_path).entry_point
-    roles = [r for r in dict.fromkeys([entry_point, "manager"]) if r]
+    roles = list(dict.fromkeys([Config.load(project_path).entry_role, "manager"]))
     registry = get_registry()
     for role in roles:
         managers = registry.get_by_role(role)

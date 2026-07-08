@@ -316,6 +316,15 @@ class Config:
     roles: dict = field(default_factory=dict)
 
     @property
+    def entry_role(self) -> str:
+        """The team's entry-point role, defaulting to "manager" when unset.
+
+        The one place the default lives: named start, monitor agent spawns,
+        and address resolution all resolve the role through this property.
+        """
+        return self.entry_point or "manager"
+
+    @property
     def brain_kind(self) -> str:
         """The configured brain kind, or "" for the framework default."""
         return str((self.brain or {}).get("kind", "") or "")

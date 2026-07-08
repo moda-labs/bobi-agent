@@ -796,6 +796,43 @@ class TestDefaultSpawnCheckEntryPoint:
         role_idx = cmd.index("--role")
         assert cmd[role_idx + 1] == "monitor_role"
 
+    def test_no_entry_point_defaults_to_manager(self, tmp_path, monkeypatch):
+        """No monitor role and no entry_point resolves --role to "manager" -
+        the same default named start applies (Config.entry_role, #695), so a
+        check spawn never fails on a config `bobi start` accepts."""
+        from bobi.monitors.scheduler import _default_spawn_check
+        import bobi.sdk as sdk_mod
+
+        project = tmp_path / "proj"
+        paths.state_dir(project)
+        paths.package_dir(project).mkdir(parents=True)
+        paths.agent_yaml_path(project).write_text("agent: test-pack\n")
+
+        monkeypatch.setattr(sdk_mod, "get_project_root", lambda: project)
+        paths.bind_root(project)
+
+        captured_cmds = []
+
+        class FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured_cmds.append(cmd)
+
+            def communicate(self, timeout=None):
+                return ("", "")
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr("subprocess.Popen", FakePopen)
+
+        m = Monitor(name="check", description="check something",
+                    event="monitor/check")
+        _default_spawn_check(m, str(project), lambda verdict: None)
+
+        assert len(captured_cmds) == 1
+        cmd = captured_cmds[0]
+        assert cmd[cmd.index("--role") + 1] == "manager"
+
     def test_description_only_monitor_spawns_check(self, tmp_path):
         """End-to-end: a description-only monitor invokes spawn_check
         (proving the check actually runs, not silently fails)."""

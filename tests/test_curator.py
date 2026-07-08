@@ -304,45 +304,55 @@ class TestCuratorDispatch:
         )]
 
 
+def _spawn_curator_and_wait(monkeypatch, monitor, task: str = "task body",
+                            on_spawn=None):
+    """Run _default_spawn_curator with a stubbed Popen and wait for the waiter
+    thread's result. Returns (captured argv list, results list). ``on_spawn``
+    (if given) is called with the argv at spawn time, before the fake process
+    "exits" - the window where the task file must still exist on disk."""
+    from bobi.monitors.scheduler import _default_spawn_curator
+
+    captured = []
+    results = []
+
+    class FakeProc:
+        def communicate(self, timeout=None):
+            return '{"success": true, "updated": false}\n', None
+
+    def fake_popen(cmd, **kwargs):
+        captured.append(cmd)
+        if on_spawn:
+            on_spawn(cmd)
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    _default_spawn_curator(monitor, None, task, results.append)
+    for _ in range(100):
+        if results:
+            break
+        time.sleep(0.01)
+    return captured, results
+
+
 class TestCuratorTaskTransport:
-    def test_default_spawn_curator_passes_short_file_pointer_and_cleans_up(
+    def test_default_spawn_curator_passes_request_file_and_cleans_up(
         self, tmp_path, monkeypatch, monitor
     ):
-        from bobi.monitors.scheduler import _default_spawn_curator
-
-        paths.package_dir(tmp_path).mkdir(parents=True)
-        paths.agent_yaml_path(tmp_path).write_text(
-            "agent: test-pack\nentry_point: director\n")
         paths.bind_root(tmp_path)
         full_task = "x" * 205_000
-        captured = {}
-        results = []
+        seen = {}
 
-        class FakeProc:
-            def communicate(self, timeout=None):
-                return '{"success": true, "updated": false}\n', None
-
-        def fake_popen(cmd, **kwargs):
-            pointer = cmd[cmd.index("--task") + 1]
-            captured["cmd"] = cmd
-            captured["pointer"] = pointer
-            task_path = Path(pointer.splitlines()[2])
-            captured["task_path"] = task_path
-            assert len(pointer) < 1000
+        def check_task_file(cmd):
+            task_path = Path(cmd[cmd.index("--request") + 1])
+            seen["task_path"] = task_path
             assert task_path.read_text() == full_task
-            return FakeProc()
 
-        monkeypatch.setattr("subprocess.Popen", fake_popen)
-        _default_spawn_curator(monitor, None, full_task, results.append)
-
-        for _ in range(100):
-            if results:
-                break
-            time.sleep(0.01)
+        captured, results = _spawn_curator_and_wait(
+            monkeypatch, monitor, task=full_task, on_spawn=check_task_file)
 
         assert results == [{"success": True, "updated": False}]
-        assert "--task" in captured["cmd"]
-        assert not captured["task_path"].exists()
+        assert "--request" in captured[0]
+        assert not seen["task_path"].exists()
 
     def test_monitor_spawn_rejects_oversized_argv_and_publishes_error(
         self, tmp_path, monkeypatch, monitor
@@ -410,100 +420,32 @@ class TestCuratorTaskTransport:
 
 
 # ---------------------------------------------------------------------------
-# spawn role contract (#695) — the curator argv must satisfy the real CLI
+# spawn CLI contract (#695) - the curator argv must satisfy the real CLI
 # ---------------------------------------------------------------------------
 
-class TestCuratorSpawnRole:
-    """Regression tests for #695: `subagents launch` requires --role, and the
-    shipped policy-curator monitor sets none, so the spawn must fall back to
-    the team's entry_point (parity with _default_spawn_check). The argv is
-    parsed against the real click command so a contract drift fails here, not
-    in production."""
+class TestCuratorSpawnContract:
+    """Regression tests for #695: the curator argv is parsed against the real
+    click command so a CLI contract drift (a required option the spawn does
+    not pass - the way `subagents launch --role` broke every curator run)
+    fails here, not in production. The curator must NOT ride `subagents
+    launch`: its --wait path wraps the task in check-verdict semantics that
+    swallow the curator's summary and never advance the cursor."""
 
-    def _project(self, tmp_path, agent_yaml: str):
-        project = tmp_path / "proj"
-        paths.state_dir(project)
-        paths.package_dir(project).mkdir(parents=True)
-        paths.agent_yaml_path(project).write_text(agent_yaml)
-        paths.bind_root(project)
-        return project
-
-    def _spawn(self, monkeypatch, monitor):
-        from bobi.monitors.scheduler import _default_spawn_curator
-
-        captured = []
-        results = []
-
-        class FakeProc:
-            def communicate(self, timeout=None):
-                return '{"success": true, "updated": false}\n', None
-
-        monkeypatch.setattr(
-            "subprocess.Popen",
-            lambda cmd, **kwargs: captured.append(cmd) or FakeProc(),
-        )
-        _default_spawn_curator(monitor, None, "task body", results.append)
-        for _ in range(100):
-            if results:
-                break
-            time.sleep(0.01)
-        return captured, results
-
-    def test_curator_argv_satisfies_launch_cli_contract(
+    def test_curator_argv_satisfies_monitors_curator_cli_contract(
         self, tmp_path, monkeypatch, monitor
     ):
-        """The spawned argv parses under the real `subagents launch` command
-        (required options included) and resolves --role to entry_point."""
-        from bobi.cli import subagents_launch
+        from bobi.cli import monitor_curator
 
-        self._project(tmp_path, "agent: test-pack\nentry_point: director\n")
-        captured, results = self._spawn(monkeypatch, monitor)
+        paths.bind_root(tmp_path)
+        captured, results = _spawn_curator_and_wait(monkeypatch, monitor)
 
         assert results == [{"success": True, "updated": False}]
         assert len(captured) == 1
-        launch_args = captured[0][captured[0].index("launch") + 1:]
-        ctx = subagents_launch.make_context("launch", list(launch_args))
-        assert ctx.params["role"] == "director"
-
-    def test_curator_monitor_role_wins_over_entry_point(
-        self, tmp_path, monkeypatch
-    ):
-        """An explicit role: on the monitor is used verbatim."""
-        self._project(tmp_path, "agent: test-pack\nentry_point: director\n")
-        m = Monitor(name="policy-curator", curator=True, role="librarian",
-                    event="system/policy.updated", interval="6h")
-        captured, _ = self._spawn(monkeypatch, m)
-
         cmd = captured[0]
-        assert cmd[cmd.index("--role") + 1] == "librarian"
-
-    def test_curator_without_resolvable_role_fails_loud_not_doomed_spawn(
-        self, tmp_path, monkeypatch, monitor
-    ):
-        """No monitor role and no entry_point: publish monitor.error instead
-        of launching a subprocess the CLI is guaranteed to reject."""
-        from bobi.monitors.scheduler import _default_spawn_curator
-
-        self._project(tmp_path, "agent: test-pack\n")
-        published = []
-        results = []
-        monkeypatch.setattr(
-            "bobi.monitors.scheduler._default_publish",
-            lambda event, data: published.append((event, data)) or True,
-        )
-        monkeypatch.setattr(
-            "subprocess.Popen",
-            lambda *args, **kwargs: pytest.fail("Popen should not be called"),
-        )
-
-        _default_spawn_curator(monitor, None, "task body", results.append)
-
-        assert results == [None]
-        assert published[0][0] == "system/monitor.error"
-        assert published[0][1]["reason"] == "spawn-failed"
-        assert "role" in published[0][1]["detail"]
-        tasks_dir = paths.state_dir() / "curator"
-        assert not list(tasks_dir.glob("task-*.md"))
+        assert "launch" not in cmd
+        curator_args = cmd[cmd.index("curator") + 1:]
+        ctx = monitor_curator.make_context("curator", list(curator_args))
+        assert ctx.params["request_path"] == cmd[cmd.index("--request") + 1]
 
 
 # ---------------------------------------------------------------------------

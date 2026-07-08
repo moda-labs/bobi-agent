@@ -2822,6 +2822,37 @@ def monitor_gate(request_path):
         raise SystemExit(1)
 
 
+@monitors.command("curator", hidden=True)
+@click.option("--request", "request_path", required=True,
+              help="Path to the rendered curator task written by the scheduler.")
+def monitor_curator(request_path):
+    """Internal: distill the transcript delta into policy.md (#456).
+
+    Scheduler plumbing, launched out-of-band by _default_spawn_curator. Reads
+    the full rendered curator task (prompt + current policy + transcript
+    delta) from the request file, runs the curator agent, and prints its
+    summary as a single JSON line: {"success": ..., "updated": ...}.
+    """
+    from .subagent import run_curator_blocking
+
+    project_path = _detect_project_root()
+    try:
+        task = Path(request_path).read_text()
+    except OSError as e:
+        click.echo(f"Bad curator request file: {e}", err=True)
+        raise SystemExit(1)
+    if not task.strip():
+        click.echo("Curator request file is empty.", err=True)
+        raise SystemExit(1)
+
+    summary, error = run_curator_blocking(task, cwd=str(project_path))
+    if summary is None:
+        click.echo(json.dumps({"success": False, "summary": error}))
+        click.echo(f"Curator failed: {error}", err=True)
+        raise SystemExit(1)
+    click.echo(json.dumps(summary))
+
+
 main.add_command(monitors)
 
 
