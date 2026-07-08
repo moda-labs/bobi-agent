@@ -184,6 +184,21 @@ signed body, never from client input**:
   also record the conversation's 24h customer-service window, which
   `/channels/send` enforces (`outside_message_window` typed error). Delivery
   receipts (`statuses`) are skipped.
+- **Discord** (#2) is the exception to the webhook pattern: Discord delivers
+  message events only over the **Gateway**, a persistent outbound WebSocket.
+  The **local server** runs a Gateway connection manager
+  (`src/discord-gateway-local.ts`, one connection per registered bot) around
+  a runtime-agnostic protocol core (`core/src/gateway/discord.ts`:
+  IDENTIFY/RESUME, heartbeats, close-code policy - resume-first reconnect
+  protects the 1000/day IDENTIFY budget; bad-token/bad-intent closes park the
+  connection as `fatal` in `/health`). The Worker has no Gateway driver yet.
+  Types `discord.dm` / `discord.mention` / `discord.reply`, key
+  `discord:<application_id>`; v1 receives DMs, bot @mentions, and replies to
+  the bot only (no channel firehose), and drops all bot-authored messages
+  (loop prevention). Connections start at boot from `BOBI_ES_DISCORD_BOT_TOKEN`
+  + `BOBI_ES_DISCORD_APPLICATION_ID` and on `POST /discord/apps`
+  registrations; `BOBI_ES_DISCORD_MESSAGE_CONTENT=1` opts into the privileged
+  Message Content intent.
 - **Generic ingest** (`POST /webhooks/ingest/<topic>`, #640): the escape hatch for
   external systems that cannot compute per-request signatures (alerting, CI, SaaS
   webhooks - most can only set static headers). The verify slot checks a **scoped
@@ -217,12 +232,13 @@ prefixed by the subscriber's bubble id for tenant isolation (see Security).
 | `slack:<team>` | Slack webhook (no app id) | `slack:T0ABC` |
 | `slack:<team>:app:<app_id>[:<channel>]` | Slack webhook (app-qualified) | `slack:T0ABC:app:A123:C0XYZ` |
 | `whatsapp:<phone_number_id>` | WhatsApp webhook | `whatsapp:747556541` |
+| `discord:<application_id>` | Discord Gateway (local server) | `discord:111222333444555666` |
 | `inbox/<session>` | inter-agent fire-and-forget | `inbox/director` |
 | `reply/<uuid>` | transient ask-reply channel | `reply/9f3a...` |
 | `<type>` and `<source>/<type>` | monitors / agent publishes | `support.email`, `monitor/support.email` |
 | `agent/session.completed` (+ bare `session.completed`) | sub-agent lifecycle | |
 
-`github:`, `linear:`, `slack:`, and `whatsapp:` are **global** topics (cross-bubble, gated by
+`github:`, `linear:`, `slack:`, `whatsapp:`, and `discord:` are **global** topics (cross-bubble, gated by
 resource grants). Everything else is **bubble-scoped**. Monitors and lifecycle
 events are published to both the bare `<type>` and the `<source>/<type>` form, and
 clients subscribe to both, for cross-version compatibility.
@@ -412,8 +428,12 @@ the grant, never the credential:
 - **WhatsApp**: the bubble-signed `/whatsapp/numbers` registration (proving the
   Cloud API token can read the phone-number node on the Graph API) doubles as
   the grant, and stores the bubble-scoped send credential.
+- **Discord**: the bubble-signed `/discord/apps` registration (proving the bot
+  token via `GET /applications/@me`, whose id must match) doubles as the
+  grant, and stores the bubble-scoped send credential. On the local server it
+  also starts the app's Gateway connection.
 
-Unknown services are default-deny (only `github:` / `linear:` / `slack:` / `whatsapp:` are global).
+Unknown services are default-deny (only `github:` / `linear:` / `slack:` / `whatsapp:` / `discord:` are global).
 The grant is enforced at **three points**, all sharing one parser so they cannot
 diverge:
 
@@ -423,9 +443,10 @@ diverge:
    admitted to a subscriber only if its bubble currently holds the grant, so a stale
    index entry for a revoked bubble is dropped.
 
-The client authorizes its github/linear topics (and registers Slack workspaces / WhatsApp numbers)
-before it registers subscriptions, dropping any topic whose credential is missing or
-rejected so it never trips the server's hard reject.
+The client authorizes its github/linear topics (and registers Slack workspaces /
+WhatsApp numbers / Discord apps) before it registers subscriptions, dropping any
+topic whose credential is missing or rejected so it never trips the server's
+hard reject.
 
 ### Internal Worker to Durable Object auth
 
