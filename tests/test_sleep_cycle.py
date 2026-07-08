@@ -26,6 +26,10 @@ def test_legacy_curator_import_surface_remains_for_one_release():
 
     assert curator_mod.read_cursor is sleep_cycle_mod.read_cursor
     assert curator_mod.build_curator_task is sleep_cycle_mod.build_sleep_cycle_task
+    assert curator_mod.MAX_CURATOR_INPUT_CHARS == (
+        sleep_cycle_mod.MAX_SLEEP_CYCLE_INPUT_CHARS
+    )
+    assert curator_mod.MAX_SEED_INPUT_CHARS == sleep_cycle_mod.MAX_SEED_INPUT_CHARS
     assert CURATOR_PATH == SLEEP_CYCLE_PATH
 
 
@@ -287,6 +291,20 @@ class TestSleepCycleDispatch:
         legacy_event, legacy_data = h.published[1]
         assert legacy_event == "system/policy.updated"
         assert legacy_data == data
+
+    def test_legacy_policy_event_still_publishes_memory_updated(self, tmp_path):
+        monitor = Monitor(name="sleep-cycle", sleep_cycle=True,
+                          event="system/policy.updated", interval="6h")
+        h = _SleepCycleHarness(tmp_path, [_row(10, "a")])
+        with _patch_history(h):
+            h.sched._spawn_sleep_cycle(monitor, [tmp_path])
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "added a fact"})
+
+        assert [event for event, _ in h.published] == [
+            "system/policy.updated",
+            "system/memory.updated",
+        ]
 
     def test_no_publish_when_not_updated(self, tmp_path, monitor):
         h = _SleepCycleHarness(tmp_path, [_row(10, "a")])

@@ -802,9 +802,15 @@ class MonitorScheduler:
             "bytes": int(result.get("bytes", 0) or 0),
             "urgent": bool(result.get("urgent", False)),
         }
-        published = self.publish(event, payload)
-        if event != "system/policy.updated":
-            self.publish("system/policy.updated", payload)
+        published = False
+        published_events = set()
+        for candidate in (event, "system/memory.updated", "system/policy.updated"):
+            if candidate in published_events:
+                continue
+            published_events.add(candidate)
+            ok = self.publish(candidate, payload)
+            if candidate == event:
+                published = ok
         if published:
             log.info("Monitor %s published %s (urgent=%s)",
                      monitor.name, event, payload["urgent"])
