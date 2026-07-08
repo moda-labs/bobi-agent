@@ -129,7 +129,7 @@ class TestDrainLoop:
         pushed = []
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 pushed.append(msg)
 
         def mock_formatter(event):
@@ -162,7 +162,7 @@ class TestDrainLoop:
         pushed = []
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 pushed.append(msg)
 
         register_local_inbox("test-session", _CaptureInbox())

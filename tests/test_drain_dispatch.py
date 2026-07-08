@@ -63,7 +63,7 @@ class TestDrainAutoDispatch:
         delivered = []
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 delivered.append(msg.text)
 
         def fake_formatter(event):

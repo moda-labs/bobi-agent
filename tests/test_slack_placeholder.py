@@ -269,7 +269,7 @@ class TestDrainChannelIntegration:
         from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 delivered.append(msg.text)
                 raise SystemExit
 
@@ -310,7 +310,7 @@ class TestDrainChannelIntegration:
         from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 delivered.append(msg.text)
                 raise SystemExit
 
@@ -349,7 +349,7 @@ class TestDrainChannelIntegration:
         from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 delivered.append(msg.text)
                 raise SystemExit
 
@@ -441,7 +441,7 @@ class TestDrainChannelIntegration:
         from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 delivered.append(msg.text)
                 raise SystemExit
 
@@ -487,7 +487,7 @@ class TestDrainChannelIntegration:
         from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 delivered.append(msg.text)
                 raise SystemExit
 
@@ -528,7 +528,7 @@ class TestDrainChannelIntegration:
         from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 delivered.append(msg.text)
                 raise SystemExit
 
