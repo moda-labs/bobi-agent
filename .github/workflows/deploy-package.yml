@@ -1,7 +1,7 @@
 name: Deploy package
 
 # CI for the bobi-deploy plugin package (repo-split phase 1). This whole file
-# moves to the private repo at cut time along with bobi_deploy/ — nothing here
+# moves to the private repo at cut time along with bobi_deploy/ - nothing here
 # may be load-bearing for the public product's own gates (those live in
 # ci.yml). Triggers mirror ci.yml so coverage is unchanged by the split.
 on:
@@ -27,11 +27,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: |
+            pyproject.toml
+            bobi_deploy/pyproject.toml
 
       - name: Install dependencies
         # bobi is a runtime dependency of the plugin (private imports public,
-        # never the reverse — tests/test_import_boundaries.py enforces it).
+        # never the reverse - tests/test_import_boundaries.py enforces it).
         run: pip install -e ".[dev]" -e ./bobi_deploy
 
       - name: Run bobi-deploy unit tests

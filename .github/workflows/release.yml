@@ -10,7 +10,7 @@ name: Release
 #   3. fleet                     → release-fleet.yml: deploy the Worker the canary
 #                                talks to, then deploy the canary from an image
 #                                built FROM that wheel (BOBI_BUILD=wheel) and
-#                                SMOKE it — a functional `ask` proving the agent
+#                                SMOKE it - a functional `ask` proving the agent
 #                                answers CANARY-OK end-to-end. THIS is the gate.
 #   4. publish                   needs fleet → upload the SAME wheel to PyPI
 #                                and update/smoke Homebrew.
@@ -180,7 +180,7 @@ jobs:
   # build the brain canaries FROM the just-built wheel and functionally smoke
   # them. A broken wheel/image fails here and blocks PyPI/Homebrew publish.
   # `smoked` is true only when the canary gate actually RAN (it is skipped
-  # when FLY_API_TOKEN is unset — fleet not wired).
+  # when FLY_API_TOKEN is unset - fleet not wired).
   fleet:
     name: Fleet gate
     needs: [subscription-login-smoke, build-wheel]
@@ -192,7 +192,7 @@ jobs:
     secrets: inherit
 
   # --------------------------------------------------------------------------
-  # Publish the SAME wheel the canary proved — gated on the fleet gate, NOT the
+  # Publish the SAME wheel the canary proved - gated on the fleet gate, NOT the
   # fleet roll. Trusted publishing (OIDC): this step must live in the top-level
   # workflow the PyPI publisher config names (release.yml), so it stays a
   # native job here.
@@ -216,7 +216,7 @@ jobs:
   # The GHCR base image (called workflow, private-bound). Gates, both required
   # because GHCR auth is the always-present GITHUB_TOKEN (no external backstop
   # like PyPI's trusted-publisher config):
-  #   * a canary that actually RAN (the fleet `smoked` output) — plain job
+  #   * a canary that actually RAN (the fleet `smoked` output) - plain job
   #     success also covers the fleet-not-wired skip;
   #   * a release-tag-shaped ref - a bare dispatch from a branch would bake an
   #     UNRELEASED wheel whose version collides with an already-published tag.

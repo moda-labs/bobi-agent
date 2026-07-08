@@ -26,7 +26,7 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
-        # Public product only — the bobi_deploy plugin's suite (and the
+        # Public product only - the bobi_deploy plugin's suite (and the
         # two-wheel install smoke) run in deploy-package.yml, which moves to
         # the private repo at cut time (repo-split phase 1).
         run: pip install -e ".[dev,kb]"
@@ -182,7 +182,7 @@ jobs:
           --timeout=60 -v
 
   # NOTE: the wrangler-dev integration job (Worker adapter under a real
-  # `wrangler dev`) lives in worker-integration.yml — the Worker runtime moves
+  # `wrangler dev`) lives in worker-integration.yml - the Worker runtime moves
   # to the private repo at cut time (repo-split phase 1), so its CI moves as a
   # whole file.
 

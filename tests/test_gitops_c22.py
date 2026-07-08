@@ -32,6 +32,8 @@ from pathlib import Path
 
 import yaml
 
+from tests.workflow_utils import workflow_on
+
 REPO = Path(__file__).resolve().parent.parent
 FLEET_SH = REPO / "scripts" / "fleet.sh"
 PROVISION_SH = REPO / "scripts" / "provision-instance.sh"
@@ -266,7 +268,7 @@ def test_teams_is_callable_and_not_release_triggered():
     image roll can precede it), NOT directly on a release. Standalone image-free
     team updates still run via a `deploy-*` tag or workflow_dispatch."""
     wf = _load(WF_TEAMS)
-    on = wf.get("on", wf.get(True))  # PyYAML parses bare `on:` as boolean True.
+    on = workflow_on(wf)
     # Reusable: release.yml calls it as its final step.
     assert "workflow_call" in on
     # No longer fires directly on a release — release.yml owns that ordering.
@@ -363,7 +365,7 @@ def _uses_blob(job: dict) -> str:
 
 def test_release_triggers_on_published_release():
     wf = _load(WF_RELEASE)
-    on = wf.get("on", wf.get(True))
+    on = workflow_on(wf)
     assert "published" in on["release"]["types"]
 
 
@@ -400,7 +402,7 @@ def test_release_publish_is_gated_on_the_canary():
     the SAME artifact the canary ran (no rebuild)."""
     jobs = _jobs(_load(WF_RELEASE))
     publish = jobs["publish"]
-    # Gated on the fleet gate — the called workflow whose build-canary job is
+    # Gated on the fleet gate - the called workflow whose build-canary job is
     # the functional canary (repo-split phase 1).
     assert publish["needs"] == "fleet"
     assert jobs["fleet"]["uses"] == "./.github/workflows/release-fleet.yml"

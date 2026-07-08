@@ -671,7 +671,7 @@ at cut time (repo-split phase 1):
   fleet `smoked` output). Builds the base image per arch natively (no
   QEMU) from the same wheel and the same resolved claude pin, then stitches
   `ghcr.io/moda-labs/bobi:<version>`; `:latest` moves only when the version is
-  the repo's latest non-prerelease release. Not in `publish`'s needs — an image
+  the repo's latest non-prerelease release. Not in `publish`'s needs - an image
   failure never blocks PyPI.
 - **update-homebrew** — `needs: [publish, build-wheel]`. Bumps the tap from the
   wheel-derived version and smokes bottle URLs after PyPI publish.

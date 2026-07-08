@@ -1,10 +1,10 @@
 """Release pipeline invariants across the split workflow files (repo-split
 phase 1): release.yml keeps the public jobs (smoke, wheel, PyPI, Homebrew) and
 calls release-fleet.yml (event-server deploy + canary gate) and
-release-image.yml (GHCR base image) — the two private-bound files that move
+release-image.yml (GHCR base image) - the two private-bound files that move
 whole at cut time."""
 
-from tests.workflow_utils import load_workflow
+from tests.workflow_utils import load_workflow, workflow_on
 
 
 def _release_jobs() -> dict:
@@ -17,11 +17,6 @@ def _fleet() -> dict:
 
 def _image_jobs() -> dict:
     return load_workflow("release-image.yml")["jobs"]
-
-
-def _on(workflow: dict) -> dict:
-    # PyYAML parses a bare `on:` key as boolean True (YAML 1.1).
-    return workflow.get("on", workflow.get(True))
 
 
 def _build_step(job: dict) -> dict:
@@ -41,14 +36,14 @@ def test_fleet_and_image_are_the_called_private_bound_workflows():
     assert jobs["fleet"]["secrets"] == "inherit"
     assert jobs["image"]["uses"] == "./.github/workflows/release-image.yml"
     for name in ("release-fleet.yml", "release-image.yml"):
-        assert "workflow_call" in _on(load_workflow(name)), (
-            f"{name} must be callable-only — it moves private at cut time"
+        assert "workflow_call" in workflow_on(load_workflow(name)), (
+            f"{name} must be callable-only - it moves private at cut time"
         )
 
 
 def test_pypi_publish_is_gated_on_the_fleet_gate_not_the_image():
     # PyPI is irreversible: publish waits on the canary gate. The GHCR image
-    # is deliberately NOT in its needs — an image failure never blocks PyPI.
+    # is deliberately NOT in its needs - an image failure never blocks PyPI.
     jobs = _release_jobs()
     assert jobs["publish"]["needs"] == "fleet"
     assert "image" not in str(jobs["publish"].get("needs"))
@@ -62,7 +57,7 @@ def test_image_publish_requires_a_canary_that_actually_ran():
     # anything when FLY_API_TOKEN is unset.
     assert "needs.fleet.outputs.smoked == 'true'" in job["if"]
     fleet = _fleet()
-    smoked = _on(fleet)["workflow_call"]["outputs"]["smoked"]
+    smoked = workflow_on(fleet)["workflow_call"]["outputs"]["smoked"]
     assert smoked["value"] == "${{ jobs.build-canary.outputs.smoked }}"
     canary = fleet["jobs"]["build-canary"]
     assert canary["outputs"]["smoked"] == "${{ steps.canary.outputs.smoked }}"

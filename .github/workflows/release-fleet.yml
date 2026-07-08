@@ -4,7 +4,7 @@ name: Release fleet gate
 # Cloudflare event server, then build the brain canaries FROM the release wheel
 # and functionally smoke them. Called from release.yml as the `fleet` job; the
 # `smoked` output is release.yml's publish gate. This whole file moves to the
-# private repo at cut time — the public release keeps wheel + PyPI + Homebrew
+# private repo at cut time - the public release keeps wheel + PyPI + Homebrew
 # and drops this gate (its release scope shrinks to the local product).
 on:
   workflow_call:

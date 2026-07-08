@@ -28,7 +28,7 @@ def _plugin_commands() -> frozenset[str]:
     cannot resolve these from entry-point metadata. Read the declarations from
     the plugin's own pyproject instead. When bobi_deploy/ leaves the tree at
     cut time this returns empty, and any doc still referencing a private
-    command fails the contract check — exactly the drift we want flagged.
+    command fails the contract check - exactly the drift we want flagged.
     """
     pyproject = REPO_ROOT / "bobi_deploy" / "pyproject.toml"
     if not pyproject.exists():

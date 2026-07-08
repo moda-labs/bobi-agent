@@ -4,7 +4,7 @@ name: Release base image
 # called from release.yml as the `image` job. Kept separate from the fleet
 # gate so an image-publish failure can never block the PyPI publish (which
 # gates on the fleet workflow, not this one). This whole file moves to the
-# private repo at cut time — the base image is a deployed-product artifact.
+# private repo at cut time - the base image is a deployed-product artifact.
 #
 # The caller gates this on a canary that actually RAN (fleet `smoked` output)
 # and a release-tag-shaped ref, both required because GHCR auth is the
