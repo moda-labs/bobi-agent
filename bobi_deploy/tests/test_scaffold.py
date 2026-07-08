@@ -1,4 +1,9 @@
-"""Tests for `bobi deploy-init` scaffolding (bobi/scaffold.py)."""
+"""Tests for `bobi deploy-init` scaffolding (bobi_deploy/scaffold.py).
+
+Invokes through `bobi.cli.main`, so these also prove the `bobi.commands`
+entry-point plugin wiring end-to-end (deploy-init only appears when the
+bobi-deploy package is installed).
+"""
 
 from pathlib import Path
 
@@ -6,7 +11,7 @@ import yaml
 import pytest
 from click.testing import CliRunner
 
-from bobi import scaffold
+from bobi_deploy import scaffold
 from bobi.cli import main
 
 

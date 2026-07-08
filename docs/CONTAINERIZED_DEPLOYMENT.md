@@ -8,9 +8,10 @@ instances, and the remaining scale-to-zero design, is tracked in issue #395.
 
 Pieces:
 
-- `bobi deploy <name>` / `destroy <name>` (`bobi/deploy.py`) — **the
-  one-instance primitive**; everything else is mechanics it drives or
-  orchestration that calls it
+- `bobi deploy <name>` / `destroy <name>` (`bobi_deploy/src/bobi_deploy/deploy.py`,
+  a separately-installable `bobi-deploy` package delivered into the CLI via
+  `bobi.commands` entry points) — **the one-instance primitive**; everything
+  else is mechanics it drives or orchestration that calls it
 - `deployments/<name>.yaml` (+ `defaults.yaml`) — per-instance operator config
 - `Dockerfile` — the image
 - `scripts/provision-instance.sh` + `scripts/destroy-instance.sh` — stand up / tear down one instance
@@ -529,7 +530,7 @@ The deploy job binds `environment: <tenant>`, dumps `toJSON(secrets)`, selects k
 with the `<TEAM>__` prefix, strips it, writes a temp env-file under `umask 077`, and
 hands it to `bobi deploy … --env-file`.
 
-**The reconcile** (`bobi/deploy.py`): on an existing app, deploy reads the live
+**The reconcile** (`bobi_deploy/deploy.py`): on an existing app, deploy reads the live
 Fly secret names (`fly secrets list`), then:
 - a live secret **satisfies the required check** — an update needn't re-supply what
   Fly already holds (kills the "re-paste the whole blob" friction);

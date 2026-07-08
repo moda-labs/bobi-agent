@@ -287,7 +287,7 @@ def secret_keys_for(project_path: Path, team: str, auth: str) -> list[str]:
     ANTHROPIC_API_KEY; subscription mode must NOT have it (it would override the
     OAuth creds). Mirrors `deploy._secret_sets` so the wiring matches the engine.
     """
-    from bobi.deploy import scan_declared_vars
+    from bobi.config import scan_declared_vars
 
     agent_yaml = project_path / "agents" / team / "agent.yaml"
     keys = [v for v in scan_declared_vars(agent_yaml)

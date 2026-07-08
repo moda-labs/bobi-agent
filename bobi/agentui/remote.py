@@ -6,6 +6,11 @@ would otherwise do by hand — resolve the Fly app (same precedence as
 `bobi deploy`), read the UI's port + token off the machine over `fly ssh`,
 start `fly proxy`, and open the browser. Reading the token live also means a
 token that rotated on the last restart just works.
+
+Scheduled for DELETION, not porting (#614/#690: deployed teams are administered
+via the control plane; the `ui <deployment>` tunnel dies with it). Until then
+this module lazily imports the bobi_deploy package — the ONE tolerated
+public->private edge, gone when this file is.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ DEFAULT_REMOTE_PORT = 8080
 
 
 def _fly() -> str:
-    from bobi.deploy import _fly_bin
+    from bobi_deploy.deploy import _fly_bin
     return _fly_bin()
 
 
@@ -37,7 +42,7 @@ def resolve_app(name: str | None, app: str | None,
         return app
     if not name:
         raise ValueError("a deployment name or --app is required")
-    from bobi.deploy import load_deploy_config
+    from bobi_deploy.deploy import load_deploy_config
     return load_deploy_config(project_path or Path.cwd(), name).app_name
 
 
@@ -131,7 +136,7 @@ def run(name: str | None = None, *, app: str | None = None,
         open_browser: bool = True, check: bool = False) -> int:
     """Resolve → fetch token/port → `fly proxy` → open browser (or, with
     ``check``, probe /api/dashboard once and exit)."""
-    from bobi import deploy
+    from bobi_deploy import deploy
     deploy.preflight_fly_or_exit()                  # flyctl installed + logged in
     target = resolve_app(name, app)
     if not deploy.fly_app_exists(target):

@@ -35,7 +35,7 @@ def test_resolve_app_explicit_wins():
 
 
 def test_resolve_app_via_deployment(monkeypatch):
-    import bobi.deploy as deploy
+    import bobi_deploy.deploy as deploy
     monkeypatch.setattr(deploy, "load_deploy_config",
                         lambda proj, name: types.SimpleNamespace(app_name=f"ci-{name}"))
     assert remote.resolve_app("canary", None) == "ci-canary"
@@ -78,7 +78,7 @@ class _FakeProc:
 
 
 def _patch_run(monkeypatch, *, exists=True, token="tok", rport=8080):
-    import bobi.deploy as deploy
+    import bobi_deploy.deploy as deploy
     monkeypatch.setattr(deploy, "preflight_fly_or_exit", lambda: None)
     monkeypatch.setattr(deploy, "fly_app_exists", lambda app: exists)
     monkeypatch.setattr(remote, "fetch_remote_port", lambda *a, **k: rport)

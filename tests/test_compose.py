@@ -479,12 +479,12 @@ def test_deploy_flatten_carries_overlay_workspace(project):
     # The real deploy-path regression: a `from:` overlay's workspace must ride the
     # flattened tarball, else the per-principal assistant-context.md never reaches
     # the box (and the assistant runs context-less).
-    from bobi import deploy
+    from bobi import build
     _team(project, "pa", 'version: "1.0.0"\nentry_point: assistant\n',
           workspace={"assistant-context.md": "TEMPLATE"})
     _team(project, "zpa", 'from: pa\nversion: "1.0.0"\nentry_point: assistant\n',
           workspace={"assistant-context.md": "ZACHS"})
-    flat = deploy.resolve_team_dir(project, "zpa")
+    flat = build.resolve_team_dir(project, "zpa")
     assert (flat / "workspace" / "assistant-context.md").read_text() == "ZACHS"
 
 
@@ -508,12 +508,12 @@ def test_reject_path_from_allows_name_ref(tmp_path):
 
 
 def test_deploy_resolve_team_dir_flattens_chain(project):
-    from bobi import deploy
+    from bobi import build
     _team(project, "core", 'version: "1.0.0"\nentry_point: director\n'
           'build:\n  apt: [nodejs]\n', tools={"github.md": "gh"})
     _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
           'build:\n  npm: [codex]\n', tools={"linear.md": "lin"})
-    out = deploy.resolve_team_dir(project, "moda")
+    out = build.resolve_team_dir(project, "moda")
     cfg = yaml.safe_load((out / "agent.yaml").read_text())
     assert "from" not in cfg
     assert cfg["build"]["apt"] == ["nodejs"] and cfg["build"]["npm"] == ["codex"]
@@ -523,9 +523,9 @@ def test_deploy_resolve_team_dir_flattens_chain(project):
 
 
 def test_deploy_resolve_team_dir_passthrough_no_from(project):
-    from bobi import deploy
+    from bobi import build
     src = _team(project, "solo", 'version: "1.0.0"\nentry_point: director\n')
-    out = deploy.resolve_team_dir(project, "solo")
+    out = build.resolve_team_dir(project, "solo")
     assert out == src.resolve()  # unchanged when there's no `from:`
 
 

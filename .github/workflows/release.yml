@@ -216,7 +216,10 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install bobi
-        run: pip install -e .
+        # bobi_deploy: the agent-UI reachability gate tunnels in exactly as
+        # `bobi agent <name> ui <deployment>` does, which drives the deploy
+        # engine (fly resolution) — a plugin package post-carve-out.
+        run: pip install -e . -e ./bobi_deploy
 
       - name: Build the brain canary images from the wheel + smoke them
         id: canary

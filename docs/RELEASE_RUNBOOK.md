@@ -4,6 +4,14 @@ This is the production bugfix release recipe for `bobi` plus the Moda
 agent-team fleet. Use it when a fix has merged to `main` and needs to reach the
 Fly-hosted agents.
 
+> **Repo-split phase 1 caveat:** the deploy commands now live in the separate
+> `bobi-deploy` package (`bobi_deploy/`, its own wheel), which is NOT published
+> to PyPI. A `uv tool install bobi` from the next release therefore has no
+> `bobi deploy` - decide the bobi-deploy distribution channel (private index
+> per the split plan, or temporary PyPI publish) before cutting a release that
+> external deploy users depend on. CI and this runbook's fleet steps are
+> unaffected (they install both packages from the checkout).
+
 ## 1. Sync `bobi`
 
 ```bash

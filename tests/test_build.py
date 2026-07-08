@@ -11,7 +11,6 @@ from textwrap import dedent
 import pytest
 
 from bobi import build as B
-from bobi import deploy as D
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -247,14 +246,6 @@ def test_stage_team_deps_refuses_guide_deps_without_agent(tmp_path):
                           allow_agent=False)
 
 
-def test_deploy_guide_dep_error_points_at_bobi_build(tmp_path):
-    """The deploy-side wrap of GuideDepsError names the replacement command."""
-    repo = _make_repo(tmp_path, GUIDE_TEAM)
-    cfg = D.DeployConfig(name="x", team=str(repo / "agents" / "eng-team"))
-    with pytest.raises(D.DeployError, match=r"bobi build"):
-        D._render_team_deps_into_context(repo, cfg, assets=None)
-
-
 # --- build modes ---------------------------------------------------------------
 
 def test_binary_mode_pins_pypi_version(tmp_path, recorder, monkeypatch):
@@ -269,10 +260,10 @@ def test_binary_mode_pins_pypi_version(tmp_path, recorder, monkeypatch):
     (pkg / "scripts" / "provision-instance.sh").write_text("#!/bin/sh\n")
     (pkg / "scripts" / "destroy-instance.sh").write_text("#!/bin/sh\n")
     monkeypatch.setattr(
-        D, "find_repo_root",
-        lambda p=None: (_ for _ in ()).throw(D.DeployError("no checkout")))
-    monkeypatch.setattr(D, "_packaged_deploy_dir", lambda: pkg)
-    monkeypatch.setattr(D, "_bobi_version", lambda: "9.9.9")
+        B, "find_repo_root",
+        lambda p=None: (_ for _ in ()).throw(B.BuildError("no checkout")))
+    monkeypatch.setattr(B, "_packaged_deploy_dir", lambda: pkg)
+    monkeypatch.setattr(B, "_bobi_version", lambda: "9.9.9")
 
     result = B.build_team_image(str(team), project_path=tmp_path / "elsewhere")
     (cmd,) = _builds(recorder)
@@ -295,7 +286,7 @@ def test_explicit_bobi_version_wins(tmp_path, recorder, monkeypatch):
     """The wrapper's BOBI_VERSION contract: an explicit pin overrides the
     installed version (which may be unpublished in a dev checkout)."""
     repo = _make_repo(tmp_path, BAKING_TEAM)
-    monkeypatch.setattr(D, "_bobi_version", lambda: "0.0.0.dev0")
+    monkeypatch.setattr(B, "_bobi_version", lambda: "0.0.0.dev0")
     B.build_team_image(str(repo / "agents" / "eng-team"), project_path=repo,
                        build_mode="pypi", bobi_version="0.38.0")
     (cmd,) = _builds(recorder)
@@ -304,7 +295,7 @@ def test_explicit_bobi_version_wins(tmp_path, recorder, monkeypatch):
 
 def test_source_checkout_can_force_pypi_mode(tmp_path, recorder, monkeypatch):
     repo = _make_repo(tmp_path, BAKING_TEAM)
-    monkeypatch.setattr(D, "_bobi_version", lambda: "9.9.9")
+    monkeypatch.setattr(B, "_bobi_version", lambda: "9.9.9")
     B.build_team_image(str(repo / "agents" / "eng-team"), project_path=repo,
                        build_mode="pypi")
     (cmd,) = _builds(recorder)
@@ -385,8 +376,8 @@ def test_cli_build_maps_errors(tmp_path, monkeypatch):
 
 
 def test_cli_build_maps_compose_and_deploy_errors(tmp_path, monkeypatch):
-    """ComposeError (bad from:/catalog ref) and DeployError (e.g. version
-    lookup) must surface as clean click errors, not tracebacks."""
+    """ComposeError (bad from:/catalog ref) must surface as a clean click
+    error, not a traceback."""
     from click.testing import CliRunner
 
     from bobi.cli import main as cli_main
@@ -399,3 +390,68 @@ def test_cli_build_maps_compose_and_deploy_errors(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli_main, ["build", "./my-team"])
     assert result.exit_code != 0
     assert "unknown base" in result.output
+
+
+# --- repo + build-asset resolution (moved with the helpers from deploy.py) ----
+
+def test_find_repo_root_walks_up(tmp_path):
+    repo = _make_repo(tmp_path, GENERIC_TEAM)
+    deep = repo / "agents" / "eng-team"
+    assert B.find_repo_root(deep) == repo
+
+
+def test_find_repo_root_raises_without_scripts(tmp_path):
+    with pytest.raises(B.BuildError, match="not a bobi checkout"):
+        B.find_repo_root(tmp_path)
+
+
+def test_resolve_assets_source_mode_in_a_checkout(tmp_path):
+    """In a checkout, build from source (repo Dockerfile)."""
+    repo = _make_repo(tmp_path, GENERIC_TEAM)
+    a = B.resolve_assets(repo, tmp_path)
+    assert a.mode == "source"
+    assert a.build_context == repo
+    assert a.dockerfile == repo / "Dockerfile"
+    assert a.build_args == {}
+    assert a.provision_sh == repo / "scripts" / "provision-instance.sh"
+
+
+def test_resolve_assets_binary_mode_from_packaged(tmp_path, monkeypatch):
+    """With no checkout, build from the bundled wheel assets (PyPI image)."""
+    # A fake packaged _deploy dir (what the wheel ships).
+    pkg = tmp_path / "_deploy"
+    (pkg / "scripts").mkdir(parents=True)
+    (pkg / "docker").mkdir()
+    (pkg / "Dockerfile").write_text("FROM scratch\n")
+    (pkg / "docker" / "docker-entrypoint.sh").write_text("#!/bin/sh\n")
+    (pkg / "scripts" / "provision-instance.sh").write_text("#!/bin/sh\n")
+    (pkg / "scripts" / "destroy-instance.sh").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(B, "find_repo_root",
+                        lambda p=None: (_ for _ in ()).throw(B.BuildError("x")))
+    monkeypatch.setattr(B, "_packaged_deploy_dir", lambda: pkg)
+    monkeypatch.setattr(B, "_bobi_version", lambda: "9.9.9")
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    a = B.resolve_assets(tmp_path / "elsewhere", staging)
+    assert a.mode == "binary"
+    assert a.build_args == {"BOBI_BUILD": "pypi", "BOBI_VERSION": "9.9.9"}
+    # build context assembled: Dockerfile + docker/ copied into staging
+    assert (a.build_context / "Dockerfile").exists()
+    assert (a.build_context / "docker" / "docker-entrypoint.sh").exists()
+    assert a.provision_sh == pkg / "scripts" / "provision-instance.sh"
+
+
+def test_local_package_dir_requires_agent_yaml(tmp_path):
+    repo = _make_repo(tmp_path, GENERIC_TEAM)
+    with pytest.raises(B.BuildError, match="not found"):
+        B.local_package_dir(repo, "nope")
+
+
+def test_local_package_dir_accepts_a_path(tmp_path):
+    repo = _make_repo(tmp_path, GENERIC_TEAM)
+    team = tmp_path / "somewhere" / "myteam"
+    team.mkdir(parents=True)
+    (team / "agent.yaml").write_text("agent: myteam\n")
+    assert B.local_package_dir(repo, str(team)) == team.resolve()
+

@@ -738,3 +738,22 @@ def test_run_requires_checks_command_not_found():
 def test_run_requires_checks_empty():
     from bobi.config import run_requires_checks
     assert run_requires_checks([]) == []
+
+
+# --- package-file env-ref scanning (scan_* — the not-yet-installed variant) ---
+
+def test_scan_required_vars_excludes_defaulted(tmp_path):
+    from bobi.config import scan_required_vars
+
+    y = tmp_path / "agent.yaml"
+    y.write_text("a: ${REQUIRED}\nb: ${OPTIONAL:-x}\nc: literal\n")
+    assert scan_required_vars(y) == ["REQUIRED"]
+
+
+def test_scan_declared_vars_keeps_optional_refs(tmp_path):
+    from bobi.config import scan_declared_vars
+
+    y = tmp_path / "agent.yaml"
+    y.write_text("a: ${REQUIRED}\nb: ${OPTIONAL:-x}\nc: ${REQUIRED}\n")
+    assert scan_declared_vars(y) == ["REQUIRED", "OPTIONAL"]
+

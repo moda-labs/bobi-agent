@@ -305,7 +305,10 @@ always-on shift is the real productivity unlock, and Bobi makes it one command.
 an always-on instance on a cloud VM - no Dockerfile to write, no server to
 configure.
 
-**Prerequisites.** Cloud deployment targets [Fly](https://fly.io) Machines, so you
+**Prerequisites.** The deploy commands ship in the separate `bobi-deploy`
+package (this repo's `bobi_deploy/`; from a checkout: `pip install ./bobi_deploy`) -
+installing it alongside `bobi` adds `deploy`/`deploy-init`/`destroy` to the CLI.
+Cloud deployment targets [Fly](https://fly.io) Machines, so you also
 need a Fly.io account and a Fly API token (`flyctl` authenticated via
 `fly auth login`). First time on Fly? `bobi deploy` preflights your setup and
 prints exactly what to do - install `flyctl`, sign up or log in, and clear the
