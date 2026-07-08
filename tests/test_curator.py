@@ -360,7 +360,7 @@ def _run_drain_one_batch(events):
     delivered = []
 
     class _CaptureInbox:
-        def push(self, msg):
+        def push(self, msg, priority=False):
             delivered.append(msg)
 
     register_local_inbox("test-policy-session", _CaptureInbox())

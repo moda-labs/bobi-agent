@@ -50,7 +50,7 @@ class Message:
     reply_to: str = ""
     # Invoked when the session finishes processing this message. The drain
     # loop wires it to the event-server cursor so an event is ACKed only once
-    # processed, never at inbox-push time — a restart replays anything still
+    # processed, never at inbox-push time - a restart replays anything still
     # queued (#688). In-memory only; never crosses the wire.
     on_done: Callable[[], None] | None = field(
         default=None, repr=False, compare=False)
@@ -88,7 +88,7 @@ class Inbox:
     """In-memory message queue drained by a session's run loop.
 
     Two delivery classes (#688): priority (chat channel messages, where a
-    human is waiting) and normal (everything else — bulk webhooks, agent
+    human is waiting) and normal (everything else - bulk webhooks, agent
     inbox messages). Priority messages are received first; ordering is FIFO
     within each class, enforced by a monotonic tie-break counter so equal
     priorities never compare ``Message`` objects.

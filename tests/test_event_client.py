@@ -341,6 +341,73 @@ class TestAckThrough:
         assert _load_cursor(cursor_path) == 0  # unchanged
 
 
+class TestReconnectReplayFloor:
+    """#688: with ACK-after-processing the saved cursor trails delivery by the
+    whole unprocessed backlog, so reconnecting with the cursor alone would
+    make every routine CF cycle replay events still queued in this process
+    (duplicate turns, duplicate chat replies). last_seen must be floored at
+    the highest seq already enqueued in-process; after a real restart the
+    floor is 0 again and the cursor drives the full replay."""
+
+    def _client(self, tmp_path):
+        from bobi.events.client import EventServerClient
+        return EventServerClient(
+            server_url="http://localhost:9999",
+            deployment_id="dep-1",
+            api_key="key-1",
+            cursor_path=tmp_path / "cursor.json",
+        )
+
+    def _connect_capturing(self, client, monkeypatch):
+        from bobi.events import client as client_mod
+        captured = {}
+
+        class FakeWSApp:
+            def __init__(self, url, **kwargs):
+                captured["url"] = url
+                captured["on_message"] = kwargs.get("on_message")
+
+            def run_forever(self, **kwargs):
+                return
+
+        monkeypatch.setattr(client_mod.websocket, "WebSocketApp", FakeWSApp)
+        client._connect()
+        return captured
+
+    def test_reconnect_floors_last_seen_at_enqueued_seq(self, tmp_path, monkeypatch):
+        from bobi.events.client import _save_cursor
+        client = self._client(tmp_path)
+        _save_cursor(5, client.cursor_path)
+        client._max_enqueued_seq = 12  # events 6..12 delivered, not yet processed
+
+        captured = self._connect_capturing(client, monkeypatch)
+
+        assert "last_seen=12" in captured["url"]
+
+    def test_fresh_process_uses_saved_cursor(self, tmp_path, monkeypatch):
+        from bobi.events.client import _save_cursor
+        client = self._client(tmp_path)
+        _save_cursor(5, client.cursor_path)  # restart: nothing enqueued yet
+
+        captured = self._connect_capturing(client, monkeypatch)
+
+        assert "last_seen=5" in captured["url"]
+
+    def test_on_message_tracks_enqueued_seq(self, tmp_path, monkeypatch):
+        from bobi.events import client as client_mod
+        monkeypatch.setattr(client_mod, "_log_event", lambda *a, **k: None)
+        client = self._client(tmp_path)
+        captured = self._connect_capturing(client, monkeypatch)
+
+        captured["on_message"](None, json.dumps(
+            {"type": "event", "data": {"type": "x.y", "seq": 9}}))
+        assert client._max_enqueued_seq == 9
+        # An older replay must not move the floor backwards.
+        captured["on_message"](None, json.dumps(
+            {"type": "replay", "data": {"type": "x.y", "seq": 7}}))
+        assert client._max_enqueued_seq == 9
+
+
 class TestRecordDisconnect:
     """_record_disconnect keeps routine CF-cycle reconnects quiet but flags
     genuine flapping. A long-lived connection that CF cycles (hibernation /

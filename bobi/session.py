@@ -180,7 +180,7 @@ def _emit_session_unreachable_alert(
 def _ack_message(msg: Message) -> None:
     """Confirm a fully-processed message so its event-server cursor advances.
 
-    Only called on paths where the message was actually processed (#688) —
+    Only called on paths where the message was actually processed (#688) -
     a dropped or failed message must not ack, so a restart replays it.
     Ack failure is non-fatal: the cursor stays behind and the event is
     re-delivered after a restart (at-least-once).
@@ -709,6 +709,17 @@ class Session:
 
         return self._last_response
 
+    async def _ack_processed(self, msg: Message) -> None:
+        """Run the message ack off the event loop.
+
+        The ack ends in real I/O (cursor-file write + WS send in
+        ``ack_through``); a blocked socket must never freeze this session's
+        event loop, so it runs on the executor like ``inbox.recv``.
+        """
+        if msg.on_done is None:
+            return
+        await asyncio.get_running_loop().run_in_executor(None, _ack_message, msg)
+
     async def _process_message(self, msg: Message) -> None:
         """Wait for ready state, inject a message, and optionally respond."""
         wait_started = time.monotonic()
@@ -777,7 +788,7 @@ class Session:
             self._rotate_reason = "manual"
             if msg.wait:
                 self.inbox.respond(msg, "compaction requested; rotating at next idle")
-            _ack_message(msg)
+            await self._ack_processed(msg)
             return
 
         try:
@@ -815,7 +826,7 @@ class Session:
 
             if msg.wait:
                 self.inbox.respond(msg, response)
-            _ack_message(msg)
+            await self._ack_processed(msg)
         except Exception as e:
             # No ack: the message was not processed, so a restart replays it.
             log.error(f"Inbox processing failed for '{self.name}': {e}")

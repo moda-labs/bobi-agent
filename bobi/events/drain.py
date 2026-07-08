@@ -96,70 +96,86 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
     return result
 
 
+# A pending map this large means the cursor floor has been pinned for a long
+# time (a message dropped un-acked, or a no-inbox drop) - warn so a wedged
+# watermark is visible in logs instead of surfacing as a giant replay later.
+_WATERMARK_PENDING_WARN = 512
+
+
 class _AckWatermark:
     """ACK-after-processing cursor tracker (#688).
 
     The server treats an ACK of seq N as "everything through N is processed",
-    and chat priority makes messages complete out of push order — so acking
+    and chat priority makes messages complete out of push order - so acking
     the seq of whatever finished last could silently discard older events
-    still queued in the inbox. Batches register here in arrival (ascending
-    seq) order; the watermark acks the highest seq whose batch and every
-    batch below it have fully completed.
+    still queued in the inbox. The watermark acks the highest seq whose batch
+    and every batch below it have fully completed.
+
+    Each batch is a refcount: open_batch() takes one reference (released by
+    close()), attach() takes one per pushed message (released by its done
+    callback). A batch is complete at zero. A batch that never completes (a
+    message dropped while the session is stopped/error) deliberately pins the
+    floor so a restart replays it.
     """
 
     def __init__(self, ack: Callable[[int], None]) -> None:
         self._ack = ack
         self._lock = threading.Lock()
-        # seq -> [outstanding message count, closed]; insertion order is
-        # ascending seq because batches arrive in seq order.
-        self._batches: dict[int, list] = {}
-        self._acked = 0
+        self._pending: dict[int, int] = {}  # seq -> outstanding references
+        self._acked = 0    # newest ackable seq decided so far
+        self._sent = 0     # last seq actually handed to self._ack
+        self._sending = False
 
     def open_batch(self, seq: int) -> "_BatchAck":
-        with self._lock:
-            # A reconnect replay can re-deliver a seq that is still pending:
-            # fold it into the existing entry rather than losing its counts.
-            entry = self._batches.setdefault(seq, [0, False])
-            entry[1] = False
+        self._add(seq)
         return _BatchAck(self, seq)
 
-    def _attach(self, seq: int) -> None:
+    def _add(self, seq: int) -> None:
         with self._lock:
-            entry = self._batches.get(seq)
-            if entry is not None:
-                entry[0] += 1
+            self._pending[seq] = self._pending.get(seq, 0) + 1
+            if len(self._pending) == _WATERMARK_PENDING_WARN:
+                log.warning(
+                    "Ack watermark has %d outstanding batches - cursor "
+                    "pinned near seq %d (a message was likely dropped "
+                    "un-acked; a restart will replay from there)",
+                    len(self._pending), min(self._pending))
 
-    def _complete(self, seq: int) -> None:
+    def _done(self, seq: int) -> None:
         with self._lock:
-            entry = self._batches.get(seq)
-            if entry is not None:
-                entry[0] -= 1
-            self._ack_ready_locked()
+            if seq in self._pending:
+                self._pending[seq] -= 1
+            # Ascending scan (NOT insertion order: a reconnect replay can
+            # register a lower seq after a higher one): pop fully-completed
+            # batches until the first still-outstanding seq holds the floor.
+            for s in sorted(self._pending):
+                if self._pending[s] <= 0:
+                    del self._pending[s]
+                    self._acked = max(self._acked, s)
+                else:
+                    break
+        self._flush()
 
-    def _close(self, seq: int) -> None:
-        with self._lock:
-            entry = self._batches.get(seq)
-            if entry is not None:
-                entry[1] = True
-            self._ack_ready_locked()
+    def _flush(self) -> None:
+        """Send the newest ackable seq via self._ack, outside the state lock.
 
-    def _ack_ready_locked(self) -> None:
-        """Pop leading fully-completed batches and ack the highest one.
-
-        Acking inside the lock keeps acks strictly increasing; the callback
-        is cheap (a tiny cursor-file write and a WS frame).
+        The callback does real I/O (cursor-file write + WS send), and a
+        blocked socket must never stall whoever holds the state lock - the
+        drain thread and the session loop both take it on hot paths. One
+        sender at a time; a newer target decided mid-send is picked up by
+        the loop, so sends stay strictly increasing.
         """
-        target = 0
-        for seq in list(self._batches):
-            outstanding, closed = self._batches[seq]
-            if closed and outstanding <= 0:
-                target = seq
-                del self._batches[seq]
-            else:
-                break
-        if target > self._acked:
-            self._acked = target
-            self._ack(target)
+        while True:
+            with self._lock:
+                if self._sending or self._sent == self._acked:
+                    return
+                self._sending = True
+                target = self._acked
+            try:
+                self._ack(target)
+            finally:
+                with self._lock:
+                    self._sent = target
+                    self._sending = False
 
 
 class _BatchAck:
@@ -171,20 +187,20 @@ class _BatchAck:
 
     def attach(self) -> Callable[[], None]:
         """Register one pushed message; returns its once-only done callback."""
-        self._tracker._attach(self._seq)
-        called = threading.Event()
+        self._tracker._add(self._seq)
+        called = [False]
 
         def _done() -> None:
-            if called.is_set():
+            if called[0]:
                 return
-            called.set()
-            self._tracker._complete(self._seq)
+            called[0] = True
+            self._tracker._done(self._seq)
 
         return _done
 
     def close(self) -> None:
-        """No more messages will attach; an empty batch completes now."""
-        self._tracker._close(self._seq)
+        """Release the batch's own reference; an empty batch completes now."""
+        self._tracker._done(self._seq)
 
 
 def drain_loop(session_name: str, queue: SimpleQueue | None = None,
@@ -204,7 +220,7 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
             annotated so the LLM knows a workflow was already launched.
         cursor_ack: Optional callback invoked with the highest safe seq
             number once every message pushed for that seq (and every seq
-            below it) has been PROCESSED by the session — not merely pushed
+            below it) has been PROCESSED by the session - not merely pushed
             into its in-memory inbox. A restart therefore replays anything
             still queued instead of destroying it (#278, #688).
     """
@@ -247,7 +263,7 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
             # batch_ack is deliberately never closed: the seq stays
             # outstanding, holding the ack floor so the server replays these
             # events after a restart instead of losing them.
-            log.warning("No local inbox for %s — dropping %d event(s) "
+            log.warning("No local inbox for %s - dropping %d event(s) "
                         "(seq<=%d, not ACKed; replayed after restart)",
                         session_name, len(batch), max_seq)
             if stop_after:
@@ -297,13 +313,6 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 ))
             else:
                 external.append(e)
-
-        if not external:
-            if batch_ack:
-                batch_ack.close()
-            if stop_after:
-                return
-            continue
 
         # Single pass: auto-dispatch + group by delivery class. Chat events
         # are pushed as priority messages (#688): a human is waiting on

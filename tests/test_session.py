@@ -341,7 +341,7 @@ class TestMessageAck:
 
         await session._process_message(msg)
 
-        assert acked == [], "dropped message acked — restart would not replay it"
+        assert acked == [], "dropped message acked - restart would not replay it"
 
     @pytest.mark.asyncio
     async def test_failed_turn_does_not_ack(self, session):

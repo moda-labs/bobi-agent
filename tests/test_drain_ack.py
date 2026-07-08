@@ -1,7 +1,7 @@
 """ACK-after-processing drain tests (#688).
 
 The drain must not ACK the event-server cursor when it pushes a batch into
-the session inbox — only when the session finishes processing the pushed
+the session inbox - only when the session finishes processing the pushed
 message(s). Otherwise a restart destroys every queued-but-unprocessed
 message: the server believes them delivered and never replays them.
 
@@ -20,7 +20,7 @@ class _ScriptedQueue:
     """Yields pre-scripted batches to drain_loop, then stops the loop.
 
     drain_loop forms a batch from one blocking get() plus get_nowait() until
-    empty() — so each inner list here becomes exactly one delivered batch.
+    empty() - so each inner list here becomes exactly one delivered batch.
     """
 
     def __init__(self, batches):
@@ -81,7 +81,7 @@ def _bulk(seq, text="bulk event"):
 
 
 def _chat(seq, text="chat message"):
-    # An unknown source has no channel handler — passes through prepare.
+    # An unknown source has no channel handler - passes through prepare.
     return {"type": "chat.message", "text": text, "delivery": "chat",
             "source": "testchan", "seq": seq}
 
@@ -90,7 +90,7 @@ class TestAckAfterProcessing:
     def test_no_ack_at_push_time(self):
         inbox, acks = _run_drain([[_bulk(5)]])
         assert len(inbox.messages) == 1
-        assert acks == [], "cursor ACKed at push time — restart loses the message"
+        assert acks == [], "cursor ACKed at push time - restart loses the message"
         inbox.messages[0].on_done()
         assert acks == [5]
 
@@ -101,7 +101,7 @@ class TestAckAfterProcessing:
         assert acks == [5]
 
     def test_batch_with_nothing_pushed_acks_immediately(self):
-        # An inbox event with empty text pushes nothing — the batch is done
+        # An inbox event with empty text pushes nothing - the batch is done
         # the moment the drain finishes with it.
         events = [{"source": "inbox", "type": "inbox/ack-test",
                    "payload": {"text": ""}, "seq": 7}]
@@ -133,7 +133,7 @@ class TestAckAfterProcessing:
 class TestAckWatermark:
     def test_out_of_order_completion_holds_ack_floor(self):
         # Chat (seq 20) jumps the queue and completes before bulk (seq 10).
-        # Acking 20 then would tell the server the bulk event was processed —
+        # Acking 20 then would tell the server the bulk event was processed -
         # a restart would lose it. The watermark must hold until 10 completes.
         inbox, acks = _run_drain([[_bulk(10)], [_chat(20)]])
         assert len(inbox.messages) == 2
@@ -168,13 +168,54 @@ class TestChatPriorityDelivery:
         assert inbox.priorities == [False, True]
 
     def test_agent_inbox_messages_are_not_priority(self):
-        # Only chat-class external events jump the queue — agent-to-agent
+        # Only chat-class external events jump the queue - agent-to-agent
         # inbox messages keep normal ordering.
         events = [{"source": "inbox", "type": "inbox/ack-test",
                    "payload": {"id": "m1", "sender": "peer", "text": "hi"},
                    "seq": 3}]
         inbox, _ = _run_drain([events])
         assert inbox.priorities == [False]
+
+
+class TestWatermarkReplayOrdering:
+    """A reconnect replay can register a LOWER seq after a higher pending one
+    (a wedged batch holds the floor, the server replays, and the replay's
+    drain batches draw different boundaries). The scan must be by ascending
+    seq, not registration order, or the higher seq acks past the lower."""
+
+    def test_lower_seq_registered_late_still_holds_the_floor(self):
+        from bobi.events.drain import _AckWatermark
+
+        acks = []
+        tracker = _AckWatermark(acks.append)
+        b10 = tracker.open_batch(10)
+        done10 = b10.attach()
+        b10.close()
+        b8 = tracker.open_batch(8)  # replayed older events, registered later
+        done8 = b8.attach()
+        b8.close()
+
+        done10()
+        assert acks == [], "acked seq 10 past the unprocessed replayed seq 8"
+        done8()
+        assert acks == [10]
+
+    def test_refolded_replay_batch_shares_the_seq_refcount(self):
+        from bobi.events.drain import _AckWatermark
+
+        acks = []
+        tracker = _AckWatermark(acks.append)
+        first = tracker.open_batch(4)
+        done_a = first.attach()
+        first.close()
+        replay = tracker.open_batch(4)  # same seq re-delivered
+        done_b = replay.attach()
+        replay.close()
+
+        done_a()
+        assert acks == []
+        done_b()
+        assert acks == [4]
 
 
 class TestCursorReplaySimulation:
@@ -202,7 +243,7 @@ class TestCursorReplaySimulation:
             unregister_local_inbox("cursor-test")
 
         assert _load_cursor(cursor_path) == 3, (
-            "cursor advanced before processing — a restart here would "
+            "cursor advanced before processing - a restart here would "
             "permanently lose the queued message")
         inbox.messages[0].on_done()
         assert _load_cursor(cursor_path) == 8

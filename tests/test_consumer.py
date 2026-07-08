@@ -223,7 +223,7 @@ class TestDrainLoopWithReactor:
 
 class TestCursorAckAfterDelivery:
     """cursor_ack fires only after the session PROCESSES the pushed message
-    (#278, #688) — never at push time, so a restart replays queued messages.
+    (#278, #688) - never at push time, so a restart replays queued messages.
     Deeper coverage (watermark, out-of-order completion) in test_drain_ack.py."""
 
     def test_cursor_ack_called_with_max_seq_after_processing(self):
@@ -267,7 +267,7 @@ class TestCursorAckAfterDelivery:
         finally:
             unregister_local_inbox("test-ack-zero")
 
-        # An unsequenced batch has no cursor to advance — no ack wiring.
+        # An unsequenced batch has no cursor to advance - no ack wiring.
         assert inbox.messages[0].on_done is None
         assert acked == []
 
