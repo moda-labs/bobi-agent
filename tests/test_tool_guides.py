@@ -108,6 +108,13 @@ def _split_invocation(invocation: str) -> list[str]:
         return invocation.split()
 
 
+def test_linear_setup_documents_worker_webhook_secret():
+    text = (REPO_ROOT / "skills" / "linear-setup.md").read_text()
+    assert "<event-server-url>/webhooks/linear" in text
+    assert "LINEAR_WEBHOOK_SECRET" in text
+    assert "wrangler secret put LINEAR_WEBHOOK_SECRET" in text
+
+
 def _extract_bobi_tokens(line: str) -> tuple[str, ...] | None:
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
