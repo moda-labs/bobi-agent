@@ -36,9 +36,12 @@ on:
       # --render), which pulls in the harness + the brain registry. (#428 Stage 3)
       - "bobi/dep_bootstrap.py"
       - "bobi/brain/**"
-      # The wrapper drives `bobi build` (#610), which routes through the
-      # deploy asset/team-resolution helpers and the CLI.
+      # The wrapper drives `bobi build` (#610), which lives in the deploy
+      # plugin (#707) over the public team-resolution helpers.
       - "bobi/build.py"
+      - "bobi_deploy/src/bobi_deploy/build.py"
+      - "bobi_deploy/src/bobi_deploy/cli.py"
+      - "bobi_deploy/pyproject.toml"
       - "bobi_deploy/src/bobi_deploy/deploy.py"
       - "bobi/registry.py"
       - "bobi/cli.py"
@@ -61,9 +64,10 @@ jobs:
           python-version: "3.11"
 
       # build_render imports bobi.config (needs pyyaml); install the package
-      # so `python -m bobi.build_render` resolves on the runner.
-      - name: Install bobi (for the renderer)
-        run: pip install -e .
+      # so `python -m bobi.build_render` resolves on the runner. The deploy
+      # plugin brings the `bobi build` command itself (#707).
+      - name: Install bobi (for the renderer + the build command)
+        run: pip install -e . -e ./bobi_deploy
 
       - name: Build team images (no push — verify the build + requires gate)
         env:

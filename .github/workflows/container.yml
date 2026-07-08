@@ -25,7 +25,9 @@ on:
       - "bobi/cli.py"
       - "bobi_deploy/src/bobi_deploy/deploy.py"
       - "bobi/registry.py"
-      - "tests/integration/test_bobi_build.py"
+      - "bobi_deploy/src/bobi_deploy/build.py"
+      - "bobi_deploy/src/bobi_deploy/cli.py"
+      - "bobi_deploy/tests/integration/test_bobi_build.py"
       - ".github/workflows/container.yml"
   pull_request:
     branches: [main]
@@ -77,7 +79,9 @@ jobs:
       # conftest under tests/integration imports bobi, so the package must
       # be importable on the runner even though the tests only shell out to docker.
       - name: Install test runner
-        run: pip install -e ".[dev]"
+        # bobi_deploy: `bobi build` (and its integration test) live in the
+        # deploy plugin (#707).
+        run: pip install -e ".[dev]" -e ./bobi_deploy
 
       - name: Build instance image
         run: docker build -t bobi:ci .
@@ -89,6 +93,12 @@ jobs:
         env:
           BOBI_TEST_IMAGE: bobi:ci
         run: pytest tests/integration/test_container_image.py -m "docker and not live" -v --timeout=400
+
+      - name: bobi build integration (team image from a declaration)
+        # #610 acceptance, moved private with the engine (#707). Runs here -
+        # not in deploy-package.yml - because it needs docker and reuses the
+        # layer cache warmed by the image build above.
+        run: pytest bobi_deploy/tests/integration/test_bobi_build.py -m docker -v --timeout=600
 
       # The live round-trip spins up an EPHEMERAL event server (the real Worker
       # via wrangler dev) so CI never touches a production deployment. It needs

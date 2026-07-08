@@ -5,7 +5,8 @@
 # For each team dir that bakes anything (declarative `build:` or a guide-only
 # dependency), run `bobi build` to produce the team-flavored image. Teams with
 # nothing to bake are skipped (they deploy on the generic image). All render
-# and bootstrap mechanics live in `bobi build` (bobi/build.py); this wrapper
+# and bootstrap mechanics live in `bobi build` (the bobi-deploy plugin,
+# bobi_deploy/build.py, #707); this wrapper
 # only keeps the CI conveniences: agents/* iteration, the skip gate, git-sha
 # tagging, and the Fly-registry holder-app dance (Fly's registry is app-scoped,
 # which plain `docker push` can't handle).

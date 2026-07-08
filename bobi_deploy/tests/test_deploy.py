@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from bobi import build as B
+from bobi_deploy import build as B
 from bobi_deploy import deploy as D
 
 

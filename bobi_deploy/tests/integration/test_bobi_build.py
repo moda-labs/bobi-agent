@@ -14,9 +14,9 @@ from textwrap import dedent
 
 import pytest
 
-from bobi.build import build_team_image
+from bobi_deploy.build import build_team_image
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 pytestmark = pytest.mark.docker
 
