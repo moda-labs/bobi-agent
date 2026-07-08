@@ -10,9 +10,6 @@
 		"./channels": "./src/channels.ts",
 		"./conversation": "./src/conversation.ts",
 		"./circuit-breaker": "./src/circuit-breaker.ts",
-		"./adapters/github": "./src/adapters/github.ts",
-		"./adapters/linear": "./src/adapters/linear.ts",
-		"./adapters/whatsapp": "./src/adapters/whatsapp.ts",
 		"./adapters/chat-sdk-slack": "./src/adapters/chat-sdk-slack.ts"
 	},
 	"dependencies": {
