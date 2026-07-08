@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.40.0 - 2026-07-08
+
+Minor release: WhatsApp joins the channel gateway, event delivery becomes
+restart-durable with chat priority, the local web UI surfaces converge on
+`bobi app`, and webhook/setup paths get release hardening.
+
+### Added
+- **WhatsApp channel adapter (#656).** Add reactive-only WhatsApp support via
+  the Meta Cloud API, including setup docs and gateway integration tests
+  (#665).
+- **Durable inbox delivery and chat priority (#688).** Event drain ACKs now wait
+  for session processing, human chat messages jump bulk webhook backlog, and
+  dropped messages log enough detail to diagnose delivery loss (#691).
+- **Local ingest tokens from env (#661).** Local development can seed scoped
+  ingest tokens from environment configuration (#685).
+
+### Changed
+- **Unified local web surfaces (#614).** Bare `bobi`, `bobi setup`, and local
+  `bobi agent <name> ui` now route through the unified `bobi app` surface; the
+  old standalone agent UI and stale design/dashboard assets are gone (#694).
+- **Shared signed JSON envelopes (#664).** Signed event-server responses now use
+  one shared envelope path across clients (#679).
+- **Slack gateway cleanup (#652).** Removed legacy Slack send shims after the
+  Chat SDK migration (#684).
+
+### Fixed
+- **Setup connection refresh during chat (#683).** Streaming setup chat updates
+  now refresh connection cards, coalesce duplicate refreshes, and reconcile
+  redacted user bubbles (#693).
+- **Curator monitor task delivery (#682).** Curator monitor tasks now deliver via
+  files instead of fragile inline payloads (#689).
+- **Config dotenv interpolation isolation (#596).** Dotenv interpolation is
+  isolated so one config load cannot leak substitutions into another (#687).
+- **Event grant and release drift warnings (#669, #670).** Unbacked event grants
+  now warn, and release automation verifies the fleet event-server identity
+  after deploy (#681, #686).
+- **Linear webhook reliability (#650, #671, #672).** Linear setup docs now cover
+  webhook secret provisioning, comment webhooks route by issue team, and Linear
+  webhooks ACK before fan-out (#675, #678, #683).
+- **Inbound ingress and onboarding polish (#590, #635).** Bobi now warns when
+  inbound ingress is unreachable and clarifies setup/onboarding paths (#676,
+  #677).
+- **Slack placeholder behavior.** Automatic Slack placeholders are removed for
+  cases where typing/status UX should own progress indication (#674).
+
 ## 0.39.0 - 2026-07-05
 
 Minor release: the channel gateway lands (Slack rebuilt on the Chat SDK, inbound
