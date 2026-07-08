@@ -1658,10 +1658,10 @@ const LINEAR_KEY_RE = /^[A-Za-z0-9_-]+$/;
 // owner/repo shape (each segment non-empty, no extra slashes).
 const GITHUB_SLUG_RE = /^[^/\s]+\/[^/\s]+$/;
 
-// POST /resources/authorize handler. `bubbleId` is the AUTHENTICATED bubble —
+// POST /resources/authorize handler. `bubbleId` is the AUTHENTICATED bubble -
 // the entry file rejects an unsigned / partial / bad-signature request with an
-// opaque 403 BEFORE calling this (mandatory auth, mirroring how /slack/send is
-// wired). Verifies the upstream credential once, then stores ONLY a grant.
+// opaque 403 BEFORE calling this. Verifies the upstream credential once, then
+// stores ONLY a grant.
 //
 // The credential is NEVER logged and NEVER stored: the route is excluded from
 // body logging, and a verification failure logs `{service, reason}` only.
@@ -1813,8 +1813,8 @@ export async function admittedDeploymentIds(
 }
 
 // Storage key for a bubble-scoped Slack workspace registration. Outbound
-// /slack/send reads ONLY this key — never the bare global `slack_workspace:<id>`
-// that drives inbound self-reply — so one bubble can never send through a
+// channel sends read ONLY this key - never the bare global `slack_workspace:<id>`
+// that drives inbound self-reply - so one bubble can never send through a
 // workspace another bubble registered. With the KV adapter's `slack_workspace:`
 // prefix this yields `slack_workspace:${bubbleId}:${workspaceId}`.
 export function bubbleScopedWorkspaceKey(bubbleId: string, workspaceId: string): string {
@@ -1940,55 +1940,6 @@ export async function handleWhatsAppNumberRegister(
 	return { status: 200, body: { ok: true, phone_number_id: phoneNumberId } };
 }
 
-// `bubbleId` is the AUTHENTICATED bubble (the entry files reject an unsigned or
-// bad-signature request with 403 before calling this). The Slack credentials
-// are looked up under that bubble's scope only — the outbound tenancy boundary.
-//
-// Legacy Slack-shaped send, kept as a shim over the channel adapter for
-// pre-#618 clients. Text arrives pre-converted (mrkdwn) and is sent verbatim;
-// the generic /channels/send path takes raw markdown instead.
-export async function handleSlackSend(
-	storage: StorageAdapter,
-	body: Record<string, unknown>,
-	bubbleId: string,
-): Promise<HandlerResult> {
-	const channel = body.channel as string;
-	const text = body.text as string;
-	if (!channel || !text) {
-		return { status: 400, body: { error: "channel and text required" } };
-	}
-
-	const botToken = await resolveSlackSendToken(
-		storage,
-		bubbleId,
-		(body.workspace as string) || "",
-		(body.app_id as string) || "",
-		(body.bot_id as string) || "",
-	);
-	if (!botToken) {
-		return { status: 400, body: { error: "no bot token for workspace" } };
-	}
-
-	const adapter = getChannelAdapter("slack")!;
-	const conv: Conversation = {
-		source: "slack",
-		scope: (body.workspace as string) || "",
-		chatType: "channel",
-		chatId: channel,
-		...(body.thread_ts ? { threadId: body.thread_ts as string } : {}),
-	};
-	let result;
-	try {
-		result = await adapter.send(botToken, conv, text);
-	} catch (err) {
-		return { status: 502, body: { ok: false, error: String(err) } };
-	}
-	if (!result.ok) {
-		return { status: 502, body: { ok: false, error: result.error } };
-	}
-	return { status: 200, body: { ok: true, ts: result.ts } };
-}
-
 // One outbound file on /channels/send: { name, content_b64, title? }.
 function decodeOutboundFiles(raw: unknown): OutboundFile[] | null {
 	if (raw === undefined) return [];
@@ -2019,7 +1970,7 @@ function decodeOutboundFiles(raw: unknown): OutboundFile[] | null {
 //   { conversation, text?, mode?, edit_ref?, files? }
 // Parses the conversation reference and delegates to the channel's adapter.
 // `bubbleId` is the authenticated bubble; credentials resolve only under its
-// scope (same contract as handleSlackSend).
+// scope.
 //
 // Text arrives as raw markdown — formatting is the gateway's job (the Slack
 // adapter delivers it natively via markdown_text). Modes:
@@ -2138,7 +2089,7 @@ export async function handleChannelsSend(
 					return { status: 400, body: { error: "text required when edit_ref is combined with files" } };
 				}
 				if (adapter.update && caps.edit) {
-					const edited = await adapter.update(botToken, conv, editRef, outText, { markdown: true });
+					const edited = await adapter.update(botToken, conv, editRef, outText);
 					if (!edited.ok) {
 						return { status: 502, body: { ok: false, error: edited.error } };
 					}
@@ -2154,8 +2105,8 @@ export async function handleChannelsSend(
 			const wantsEdit = Boolean(editRef) && (mode === "update" || mode === "final");
 			const editOrSend = (txt: string) =>
 				wantsEdit && adapter.update && caps.edit
-					? adapter.update(botToken, conv, editRef, txt, { markdown: true })
-					: adapter.send(botToken, conv, txt, { markdown: true });
+					? adapter.update(botToken, conv, editRef, txt)
+					: adapter.send(botToken, conv, txt);
 
 			if (editRef && mode === "update") {
 				// Streaming rewrite of one message: chunking would post a new
@@ -2172,7 +2123,7 @@ export async function handleChannelsSend(
 				result = await editOrSend(chunks[0]);
 				for (let i = 1; result.ok && i < chunks.length; i++) {
 					await new Promise((r) => setTimeout(r, CHUNK_SPACING_MS));
-					const follow = await adapter.send(botToken, conv, chunks[i], { markdown: true });
+					const follow = await adapter.send(botToken, conv, chunks[i]);
 					if (!follow.ok) {
 						// Chunks 1..i are already visible: clear the typing
 						// indicator (the reply IS partially delivered) and
@@ -2278,9 +2229,9 @@ export async function handleChannelsHistory(
 
 // `bubbleId`, when present, is the AUTHENTICATED bubble that signed the
 // registration. The global record (bare workspaceId) is ALWAYS written so
-// inbound webhook self-reply loop prevention keeps working for any client —
+// inbound webhook self-reply loop prevention keeps working for any client -
 // signed or not. The bubble-scoped record is written ONLY for an authenticated
-// bubble, and is the only store outbound /slack/send reads.
+// bubble, and is the only store outbound channel sends read.
 export async function handleSlackWorkspaceRegister(
 	storage: StorageAdapter,
 	body: Record<string, unknown>,
@@ -2375,12 +2326,12 @@ export async function handleSlackWorkspaceRegister(
 		};
 	};
 
-	// Global record — drives inbound webhook self-reply loop prevention. ALWAYS
+	// Global record - drives inbound webhook self-reply loop prevention. ALWAYS
 	// written so a client that doesn't (yet) sign keeps loop prevention.
 	const globalExisting = await storage.getSlackWorkspace(workspaceId);
 	await storage.putSlackWorkspace(workspaceId, mergeBot(globalExisting));
 
-	// Bubble-scoped record — the ONLY store outbound /slack/send reads. Written
+	// Bubble-scoped record - the ONLY store outbound channel sends read. Written
 	// only for an authenticated bubble, so that bubble (and no other) can send
 	// through this workspace.
 	if (bubbleId) {

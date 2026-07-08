@@ -193,12 +193,12 @@ class TestTranscript:
         assert result.returncode == 0 or "not found" in (result.stdout + result.stderr).lower()
 
 
-class TestSlackReply:
+class TestRemovedSlackShims:
 
-    def test_slack_reply_requires_args(self, cli_run):
-        result = cli_run("slack-reply", "hello")
+    def test_slack_reply_command_is_removed(self, cli_run):
+        result = cli_run("slack-reply", "hello", timeout=30)
         assert result.returncode != 0
-        assert "workspace" in result.stderr.lower() or "required" in result.stderr.lower()
+        assert "no such command" in result.stderr.lower()
 
 
 class TestMachineScopedCLI:

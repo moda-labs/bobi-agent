@@ -109,8 +109,8 @@ export interface ConversationMessage {
 
 export interface ChannelAdapter {
 	descriptor: ChannelDescriptor;
-	send(token: string, conv: Conversation, text: string, opts?: { markdown?: boolean }): Promise<SendResult>;
-	update?(token: string, conv: Conversation, messageId: string, text: string, opts?: { markdown?: boolean }): Promise<SendResult>;
+	send(token: string, conv: Conversation, text: string): Promise<SendResult>;
+	update?(token: string, conv: Conversation, messageId: string, text: string): Promise<SendResult>;
 	/** Set (on) or clear (off) the channel's thinking/typing indicator. Best-effort. */
 	typing?(token: string, conv: Conversation, on: boolean): Promise<void>;
 	fetchConversation?(token: string, conv: Conversation, limit?: number): Promise<ConversationMessage[]>;
@@ -280,10 +280,9 @@ function toConversationMessage(raw: Record<string, unknown>): ConversationMessag
 }
 
 // Message body for a Slack post/update. Raw markdown goes out as Slack's
-// native `markdown_text` (AST-rendered by Slack, 12k budget); pre-converted
-// mrkdwn from the legacy /slack/send path goes out as `text` unchanged.
-function slackContent(text: string, markdown: boolean): Pick<SlackMessageOptions, "markdownText" | "text"> {
-	return markdown ? { markdownText: text } : { text };
+// native `markdown_text` (AST-rendered by Slack, 12k budget).
+function slackContent(text: string): Pick<SlackMessageOptions, "markdownText"> {
+	return { markdownText: text };
 }
 
 const slackAdapter: ChannelAdapter = {
@@ -314,14 +313,14 @@ const slackAdapter: ChannelAdapter = {
 		setupSkill: "skills/slack-setup.md",
 	},
 
-	async send(token, conv, text, opts) {
+	async send(token, conv, text) {
 		try {
 			const posted = await postSlackMessage({
 				apiUrl: slackApiUrl(),
 				token,
 				channel: conv.chatId,
 				...(conv.threadId ? { threadTs: conv.threadId } : {}),
-				...slackContent(text, opts?.markdown ?? false),
+				...slackContent(text),
 			});
 			return { ok: true, ts: posted.id };
 		} catch (err) {
@@ -329,14 +328,14 @@ const slackAdapter: ChannelAdapter = {
 		}
 	},
 
-	async update(token, conv, messageId, text, opts) {
+	async update(token, conv, messageId, text) {
 		try {
 			const posted = await updateSlackMessage({
 				apiUrl: slackApiUrl(),
 				token,
 				channel: conv.chatId,
 				ts: messageId,
-				...slackContent(text, opts?.markdown ?? false),
+				...slackContent(text),
 			});
 			return { ok: true, ts: posted.id };
 		} catch (err) {

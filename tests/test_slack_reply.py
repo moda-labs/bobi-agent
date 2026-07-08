@@ -1,5 +1,4 @@
-"""Tests for `bobi reply` / `bobi read-conversation` and the deprecated
-slack-* shims (#190 Phase 2).
+"""Tests for `bobi reply` / `bobi read-conversation`.
 
 All of these go through the channel gateway: the CLI signs requests with the
 instance's bubble key and POSTs to the event server's /channels/* endpoints.
@@ -301,89 +300,22 @@ class TestReadConversationCommand:
         assert json.loads(result.output) == messages
 
 
-class TestDeprecatedSlackShims:
-    """slack-reply / slack-upload-file / slack-read-thread rewrite their
-    flags into a conversation reference and call the gateway path."""
+class TestRemovedSlackShims:
+    """The deprecated slack-* CLI shims were removed after the gateway migration."""
 
-    def test_slack_reply_rewrites_flags_and_warns(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch)
-        reqs = []
-        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
-            runner = CliRunner()
-            result = runner.invoke(main, [
-                "slack-reply", "-w", "T0952RZRZ0X", "-c", "C123",
-                "-t", "171.42", "hello",
-            ])
-        assert result.exit_code == 0, result.output
-        assert "deprecated" in result.output
-        body = json.loads(reqs[0].content)
-        assert body["conversation"] == "slack:T0952RZRZ0X:channel:C123:thread:171.42"
-        assert body["text"] == "hello"
-        assert body["mode"] == "final"
+    def test_slack_reply_command_is_removed(self):
+        result = CliRunner().invoke(main, ["slack-reply", "hello"])
+        assert result.exit_code != 0
+        assert "No such command 'slack-reply'" in result.output
 
-    def test_slack_reply_dm_channel_without_thread(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch)
-        reqs = []
-        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
-            runner = CliRunner()
-            result = runner.invoke(main, [
-                "slack-reply", "-w", "T1", "-c", "D456", "hi",
-            ])
-        assert result.exit_code == 0, result.output
-        body = json.loads(reqs[0].content)
-        assert body["conversation"] == "slack:T1:dm:D456"
-
-    def test_slack_reply_edit_flag(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch)
-        reqs = []
-        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
-            runner = CliRunner()
-            result = runner.invoke(main, [
-                "slack-reply", "-w", "T1", "-c", "C1", "-t", "171.42",
-                "--edit", "171.99", "final answer",
-            ])
-        assert result.exit_code == 0, result.output
-        body = json.loads(reqs[0].content)
-        assert body["edit_ref"] == "171.99"
-
-    def test_slack_upload_file_shim(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch)
+    def test_slack_upload_file_command_is_removed(self, tmp_path):
         f = tmp_path / "shot.png"
         f.write_bytes(b"png-bytes")
-        reqs = []
-        with patch.object(pooled, '_client', _mock_client(_gateway_ok(reqs))):
-            runner = CliRunner()
-            result = runner.invoke(main, [
-                "slack-upload-file", str(f), "-w", "T1", "-c", "C1",
-                "-t", "171.42", "--title", "Shot", "--comment", "see this",
-            ])
-        assert result.exit_code == 0, result.output
-        assert "deprecated" in result.output
-        assert "Uploaded shot.png to C1" in result.output
-        body = json.loads(reqs[0].content)
-        assert body["conversation"] == "slack:T1:channel:C1:thread:171.42"
-        assert body["text"] == "see this"
-        assert body["files"][0]["name"] == "shot.png"
-        assert body["files"][0]["title"] == "Shot"
-        assert base64.b64decode(body["files"][0]["content_b64"]) == b"png-bytes"
+        result = CliRunner().invoke(main, ["slack-upload-file", str(f)])
+        assert result.exit_code != 0
+        assert "No such command 'slack-upload-file'" in result.output
 
-    def test_slack_read_thread_shim(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch)
-        reqs = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            reqs.append(request)
-            return httpx.Response(200, json={"ok": True, "messages": [
-                {"user": "U1", "text": "hi", "ts": "1.2"},
-            ]})
-
-        with patch.object(pooled, '_client', _mock_client(handler)):
-            runner = CliRunner()
-            result = runner.invoke(main, [
-                "slack-read-thread", "-w", "T1", "-c", "C1", "-t", "1.2",
-            ])
-        assert result.exit_code == 0, result.output
-        assert "deprecated" in result.output
-        assert "[1.2] U1: hi" in result.output
-        assert "/channels/history?" in str(reqs[0].url)
-        assert "slack%3AT1%3Achannel%3AC1%3Athread%3A1.2" in str(reqs[0].url)
+    def test_slack_read_thread_command_is_removed(self):
+        result = CliRunner().invoke(main, ["slack-read-thread"])
+        assert result.exit_code != 0
+        assert "No such command 'slack-read-thread'" in result.output

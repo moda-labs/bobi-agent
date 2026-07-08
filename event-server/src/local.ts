@@ -32,7 +32,6 @@ import {
 	handleChannelsSend,
 	handleChannelsTyping,
 	handleChannelsHistory,
-	handleSlackSend,
 	handleSlackWorkspaceRegister,
 	handleWhatsAppNumberRegister,
 	handleTestSeedResourceGrants,
@@ -553,14 +552,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		return respond(res, await handleWhatsAppNumberRegister(storage, auth.data, auth.bubble.id));
 	}
 
-	if (method === "POST" && path === "/slack/send") {
-		const auth = await bubbleAuthedJson(req, res, url);
-		if (!auth) return;
-		return respond(res, await handleSlackSend(storage, auth.data, auth.bubble.id));
-	}
-
 	if (method === "POST" && path === "/channels/send") {
-		// Channel-agnostic send (#618) - same mandatory bubble auth as /slack/send.
+		// Channel-agnostic send (#618) - mandatory bubble auth.
 		const auth = await bubbleAuthedJson(req, res, url);
 		if (!auth) return;
 		return respond(res, await handleChannelsSend(storage, auth.data, auth.bubble.id));
@@ -585,7 +578,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
 	if (method === "POST" && path === "/resources/authorize") {
 		// Mandatory bubble auth; the credential in the body is verified once and
-		// never persisted/logged (mirrors /slack/send wiring).
+		// never persisted/logged.
 		const auth = await bubbleAuthedJson(req, res, url);
 		if (!auth) return;
 		return respond(res, await handleAuthorizeResource(storage, auth.data, auth.bubble.id));

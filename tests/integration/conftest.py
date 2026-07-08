@@ -199,6 +199,10 @@ def cli_run(bobi_env):
         explicit_top_level = {
             "agent", "agents", "deploy", "destroy", "supervise", "version",
             "create-slack-bot", "skill", "login-bootstrap",
+            "reply", "read-conversation",
+            # Removed top-level commands still belong here so removal
+            # regression tests assert the actual top-level CLI error instead
+            # of routing them through `bobi agent <name>`.
             "slack-reply", "slack-upload-file", "slack-read-thread",
         }
         argv = list(args)

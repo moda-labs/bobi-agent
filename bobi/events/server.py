@@ -610,7 +610,7 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
     When ``bubble_key`` is supplied the request is HMAC-signed (same scheme as
     :func:`_post_register`). A signed registration tells the server to ALSO
     store a bubble-scoped workspace record, which is the only credential
-    outbound ``POST /slack/send`` will accept (#487) — so this bubble can send
+    outbound channel sends accept (#487) - so this bubble can send
     through its own Slack bot. The global record (inbound self-reply loop
     prevention) is written either way, so an unsigned call still works.
     """
@@ -645,7 +645,7 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
         if signing_secret:
             record["signing_secret"] = signing_secret
         # Signed when we hold a bubble key, so the server writes the
-        # bubble-scoped record outbound /slack/send requires. Unsigned
+        # bubble-scoped record outbound channel sends require. Unsigned
         # otherwise (still writes the global self-reply record).
         from bobi.events.signing import signed_request
         signed_request(

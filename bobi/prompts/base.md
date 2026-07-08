@@ -63,9 +63,6 @@ you intentionally need to edit an existing message. To read the
 conversation's history, use
 `bobi read-conversation <conversation>`.
 
-The `slack-reply`, `slack-upload-file`, and `slack-read-thread` commands
-are deprecated shims over the same path - do not use them in new work.
-
 ## CLI tools
 
 ### Launch agents
