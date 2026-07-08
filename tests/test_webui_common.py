@@ -8,8 +8,6 @@ from fastapi.testclient import TestClient
 from bobi.webui_common import resolve_static_asset
 from bobi.webui_common.launcher import serve_container, serve_local
 from bobi.webui_common.security import (
-    LEGACY_AGENTUI_TOKEN_HEADER,
-    LEGACY_SETUP_TOKEN_HEADER,
     WEBUI_TOKEN_HEADER,
     install_security,
 )
@@ -29,7 +27,6 @@ def _secured_app():
         app,
         secret=SECRET,
         header_name=WEBUI_TOKEN_HEADER,
-        legacy_header_names=(LEGACY_SETUP_TOKEN_HEADER, LEGACY_AGENTUI_TOKEN_HEADER),
         error_message="bad or missing token",
     )
 
@@ -57,10 +54,10 @@ def test_security_allows_page_without_secret_but_guards_api():
     assert c.get("/api/ping", headers={WEBUI_TOKEN_HEADER: SECRET}).json() == {"ok": True}
 
 
-def test_security_accepts_legacy_headers_as_aliases():
+def test_security_rejects_legacy_headers():
     c = _client(_secured_app())
-    assert c.get("/api/ping", headers={LEGACY_SETUP_TOKEN_HEADER: SECRET}).status_code == 200
-    assert c.get("/api/ping", headers={LEGACY_AGENTUI_TOKEN_HEADER: SECRET}).status_code == 200
+    assert c.get("/api/ping", headers={"x-bobi-nonce": SECRET}).status_code == 403
+    assert c.get("/api/ping", headers={"x-bobi-ui-token": SECRET}).status_code == 403
 
 
 def test_static_routes_substitute_index_and_serve_no_store_assets(tmp_path):

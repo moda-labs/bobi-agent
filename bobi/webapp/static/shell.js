@@ -60,11 +60,19 @@ let teardown = null; // current view's cleanup (clears pollers)
 
 function parseRoute() {
   const hash = location.hash.replace(/^#\/?/, "");
-  const parts = hash.split("/").filter(Boolean);
+  const [path, query = ""] = hash.split("?", 2);
+  const params = new URLSearchParams(query);
+  const parts = path.split("/").filter(Boolean);
   if (parts[0] === "agents" && parts[1]) {
     return { view: "agent", name: decodeURIComponent(parts[1]) };
   }
-  if (parts[0] === "setup") return { view: "setup" };
+  if (parts[0] === "setup") {
+    return {
+      view: "setup",
+      name: parts[1] ? decodeURIComponent(parts[1]) : "",
+      model: params.get("model") || "",
+    };
+  }
   return { view: "dashboard" };
 }
 
@@ -97,7 +105,7 @@ async function route() {
   }
   if (r.view === "setup") {
     setSubtitle("setup");
-    mountSetupEntry(el);
+    mountSetupEntry(el, r);
     return;
   }
   setSubtitle("agents");
@@ -122,7 +130,7 @@ export async function openSetup(body) {
 /* #/setup — a transient route: kick off onboarding and hand the browser
    to the hosted setup flow. Kept for deep links; the dashboard's create
    card is the primary entry. */
-async function mountSetupEntry(el) {
+async function mountSetupEntry(el, routeInfo = {}) {
   el.innerHTML = "";
   const wrap = document.createElement("div");
   wrap.className = "stub";
@@ -131,7 +139,10 @@ async function mountSetupEntry(el) {
   wrap.appendChild(h);
   el.appendChild(wrap);
 
-  const err = await openSetup({});
+  const body = {};
+  if (routeInfo.name) body.name = routeInfo.name;
+  if (routeInfo.model) body.model = routeInfo.model;
+  const err = await openSetup(body);
   if (err) {
     h.textContent = "Couldn't open setup";
     const p = document.createElement("p");

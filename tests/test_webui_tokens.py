@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TOKENS_CSS = ROOT / "bobi" / "webui_common" / "static" / "tokens.css"
 APP_CSS = [
     ROOT / "bobi" / "setup" / "webui" / "static" / "app.css",
-    ROOT / "bobi" / "agentui" / "static" / "app.css",
+    ROOT / "bobi" / "webapp" / "static" / "app.css",
 ]
 
 DESIGN_TOKENS = {

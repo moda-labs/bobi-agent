@@ -210,9 +210,10 @@ def _attach_runtime_log(root: Path) -> None:
 
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="bobi")
-def main():
+@click.pass_context
+def main(ctx):
     """Bobi — build teams of event-driven AI agents."""
     logging.basicConfig(
         level=logging.INFO,
@@ -222,6 +223,14 @@ def main():
     )
     # Top-level commands are machine/repo scoped. Runtime identity is bound by
     # `bobi agent <name> ...` or inherited BOBI_ROOT in child processes.
+    if ctx.invoked_subcommand is None:
+        from bobi.webapp import daemon
+
+        try:
+            st = daemon.start(open_browser=True)
+        except RuntimeError as e:
+            raise click.ClickException(str(e))
+        click.echo(f"bobi app is running at {st.url} (pid {st.pid})")
     return
 
 
@@ -994,42 +1003,21 @@ def setup(name, model, resume):
     review and install. Interrupt anytime — `--resume` picks up where you
     left off.
     """
-    agent_name = name or "new-agent"
-    project_path = paths.agent_run_root(agent_name)
-    project_path.mkdir(parents=True, exist_ok=True)
-    paths.workspace_dir(project_path).mkdir(parents=True, exist_ok=True)
+    del resume
+    from urllib.parse import quote, urlencode
+    import webbrowser
 
-    # Setup is often the very first command a new user runs — fail with
-    # a pointed message instead of a spawn error deep in the SDK.
-    import shutil as _shutil
-    from bobi.sdk import get_cli_path
-    if not _shutil.which("claude") and not Path(get_cli_path()).exists():
-        raise click.UsageError(
-            "the Claude Code CLI is required for setup — install it first "
-            "(https://claude.com/claude-code), then re-run `bobi setup`.")
+    from bobi.webapp import daemon
 
-    if not resume:
-        from bobi.setup.state import SetupState
-        from bobi.setup.actions import installed_team_name
-
-        in_progress = SetupState.load(project_path)
-        if in_progress and not in_progress.finished:
-            click.confirm(
-                f"An interrupted setup exists (stage: {in_progress.stage.value}) "
-                "— resume it with `bobi setup --resume`. Start over "
-                "and discard it?", abort=True)
-
-        name = installed_team_name(project_path)
-        if name:
-            click.confirm(
-                f"'{name}' is already installed here — setup can replace it. "
-                "Continue?", abort=True)
-        if not in_progress and agent_name:
-            state = SetupState(team_name=agent_name)
-            state.save(project_path)
-
-    from bobi.setup import run_setup
-    raise SystemExit(run_setup(project_path, model=model, resume=resume))
+    try:
+        st = daemon.start(open_browser=False)
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
+    target = st.url + (f"#/setup/{quote(name)}" if name else "#/setup")
+    if model:
+        target += "?" + urlencode({"model": model})
+    webbrowser.open(target)
+    click.echo(f"bobi setup is open at {target}")
 
 
 @main.group("app")
@@ -1103,7 +1091,7 @@ def app_run():
               help="UI port inside the container (default: read from the instance, else 8080).")
 @click.option("--no-browser", is_flag=True, help="Don't open a browser window.")
 @click.option("--check", is_flag=True,
-              help="Remote: probe /api/agents through the tunnel once and exit (a smoke check).")
+              help="Remote: probe /api/dashboard through the tunnel once and exit (a smoke check).")
 @click.pass_context
 def ui(ctx, name, app, local_port, remote_port, no_browser, check):
     """View and chat with an agent team's agents in a web UI.
@@ -1130,12 +1118,22 @@ def ui(ctx, name, app, local_port, remote_port, no_browser, check):
     selected = ""
     if ctx.parent is not None and isinstance(ctx.parent.obj, dict):
         selected = str(ctx.parent.obj.get("agent") or "")
-    project_path = _bind_agent_runtime(selected) if selected else _detect_project_root()
-    from bobi.sdk import set_project_root
-    set_project_root(project_path)
-    from bobi.agentui import server as agentui_server
-    raise SystemExit(agentui_server.serve(
-        project_path, mode="local", open_browser=not no_browser))
+    if not selected:
+        raise click.UsageError("local UI requires `bobi agent <name> ui`")
+
+    from urllib.parse import quote
+    import webbrowser
+
+    from bobi.webapp import daemon
+
+    try:
+        st = daemon.start(open_browser=False)
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
+    target = st.url + f"#/agents/{quote(selected)}"
+    if not no_browser:
+        webbrowser.open(target)
+    click.echo(f"bobi app is running at {target} (pid {st.pid})")
 
 
 def _manager_session_name(project_path: Path, role: str | None = None) -> str:

@@ -106,15 +106,15 @@ def _wait_for_port(port: int, timeout: float = 20.0) -> bool:
 
 def _get_agents(local_port: int, token: str) -> dict:
     req = urllib.request.Request(
-        f"http://127.0.0.1:{local_port}/api/agents",
-        headers={"x-bobi-webui-token": token, "x-bobi-ui-token": token})
+        f"http://127.0.0.1:{local_port}/api/dashboard",
+        headers={"x-bobi-webui-token": token})
     with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read().decode())
 
 
 def _check(local_port: int, token: str) -> int:
     """One-shot reachability probe (for a non-gating canary smoke): GET
-    /api/agents through the tunnel and report. 0 = reachable, 1 = not."""
+    /api/dashboard through the tunnel and report. 0 = reachable, 1 = not."""
     try:
         data = _get_agents(local_port, token)
     except Exception as e:                          # noqa: BLE001 — report any failure
@@ -130,7 +130,7 @@ def run(name: str | None = None, *, app: str | None = None,
         local_port: int | None = None, remote_port: int | None = None,
         open_browser: bool = True, check: bool = False) -> int:
     """Resolve → fetch token/port → `fly proxy` → open browser (or, with
-    ``check``, probe /api/agents once and exit)."""
+    ``check``, probe /api/dashboard once and exit)."""
     from bobi import deploy
     deploy.preflight_fly_or_exit()                  # flyctl installed + logged in
     target = resolve_app(name, app)

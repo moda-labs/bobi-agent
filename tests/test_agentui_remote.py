@@ -135,7 +135,7 @@ def test_check_reports_reachable(monkeypatch, capsys):
     assert "reachable" in capsys.readouterr().out
 
 
-def test_get_agents_sends_canonical_and_legacy_headers(monkeypatch):
+def test_get_agents_sends_canonical_header(monkeypatch):
     seen = {}
 
     class _Response:
@@ -149,6 +149,7 @@ def test_get_agents_sends_canonical_and_legacy_headers(monkeypatch):
             return b'{"agents": []}'
 
     def fake_urlopen(req, timeout=10):
+        seen["url"] = req.full_url
         seen["headers"] = dict(req.header_items())
         seen["timeout"] = timeout
         return _Response()
@@ -156,8 +157,9 @@ def test_get_agents_sends_canonical_and_legacy_headers(monkeypatch):
     monkeypatch.setattr(remote.urllib.request, "urlopen", fake_urlopen)
 
     assert remote._get_agents(18081, "tok") == {"agents": []}
+    assert seen["url"] == "http://127.0.0.1:18081/api/dashboard"
     assert seen["headers"]["X-bobi-webui-token"] == "tok"
-    assert seen["headers"]["X-bobi-ui-token"] == "tok"
+    assert "X-bobi-ui-token" not in seen["headers"]
     assert seen["timeout"] == 10
 
 

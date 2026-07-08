@@ -572,12 +572,16 @@ def run_manager_from_config(
 
     if os.environ.get("BOBI_UI"):
         try:
-            from bobi.agentui import server as agentui_server
+            from bobi.webapp.server import build_app
+            from bobi.webui_common.launcher import serve_container
 
-            ui_port = agentui_server.start_in_thread(project_path, state_dir=state_dir)
-            log.info("Agent UI on port %d (reach it with `fly proxy`)", ui_port)
+            ui_port = serve_container(
+                lambda token: build_app(token=token),
+                state_dir=state_dir,
+            )
+            log.info("Bobi web app on port %d (reach it with `fly proxy`)", ui_port)
         except Exception as e:
-            log.warning("Agent UI failed to start: %s", e)
+            log.warning("Bobi web app failed to start: %s", e)
 
     log.info(
         "Bobi starting for %s (role=%s)",

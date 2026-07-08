@@ -28,6 +28,8 @@ from urllib.parse import urlparse
 from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
 
+import yaml
+
 # Imported at module level (not inside build_app) so that, under
 # `from __future__ import annotations`, FastAPI can resolve the string
 # annotations on the route handlers against this module's globals.
@@ -38,14 +40,13 @@ from bobi import paths
 from bobi.setup.state import STAGE_ORDER, SetupState, Stage
 from bobi.webui_common.launcher import serve_local
 from bobi.webui_common.security import (
-    LEGACY_AGENTUI_TOKEN_HEADER,
     WEBUI_TOKEN_HEADER,
     install_security,
 )
 from bobi.webui_common.static import mount_static, serve_index
 
 STATIC_DIR = Path(__file__).parent / "static"
-NONCE_HEADER = "x-bobi-nonce"
+NONCE_HEADER = WEBUI_TOKEN_HEADER
 
 
 # --- serialization -------------------------------------------------------
@@ -180,11 +181,43 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         p = p.resolve()
         return p, (p == home or home in p.parents)
 
+    def _load_machine_config() -> dict:
+        cfg_path = paths.ensure_global_config()
+        try:
+            return yaml.safe_load(cfg_path.read_text()) or {}
+        except Exception:
+            return {}
+
+    def _write_machine_config(raw: dict) -> None:
+        cfg_path = paths.ensure_global_config()
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(yaml.dump(raw, default_flow_style=False))
+
+    def source_roots() -> list[Path]:
+        """Configured team-source scan roots, always including the library."""
+        roots: list[Path] = []
+
+        def add(path: Path) -> None:
+            try:
+                resolved = path.resolve()
+            except OSError:
+                return
+            if resolved not in roots:
+                roots.append(resolved)
+
+        add(library)
+        configured = _load_machine_config().get("sources", [])
+        if isinstance(configured, list):
+            for item in configured:
+                target, ok = _within_home(str(item), library)
+                if ok:
+                    add(target)
+        return roots
+
     install_security(
         app,
         secret=nonce,
         header_name=WEBUI_TOKEN_HEADER,
-        legacy_header_names=(NONCE_HEADER, LEGACY_AGENTUI_TOKEN_HEADER),
         error_message="bad or missing nonce",
     )
     serve_index(app, STATIC_DIR / "index.html",
@@ -220,10 +253,15 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # team the user explicitly placed elsewhere is invisible on the home screen.
         from bobi.setup import open_mode
         from bobi.setup.actions import team_source_dir
-        teams = open_mode.list_teams_in(library)
+        teams = []
+        seen = set()
+        for root in source_roots():
+            for t in open_mode.list_teams_in(root):
+                if t["path"] not in seen:
+                    seen.add(t["path"])
+                    teams.append(t)
         if state.source_dir:
             src = team_source_dir(project, state)
-            seen = {t["path"] for t in teams}
             teams += [t for t in open_mode.list_teams_in(src)
                       if t["path"] not in seen]
         return teams
@@ -239,7 +277,30 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         default_source = paths.agent_source_dir(state.team_name or "new-agent")
         return {"teams": visible_teams(),
                 "default_location": str(default_source),
-                "scan_dir": str(library)}
+                "scan_dir": str(library),
+                "source_roots": [str(p) for p in source_roots()]}
+
+    @app.get("/api/source-roots")
+    def get_source_roots() -> dict:
+        return {"source_roots": [str(p) for p in source_roots()]}
+
+    @app.post("/api/source-roots")
+    def add_source_root(payload: dict) -> JSONResponse:
+        target, ok = _within_home(str(payload.get("dir") or ""), library)
+        if not ok:
+            return JSONResponse(
+                {"error": "pick a folder inside your home directory"},
+                status_code=400)
+        raw = _load_machine_config()
+        configured = raw.get("sources", [])
+        if not isinstance(configured, list):
+            configured = []
+        existing = {str(p) for p in source_roots()}
+        if str(target) not in existing:
+            configured.append(str(target))
+        raw["sources"] = configured
+        _write_machine_config(raw)
+        return JSONResponse({"source_roots": [str(p) for p in source_roots()]})
 
     @app.get("/api/teams")
     def teams(request: Request) -> JSONResponse:

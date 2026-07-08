@@ -157,6 +157,7 @@ def ensure_global_config() -> Path:
         path.write_text(
             "# Bobi machine config. BOBI_HOME controls this file's location.\n"
             "registries: []\n"
+            "sources: []\n"
         )
     return path
 
