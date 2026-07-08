@@ -220,6 +220,10 @@ If you already run the local event server behind a Cloudflare tunnel, use the
 quick tunnel option; the wizard does not replace that topology, it validates and
 persists the tunnel URL for webhook-backed services.
 
+To run that ingress yourself - a tunnel in front of the embedded server, or a
+standalone event server on a box you manage - follow
+[docs/SELF_HOSTED_EVENT_SERVER.md](docs/SELF_HOSTED_EVENT_SERVER.md).
+
 ### Talk to your agent from Slack (optional)
 
 By default you talk to an agent from the terminal (`bobi agent <name> ask`). To
@@ -374,6 +378,7 @@ the prompt-injection surface, and trusted team code. Event-bus internals:
 | Run and operate Bobi | [skills/bobi.md](skills/bobi.md) - full CLI reference |
 | Build your own agent | [skills/create-agent.md](skills/create-agent.md) · [docs/BUILDING_AGENT_TEAMS.md](docs/BUILDING_AGENT_TEAMS.md) |
 | Understand the event bus | [docs/EVENT_SERVER.md](docs/EVENT_SERVER.md) — architecture, topics, security |
+| Receive webhooks on your own infrastructure | [docs/SELF_HOSTED_EVENT_SERVER.md](docs/SELF_HOSTED_EVENT_SERVER.md) — tunnel or standalone server |
 | Understand the security model | [docs/SECURITY.md](docs/SECURITY.md) — trust, credentials, prompt-injection |
 | Connect Slack / Linear | [skills/slack-setup.md](skills/slack-setup.md) · [skills/linear-setup.md](skills/linear-setup.md) |
 | Deploy to production | [docs/CONTAINERIZED_DEPLOYMENT.md](docs/CONTAINERIZED_DEPLOYMENT.md) |

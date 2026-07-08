@@ -72,6 +72,11 @@ genuinely remote `https://` event server skips all of this - the container never
 needs Node. (`bobi agent <name> event-server start` calls the same path as a
 convenience.)
 
+The same local server also runs standalone - behind a tunnel on the agent's
+machine, or on its own box behind TLS - to receive provider webhooks on
+infrastructure you manage. Setup guide:
+[SELF_HOSTED_EVENT_SERVER.md](SELF_HOSTED_EVENT_SERVER.md).
+
 ### The client
 
 `bobi/events/client.py` (`EventServerClient`) is the outbound WebSocket client. It
