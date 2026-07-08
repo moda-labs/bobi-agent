@@ -573,12 +573,13 @@ publish a GitHub Release   ─▶ release.yml  (the single gated pipeline)
    │                              build-wheel                (one artifact for all)
    │                                 python -m build -> upload the wheel/sdist
    │                                 │
-   │                              build-canary               (THE gate)
+   │                              fleet -> release-fleet.yml (THE gate)
+   │                                 deploy-event-server, then build-canary:
    │                                 for each brain canary (ci-canary Claude,
    │                                 ci-codex-smoke Codex): build image FROM the
    │                                 wheel + `ask` it -> assert CANARY-OK e2e
    │                                 ├──────────────┐
-   │                              publish              publish-image + publish-manifest
+   │                              publish              image -> release-image.yml
    │                              same wheel ->        same wheel -> ghcr.io/moda-labs/bobi:<ver>
    │                              PyPI + Homebrew      (+ :latest when newest release)
    │
@@ -596,8 +597,8 @@ canaries (`ci-canary` Claude + `ci-codex-smoke` Codex) *from that wheel* and
 smokes each (`CANARY-OK`), and only then publishes the same wheel to PyPI and
 Homebrew and the base image built from it to GHCR (#609). Codex is a hard gate
 at parity with Claude (#428); its instance is
-`bootstrap`-tolerant in `release.yml` (warn+skip until first provisioned, then a
-hard gate). Production agent rollout is owned by fleet repos
+`bootstrap`-tolerant in `release-fleet.yml` (warn+skip until first provisioned,
+then a hard gate). Production agent rollout is owned by fleet repos
 such as `moda-agents`; they bump their pinned `bobi` version and run their own
 deploy workflow.
 
@@ -650,24 +651,28 @@ when a deployment uses `team-url:`; pure ssh-push (`team:`) deployments ignore i
 ### release.yml — the release pipeline
 Triggered by **`release: published`**. One gated pipeline; the canary, running the
 exact wheel we publish, is the single functional gate for PyPI, Homebrew, and the
-GHCR base image:
+GHCR base image. The Fly/Worker/image halves live in two called workflow files
+(`release-fleet.yml`, `release-image.yml`) so they move whole to the private repo
+at cut time (repo-split phase 1):
 - **subscription-login-smoke** — gate the release on a verified subscription-login
   bootstrap (a hermetic mock-code smoke; #388).
 - **build-wheel** — `python -m build` the wheel/sdist **once** and upload it, so the
   canary and PyPI run the identical artifact. A fail-fast
   `pip install dist/*.whl && bobi --version` rejects an obviously-broken wheel
   before the expensive canary build.
-- **build-canary** — for each brain canary (`ci-canary` Claude, `ci-codex-smoke`
-  Codex), deploy from an image built **from that wheel** (`--build-arg
-  BOBI_BUILD=wheel`, the artifact staged into `dist/`), then a functional `ask`
-  asserts `CANARY-OK` end-to-end. **This is the gate** - both brains at parity.
-- **publish** — `needs: build-canary`. Uploads the **same** wheel to PyPI via
+- **fleet → release-fleet.yml** — deploy the Cloudflare event server, then for
+  each brain canary (`ci-canary` Claude, `ci-codex-smoke` Codex), deploy from an
+  image built **from that wheel** (`--build-arg BOBI_BUILD=wheel`, the artifact
+  staged into `dist/`), then a functional `ask` asserts `CANARY-OK` end-to-end.
+  **This is the gate** - both brains at parity.
+- **publish** — `needs: fleet`. Uploads the **same** wheel to PyPI via
   trusted publishing (`environment: pypi`).
-- **publish-image / publish-manifest** - needs a canary that actually **ran**
-  (`build-canary.outputs.smoked`). Builds the base image per arch natively (no
+- **image → release-image.yml** - needs a canary that actually **ran** (the
+  fleet `smoked` output). Builds the base image per arch natively (no
   QEMU) from the same wheel and the same resolved claude pin, then stitches
   `ghcr.io/moda-labs/bobi:<version>`; `:latest` moves only when the version is
-  the repo's latest non-prerelease release.
+  the repo's latest non-prerelease release. Not in `publish`'s needs — an image
+  failure never blocks PyPI.
 - **update-homebrew** — `needs: [publish, build-wheel]`. Bumps the tap from the
   wheel-derived version and smokes bottle URLs after PyPI publish.
 

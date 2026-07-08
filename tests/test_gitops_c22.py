@@ -40,6 +40,9 @@ CANARY_SMOKE_SH = REPO / "scripts" / "canary-smoke.sh"
 HOMEBREW_SMOKE_SH = REPO / "scripts" / "smoke-homebrew-bottles.sh"
 WF_TEAMS = REPO / ".github" / "workflows" / "deploy-agent-teams.yml.example"
 WF_RELEASE = REPO / ".github" / "workflows" / "release.yml"
+# The private-bound half of the release pipeline (repo-split phase 1), called
+# from release.yml as the `fleet` job; moves whole at cut time.
+WF_RELEASE_FLEET = REPO / ".github" / "workflows" / "release-fleet.yml"
 
 
 # --- scripts/fleet.sh (exercised for real, Fly stubbed) ---------------------
@@ -345,7 +348,9 @@ def test_teams_no_ops_without_fly_token():
     assert "configured == 'true'" in deploy["if"]
 
 
-# --- release.yml invariants (build-wheel → build-canary → publish/roll) ------
+# --- release pipeline invariants (build-wheel → fleet gate → publish) --------
+# The fleet half (event-server deploy + build-canary) lives in the called
+# release-fleet.yml; structural cross-file wiring is in test_release_workflow.py.
 
 def _steps(job: dict) -> list:
     return job.get("steps", [])
@@ -375,7 +380,7 @@ def test_release_canary_is_built_from_the_wheel_and_smoked():
     """THE gate: the canary image is built FROM the prebuilt wheel (not source) and
     smoked with a functional ask — so we prove the exact bytes we publish boot and
     answer end-to-end."""
-    canary = _jobs(_load(WF_RELEASE))["build-canary"]
+    canary = _jobs(_load(WF_RELEASE_FLEET))["build-canary"]
     # consumes the built wheel and builds the image in wheel mode
     assert "download-artifact" in _uses_blob(canary)
     script = _step_scripts(canary)
@@ -395,7 +400,10 @@ def test_release_publish_is_gated_on_the_canary():
     the SAME artifact the canary ran (no rebuild)."""
     jobs = _jobs(_load(WF_RELEASE))
     publish = jobs["publish"]
-    assert publish["needs"] == "build-canary"      # gated on the canary
+    # Gated on the fleet gate — the called workflow whose build-canary job is
+    # the functional canary (repo-split phase 1).
+    assert publish["needs"] == "fleet"
+    assert jobs["fleet"]["uses"] == "./.github/workflows/release-fleet.yml"
     assert publish["environment"] == "pypi"        # trusted-publishing env
     # publishes the proven bytes: downloads the artifact, never rebuilds
     assert "download-artifact" in _uses_blob(publish)
@@ -406,7 +414,7 @@ def test_release_publish_is_gated_on_the_canary():
 def test_release_targets_only_the_named_brain_canaries():
     """The framework repo should build/smoke the permanent brain canaries by name,
     not scan the whole ci fleet and pick arbitrary apps."""
-    script = _step_scripts(_jobs(_load(WF_RELEASE))["build-canary"])
+    script = _step_scripts(_jobs(_load(WF_RELEASE_FLEET))["build-canary"])
     assert '-canary' in script
     assert "scripts/fleet.sh list" not in script
     assert "render-team-deps.py" not in script
@@ -423,7 +431,7 @@ def test_release_smokes_both_brain_canaries_at_parity():
     named explicitly and smoked from the same wheel — ci-canary (Claude) is
     `required`, ci-codex-smoke (Codex) is `bootstrap` (a one-time warn+skip window
     until it is provisioned, then a hard gate)."""
-    script = _step_scripts(_jobs(_load(WF_RELEASE))["build-canary"])
+    script = _step_scripts(_jobs(_load(WF_RELEASE_FLEET))["build-canary"])
     assert "-canary:required" in script          # Claude canary, mandatory
     assert "-codex-smoke:bootstrap" in script    # Codex canary, gate-once-live
     # Both go through the ONE build+smoke loop (same wheel, same base image).
@@ -437,15 +445,19 @@ def test_release_publishes_to_pypi_only_after_the_canary():
     deploys BEFORE the canary so event-server-only fixes are live when the canary
     runs its functional gate against the live event bus."""
     jobs = _jobs(_load(WF_RELEASE))
-    assert jobs["deploy-event-server"]["needs"] == ["subscription-login-smoke", "build-wheel"]
-    assert "deploy-event-server" in jobs["build-canary"]["needs"]
+    fleet_jobs = _jobs(_load(WF_RELEASE_FLEET))
+    # The fleet gate (event-server deploy + canary) waits on the public jobs
+    # at the caller; inside it the canary waits on the event-server deploy.
+    assert jobs["fleet"]["needs"] == ["subscription-login-smoke", "build-wheel"]
+    assert "deploy-event-server" in fleet_jobs["build-canary"]["needs"]
     # Homebrew stays behind the canary via publish; build-wheel is in needs
     # only for its version output (the wheel filename, the single source of
     # truth all publish jobs share).
     assert "publish" in jobs["update-homebrew"]["needs"]
     assert "build-wheel" in jobs["update-homebrew"]["needs"]
-    assert "roll-fleet" not in jobs
-    assert "deploy-teams" not in jobs
+    for job_map in (jobs, fleet_jobs):
+        assert "roll-fleet" not in job_map
+        assert "deploy-teams" not in job_map
 
 
 def test_release_smokes_homebrew_bottle_urls_after_dispatch():

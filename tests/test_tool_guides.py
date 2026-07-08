@@ -10,6 +10,7 @@ image is gone, and runtime operations now require a named scope.
 
 import re
 import shlex
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,27 @@ import pytest
 from bobi.cli import main as cli_main
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _plugin_commands() -> frozenset[str]:
+    """Commands the in-repo bobi-deploy plugin declares via `bobi.commands`.
+
+    The public unit suite runs WITHOUT the plugin installed (its CI lives in
+    deploy-package.yml; repo-split phase 1), so `_PluginGroup.get_command`
+    cannot resolve these from entry-point metadata. Read the declarations from
+    the plugin's own pyproject instead. When bobi_deploy/ leaves the tree at
+    cut time this returns empty, and any doc still referencing a private
+    command fails the contract check — exactly the drift we want flagged.
+    """
+    pyproject = REPO_ROOT / "bobi_deploy" / "pyproject.toml"
+    if not pyproject.exists():
+        return frozenset()
+    data = tomllib.loads(pyproject.read_text())
+    entry_points = data.get("project", {}).get("entry-points", {})
+    return frozenset(entry_points.get("bobi.commands", {}))
+
+
+_PLUGIN_COMMANDS = _plugin_commands()
 
 # bobi invocations inside fenced code blocks or inline code spans.
 _FENCE = re.compile(r"```.*?```", re.DOTALL)
@@ -175,7 +197,9 @@ def _command_error(tokens: tuple[str, ...]) -> str | None:
     # Resolve through the group, not `.commands`: plugin commands (the
     # `bobi.commands` entry points, e.g. bobi-deploy's deploy/destroy) are
     # served lazily by _PluginGroup.get_command and never live in the dict.
-    if cli_main.get_command(None, command) is None:
+    # When the plugin is not installed (the public unit suite), fall back to
+    # its on-disk entry-point declarations.
+    if cli_main.get_command(None, command) is None and command not in _PLUGIN_COMMANDS:
         return f"`bobi {command}` is not a public top-level command"
 
     if command == "agents":

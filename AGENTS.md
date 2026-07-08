@@ -99,9 +99,10 @@ source .venv/bin/activate
 pip install -e ".[dev,kb]" -e ./bobi_deploy
 ```
 
-Use this install for broad non-integration test runs. It matches the CI `Unit
-tests` job and includes the knowledge-base dependencies imported during test
-collection (`bobi_deploy` is the deploy-plugin package; its tests live in
+Use this install for broad non-integration test runs. It covers both CI unit
+suites (`ci.yml` Unit tests for the public package, `deploy-package.yml` for
+the deploy plugin) and includes the knowledge-base dependencies imported during
+test collection (`bobi_deploy` is the deploy-plugin package; its tests live in
 `bobi_deploy/tests/`). Use `.[dev]` only for focused e2e work that does not
 collect the KB test surface.
 
