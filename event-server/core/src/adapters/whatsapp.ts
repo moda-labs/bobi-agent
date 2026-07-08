@@ -12,8 +12,8 @@
  * `whatsapp:<phone_number_id>` with the reply address
  * `whatsapp:<pnid>:dm:<wa_id>` (the grammar in ../conversation.ts).
  */
-import type { NormalizedEvent } from "../core";
-import { buildConversation } from "../conversation";
+import type { NormalizedEvent } from "../core.js";
+import { buildConversation } from "../conversation.js";
 
 export interface WhatsAppNormalization {
 	events: NormalizedEvent[];

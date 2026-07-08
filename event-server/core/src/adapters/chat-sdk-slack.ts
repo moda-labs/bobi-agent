@@ -6,8 +6,8 @@
  * hand-rolled normalizeSlackWebhook once the bridge soaked (#629, #647).
  */
 import { parseSlackWebhookBody } from "@chat-adapter/slack/webhook";
-import type { NormalizedEvent, SlackNormalizationResult } from "../core";
-import { slackConversation } from "../conversation";
+import type { NormalizedEvent, SlackNormalizationResult } from "../core.js";
+import { slackConversation } from "../conversation.js";
 
 export type ChatSdkBridgeResult = SlackNormalizationResult;
 

@@ -1,10 +1,20 @@
 {
 	"name": "@moda-labs/bobi-events-core",
-	"version": "0.0.0",
+	"version": "0.1.0",
 	"private": true,
 	"description": "Bobi event protocol core: normalized events, webhook pipeline, channel adapters, circuit breaker. Runtime-agnostic - consumed by both the local Node server and the Cloudflare worker adapter.",
 	"license": "Apache-2.0",
 	"type": "module",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/moda-labs/bobi-agent.git",
+		"directory": "event-server/core"
+	},
+	"scripts": {
+		"build": "tsc -p tsconfig.json",
+		"pack:publish": "node scripts/pack.mjs",
+		"smoke": "node scripts/smoke.mjs"
+	},
 	"exports": {
 		".": "./src/core.ts",
 		"./channels": "./src/channels.ts",
@@ -14,5 +24,8 @@
 	},
 	"dependencies": {
 		"@chat-adapter/slack": "^4.30.0"
+	},
+	"devDependencies": {
+		"typescript": "^5.7.2"
 	}
 }

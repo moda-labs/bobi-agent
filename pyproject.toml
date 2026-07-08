@@ -89,7 +89,8 @@ packages = ["bobi"]
 # force-include note above).
 include = ["bobi", "event-server", "skills", "README.md", "CHANGELOG.md"]
 exclude = ["event-server/node_modules", "event-server/core/node_modules",
-           "event-server/dist", "**/__pycache__"]
+           "event-server/dist", "event-server/core/dist",
+           "event-server/core/*.tgz", "**/__pycache__"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

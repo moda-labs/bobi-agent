@@ -22,6 +22,9 @@ worktrees/
 .bobi/
 .context/
 
+# events-core publishable tarballs (scripts/pack.mjs output)
+event-server/core/*.tgz
+
 # Local secrets for the Bobbers test drive (never commit)
 .bobbers.env
 *bobbers*.env

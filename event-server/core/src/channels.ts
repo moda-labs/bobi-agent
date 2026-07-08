@@ -23,7 +23,7 @@ import {
 	SlackApiError,
 	type SlackMessageOptions,
 } from "@chat-adapter/slack/api";
-import type { Conversation } from "./conversation";
+import type { Conversation } from "./conversation.js";
 
 export interface CredentialSpec {
 	env: string;
@@ -96,7 +96,9 @@ export interface SendResult {
 
 export interface OutboundFile {
 	name: string;
-	data: Uint8Array;
+	// ArrayBuffer-backed by contract: the bytes go into Blob/BufferSource
+	// APIs that reject SharedArrayBuffer-backed views.
+	data: Uint8Array<ArrayBuffer>;
 	title?: string;
 }
 

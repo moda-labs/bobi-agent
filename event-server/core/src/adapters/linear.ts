@@ -1,4 +1,4 @@
-import type { NormalizedEvent } from "../core";
+import type { NormalizedEvent } from "../core.js";
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
