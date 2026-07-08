@@ -2935,6 +2935,8 @@ main.add_command(event_server_cmd)
 @click.option("--task", default=None, help="Task description / context for the agent")
 @click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
 @click.option("--wait", is_flag=True, help="Block until the agent completes")
+@click.option("--agent-wait", "agent_wait", is_flag=True, hidden=True,
+              help="Block on the requested agent instead of the check harness")
 @click.option("--post-event", "post_event", default=None,
               help="Post this event type on completion (for --wait checks)")
 @click.option("--requested-by", "requested_by", default=None,
@@ -2948,7 +2950,9 @@ main.add_command(event_server_cmd)
 @click.option("--model", default="",
               help="Model override for this launch (provider-native, e.g. haiku, "
                    "opus, or a full model ID). Wins over step and role config.")
-def subagents_launch(workflow, role, run_key, task, timeout, wait, post_event, requested_by, non_interactive, persistent, subscribe, model):
+def subagents_launch(workflow, role, run_key, task, timeout, wait, agent_wait,
+                     post_event, requested_by, non_interactive, persistent,
+                     subscribe, model):
     """Launch a sub-agent with a workflow and role.
 
     Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
@@ -2961,7 +2965,8 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, post_event, r
     if subscribe:
         persistent = True
     _dispatch_agent(task=task, workflow=workflow, role=role, run_key=run_key,
-                    timeout=timeout, wait=wait, post_event=post_event,
+                    timeout=timeout, wait=wait, agent_wait=agent_wait,
+                    post_event=post_event,
                     requested_by=requested_by,
                     interactive=not non_interactive,
                     persistent=persistent,
@@ -2969,9 +2974,9 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, post_event, r
                     model=model)
 
 
-def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait, post_event,
-                    requested_by, interactive=True, persistent=False, subscribe=None,
-                    model=""):
+def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
+                    agent_wait=False, post_event=None, requested_by=None,
+                    interactive=True, persistent=False, subscribe=None, model=""):
     """Dispatch logic for the agent command."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
@@ -2984,7 +2989,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait, post_e
     project_path = _detect_project_root()
     cwd = str(project_path)
 
-    if wait:
+    if wait and not agent_wait:
         _run_check(cwd=cwd, task=task, timeout=timeout, post_event=post_event)
         return
 
@@ -2995,6 +3000,14 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait, post_e
         names = ", ".join(r["name"] for r in available) if available else "(none)"
         click.echo(f"Unknown role '{role}'. Available: {names}", err=True)
         raise SystemExit(1)
+
+    if wait and agent_wait:
+        _run_agent_wait(cwd=cwd, task=task, workflow=workflow, role=role,
+                        run_key=run_key, timeout=timeout,
+                        requested_by=requested_by, interactive=interactive,
+                        persistent=persistent, subscribe=subscribe or [],
+                        model=model)
+        return
 
     requester: dict = {}
     if requested_by:
@@ -3021,6 +3034,45 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait, post_e
         model=model,
     )
     click.echo(f"Agent started: {session_name}")
+
+
+def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
+                    run_key: str | None, timeout: int, requested_by,
+                    interactive: bool, persistent: bool,
+                    subscribe: list[str], model: str = "") -> None:
+    """Run a real agent synchronously and print its final text."""
+    if workflow != "adhoc":
+        click.echo("--agent-wait only supports adhoc workflow runs", err=True)
+        raise SystemExit(1)
+    if persistent:
+        click.echo("--agent-wait cannot be used with --persistent", err=True)
+        raise SystemExit(1)
+
+    requester: dict = {}
+    if requested_by:
+        try:
+            parsed = json.loads(requested_by)
+            if isinstance(parsed, dict):
+                requester = parsed
+            else:
+                click.echo("--requested-by must be a JSON object", err=True)
+                raise SystemExit(1)
+        except json.JSONDecodeError:
+            click.echo("--requested-by must be valid JSON", err=True)
+            raise SystemExit(1)
+
+    from .subagent import spawn_adhoc
+    result = spawn_adhoc(
+        cwd=cwd, task=task, timeout=timeout, name=run_key,
+        requested_by=requester, persistent=False, role=role,
+        subscribe=subscribe, model=model,
+    )
+    if result.final_text:
+        click.echo(result.final_text)
+    if not result.success:
+        if result.error:
+            click.echo(f"Agent failed: {result.error}", err=True)
+        raise SystemExit(1)
 
 
 

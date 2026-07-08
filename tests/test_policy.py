@@ -5,6 +5,7 @@ curated, capped file with two sections (## Facts / ## Decisions), injected
 read-only into every agent prompt.
 """
 
+import json
 from pathlib import Path
 
 from unittest.mock import patch
@@ -149,6 +150,32 @@ class TestDoctorPolicyCheck:
             from bobi.doctor import _check_policy
             r = _check_policy()
         assert r.ok
+
+    def test_ok_when_curator_due_tick_had_no_work(self, tmp_path):
+        state = paths.state_path(tmp_path)
+        state.mkdir(parents=True)
+        (state / "monitor_state.json").write_text(json.dumps({
+            "policy-curator": {"last_run": "2026-07-08T13:33:00+00:00"}
+        }))
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_policy
+            r = _check_policy()
+        assert r.ok
+
+    def test_flags_curator_spawn_without_policy_or_cursor(self, tmp_path):
+        state = paths.state_path(tmp_path)
+        state.mkdir(parents=True)
+        (state / "monitor_state.json").write_text(json.dumps({
+            "policy-curator": {
+                "last_run": "2026-07-08T13:33:00+00:00",
+                "last_spawn": "2026-07-08T13:33:00+00:00",
+            }
+        }))
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_policy
+            r = _check_policy()
+        assert not r.ok
+        assert "policy-curator has spawned" in r.detail
 
     def test_ok_when_policy_present(self, tmp_path):
         state = paths.state_path(tmp_path)

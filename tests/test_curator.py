@@ -9,6 +9,7 @@ Python (the #454 lesson: never let a mocked model bypass the gate).
 
 import queue
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -238,7 +239,8 @@ class TestCuratorDispatch:
         from bobi import paths
         curator_mod.write_cursor(paths.policy_cursor_path(tmp_path), 9)
         with _patch_history(h):
-            h.sched._spawn_curator(monitor, [tmp_path])
+            spawned = h.sched._spawn_curator(monitor, [tmp_path])
+        assert spawned is True
         assert h.cursor_seen == [9]
         assert "task" in h.captured  # dispatched
 
@@ -285,8 +287,37 @@ class TestCuratorDispatch:
     def test_no_dispatch_when_no_rows_and_no_seed(self, tmp_path, monitor):
         h = _CuratorHarness(tmp_path, [])
         with _patch_history(h):
-            h.sched._spawn_curator(monitor, [tmp_path])
+            spawned = h.sched._spawn_curator(monitor, [tmp_path])
+        assert spawned is False
         assert h.captured == {}  # nothing dispatched
+
+    def test_run_monitor_records_last_spawn_only_when_dispatched(self, tmp_path, monitor):
+        class FakeRegistry:
+            def projects_for(self, _monitor):
+                return [tmp_path]
+
+        h = _CuratorHarness(tmp_path, [_row(10, "a")])
+        now = datetime(2026, 7, 8, 13, 33, tzinfo=timezone.utc)
+        with _patch_history(h):
+            h.sched.run_monitor(monitor, FakeRegistry(), now)
+
+        state = h.sched.state["policy-curator"]
+        assert state["last_run"] == now.isoformat()
+        assert state["last_spawn"] == now.isoformat()
+
+    def test_run_monitor_no_work_records_last_run_without_last_spawn(self, tmp_path, monitor):
+        class FakeRegistry:
+            def projects_for(self, _monitor):
+                return [tmp_path]
+
+        h = _CuratorHarness(tmp_path, [])
+        now = datetime(2026, 7, 8, 13, 33, tzinfo=timezone.utc)
+        with _patch_history(h):
+            h.sched.run_monitor(monitor, FakeRegistry(), now)
+
+        state = h.sched.state["policy-curator"]
+        assert state["last_run"] == now.isoformat()
+        assert "last_spawn" not in state
 
     def test_failed_curator_result_publishes_monitor_error(self, tmp_path, monitor):
         h = _CuratorHarness(tmp_path, [_row(10, "a")])
@@ -340,6 +371,83 @@ class TestCuratorTaskTransport:
         assert results == [{"success": True, "updated": False}]
         assert "--task" in captured["cmd"]
         assert not captured["task_path"].exists()
+
+    def test_default_spawn_curator_uses_entry_point_role_and_real_agent_wait(
+        self, tmp_path, monkeypatch, monitor
+    ):
+        from click.testing import CliRunner
+
+        from bobi.cli import subagents_launch
+        from bobi.monitors.scheduler import _default_spawn_curator
+
+        paths.state_dir(tmp_path)
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "agent: test-pack\nentry_point: policy_manager\n"
+        )
+        role_dir = paths.roles_dir(tmp_path) / "policy_manager"
+        role_dir.mkdir(parents=True)
+        (role_dir / "ROLE.md").write_text("# Policy Manager\n")
+        paths.bind_root(tmp_path)
+
+        captured = {}
+        waited = {}
+
+        class FakeProc:
+            def communicate(self, timeout=None):
+                return '{"success": true, "updated": false}\n', None
+
+        def fake_popen(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return FakeProc()
+
+        monkeypatch.setattr("subprocess.Popen", fake_popen)
+        monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
+        monkeypatch.setattr("bobi.cli._run_agent_wait",
+                            lambda **kwargs: waited.update(kwargs))
+
+        _default_spawn_curator(monitor, None, "curate policy", lambda result: None)
+
+        cmd = captured["cmd"]
+        assert "--role" in cmd, f"--role missing from command: {cmd}"
+        assert cmd[cmd.index("--role") + 1] == "policy_manager"
+        assert "--agent-wait" in cmd
+
+        launch_args = cmd[cmd.index("launch") + 1:]
+        result = CliRunner().invoke(subagents_launch, launch_args)
+        assert result.exit_code == 0, result.output
+        assert waited["workflow"] == "adhoc"
+        assert waited["role"] == "policy_manager"
+        assert waited["task"].startswith("Read the monitor task file")
+        assert waited["interactive"] is False
+
+    def test_default_spawn_curator_defaults_missing_entry_point_to_manager(
+        self, tmp_path, monkeypatch, monitor
+    ):
+        from bobi.monitors.scheduler import _default_spawn_curator
+
+        paths.state_dir(tmp_path)
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text("agent: test-pack\n")
+        paths.bind_root(tmp_path)
+
+        captured = {}
+
+        class FakeProc:
+            def communicate(self, timeout=None):
+                return '{"success": true, "updated": false}\n', None
+
+        def fake_popen(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return FakeProc()
+
+        monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+        _default_spawn_curator(monitor, None, "curate policy", lambda result: None)
+
+        cmd = captured["cmd"]
+        assert "--role" in cmd, f"--role missing from command: {cmd}"
+        assert cmd[cmd.index("--role") + 1] == "manager"
 
     def test_monitor_spawn_rejects_oversized_argv_and_publishes_error(
         self, tmp_path, monkeypatch, monitor

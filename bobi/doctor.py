@@ -402,6 +402,20 @@ def _check_policy() -> CheckResult:
     from bobi import paths
     policy = paths.policy_path(root)
     if not policy.is_file():
+        monitor_state = paths.state_path(root) / "monitor_state.json"
+        cursor = paths.policy_cursor_path(root)
+        try:
+            import json
+            state = json.loads(monitor_state.read_text()) if monitor_state.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            state = {}
+        curator_state = state.get("policy-curator") if isinstance(state, dict) else None
+        if isinstance(curator_state, dict) and curator_state.get("last_spawn") and not cursor.is_file():
+            return CheckResult(
+                "Team policy", ok=False,
+                detail="policy-curator has spawned but policy.md and policy_cursor are absent",
+                hint="Check manager.log and system/monitor.error events for curator failures")
+
         backlog = 0
         try:
             from bobi import history

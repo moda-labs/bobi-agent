@@ -205,6 +205,23 @@ def _publish_monitor_error(monitor_name: str, kind: str, reason: str,
         log.exception("Failed to publish monitor.error for %s", monitor_name)
 
 
+def _resolve_monitor_role(monitor) -> str:
+    """Resolve the role for a monitor-launched subagent."""
+    role = getattr(monitor, "role", "") or ""
+    if role:
+        return role
+    try:
+        from bobi.config import Config
+        from bobi.paths import bound_root as get_project_root
+        root = get_project_root()
+        if root:
+            cfg = Config.load(root)
+            return cfg.entry_point or "manager"
+    except Exception:
+        pass
+    return ""
+
+
 def _parse_stdout_json(output: str, key: str) -> dict | None:
     """Extract the trailing JSON line containing ``key`` that a monitor
     subprocess printed, or None.
@@ -338,18 +355,7 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict,
     process exits. The check agent only observes — converting the verdict to
     conditions, dedup, and publishing all happen in the scheduler.
     """
-    role = getattr(monitor, "role", "") or ""
-    if not role:
-        try:
-            from bobi.config import Config
-            from bobi.paths import bound_root as get_project_root
-            root = get_project_root()
-            if root:
-                cfg = Config.load(root)
-                role = cfg.entry_point
-        except Exception:
-            pass
-
+    role = _resolve_monitor_role(monitor)
     from bobi import paths
     root = paths.bobi_root()
     cmd = [
@@ -505,7 +511,7 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result,
     parsed summary (or None) to ``on_result`` when the process exits. The
     scheduler — not the agent — owns the cursor advance and the publish.
     """
-    role = getattr(monitor, "role", "") or ""
+    role = _resolve_monitor_role(monitor)
     from bobi import paths
 
     task_path = _write_curator_task(monitor, task)
@@ -530,6 +536,7 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result,
         *(["--role", role] if role else []),
         "--non-interactive",
         "--wait",
+        "--agent-wait",
         "--task", pointer_task,
     ]
 
@@ -711,6 +718,7 @@ class MonitorScheduler:
         detect out-of-band: nothing reconciles here, the waiter thread calls
         back into _reconcile when the verdict lands.
         """
+        curator_spawned = False
         if monitor.notify:
             # Scheduled notification — keyed to the due time, so the shared
             # dedup path never suppresses it.
@@ -725,7 +733,8 @@ class MonitorScheduler:
         elif monitor.curator:
             # The curator writes an artifact, not a verdict — it does not flow
             # through _reconcile. The cursor advance + publish happen on result.
-            self._spawn_curator(monitor, registry.projects_for(monitor))
+            curator_spawned = self._spawn_curator(
+                monitor, registry.projects_for(monitor))
             conditions = None
         else:
             self._spawn_check(monitor, registry.projects_for(monitor))
@@ -741,7 +750,10 @@ class MonitorScheduler:
                 self._reconcile(monitor, conditions)
 
         with self._state_lock:
-            self.state.setdefault(monitor.state_key, {})["last_run"] = now.isoformat()
+            entry = self.state.setdefault(monitor.state_key, {})
+            entry["last_run"] = now.isoformat()
+            if monitor.curator and curator_spawned:
+                entry["last_spawn"] = now.isoformat()
             self._save_state()
 
     def _reconcile(self, monitor, conditions: list) -> None:
@@ -1058,7 +1070,7 @@ class MonitorScheduler:
             log.error("Curator prompt missing at %s", CURATOR_PATH)
             return ""
 
-    def _spawn_curator(self, monitor, projects: list[Path]) -> None:
+    def _spawn_curator(self, monitor, projects: list[Path]) -> bool:
         """Window the transcript delta, apply the input cap, and launch the
         curator agent with the rendered delta (#456).
 
@@ -1095,15 +1107,15 @@ class MonitorScheduler:
             seed = collect_legacy_journals(state_dir, curator_mod.MAX_SEED_INPUT_CHARS)
 
         if not rows and not seed:
-            log.info("Monitor %s due — no new transcript messages since cursor %d "
+            log.info("Monitor %s due - no new transcript messages since cursor %d "
                      "and nothing to seed", monitor.name, cursor)
-            return
+            return False
 
         ingested, highest_id, flags = curator_mod.select_messages(
             rows, curator_mod.MAX_CURATOR_INPUT_CHARS)
         if highest_id is None and not seed:
             log.info("Monitor %s: nothing ingestable this run", monitor.name)
-            return
+            return False
 
         transcript = curator_mod.render_transcript(ingested)
         try:
@@ -1125,6 +1137,7 @@ class MonitorScheduler:
             lambda result: self._on_curator_result(
                 monitor, result, highest_id, cursor_path),
         )
+        return True
 
     def _on_curator_result(self, monitor, result: dict | None,
                            highest_id: int | None, cursor_path: Path) -> None:
