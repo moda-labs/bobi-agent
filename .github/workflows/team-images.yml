@@ -39,7 +39,7 @@ on:
       # The wrapper drives `bobi build` (#610), which routes through the
       # deploy asset/team-resolution helpers and the CLI.
       - "bobi/build.py"
-      - "bobi/deploy.py"
+      - "bobi_deploy/src/bobi_deploy/deploy.py"
       - "bobi/registry.py"
       - "bobi/cli.py"
       - "scripts/build-team-images.sh"

@@ -68,6 +68,8 @@ env:
   # The published framework version this repo's instances are built on. Bump to
   # adopt a new bobi release (rebuilds team images on the next deploy).
   BOBI_VERSION: "__BOBI_VERSION__"
+  # The deploy-plugin package that delivers `bobi deploy` into the CLI.
+  BOBI_DEPLOY_VERSION: "__BOBI_DEPLOY_VERSION__"
 
 on:
   push:
@@ -156,8 +158,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install the bobi CLI from PyPI
-        run: pip install "bobi==${BOBI_VERSION}"
+      - name: Install the bobi CLI + deploy plugin
+        # bobi-deploy delivers the `bobi deploy` command (bobi.commands entry
+        # point); without it the pinned bobi wheel is the local product only.
+        # Pinned like bobi itself, so the reconcile runs from known artifacts.
+        run: pip install "bobi==${BOBI_VERSION}" "bobi-deploy==${BOBI_DEPLOY_VERSION}"
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
@@ -256,9 +261,22 @@ class ScaffoldResult:
     repo_slug: str | None = None
 
 
+def _own_version() -> str:
+    """The installed bobi-deploy version — pinned into the scaffolded workflow
+    alongside the bobi pin, so fleet CI installs the pair this scaffold was
+    generated from."""
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return version("bobi-deploy")
+    except PackageNotFoundError:
+        return "<version>"  # not pip-installed; user pins manually
+
+
 def render_workflow(version: str) -> str:
     """The standalone deploy workflow YAML, pinned to `version`."""
-    return WORKFLOW_TEMPLATE.replace("__BOBI_VERSION__", version)
+    return (WORKFLOW_TEMPLATE
+            .replace("__BOBI_VERSION__", version)
+            .replace("__BOBI_DEPLOY_VERSION__", _own_version()))
 
 
 def prefix_for(name: str) -> str:
@@ -287,7 +305,7 @@ def secret_keys_for(project_path: Path, team: str, auth: str) -> list[str]:
     ANTHROPIC_API_KEY; subscription mode must NOT have it (it would override the
     OAuth creds). Mirrors `deploy._secret_sets` so the wiring matches the engine.
     """
-    from bobi.deploy import scan_declared_vars
+    from bobi.config import scan_declared_vars
 
     agent_yaml = project_path / "agents" / team / "agent.yaml"
     keys = [v for v in scan_declared_vars(agent_yaml)

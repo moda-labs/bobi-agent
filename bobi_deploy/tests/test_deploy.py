@@ -1,4 +1,4 @@
-"""Unit tests for the `bobi deploy` engine (bobi/deploy.py).
+"""Unit tests for the `bobi deploy` engine (bobi_deploy/deploy.py).
 
 The deployment PRIMITIVE: config precedence, delivery-mode selection, identity
 naming, secret resolution/validation, and the idempotent provision-or-update
@@ -10,13 +10,13 @@ The workflow STRUCTURE (thin-client asserts) is in test_gitops_c22.py.
 
 import logging
 import json
-import os
 import tarfile
 from pathlib import Path
 
 import pytest
 
-from bobi import deploy as D
+from bobi import build as B
+from bobi_deploy import deploy as D
 
 
 # --- fixtures ----------------------------------------------------------------
@@ -171,65 +171,6 @@ def test_bad_brain_is_an_error(repo):
     )
     with pytest.raises(D.DeployError, match="brain="):
         D.load_deploy_config(repo, "x")
-
-
-# --- repo + package resolution ----------------------------------------------
-
-def test_find_repo_root_walks_up(repo):
-    deep = repo / "deployments"
-    assert D.find_repo_root(deep) == repo
-
-
-def test_find_repo_root_raises_without_scripts(tmp_path):
-    with pytest.raises(D.DeployError, match="not a bobi checkout"):
-        D.find_repo_root(tmp_path)
-
-
-def test_resolve_assets_source_mode_in_a_checkout(repo, tmp_path):
-    """In a checkout, build from source (repo Dockerfile)."""
-    a = D.resolve_assets(repo, tmp_path)
-    assert a.mode == "source"
-    assert a.build_context == repo
-    assert a.dockerfile == repo / "Dockerfile"
-    assert a.build_args == {}
-    assert a.provision_sh == repo / "scripts" / "provision-instance.sh"
-
-
-def test_resolve_assets_binary_mode_from_packaged(tmp_path, monkeypatch):
-    """With no checkout, build from the bundled wheel assets (PyPI image)."""
-    # A fake packaged _deploy dir (what the wheel ships).
-    pkg = tmp_path / "_deploy"
-    (pkg / "scripts").mkdir(parents=True)
-    (pkg / "docker").mkdir()
-    (pkg / "Dockerfile").write_text("FROM scratch\n")
-    (pkg / "docker" / "docker-entrypoint.sh").write_text("#!/bin/sh\n")
-    (pkg / "scripts" / "provision-instance.sh").write_text("#!/bin/sh\n")
-    (pkg / "scripts" / "destroy-instance.sh").write_text("#!/bin/sh\n")
-    monkeypatch.setattr(D, "find_repo_root",
-                        lambda p=None: (_ for _ in ()).throw(D.DeployError("x")))
-    monkeypatch.setattr(D, "_packaged_deploy_dir", lambda: pkg)
-    monkeypatch.setattr(D, "_bobi_version", lambda: "9.9.9")
-
-    staging = tmp_path / "staging"
-    staging.mkdir()
-    a = D.resolve_assets(tmp_path / "elsewhere", staging)
-    assert a.mode == "binary"
-    assert a.build_args == {"BOBI_BUILD": "pypi", "BOBI_VERSION": "9.9.9"}
-    # build context assembled: Dockerfile + docker/ copied into staging
-    assert (a.build_context / "Dockerfile").exists()
-    assert (a.build_context / "docker" / "docker-entrypoint.sh").exists()
-    assert a.provision_sh == pkg / "scripts" / "provision-instance.sh"
-
-
-def test_local_package_dir_requires_agent_yaml(repo):
-    with pytest.raises(D.DeployError, match="not found"):
-        D.local_package_dir(repo, "nope")
-
-
-def test_scan_required_vars_excludes_defaulted(tmp_path):
-    y = tmp_path / "agent.yaml"
-    y.write_text("a: ${REQUIRED}\nb: ${OPTIONAL:-x}\nc: literal\n")
-    assert D.scan_required_vars(y) == ["REQUIRED"]
 
 
 # --- secret resolution -------------------------------------------------------
@@ -975,6 +916,20 @@ def test_guide_only_dep_deploy_is_refused(repo, monkeypatch):
         D.deploy(repo, "eng-team")
 
 
+def test_deploy_guide_dep_error_points_at_bobi_build(repo):
+    """The deploy-side wrap of GuideDepsError names the replacement command."""
+    pkg = repo / "agents" / "eng-team"
+    (pkg / "agent.yaml").write_text(
+        "agent: eng-team\n"
+        "tool_library:\n"
+        "  - name: gtool\n"
+        "    guide: 'install gtool somehow'\n"
+        "    success: 'command -v gtool'\n")
+    cfg = D.DeployConfig(name="x", team=str(pkg))
+    with pytest.raises(D.DeployError, match=r"bobi build"):
+        D._render_team_deps_into_context(repo, cfg, assets=None)
+
+
 def test_binary_mode_pins_bobi_version_as_build_arg(repo, recorder, monkeypatch, tmp_path):
     """Binary mode builds the PyPI image pinned to the installed version."""
     monkeypatch.setattr(D, "fly_app_exists", lambda app: False)
@@ -987,10 +942,10 @@ def test_binary_mode_pins_bobi_version_as_build_arg(repo, recorder, monkeypatch,
     (pkg / "docker" / "x").write_text("")
     (pkg / "scripts" / "provision-instance.sh").write_text("#!/bin/sh\n")
     (pkg / "scripts" / "destroy-instance.sh").write_text("#!/bin/sh\n")
-    monkeypatch.setattr(D, "find_repo_root",
-                        lambda p=None: (_ for _ in ()).throw(D.DeployError("x")))
-    monkeypatch.setattr(D, "_packaged_deploy_dir", lambda: pkg)
-    monkeypatch.setattr(D, "_bobi_version", lambda: "1.2.3")
+    monkeypatch.setattr(B, "find_repo_root",
+                        lambda p=None: (_ for _ in ()).throw(B.BuildError("x")))
+    monkeypatch.setattr(B, "_packaged_deploy_dir", lambda: pkg)
+    monkeypatch.setattr(B, "installed_bobi_version", lambda: "1.2.3")
     D.deploy(repo, "eng")
     prov = next(c for c in _flat(recorder) if "provision-instance.sh" in c)
     assert "--build-arg" in prov and "BOBI_VERSION=1.2.3" in prov
@@ -1020,13 +975,6 @@ def test_preflight_passes_when_ready(monkeypatch):
     monkeypatch.setattr(D.subprocess, "run",
                         lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "me@x", "stderr": ""})())
     assert D.fly_preflight() == []
-
-
-def test_local_package_dir_accepts_a_path(repo, tmp_path):
-    team = tmp_path / "somewhere" / "myteam"
-    team.mkdir(parents=True)
-    (team / "agent.yaml").write_text("agent: myteam\n")
-    assert D.local_package_dir(repo, str(team)) == team.resolve()
 
 
 def test_half_provisioned_app_reprovisions_not_ssh_updates(repo, recorder, monkeypatch):

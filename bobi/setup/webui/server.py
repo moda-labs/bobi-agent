@@ -776,7 +776,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     @app.post("/api/ingress/verify")
     def ingress_verify(payload: dict) -> JSONResponse:
         from datetime import datetime, timezone
-        from bobi.deploy import DEFAULT_EVENT_SERVER
+        from bobi.config import DEFAULT_EVENT_SERVER
         mode = (payload.get("mode") or state.ingress.mode or "local").strip()
         url = (payload.get("url") or state.ingress.url or "").strip().rstrip("/")
         if mode == "bobi_cloud":

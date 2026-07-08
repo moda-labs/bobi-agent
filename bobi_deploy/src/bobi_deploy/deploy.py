@@ -42,13 +42,21 @@ from pathlib import Path
 
 import yaml
 
-from bobi.config import _ENV_VAR_RE, parse_env_file, parse_env_ref, write_env_file
+from bobi.build import (
+    BuildAssets,
+    BuildError,
+    resolve_assets,
+    resolve_team_dir,
+)
+from bobi.config import (
+    DEFAULT_EVENT_SERVER,
+    parse_env_file,
+    scan_declared_vars,
+    scan_required_vars,
+    write_env_file,
+)
 
 log = logging.getLogger(__name__)
-
-# Mirror provision-instance.sh's default so a standalone deploy and the script
-# agree on where instances phone home when no event server is configured.
-DEFAULT_EVENT_SERVER = "https://bobi-events.modalabs.workers.dev"
 
 # Built-in defaults — the lowest-precedence layer. Operators override via
 # deployments/defaults.yaml (shared values) or per-instance deployments/<name>.yaml.
@@ -314,259 +322,6 @@ def _team_brain_kind(project_path: Path, cfg: "DeployConfig") -> str:
         return ""
 
 
-# --- repo + package resolution ----------------------------------------------
-
-def find_repo_root(start: Path | None = None) -> Path:
-    """Locate the bobi source root (the dir holding scripts/ + Dockerfile).
-
-    `deploy` builds the instance image from the Dockerfile (the image is generic;
-    identity lives in the volume + env), so it must run from a bobi checkout
-    — exactly as the GitHub Action does. Walk up from `start` until both
-    scripts/provision-instance.sh and Dockerfile are found.
-    """
-    cur = (start or Path.cwd()).resolve()
-    for d in (cur, *cur.parents):
-        if (d / "scripts" / "provision-instance.sh").exists() and (d / "Dockerfile").exists():
-            return d
-    raise DeployError("not a bobi checkout")
-
-
-@dataclass
-class DeployAssets:
-    """Where deploy finds its mechanics + how the instance image is built.
-
-    Two modes, so the binary deploys with OR without a repo:
-      * **source** — a bobi checkout: build the image from local source
-        (Dockerfile, `COPY . .`). Used in dev and the bobi repo's own CI.
-      * **binary** — no checkout: the scripts + a PyPI-install Dockerfile ship in
-        the wheel (`bobi/_deploy`), so `uv tool install bobi` is enough
-        to deploy. The image installs `bobi==<this version>` from PyPI.
-    """
-
-    mode: str
-    provision_sh: Path
-    destroy_sh: Path
-    build_context: Path | None
-    dockerfile: Path | None
-    build_args: dict
-    run_cwd: Path | None
-
-
-def _packaged_deploy_dir() -> Path | None:
-    """The bundled deploy assets (`bobi/_deploy`) in an installed wheel, or
-    None in an editable/source checkout (where source mode is used instead)."""
-    try:
-        import importlib.resources as ir
-        root = ir.files("bobi") / "_deploy"
-        if root.is_dir():
-            return Path(str(root))
-    except (ModuleNotFoundError, FileNotFoundError, AttributeError, TypeError):
-        pass
-    return None
-
-
-def _bobi_version() -> str:
-    """The installed bobi version — pinned into the PyPI instance image so
-    the deployed instance runs the same code as the binary that deployed it."""
-    from importlib.metadata import PackageNotFoundError, version
-    try:
-        return version("bobi")
-    except PackageNotFoundError as e:
-        raise DeployError(
-            "cannot determine the installed bobi version to build the "
-            "instance image. Install bobi from PyPI (`uv tool install "
-            "bobi`)."
-        ) from e
-
-
-def resolve_assets(project_path: Path, staging: Path | None = None) -> DeployAssets:
-    """Resolve deploy mechanics, preferring a source checkout, else the bundled
-    wheel assets. When `staging` is given (a deploy that builds an image), the
-    binary-mode build context is assembled there (Dockerfile.pypi + docker/)."""
-    try:
-        repo = find_repo_root(project_path)
-        return DeployAssets(
-            mode="source",
-            provision_sh=repo / "scripts" / "provision-instance.sh",
-            destroy_sh=repo / "scripts" / "destroy-instance.sh",
-            build_context=repo,
-            dockerfile=repo / "Dockerfile",
-            build_args={},
-            run_cwd=repo,
-        )
-    except DeployError:
-        pass
-
-    pkg = _packaged_deploy_dir()
-    if pkg is None:
-        raise DeployError(
-            "no deploy assets found — not in a bobi checkout, and the "
-            "installed package has no bundled deploy assets. Reinstall with "
-            "`uv tool install bobi`."
-        )
-
-    ctx = dockerfile = None
-    if staging is not None:
-        ctx = staging / "build-context"
-        ctx.mkdir(parents=True, exist_ok=True)
-        shutil.copy(pkg / "Dockerfile", ctx / "Dockerfile")
-        shutil.copytree(pkg / "docker", ctx / "docker", dirs_exist_ok=True)
-        dockerfile = ctx / "Dockerfile"
-    return DeployAssets(
-        mode="binary",
-        provision_sh=pkg / "scripts" / "provision-instance.sh",
-        destroy_sh=pkg / "scripts" / "destroy-instance.sh",
-        build_context=ctx,
-        dockerfile=dockerfile,
-        # `pypi` builder + the version to install (the source builder is the
-        # Dockerfile's default, used in a checkout).
-        build_args={"BOBI_BUILD": "pypi",
-                    "BOBI_VERSION": _bobi_version()},
-        run_cwd=None,
-    )
-
-
-def local_package_dir(base: Path, team: str) -> Path:
-    """Resolve a local team package (the ssh-push source). `team` may be a path
-    to a team dir, or a name found under `base/agents/<team>` or `base/<team>`."""
-    for cand in (Path(team), base / "agents" / team, base / team):
-        if (cand / "agent.yaml").exists():
-            return cand.resolve()
-    raise DeployError(
-        f"local team '{team}' not found — looked for agent.yaml in '{team}', "
-        f"'{base}/agents/{team}', and '{base}/{team}'. For ssh-push delivery, "
-        "point `team:` at a local package directory holding agent.yaml."
-    )
-
-
-def resolve_team_dir(project_path: Path, team: str) -> Path:
-    """Resolve a deploy `team:` ref to a **flat, ready-to-ship** package dir.
-
-    The single seam every deploy consumer routes through (D-2) — secret-prune
-    scan, deps-render, deps-hash, AND the ssh-push — so they all see the same
-    package. A team that declares `from:` is **composed (flattened) here** (#446/
-    #451): the base is resolved on the host (which has registry access), the
-    chain is merged into a staging dir with no `from:`, and every downstream
-    consumer sees the merged build/secrets. The pushed tarball is already flat,
-    so the instance never resolves a chain at first boot.
-    """
-    src = _resolve_team_package(project_path, team)
-    return _flatten_if_chained(project_path, src)
-
-
-def _flatten_if_chained(project_path: Path, team_dir: Path) -> Path:
-    """Compose a `from:` chain into a flat staging dir; pass through otherwise.
-
-    A team with no `from:` is returned unchanged (today's behavior, byte-for-byte).
-    Composition is deterministic, so the repeated `resolve_team_dir` calls across
-    one deploy each produce the same staged image."""
-    from bobi import compose, paths
-    try:
-        has_from = bool((compose._read_agent_yaml(team_dir)).get("from"))
-    except compose.ComposeError:
-        return team_dir
-    if not has_from:
-        return team_dir
-    chain = compose.resolve_chain(team_dir, project_path)
-    staged = paths.build_cache_dir() / "composed" / f"composed-{team_dir.name}"
-    staged.parent.mkdir(parents=True, exist_ok=True)
-    if staged.exists():
-        shutil.rmtree(staged)
-    compose.compose(chain, staged)
-    # compose() doesn't freeze workspace/ (it's the seed-if-absent surface for a
-    # local install), but the flat tarball IS what reaches the instance — so carry
-    # the chain's merged workspace (leaf-wins) so an overlay's per-principal
-    # assistant-context.md actually ships.
-    compose.merge_workspace(chain, staged)
-    # Preserve the leaf's directory name so the app/tarball naming is unchanged.
-    cfg = compose._read_agent_yaml(staged)
-    cfg.setdefault("agent", team_dir.name)
-    (staged / "agent.yaml").write_text(
-        yaml.dump(cfg, default_flow_style=False, sort_keys=False))
-    final = staged.parent / team_dir.name
-    if final.exists():
-        shutil.rmtree(final)
-    staged.rename(final)
-    return final
-
-
-def _resolve_team_package(project_path: Path, team: str) -> Path:
-    """Resolve a deploy `team:` ref (optionally `name@version`) to a package dir.
-
-    After resolution the package is on disk, so the existing local-team
-    build/prune/push path runs unchanged. Resolution order:
-
-      1. explicit `@version` → fetch the immutable per-team asset into the
-         **shared** install/deploy cache (D-3). A pin **never** falls back to a
-         local dir: a stale `agents/<name>` must not silently shadow the pin, and
-         a missing asset is a hard error (surfaced by registry.fetch).
-      2. bare name with a local `agents/<name>` / `<name>` dir → use it (today's
-         behavior, byte-for-byte unchanged — local dev keeps working).
-      3. bare name, no local dir → fetch latest into the shared cache.
-    """
-    from bobi import registry
-    # A `team:` that is itself a path to a package dir wins literally — mirrors
-    # local_package_dir's first candidate (`Path(team)`) and avoids mis-splitting
-    # a filesystem path that happens to contain '@' (e.g. `/work@v2/eng-team`).
-    if (Path(team) / "agent.yaml").exists():
-        return Path(team).resolve()
-    name, version = registry.split_team_ref(team)
-    if version:
-        # Reuse an already-cached pin with no second download (§3.4); the
-        # immutable asset makes the cached copy authoritative.
-        if (registry.cached_version(project_path, name) == version
-                and registry.is_cached(project_path, name)):
-            return registry.cache_path(project_path, name)
-        try:
-            return registry.fetch(project_path, name, version=version)
-        except Exception as e:
-            raise DeployError(
-                f"could not resolve pinned team '{name}@{version}': {e}"
-            ) from e
-    # Bare name: a local checkout wins (unchanged), exactly like local_package_dir.
-    for cand in (project_path / "agents" / name, project_path / name):
-        if (cand / "agent.yaml").exists():
-            return cand.resolve()
-    try:
-        return registry.fetch(project_path, name)
-    except Exception as e:
-        raise DeployError(
-            f"local team '{name}' not found and could not fetch it from the "
-            f"registry: {e}"
-        ) from e
-
-
-def scan_required_vars(agent_yaml: Path) -> list[str]:
-    """Return the bare ${VAR} secret names a package's agent.yaml requires.
-
-    Like config.find_required_env_vars but for an arbitrary (not-yet-installed)
-    package file. A bare ${VAR} is required; ${VAR:-default} carries its own
-    fallback (a ':' in the captured name) and is optional, so it's excluded.
-    """
-    if not agent_yaml.exists():
-        return []
-    return [ref.name
-            for ref in map(parse_env_ref, _ENV_VAR_RE.findall(agent_yaml.read_text()))
-            if ref.required]
-
-
-def scan_declared_vars(agent_yaml: Path) -> list[str]:
-    """All ${VAR} secret names a package references — required AND optional.
-
-    Unlike `scan_required_vars`, this keeps ${VAR:-default} refs (stripping the
-    `:-default` suffix). An optional ref is still DECLARED: it may legitimately be
-    set, and must never be pruned. This is the team's complete secret surface, so
-    it doubles as the prune authority and the env-file filter. De-duped, order
-    preserved.
-    """
-    if not agent_yaml.exists():
-        return []
-    seen: dict[str, None] = {}
-    for v in _ENV_VAR_RE.findall(agent_yaml.read_text()):
-        seen.setdefault(parse_env_ref(v).name, None)  # ${VAR:-x} -> VAR
-    return list(seen)
-
-
 def _secret_sets(cfg: DeployConfig,
                  project_path: Path) -> tuple[list[str], set[str] | None]:
     """Compute (required, declared) secret keys for one deployment.
@@ -595,13 +350,8 @@ def _secret_sets(cfg: DeployConfig,
 
 # --- secret resolution -------------------------------------------------------
 
-def resolve_env_file(cfg: DeployConfig, project_path: Path,
-                     out_dir: Path, *, live: set[str] | None = None) -> Path:
-    """Materialize the resolved secrets into the KEY=VALUE env-file that
-    provision-instance.sh consumes (mode 0600). Thin wrapper over
-    resolve_secret_values — see it for sourcing, the declared-set filter, and the
-    live-aware required check."""
-    values = resolve_secret_values(cfg, project_path, live=live)
+def _write_instance_env(out_dir: Path, values: dict[str, str]) -> Path:
+    """Write the KEY=VALUE env-file provision-instance.sh consumes (mode 0600)."""
     out = out_dir / "instance.env"
     write_env_file(out, values)
     try:
@@ -609,6 +359,15 @@ def resolve_env_file(cfg: DeployConfig, project_path: Path,
     except OSError:
         pass
     return out
+
+
+def resolve_env_file(cfg: DeployConfig, project_path: Path,
+                     out_dir: Path, *, live: set[str] | None = None) -> Path:
+    """Materialize the resolved secrets into the provisioner's env-file. Thin
+    wrapper over resolve_secret_values — see it for sourcing, the declared-set
+    filter, and the live-aware required check."""
+    return _write_instance_env(
+        out_dir, resolve_secret_values(cfg, project_path, live=live))
 
 
 def resolve_secret_values(cfg: DeployConfig, project_path: Path,
@@ -887,7 +646,6 @@ def fly_instance_running(app: str) -> bool:
     this (not mere existence): an app that exists but has no started machine is
     HALF-PROVISIONED (a deploy that failed mid-build) and must re-provision, not
     take the ssh update path (which errors 'no started VMs'). Caught in e2e."""
-    import json
     proc = subprocess.run([_fly_bin(), "machine", "list", "-a", app, "--json"],
                           capture_output=True, text=True)
     if proc.returncode != 0:
@@ -903,7 +661,6 @@ def _fly_machine_ids(app: str) -> list[str]:
     """The app's machine IDs. `fly machine restart` requires an explicit ID when
     not attached to a TTY (a bare `-a <app>` errors 'a machine ID must be
     specified' — caught in the live ssh-push e2e), so resolve them first."""
-    import json
     proc = subprocess.run(
         [_fly_bin(), "machine", "list", "-a", app, "--json"],
         capture_output=True, text=True, check=True,
@@ -1028,7 +785,7 @@ def _provision_args(cfg: DeployConfig, env_file: Path) -> list[str]:
 
 
 def _render_team_deps_into_context(project_path: Path, cfg: DeployConfig,
-                                   assets: "DeployAssets") -> str | None:
+                                   assets: BuildAssets | None) -> str | None:
     """Render a `build:`-declaring team's deps hook into the build context.
 
     Returns the TEAM_DEPS build-arg value (a path RELATIVE to the build context,
@@ -1041,7 +798,7 @@ def _render_team_deps_into_context(project_path: Path, cfg: DeployConfig,
         return None
     try:
         team_dir = resolve_team_dir(project_path, cfg.team)
-    except DeployError:
+    except BuildError:
         # A bare-name team with no local dir / no registry hit is legitimately
         # "not buildable here" → generic image. But a PIN that fails to resolve
         # must never be silently downgraded to a generic image — propagate it.
@@ -1078,7 +835,7 @@ def _local_team_deps_hash(project_path: Path, cfg: DeployConfig) -> str:
         return ""  # team-url: package isn't local
     try:
         team_dir = resolve_team_dir(project_path, cfg.team)
-    except DeployError:
+    except BuildError:
         if cfg.team_version:  # a pin must hard-fail, not silently hash-as-generic
             raise
         return ""
@@ -1127,7 +884,7 @@ def _local_dep_list_hash(project_path: Path, cfg: DeployConfig) -> str:
         return ""
     try:
         team_dir = resolve_team_dir(project_path, cfg.team)
-    except DeployError:
+    except BuildError:
         if cfg.team_version:
             raise
         return ""
@@ -1284,12 +1041,7 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
         if app_exists:
             _, volume_env_pruned = reconcile_live_secrets(
                 cfg, project_path, app, values, live or set(), prune=prune)
-        env_file = Path(tmp) / "instance.env"
-        write_env_file(env_file, values)
-        try:
-            os.chmod(env_file, 0o600)
-        except OSError:
-            pass
+        env_file = _write_instance_env(Path(tmp), values)
         # Provision when there's no running instance — covers a brand-new app AND a
         # half-provisioned one (app/volume exist but the image build failed, so no
         # started machine). Only ssh-update an instance that's actually up.

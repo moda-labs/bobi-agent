@@ -23,7 +23,7 @@ on:
       # #610: the wrapper drives `bobi build`, which routes through these.
       - "bobi/build.py"
       - "bobi/cli.py"
-      - "bobi/deploy.py"
+      - "bobi_deploy/src/bobi_deploy/deploy.py"
       - "bobi/registry.py"
       - "tests/integration/test_bobi_build.py"
       - ".github/workflows/container.yml"

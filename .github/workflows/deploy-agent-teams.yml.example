@@ -189,7 +189,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install bobi CLI
-        run: pip install -e .
+        run: pip install -e . -e ./bobi_deploy
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 

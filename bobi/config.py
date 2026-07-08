@@ -18,6 +18,11 @@ log = logging.getLogger(__name__)
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 _DOTENV_LOADED: dict[str, str] = {}
 
+# The shared moda-hosted event server. Mirrors provision-instance.sh's default
+# so every surface (setup, Slack manifest, deploy) agrees on where instances
+# phone home when no event server is configured.
+DEFAULT_EVENT_SERVER = "https://bobi-events.modalabs.workers.dev"
+
 
 @dataclass(frozen=True)
 class EnvVarRef:
@@ -101,12 +106,8 @@ def find_env_var_refs(project_path: Path) -> list[EnvVarRef]:
     optional one to the same name.
     """
     from bobi import paths
-    agent_yaml = paths.agent_yaml_path(project_path)
-    if not agent_yaml.exists():
-        return []
     refs: dict[str, EnvVarRef] = {}
-    for token in _ENV_VAR_RE.findall(agent_yaml.read_text()):
-        ref = parse_env_ref(token)
+    for ref in _scan_env_refs(paths.agent_yaml_path(project_path)):
         prior = refs.get(ref.name)
         if prior is None or (ref.required and not prior.required):
             refs[ref.name] = ref
@@ -116,6 +117,42 @@ def find_env_var_refs(project_path: Path) -> list[EnvVarRef]:
 def find_required_env_vars(project_path: Path) -> list[str]:
     """The bare ${VAR} names agent.yaml requires (${VAR:-default} excluded)."""
     return [r.name for r in find_env_var_refs(project_path) if r.required]
+
+
+def _scan_env_refs(agent_yaml: Path) -> list[EnvVarRef]:
+    """Every ${VAR} reference in an arbitrary (not-yet-installed) package
+    file, in order, un-deduped. The one file-level scan the filters below and
+    find_env_var_refs build on."""
+    if not agent_yaml.exists():
+        return []
+    return [parse_env_ref(t) for t in _ENV_VAR_RE.findall(agent_yaml.read_text())]
+
+
+def _dedup(names: list[str]) -> list[str]:
+    return list(dict.fromkeys(names))
+
+
+def scan_required_vars(agent_yaml: Path) -> list[str]:
+    """The bare ${VAR} secret names a package's agent.yaml requires.
+
+    Like find_required_env_vars but for a package file that isn't installed
+    yet. A bare ${VAR} is required; ${VAR:-default} carries its own fallback
+    (a ':' in the captured name) and is optional, so it's excluded. De-duped,
+    order preserved.
+    """
+    return _dedup([r.name for r in _scan_env_refs(agent_yaml) if r.required])
+
+
+def scan_declared_vars(agent_yaml: Path) -> list[str]:
+    """All ${VAR} secret names a package references — required AND optional.
+
+    Unlike `scan_required_vars`, this keeps ${VAR:-default} refs (stripping the
+    `:-default` suffix). An optional ref is still DECLARED: it may legitimately be
+    set, and must never be pruned. This is the team's complete secret surface, so
+    it doubles as the prune authority and the env-file filter. De-duped, order
+    preserved.
+    """
+    return _dedup([r.name for r in _scan_env_refs(agent_yaml)])
 
 
 def _interpolate_env(value, env: dict[str, str] | None = None):

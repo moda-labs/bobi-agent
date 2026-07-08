@@ -5,11 +5,12 @@ One command from team declaration to tagged, pushable Docker image:
     bobi build <team> --tag ghcr.io/acme/my-team:1 --push
 
 Consolidates the pieces that already existed but were scattered and
-Fly-coupled: `deploy.resolve_team_dir` (path / `name@version` registry pin /
-`from:` flattening), `deploy.resolve_assets` (source-checkout vs bundled-wheel
-build context), and `dep_bootstrap.render_team_deps` (the ONE deps-render
-seam: compose, resolve the declared dependency set, bootstrap guide-only deps,
-render team-deps.sh with both in-image identity stamps).
+Fly-coupled: `resolve_team_dir` (path / `name@version` registry pin /
+`from:` flattening), `resolve_assets` (source-checkout vs bundled-wheel
+build context) — both defined here, shared with the deploy engine — and
+`dep_bootstrap.render_team_deps` (the ONE deps-render seam: compose, resolve
+the declared dependency set, bootstrap guide-only deps, render team-deps.sh
+with both in-image identity stamps).
 
 Guide-only dependencies are materialized by the bootstrap agent INSIDE a fresh
 base image (OQ6: the resolved recipe is faithful to the image, not the host) -
@@ -35,6 +36,8 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+import yaml
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +78,221 @@ class BuildResult:
     team_dir: Path
     mode: str  # BOBI_BUILD mode the image was built with
     team_deps: str | None  # TEAM_DEPS build-arg used, None = generic image
+
+
+# --- repo + build-asset resolution -------------------------------------------
+# Shared by `bobi build` and the deploy engine (the bobi_deploy package): both
+# build the same instance image from the same assets, so the resolution lives
+# here, on the public side, and deploy imports downward.
+
+def find_repo_root(start: Path | None = None) -> Path:
+    """Locate the bobi source root (the dir holding scripts/ + Dockerfile).
+
+    The instance image builds from the Dockerfile (the image is generic;
+    identity lives in the volume + env), so a source-mode build must run from a
+    bobi checkout — exactly as the GitHub Action does. Walk up from `start`
+    until both scripts/provision-instance.sh and Dockerfile are found.
+    """
+    cur = (start or Path.cwd()).resolve()
+    for d in (cur, *cur.parents):
+        if (d / "scripts" / "provision-instance.sh").exists() and (d / "Dockerfile").exists():
+            return d
+    raise BuildError("not a bobi checkout")
+
+
+@dataclass
+class BuildAssets:
+    """Where a build finds its mechanics + how the instance image is built.
+
+    Two modes, so the binary builds with OR without a repo:
+      * **source** — a bobi checkout: build the image from local source
+        (Dockerfile, `COPY . .`). Used in dev and the bobi repo's own CI.
+      * **binary** — no checkout: the scripts + a PyPI-install Dockerfile ship in
+        the wheel (`bobi/_deploy`), so `uv tool install bobi` is enough
+        to build or deploy. The image installs `bobi==<this version>` from PyPI.
+    """
+
+    mode: str
+    provision_sh: Path
+    destroy_sh: Path
+    build_context: Path | None
+    dockerfile: Path | None
+    build_args: dict
+    run_cwd: Path | None
+
+
+def _packaged_deploy_dir() -> Path | None:
+    """The bundled deploy assets (`bobi/_deploy`) in an installed wheel, or
+    None in an editable/source checkout (where source mode is used instead)."""
+    try:
+        import importlib.resources as ir
+        root = ir.files("bobi") / "_deploy"
+        if root.is_dir():
+            return Path(str(root))
+    except (ModuleNotFoundError, FileNotFoundError, AttributeError, TypeError):
+        pass
+    return None
+
+
+def installed_bobi_version() -> str:
+    """The installed bobi version — pinned into the PyPI instance image so
+    the built instance runs the same code as the binary that built it."""
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return version("bobi")
+    except PackageNotFoundError as e:
+        raise BuildError(
+            "cannot determine the installed bobi version to build the "
+            "instance image. Install bobi from PyPI (`uv tool install "
+            "bobi`)."
+        ) from e
+
+
+def resolve_assets(project_path: Path, staging: Path | None = None) -> BuildAssets:
+    """Resolve build mechanics, preferring a source checkout, else the bundled
+    wheel assets. When `staging` is given (a build that produces an image), the
+    binary-mode build context is assembled there (Dockerfile.pypi + docker/)."""
+    try:
+        repo = find_repo_root(project_path)
+    except BuildError:
+        repo = None
+    if repo is not None:
+        return BuildAssets(
+            mode="source",
+            provision_sh=repo / "scripts" / "provision-instance.sh",
+            destroy_sh=repo / "scripts" / "destroy-instance.sh",
+            build_context=repo,
+            dockerfile=repo / "Dockerfile",
+            build_args={},
+            run_cwd=repo,
+        )
+
+    pkg = _packaged_deploy_dir()
+    if pkg is None:
+        raise BuildError(
+            "no build assets found — not in a bobi checkout, and the "
+            "installed package has no bundled deploy assets. Reinstall with "
+            "`uv tool install bobi`."
+        )
+
+    ctx = dockerfile = None
+    if staging is not None:
+        ctx = staging / "build-context"
+        ctx.mkdir(parents=True, exist_ok=True)
+        shutil.copy(pkg / "Dockerfile", ctx / "Dockerfile")
+        shutil.copytree(pkg / "docker", ctx / "docker", dirs_exist_ok=True)
+        dockerfile = ctx / "Dockerfile"
+    return BuildAssets(
+        mode="binary",
+        provision_sh=pkg / "scripts" / "provision-instance.sh",
+        destroy_sh=pkg / "scripts" / "destroy-instance.sh",
+        build_context=ctx,
+        dockerfile=dockerfile,
+        # `pypi` builder + the version to install (the source builder is the
+        # Dockerfile's default, used in a checkout).
+        build_args={"BOBI_BUILD": "pypi",
+                    "BOBI_VERSION": installed_bobi_version()},
+        run_cwd=None,
+    )
+
+
+# --- team package resolution --------------------------------------------------
+
+def resolve_team_dir(project_path: Path, team: str) -> Path:
+    """Resolve a team ref to a **flat, ready-to-ship** package dir.
+
+    The single seam every build/deploy consumer routes through (D-2) — secret-
+    prune scan, deps-render, deps-hash, AND the ssh-push — so they all see the
+    same package. A team that declares `from:` is **composed (flattened) here**
+    (#446/#451): the base is resolved on the host (which has registry access),
+    the chain is merged into a staging dir with no `from:`, and every downstream
+    consumer sees the merged build/secrets. The pushed tarball is already flat,
+    so the instance never resolves a chain at first boot.
+    """
+    src = _resolve_team_package(project_path, team)
+    return _flatten_if_chained(project_path, src)
+
+
+def _flatten_if_chained(project_path: Path, team_dir: Path) -> Path:
+    """Compose a `from:` chain into a flat staging dir; pass through otherwise.
+
+    A team with no `from:` is returned unchanged (today's behavior, byte-for-byte).
+    Composition is deterministic, so the repeated `resolve_team_dir` calls across
+    one deploy each produce the same staged image."""
+    from bobi import compose, paths
+    try:
+        has_from = bool((compose._read_agent_yaml(team_dir)).get("from"))
+    except compose.ComposeError:
+        return team_dir
+    if not has_from:
+        return team_dir
+    chain = compose.resolve_chain(team_dir, project_path)
+    staged = paths.build_cache_dir() / "composed" / f"composed-{team_dir.name}"
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    if staged.exists():
+        shutil.rmtree(staged)
+    compose.compose(chain, staged)
+    # compose() doesn't freeze workspace/ (it's the seed-if-absent surface for a
+    # local install), but the flat tarball IS what reaches the instance — so carry
+    # the chain's merged workspace (leaf-wins) so an overlay's per-principal
+    # assistant-context.md actually ships.
+    compose.merge_workspace(chain, staged)
+    # Preserve the leaf's directory name so the app/tarball naming is unchanged.
+    cfg = compose._read_agent_yaml(staged)
+    cfg.setdefault("agent", team_dir.name)
+    (staged / "agent.yaml").write_text(
+        yaml.dump(cfg, default_flow_style=False, sort_keys=False))
+    final = staged.parent / team_dir.name
+    if final.exists():
+        shutil.rmtree(final)
+    staged.rename(final)
+    return final
+
+
+def _resolve_team_package(project_path: Path, team: str) -> Path:
+    """Resolve a team ref (optionally `name@version`) to a package dir.
+
+    After resolution the package is on disk, so the existing local-team
+    build/prune/push path runs unchanged. Resolution order:
+
+      1. explicit `@version` → fetch the immutable per-team asset into the
+         **shared** install/deploy cache (D-3). A pin **never** falls back to a
+         local dir: a stale `agents/<name>` must not silently shadow the pin, and
+         a missing asset is a hard error (surfaced by registry.fetch).
+      2. bare name with a local `agents/<name>` / `<name>` dir → use it (today's
+         behavior, byte-for-byte unchanged — local dev keeps working).
+      3. bare name, no local dir → fetch latest into the shared cache.
+    """
+    from bobi import registry
+    # A team ref that is itself a path to a package dir wins literally — avoids
+    # mis-splitting a filesystem path that happens to contain '@'
+    # (e.g. `/work@v2/eng-team`).
+    if (Path(team) / "agent.yaml").exists():
+        return Path(team).resolve()
+    name, version = registry.split_team_ref(team)
+    if version:
+        # Reuse an already-cached pin with no second download (§3.4); the
+        # immutable asset makes the cached copy authoritative.
+        if (registry.cached_version(project_path, name) == version
+                and registry.is_cached(project_path, name)):
+            return registry.cache_path(project_path, name)
+        try:
+            return registry.fetch(project_path, name, version=version)
+        except Exception as e:
+            raise BuildError(
+                f"could not resolve pinned team '{name}@{version}': {e}"
+            ) from e
+    # Bare name: a local checkout wins (unchanged).
+    for cand in (project_path / "agents" / name, project_path / name):
+        if (cand / "agent.yaml").exists():
+            return cand.resolve()
+    try:
+        return registry.fetch(project_path, name)
+    except Exception as e:
+        raise BuildError(
+            f"local team '{name}' not found and could not fetch it from the "
+            f"registry: {e}"
+        ) from e
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -231,9 +449,7 @@ def _pypi_version(bobi_version: str | None) -> str:
     """The version a pypi-mode image installs: an explicit pin, else the
     version of the bobi running this command (the image runs the same code as
     the CLI that built it). Warns on a version PyPI can't serve."""
-    from bobi.deploy import _bobi_version
-
-    version = bobi_version or _bobi_version()
+    version = bobi_version or installed_bobi_version()
     if not re.fullmatch(r"\d+(\.\d+)*", version):
         log.warning(
             "pypi build mode pins bobi==%s, which does not look like a "
@@ -288,24 +504,16 @@ def build_team_image(team: str, *, tags: list[str] | None = None,
     `team` is a path to a team dir, a registry `name[@version]` ref, or a bare
     name resolvable under `<project>/agents/` - exactly deploy's resolution.
     """
-    from bobi.deploy import DeployError, resolve_assets, resolve_team_dir
-
     if not shutil.which("docker"):
         raise BuildError("docker not found - `bobi build` needs a local "
                          "docker daemon to build the image")
     project_path = Path(project_path or Path.cwd())
-    try:
-        team_dir = resolve_team_dir(project_path, str(team))
-    except DeployError as exc:
-        raise BuildError(str(exc)) from exc
+    team_dir = resolve_team_dir(project_path, str(team))
 
     tags = list(tags or []) or [f"bobi-{team_dir.name}:latest"]
 
     with tempfile.TemporaryDirectory(prefix="bobi-build-") as tmp:
-        try:
-            assets = resolve_assets(project_path, Path(tmp))
-        except DeployError as exc:
-            raise BuildError(str(exc)) from exc
+        assets = resolve_assets(project_path, Path(tmp))
         mode, build_args = _resolve_build_mode(assets, build_mode,
                                                bobi_version)
         ctx = Path(assets.build_context)

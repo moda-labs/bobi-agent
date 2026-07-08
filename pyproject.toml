@@ -77,10 +77,11 @@ packages = ["bobi"]
 # copy into the framework wheel would pin a team to the framework release and
 # defeat independent team versioning. `bobi setup` lists teams from the
 # registry (and, in a source checkout, the repo's `agents/` dir for dev).
-# Bundle the Fly deploy assets so `bobi deploy` works from the binary alone
-# — no repo checkout. The one Dockerfile builds in `pypi` mode (installs bobi
-# from PyPI), so its build context is just these files; bobi/deploy.py
-# resolves them from here in "binary mode".
+# Bundle the Fly deploy assets so `bobi build` (and, with the bobi-deploy
+# package installed, `bobi deploy`) works from the binary alone — no repo
+# checkout. The one Dockerfile builds in `pypi` mode (installs bobi from
+# PyPI), so its build context is just these files; bobi/build.py resolves
+# them from here in "binary mode".
 "Dockerfile" = "bobi/_deploy/Dockerfile"
 "docker/docker-entrypoint.sh" = "bobi/_deploy/docker/docker-entrypoint.sh"
 "docker/healthcheck.sh" = "bobi/_deploy/docker/healthcheck.sh"

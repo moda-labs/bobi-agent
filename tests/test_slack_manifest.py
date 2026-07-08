@@ -14,7 +14,7 @@ import yaml
 from click.testing import CliRunner
 
 from bobi.cli import main
-from bobi.deploy import DEFAULT_EVENT_SERVER
+from bobi.config import DEFAULT_EVENT_SERVER
 from bobi.slack_manifest import (
     WEBHOOK_PATH,
     create_app_url,

@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from bobi import deploy as D
+from bobi import build as B
+from bobi_deploy import deploy as D
 from bobi import registry
 
 
@@ -72,7 +73,7 @@ def test_pinned_fetches_into_shared_cache(project, monkeypatch):
         return _cached_team(pp, name, version)
 
     monkeypatch.setattr(registry, "fetch", fake_fetch)
-    out = D.resolve_team_dir(project, "eng-team@1.1.0")
+    out = B.resolve_team_dir(project, "eng-team@1.1.0")
 
     assert calls == [("eng-team", "1.1.0")]
     assert out == registry.cache_path(project, "eng-team")
@@ -85,7 +86,7 @@ def test_pinned_reuses_cache_with_no_second_download(project, monkeypatch):
     monkeypatch.setattr(registry, "fetch", lambda *a, **k: pytest.fail(
         "should not re-download an already-cached pin"))
 
-    out = D.resolve_team_dir(project, "eng-team@1.1.0")
+    out = B.resolve_team_dir(project, "eng-team@1.1.0")
     assert out == registry.cache_path(project, "eng-team")
 
 
@@ -95,7 +96,7 @@ def test_bare_name_prefers_local_dir(project, monkeypatch):
     monkeypatch.setattr(registry, "fetch", lambda *a, **k: pytest.fail(
         "a local dir must win for a bare name"))
 
-    out = D.resolve_team_dir(project, "eng-team")
+    out = B.resolve_team_dir(project, "eng-team")
     assert out == pkg.resolve()
 
 
@@ -108,7 +109,7 @@ def test_bare_name_no_local_fetches_latest(project, monkeypatch):
         return _cached_team(pp, name, "1.1.0")
 
     monkeypatch.setattr(registry, "fetch", fake_fetch)
-    out = D.resolve_team_dir(project, "eng-team")
+    out = B.resolve_team_dir(project, "eng-team")
 
     assert calls == [("eng-team", None)]
     assert out == registry.cache_path(project, "eng-team")
@@ -116,14 +117,14 @@ def test_bare_name_no_local_fetches_latest(project, monkeypatch):
 
 def test_team_as_filesystem_path_with_at_is_not_mis_split(project, monkeypatch):
     """A `team:` that is a literal path containing '@' must resolve to that dir,
-    not be mis-parsed as name@version (regression: local_package_dir never split)."""
+    not be mis-parsed as name@version (regression: path resolution never split)."""
     weird = project / "checkout@v2" / "eng-team"
     weird.mkdir(parents=True)
     weird.joinpath("agent.yaml").write_text("agent: eng-team\nentry_point: manager\n")
     monkeypatch.setattr(registry, "fetch", lambda *a, **k: pytest.fail(
         "a literal team path must not trigger a registry fetch"))
 
-    out = D.resolve_team_dir(project, str(weird))
+    out = B.resolve_team_dir(project, str(weird))
     assert out == weird.resolve()
 
 
@@ -136,13 +137,13 @@ def test_explicit_pin_never_falls_back_to_local(project, monkeypatch):
         raise RuntimeError("no published asset at …/eng-team-9.9.9.tar.gz")
 
     monkeypatch.setattr(registry, "fetch", boom)
-    with pytest.raises(D.DeployError) as exc:
-        D.resolve_team_dir(project, "eng-team@9.9.9")
+    with pytest.raises(B.BuildError) as exc:
+        B.resolve_team_dir(project, "eng-team@9.9.9")
     assert "9.9.9" in str(exc.value)
 
 
 def test_pin_failure_in_deps_helpers_is_not_swallowed(project, monkeypatch):
-    """The deps-render / deps-hash helpers swallow DeployError for a bare name
+    """The deps-render / deps-hash helpers swallow BuildError for a bare name
     (legitimately "generic image"), but a PIN that fails to resolve must
     propagate — never silently produce a non-team-flavored image (F3)."""
     def boom(pp, name, *, version=None, repo=None):
@@ -151,9 +152,9 @@ def test_pin_failure_in_deps_helpers_is_not_swallowed(project, monkeypatch):
     monkeypatch.setattr(registry, "fetch", boom)
     cfg = D.DeployConfig(name="x", team="eng-team@9.9.9")  # no local dir
 
-    with pytest.raises(D.DeployError):
+    with pytest.raises(B.BuildError):
         D._render_team_deps_into_context(project, cfg, assets=None)
-    with pytest.raises(D.DeployError):
+    with pytest.raises(B.BuildError):
         D._local_team_deps_hash(project, cfg)
 
 

@@ -211,13 +211,6 @@ jobs:
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
-      # Needed for `bobi agent <name> ui --check`.
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install bobi
-        run: pip install -e .
-
       - name: Build the brain canary images from the wheel + smoke them
         id: canary
         run: |
@@ -237,7 +230,7 @@ jobs:
 
           # The brain canaries, each a hard gate at parity (#428). Fields are
           # <deployment>:<app>:<policy>, where deployment is the deployments/<name>.yaml
-          # (also the `bobi agent <name> ui` handle) and app is its Fly app.
+          # name and app is its Fly app.
           #   required  — must exist; its absence is a misconfiguration that fails.
           #   bootstrap — may not be provisioned yet; warn+skip until it is, THEN it
           #               is a hard gate. This is the one-time window after this PR
@@ -249,7 +242,7 @@ jobs:
           )
 
           for spec in "${canaries[@]}"; do
-            IFS=: read -r name app policy <<<"$spec"
+            IFS=: read -r _deployment app policy <<<"$spec"
             if ! "$FLY" status -a "$app" >/dev/null 2>&1; then
               if [ "$policy" = required ]; then
                 echo "::error::$app does not exist — the release canary gate cannot run"
@@ -279,16 +272,6 @@ jobs:
             # ask with a generous budget that covers a cold first boot.
             echo "::group::smoke $app (functional ask)"
             scripts/canary-smoke.sh "$app"
-            echo "::endgroup::"
-            # Agent-UI reachability gate: tunnel in exactly as `bobi agent <name> ui
-            # <deployment>` does for an operator — resolve the app, read the UI
-            # token off the machine, `fly proxy`, GET /api/dashboard — and assert it
-            # answers. Proves the in-container UI is on, the 6PN bind works, the
-            # token is readable, and the proxy reaches it. `--check` is bounded
-            # (it never blocks) and `timeout` is a belt-and-suspenders cap so a
-            # stuck tunnel can't hang the release.
-            echo "::group::smoke $app (agent UI reachable)"
-            timeout 150 bobi agent "$name" ui --app "$app" --check
             echo "::endgroup::"
           done
 
