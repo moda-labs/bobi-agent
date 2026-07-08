@@ -69,6 +69,14 @@ gh run list --repo moda-labs/bobi-agent --workflow release.yml --limit 3 \
 gh run watch <run-id> --repo moda-labs/bobi-agent --interval 20
 ```
 
+The release workflow deploys the Cloudflare event server, then checks the
+authoritative fleet event-server URL by fetching `<event_server>/health`. Set
+the repo variable `FLEET_EVENT_SERVER_URL` when production fleet config lives
+outside this repo; otherwise the workflow falls back to this repo's
+`deployments/defaults.yaml`. The health payload must report the wheel version
+and source git SHA just deployed. If this fails, stop: production is pointed at a
+different Worker or the new Worker has not propagated.
+
 Do not continue to the Moda fleet pin until the release workflow is green,
 including:
 
@@ -79,6 +87,7 @@ including:
 - GHCR base image publish (`ghcr.io/moda-labs/bobi:<version>`; `:latest` moves
   when this version is the repo's latest non-prerelease release)
 - event server deploy
+- event server identity check against the fleet `event_server` URL
 - fleet roll jobs
 
 If PyPI was just published, allow a short propagation delay before installing
@@ -116,6 +125,17 @@ Update both pins:
 
 - `.github/workflows/deploy-agent-teams.yml`: `BOBI_VERSION`
 - `.github/workflows/lint.yml`: pinned `pip install "bobi==..."`
+
+Worker identity check: if the event-server Worker name or URL changes, move all
+external entry points together before validating the release:
+
+- `moda-agents` `deployments/defaults.yaml` `event_server`
+- Slack app request URLs
+- GitHub App webhook URL
+- Linear webhook URL
+
+After any move, fetch the fleet URL directly and confirm `/health` reports the
+release version/SHA that the `bobi-agent` release workflow deployed.
 
 Verify compose against the exact released package:
 

@@ -71,6 +71,22 @@ def test_version_and_claude_pin_have_a_single_source_of_truth():
     # Both come from build-wheel outputs: version from the wheel filename,
     # claude pin resolved once so canary + all arches bake the same CLI.
     assert "build-wheel" in jobs["publish-image"]["needs"]
+    assert jobs["build-wheel"]["outputs"]["source-sha"] == "${{ steps.meta.outputs.source-sha }}"
+    meta = next(
+        step
+        for step in jobs["build-wheel"]["steps"]
+        if step.get("name") == "Resolve release version + claude CLI pin"
+    )
+    assert "source-sha=$(git rev-parse HEAD)" in meta["run"]
+
+    for job_name in ("build-canary", "publish-image", "deploy-event-server", "update-homebrew"):
+        checkout = next(
+            step
+            for step in jobs[job_name]["steps"]
+            if str(step.get("uses", "")).startswith("actions/checkout")
+        )
+        assert checkout["with"]["ref"] == "${{ needs.build-wheel.outputs.source-sha }}"
+
     build = _build_step(jobs["publish-image"])
     assert (
         "CLAUDE_VERSION=${{ needs.build-wheel.outputs.claude-version }}"
@@ -86,6 +102,45 @@ def test_version_and_claude_pin_have_a_single_source_of_truth():
         if str(step.get("uses", "")).startswith("peter-evans/repository-dispatch")
     )
     assert "needs.build-wheel.outputs.version" in dispatch["with"]["client-payload"]
+
+
+def test_event_server_deploy_stamps_and_verifies_fleet_url_before_canary():
+    jobs = _jobs()
+    deploy = jobs["deploy-event-server"]
+    assert "build-wheel" in deploy["needs"]
+
+    stamp = next(
+        step
+        for step in deploy["steps"]
+        if step.get("name") == "Stamp event-server release metadata"
+    )
+    assert "BOBI_RELEASE_VERSION" in stamp["run"]
+    assert "BOBI_RELEASE_SHA" in stamp["run"]
+    assert "needs.build-wheel.outputs.version" in stamp["run"]
+    assert "needs.build-wheel.outputs.source-sha" in stamp["run"]
+
+    guard = next(
+        step
+        for step in deploy["steps"]
+        if step.get("name") == "Verify fleet event server is the deployed Worker"
+    )
+    assert guard["env"]["FLEET_EVENT_SERVER_URL"] == "${{ vars.FLEET_EVENT_SERVER_URL }}"
+    assert "FLEET_EVENT_SERVER_URL" in guard["run"]
+    assert "deployments/defaults.yaml" in guard["run"]
+    assert 'event_server="${event_server%/}"' in guard["run"]
+    assert "/health" in guard["run"]
+    assert "expected_sha" in guard["run"]
+    assert "actual_sha" in guard["run"]
+    assert "exit 1" in guard["run"]
+
+    stamp_index = deploy["steps"].index(stamp)
+    deploy_index = next(
+        i for i, step in enumerate(deploy["steps"])
+        if step.get("name") == "Deploy to Cloudflare"
+    )
+    guard_index = deploy["steps"].index(guard)
+    assert stamp_index < deploy_index < guard_index
+    assert "deploy-event-server" in jobs["build-canary"]["needs"]
 
 
 def test_latest_moves_only_for_the_repos_latest_release():
