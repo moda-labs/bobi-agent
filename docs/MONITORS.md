@@ -85,7 +85,16 @@ every tick, so monitors added at runtime take effect without a restart.
   cheap model instead of the manager's (setup-generated packs ship this
   default).
 - **Curator** (`curator: true`) - the one flavor whose agent *writes* an
-  artifact (`policy.md`) instead of returning a verdict.
+  artifact (`policy.md`) instead of returning a verdict. Curator input can be
+  large, so the scheduler writes the rendered task to `run/state/curator/` and
+  passes the spawned agent a short "read this file" task pointer.
+
+Out-of-band monitor agents must not inline large context into the spawn command.
+Use the request-file pattern instead: write the full context under `run/state/`,
+pass a short absolute-path pointer in `--task` or a dedicated `--request`
+argument, and delete the file from the subprocess cleanup hook. The scheduler
+rejects any monitor-agent argv element over 100KB before `Popen`, well below
+Linux's per-argument cap.
 
 ## The relevance gate: judging "about X" without paying per tick
 
@@ -169,6 +178,12 @@ reconcile path (`scheduler.py`):
 - A condition is recorded active **only after its event actually publishes**, so
   a failed publish (event server briefly down) retries next interval instead of
   being lost.
+- Out-of-band agent failures publish `system/monitor.error` with the monitor
+  name, flavor, reason (`spawn-failed`, `timeout`, or
+  `indeterminate-result`), and detail. The drain loop actively delivers the
+  first failure for each monitor/flavor/reason to the director inbox and
+  throttles repeated identical failures there so observability does not become
+  inbox spam. The failure is also written to `manager.log`.
 
 Scheduler-owned state (last-run times, active condition keys) lives in
 `run/state/monitor_state.json`, rewritten wholesale each tick.

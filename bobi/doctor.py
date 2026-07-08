@@ -402,6 +402,23 @@ def _check_policy() -> CheckResult:
     from bobi import paths
     policy = paths.policy_path(root)
     if not policy.is_file():
+        backlog = 0
+        try:
+            from bobi import history
+            backlog = len(history.messages_since(0, limit=101))
+        except Exception:
+            backlog = 0
+        if backlog > 100:
+            cursor = paths.policy_cursor_path(root)
+            cursor_detail = (
+                "no policy_cursor" if not cursor.is_file() else "stale policy_cursor"
+            )
+            return CheckResult(
+                "Team policy", ok=False,
+                detail=(f"no policy.md yet, but at least {backlog} transcript "
+                        f"messages are pending and {cursor_detail}"),
+                hint=("The policy-curator appears stalled; check monitor.error "
+                      "events and manager.log"))
         return CheckResult("Team policy", ok=True,
                            detail="no policy.md yet (curator seeds it on first run)")
 

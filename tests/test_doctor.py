@@ -57,6 +57,32 @@ class TestCheckProjectConfig:
         assert "missing" in r.detail
 
 
+# --- Team policy ---
+
+class TestCheckPolicy:
+    def test_missing_policy_is_ok_for_fresh_runtime(self, tmp_path):
+        with (
+            patch("bobi.doctor.bound_root", return_value=tmp_path),
+            patch("bobi.history.messages_since", return_value=[]),
+        ):
+            from bobi.doctor import _check_policy
+            r = _check_policy()
+        assert r.ok
+        assert "no policy.md yet" in r.detail
+
+    def test_missing_policy_with_large_backlog_fails(self, tmp_path):
+        rows = [{"id": i} for i in range(101)]
+        with (
+            patch("bobi.doctor.bound_root", return_value=tmp_path),
+            patch("bobi.history.messages_since", return_value=rows),
+        ):
+            from bobi.doctor import _check_policy
+            r = _check_policy()
+        assert not r.ok
+        assert "pending" in r.detail
+        assert "policy-curator appears stalled" in r.hint
+
+
 # --- Ingress reachability ---
 
 class TestCheckIngressReachability:

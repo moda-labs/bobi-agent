@@ -18,6 +18,8 @@ DRAIN_INTERVAL = 2
 # session can stop its drain thread cleanly on shutdown (the loop otherwise
 # blocks forever on queue.get()).
 _DRAIN_STOP = object()
+_MONITOR_ERROR_DELIVERED: dict[tuple[str, str, str, str], int] = {}
+_MONITOR_ERROR_REPEAT_PUSH_EVERY = 3
 
 
 def _get_project_root():
@@ -49,6 +51,12 @@ def _is_policy_update(event: dict) -> bool:
     """
     etype = str(event.get("type", ""))
     return etype == "policy.updated" or etype.endswith("/policy.updated")
+
+
+def _is_monitor_error(event: dict) -> bool:
+    """Whether an event is a monitor failure signal that should push actively."""
+    etype = str(event.get("type", ""))
+    return etype == "monitor.error" or etype.endswith("/monitor.error")
 
 
 def _is_passive_slack_thread_reply(event: dict) -> bool:
@@ -189,6 +197,33 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                     text=(f"policy.md updated — {summary}\n"
                           "Re-read run/state/policy.md and reconcile any "
                           "in-flight plan against it."),
+                ))
+            elif _is_monitor_error(e):
+                payload = e.get("payload") or e.get("fields") or {}
+                monitor = str(payload.get("monitor", "") or "unknown-monitor")
+                flavor = str(payload.get("flavor", "") or "unknown")
+                reason = str(payload.get("reason", "") or "unknown")
+                detail = str(payload.get("detail", "") or "").strip()
+                key = (session_name, monitor, flavor, reason)
+                count = _MONITOR_ERROR_DELIVERED.get(key, 0) + 1
+                _MONITOR_ERROR_DELIVERED[key] = count
+                should_push = (
+                    count == 1
+                    or count % _MONITOR_ERROR_REPEAT_PUSH_EVERY == 0
+                )
+                if not should_push:
+                    log.debug("Suppressing duplicate monitor.error inbox push "
+                              "for %s/%s/%s", monitor, flavor, reason)
+                    continue
+                text = f"Monitor {monitor} failed ({flavor}: {reason})."
+                if count > 1:
+                    text += f" Repeated {count} times."
+                if detail:
+                    text += f"\n{detail}"
+                inbox.push(Message(
+                    id=_msg_id(),
+                    sender="monitor-error",
+                    text=text,
                 ))
             else:
                 external.append(e)

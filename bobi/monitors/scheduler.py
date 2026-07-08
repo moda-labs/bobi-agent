@@ -74,6 +74,8 @@ import logging
 import subprocess
 import sys
 import threading
+import tempfile
+import time as time_mod
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -156,6 +158,10 @@ TICK_INTERVAL = 30  # seconds between scheduler ticks
 # pending items (poll windows must cover a burst across intervals).
 GATE_MAX_ITEMS = 20
 
+# Linux MAX_ARG_STRLEN is 131072 bytes; keep monitor agent argv elements well
+# below that so failures are caught before Popen raises E2BIG.
+MAX_MONITOR_ARG_BYTES = 100_000
+
 # How late a weekday-gated (`days:`) at-monitor may fire and still count as a
 # live run rather than a missed-while-down catch-up. A live fire lands within
 # one tick of the scheduled instant; anything later means the manager was down
@@ -172,6 +178,31 @@ def _default_publish(event: str, data: dict) -> bool:
     """
     from bobi.events.publish import post_event
     return post_event(event, data)
+
+
+def _append_manager_log(message: str) -> None:
+    try:
+        from bobi import paths
+        log_path = paths.state_dir() / "manager.log"
+        with open(log_path, "a") as lf:
+            lf.write(message.rstrip() + "\n")
+    except Exception:
+        pass
+
+
+def _publish_monitor_error(monitor_name: str, kind: str, reason: str,
+                           detail: str = "", publish=None) -> None:
+    payload = {
+        "monitor": monitor_name,
+        "flavor": kind,
+        "reason": reason,
+        "detail": detail,
+    }
+    publisher = publish or _default_publish
+    try:
+        publisher("system/monitor.error", payload)
+    except Exception:
+        log.exception("Failed to publish monitor.error for %s", monitor_name)
 
 
 def _parse_stdout_json(output: str, key: str) -> dict | None:
@@ -206,7 +237,7 @@ def _parse_gate_output(output: str) -> dict | None:
 
 
 def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
-                         on_result, cleanup=None) -> None:
+                         on_result, cleanup=None, publish=None) -> None:
     """Launch an out-of-band monitor agent subprocess and report its result.
 
     The shared subprocess machinery for the check, gate, and curator flavors:
@@ -219,6 +250,23 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
     root = paths.bobi_root()
     log_path = paths.state_dir() / "manager.log"
 
+    oversized = [(idx, len(str(arg).encode())) for idx, arg in enumerate(cmd)
+                 if len(str(arg).encode()) > MAX_MONITOR_ARG_BYTES]
+    if oversized:
+        idx, size = oversized[0]
+        detail = (f"argv element {idx} is {size} bytes, over "
+                  f"{MAX_MONITOR_ARG_BYTES} byte safety bound")
+        message = (f"Failed to spawn {kind} for monitor {monitor_name}: "
+                   f"{detail}")
+        log.error(message)
+        _append_manager_log(message)
+        if cleanup:
+            cleanup()
+        _publish_monitor_error(
+            monitor_name, kind, "spawn-failed", detail, publish=publish)
+        on_result(None)
+        return
+
     try:
         with open(log_path, "a") as lf:
             # cwd pins the child CLI's root resolution to this process's
@@ -228,9 +276,14 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
                                     text=True, start_new_session=True,
                                     cwd=str(root))
     except OSError as e:
-        log.error(f"Failed to spawn {kind} for monitor {monitor_name}: {e}")
+        detail = str(e)
+        message = f"Failed to spawn {kind} for monitor {monitor_name}: {detail}"
+        log.error(message)
+        _append_manager_log(message)
         if cleanup:
             cleanup()
+        _publish_monitor_error(
+            monitor_name, kind, "spawn-failed", detail, publish=publish)
         on_result(None)
         return
 
@@ -243,8 +296,12 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
             out, _ = proc.communicate(timeout=budget)
         except subprocess.TimeoutExpired:
             proc.kill()
-            log.error(f"{kind.capitalize()} for monitor {monitor_name} "
-                      f"exceeded {budget}s - killed")
+            detail = f"exceeded {budget}s - killed"
+            message = f"{kind.capitalize()} for monitor {monitor_name} {detail}"
+            log.error(message)
+            _append_manager_log(message)
+            _publish_monitor_error(
+                monitor_name, kind, "timeout", detail, publish=publish)
             on_result(None)
             return
         finally:
@@ -256,13 +313,23 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
                     lf.write(out)
             except OSError:
                 pass
-        on_result(parse(out))
+        result = parse(out)
+        if result is None:
+            detail = "subprocess output did not contain a parseable result"
+            log.warning("Monitor %s: %s %s", monitor_name, kind, detail)
+            _append_manager_log(
+                f"Monitor {monitor_name}: {kind} {detail}")
+            _publish_monitor_error(
+                monitor_name, kind, "indeterminate-result", detail,
+                publish=publish)
+        on_result(result)
 
     threading.Thread(target=_wait, daemon=True,
                      name=f"{kind}-wait-{monitor_name}").start()
 
 
-def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
+def _default_spawn_check(monitor, cwd: str | None, on_verdict,
+                         publish=None) -> None:
     """Launch a non-interactive check subprocess and report its verdict.
 
     Runs `bobi agent <name> subagents launch --wait` out-of-band so the scheduler thread
@@ -294,13 +361,16 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
         "--wait",
         "--task", monitor.description or monitor.name,
     ]
-    _spawn_monitor_agent(cmd, monitor.name, "check", _parse_verdict, on_verdict)
+    _spawn_monitor_agent(
+        cmd, monitor.name, "check", _parse_verdict, on_verdict,
+        publish=publish)
 
 
 # A gate request file older than this is an orphan: the waiter thread that
 # would have deleted it died with a previous manager. Twice the waiter budget
 # leaves generous slack for a live in-flight gate.
 _GATE_REQUEST_MAX_AGE = 3600 * 2
+_CURATOR_TASK_MAX_AGE = 3600 * 2
 
 
 def _write_gate_request(monitor, items: list) -> str | None:
@@ -359,7 +429,43 @@ def _write_gate_request(monitor, items: list) -> str | None:
     return request_path
 
 
-def _default_spawn_gate(monitor, cwd: str | None, items: list, on_verdict) -> None:
+def _write_curator_task(monitor, task: str) -> str | None:
+    """Write a rendered curator task to disk and return its absolute path.
+
+    Curator prompts include transcript windows up to hundreds of KB, which can
+    exceed Linux's per-argv-string limit if passed inline. Store the full task
+    under state/curator and pass the agent a short read-this-file instruction.
+    """
+    from bobi import paths
+
+    tasks_dir = paths.state_dir() / "curator"
+    try:
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        cutoff = time_mod.time() - _CURATOR_TASK_MAX_AGE
+        for stale in tasks_dir.glob("task-*.md"):
+            try:
+                if stale.stat().st_mtime < cutoff:
+                    stale.unlink()
+            except OSError:
+                pass
+
+        fd, task_path = tempfile.mkstemp(
+            dir=tasks_dir, prefix="task-", suffix=".md")
+        try:
+            with open(fd, "w") as f:
+                f.write(task)
+        except OSError:
+            Path(task_path).unlink(missing_ok=True)
+            raise
+    except OSError as e:
+        log.error("Failed to write curator task for monitor %s: %s",
+                  monitor.name, e)
+        return None
+    return task_path
+
+
+def _default_spawn_gate(monitor, cwd: str | None, items: list, on_verdict,
+                        publish=None) -> None:
     """Launch a non-interactive relevance-gate subprocess over new items (#630).
 
     Mirrors _default_spawn_check: out-of-band so the scheduler thread is never
@@ -385,10 +491,12 @@ def _default_spawn_gate(monitor, cwd: str | None, items: list, on_verdict) -> No
     _spawn_monitor_agent(
         cmd, monitor.name, "gate", _parse_gate_output, on_verdict,
         cleanup=lambda: Path(request_path).unlink(missing_ok=True),
+        publish=publish,
     )
 
 
-def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result) -> None:
+def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result,
+                           publish=None) -> None:
     """Launch the out-of-band curator agent with a pre-rendered task (#456).
 
     Mirrors _default_spawn_check, but the agent WRITES policy.md (its Write tool
@@ -399,7 +507,22 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result) -> No
     """
     role = getattr(monitor, "role", "") or ""
     from bobi import paths
+
+    task_path = _write_curator_task(monitor, task)
+    if task_path is None:
+        _publish_monitor_error(
+            monitor.name, "curator", "spawn-failed",
+            "failed to write curator task file", publish=publish)
+        on_result(None)
+        return
+
     root = paths.bobi_root()
+    pointer_task = (
+        "Read the monitor task file at this absolute path and follow its "
+        f"instructions exactly:\n\n{task_path}\n\n"
+        "Do not treat this pointer as the full task; the full curator prompt, "
+        "current policy, transcript delta, and ingest notes are in the file."
+    )
     cmd = [
         sys.executable, "-m", "bobi.cli",
         "agent", paths.agent_name_for_root(root), "subagents", "launch",
@@ -407,14 +530,18 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result) -> No
         *(["--role", role] if role else []),
         "--non-interactive",
         "--wait",
-        "--task", task,
+        "--task", pointer_task,
     ]
 
     def _parse_curator(out: str):
         from bobi.monitors import curator as curator_mod
         return curator_mod.parse_result(out)
 
-    _spawn_monitor_agent(cmd, monitor.name, "curator", _parse_curator, on_result)
+    _spawn_monitor_agent(
+        cmd, monitor.name, "curator", _parse_curator, on_result,
+        cleanup=lambda: Path(task_path).unlink(missing_ok=True),
+        publish=publish,
+    )
 
 
 class MonitorScheduler:
@@ -423,9 +550,18 @@ class MonitorScheduler:
                  project_path: Path | None = None, spawn_curator=None,
                  spawn_gate=None):
         self.publish = publish or _default_publish
-        self.spawn_check = spawn_check or _default_spawn_check
-        self.spawn_curator = spawn_curator or _default_spawn_curator
-        self.spawn_gate = spawn_gate or _default_spawn_gate
+        self.spawn_check = spawn_check or (
+            lambda monitor, cwd, on_verdict: _default_spawn_check(
+                monitor, cwd, on_verdict, publish=self.publish)
+        )
+        self.spawn_curator = spawn_curator or (
+            lambda monitor, cwd, task, on_result: _default_spawn_curator(
+                monitor, cwd, task, on_result, publish=self.publish)
+        )
+        self.spawn_gate = spawn_gate or (
+            lambda monitor, cwd, items, on_verdict: _default_spawn_gate(
+                monitor, cwd, items, on_verdict, publish=self.publish)
+        )
         self.state_path = Path(state_path) if state_path else _monitor_state_path()
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._project_path = project_path
@@ -1001,9 +1137,17 @@ class MonitorScheduler:
         """
         from bobi.monitors import curator as curator_mod
 
-        if not isinstance(result, dict) or not result.get("success"):
+        if not isinstance(result, dict):
             log.warning("Monitor %s: curator run failed/indeterminate — cursor "
                         "NOT advanced, retrying next interval", monitor.name)
+            return
+        if not result.get("success"):
+            summary = str(result.get("summary", "") or "curator returned failure")
+            log.warning("Monitor %s: curator run failed — cursor NOT advanced, "
+                        "retrying next interval: %s", monitor.name, summary)
+            _publish_monitor_error(
+                monitor.name, "curator", "indeterminate-result", summary,
+                publish=self.publish)
             return
 
         # A seed-only first run ingests no transcript rows (highest_id is None) —
