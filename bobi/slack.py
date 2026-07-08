@@ -26,6 +26,8 @@ log = logging.getLogger(__name__)
 
 TRUNCATION_LIMIT = 3000
 TRUNCATION_SUFFIX = "\n_(truncated)_"
+BOLD_MARKER = "\x02"
+STRIKE_MARKER = "\x03"
 
 
 def _is_markdown_table_row(line: str) -> bool:
@@ -70,9 +72,17 @@ def _wrap_markdown_tables(text: str) -> str:
 
 
 def _convert_markdown_line(line: str) -> str:
-    line = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', line)
-    line = re.sub(r'\*\*(.+?)\*\*', r'*\1*', line)
-    line = re.sub(r'~~(.+?)~~', r'~\1~', line)
+    line = re.sub(r'^#{1,6}\s+(.+)$', rf'{BOLD_MARKER}\1{BOLD_MARKER}', line)
+    line = re.sub(
+        r'\*\*(.+?)\*\*',
+        lambda match: f"{BOLD_MARKER}{match.group(1)}{BOLD_MARKER}",
+        line,
+    )
+    line = re.sub(
+        r'~~(.+?)~~',
+        lambda match: f"{STRIKE_MARKER}{match.group(1)}{STRIKE_MARKER}",
+        line,
+    )
     line = re.sub(r'^( *)[-*] ', r'\1• ', line)
     return re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', line)
 
@@ -100,34 +110,34 @@ def _has_open_code_fence(text: str) -> bool:
     return in_code_block
 
 
-def _outside_code_marker_count(text: str, marker: str) -> int:
-    count = 0
+def _outside_code_marker_locations(text: str, marker: str) -> list[tuple[int, int]]:
+    locations: list[tuple[int, int]] = []
     in_code_block = False
-    for line in text.split("\n"):
-        if line.strip().startswith("```"):
-            in_code_block = not in_code_block
-            continue
-        if not in_code_block:
-            count += line.count(marker)
-    return count
-
-
-def _remove_last_outside_code_marker(text: str, marker: str) -> str:
-    lines = text.split("\n")
-    in_code_block = False
-    last: tuple[int, int] | None = None
-    for line_index, line in enumerate(lines):
+    for line_index, line in enumerate(text.split("\n")):
         if line.strip().startswith("```"):
             in_code_block = not in_code_block
             continue
         if in_code_block:
             continue
-        marker_index = line.rfind(marker)
-        if marker_index >= 0:
-            last = (line_index, marker_index)
-    if last is None:
-        return text
-    line_index, marker_index = last
+        start = 0
+        line_locations: list[int] = []
+        while True:
+            marker_index = line.find(marker, start)
+            if marker_index < 0:
+                break
+            line_locations.append(marker_index)
+            start = marker_index + len(marker)
+        locations.extend((line_index, marker_index) for marker_index in line_locations)
+    return locations
+
+
+def _remove_outside_code_marker(
+    text: str,
+    marker: str,
+    location: tuple[int, int],
+) -> str:
+    lines = text.split("\n")
+    line_index, marker_index = location
     line = lines[line_index]
     lines[line_index] = line[:marker_index] + line[marker_index + len(marker):]
     return "\n".join(lines)
@@ -146,9 +156,10 @@ def _truncate_slack_message(text: str) -> str:
 
     if _has_open_code_fence(body):
         body += "\n```"
-    for marker in ("`", "*", "~"):
-        if _outside_code_marker_count(body, marker) % 2:
-            body = _remove_last_outside_code_marker(body, marker)
+    for marker in ("`", BOLD_MARKER, STRIKE_MARKER):
+        locations = _outside_code_marker_locations(body, marker)
+        if len(locations) % 2:
+            body = _remove_outside_code_marker(body, marker, locations[-1])
 
     return body + TRUNCATION_SUFFIX
 
@@ -159,7 +170,8 @@ def format_slack_message(text: str) -> str:
     text = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
     text = _wrap_markdown_tables(text)
     text = _convert_markdown_outside_code_blocks(text)
-    return _truncate_slack_message(text)
+    text = _truncate_slack_message(text)
+    return text.replace(BOLD_MARKER, "*").replace(STRIKE_MARKER, "~")
 
 
 # ---------------------------------------------------------------------------

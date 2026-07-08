@@ -166,6 +166,55 @@ class TestFormatSlackMessage:
         assert result.startswith("```\n*\n```")
         assert before_suffix.endswith("word")
 
+    def test_truncation_preserves_literal_tilde_in_paths(self):
+        result = format_slack_message("See ~/AGENTS.md\n" + ("word " * 700))
+        assert result.startswith("See ~/AGENTS.md")
+
+    def test_truncation_preserves_literal_asterisk_in_globs(self):
+        result = format_slack_message("Files: *.py\n" + ("word " * 700))
+        assert result.startswith("Files: *.py")
+
+    def test_truncation_does_not_leave_unmatched_emoji_led_bold_marker(self):
+        text = "**:warning: " + ("verylong " * 600) + "**"
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert before_suffix.count("*") % 2 == 0
+
+    def test_truncation_does_not_leave_unmatched_punctuation_led_bold_marker(self):
+        text = "**(urgent " + ("verylong " * 600) + "**"
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert before_suffix.count("*") % 2 == 0
+
+    def test_truncation_preserves_path_led_bold_marker_pair(self):
+        text = "**/tmp/output**\n" + ("word " * 700)
+        result = format_slack_message(text)
+        assert result.startswith("*/tmp/output*")
+
+    def test_truncation_preserves_dotfile_bold_marker_pair(self):
+        text = "**.env**\n" + ("word " * 700)
+        result = format_slack_message(text)
+        assert result.startswith("*.env*")
+
+    def test_truncation_removes_unmatched_path_led_bold_opener(self):
+        text = "Path: **/tmp/output " + ("verylong " * 600) + "**"
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert before_suffix.startswith("Path: /tmp/output ")
+
+    def test_truncation_removes_unmatched_long_path_bold_opener(self):
+        text = "**/tmp/" + ("a" * 4000) + "**"
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert before_suffix.startswith("/tmp/")
+        assert before_suffix.count("*") == 0
+
+    def test_truncation_removes_unmatched_dotfile_bold_opener(self):
+        text = "File: **.env " + ("verylong " * 600) + "**"
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert before_suffix.startswith("File: .env ")
+
 
 # ---------------------------------------------------------------------------
 # post_slack_message
