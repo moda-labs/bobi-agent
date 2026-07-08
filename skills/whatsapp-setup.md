@@ -68,13 +68,17 @@ WHATSAPP_ACCESS_TOKEN=EAAG…
 WHATSAPP_PHONE_NUMBER_ID=747556541
 ```
 
-And declare the service in `agent.yaml` so subscription detection picks the
-number up:
+And declare the service in `agent.yaml` with the credential mapping -
+subscription detection and registration read `credentials:`, not the bare
+environment:
 
 ```yaml
 services:
   - name: whatsapp
     events: true
+    credentials:
+      access_token: ${WHATSAPP_ACCESS_TOKEN}
+      phone_number_id: ${WHATSAPP_PHONE_NUMBER_ID}
 ```
 
 At session start the agent registers the number with the event server (a

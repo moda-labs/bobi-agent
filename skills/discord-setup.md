@@ -47,13 +47,17 @@ DISCORD_BOT_TOKEN=…
 DISCORD_APPLICATION_ID=111222333444555666
 ```
 
-And declare the service in `agent.yaml` so subscription detection picks the
-app up:
+And declare the service in `agent.yaml` with the credential mapping -
+subscription detection and registration read `credentials:`, not the bare
+environment:
 
 ```yaml
 services:
   - name: discord
     events: true
+    credentials:
+      bot_token: ${DISCORD_BOT_TOKEN}
+      application_id: ${DISCORD_APPLICATION_ID}
 ```
 
 At session start the agent registers the app with the event server (a

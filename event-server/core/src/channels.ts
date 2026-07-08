@@ -708,28 +708,40 @@ const discordAdapter: ChannelAdapter = {
 			.reverse();
 	},
 
-	// One multipart message carrying every file (Discord allows 10 per
-	// message), with the comment as its content.
+	// Multipart messages of up to 10 files each (Discord's hard per-message
+	// attachment cap), the first carrying the comment as its content. Follows
+	// the partial-delivery contract: once any batch reached the user, the
+	// error must tell the caller not to blind-retry the whole set.
 	async uploadFiles(token, conv, files, comment) {
+		const BATCH = 10;
+		let delivered = 0;
 		try {
-			const form = new FormData();
-			form.append("payload_json", JSON.stringify({
-				...(comment ? { content: comment } : {}),
-				attachments: files.map((f, i) => ({
-					id: i,
-					filename: f.name,
-					...(f.title ? { description: f.title } : {}),
-				})),
-			}));
-			for (const [i, f] of files.entries()) {
-				form.append(`files[${i}]`, new Blob([f.data]), f.name);
+			let lastId = "";
+			for (let start = 0; start < files.length; start += BATCH) {
+				const batch = files.slice(start, start + BATCH);
+				const form = new FormData();
+				form.append("payload_json", JSON.stringify({
+					...(start === 0 && comment ? { content: comment } : {}),
+					attachments: batch.map((f, i) => ({
+						id: i,
+						filename: f.name,
+						...(f.title ? { description: f.title } : {}),
+					})),
+				}));
+				for (const [i, f] of batch.entries()) {
+					form.append(`files[${i}]`, new Blob([f.data]), f.name);
+				}
+				const data = await discordApi(token, `channels/${conv.chatId}/messages`, { form });
+				const id = data.id as string;
+				if (!id) {
+					return { ok: false, error: partialUploadError(discordError(data), delivered, files.length) };
+				}
+				lastId = id;
+				delivered = Math.min(start + BATCH, files.length);
 			}
-			const data = await discordApi(token, `channels/${conv.chatId}/messages`, { form });
-			const id = data.id as string;
-			if (!id) return { ok: false, error: discordError(data) };
-			return { ok: true, ts: id };
+			return { ok: true, ts: lastId };
 		} catch (err) {
-			return { ok: false, error: String(err) };
+			return { ok: false, error: partialUploadError(String(err), delivered, files.length) };
 		}
 	},
 };

@@ -80,10 +80,6 @@ export function normalizeDiscordMessage(
 		return []; // an id carrying ":" cannot be addressed - drop, never throw
 	}
 
-	const text = (typeof d.content === "string" && d.content
-		? d.content
-		: NO_CONTENT_MARKER
-	).slice(0, 4000);
 	const userName =
 		(typeof author?.global_name === "string" && author.global_name)
 		|| (typeof author?.username === "string" ? author.username : "")
@@ -102,6 +98,23 @@ export function normalizeDiscordMessage(
 		if (a.size) entry.size = String(a.size);
 		files.push(entry);
 	}
+
+	// Empty content is only "withheld" when nothing else came through: an
+	// attachment-only message (a DM'd screenshot, say) legitimately has no
+	// content, and telling the agent to enable an intent would be wrong.
+	let text: string;
+	if (typeof d.content === "string" && d.content) {
+		text = d.content;
+	} else if (files.length > 0) {
+		text = `[attachment] ${files.map((f) => f.name || "file").join(", ")}`;
+	} else {
+		text = NO_CONTENT_MARKER;
+	}
+	text = text.slice(0, 4000);
+
+	// The message's own send time when Discord stamped one - resume replays
+	// deliver messages minutes late, and "now" would misdate them.
+	const sentAt = Date.parse(typeof d.timestamp === "string" ? d.timestamp : "");
 
 	const fields: Record<string, string | number | boolean> = {
 		user_id: authorId,
@@ -125,7 +138,9 @@ export function normalizeDiscordMessage(
 		text,
 		conversation,
 		fields,
-		timestamp: new Date().toISOString(),
+		timestamp: Number.isNaN(sentAt)
+			? new Date().toISOString()
+			: new Date(sentAt).toISOString(),
 		payload: {
 			user_id: authorId,
 			user_name: userName,

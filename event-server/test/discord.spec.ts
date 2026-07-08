@@ -303,6 +303,27 @@ describe("normalizeDiscordMessage", () => {
 		}]);
 	});
 
+	it("describes an attachment-only message instead of claiming withheld content", () => {
+		// content is legitimately empty when the message is just a file - the
+		// intent marker would misdiagnose it.
+		const [event] = normalizeDiscordMessage({
+			id: "m1", channel_id: "c1", content: "",
+			author: { id: "u1", username: "ada" },
+			attachments: [{ id: "a1", filename: "shot.png" }],
+		}, BOT_USER, APP_ID);
+		expect(event.text).toBe("[attachment] shot.png");
+	});
+
+	it("stamps the message's own send time, not normalization time", () => {
+		// Resume replays deliver messages minutes late; "now" would misdate them.
+		const [event] = normalizeDiscordMessage({
+			id: "m1", channel_id: "c1", content: "hi",
+			timestamp: "2026-07-01T10:00:00.000Z",
+			author: { id: "u1", username: "ada" },
+		}, BOT_USER, APP_ID);
+		expect(event.timestamp).toBe("2026-07-01T10:00:00.000Z");
+	});
+
 	it("marks withheld content instead of shipping an empty text", () => {
 		// A guild reply whose auto-mention was suppressed loses content without
 		// the privileged MESSAGE_CONTENT intent.
