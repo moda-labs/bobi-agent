@@ -111,15 +111,109 @@ class TestFormatSlackMessage:
     def test_unordered_list_asterisk(self):
         assert format_slack_message("* item one\n* item two") == "• item one\n• item two"
 
+    def test_ordered_list_is_preserved_for_slack(self):
+        result = format_slack_message("1. First\n2. Second")
+        assert result == "1. First\n2. Second"
+
     def test_nested_list(self):
         result = format_slack_message("- top\n  - nested")
         assert result == "• top\n  • nested"
+
+    def test_strikethrough_markdown(self):
+        assert format_slack_message("~~done~~") == "~done~"
+
+    def test_markdown_table_falls_back_to_monospace_block(self):
+        result = format_slack_message("| A | B |\n| --- | --- |\n| 1 | 2 |")
+        assert result == "```\n| A | B |\n| --- | --- |\n| 1 | 2 |\n```"
+
+    def test_markdown_table_in_existing_code_block_is_not_wrapped_again(self):
+        source = "```\n| A | B |\n| --- | --- |\n| 1 | 2 |\n```"
+        assert format_slack_message(source) == source
+
+    def test_wrapped_table_preserves_markdown_cell_contents(self):
+        source = "| A | B |\n| --- | --- |\n| [x](https://example.com) | **b** |"
+        result = format_slack_message(source)
+        assert result == (
+            "```\n"
+            "| A | B |\n"
+            "| --- | --- |\n"
+            "| [x](https://example.com) | **b** |\n"
+            "```"
+        )
 
     def test_truncation(self):
         long_text = "x" * 4000
         result = format_slack_message(long_text)
         assert len(result) <= 3020  # 3000 + truncation suffix
         assert "_(truncated)_" in result
+
+    def test_truncation_uses_word_boundary(self):
+        text = ("word " * 700) + "tail"
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert before_suffix.endswith("word")
+
+    def test_truncation_does_not_leave_unmatched_bold_marker(self):
+        text = "**" + ("verylong " * 600) + "**"
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert before_suffix.count("*") % 2 == 0
+
+    def test_truncation_ignores_literal_markers_inside_code_block(self):
+        text = "```\n*\n```\n" + ("word " * 700)
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert result.startswith("```\n*\n```")
+        assert before_suffix.endswith("word")
+
+    def test_truncation_preserves_literal_tilde_in_paths(self):
+        result = format_slack_message("See ~/AGENTS.md\n" + ("word " * 700))
+        assert result.startswith("See ~/AGENTS.md")
+
+    def test_truncation_preserves_literal_asterisk_in_globs(self):
+        result = format_slack_message("Files: *.py\n" + ("word " * 700))
+        assert result.startswith("Files: *.py")
+
+    def test_truncation_does_not_leave_unmatched_emoji_led_bold_marker(self):
+        text = "**:warning: " + ("verylong " * 600) + "**"
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert before_suffix.count("*") % 2 == 0
+
+    def test_truncation_does_not_leave_unmatched_punctuation_led_bold_marker(self):
+        text = "**(urgent " + ("verylong " * 600) + "**"
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert before_suffix.count("*") % 2 == 0
+
+    def test_truncation_preserves_path_led_bold_marker_pair(self):
+        text = "**/tmp/output**\n" + ("word " * 700)
+        result = format_slack_message(text)
+        assert result.startswith("*/tmp/output*")
+
+    def test_truncation_preserves_dotfile_bold_marker_pair(self):
+        text = "**.env**\n" + ("word " * 700)
+        result = format_slack_message(text)
+        assert result.startswith("*.env*")
+
+    def test_truncation_removes_unmatched_path_led_bold_opener(self):
+        text = "Path: **/tmp/output " + ("verylong " * 600) + "**"
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert before_suffix.startswith("Path: /tmp/output ")
+
+    def test_truncation_removes_unmatched_long_path_bold_opener(self):
+        text = "**/tmp/" + ("a" * 4000) + "**"
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert before_suffix.startswith("/tmp/")
+        assert before_suffix.count("*") == 0
+
+    def test_truncation_removes_unmatched_dotfile_bold_opener(self):
+        text = "File: **.env " + ("verylong " * 600) + "**"
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert before_suffix.startswith("File: .env ")
 
 
 # ---------------------------------------------------------------------------
