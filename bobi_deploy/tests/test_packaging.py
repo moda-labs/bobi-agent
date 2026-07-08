@@ -27,20 +27,31 @@ def _force_include():
 
 def test_deploy_assets_force_included_under_deploy_dir():
     """Binary mode resolves its mechanics from bobi_deploy/_deploy in an
-    installed wheel (build.py:_packaged_deploy_dir). Guard the mapping."""
+    installed wheel (build.py:_packaged_deploy_dir). Guard the mapping
+    mechanically over EVERY entry - a hand-typed subset would let a new or
+    dropped asset drift past - and pin the assets the engine reads by name."""
     force_include = _force_include()
-    wanted = {
-        "../Dockerfile": "bobi_deploy/_deploy/Dockerfile",
-        "../docker/docker-entrypoint.sh": "bobi_deploy/_deploy/docker/docker-entrypoint.sh",
-        "../docker/noop-deps.sh": "bobi_deploy/_deploy/docker/noop-deps.sh",
-        "../scripts/provision-instance.sh": "bobi_deploy/_deploy/scripts/provision-instance.sh",
-        "../scripts/destroy-instance.sh": "bobi_deploy/_deploy/scripts/destroy-instance.sh",
-    }
-    for src, dest in wanted.items():
-        assert force_include.get(src) == dest, (
-            f"deploy asset '{src}' must force-include to '{dest}' (got "
-            f"{force_include.get(src)!r}) — binary `bobi build`/`bobi deploy` "
-            f"need it."
+    for src, dest in force_include.items():
+        assert dest == "bobi_deploy/_deploy/" + src.removeprefix("../"), (
+            f"deploy asset '{src}' maps to '{dest}' - binary mode reads "
+            f"bobi_deploy/_deploy/<repo-relative path>, so the mapping must "
+            f"be mechanical."
+        )
+    # The engine's hardcoded reads (resolve_assets): these exact files must
+    # stay in the bundle, whatever else the mapping carries.
+    dests = set(force_include.values())
+    for needed in (
+        "bobi_deploy/_deploy/Dockerfile",
+        "bobi_deploy/_deploy/docker/docker-entrypoint.sh",
+        "bobi_deploy/_deploy/docker/noop-deps.sh",
+        "bobi_deploy/_deploy/docker/healthcheck.sh",
+        "bobi_deploy/_deploy/scripts/provision-instance.sh",
+        "bobi_deploy/_deploy/scripts/destroy-instance.sh",
+        "bobi_deploy/_deploy/scripts/fleet.sh",
+    ):
+        assert needed in dests, (
+            f"'{needed}' missing from the bundled deploy assets - binary "
+            f"`bobi build`/`bobi deploy` need it."
         )
 
 

@@ -13,7 +13,9 @@ Fly-hosted agents.
 > next release therefore has no `bobi deploy`; that is the product line.
 > Before the first private-channel release: raise bobi_deploy/pyproject.toml's
 > `bobi>=` floor to the bobi release that ships the carve-out seams (0.40.0
-> satisfies the pin but predates bobi.build/bobi.config). And claim the
+> satisfies the pin but predates bobi.build/bobi.config, and its CLI still
+> mounts a built-in `build` command that silently shadows the plugin's
+> entry point - built-ins win in bobi.cli's plugin group). And claim the
 > `bobi-deploy` name on PyPI with a defensive stub (or rename the package):
 > it is squattable today and `deploy-init`-scaffolded fleet workflows
 > pip-install it by name inside CI jobs holding FLY_API_TOKEN. CI and this

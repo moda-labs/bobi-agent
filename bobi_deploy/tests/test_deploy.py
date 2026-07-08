@@ -22,19 +22,10 @@ from bobi_deploy import deploy as D
 # --- fixtures ----------------------------------------------------------------
 
 def _make_repo(tmp_path: Path) -> Path:
-    """A minimal bobi source root: scripts/ + Dockerfile + a local team."""
-    repo = tmp_path / "repo"
-    (repo / "scripts").mkdir(parents=True)
-    (repo / "scripts" / "provision-instance.sh").write_text("#!/usr/bin/env bash\n")
-    (repo / "scripts" / "destroy-instance.sh").write_text("#!/usr/bin/env bash\n")
-    (repo / "Dockerfile").write_text("FROM scratch\n")
-    pkg = repo / "agents" / "eng-team"
-    pkg.mkdir(parents=True)
-    pkg.joinpath("agent.yaml").write_text(
-        "agent: eng-team\nslack_token: ${SLACK_BOT_TOKEN}\n"
-    )
-    (repo / "deployments").mkdir()
-    return repo
+    from conftest import make_repo
+    return make_repo(
+        tmp_path, "agent: eng-team\nslack_token: ${SLACK_BOT_TOKEN}\n",
+        deployments=True)
 
 
 @pytest.fixture

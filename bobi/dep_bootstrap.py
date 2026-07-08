@@ -398,7 +398,7 @@ class BootstrapError(RuntimeError):
             f"bootstrap gate failed ({report.summary()}); unsatisfied: {fails}")
 
 
-def _agent_needed(dep: Dependency) -> bool:
+def agent_needed(dep: Dependency) -> bool:
     """A dependency the bootstrap agent must materialize from its guide.
 
     A pinned `install` is baked deterministically by the existing build layer (via
@@ -429,7 +429,7 @@ def team_has_bake(team_dir: "Path", project_path: "Path | None" = None) -> bool:
     if declarative:
         return True
     deps = resolve_team_dependencies(team_dir, project_path)
-    return any(_agent_needed(d) for d in deps)
+    return any(agent_needed(d) for d in deps)
 
 
 def render_team_deps(team_dir: "Path", project_path: "Path | None" = None, *,
@@ -452,7 +452,7 @@ def render_team_deps(team_dir: "Path", project_path: "Path | None" = None, *,
     frozen.
 
     `cfg`/`deps` let a caller that already composed the team and resolved its
-    dependency set (the deploy plugin's stage_team_deps) pass them in, avoiding a second
+    dependency set may pass them in, avoiding a second
     chain walk + registry fetch; omitted, they are computed here as before.
     """
     from pathlib import Path
@@ -474,7 +474,7 @@ def render_team_deps(team_dir: "Path", project_path: "Path | None" = None, *,
     spec = cfg.build
     declarative = spec is not None and bool(
         spec.apt or spec.npm or spec.run_root or spec.run or spec.verify_requires)
-    guide_deps = [d for d in deps if _agent_needed(d)]
+    guide_deps = [d for d in deps if agent_needed(d)]
     if not declarative and not guide_deps:
         return None  # generic team — deploys on the shared base image
 
@@ -666,7 +666,7 @@ def _main(argv: list[str] | None = None) -> int:
         return 0 if team_has_bake(team_dir, project_path) else 2
     if args.needs_agent:
         deps = resolve_team_dependencies(team_dir, project_path)
-        return 0 if any(_agent_needed(d) for d in deps) else 2
+        return 0 if any(agent_needed(d) for d in deps) else 2
     if args.print_dep_hash:
         deps = resolve_team_dependencies(team_dir, project_path)
         print(dependency_list_hash(deps))

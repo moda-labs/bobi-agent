@@ -8,27 +8,16 @@ public suite and test_deploy_registry.py.
 """
 
 from pathlib import Path
-from textwrap import dedent
 
 import pytest
 
 from bobi_deploy import build as B
 
+from conftest import make_repo as _make_repo
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # --- fixtures ----------------------------------------------------------------
-
-def _make_repo(tmp_path: Path, agent_yaml: str) -> Path:
-    """A minimal bobi source root (checkout: scripts/ + Dockerfile) + one team."""
-    repo = tmp_path / "repo"
-    (repo / "scripts").mkdir(parents=True)
-    (repo / "scripts" / "provision-instance.sh").write_text("#!/usr/bin/env bash\n")
-    (repo / "scripts" / "destroy-instance.sh").write_text("#!/usr/bin/env bash\n")
-    (repo / "Dockerfile").write_text("FROM scratch\n")
-    pkg = repo / "agents" / "eng-team"
-    pkg.mkdir(parents=True)
-    pkg.joinpath("agent.yaml").write_text(dedent(agent_yaml))
-    return repo
-
 
 BAKING_TEAM = """
     agent: eng-team
@@ -139,6 +128,19 @@ def test_baking_team_without_ctx_is_clean_error(tmp_path):
     with pytest.raises(B.BuildError, match="no build context"):
         B.stage_team_deps(repo / "agents" / "eng-team", repo, ctx=None,
                           allow_agent=True)
+
+
+@pytest.mark.skipif(not (REPO_ROOT / "agents" / "eng-team").exists(),
+                    reason="checked-in eng-team not present (post repo-split)")
+def test_real_eng_team_stays_deployable_without_an_agent(tmp_path):
+    """The real checked-in eng-team passes the deploy-path gate
+    (allow_agent=False): adding a guide-only dependency to it would raise
+    GuideDepsError at PR time here, instead of first surfacing when
+    `bobi deploy eng-team` refuses in production tooling."""
+    rel = B.stage_team_deps(REPO_ROOT / "agents" / "eng-team", REPO_ROOT,
+                            ctx=tmp_path, allow_agent=False)
+    assert rel == "dist/team-deps/eng-team.sh"
+    assert "verify gh" in (tmp_path / rel).read_text()
 
 
 def test_dockerfile_escape_hatch_refused_in_build_path(tmp_path):
@@ -324,8 +326,8 @@ def test_unresolvable_team_is_a_build_error(tmp_path, recorder):
 # --- CLI wiring ------------------------------------------------------------------
 # The command is invoked directly (not through `bobi.cli` entry-point
 # discovery): unit envs may carry a stale editable install whose entry points
-# predate this package. ci.yml's package-smoke proves the mounted-command path
-# from real wheels.
+# predate this package. deploy-package.yml's package-smoke job proves the
+# mounted-command path from real wheels.
 
 def test_cli_build_wiring(tmp_path, monkeypatch):
     from click.testing import CliRunner

@@ -10,24 +10,22 @@ a chain themselves.
 The image engine that used to live here (`bobi build`, #610) moved behind the
 deploy-plugin boundary (#707): building container images is deployment
 mechanics, delivered by the separately installable deploy plugin. This module
-keeps only
-what the public product itself needs - resolution stays public; the plugin
-imports downward (never the reverse; tests/test_import_boundaries.py).
+keeps only what the public product itself needs - resolution stays public;
+the plugin imports downward (never the reverse;
+tests/test_import_boundaries.py).
 """
 
 from __future__ import annotations
 
-import logging
 import shutil
 from pathlib import Path
 
 import yaml
 
-log = logging.getLogger(__name__)
-
 
 class BuildError(RuntimeError):
-    """A team-image build failed."""
+    """A team build step failed - resolution here, or the image engine
+    downstream (the deploy plugin's errors subclass or reuse this type)."""
 
 
 def resolve_team_dir(project_path: Path, team: str) -> Path:

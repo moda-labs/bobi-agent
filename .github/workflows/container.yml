@@ -20,13 +20,14 @@ on:
       - "bobi/dep_bootstrap.py"
       - "bobi/build_render.py"
       - "bobi/tool_library.py"
-      # #610: the wrapper drives `bobi build`, which routes through these.
+      # Team resolution (bobi/build.py) and the CLI plugin loader (bobi/cli.py)
+      # stay public; the build engine itself is the bobi_deploy entries below
+      # (#707).
       - "bobi/build.py"
       - "bobi/cli.py"
       - "bobi_deploy/src/bobi_deploy/deploy.py"
       - "bobi/registry.py"
       - "bobi_deploy/src/bobi_deploy/build.py"
-      - "bobi_deploy/src/bobi_deploy/cli.py"
       - "bobi_deploy/tests/integration/test_bobi_build.py"
       - ".github/workflows/container.yml"
   pull_request:

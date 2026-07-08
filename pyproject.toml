@@ -80,7 +80,7 @@ packages = ["bobi"]
 # defeat independent team versioning. `bobi setup` lists teams from the
 # registry (and, in a source checkout, the repo's `agents/` dir for dev).
 # The Fly deploy assets (Dockerfile, docker/, deploy scripts) ship in the
-# bobi-deploy plugin wheel, not here (#707) — the public product builds no
+# bobi-deploy plugin wheel, not here (#707) - the public product builds no
 # docker images.
 
 [tool.hatch.build.targets.sdist]

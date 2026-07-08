@@ -41,7 +41,6 @@ on:
       - "bobi/build.py"
       - "bobi_deploy/src/bobi_deploy/build.py"
       - "bobi_deploy/src/bobi_deploy/cli.py"
-      - "bobi_deploy/pyproject.toml"
       - "bobi_deploy/src/bobi_deploy/deploy.py"
       - "bobi/registry.py"
       - "bobi/cli.py"

@@ -10,7 +10,7 @@ private-side, behind the `bobi.commands` plugin seam. The public package keeps
 the dual-use seams this engine composes: `bobi.build.resolve_team_dir` (path /
 `name@version` registry pin / `from:` flattening), `bobi.build_render` (the
 team-deps script renderer) and `bobi.dep_bootstrap.render_team_deps` (the ONE
-deps-render seam) - both of which must remain importable from the public wheel
+deps-render seam) - all of which must remain importable from the public wheel
 alone, because the guide-dep bootstrap runs `python -m bobi.dep_bootstrap`
 INSIDE the built container, whose installed bobi is the public PyPI package.
 
@@ -233,7 +233,7 @@ def stage_team_deps(team_dir: Path, project_path: Path, *,
     raises a clean BuildError when ctx is None rather than staging nowhere.
     """
     from bobi.build_render import load_composed_team_config
-    from bobi.dep_bootstrap import _agent_needed, render_team_deps
+    from bobi.dep_bootstrap import agent_needed, render_team_deps
     from bobi.tool_library import resolve_team_dependencies
 
     team_dir = Path(team_dir)
@@ -242,7 +242,7 @@ def stage_team_deps(team_dir: Path, project_path: Path, *,
     # for chained teams).
     cfg = load_composed_team_config(team_dir, project_path)
     deps = resolve_team_dependencies(team_dir, project_path)
-    guide_deps = [d for d in deps if _agent_needed(d)]
+    guide_deps = [d for d in deps if agent_needed(d)]
     if guide_deps and not allow_agent:
         raise GuideDepsError(team_dir.name, [d.name for d in guide_deps])
 

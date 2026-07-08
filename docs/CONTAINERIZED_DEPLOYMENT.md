@@ -350,7 +350,7 @@ prompt edit is still a hot update — only a deps change rebuilds an image.
 
 **How it builds (built on Fly during deploy).** `bobi deploy` renders the
 `build:` spec to a shell hook (the shared staging seam
-`build.py:stage_team_deps`, #610) into the build context and builds the
+`stage_team_deps` in the bobi-deploy package, #610/#707) into the build context and builds the
 ONE Dockerfile **on Fly's remote builder** with `--build-arg TEAM_DEPS=<rendered>`
 — Fly creates app + registry + machine together (no separate registry push), and
 its builder caches the tool layers. The hook runs as a stable layer **below** the
@@ -795,9 +795,10 @@ No `FLEET_PREFIX` var, no manifest, no database — the Fly API is the state sto
 **Bring your own repo (teams developed *independently* of the framework).** A
 team is pure config (role prompts, workflows, monitors, `agent.yaml`) with **zero
 framework imports**, and `bobi deploy` has a **binary mode**: outside a
-bobi checkout it falls back to the deploy assets bundled in the wheel
-(`bobi/_deploy`: a PyPI `Dockerfile` + provision/destroy/fleet scripts), so
-`pip install bobi==<pin>` is fully self-sufficient. That means your teams can
+bobi checkout it falls back to the deploy assets bundled in the bobi-deploy
+wheel (`bobi_deploy/_deploy`: a PyPI `Dockerfile` + provision/destroy/fleet
+scripts, #707), so `pip install bobi==<pin>` plus the bobi-deploy package is
+fully self-sufficient. That means your teams can
 live in their **own private repo** that never carries framework source — the
 "outside user runs their own teams on Fly" shape. The reference example is
 **`moda-labs/moda-agents`** (it owns the `moda` fleet; this framework repo
