@@ -88,8 +88,12 @@ jobs:
               echo "::error::'bobi ${cmd}' present without the bobi-deploy package"; exit 1
             fi
           done
-          ! /tmp/bobi-only/bin/bobi deploy --help >/dev/null 2>&1
-          ! /tmp/bobi-only/bin/bobi build --help >/dev/null 2>&1
+          if /tmp/bobi-only/bin/bobi deploy --help >/dev/null 2>&1; then
+            echo "::error::'bobi deploy --help' succeeded without the bobi-deploy package"; exit 1
+          fi
+          if /tmp/bobi-only/bin/bobi build --help >/dev/null 2>&1; then
+            echo "::error::'bobi build --help' succeeded without the bobi-deploy package"; exit 1
+          fi
 
       - name: bobi + bobi-deploy → deploy commands appear via entry points
         run: |
