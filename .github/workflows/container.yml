@@ -38,6 +38,30 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  # Dockerfile lint, moved here from ci.yml's every-PR lint job (repo-split
+  # phase 1: the Dockerfile moves private, so its checks live in this
+  # private-bound file). A lint regression can only come from image-defining
+  # changes, which this workflow's path filter already covers.
+  image-lint:
+    name: Lint (Dockerfile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: hadolint (Dockerfile)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+
+      - name: Dockerfile build-check (source + binary modes)
+        # BuildKit lint + stage-graph resolution for both build modes, so a
+        # regression in the BOBI_BUILD=pypi path (binary deploy) is caught
+        # without a full image build.
+        run: |
+          docker build --check .
+          docker build --check --build-arg BOBI_BUILD=pypi --build-arg BOBI_VERSION=0.0.0 .
+
   container-image:
     name: Build + contract tests
     runs-on: ubuntu-latest

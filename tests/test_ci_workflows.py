@@ -31,7 +31,9 @@ def test_integration_fast_model_download_is_bounded_without_hf_xet():
 
 
 def test_wrangler_event_server_install_retries_transient_npm_failures():
-    workflow = _ci_workflow()
+    # Lives in worker-integration.yml (repo-split phase 1): the Worker adapter
+    # moves private at cut time, so its wrangler-dev CI is a whole-file unit.
+    workflow = load_workflow("worker-integration.yml")
     job = workflow["jobs"]["integration-wrangler"]
     step = next(
         step

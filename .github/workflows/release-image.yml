@@ -1,0 +1,156 @@
+name: Release base image
+
+# The GHCR base-image half of the release pipeline (repo-split phase 1),
+# called from release.yml as the `image` job. Kept separate from the fleet
+# gate so an image-publish failure can never block the PyPI publish (which
+# gates on the fleet workflow, not this one). This whole file moves to the
+# private repo at cut time - the base image is a deployed-product artifact.
+#
+# The caller gates this on a canary that actually RAN (fleet `smoked` output)
+# and a release-tag-shaped ref, both required because GHCR auth is the
+# always-present GITHUB_TOKEN (no external backstop like PyPI's
+# trusted-publisher config).
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Release version (from the wheel filename)"
+        required: true
+        type: string
+      claude-version:
+        description: "Exact claude CLI version resolved once by build-wheel"
+        required: true
+        type: string
+      source-sha:
+        description: "Commit the release wheel was built from"
+        required: true
+        type: string
+
+env:
+  # The ONE automation-side definition of the published base-image name
+  # (docs necessarily repeat it for consumers).
+  IMAGE: ghcr.io/moda-labs/bobi
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Publish the base image to GHCR (#609), per arch. Built FROM the SAME wheel
+  # the canary proved (BOBI_BUILD=wheel) with the SAME resolved claude pin, so
+  # ghcr.io/moda-labs/bobi:<version> is the artifact the gate exercised: a
+  # consumer on their own orchestrator can `docker run` it or `FROM` it without
+  # vendoring our Dockerfile.
+  #
+  # Each arch builds NATIVELY (arm64 on ubuntu-24.04-arm, free for public
+  # repos) - never under QEMU: the runtime stage executes the fetched binaries
+  # (`claude --version` et al), and the Bun-compiled claude binary is known to
+  # segfault under qemu-user emulation. The legs push per-arch tags
+  # (:<version>-amd64/-arm64); publish-manifest stitches them into the public
+  # multi-arch tag.
+  publish-image:
+    name: Build base image (${{ matrix.platform }})
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source-sha }}
+
+      - name: Assert the ref matches the wheel version
+        # The image tag always comes from the wheel (the released bytes). This
+        # catches the residual mismatch: a v-prefixed ref whose checkout builds
+        # a different version than the ref names.
+        env:
+          REF: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          [ "$REF" = "v${VERSION}" ] || [ "$REF" = "${VERSION}" ] \
+            || { echo "::error::ref '$REF' does not match wheel version '${VERSION}'; refusing to publish"; exit 1; }
+
+      # The SAME artifact the canary smoked and PyPI publishes - do NOT
+      # rebuild. builder-wheel installs dist/*.whl (re-included in
+      # .dockerignore).
+      - name: Stage the proven wheel into the build context
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push the ${{ matrix.platform }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          build-args: |
+            BOBI_BUILD=wheel
+            CLAUDE_VERSION=${{ inputs.claude-version }}
+          # Keep the pyproject-keyed deps layer warm across releases (the
+          # Dockerfile orders layers stable→volatile precisely for this).
+          cache-from: type=gha,scope=base-image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=base-image-${{ matrix.arch }}
+          # No provenance attestation: it adds unknown/unknown manifest entries
+          # that confuse `docker run` UIs and downstream FROM digest pinning.
+          provenance: false
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}-${{ matrix.arch }}
+
+  # --------------------------------------------------------------------------
+  # Stitch the per-arch images into the public multi-arch tags. :latest moves
+  # only when the version being published IS the repo's latest non-prerelease
+  # release (GitHub's releases/latest), which is correct by construction:
+  # prerelease publishes and re-runs of an OLD release's run can never move
+  # it, and a workflow_dispatch re-push of the newest tag restores it after a
+  # transient failure.
+  publish-manifest:
+    name: Publish base image manifest to GHCR
+    needs: [publish-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create the multi-arch manifest (+ :latest when newest release)
+        run: |
+          set -euo pipefail
+          tags=(-t "${IMAGE}:${VERSION}")
+          latest_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          if [ "$latest_release" = "v${VERSION}" ]; then
+            tags+=(-t "${IMAGE}:latest")
+          else
+            echo "::notice::v${VERSION} is not the latest release (latest: ${latest_release:-none}); :latest not moved"
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            "${IMAGE}:${VERSION}-amd64" "${IMAGE}:${VERSION}-arm64"
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"

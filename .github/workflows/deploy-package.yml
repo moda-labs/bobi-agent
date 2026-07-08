@@ -1,0 +1,87 @@
+name: Deploy package
+
+# CI for the bobi-deploy plugin package (repo-split phase 1). This whole file
+# moves to the private repo at cut time along with bobi_deploy/ - nothing here
+# may be load-bearing for the public product's own gates (those live in
+# ci.yml). Triggers mirror ci.yml so coverage is unchanged by the split.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * *"  # nightly at 6am UTC
+  workflow_dispatch: {}
+
+jobs:
+  deploy-tests:
+    name: bobi-deploy unit tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            bobi_deploy/pyproject.toml
+
+      - name: Install dependencies
+        # bobi is a runtime dependency of the plugin (private imports public,
+        # never the reverse - tests/test_import_boundaries.py enforces it).
+        run: pip install -e ".[dev]" -e ./bobi_deploy
+
+      - name: Run bobi-deploy unit tests
+        run: pytest bobi_deploy/tests/ --timeout=30 -q
+
+  # The phase-1 repo-split exit criterion (two installable packages, one repo):
+  # `pip install bobi` alone must have NO deploy commands; installing the
+  # bobi-deploy wheel must make `deploy`/`deploy-init`/`destroy` appear via the
+  # `bobi.commands` entry points. Proves the post-split CLI plugin seam before
+  # the private repo exists.
+  package-smoke:
+    name: Two-wheel install smoke (CLI plugin seam)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Build both wheels
+        run: |
+          pip install build
+          python -m build --wheel --outdir dist/ .
+          python -m build --wheel --outdir dist-deploy/ ./bobi_deploy
+
+      - name: bobi alone → local product only (no deploy commands)
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/bobi-only && /tmp/bobi-only/bin/pip install --quiet dist/*.whl
+          help="$(/tmp/bobi-only/bin/bobi --help)"
+          for cmd in deploy deploy-init destroy; do
+            if echo "$help" | grep -qE "^  ${cmd}( |$)"; then
+              echo "::error::'bobi ${cmd}' present without the bobi-deploy package"; exit 1
+            fi
+          done
+          ! /tmp/bobi-only/bin/bobi deploy --help >/dev/null 2>&1
+
+      - name: bobi + bobi-deploy → deploy commands appear via entry points
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/bobi-full
+          /tmp/bobi-full/bin/pip install --quiet dist/*.whl dist-deploy/*.whl
+          help="$(/tmp/bobi-full/bin/bobi --help)"
+          for cmd in deploy deploy-init destroy; do
+            echo "$help" | grep -qE "^  ${cmd}( |$)" \
+              || { echo "::error::'bobi ${cmd}' missing with bobi-deploy installed"; exit 1; }
+          done
+          /tmp/bobi-full/bin/bobi deploy --help >/dev/null
+          /tmp/bobi-full/bin/bobi deploy-init --help >/dev/null
+          /tmp/bobi-full/bin/bobi destroy --help >/dev/null
