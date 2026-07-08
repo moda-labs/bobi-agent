@@ -335,6 +335,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
         return list(subscribe)  # can't sign — leave the set unchanged
 
     kept: list[str] = []
+    unbacked: list[str] = []
     for sub in subscribe:
         service = sub.split(":", 1)[0] if ":" in sub else ""
         if service in ("github", "linear", "slack", "whatsapp") and ":" in sub:
@@ -353,6 +354,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                     "subscriptions (a resource grant is required, #488)",
                     sub, action,
                 )
+                unbacked.append(sub)
                 if not filter_unauthorized:
                     kept.append(sub)
                 continue
@@ -373,6 +375,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                 "session's subscriptions (a resource grant is required, #488)",
                 service, sub, action,
             )
+            unbacked.append(sub)
             if not filter_unauthorized:
                 kept.append(sub)
             continue
@@ -382,7 +385,11 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
             )
         except Exception as e:  # transport hiccup — drop, never block startup
             action = "dropping" if filter_unauthorized else "keeping"
-            log.warning("Resource authorize failed for %r: %s — %s", sub, e, action)
+            log.warning(
+                "Resource authorize failed for %r: %s — %s",
+                sub, type(e).__name__, action,
+            )
+            unbacked.append(sub)
             if not filter_unauthorized:
                 kept.append(sub)
             continue
@@ -395,8 +402,15 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                 "%s credential cannot read it; %s subscriptions (#488)",
                 sub, service, action,
             )
+            unbacked.append(sub)
             if not filter_unauthorized:
                 kept.append(sub)
+    if unbacked:
+        action = "dropped" if filter_unauthorized else "kept"
+        log.warning(
+            "Global event subscriptions without resource grants were %s: %s",
+            action, sorted(unbacked),
+        )
     return kept
 
 

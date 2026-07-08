@@ -67,6 +67,35 @@ def test_fresh_state_registers_without_put(mock_register,
     assert mock_client.call_args.kwargs["deployment_id"] == "dep-1"
 
 
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
+def test_deaf_reconnect_uses_filtered_registered_subscriptions(
+        mock_register, mock_client, _drain, project):
+    """If fresh registration drops an unbacked global topic, the deaf reconnect
+    resubscribe must not later PUT the raw unfiltered subscribe list."""
+    mock_register.return_value = ("dep-1", "key-1")
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+    mock_http = httpx.Client(transport=transport)
+
+    with patch.object(pooled, '_client', mock_http):
+        _start_event_subscription("sess", ["github:o/r", "inbox/self"], project)
+        on_deaf = mock_client.call_args.kwargs["on_deaf_reconnect"]
+        on_deaf()
+
+    mock_register.assert_called_once()
+    assert mock_register.call_args.args[2] == ["inbox/self"]
+    put_reqs = [r for r in captured if r.method == "PUT"]
+    assert len(put_reqs) == 1
+    assert json.loads(put_reqs[0].content) == {"replace": ["inbox/self"]}
+
+
 @patch("time.sleep")
 @patch("bobi.events.drain.drain_loop")
 @patch("bobi.events.client.EventServerClient")
@@ -140,6 +169,48 @@ def test_saved_state_uses_put_not_register(mock_register,
     assert str(put_reqs[0].url) == f"{REMOTE_URL}/deployments/dep-3/subscriptions"
     assert json.loads(put_reqs[0].content) == {"replace": ["github:o/r"]}
     assert mock_client.call_args.kwargs["deployment_id"] == "dep-3"
+
+
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
+def test_saved_state_keeps_unbacked_global_topics_and_resubscribes_same(
+        mock_register, mock_client, _drain, project):
+    """Saved deployments keep global topics when pre-PUT authorization fails,
+    because the server may already hold a no-expiry grant. Deaf reconnect must
+    reassert that same authorized/kept list, not the raw subscribe input."""
+    from bobi import paths
+
+    paths.agent_yaml_path(project).write_text(
+        f"agent: test\nentry_point: manager\nevent_server: {REMOTE_URL}\n"
+        "services:\n  - name: github\n    credentials:\n      token: ghp_secret\n"
+    )
+    state = _state_file(project)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"deployment_id": "dep-3", "api_key": "key-3"}))
+    _create_bubble(project)
+
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.method == "POST" and str(request.url).endswith("/resources/authorize"):
+            return httpx.Response(403, json={"error": "forbidden"})
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+    mock_http = httpx.Client(transport=transport)
+
+    with patch.object(pooled, '_client', mock_http):
+        _start_event_subscription("sess", ["github:o/r", "inbox/self"], project)
+        on_deaf = mock_client.call_args.kwargs["on_deaf_reconnect"]
+        on_deaf()
+
+    mock_register.assert_not_called()
+    put_reqs = [r for r in captured if r.method == "PUT"]
+    assert len(put_reqs) == 2
+    assert json.loads(put_reqs[0].content) == {"replace": ["github:o/r", "inbox/self"]}
+    assert json.loads(put_reqs[1].content) == {"replace": ["github:o/r", "inbox/self"]}
 
 
 @patch("bobi.events.drain.drain_loop")
