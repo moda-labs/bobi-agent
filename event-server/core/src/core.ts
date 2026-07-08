@@ -320,15 +320,15 @@ export function createTopicEvent(
 // Re-exported here so existing imports from core continue to work.
 // ---------------------------------------------------------------------------
 
-import { normalizeGitHubWebhook } from "./adapters/github";
-import { normalizeLinearWebhook } from "./adapters/linear";
-import { bridgeSlackWebhook } from "./adapters/chat-sdk-slack";
-import { normalizeWhatsAppWebhook } from "./adapters/whatsapp";
-import { chunkForChannel, getChannelAdapter, slackApiUrl, truncateForChannel, whatsappApi, type OutboundFile } from "./channels";
-import { parseConversation, type Conversation } from "./conversation";
+import { normalizeGitHubWebhook } from "./adapters/github.js";
+import { normalizeLinearWebhook } from "./adapters/linear.js";
+import { bridgeSlackWebhook } from "./adapters/chat-sdk-slack.js";
+import { normalizeWhatsAppWebhook } from "./adapters/whatsapp.js";
+import { chunkForChannel, getChannelAdapter, slackApiUrl, truncateForChannel, whatsappApi, type OutboundFile } from "./channels.js";
+import { parseConversation, type Conversation } from "./conversation.js";
 
-export { normalizeGitHubWebhook as normalizeGitHubPayload } from "./adapters/github";
-export { normalizeLinearWebhook as normalizeLinearPayload } from "./adapters/linear";
+export { normalizeGitHubWebhook as normalizeGitHubPayload } from "./adapters/github.js";
+export { normalizeLinearWebhook as normalizeLinearPayload } from "./adapters/linear.js";
 
 // ---------------------------------------------------------------------------
 // Routing — topics-based (v2)
@@ -420,7 +420,10 @@ async function hmacSha256Hex(secret: string, data: Uint8Array | string): Promise
 		false,
 		["sign"],
 	);
-	return bytesToHex(await crypto.subtle.sign("HMAC", key, bytes));
+	// Cast: BufferSource wants an ArrayBuffer-backed view; the buffer is
+	// never a SharedArrayBuffer here, but Uint8Array's default type argument
+	// (ArrayBufferLike) can't prove that across lib variants.
+	return bytesToHex(await crypto.subtle.sign("HMAC", key, bytes as Uint8Array<ArrayBuffer>));
 }
 
 // SHA-256 hex digest — the one-way transform between a plaintext ingest token

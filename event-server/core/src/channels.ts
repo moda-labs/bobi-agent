@@ -23,7 +23,7 @@ import {
 	SlackApiError,
 	type SlackMessageOptions,
 } from "@chat-adapter/slack/api";
-import type { Conversation } from "./conversation";
+import type { Conversation } from "./conversation.js";
 
 export interface CredentialSpec {
 	env: string;
@@ -518,7 +518,10 @@ const whatsappAdapter: ChannelAdapter = {
 				const form = new FormData();
 				form.append("messaging_product", "whatsapp");
 				form.append("type", mime);
-				form.append("file", new Blob([f.data], { type: mime }), f.name);
+				// Cast: BlobPart wants an ArrayBuffer-backed view; the buffer is
+				// never a SharedArrayBuffer here, but Uint8Array's default type
+				// argument (ArrayBufferLike) can't prove that across lib variants.
+				form.append("file", new Blob([f.data as Uint8Array<ArrayBuffer>], { type: mime }), f.name);
 				const uploaded = await whatsappApi(token, `${conv.scope}/media`, { form });
 				const mediaId = uploaded.id as string;
 				if (!mediaId) return { ok: false, error: partialUploadError(whatsappError(uploaded), i, files.length) };

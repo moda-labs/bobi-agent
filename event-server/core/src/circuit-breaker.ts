@@ -18,7 +18,7 @@
  * on the next human-authored event in the same key.
  */
 
-import type { NormalizedEvent } from "./core";
+import type { NormalizedEvent } from "./core.js";
 
 // ---------------------------------------------------------------------------
 // Tunables

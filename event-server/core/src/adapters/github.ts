@@ -1,4 +1,4 @@
-import type { NormalizedEvent } from "../core";
+import type { NormalizedEvent } from "../core.js";
 
 export function normalizeGitHubWebhook(
 	eventHeader: string,
