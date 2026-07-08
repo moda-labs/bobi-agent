@@ -25,7 +25,9 @@ interactively, it asks for the app name and the event server URL before
 rendering anything: press Enter to use the bobi cloud event server, or enter
 your own URL. If the agent runs on your own machine with the local event
 server, Slack can't reach localhost - put a public tunnel (cloudflared, ngrok)
-in front of `localhost:8080` and enter the tunnel URL.
+in front of `localhost:8080` and enter the tunnel URL. Both that tunnel
+topology and a standalone server on your own box are covered in
+`docs/SELF_HOSTED_EVENT_SERVER.md`.
 
 Scripted or piped, there are no prompts: the request URL comes from your
 project config when run inside an install, otherwise the bobi cloud event

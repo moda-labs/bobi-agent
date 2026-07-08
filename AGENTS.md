@@ -15,6 +15,8 @@ Bobi is an event-driven AI agent framework.
 - `skills/whatsapp-setup.md`: WhatsApp (Meta Cloud API) integration setup.
 - `skills/linear-setup.md`: Linear integration setup.
 - `docs/EVENT_SERVER.md`: event-server architecture, topics, and security model.
+- `docs/SELF_HOSTED_EVENT_SERVER.md`: running your own webhook ingress - tunnel
+  or standalone Node event server.
 - `docs/MONITORS.md`: monitor scheduler and the `script_cache` token-saving runner.
 - `docs/WORKFLOW_ENGINE.md`: workflow state machine, step types, suspend/resume.
 - `docs/TOOL_LIBRARY.md`: unified dependency model - declaring tools/skills/MCP

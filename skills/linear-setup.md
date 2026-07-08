@@ -64,6 +64,10 @@ cd event-server
 wrangler secret put LINEAR_WEBHOOK_SECRET
 ```
 
+For a self-hosted event server (tunnel or standalone box), set it as
+`BOBI_ES_LINEAR_WEBHOOK_SECRET` in the server's environment - see
+`docs/SELF_HOSTED_EVENT_SERVER.md`.
+
 ## 5. Label issues for automation
 
 Create a label in Linear called `agent` (or whatever you set in `trigger_labels`). When you want dispatch to pick up an issue, add that label.
