@@ -173,6 +173,19 @@ the others. Write prompts the way you'd brief a person: responsibilities,
 what to do with each event type, when to escalate, which tools docs to
 follow.
 
+### Slack reply style in role prompts
+
+Every role inherits the framework prompt before its own `ROLE.md`. That base
+prompt already tells agents to make Slack replies concise, human-readable
+summaries rather than reasoning transcripts, and the Slack delivery path handles
+common markdown-to-Slack formatting.
+
+Use role prompts to add the shape that is specific to that job, not to restate
+the framework default. For example, a support role can require a verdict and
+customer-facing next step; a director role can require a short status digest.
+When a role truly needs a different Slack format, say so explicitly in the
+role prompt, because the role prompt is appended after the base prompt.
+
 ## Monitors
 
 A monitor either runs on an `interval:` (`15m`, `1h`, `2d`) or at

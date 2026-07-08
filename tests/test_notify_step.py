@@ -111,15 +111,60 @@ class TestFormatSlackMessage:
     def test_unordered_list_asterisk(self):
         assert format_slack_message("* item one\n* item two") == "• item one\n• item two"
 
+    def test_ordered_list_is_preserved_for_slack(self):
+        result = format_slack_message("1. First\n2. Second")
+        assert result == "1. First\n2. Second"
+
     def test_nested_list(self):
         result = format_slack_message("- top\n  - nested")
         assert result == "• top\n  • nested"
+
+    def test_strikethrough_markdown(self):
+        assert format_slack_message("~~done~~") == "~done~"
+
+    def test_markdown_table_falls_back_to_monospace_block(self):
+        result = format_slack_message("| A | B |\n| --- | --- |\n| 1 | 2 |")
+        assert result == "```\n| A | B |\n| --- | --- |\n| 1 | 2 |\n```"
+
+    def test_markdown_table_in_existing_code_block_is_not_wrapped_again(self):
+        source = "```\n| A | B |\n| --- | --- |\n| 1 | 2 |\n```"
+        assert format_slack_message(source) == source
+
+    def test_wrapped_table_preserves_markdown_cell_contents(self):
+        source = "| A | B |\n| --- | --- |\n| [x](https://example.com) | **b** |"
+        result = format_slack_message(source)
+        assert result == (
+            "```\n"
+            "| A | B |\n"
+            "| --- | --- |\n"
+            "| [x](https://example.com) | **b** |\n"
+            "```"
+        )
 
     def test_truncation(self):
         long_text = "x" * 4000
         result = format_slack_message(long_text)
         assert len(result) <= 3020  # 3000 + truncation suffix
         assert "_(truncated)_" in result
+
+    def test_truncation_uses_word_boundary(self):
+        text = ("word " * 700) + "tail"
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert before_suffix.endswith("word")
+
+    def test_truncation_does_not_leave_unmatched_bold_marker(self):
+        text = "**" + ("verylong " * 600) + "**"
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert before_suffix.count("*") % 2 == 0
+
+    def test_truncation_ignores_literal_markers_inside_code_block(self):
+        text = "```\n*\n```\n" + ("word " * 700)
+        result = format_slack_message(text)
+        before_suffix = result.removesuffix("\n_(truncated)_")
+        assert result.startswith("```\n*\n```")
+        assert before_suffix.endswith("word")
 
 
 # ---------------------------------------------------------------------------

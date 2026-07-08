@@ -24,21 +24,142 @@ log = logging.getLogger(__name__)
 # Formatting
 # ---------------------------------------------------------------------------
 
+TRUNCATION_LIMIT = 3000
+TRUNCATION_SUFFIX = "\n_(truncated)_"
+
+
+def _is_markdown_table_row(line: str) -> bool:
+    stripped = line.strip()
+    return "|" in stripped and len(stripped.split("|")) >= 3
+
+
+def _is_markdown_table_separator(line: str) -> bool:
+    stripped = line.strip().strip("|")
+    cells = [cell.strip() for cell in stripped.split("|")]
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
+
+
+def _wrap_markdown_tables(text: str) -> str:
+    """Wrap markdown tables in code blocks so Slack does not garble them."""
+    lines = text.splitlines()
+    wrapped: list[str] = []
+    i = 0
+    in_code_block = False
+    while i < len(lines):
+        if lines[i].strip().startswith("```"):
+            in_code_block = not in_code_block
+            wrapped.append(lines[i])
+            i += 1
+            continue
+        if (
+            not in_code_block
+            and i + 1 < len(lines)
+            and _is_markdown_table_row(lines[i])
+            and _is_markdown_table_separator(lines[i + 1])
+        ):
+            table = [lines[i], lines[i + 1]]
+            i += 2
+            while i < len(lines) and _is_markdown_table_row(lines[i]):
+                table.append(lines[i])
+                i += 1
+            wrapped.extend(["```", *table, "```"])
+            continue
+        wrapped.append(lines[i])
+        i += 1
+    return "\n".join(wrapped)
+
+
+def _convert_markdown_line(line: str) -> str:
+    line = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', line)
+    line = re.sub(r'\*\*(.+?)\*\*', r'*\1*', line)
+    line = re.sub(r'~~(.+?)~~', r'~\1~', line)
+    line = re.sub(r'^( *)[-*] ', r'\1• ', line)
+    return re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', line)
+
+
+def _convert_markdown_outside_code_blocks(text: str) -> str:
+    lines = text.split("\n")
+    converted: list[str] = []
+    in_code_block = False
+    for line in lines:
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            converted.append(line)
+        elif in_code_block:
+            converted.append(line)
+        else:
+            converted.append(_convert_markdown_line(line))
+    return "\n".join(converted)
+
+
+def _has_open_code_fence(text: str) -> bool:
+    in_code_block = False
+    for line in text.split("\n"):
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+    return in_code_block
+
+
+def _outside_code_marker_count(text: str, marker: str) -> int:
+    count = 0
+    in_code_block = False
+    for line in text.split("\n"):
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if not in_code_block:
+            count += line.count(marker)
+    return count
+
+
+def _remove_last_outside_code_marker(text: str, marker: str) -> str:
+    lines = text.split("\n")
+    in_code_block = False
+    last: tuple[int, int] | None = None
+    for line_index, line in enumerate(lines):
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        marker_index = line.rfind(marker)
+        if marker_index >= 0:
+            last = (line_index, marker_index)
+    if last is None:
+        return text
+    line_index, marker_index = last
+    line = lines[line_index]
+    lines[line_index] = line[:marker_index] + line[marker_index + len(marker):]
+    return "\n".join(lines)
+
+
+def _truncate_slack_message(text: str) -> str:
+    """Truncate without cutting through words or leaving open mrkdwn markers."""
+    if len(text) <= TRUNCATION_LIMIT:
+        return text
+
+    body = text[:TRUNCATION_LIMIT]
+    boundary = max(body.rfind(" "), body.rfind("\n"), body.rfind("\t"))
+    if boundary >= int(TRUNCATION_LIMIT * 0.8):
+        body = body[:boundary]
+    body = body.rstrip()
+
+    if _has_open_code_fence(body):
+        body += "\n```"
+    for marker in ("`", "*", "~"):
+        if _outside_code_marker_count(body, marker) % 2:
+            body = _remove_last_outside_code_marker(body, marker)
+
+    return body + TRUNCATION_SUFFIX
+
+
 def format_slack_message(text: str) -> str:
     """Convert markdown to Slack mrkdwn and truncate if needed."""
     # Escaped newlines from shell invocations
     text = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
-    # Headings → bold
-    text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
-    # Bold markdown → Slack bold
-    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
-    # Unordered list markers → bullet character
-    text = re.sub(r'^( *)[-*] ', r'\1• ', text, flags=re.MULTILINE)
-    # Links
-    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', text)
-    if len(text) > 3000:
-        text = text[:3000] + '\n_(truncated)_'
-    return text
+    text = _wrap_markdown_tables(text)
+    text = _convert_markdown_outside_code_blocks(text)
+    return _truncate_slack_message(text)
 
 
 # ---------------------------------------------------------------------------
