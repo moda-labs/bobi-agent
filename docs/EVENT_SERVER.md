@@ -373,6 +373,16 @@ Properties:
   to KV propagation (typically seconds, up to ~60s across points of
   presence). Management routes are bubble-signed, and ids resolve only
   within the caller's own bubble.
+- **Env-seeded locally.** The local server can seed tokens at boot from
+  `BOBI_ES_INGEST_TOKENS`, a comma-separated list of `topic=token` bindings,
+  for example `alert/firing=ingt_...`; commas are delimiters, so env-provided
+  tokens must be comma-free. The server validates each topic, stores only the
+  token hash, and lazily attaches the seeded records to the first local bubble
+  after the first deployment registers. `list` flags these records as
+  `env_managed`; `revoke` rejects them with guidance to rotate by changing
+  `BOBI_ES_INGEST_TOKENS` in the deployment secret store and restarting. A
+  changed secret takes effect after that restart, not as a hot reload. This is
+  local-server only; Worker tokens are already durable in KV.
 - **Bounded.** 256 KiB body cap enforced before the body is parsed, 60
   requests/min per token. Auth rejections are opaque 403s (missing, unknown,
   revoked, and wrong-topic are indistinguishable) and count into
