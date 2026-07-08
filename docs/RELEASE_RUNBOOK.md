@@ -5,16 +5,18 @@ agent-team fleet. Use it when a fix has merged to `main` and needs to reach the
 Fly-hosted agents.
 
 > **Repo-split phase 1 caveat:** the deploy commands now live in the separate
-> `bobi-deploy` package (`bobi_deploy/`, its own wheel), which is NOT published
-> to PyPI. A `uv tool install bobi` from the next release therefore has no
-> `bobi deploy` - decide the bobi-deploy distribution channel (private index
-> per the split plan, or temporary PyPI publish) before cutting a release that
-> external deploy users depend on, and raise bobi_deploy/pyproject.toml's
-> `bobi>=` floor to that release (0.40.0 satisfies the pin but predates the
-> bobi.build/bobi.config seams it imports). Until the name is published or
-> claimed, `bobi-deploy` is squattable on PyPI and `deploy-init`-scaffolded
-> fleet workflows pip-install it by name - claim the name (or rename the
-> package) before any scaffold reaches an external repo. CI and this
+> `bobi-deploy` package (`bobi_deploy/`, its own wheel). It is NOT on PyPI and
+> real releases never go there - anything published to PyPI is public forever,
+> which conflicts with this package going closed-source, and a stale public
+> copy next to a private index is a dependency-confusion setup. Distribution
+> is a private index or git+ssh pin only. A `uv tool install bobi` from the
+> next release therefore has no `bobi deploy`; that is the product line.
+> Before the first private-channel release: raise bobi_deploy/pyproject.toml's
+> `bobi>=` floor to the bobi release that ships the carve-out seams (0.40.0
+> satisfies the pin but predates bobi.build/bobi.config). And claim the
+> `bobi-deploy` name on PyPI with a defensive stub (or rename the package):
+> it is squattable today and `deploy-init`-scaffolded fleet workflows
+> pip-install it by name inside CI jobs holding FLY_API_TOKEN. CI and this
 > runbook's fleet steps are unaffected (they install both packages from the
 > checkout).
 
