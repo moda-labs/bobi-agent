@@ -1562,7 +1562,7 @@ def transcript_show(session, lines, follow):
 
 def _find_transcript(session: str) -> Path | None:
     """Find the log file for a session."""
-    from bobi.sdk import session_log_path
+    from bobi.sdk import get_registry, session_log_path
 
     if session == "manager":
         project = _detect_project_root()

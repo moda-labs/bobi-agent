@@ -194,13 +194,12 @@ class _ReplyChannel:
         self.cursor_path.unlink(missing_ok=True)
         # The shared EventServerClient also writes a per-deployment events log
         # (events/client.py _log_event). For a throwaway reply channel that's
-        # pure litter — drop it so asks don't accumulate state/ files. The
-        # cursor lives in the team's state dir, so its parent IS that dir (no
-        # process-global root read).
+        # pure litter - drop it from the client's own state dir so asks don't
+        # accumulate state/ files (no process-global root read).
         try:
             deployment_id = self.client.deployment_id  # type: ignore[attr-defined]
-            (self.cursor_path.parent / f"events-{deployment_id}.jsonl").unlink(
-                missing_ok=True)
+            state_dir = self.client.state_dir  # type: ignore[attr-defined]
+            (state_dir / f"events-{deployment_id}.jsonl").unlink(missing_ok=True)
         except Exception:
             log.debug("Reply channel events-log cleanup failed", exc_info=True)
 
@@ -251,6 +250,7 @@ def _open_reply_channel(project_path: Path) -> "_ReplyChannel | None":
         api_key=api_key,
         queue=q,
         cursor_path=cursor_path,
+        state_dir=paths.state_dir(project_path),
     )
     client.start()
     return _ReplyChannel(client=client, queue=q, topic=topic, cursor_path=cursor_path)
@@ -300,7 +300,7 @@ def deliver(
 
     ``root`` selects the target team's runtime root; None means the process's
     bound root. Positional call sites (cli.py message/ask, subagent handoffs,
-    monitors) are frozen — the keyword-only root must not disturb them.
+    monitors) are frozen - the keyword-only root must not disturb them.
 
     Returns (success, response_text).
     """

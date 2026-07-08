@@ -107,8 +107,9 @@ class TeamRuntime(ABC):
         """Queue *text* for *session*; returns a message id to poll."""
 
     @abstractmethod
-    def chat_job(self, message_id: str) -> dict | None:
-        """The submit's outcome: pending/done/error, or None if unknown."""
+    def chat_job(self, name: str, message_id: str) -> dict | None:
+        """The submit's outcome: pending/done/error. None when the id is
+        unknown or belongs to a different team."""
 
 
 # --- Local implementation ----------------------------------------------------
@@ -134,26 +135,12 @@ def _describe(agent_dir: Path) -> str:
 
 
 def _manager_pid(root: Path) -> int:
-    """The manager pid when alive, else 0. A pure filesystem+signal check —
+    """The manager pid when alive, else 0. A pure filesystem+signal check -
     the dashboard read path never touches a runtime bind."""
-    import os
+    from bobi.sdk import pid_alive, read_pid
 
-    pid_path = paths.manager_pid_path(root)
-    if not pid_path.exists():
-        return 0
-    try:
-        pid = int(pid_path.read_text().strip())
-    except (OSError, ValueError):
-        return 0
-    if pid <= 0:
-        return 0
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return 0
-    except PermissionError:
-        pass  # exists, owned by someone else — still alive
-    return pid
+    pid = read_pid(paths.manager_pid_path(root))
+    return pid if pid > 0 and pid_alive(pid) else 0
 
 
 def agent_card(name: str) -> dict:
@@ -170,7 +157,7 @@ def agent_card(name: str) -> dict:
 
 
 def design_card(name: str) -> dict:
-    """A source-only slot (designed, never installed) — dashboard shows it so
+    """A source-only slot (designed, never installed) - dashboard shows it so
     the library and the runtime roster share one home."""
     return {
         "name": name,
@@ -208,23 +195,21 @@ def ordered_subagents(entries, *, manager_name: str = "") -> list:
                                  else 1, e.started_at or 0))
 
 
-def _session_id_for(root: Path, session: str) -> str:
-    """A session's Claude session id: the on-disk <sessions>/<name>.id file —
-    read directly so no runtime bind is needed."""
-    try:
-        return (paths.sessions_dir(root) / f"{session}.id").read_text().strip()
-    except OSError:
-        return ""
-
-
 class LocalRuntime(TeamRuntime):
     """Today's behavior: this machine's agents tree, explicit-root service
     calls, chat delivered by a background thread per submit."""
 
     def __init__(self) -> None:
         # Submit-then-poll job store. Carries only status and errors; the
-        # reply itself reaches the transcript via the messages poll.
+        # reply itself reaches the transcript via the messages poll. Guarded
+        # by a lock: submits and finishing worker threads share it.
         self._chat_jobs: dict[str, dict] = {}
+        self._chat_lock = threading.Lock()
+        # Spawning pins process-global brain state for the in-process
+        # preflight probe (service.spawn_team, #655) - serialize starts so
+        # two teams' preflights never interleave those env writes. Held only
+        # for the spawn call, not for stop waits or chat.
+        self._spawn_lock = threading.Lock()
 
     def _resolve(self, name: str) -> Path:
         try:
@@ -255,7 +240,8 @@ class LocalRuntime(TeamRuntime):
 
         root = self._resolve(name)
         try:
-            result = service.spawn_team(root)
+            with self._spawn_lock:
+                result = service.spawn_team(root)
         except service.AlreadyRunning as e:
             raise TeamAlreadyRunning(e.pid) from e
         except service.PreflightFailed as e:
@@ -284,11 +270,9 @@ class LocalRuntime(TeamRuntime):
         stop = service.stop_team(root)
         if stop.still_running:
             raise TeamDidNotStop(stop.pid)
-        try:
-            result = service.spawn_team(root)
-        except service.ServiceError as e:
-            raise TeamLifecycleError(str(e)) from e
-        return {"ok": True, "pid": result.startup.pid}
+        # One spawn path: restart is stop + start, so a preflight failure
+        # carries the same structured report either way.
+        return self.start_team(name)
 
     def subagents(self, name: str) -> list[dict]:
         from bobi import service
@@ -300,16 +284,19 @@ class LocalRuntime(TeamRuntime):
                 for e in ordered_subagents(entries, manager_name=mgr)]
 
     def messages(self, name: str, session: str) -> list[dict]:
+        from bobi.sdk import load_session_id
+
         root = self._resolve(name)
         # The durable source of truth is the Claude transcript; the web-UI
         # chat log is the fallback when no transcript resolves yet. Both are
         # explicit-path reads.
-        messages = read_transcript_messages(_session_id_for(root, session))
+        messages = read_transcript_messages(load_session_id(session, root=root))
         if not messages:
             messages = read_chat(root, session)
         return messages
 
     def _prune_jobs(self) -> None:
+        # Caller holds _chat_lock.
         if len(self._chat_jobs) <= 500:
             return
         for mid in [m for m, j in self._chat_jobs.items()
@@ -319,8 +306,9 @@ class LocalRuntime(TeamRuntime):
     def chat_submit(self, name: str, session: str, text: str) -> str:
         root = self._resolve(name)
         message_id = uuid.uuid4().hex
-        self._prune_jobs()
-        self._chat_jobs[message_id] = {"status": "pending"}
+        with self._chat_lock:
+            self._prune_jobs()
+            self._chat_jobs[message_id] = {"team": name, "status": "pending"}
 
         def work() -> None:
             from bobi import service
@@ -328,14 +316,20 @@ class LocalRuntime(TeamRuntime):
             try:
                 service.ask(root, session, text,
                             timeout=DEFAULT_CHAT_TIMEOUT)
-                self._chat_jobs[message_id] = {"status": "done"}
-            except Exception as e:  # noqa: BLE001 — job must resolve
-                self._chat_jobs[message_id] = {"status": "error",
-                                               "error": str(e)}
+                outcome = {"team": name, "status": "done"}
+            except Exception as e:  # noqa: BLE001 - job must resolve
+                outcome = {"team": name, "status": "error", "error": str(e)}
+            with self._chat_lock:
+                self._chat_jobs[message_id] = outcome
 
         threading.Thread(target=work, daemon=True,
                          name=f"chat-{message_id[:8]}").start()
         return message_id
 
-    def chat_job(self, message_id: str) -> dict | None:
-        return self._chat_jobs.get(message_id)
+    def chat_job(self, name: str, message_id: str) -> dict | None:
+        with self._chat_lock:
+            job = self._chat_jobs.get(message_id)
+        # A job is only visible under the team it was submitted for.
+        if job is None or job.get("team") != name:
+            return None
+        return {k: v for k, v in job.items() if k != "team"}

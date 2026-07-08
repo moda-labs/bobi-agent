@@ -13,8 +13,10 @@ Bobi Agent (a dashboard card); sessions inside one agent are its subagents
 Handlers speak only to a `TeamRuntime` (see `runtime.py`, #690 stage 1):
 this module owns HTTP mapping (routes, status codes, input validation) and
 the hosted-onboarding surface, which is local-only product. The app binds
-`LocalRuntime` at build time; nothing here mutates process state per
-request, so requests for different agents run concurrently.
+`LocalRuntime` at build time; no handler binds a runtime root, so requests
+for different agents run concurrently (spawns serialize on a runtime-owned
+lock around the one remaining process-global, the brain pin - see
+`LocalRuntime._spawn_lock`).
 """
 
 from __future__ import annotations
@@ -112,8 +114,31 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     serve_index(app, STATIC_DIR / "index.html", {"{{TOKEN}}": token})
     mount_static(app, STATIC_DIR)
 
-    def _unknown() -> JSONResponse:
+    # One HTTP mapping per runtime error type, app-wide, so every endpoint
+    # (and any added later) translates the TeamRuntime error surface the
+    # same way instead of growing per-route except-ladders.
+    @app.exception_handler(UnknownTeam)
+    def _unknown_team(request, exc) -> JSONResponse:
         return JSONResponse({"error": "unknown agent"}, status_code=404)
+
+    @app.exception_handler(TeamAlreadyRunning)
+    def _already_running(request, exc) -> JSONResponse:
+        return JSONResponse({"error": "already running", "pid": exc.pid},
+                            status_code=409)
+
+    @app.exception_handler(TeamPreflightFailed)
+    def _preflight_failed(request, exc) -> JSONResponse:
+        return JSONResponse({"error": "preflight failed", "report": exc.report},
+                            status_code=409)
+
+    @app.exception_handler(TeamDidNotStop)
+    def _did_not_stop(request, exc) -> JSONResponse:
+        return JSONResponse({"error": "manager did not stop", "pid": exc.pid},
+                            status_code=409)
+
+    @app.exception_handler(TeamLifecycleError)
+    def _lifecycle_error(request, exc) -> JSONResponse:
+        return JSONResponse({"error": str(exc)}, status_code=409)
 
     @app.get("/api/ping")
     def ping() -> dict:
@@ -125,48 +150,21 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
 
     @app.get("/api/agents/{name}/status")
     def agent_status(name: str) -> JSONResponse:
-        try:
-            return JSONResponse(rt.team_status(name))
-        except UnknownTeam:
-            return _unknown()
+        return JSONResponse(rt.team_status(name))
 
     # Lifecycle actions are sync `def` on purpose: FastAPI runs them in a
     # threadpool so the (brief) spawn/stop work never stalls the event loop.
     @app.post("/api/agents/{name}/start")
     def start_agent(name: str) -> JSONResponse:
-        try:
-            return JSONResponse(rt.start_team(name))
-        except UnknownTeam:
-            return _unknown()
-        except TeamAlreadyRunning as e:
-            return JSONResponse({"error": "already running", "pid": e.pid},
-                                status_code=409)
-        except TeamPreflightFailed as e:
-            return JSONResponse(
-                {"error": "preflight failed", "report": e.report},
-                status_code=409)
-        except TeamLifecycleError as e:
-            return JSONResponse({"error": str(e)}, status_code=409)
+        return JSONResponse(rt.start_team(name))
 
     @app.post("/api/agents/{name}/stop")
     def stop_agent(name: str) -> JSONResponse:
-        try:
-            return JSONResponse(rt.stop_team(name))
-        except UnknownTeam:
-            return _unknown()
+        return JSONResponse(rt.stop_team(name))
 
     @app.post("/api/agents/{name}/restart")
     def restart_agent(name: str) -> JSONResponse:
-        try:
-            return JSONResponse(rt.restart_team(name))
-        except UnknownTeam:
-            return _unknown()
-        except TeamDidNotStop as e:
-            return JSONResponse(
-                {"error": "manager did not stop", "pid": e.pid},
-                status_code=409)
-        except TeamLifecycleError as e:
-            return JSONResponse({"error": str(e)}, status_code=409)
+        return JSONResponse(rt.restart_team(name))
 
     # --- onboarding (the setup app, hosted) -----------------------------
 
@@ -276,19 +274,13 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
 
     @app.get("/api/agents/{name}/subagents")
     def subagents(name: str) -> JSONResponse:
-        try:
-            return JSONResponse({"subagents": rt.subagents(name)})
-        except UnknownTeam:
-            return _unknown()
+        return JSONResponse({"subagents": rt.subagents(name)})
 
     @app.get("/api/agents/{name}/subagents/{session}/messages")
     def subagent_messages(name: str, session: str) -> JSONResponse:
         if not safe_name(session):
-            return _unknown()
-        try:
-            return JSONResponse({"messages": rt.messages(name, session)})
-        except UnknownTeam:
-            return _unknown()
+            return JSONResponse({"error": "unknown agent"}, status_code=404)
+        return JSONResponse({"messages": rt.messages(name, session)})
 
     # Submit-then-poll chat: the POST returns a message id immediately and
     # the deliver runs in the background — no request is held open for the
@@ -301,16 +293,15 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
         subagent = (payload.get("subagent") or "").strip()
         text = (payload.get("text") or "").strip()
         if not text:
+            # Unknown team still wins over bad input (the historical order):
+            # the status probe raises UnknownTeam -> 404 before the 400.
+            rt.team_status(name)
             return JSONResponse({"error": "empty message"}, status_code=400)
-        try:
-            message_id = rt.chat_submit(name, subagent, text)
-        except UnknownTeam:
-            return _unknown()
-        return JSONResponse({"message_id": message_id})
+        return JSONResponse({"message_id": rt.chat_submit(name, subagent, text)})
 
     @app.get("/api/agents/{name}/chat/{message_id}")
     def chat_status(name: str, message_id: str) -> JSONResponse:
-        job = rt.chat_job(message_id)
+        job = rt.chat_job(name, message_id)
         if job is None:
             return JSONResponse({"error": "unknown message"}, status_code=404)
         return JSONResponse(job)

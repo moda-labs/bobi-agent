@@ -164,7 +164,8 @@ class EventServerClient:
     def __init__(self, server_url: str, deployment_id: str, api_key: str,
                  on_event: callable = None, cursor_path: Path | None = None,
                  queue: SimpleQueue | None = None,
-                 on_deaf_reconnect: callable = None):
+                 on_deaf_reconnect: callable = None,
+                 state_dir: Path | None = None):
         self.server_url = server_url.rstrip("/")
         self.deployment_id = deployment_id
         self.api_key = api_key
@@ -172,6 +173,10 @@ class EventServerClient:
         self._queue = queue if queue is not None else event_queue
         # Seq numbers are per-deployment — sessions must not share a cursor.
         self.cursor_path = cursor_path
+        # Where the events log lands. None means the process's bound-root
+        # state dir; a host serving many teams (the webapp's reply channel)
+        # passes the target team's state dir explicitly.
+        self.state_dir = state_dir
         self._ws: websocket.WebSocketApp | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -425,12 +430,8 @@ class EventServerClient:
             if msg_type in ("event", "replay"):
                 data = msg.get("data", {})
 
-                # An explicit cursor pins the whole client to that team's
-                # state dir (the reply channel in an unbound multi-team host);
-                # without one, the bound-root default applies.
                 _log_event(data, session_id=self.deployment_id,
-                           state_dir=self.cursor_path.parent
-                           if self.cursor_path else None)
+                           state_dir=self.state_dir)
                 seq = data.get("seq") or 0
                 if seq > self._max_enqueued_seq:
                     self._max_enqueued_seq = seq
