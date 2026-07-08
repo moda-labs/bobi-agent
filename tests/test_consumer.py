@@ -22,7 +22,7 @@ class _CaptureInbox:
         self.messages = []
         self.stop_after = stop_after
 
-    def push(self, msg):
+    def push(self, msg, priority=False):
         self.messages.append(msg)
         if self.stop_after and len(self.messages) >= self.stop_after:
             raise SystemExit()
@@ -222,9 +222,11 @@ class TestDrainLoopWithReactor:
 
 
 class TestCursorAckAfterDelivery:
-    """cursor_ack callback is called AFTER delivery, not before (#278)."""
+    """cursor_ack fires only after the session PROCESSES the pushed message
+    (#278, #688) — never at push time, so a restart replays queued messages.
+    Deeper coverage (watermark, out-of-order completion) in test_drain_ack.py."""
 
-    def test_cursor_ack_called_with_max_seq(self):
+    def test_cursor_ack_called_with_max_seq_after_processing(self):
         from bobi.events.drain import drain_loop, _DRAIN_STOP
         q = SimpleQueue()
         q.put({"type": "push", "source": "github", "delivery": "bulk",
@@ -242,8 +244,11 @@ class TestCursorAckAfterDelivery:
         finally:
             unregister_local_inbox("test-ack")
 
-        # Both events delivered in one batch; cursor_ack gets the max seq.
-        assert len(inbox.messages) >= 1
+        # Both events delivered in one batch as one message; nothing acked
+        # until that message is processed, then the batch max seq is.
+        assert len(inbox.messages) == 1
+        assert acked == []
+        inbox.messages[0].on_done()
         assert acked == [7]
 
     def test_cursor_ack_not_called_for_zero_seq(self):
@@ -262,37 +267,9 @@ class TestCursorAckAfterDelivery:
         finally:
             unregister_local_inbox("test-ack-zero")
 
+        # An unsequenced batch has no cursor to advance — no ack wiring.
+        assert inbox.messages[0].on_done is None
         assert acked == []
-
-    def test_cursor_ack_called_after_inbox_push(self):
-        """Ensures cursor_ack fires AFTER inbox.push, not before."""
-        from bobi.events.drain import drain_loop, _DRAIN_STOP
-
-        order = []
-
-        class OrderTrackingInbox:
-            def __init__(self):
-                self.messages = []
-            def push(self, msg):
-                order.append("push")
-                self.messages.append(msg)
-
-        def track_ack(seq):
-            order.append("ack")
-
-        q = SimpleQueue()
-        q.put({"type": "push", "source": "github", "delivery": "bulk",
-               "seq": 3, "data": {"issue_id": "1"}})
-        q.put(_DRAIN_STOP)
-
-        inbox = OrderTrackingInbox()
-        register_local_inbox("test-ack-order", inbox)
-        try:
-            drain_loop("test-ack-order", queue=q, cursor_ack=track_ack)
-        finally:
-            unregister_local_inbox("test-ack-order")
-
-        assert order == ["push", "ack"]
 
 
 class TestFormatBatching:

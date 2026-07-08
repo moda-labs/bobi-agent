@@ -177,6 +177,22 @@ def _emit_session_unreachable_alert(
         log.warning("Failed to emit session unreachable alert", exc_info=True)
 
 
+def _ack_message(msg: Message) -> None:
+    """Confirm a fully-processed message so its event-server cursor advances.
+
+    Only called on paths where the message was actually processed (#688) —
+    a dropped or failed message must not ack, so a restart replays it.
+    Ack failure is non-fatal: the cursor stays behind and the event is
+    re-delivered after a restart (at-least-once).
+    """
+    if msg.on_done is None:
+        return
+    try:
+        msg.on_done()
+    except Exception:
+        log.warning("Message ack failed for %s", msg.id, exc_info=True)
+
+
 class Session:
     """A Claude Code session with an inbox for receiving messages."""
 
@@ -732,6 +748,12 @@ class Session:
                 await asyncio.sleep(SESSION_READY_WAIT_POLL)
 
         if self._state in ("stopped", "error"):
+            # Not ACKed (on_done not called), so the event server replays the
+            # message after a restart instead of losing it (#688).
+            log.warning(
+                "Dropping inbox message for '%s' (state=%s, sender=%s): %.120s",
+                self.name, self._state, msg.sender, msg.text,
+            )
             # Dropping the message means no turn runs, so clear any Slack
             # "thinking…" indicator here — _drain_turn (which normally clears
             # it) is never reached.
@@ -755,6 +777,7 @@ class Session:
             self._rotate_reason = "manual"
             if msg.wait:
                 self.inbox.respond(msg, "compaction requested; rotating at next idle")
+            _ack_message(msg)
             return
 
         try:
@@ -792,7 +815,9 @@ class Session:
 
             if msg.wait:
                 self.inbox.respond(msg, response)
+            _ack_message(msg)
         except Exception as e:
+            # No ack: the message was not processed, so a restart replays it.
             log.error(f"Inbox processing failed for '{self.name}': {e}")
             if msg.wait:
                 self.inbox.respond(msg, f"error: {e}")
@@ -811,7 +836,7 @@ class Session:
                 # Act at idle — rotate when pending and the queue is empty. The
                 # decision-log flush is gone (#456); rotation is now just the
                 # bounded, recoverable client cycle in _rotate().
-                if self._rotate_pending and self.inbox._queue.empty():
+                if self._rotate_pending and self.inbox.empty():
                     try:
                         await self._rotate()
                     except Exception as e:
