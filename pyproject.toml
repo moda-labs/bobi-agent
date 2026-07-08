@@ -66,6 +66,8 @@ packages = ["bobi"]
 # local event server — it is npm-installed and built on first use.
 [tool.hatch.build.targets.wheel.force-include]
 "event-server/src" = "bobi/event-server/src"
+"event-server/core/src" = "bobi/event-server/core/src"
+"event-server/core/package.json" = "bobi/event-server/core/package.json"
 "event-server/package.json" = "bobi/event-server/package.json"
 "event-server/package-lock.json" = "bobi/event-server/package-lock.json"
 "event-server/tsconfig.json" = "bobi/event-server/tsconfig.json"
@@ -99,7 +101,8 @@ packages = ["bobi"]
 # force-include note above).
 include = ["bobi", "event-server", "skills", "Dockerfile", "docker",
            "scripts", "README.md", "CHANGELOG.md"]
-exclude = ["event-server/node_modules", "event-server/dist", "**/__pycache__"]
+exclude = ["event-server/node_modules", "event-server/core/node_modules",
+           "event-server/dist", "**/__pycache__"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

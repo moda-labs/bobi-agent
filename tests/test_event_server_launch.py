@@ -21,6 +21,12 @@ from bobi import paths
 from bobi.events import server as es
 
 
+def _mkdir_installed_node_modules(es_dir: Path) -> None:
+    """A node_modules that _needs_install accepts: the events-core workspace
+    link must exist, not just the directory."""
+    (es_dir / "node_modules" / "@moda-labs" / "bobi-events-core").mkdir(parents=True)
+
+
 def test_npm_failure_surfaces_stderr(tmp_path, monkeypatch, caplog):
     es_dir = tmp_path / "event-server"
     es_dir.mkdir()
@@ -42,7 +48,7 @@ def test_npm_failure_surfaces_stderr(tmp_path, monkeypatch, caplog):
 
 def test_existing_node_modules_without_esbuild_uses_npm_exec(tmp_path, monkeypatch):
     es_dir = tmp_path / "event-server"
-    (es_dir / "node_modules").mkdir(parents=True)
+    _mkdir_installed_node_modules(es_dir)
     (es_dir / "src").mkdir()
     (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
     (es_dir / "package.json").write_text("{}")
@@ -78,6 +84,44 @@ def test_existing_node_modules_without_esbuild_uses_npm_exec(tmp_path, monkeypat
     ]
 
 
+def test_pre_workspace_node_modules_triggers_reinstall(tmp_path, monkeypatch):
+    """A node_modules from before the events-core workspace split (present,
+    but no @moda-labs/bobi-events-core link) must trigger npm install: it
+    survives pip upgrades and git pulls, and without the link the local
+    bundle cannot resolve its imports."""
+    es_dir = tmp_path / "event-server"
+    (es_dir / "node_modules").mkdir(parents=True)  # pre-workspace install
+    (es_dir / "src").mkdir()
+    (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
+    (es_dir / "package.json").write_text("{}")
+    paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    health_calls = {"count": 0}
+
+    def fake_health(*args, **kwargs):
+        health_calls["count"] += 1
+        return None if health_calls["count"] == 1 else {"status": "ok"}
+
+    class FakePopen:
+        pid = 12345
+
+    monkeypatch.setattr(es.subprocess, "run", fake_run)
+    monkeypatch.setattr(es.subprocess, "Popen", lambda *a, **k: FakePopen())
+    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
+    monkeypatch.setattr(es, "health", fake_health)
+
+    result = es.ensure_running(8080, project_path=tmp_path)
+
+    assert result == "started"
+    assert calls[0][:2] == ["npm", "install"]
+
+
 def test_setup_webhook_secrets_are_forwarded_to_local_server(tmp_path, monkeypatch):
     es_dir = tmp_path / "event-server"
     (es_dir / "dist").mkdir(parents=True)
@@ -86,7 +130,7 @@ def test_setup_webhook_secrets_are_forwarded_to_local_server(tmp_path, monkeypat
     (es_dir / "src").mkdir()
     (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
     os.utime(dist, (dist.stat().st_atime, dist.stat().st_mtime + 1))
-    (es_dir / "node_modules").mkdir()
+    _mkdir_installed_node_modules(es_dir)
     (es_dir / "package.json").write_text("{}")
     paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
 
@@ -129,7 +173,7 @@ def test_explicit_webhook_secrets_override_setup_env(tmp_path, monkeypatch):
     (es_dir / "src").mkdir()
     (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
     os.utime(dist, (dist.stat().st_atime, dist.stat().st_mtime + 1))
-    (es_dir / "node_modules").mkdir()
+    _mkdir_installed_node_modules(es_dir)
     (es_dir / "package.json").write_text("{}")
     paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
 

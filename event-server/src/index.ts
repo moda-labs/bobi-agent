@@ -34,14 +34,14 @@ import {
 	handleWhatsAppNumberRegister,
 	handleTestSeedResourceGrants,
 	getAuthRejectionCounters,
-} from "./core";
+} from "@moda-labs/bobi-events-core";
 import {
 	isExemptFromBreaker,
 	recordDelivery,
 	drainPaused,
 	conversationKey,
 	buildLoopDetectedEvent,
-} from "./circuit-breaker";
+} from "@moda-labs/bobi-events-core/circuit-breaker";
 import { internalEventRequest, internalWebSocketRequest, publicBearerFromWebSocketProtocols } from "./internal-auth";
 
 interface Env {

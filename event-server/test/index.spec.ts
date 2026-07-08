@@ -1,7 +1,7 @@
 import { SELF, env } from "cloudflare:test";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import worker from "../src/index";
-import { buildBubbleSignature, parseGlobalTopic } from "../src/core";
+import { buildBubbleSignature, parseGlobalTopic } from "@moda-labs/bobi-events-core";
 import { hmacHex } from "./helpers";
 import {
 	INTERNAL_HEADER,

@@ -31,7 +31,7 @@ WebSocket and receives events; nothing reaches into the instance.
 
 ## Architecture: one core, two runtimes
 
-All domain logic lives in `event-server/src/core.ts` as pure functions that take a
+All domain logic lives in `event-server/core/src/core.ts` as pure functions that take a
 `StorageAdapter` and return a transport-neutral `HandlerResult {status, body}`.
 The core never touches a transport - it does not know `Response` vs `res.end`, KV
 vs an in-memory `Map`, or a Durable Object vs an in-process socket. The seam is the
@@ -123,7 +123,7 @@ context (edit `edit_ref` when given, else post, then clear the typing indicator)
 `POST /channels/typing` sets/clears the thinking indicator and `GET /channels/history`
 reads a conversation's messages; both share the send path's auth and tenancy
 boundary. Channel capabilities (edit, typing, files, length budget) are declared per
-adapter in `event-server/src/channels.ts` (`ChannelDescriptor`); degradation is the
+adapter in `event-server/core/src/channels.ts` (`ChannelDescriptor`); degradation is the
 gateway's job, not the caller's. Only adapters build refs and only the gateway parses
 them; the agent never assembles platform routing fields.
 
@@ -137,7 +137,7 @@ route (/webhooks/<source>) -> verifier -> normalizer -> deliver()
 ```
 
 A source registers a **required** verify slot plus a normalizer in
-`WEBHOOK_SOURCES` (`event-server/src/core.ts`); the verify field is non-optional
+`WEBHOOK_SOURCES` (`event-server/core/src/core.ts`); the verify field is non-optional
 by type, so a route cannot exist without verification by construction. Transports
 never stitch verification per-route. Verifiers run over the exact wire bytes; an
 unconfigured provider secret admits that provider unverified (zero-config local
@@ -148,7 +148,7 @@ signatures with 401 (counted as `webhook_bad_signature`).
 `release.version`, `release.sha`, and Cloudflare Worker version metadata when
 available. The release workflow uses this to fail fast if the fleet
 `event_server` URL is still pointed at a different Worker after deploy.
-Normalizers (`event-server/src/adapters/`) derive the routing key **from the
+Normalizers (`event-server/core/src/adapters/`) derive the routing key **from the
 signed body, never from client input**:
 
 - **GitHub** (`POST /webhooks/github`): `type = github.<event>`, key
@@ -443,12 +443,17 @@ serve over TLS and set all three provider webhook secrets (`WEBHOOK_SECRET`,
 
 ## Key files
 
-- `event-server/src/core.ts` - shared handlers, the unified webhook pipeline,
+`event-server/` is an npm workspace. The runtime-agnostic protocol lives in the
+`event-server/core/` package (`@moda-labs/bobi-events-core`); both runtimes under
+`event-server/src/` consume it by package name, never by relative path (enforced
+by `tests/test_import_boundaries.py`).
+
+- `event-server/core/src/core.ts` - shared handlers, the unified webhook pipeline,
   routing, HMAC auth, grant filter.
+- `event-server/core/src/adapters/{github,slack,linear}.ts` - webhook normalizers.
 - `event-server/src/index.ts` - Cloudflare Worker entry (KV storage, DO fan-out).
 - `event-server/src/local.ts` - local Node entry (in-memory store, direct sockets).
 - `event-server/src/deployment-session.ts` - the per-deployment Durable Object.
-- `event-server/src/adapters/{github,slack,linear}.ts` - webhook normalizers.
 - `bobi/events/server.py` - local-server launcher + bubble mint / grant setup.
 - `bobi/events/client.py` - the WebSocket client (connect, replay, heartbeat).
 - `bobi/events/{subscriptions,adapters,drain,publish,signing}.py` - subscription

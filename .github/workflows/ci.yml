@@ -119,6 +119,13 @@ jobs:
         working-directory: event-server
         run: npm ci
 
+      # vitest never imports local.ts and the local bundle is built lazily at
+      # runtime, so without this a dangling import (e.g. across the events-core
+      # package boundary) would reach main unnoticed.
+      - name: Typecheck (all workspace sources)
+        working-directory: event-server
+        run: npx tsc --noEmit
+
       - name: Run Worker tests
         working-directory: event-server
         run: npx vitest run

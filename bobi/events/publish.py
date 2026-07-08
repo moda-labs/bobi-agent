@@ -59,7 +59,7 @@ def _post_topic(topic: str, source: str, data: dict,
     """POST a v2 event to ``/events/{topic}`` with the given source.
 
     The server builds the event's routing topics from the URL ``topic`` and
-    the body ``source`` (``createTopicEvent`` in event-server/src/core.ts).
+    the body ``source`` (``createTopicEvent`` in event-server/core/src/core.ts).
 
     The publish is signed with the instance's bubble key so the server routes
     it within the bubble. An unsigned publish is rejected (403) - namespacing

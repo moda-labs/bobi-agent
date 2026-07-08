@@ -103,8 +103,8 @@ def test_extract_code_ignores_empty_text():
 
 
 def test_extract_code_from_real_adapter_dm_shape():
-    """Reproduces the prod bug: the Slack adapter (event-server/src/adapters/
-    slack.ts) emits `text` at the TOP LEVEL and in `payload`, with `fields`
+    """Reproduces the prod bug: the Slack adapter (event-server/core/src/
+    adapters/chat-sdk-slack.ts) emits `text` at the TOP LEVEL and in `payload`, with `fields`
     holding only channel/channel_type/user_id/ts — never `text`. The login
     bootstrap must read the code out of that real shape."""
     ev = {

@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
 	type NormalizedEvent,
 	createTopicEvent,
-} from "../src/core";
-import { bridgeSlackWebhook } from "../src/adapters/chat-sdk-slack";
+} from "@moda-labs/bobi-events-core";
+import { bridgeSlackWebhook } from "@moda-labs/bobi-events-core/adapters/chat-sdk-slack";
 import {
 	isExemptFromBreaker,
 	conversationKey,
@@ -15,7 +15,7 @@ import {
 	BREAKER_THRESHOLD,
 	BREAKER_WINDOW_MS,
 	BREAKER_COOLDOWN_MS,
-} from "../src/circuit-breaker";
+} from "@moda-labs/bobi-events-core/circuit-breaker";
 
 // ---------------------------------------------------------------------------
 // Helpers

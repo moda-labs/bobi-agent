@@ -49,13 +49,32 @@ def _needs_build(es_dir: Path) -> bool:
     dist = es_dir / "dist" / "local.js"
     if not dist.exists():
         return True
-    src_mtime = max(f.stat().st_mtime for f in (es_dir / "src").rglob("*.ts"))
+    # local.ts (src/) plus the events-core workspace package (core/src/) both
+    # feed the bundle.
+    sources = [
+        f for pattern in ("src/**/*.ts", "core/src/**/*.ts")
+        for f in es_dir.glob(pattern)
+    ]
+    if not sources:
+        return True
+    src_mtime = max(f.stat().st_mtime for f in sources)
     return dist.stat().st_mtime < src_mtime
 
 
 def _needs_install(es_dir: Path) -> bool:
-    """Whether local event-server runtime dependencies are missing."""
-    return not (es_dir / "node_modules").exists()
+    """Whether local event-server runtime dependencies are missing.
+
+    A bare node_modules check is not enough: installs that predate the
+    events-core workspace split lack the node_modules/@moda-labs/
+    bobi-events-core link, and the local bundle cannot resolve its imports
+    without it. node_modules survives both pip upgrades (it is not in the
+    wheel RECORD) and git pulls, so upgraded installs hit exactly that state.
+    """
+    node_modules = es_dir / "node_modules"
+    return not (
+        node_modules.exists()
+        and (node_modules / "@moda-labs" / "bobi-events-core").exists()
+    )
 
 
 def _esbuild_package(es_dir: Path) -> str:

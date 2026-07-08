@@ -1,6 +1,6 @@
 """Generate a Slack app manifest wired to a bobi event server.
 
-The bobi Slack adapter (``event-server/src/adapters/chat-sdk-slack.ts``) consumes a
+The bobi Slack adapter (``event-server/core/src/adapters/chat-sdk-slack.ts``) consumes a
 fixed set of events over the HTTP Events API; the only per-app variables are the
 display name and the event server host. This module renders the bundled template
 (``templates/slack-app.manifest.yaml``) with those substituted, and builds the

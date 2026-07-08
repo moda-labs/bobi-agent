@@ -31,6 +31,7 @@ build
 
 # Node build artifacts (event-server source is force-included; its deps are not)
 event-server/node_modules
+event-server/core/node_modules
 event-server/dist
 
 # Tests and docs aren't needed to build or run the image

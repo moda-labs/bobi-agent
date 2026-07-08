@@ -3,7 +3,7 @@
 Every authenticated request to the event server (generic publish + join
 registration) carries `x-moda-*` headers with an HMAC-SHA256 over a canonical
 string. This MUST stay byte-for-byte identical to the verifier in
-``event-server/src/core.ts`` (``bubbleCanonicalString`` / ``verifyBubbleSignature``):
+``event-server/core/src/core.ts`` (``bubbleCanonicalString`` / ``verifyBubbleSignature``):
 
     canonical = f"{timestamp}\n{nonce}\n{METHOD}\n{path}\n{body}"
 

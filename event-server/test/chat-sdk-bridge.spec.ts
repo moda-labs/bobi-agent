@@ -15,7 +15,7 @@ import {
 	bridgeSlackWebhook,
 	mentionsAnySelfUser,
 	type ChatSdkBridgeResult,
-} from "../src/adapters/chat-sdk-slack";
+} from "@moda-labs/bobi-events-core/adapters/chat-sdk-slack";
 
 // ---------------------------------------------------------------------------
 // Fixtures — Slack event payloads
