@@ -26,6 +26,6 @@
 		"@chat-adapter/slack": "^4.30.0"
 	},
 	"devDependencies": {
-		"typescript": "^5.5.2"
+		"typescript": "^5.7.2"
 	}
 }

@@ -2001,7 +2001,7 @@ function decodeOutboundFiles(raw: unknown): OutboundFile[] | null {
 		if (typeof f.name !== "string" || !f.name || typeof f.content_b64 !== "string" || !f.content_b64) {
 			return null;
 		}
-		let data: Uint8Array;
+		let data: Uint8Array<ArrayBuffer>;
 		try {
 			data = Uint8Array.from(atob(f.content_b64), (c) => c.charCodeAt(0));
 		} catch {

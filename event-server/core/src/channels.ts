@@ -96,7 +96,9 @@ export interface SendResult {
 
 export interface OutboundFile {
 	name: string;
-	data: Uint8Array;
+	// ArrayBuffer-backed by contract: the bytes go into Blob/BufferSource
+	// APIs that reject SharedArrayBuffer-backed views.
+	data: Uint8Array<ArrayBuffer>;
 	title?: string;
 }
 
@@ -518,10 +520,7 @@ const whatsappAdapter: ChannelAdapter = {
 				const form = new FormData();
 				form.append("messaging_product", "whatsapp");
 				form.append("type", mime);
-				// Cast: BlobPart wants an ArrayBuffer-backed view; the buffer is
-				// never a SharedArrayBuffer here, but Uint8Array's default type
-				// argument (ArrayBufferLike) can't prove that across lib variants.
-				form.append("file", new Blob([f.data as Uint8Array<ArrayBuffer>], { type: mime }), f.name);
+				form.append("file", new Blob([f.data], { type: mime }), f.name);
 				const uploaded = await whatsappApi(token, `${conv.scope}/media`, { form });
 				const mediaId = uploaded.id as string;
 				if (!mediaId) return { ok: false, error: partialUploadError(whatsappError(uploaded), i, files.length) };

@@ -8,56 +8,44 @@
 //
 // Run via `npm run smoke -w core` from event-server/ (CI does).
 
-import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { packCore } from "./pack.mjs";
+import { packCore, run } from "./pack.mjs";
 
 const require = createRequire(import.meta.url);
 
-function run(cmd, args, cwd) {
-	const res = spawnSync(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
-	if (res.status !== 0) {
-		throw new Error(
-			`${cmd} ${args.join(" ")} failed with status ${res.status}\n${res.stdout}\n${res.stderr}`,
-		);
-	}
-	return res.stdout.toString();
-}
-
 const scratch = mkdtempSync(path.join(tmpdir(), "bobi-events-core-smoke-"));
 try {
-	const { tarball, version } = packCore({ dest: scratch });
+	const { tarball, version, exports: exportsMap } = packCore({ dest: scratch });
 	console.log(`packed ${tarball}`);
 
 	writeFileSync(
 		path.join(scratch, "package.json"),
 		JSON.stringify({ name: "events-core-smoke", private: true, type: "module" }, null, "\t"),
 	);
-	run("npm", ["install", "--no-audit", "--no-fund", tarball], scratch);
+	run("npm", ["install", "--prefer-offline", "--no-audit", "--no-fund", tarball], scratch);
 
-	// Node runtime import of the root and every subpath export.
+	// Node runtime import of every export subpath, derived from the manifest
+	// so a new entry is covered (or a broken one caught) automatically.
+	const specifiers = Object.keys(exportsMap).map(
+		(subpath) => `@moda-labs/bobi-events-core${subpath.slice(1)}`,
+	);
+	const imports = specifiers
+		.map((s, i) => `import * as ns${i} from ${JSON.stringify(s)};`)
+		.join("\n");
+	const nsChecks = specifiers
+		.map((s, i) => `assert.ok(Object.keys(ns${i}).length > 0, ${JSON.stringify(`empty module: ${s}`)});`)
+		.join("\n");
 	writeFileSync(path.join(scratch, "main.mjs"), `
 		import assert from "node:assert/strict";
-		import { parseGlobalTopic, sha256Hex, constantTimeEqual, namespaceSubKey } from "@moda-labs/bobi-events-core";
-		import { setSlackApiUrl, setWhatsAppApiUrl } from "@moda-labs/bobi-events-core/channels";
+		${imports}
+		${nsChecks}
+		import { sha256Hex } from "@moda-labs/bobi-events-core";
 		import { buildConversation, parseConversation } from "@moda-labs/bobi-events-core/conversation";
-		import { BREAKER_THRESHOLD, conversationKey } from "@moda-labs/bobi-events-core/circuit-breaker";
-		import { bridgeSlackWebhook } from "@moda-labs/bobi-events-core/adapters/chat-sdk-slack";
 
-		assert.equal(typeof parseGlobalTopic, "function");
-		assert.equal(typeof setSlackApiUrl, "function");
-		assert.equal(typeof setWhatsAppApiUrl, "function");
-		assert.equal(typeof bridgeSlackWebhook, "function");
-		assert.equal(typeof conversationKey, "function");
-		assert.ok(BREAKER_THRESHOLD > 0);
-		assert.equal(constantTimeEqual("abc", "abc"), true);
-		assert.equal(constantTimeEqual("abc", "abd"), false);
-		assert.equal(typeof namespaceSubKey, "function");
 		assert.equal(
 			await sha256Hex("bobi"),
 			"7b38085de7defcec794220ebf215fe715e402bb938079b59ad1ae2481db46c09",
@@ -69,7 +57,8 @@ try {
 	console.log("node consumer ok");
 
 	// TS consumer typecheck against the shipped declarations, using the same
-	// moduleResolution the private worker repo uses.
+	// moduleResolution the private worker repo uses. skipLibCheck stays off
+	// so the shipped d.ts files themselves must be valid for a consumer.
 	writeFileSync(path.join(scratch, "consumer.ts"), `
 		import { type NormalizedEvent, parseGlobalTopic } from "@moda-labs/bobi-events-core";
 		import { conversationKey } from "@moda-labs/bobi-events-core/circuit-breaker";
@@ -84,17 +73,16 @@ try {
 		JSON.stringify({
 			compilerOptions: {
 				target: "es2022",
+				lib: ["es2024", "dom"],
 				module: "es2022",
 				moduleResolution: "bundler",
 				strict: true,
 				noEmit: true,
-				skipLibCheck: true,
 			},
 			include: ["consumer.ts"],
 		}, null, "\t"),
 	);
-	const tscBin = require.resolve("typescript/bin/tsc");
-	run(process.execPath, [tscBin, "-p", "tsconfig.json"], scratch);
+	run(process.execPath, [require.resolve("typescript/bin/tsc"), "-p", "tsconfig.json"], scratch);
 	console.log("ts consumer ok");
 
 	console.log(`events-core ${version} publish smoke passed`);
