@@ -181,12 +181,15 @@ def _pin_team_brain(root: Path) -> None:
     verdict agents) must use the team's configured brain, not the framework
     default - a gateway team's check would otherwise hit real Anthropic with
     the gateway's token. Detached children don't rely on this: their env is
-    rewritten by ``child_agent_env()``. Config.load also brings the runtime
-    .env (the gateway auth token, ${VAR} values) into this process.
+    rewritten by ``child_agent_env()``. Direct CLI sessions still need runtime
+    .env credentials (for example gateway auth) in this process, so this CLI
+    runtime-binding path loads them explicitly instead of hiding that side
+    effect inside ``Config.load()``.
     """
     from bobi.brain import set_process_brain_from_config
-    from bobi.config import Config
+    from bobi.config import Config, load_dotenv
     try:
+        load_dotenv(root)
         cfg = Config.load(root)
     except Exception as e:  # noqa: BLE001 — `stop`/`status` must still work
         logging.getLogger(__name__).warning(

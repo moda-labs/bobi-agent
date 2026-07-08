@@ -298,5 +298,5 @@ class TestProbeAndSpawnUseSameHelper:
         import bobi.validate as validate_mod
         import bobi.subagent as subagent_mod
 
-        assert validate_mod.agent_spawn_env is env_mod.agent_spawn_env
+        assert validate_mod.child_agent_env is env_mod.child_agent_env
         assert subagent_mod.agent_spawn_env is env_mod.agent_spawn_env

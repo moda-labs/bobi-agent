@@ -471,6 +471,8 @@ def run_team_foreground(
 ) -> None:
     """Run the selected manager in the current process."""
     project_path = _bind(project_path)
+    from bobi.config import load_dotenv
+    load_dotenv(project_path)
     cfg = _load_config_or_raise(project_path)
     # Pin before the preflight: the MCP probe builds a brain session here.
     from bobi.brain import set_process_brain_from_config

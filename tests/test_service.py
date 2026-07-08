@@ -110,6 +110,26 @@ def test_spawn_team_returns_without_waiting_for_registration(bobi_install, monke
     assert spawned["cmd"][-2:] == ["start", "--foreground"]
 
 
+def test_run_team_foreground_loads_runtime_dotenv(bobi_install, monkeypatch):
+    from bobi.service import run_team_foreground
+
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    (bobi_install.repo_path / ".env").write_text(
+        "ANTHROPIC_AUTH_TOKEN=from-runtime-dotenv\n")
+    monkeypatch.setattr(
+        "bobi.validate.validate_config",
+        lambda project: SimpleNamespace(ok=True, checks=[]),
+    )
+    monkeypatch.setattr(
+        "bobi.service.run_manager_from_config",
+        lambda *args, **kwargs: None,
+    )
+
+    run_team_foreground(bobi_install.repo_path, fresh=True)
+
+    assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "from-runtime-dotenv"
+
+
 def test_startup_info_warns_when_inbound_events_use_local_ingress(bobi_install):
     from bobi.service import build_startup_info
 

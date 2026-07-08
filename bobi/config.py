@@ -351,8 +351,7 @@ class Config:
 
     @classmethod
     def load(cls, project_path: Path) -> "Config":
-        """Load config from package/agent.yaml, resolving .env first."""
-        load_dotenv(project_path)
+        """Load config from package/agent.yaml with per-project env resolution."""
         agent_yaml = _project_config_path(project_path)
         if not agent_yaml.exists():
             return cls()

@@ -54,13 +54,16 @@ def test_agent_group_pins_team_brain_for_cli_process(bobi_install, monkeypatch):
     import yaml
 
     for var in ("BOBI_BRAIN", "BOBI_BRAIN_MODEL",
-                "BOBI_GATEWAY_BASE_URL", "BOBI_GATEWAY_SMALL_MODEL"):
+                "BOBI_GATEWAY_BASE_URL", "BOBI_GATEWAY_SMALL_MODEL",
+                "ANTHROPIC_AUTH_TOKEN"):
         monkeypatch.delenv(var, raising=False)
     agent_yaml = bobi_install.repo_path / "package" / "agent.yaml"
     cfg = yaml.safe_load(agent_yaml.read_text())
     cfg["brain"] = {"kind": "gateway", "base_url": "http://localhost:4000",
                     "model": "qwen3:14b"}
     agent_yaml.write_text(yaml.dump(cfg))
+    (bobi_install.repo_path / ".env").write_text(
+        "ANTHROPIC_AUTH_TOKEN=from-runtime-dotenv\n")
 
     result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "status"])
 
@@ -68,6 +71,7 @@ def test_agent_group_pins_team_brain_for_cli_process(bobi_install, monkeypatch):
     assert os.environ.get("BOBI_BRAIN") == "gateway"
     assert os.environ.get("BOBI_BRAIN_MODEL") == "qwen3:14b"
     assert os.environ.get("BOBI_GATEWAY_BASE_URL") == "http://localhost:4000"
+    assert os.environ.get("ANTHROPIC_AUTH_TOKEN") == "from-runtime-dotenv"
 
 
 def test_missing_agent_errors_without_cwd_fallback(tmp_path, monkeypatch):
