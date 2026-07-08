@@ -268,9 +268,11 @@ class TestCuratorDispatch:
         h.captured["on_result"]({"success": True, "updated": True,
                                  "summary": "added a fact", "bytes": 123,
                                  "urgent": False})
-        assert len(h.published) == 1
+        assert [event for event, _ in h.published] == [
+            "system/policy.updated",
+            "system/memory.updated",
+        ]
         event, data = h.published[0]
-        assert event == "system/policy.updated"
         assert data["summary"] == "added a fact"
         assert data["bytes"] == 123
         assert data["urgent"] is False
@@ -297,7 +299,7 @@ class TestCuratorDispatch:
             "system/monitor.error",
             {
                 "monitor": "policy-curator",
-                "flavor": "curator",
+                "flavor": "sleep-cycle",
                 "reason": "indeterminate-result",
                 "detail": "bad output",
             },
@@ -550,7 +552,7 @@ class TestPolicyUpdatedDelivery:
             "payload": {"summary": "reversed a decision", "urgent": True},
         }])
         assert len(delivered) == 1
-        assert "Re-read run/state/policy.md" in delivered[0].text
+        assert "Re-read run/state/long_term_memory.md" in delivered[0].text
         assert "reversed a decision" in delivered[0].text
 
     def test_bare_topic_also_matched(self):

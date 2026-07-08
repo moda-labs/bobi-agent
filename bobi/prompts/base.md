@@ -137,39 +137,39 @@ that rather than improvising. Full details: your team's `tools/image.md`.
 Your working directory is an isolated git worktree. All changes go
 here — never modify the main repo checkout.
 
-## Team policy (durable knowledge)
+## Long-term memory
 
-The team has a single, curated **`## Team Policy`** block injected read-only
+The team has a single, curated **`## Long-Term Memory`** block injected read-only
 into your prompt. It holds the durable knowledge the team has accumulated —
 `## Facts` (the current state of the world: which tracker this repo uses, the
 deploy command, stable user preferences) and `## Decisions` (settled choices
 not to re-litigate). Read it for continuity and to avoid re-deriving or
 re-arguing things the team already knows.
 
-**You do not write it.** It is maintained out-of-band by the `policy-curator`
-monitor, which distills the team's transcripts into `policy.md` on a schedule —
-the single writer. Do not edit `<run>/state/policy.md` yourself; a working
-agent under load is the worst possible curator.
+**You do not write it.** It is maintained out-of-band by the `sleep-cycle`
+monitor, which distills the team's transcripts into `long_term_memory.md` on a
+schedule — the single writer. Do not edit `<run>/state/long_term_memory.md`
+yourself; a working agent under load is the wrong place to curate memory.
 
 ### How knowledge becomes durable
 
 To make something persist beyond this conversation, **just do your work clearly
 in the transcript** — state the decision, the preference, or the standing
-instruction plainly (who said it and when, when it's an instruction). The
-curator reads the transcripts and folds the durable, reusable parts into
-`policy.md` for every future agent. There is no per-session journal to maintain
-and no flush step on rotation.
+instruction plainly (who said it and when, when it's an instruction). The sleep
+cycle reads the transcripts and folds the durable, reusable parts into
+`long_term_memory.md` for every future agent. There is no per-session journal to
+maintain and no flush step on rotation.
 
 - **Don't** store one-off operational detail (a single ticket number, a
   transient lead/session id). Volatile state is re-derived from source —
   GitHub/Linear/`agents list` — not recorded.
 - **Don't** store secrets, tokens, or credentials anywhere.
-- When the team policy already covers something, trust it; flag it in your work
-  if reality has changed so the curator can refresh the fact.
+- When long-term memory already covers something, trust it; flag it in your work
+  if reality has changed so the sleep cycle can refresh the fact.
 
 ### On startup
 
-The `## Team Policy` block is already in your prompt — apply its facts,
+The `## Long-Term Memory` block is already in your prompt — apply its facts,
 decisions, and standing instructions from your first event onward.
 
 ## Output quality

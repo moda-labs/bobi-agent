@@ -45,7 +45,7 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_event_server())
     results.append(_check_ingress_reachability())
     results.append(_check_recent_events())
-    results.append(_check_policy())
+    results.append(_check_long_term_memory())
 
     return results
 
@@ -387,21 +387,40 @@ def _check_recent_events() -> CheckResult:
                        detail=f"{total} events logged across {len(event_files)} file(s)")
 
 
-def _check_policy() -> CheckResult:
-    """Check the team policy.md (#456): present, under cap, and not foreign-written.
+def _check_long_term_memory() -> CheckResult:
+    """Check long_term_memory.md (#456): present, under cap, and not foreign-written.
 
-    The curator is the single writer. A soft single-writer guard (Q5): the
-    curator rewrites policy.md and advances policy_cursor together, so a
-    policy.md whose mtime is newer than the cursor file's mtime is a write not
-    attributable to the last curator run (a foreign writer). Flagged, not fatal.
+    The sleep cycle is the single writer. A soft single-writer guard (Q5): the
+    sleep cycle rewrites long_term_memory.md and advances long_term_memory_cursor
+    together, so a memory file whose mtime is newer than the cursor file's mtime
+    is a write not attributable to the last sleep-cycle run.
     """
-    from bobi.memory import MAX_POLICY_CHARS
+    from bobi.memory import MAX_MEMORY_CHARS
     root = bound_root()
     if not root:
-        return CheckResult("Team policy", ok=True, detail="no runtime selected")
+        return CheckResult("Long-term memory", ok=True, detail="no runtime selected")
     from bobi import paths
-    policy = paths.policy_path(root)
-    if not policy.is_file():
+    paths.migrate_long_term_memory_state(root)
+    memory = paths.long_term_memory_path(root)
+    if not memory.is_file():
+        monitor_state = paths.state_path(root) / "monitor_state.json"
+        cursor = paths.long_term_memory_cursor_path(root)
+        try:
+            import json
+            state = json.loads(monitor_state.read_text()) if monitor_state.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            state = {}
+        sleep_cycle_state = state.get("sleep-cycle") if isinstance(state, dict) else None
+        if (
+            isinstance(sleep_cycle_state, dict)
+            and sleep_cycle_state.get("last_spawn")
+            and not cursor.is_file()
+        ):
+            return CheckResult(
+                "Long-term memory", ok=False,
+                detail=("sleep-cycle has spawned but long_term_memory.md and "
+                        "long_term_memory_cursor are absent"),
+                hint="Check manager.log for sleep-cycle launch or result parsing errors")
         backlog = 0
         try:
             from bobi import history
@@ -409,42 +428,50 @@ def _check_policy() -> CheckResult:
         except Exception:
             backlog = 0
         if backlog > 100:
-            cursor = paths.policy_cursor_path(root)
+            cursor = paths.long_term_memory_cursor_path(root)
             cursor_detail = (
-                "no policy_cursor" if not cursor.is_file() else "stale policy_cursor"
+                "no long_term_memory_cursor"
+                if not cursor.is_file()
+                else "stale long_term_memory_cursor"
             )
             return CheckResult(
-                "Team policy", ok=False,
-                detail=(f"no policy.md yet, but at least {backlog} transcript "
+                "Long-term memory", ok=False,
+                detail=(f"no long_term_memory.md yet, but at least {backlog} transcript "
                         f"messages are pending and {cursor_detail}"),
-                hint=("The policy-curator appears stalled; check monitor.error "
+                hint=("The sleep cycle appears stalled; check monitor.error "
                       "events and manager.log"))
-        return CheckResult("Team policy", ok=True,
-                           detail="no policy.md yet (curator seeds it on first run)")
+        return CheckResult("Long-term memory", ok=True,
+                           detail="no long_term_memory.md yet (sleep cycle seeds it on first run)")
 
     try:
-        size = len(policy.read_text())
+        size = len(memory.read_text())
     except OSError as e:
-        return CheckResult("Team policy", ok=False, detail=f"unreadable policy.md: {e}")
+        return CheckResult("Long-term memory", ok=False,
+                           detail=f"unreadable long_term_memory.md: {e}")
 
-    if size > MAX_POLICY_CHARS:
+    if size > MAX_MEMORY_CHARS:
         return CheckResult(
-            "Team policy", ok=False,
-            detail=f"policy.md is {size} chars (over {MAX_POLICY_CHARS} cap)",
-            hint="The curator should keep policy.md under cap — check curator runs")
+            "Long-term memory", ok=False,
+            detail=f"long_term_memory.md is {size} chars (over {MAX_MEMORY_CHARS} cap)",
+            hint="The sleep cycle should keep long_term_memory.md under cap - check sleep cycle runs")
 
-    cursor = paths.policy_cursor_path(root)
+    cursor = paths.long_term_memory_cursor_path(root)
     if cursor.is_file():
         try:
-            if policy.stat().st_mtime > cursor.stat().st_mtime + 1.0:
+            if memory.stat().st_mtime > cursor.stat().st_mtime + 1.0:
                 return CheckResult(
-                    "Team policy", ok=False,
-                    detail="policy.md modified after the last curator cursor advance "
-                           "— a non-curator write may have occurred",
-                    hint="Only the policy-curator should write policy.md (single-writer)")
+                    "Long-term memory", ok=False,
+                    detail=("long_term_memory.md modified after the last sleep-cycle "
+                            "cursor advance - a non-sleep-cycle write may have occurred"),
+                    hint="Only the sleep cycle should write long_term_memory.md (single-writer)")
         except OSError:
             pass
 
     return CheckResult(
-        "Team policy", ok=True,
-        detail=f"policy.md present ({size} chars, under {MAX_POLICY_CHARS} cap)")
+        "Long-term memory", ok=True,
+        detail=f"long_term_memory.md present ({size} chars, under {MAX_MEMORY_CHARS} cap)")
+
+
+def _check_policy() -> CheckResult:
+    """Deprecated compatibility wrapper for one release."""
+    return _check_long_term_memory()

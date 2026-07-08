@@ -1,10 +1,11 @@
-"""Tests for the team policy doc primitives (#456).
+"""Tests for the long-term memory doc primitives (#456).
 
-policy.md replaces the per-session decision log: a single team-scoped,
+long_term_memory.md replaces the per-session decision log: a single team-scoped,
 curated, capped file with two sections (## Facts / ## Decisions), injected
 read-only into every agent prompt.
 """
 
+import json
 from pathlib import Path
 
 from unittest.mock import patch
@@ -14,61 +15,61 @@ from bobi import paths
 
 def _write_policy(state_dir: Path, body: str) -> Path:
     state_dir.mkdir(parents=True, exist_ok=True)
-    p = state_dir / "policy.md"
+    p = state_dir / "long_term_memory.md"
     p.write_text(body)
     return p
 
 
 # ---------------------------------------------------------------------------
-# memory.load_policy
+# memory.load_long_term_memory
 # ---------------------------------------------------------------------------
 
-class TestLoadPolicy:
+class TestLoadLongTermMemory:
     def test_returns_empty_when_absent(self, tmp_path):
-        from bobi.memory import load_policy
-        assert load_policy(tmp_path / "state") == ""
+        from bobi.memory import load_long_term_memory
+        assert load_long_term_memory(tmp_path / "state") == ""
 
     def test_returns_empty_when_blank(self, tmp_path):
-        from bobi.memory import load_policy
+        from bobi.memory import load_long_term_memory
         state = tmp_path / "state"
         _write_policy(state, "   \n\n")
-        assert load_policy(state) == ""
+        assert load_long_term_memory(state) == ""
 
     def test_loads_two_section_content(self, tmp_path):
-        from bobi.memory import load_policy
+        from bobi.memory import load_long_term_memory
         state = tmp_path / "state"
         _write_policy(state, "## Facts\n\nThis repo uses GitHub.\n\n"
                              "## Decisions\n\nChose squash merges over rebase.")
-        result = load_policy(state)
+        result = load_long_term_memory(state)
         assert "## Facts" in result
         assert "This repo uses GitHub." in result
         assert "## Decisions" in result
         assert "squash merges" in result
 
     def test_truncates_oversized_policy(self, tmp_path):
-        from bobi.memory import load_policy, MAX_POLICY_CHARS
+        from bobi.memory import load_long_term_memory, MAX_MEMORY_CHARS
         state = tmp_path / "state"
-        _write_policy(state, "## Facts\n\n" + ("x" * (MAX_POLICY_CHARS + 5000)))
-        result = load_policy(state)
-        assert len(result) <= MAX_POLICY_CHARS + 200
-        assert "[policy truncated]" in result
+        _write_policy(state, "## Facts\n\n" + ("x" * (MAX_MEMORY_CHARS + 5000)))
+        result = load_long_term_memory(state)
+        assert len(result) <= MAX_MEMORY_CHARS + 200
+        assert "[memory truncated]" in result
 
 
 # ---------------------------------------------------------------------------
-# memory.format_policy_prompt
+# memory.format_long_term_memory_prompt
 # ---------------------------------------------------------------------------
 
-class TestFormatPolicyPrompt:
+class TestFormatLongTermMemoryPrompt:
     def test_wraps_in_read_only_section(self):
-        from bobi.memory import format_policy_prompt
-        result = format_policy_prompt("## Facts\n\nlots of facts")
-        assert "## Team Policy" in result
+        from bobi.memory import format_long_term_memory_prompt
+        result = format_long_term_memory_prompt("## Facts\n\nlots of facts")
+        assert "## Long-Term Memory" in result
         assert "read-only" in result.lower()
         assert "lots of facts" in result
 
     def test_empty_content_yields_empty(self):
-        from bobi.memory import format_policy_prompt
-        assert format_policy_prompt("") == ""
+        from bobi.memory import format_long_term_memory_prompt
+        assert format_long_term_memory_prompt("") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -77,11 +78,11 @@ class TestFormatPolicyPrompt:
 
 class TestPolicyPaths:
     def test_policy_path_under_state(self, tmp_path):
-        assert paths.policy_path(tmp_path) == tmp_path / "state" / "policy.md"
+        assert paths.policy_path(tmp_path) == tmp_path / "state" / "long_term_memory.md"
 
     def test_cursor_path_under_state(self, tmp_path):
-        assert paths.policy_cursor_path(tmp_path) == (
-            tmp_path / "state" / "policy_cursor"
+        assert paths.long_term_memory_cursor_path(tmp_path) == (
+            tmp_path / "state" / "long_term_memory_cursor"
         )
 
     def test_policy_path_does_not_mkdir(self, tmp_path):
@@ -91,7 +92,7 @@ class TestPolicyPaths:
 
 
 # ---------------------------------------------------------------------------
-# Injection swap (spec test 5): prompts inject ## Team Policy, not ## Decision Log
+# Injection swap (spec test 5): prompts inject ## Long-Term Memory, not ## Decision Log
 # ---------------------------------------------------------------------------
 
 class TestStartupPromptInjection:
@@ -100,12 +101,12 @@ class TestStartupPromptInjection:
         roles_dir.mkdir(parents=True)
         (roles_dir / "ROLE.md").write_text("# Director\nYou direct things.")
 
-    # The base prompt now *describes* the read-only ## Team Policy block, so its
-    # bare heading appears even with no policy.md. The dynamically-injected block
+    # The base prompt now *describes* the read-only ## Long-Term Memory block, so its
+    # bare heading appears even with no long_term_memory.md. The dynamically-injected block
     # is identified by its distinctive lead-in line instead.
-    INJECTED_MARKER = "Below is the team's curated, durable policy"
+    INJECTED_MARKER = "Below is the team's curated, durable long-term memory"
 
-    def test_injects_team_policy(self, tmp_path):
+    def test_injects_long_term_memory(self, tmp_path):
         from bobi.prompts.resolver import build_startup_prompt
         self._install_role(tmp_path)
         state = paths.state_path(tmp_path)
@@ -126,21 +127,21 @@ class TestStartupPromptInjection:
         assert "## Decision Log" not in result
 
 
-class TestSubagentPolicyInjection:
-    def test_load_policy_prompt_reads_team_policy(self, tmp_path, monkeypatch):
+class TestSubagentMemoryInjection:
+    def test_load_long_term_memory_prompt_reads_long_term_memory(self, tmp_path, monkeypatch):
         import bobi.subagent as subagent
         state = paths.state_path(tmp_path)
         _write_policy(state, "## Decisions\n\nKey decision recorded.")
         monkeypatch.setattr(paths, "state_path", lambda *a, **k: state)
-        out = subagent._load_policy_prompt()
-        assert "## Team Policy" in out
+        out = subagent._load_long_term_memory_prompt()
+        assert "## Long-Term Memory" in out
         assert "Key decision recorded." in out
 
-    def test_load_policy_prompt_empty_when_absent(self, tmp_path, monkeypatch):
+    def test_load_long_term_memory_prompt_empty_when_absent(self, tmp_path, monkeypatch):
         import bobi.subagent as subagent
         monkeypatch.setattr(paths, "state_path",
                             lambda *a, **k: tmp_path / "state")
-        assert subagent._load_policy_prompt() == ""
+        assert subagent._load_long_term_memory_prompt() == ""
 
 
 class TestDoctorPolicyCheck:
@@ -150,6 +151,32 @@ class TestDoctorPolicyCheck:
             r = _check_policy()
         assert r.ok
 
+    def test_ok_when_sleep_cycle_due_tick_had_no_work(self, tmp_path):
+        state = paths.state_path(tmp_path)
+        state.mkdir(parents=True)
+        (state / "monitor_state.json").write_text(json.dumps({
+            "sleep-cycle": {"last_run": "2026-07-08T13:33:00+00:00"}
+        }))
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_policy
+            r = _check_policy()
+        assert r.ok
+
+    def test_flags_sleep_cycle_spawn_without_policy_or_cursor(self, tmp_path):
+        state = paths.state_path(tmp_path)
+        state.mkdir(parents=True)
+        (state / "monitor_state.json").write_text(json.dumps({
+            "sleep-cycle": {
+                "last_run": "2026-07-08T13:33:00+00:00",
+                "last_spawn": "2026-07-08T13:33:00+00:00",
+            }
+        }))
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_policy
+            r = _check_policy()
+        assert not r.ok
+        assert "sleep-cycle has spawned" in r.detail
+
     def test_ok_when_policy_present(self, tmp_path):
         state = paths.state_path(tmp_path)
         _write_policy(state, "## Facts\n\nsmall and bounded")
@@ -157,12 +184,12 @@ class TestDoctorPolicyCheck:
             from bobi.doctor import _check_policy
             r = _check_policy()
         assert r.ok
-        assert "policy.md present" in r.detail
+        assert "long_term_memory.md present" in r.detail
 
     def test_flags_oversized_policy(self, tmp_path):
-        from bobi.memory import MAX_POLICY_CHARS
+        from bobi.memory import MAX_MEMORY_CHARS
         state = paths.state_path(tmp_path)
-        _write_policy(state, "x" * (MAX_POLICY_CHARS + 100))
+        _write_policy(state, "x" * (MAX_MEMORY_CHARS + 100))
         with patch("bobi.doctor.bound_root", return_value=tmp_path):
             from bobi.doctor import _check_policy
             r = _check_policy()

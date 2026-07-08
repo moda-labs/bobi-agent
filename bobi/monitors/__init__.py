@@ -21,7 +21,7 @@ from .registry import MonitorRegistry
 # Framework-default monitors (#471), seeded into every composed team image as the
 # most-base layer of the `from:` chain — see compose._seed_framework_monitors.
 # Team-overridable (a same-named record wins) and prunable (opt-out). Ships as
-# package data the same way prompts/curator.md does.
+# package data the same way prompts/sleep_cycle.md does.
 FRAMEWORK_DEFAULTS_PATH = Path(__file__).parent / "framework_defaults.yaml"
 
 __all__ = ["Monitor", "parse_interval", "MonitorRegistry", "FRAMEWORK_DEFAULTS_PATH"]

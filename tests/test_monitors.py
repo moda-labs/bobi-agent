@@ -221,14 +221,14 @@ class TestDefaultsPath:
 
 # === Install copies built-in defaults ===
 
-class TestInstallFrameworkCuratorDefault:
-    """policy-curator is a framework default (#471): seeded into EVERY composed
-    team image. A pack ships no other framework monitors — only `policy-curator`
+class TestInstallFrameworkSleepCycleDefault:
+    """sleep-cycle is a framework default (#471): seeded into EVERY composed
+    team image. A pack ships no other framework monitors — only `sleep-cycle`
     is injected, and the pack's own monitors still resolve on top of it."""
 
-    def test_install_injects_only_the_framework_curator(self, tmp_path):
+    def test_install_injects_only_the_framework_sleep_cycle(self, tmp_path):
         """A pack with no monitors/ directory still gets exactly the framework
-        policy-curator default (and nothing else) — opt-out is via `prune:`."""
+        sleep-cycle default (and nothing else) — opt-out is via `prune:`."""
         from bobi.cli import _install_pack
 
         pack = tmp_path / "minimal-pack"
@@ -244,13 +244,13 @@ class TestInstallFrameworkCuratorDefault:
         assert defaults.exists()
         raw = yaml.safe_load(defaults.read_text())
         names = [m["name"] for m in raw["monitors"]]
-        assert names == ["policy-curator"], (
-            f"Only the framework curator should be injected, got: {names}"
+        assert names == ["sleep-cycle"], (
+            f"Only the framework sleep_cycle should be injected, got: {names}"
         )
 
-    def test_install_pack_monitors_resolve_on_top_of_curator(self, tmp_path):
+    def test_install_pack_monitors_resolve_on_top_of_sleep_cycle(self, tmp_path):
         """When a pack ships its own monitors/, they compose ON TOP of the
-        framework curator (curator first, as the base layer)."""
+        framework sleep_cycle (sleep_cycle first, as the base layer)."""
         from bobi.cli import _install_pack
 
         pack = tmp_path / "full-pack"
@@ -271,8 +271,8 @@ class TestInstallFrameworkCuratorDefault:
         assert defaults.exists()
         raw = yaml.safe_load(defaults.read_text())
         names = [m["name"] for m in raw["monitors"]]
-        assert names == ["policy-curator", "custom-check"], (
-            f"Framework curator + pack monitors expected, got: {names}"
+        assert names == ["sleep-cycle", "custom-check"], (
+            f"Framework sleep_cycle + pack monitors expected, got: {names}"
         )
 
 
@@ -845,6 +845,52 @@ class TestDefaultSpawnCheckEntryPoint:
         assert len(spawned) == 1
         assert spawned[0][0] is m
         assert injected == []  # no direct injection — check runs out-of-band
+
+
+# === Spawn sleep_cycle entry_point (#695) ===
+
+class TestDefaultSpawnSleepCycleEntryPoint:
+    """Regression tests for #695: sleep-cycle framework defaults have no
+    role field, but subagents launch requires --role."""
+
+    def test_entry_point_used_for_sleep_cycle_role_and_cli_parse(self, tmp_path, monkeypatch):
+        from bobi.monitors.scheduler import _default_spawn_sleep_cycle
+
+        project = tmp_path / "proj"
+        paths.state_dir(project)
+        paths.package_dir(project).mkdir(parents=True)
+        paths.agent_yaml_path(project).write_text(
+            "agent: test-pack\nentry_point: policy_manager\n"
+        )
+        role_dir = paths.roles_dir(project) / "policy_manager"
+        role_dir.mkdir(parents=True)
+        (role_dir / "ROLE.md").write_text("# Policy Manager\n")
+        paths.bind_root(project)
+
+        captured_cmds = []
+
+        class FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured_cmds.append(cmd)
+
+            def communicate(self, timeout=None):
+                return ('{"success": true, "updated": false}\n', "")
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr("subprocess.Popen", FakePopen)
+
+        m = Monitor(name="sleep-cycle", sleep_cycle=True,
+                    event="system/memory.updated")
+        _default_spawn_sleep_cycle(m, str(project), "curate policy", lambda result: None)
+
+        assert len(captured_cmds) == 1
+        cmd = captured_cmds[0]
+        assert "launch" not in cmd
+        assert cmd[cmd.index("monitors") + 1] == "curator"
+        task_path = Path(cmd[cmd.index("--request") + 1])
+        assert task_path.parent.name == "sleep-cycle"
 
 
 # === Unified path: description-only verdicts flow through reconcile ===

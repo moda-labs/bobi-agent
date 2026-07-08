@@ -10,7 +10,7 @@ events like ticket updates, incoming emails, GitHub PRs, Slack messages, or any
 webhook, acting on their own when something changes. Agents coordinate, delegate,
 and spin up new sub-agents on their own whenever the work calls for it.
 
-They also get more useful the more you use them: a closed-loop memory system distills each
+They also get more useful the more you use them: a built-in sleep cycle distills each
 session into durable facts and preferences that carry into future runs, so an
 agent learns how you like to work and adapts its behavior over time. You extend an
 agent just by telling it what you want - hand it new tasks or responsibilities in
@@ -23,7 +23,7 @@ too).
 
 ## What you can build
 
-You define what an agent is for; the framework has no opinion. Here are a few examples of 
+You define what an agent is for; the framework has no opinion. Here are a few examples of
 agents you can build:
 
 - **Agentic Engineering Team** - triage issues, open PRs through a required review-and-CI

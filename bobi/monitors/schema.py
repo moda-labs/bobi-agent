@@ -21,8 +21,8 @@ class Condition:
 # kept in `extra` (e.g. `url:` for a deploy-health check) so new check types
 # need no schema change.
 _RESERVED = {"name", "description", "interval", "event", "check", "command",
-             "enabled", "at", "tz", "days", "notify", "role", "curator",
-             "relevance"}
+             "enabled", "at", "tz", "days", "notify", "role", "sleep_cycle",
+             "curator", "relevance"}
 
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -138,6 +138,7 @@ class Monitor:
     relevance: str = ""
     notify: bool = False
     role: str = ""
+    sleep_cycle: bool = False
     curator: bool = False
     enabled: bool = True
     extra: dict = field(default_factory=dict)
@@ -168,6 +169,7 @@ class Monitor:
             relevance=str(raw.get("relevance", "") or ""),
             notify=bool(raw.get("notify", False)),
             role=raw.get("role", ""),
+            sleep_cycle=bool(raw.get("sleep_cycle", raw.get("curator", False))),
             curator=bool(raw.get("curator", False)),
             enabled=raw.get("enabled", True),
             extra=extra,
@@ -200,8 +202,8 @@ class Monitor:
             record["notify"] = True
         if self.role:
             record["role"] = self.role
-        if self.curator:
-            record["curator"] = True
+        if self.sleep_cycle or self.curator:
+            record["sleep_cycle"] = True
         if not self.enabled:
             record["enabled"] = False
         record.update(self.extra)
@@ -231,6 +233,10 @@ class Monitor:
         """Weekdays this monitor's `at:` is gated to, as Python weekday ints
         (Monday=0 … Sunday=6). Empty set = every day (no gating)."""
         return parse_days(self.days)
+
+    def __post_init__(self) -> None:
+        if self.curator:
+            self.sleep_cycle = True
 
     @property
     def tzinfo(self):

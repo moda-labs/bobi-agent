@@ -1,14 +1,15 @@
-"""Team policy (#456) and the legacy per-agent decision log.
+"""Long-term memory (#456) and the legacy per-agent decision log.
 
 The team's durable, curated knowledge lives in a single, team-scoped
-``<run>/state/policy.md`` — two sections (``## Facts`` / ``## Decisions``)
-maintained out-of-band by the policy-curator monitor and injected read-only into
-every agent's prompt. ``load_policy`` / ``format_policy_prompt`` are that path.
+``<run>/state/long_term_memory.md`` — two sections (``## Facts`` / ``## Decisions``)
+maintained out-of-band by the sleep-cycle monitor and injected read-only into
+every agent's prompt. ``load_long_term_memory`` /
+``format_long_term_memory_prompt`` are that path.
 
 The older per-session decision log (``memory/<session>/INDEX.md``, an append-only
 journal that bloated prompts and died with the agent) is being replaced by the
 above. ``memory_dir_for_session`` is retained so the one-time seed can distill the
-existing journals into the first policy.md.
+existing journals into the first long_term_memory.md.
 """
 
 from __future__ import annotations
@@ -18,55 +19,60 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# Hard cap on the injected policy doc so it stays small and bounded — the whole
+# Hard cap on the injected long-term memory doc so it stays small and bounded — the whole
 # point of #456 (the decision log it replaces grew to 127KB live and bloated
-# every prompt). The curator keeps policy.md under this; load_policy truncates
-# defensively as a backstop.
-MAX_POLICY_CHARS = 24_000
+# every prompt). The sleep cycle keeps long_term_memory.md under this;
+# load_long_term_memory truncates defensively as a backstop.
+MAX_MEMORY_CHARS = 24_000
 
-# Cap on injected memory. Raised from 8KB to 32KB for context rotation:
+# Cap on legacy journal seed input. Raised from 8KB to 32KB for context rotation:
 # the decision log is the primary continuity spine when sessions rotate,
 # so it needs room for accumulated operational state.
-MAX_MEMORY_CHARS = 32_000
+MAX_LEGACY_MEMORY_CHARS = 32_000
 
 
-def load_policy(state_dir: Path) -> str:
-    """Load the team policy.md as one capped block, or "" when absent (#456).
+def load_long_term_memory(state_dir: Path) -> str:
+    """Load the team long_term_memory.md as one capped block, or "" when absent (#456).
 
-    Reads ``state_dir/policy.md`` (the two-section ``## Facts`` / ``## Decisions``
-    file the curator maintains), truncates at ``MAX_POLICY_CHARS`` as a backstop,
+    Reads ``state_dir/long_term_memory.md`` (the two-section ``## Facts`` / ``## Decisions``
+    file the sleep cycle maintains), truncates at ``MAX_MEMORY_CHARS`` as a backstop,
     and returns "" if the file is missing or empty so callers can skip injection.
     Read-only — working agents never write this file.
     """
-    policy_file = state_dir / "policy.md"
+    from bobi import paths
+
+    root = state_dir.parent if state_dir.name == "state" else None
+    if root is not None:
+        paths.migrate_long_term_memory_state(root)
+    memory_file = state_dir / "long_term_memory.md"
     try:
-        if not policy_file.is_file():
+        if not memory_file.is_file():
             return ""
-        content = policy_file.read_text().strip()
+        content = memory_file.read_text().strip()
     except OSError:
-        log.debug("Failed to read policy.md at %s", policy_file, exc_info=True)
+        log.debug("Failed to read long_term_memory.md at %s", memory_file, exc_info=True)
         return ""
     if not content:
         return ""
-    if len(content) > MAX_POLICY_CHARS:
-        content = content[:MAX_POLICY_CHARS] + "\n\n[policy truncated]"
+    if len(content) > MAX_MEMORY_CHARS:
+        content = content[:MAX_MEMORY_CHARS] + "\n\n[memory truncated]"
     return content
 
 
-def format_policy_prompt(content: str) -> str:
-    """Wrap policy content in a read-only prompt section for injection (#456).
+def format_long_term_memory_prompt(content: str) -> str:
+    """Wrap long-term memory in a read-only prompt section for injection (#456).
 
     Returns "" for empty content so callers can skip injection. The section is
-    marked read-only: it is maintained out-of-band by the curator, not edited
+    marked read-only: it is maintained out-of-band by the sleep cycle, not edited
     by the working agent.
     """
     if not content:
         return ""
     return (
-        "## Team Policy\n\n"
-        "Below is the team's curated, durable policy (facts and decisions), "
-        "maintained out-of-band by the policy-curator. It is **read-only** — do "
-        "not edit it directly; the curator rewrites it from the team's "
+        "## Long-Term Memory\n\n"
+        "Below is the team's curated, durable long-term memory (facts and decisions), "
+        "maintained out-of-band by the sleep-cycle. It is **read-only** — do "
+        "not edit it directly; the sleep cycle rewrites it from the team's "
         "transcripts. Use it for continuity and to avoid re-litigating settled "
         "decisions.\n\n"
         f"{content}"
@@ -81,10 +87,10 @@ def memory_dir_for_session(state_dir: Path, session_name: str) -> Path:
 def load_memory(state_dir: Path, session_name: str) -> str:
     """Load a legacy decision-log index + notes for a session, as raw text.
 
-    No longer injected into prompts (#456 replaced that with the team policy).
-    Retained for the one-time policy seed, which distills the existing
-    memory/<session>/INDEX.md journal(s) into the first policy.md. Returns ""
-    when no journal exists; truncates at MAX_MEMORY_CHARS as a safety bound.
+    No longer injected into prompts (#456 replaced that with long-term memory).
+    Retained for the one-time memory seed, which distills the existing
+    memory/<session>/INDEX.md journal(s) into the first long_term_memory.md. Returns ""
+    when no journal exists; truncates at MAX_LEGACY_MEMORY_CHARS as a safety bound.
     """
     mem_dir = memory_dir_for_session(state_dir, session_name)
     if not mem_dir.is_dir():
@@ -114,8 +120,8 @@ def load_memory(state_dir: Path, session_name: str) -> str:
         return ""
 
     combined = "\n\n".join(parts)
-    if len(combined) > MAX_MEMORY_CHARS:
-        combined = combined[:MAX_MEMORY_CHARS] + "\n\n[memory truncated]"
+    if len(combined) > MAX_LEGACY_MEMORY_CHARS:
+        combined = combined[:MAX_LEGACY_MEMORY_CHARS] + "\n\n[memory truncated]"
     return combined
 
 
@@ -124,9 +130,9 @@ def collect_legacy_journals(state_dir: Path, budget: int) -> str:
 
     Walks ``state_dir/memory/<session>/`` and concatenates each session's
     ``load_memory`` text, capped at ``budget`` chars total. Returns "" when no
-    journals exist (a fresh team with nothing to seed). This feeds the curator's
+    journals exist (a fresh team with nothing to seed). This feeds the sleep cycle's
     first run so the existing ~127KB of accumulated knowledge is distilled into
-    the first ``policy.md`` rather than discarded; after ``policy.md`` exists the
+    the first ``long_term_memory.md`` rather than discarded; after ``long_term_memory.md`` exists the
     seed never runs again (the caller guards on absence).
     """
     mem_root = state_dir / "memory"
@@ -149,3 +155,15 @@ def collect_legacy_journals(state_dir: Path, budget: int) -> str:
         used += len(block)
 
     return "\n\n".join(parts)
+
+
+# Deprecated aliases kept for one release while installed packages catch up.
+MAX_POLICY_CHARS = MAX_MEMORY_CHARS
+
+
+def load_policy(state_dir: Path) -> str:
+    return load_long_term_memory(state_dir)
+
+
+def format_policy_prompt(content: str) -> str:
+    return format_long_term_memory_prompt(content)

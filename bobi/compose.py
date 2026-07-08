@@ -37,6 +37,14 @@ PROSE_AGENT_MD = "agent.md"
 # Structured directory surfaces and their per-file merge key.
 STRUCTURED_DIRS = ("tools", "workflows", "monitors", "context")
 
+LEGACY_MONITOR_NAMES = {
+    "policy-curator": "sleep-cycle",
+}
+
+LEGACY_MONITOR_FIELDS = {
+    "curator": "sleep_cycle",
+}
+
 # The agent.yaml `build` block: list subkeys accrete (append + de-dupe across
 # layers); every other subkey is a scalar that the last layer wins.
 BUILD_LIST_KEYS = ("apt", "npm", "run_root", "run")
@@ -516,6 +524,7 @@ def _accumulate_monitors(f: Path, label: str, records: dict[str, dict],
     except yaml.YAMLError as e:
         raise ComposeError(f"could not parse monitor file {f}: {e}") from e
     for rec in data.get("monitors", []) or []:
+        rec = _normalize_monitor_record(rec)
         name = rec.get("name")
         if not name:
             continue
@@ -526,6 +535,19 @@ def _accumulate_monitors(f: Path, label: str, records: dict[str, dict],
             records[name] = dict(rec)
             order.append(name)
             src[name] = label
+
+
+def _normalize_monitor_record(rec: dict) -> dict:
+    """Map one-release legacy monitor names and flags to their new spelling."""
+    out = dict(rec)
+    name = out.get("name")
+    if isinstance(name, str):
+        out["name"] = LEGACY_MONITOR_NAMES.get(name, name)
+    for old, new in LEGACY_MONITOR_FIELDS.items():
+        if old in out and new not in out:
+            out[new] = out[old]
+        out.pop(old, None)
+    return out
 
 
 def _seed_framework_monitors(records: dict[str, dict], order: list[str],
@@ -700,6 +722,7 @@ def _prune_one(dest: Path, merged_yaml: dict, surface: str, name: str) -> bool:
     """Remove one named item from a frozen surface. Returns True if something
     was removed."""
     if surface == "monitors":
+        name = LEGACY_MONITOR_NAMES.get(name, name)
         mfile = dest / "monitors" / "defaults.yaml"
         if mfile.is_file():
             data = yaml.safe_load(mfile.read_text()) or {}

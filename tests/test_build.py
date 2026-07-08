@@ -448,4 +448,3 @@ def test_resolve_team_dir_accepts_a_literal_path(tmp_path):
     team.mkdir(parents=True)
     (team / "agent.yaml").write_text("agent: myteam\n")
     assert B.resolve_team_dir(repo, str(team)) == team.resolve()
-

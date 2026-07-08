@@ -68,7 +68,7 @@ class TestCheckPolicy:
             from bobi.doctor import _check_policy
             r = _check_policy()
         assert r.ok
-        assert "no policy.md yet" in r.detail
+        assert "no long_term_memory.md yet" in r.detail
 
     def test_missing_policy_with_large_backlog_fails(self, tmp_path):
         rows = [{"id": i} for i in range(101)]
@@ -80,7 +80,7 @@ class TestCheckPolicy:
             r = _check_policy()
         assert not r.ok
         assert "pending" in r.detail
-        assert "policy-curator appears stalled" in r.hint
+        assert "sleep cycle appears stalled" in r.hint
 
 
 # --- Ingress reachability ---

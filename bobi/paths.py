@@ -226,12 +226,43 @@ def manager_pid_path(root: Path | None = None) -> Path:
     return state_path(root) / "manager.pid"
 
 
+def long_term_memory_path(root: Path | None = None) -> Path:
+    return state_path(root) / "long_term_memory.md"
+
+
+def long_term_memory_cursor_path(root: Path | None = None) -> Path:
+    return state_path(root) / "long_term_memory_cursor"
+
+
+def migrate_long_term_memory_state(root: Path | None = None) -> None:
+    """Rename legacy policy state files in place when present.
+
+    This is intentionally path-level and best-effort: fresh installs only use
+    the new names, while dev installs that already produced the old files keep
+    their document and cursor without a manual migration step.
+    """
+    state = state_path(root)
+    legacy_memory = state / "policy.md"
+    memory = long_term_memory_path(root)
+    legacy_cursor = state / "policy_cursor"
+    cursor = long_term_memory_cursor_path(root)
+    try:
+        if legacy_memory.is_file() and not memory.exists():
+            legacy_memory.rename(memory)
+        if legacy_cursor.is_file() and not cursor.exists():
+            legacy_cursor.rename(cursor)
+    except OSError:
+        return
+
+
 def policy_path(root: Path | None = None) -> Path:
-    return state_path(root) / "policy.md"
+    """Deprecated alias for one release; use long_term_memory_path."""
+    return long_term_memory_path(root)
 
 
 def policy_cursor_path(root: Path | None = None) -> Path:
-    return state_path(root) / "policy_cursor"
+    """Deprecated alias for one release; use long_term_memory_cursor_path."""
+    return long_term_memory_cursor_path(root)
 
 
 def sessions_dir(root: Path | None = None) -> Path:

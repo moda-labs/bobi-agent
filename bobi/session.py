@@ -377,7 +377,7 @@ class Session:
             await self._safe_disconnect(self._client)
             self._client = None
 
-        # Rebuild system prompt — reloads the team policy (#456).
+        # Rebuild system prompt - reloads long-term memory (#456).
         self._system_prompt = self._rebuild_system_prompt()
 
         # Bounded, recoverable reconnect.
@@ -564,29 +564,31 @@ class Session:
         )
 
     def _rebuild_system_prompt(self) -> dict:
-        """Rebuild the system prompt, reloading the team policy (#456).
+        """Rebuild the system prompt, reloading long-term memory (#456).
 
-        A rotated session re-reads policy.md here — the passive pickup path for
-        a curator update (no inbox push needed for a routine distillation).
+        A rotated session re-reads long_term_memory.md here - the passive
+        pickup path for a sleep-cycle update.
         """
         try:
-            from bobi.subagent import _load_policy_prompt
-            policy_prompt = _load_policy_prompt()
+            from bobi.subagent import _load_long_term_memory_prompt
+            memory_prompt = _load_long_term_memory_prompt()
             if isinstance(self._system_prompt, dict):
                 base_append = self._system_prompt.get("append", "")
-                # Strip a previously-injected policy section so it isn't doubled
-                # across rotations.
-                if "## Team Policy" in base_append:
-                    base_append = base_append.split("## Team Policy")[0].rstrip()
-                if policy_prompt:
+                # Strip a previously-injected memory section so it isn't
+                # doubled across rotations.
+                for heading in ("## Long-Term Memory", "## Team Policy"):
+                    if heading in base_append:
+                        base_append = base_append.split(heading)[0].rstrip()
+                        break
+                if memory_prompt:
                     new_append = (
-                        f"{base_append}\n\n{policy_prompt}" if base_append else policy_prompt
+                        f"{base_append}\n\n{memory_prompt}" if base_append else memory_prompt
                     )
                 else:
                     new_append = base_append
                 return {**self._system_prompt, "append": new_append}
         except Exception:
-            log.debug("Failed to reload policy for '%s'", self.name, exc_info=True)
+            log.debug("Failed to reload long-term memory for '%s'", self.name, exc_info=True)
         return self._system_prompt
 
     async def _drain_turn(self) -> str:

@@ -536,9 +536,9 @@ def run_phase_blocking(
         f"You are a {label} agent working on issue #{run_key}, "
         f"phase: {phase}. Follow the skill file instructions exactly."
     )
-    policy_prompt = _load_policy_prompt()
-    if policy_prompt:
-        append_text += "\n\n" + policy_prompt
+    memory_prompt = _load_long_term_memory_prompt()
+    if memory_prompt:
+        append_text += "\n\n" + memory_prompt
 
     # Pass through any user-declared MCP servers from config so workflow
     # step agents also have access to them.
@@ -609,21 +609,26 @@ def _resolve_project_name(cwd: str) -> str:
     return path.name or cwd
 
 
-def _load_policy_prompt() -> str:
-    """Load the team policy.md, returning read-only formatted prompt text (#456).
+def _load_long_term_memory_prompt() -> str:
+    """Load the team long_term_memory.md, returning read-only formatted prompt text (#456).
 
-    Team-scoped — the same curated policy for every session. Returns empty
-    string when policy.md is absent. Never raises — policy loading is
+    Team-scoped — the same curated memory for every session. Returns empty
+    string when long_term_memory.md is absent. Never raises — memory loading is
     best-effort and must not block session startup.
     """
     try:
         from bobi import paths
-        from bobi.memory import load_policy, format_policy_prompt
-        content = load_policy(paths.state_path())
-        return format_policy_prompt(content)
+        from bobi.memory import load_long_term_memory, format_long_term_memory_prompt
+        content = load_long_term_memory(paths.state_path())
+        return format_long_term_memory_prompt(content)
     except Exception:
-        log.debug("Failed to load policy", exc_info=True)
+        log.debug("Failed to load long-term memory", exc_info=True)
         return ""
+
+
+def _load_policy_prompt() -> str:
+    """Deprecated alias for one release."""
+    return _load_long_term_memory_prompt()
 
 
 def spawn_adhoc(
@@ -682,13 +687,13 @@ def spawn_adhoc(
     if role_prompt:
         append_parts.append(role_prompt)
 
-    # Inject the team policy (#456) so the session has continuity.
+    # Inject long-term memory (#456) so the session has continuity.
     # Skip if the task prompt already contains it (e.g. entry-point agent
     # where build_startup_prompt() already injected the policy).
-    if "## Team Policy" not in task:
-        policy_prompt = _load_policy_prompt()
-        if policy_prompt:
-            append_parts.append(policy_prompt)
+    if "## Long-Term Memory" not in task:
+        memory_prompt = _load_long_term_memory_prompt()
+        if memory_prompt:
+            append_parts.append(memory_prompt)
 
     # Resolve MCP servers: caller-supplied override, else config-declared.
     # Done here so all spawn paths (CLI, workflow, subagent) go through one

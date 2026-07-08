@@ -42,7 +42,7 @@ Code lives in `bobi/monitors/`:
 | `registry.py` | Merges monitors from framework defaults + team package + user config |
 | `scheduler.py` | Background thread: reload, run due monitors, dedup, publish |
 | `*_checks.py` | Native check runners, auto-discovered by glob (`script_cache`, `tool_poll`, …) |
-| `curator.py` | The one flavor that writes an artifact instead of returning a verdict |
+| `sleep_cycle.py` | The one flavor that writes an artifact instead of returning a verdict |
 
 ## Defining a monitor
 
@@ -84,13 +84,13 @@ every tick, so monitors added at runtime take effect without a restart.
   `roles: {monitor: {model: haiku}}` in `agent.yaml` puts every check on a
   cheap model instead of the manager's (setup-generated packs ship this
   default).
-- **Curator** (`curator: true`) - the one flavor whose agent *writes* an
-  artifact (`policy.md`) instead of returning a verdict. Curator input can be
-  large, so the scheduler writes the rendered task to `run/state/curator/` and
+- **Sleep cycle** (`sleep_cycle: true`) - the one flavor whose agent *writes* an
+  artifact (`long_term_memory.md`) instead of returning a verdict. Sleep-cycle
+  input can be large, so the scheduler writes the rendered task to `run/state/sleep-cycle/` and
   spawns the dedicated `monitors curator --request <file>` command (like the
   gate's `monitors gate`), never `subagents launch` - its `--wait` path wraps
-  the task in check-verdict semantics that swallow the curator's summary
-  (#695). The curator agent runs with role `curator`, not the cheap-model
+  the task in check-verdict semantics that can swallow the summary
+  (#695). The sleep-cycle agent runs with role `curator`, not the cheap-model
   `monitor` role - distillation judgment matters more than poll cost; pin its
   model with `roles: {curator: {model: ...}}`.
 

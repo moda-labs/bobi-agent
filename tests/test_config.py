@@ -756,4 +756,3 @@ def test_scan_declared_vars_keeps_optional_refs(tmp_path):
     y = tmp_path / "agent.yaml"
     y.write_text("a: ${REQUIRED}\nb: ${OPTIONAL:-x}\nc: ${REQUIRED}\n")
     assert scan_declared_vars(y) == ["REQUIRED", "OPTIONAL"]
-
