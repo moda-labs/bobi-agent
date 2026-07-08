@@ -356,11 +356,13 @@
   // non-lossy edit) or design a new team from scratch (auto-named in chat).
   // Modify-an-existing-team will return later in a different shape.
   let introRegistry = null, introBase = "bobi", introLoc = "", introLocChanged = false;
+  let introSourceRoots = [];
   async function renderIntro() {
     setPanes("1fr");
     const data = await getJSON("/api/intro");
     introBase = data.default_location || introBase;
     introLoc = introBase;
+    introSourceRoots = data.source_roots || [];
     introLocChanged = false;
     drawIntro();
     loadTemplates();
@@ -388,6 +390,10 @@
           <span class="locbox-path" id="loc-path" title="${esc(introLoc)}">${esc(introLoc)}</span>
           <button type="button" class="btn ghost xs" id="loc-change">Change…</button>
         </div>
+        <div class="source-roots">
+          <div class="source-roots-head"><span>Team source folders</span><button type="button" class="linkbtn" id="source-add">Add folder</button></div>
+          <div class="source-root-list">${sourceRootsHTML()}</div>
+        </div>
       </section>
 
       <section class="isec">
@@ -397,6 +403,12 @@
       </section>
     </main>`;
     wireIntro();
+  }
+  function sourceRootsHTML() {
+    if (!introSourceRoots.length) return `<span class="source-root muted">No source folders configured.</span>`;
+    return introSourceRoots.map(p =>
+      `<span class="source-root" title="${esc(p)}">${esc(p)}</span>`
+    ).join("");
   }
   // Templates come from the configured registries (lazy / network-backed), so
   // the intro paints immediately and fills the list in when they arrive.
@@ -443,6 +455,15 @@
     if (lc) lc.addEventListener("click", () => openFolderPicker(p => {
       introLoc = p; introLocChanged = true;
       const lp = $("#loc-path"); if (lp) { lp.textContent = p; lp.title = p; }
+    }));
+    const add = $("#source-add");
+    if (add) add.addEventListener("click", () => openFolderPicker(async p => {
+      const r = await postJSON("/api/source-roots", { dir: p });
+      if (!r.ok) { toast(r.data.error || "couldn't add folder"); return; }
+      introSourceRoots = r.data.source_roots || [];
+      const list = $(".source-root-list");
+      if (list) list.innerHTML = sourceRootsHTML();
+      toast("Source folder added");
     }));
   }
   // Shared start path: disables the clicked control, posts, advances on success.

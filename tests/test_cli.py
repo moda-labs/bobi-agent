@@ -20,6 +20,23 @@ def test_version_flag():
     assert __version__ in result.output
 
 
+def test_bare_bobi_starts_app(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        "bobi.webapp.daemon.start",
+        lambda open_browser=True: calls.append(open_browser)
+        or type("Status", (), {"url": "http://127.0.0.1:8642/?n=tok",
+                               "pid": 1234})(),
+    )
+
+    result = CliRunner().invoke(main, [])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [True]
+    assert "bobi app is running at http://127.0.0.1:8642/?n=tok" in result.output
+
+
 def test_top_level_help_is_machine_scoped():
     result = CliRunner().invoke(main, ["--help"])
     assert result.exit_code == 0
@@ -103,6 +120,25 @@ def test_agent_ui_app_does_not_require_local_install(tmp_path, monkeypatch):
         "open_browser": True,
         "check": True,
     }]
+
+
+def test_agent_ui_local_deep_links_unified_app(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+    opened = {}
+
+    monkeypatch.setattr(
+        "bobi.webapp.daemon.start",
+        lambda open_browser=True: type(
+            "Status", (), {"url": "http://127.0.0.1:8642/?n=tok",
+                           "pid": 1234})(),
+    )
+    monkeypatch.setattr("webbrowser.open",
+                        lambda url: opened.setdefault("url", url))
+
+    result = CliRunner().invoke(main, ["agent", "canary", "ui"])
+
+    assert result.exit_code == 0, result.output
+    assert opened["url"] == "http://127.0.0.1:8642/?n=tok#/agents/canary"
 
 
 def test_agents_list_without_installs_is_empty(tmp_path, monkeypatch):
@@ -513,77 +549,54 @@ class TestSetupCommand:
         monkeypatch.setenv("BOBI_HOME", str(home))
         return home
 
-    def test_missing_claude_cli_fails_with_hint(self, tmp_path, monkeypatch):
+    def _patch_app(self, monkeypatch):
+        seen = {}
+
+        monkeypatch.setattr(
+            "bobi.webapp.daemon.start",
+            lambda open_browser=True: seen.setdefault("open_browser", open_browser)
+            or type("Status", (), {"url": "http://127.0.0.1:8642/?n=tok",
+                                   "pid": 1234})(),
+        )
+        monkeypatch.setattr("webbrowser.open",
+                            lambda url: seen.setdefault("url", url))
+        return seen
+
+    def test_setup_opens_named_unified_app_route(self, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        monkeypatch.setattr("shutil.which", lambda name: None)
-        monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/nonexistent/claude")
+        seen = self._patch_app(monkeypatch)
+
         result = CliRunner().invoke(main, ["setup", "alpha"])
-        assert result.exit_code != 0
-        assert "Claude Code CLI" in result.output
+
+        assert result.exit_code == 0, result.output
+        assert seen["open_browser"] is False
+        assert seen["url"] == "http://127.0.0.1:8642/?n=tok#/setup/alpha"
+        assert "bobi setup is open at" in result.output
 
     def test_help(self):
         result = CliRunner().invoke(main, ["setup", "--help"])
         assert result.exit_code == 0
         assert "--resume" in result.output
 
-    def test_runs_setup_against_agent_run_root(self, tmp_path, monkeypatch):
+    def test_setup_without_name_opens_create_route(self, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
-        seen = {}
+        seen = self._patch_app(monkeypatch)
 
-        def fake_run_setup(project_path, model=None, resume=False):
-            seen.update(project=project_path, model=model, resume=resume)
-            return 0
+        result = CliRunner().invoke(main, ["setup"])
 
-        monkeypatch.setattr("bobi.setup.run_setup", fake_run_setup)
+        assert result.exit_code == 0, result.output
+        assert seen["url"] == "http://127.0.0.1:8642/?n=tok#/setup"
+
+    def test_setup_options_are_accepted_for_compatibility(self, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        seen = self._patch_app(monkeypatch)
+
         result = CliRunner().invoke(
-            main, ["setup", "alpha", "--model", "sonnet"])
+            main, ["setup", "alpha", "--resume", "--model", "sonnet"])
+
         assert result.exit_code == 0, result.output
-        assert seen["project"] == paths.agent_run_root("alpha")
-        assert seen["model"] == "sonnet"
-        assert seen["resume"] is False
-
-    def test_interrupted_setup_requires_confirmation(self, tmp_path, monkeypatch):
-        from bobi.setup.state import SetupState, Stage
-
-        self._home(tmp_path, monkeypatch)
-        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
-        called = {}
-        monkeypatch.setattr("bobi.setup.run_setup",
-                            lambda *a, **k: called.setdefault("ran", True) and 0)
-        project = paths.agent_run_root("alpha")
-        paths.state_dir(project)
-        SetupState(stage=Stage.DESIGN, team_name="alpha").save(project)
-
-        declined = CliRunner().invoke(main, ["setup", "alpha"], input="n\n")
-        assert declined.exit_code != 0
-        assert "--resume" in declined.output
-        assert "ran" not in called
-
-    def test_existing_install_requires_confirmation(self, tmp_path, monkeypatch):
-        self._home(tmp_path, monkeypatch)
-        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
-        called = {}
-        monkeypatch.setattr("bobi.setup.run_setup",
-                            lambda *a, **k: called.setdefault("ran", True) and 0)
-        project = paths.agent_run_root("alpha")
-        package = paths.package_dir(project)
-        package.mkdir(parents=True)
-        (package / "agent.yaml").write_text("agent: alpha\n")
-
-        declined = CliRunner().invoke(main, ["setup", "alpha"], input="n\n")
-        assert declined.exit_code != 0
-        assert "ran" not in called
-        accepted = CliRunner().invoke(main, ["setup", "alpha"], input="y\n")
-        assert accepted.exit_code == 0, accepted.output
-        assert called.get("ran") is True
-
-    def test_resume_skips_confirmation(self, tmp_path, monkeypatch):
-        self._home(tmp_path, monkeypatch)
-        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
-        monkeypatch.setattr("bobi.setup.run_setup", lambda *a, **k: 0)
-        result = CliRunner().invoke(main, ["setup", "alpha", "--resume"])
-        assert result.exit_code == 0, result.output
+        assert seen["url"] == (
+            "http://127.0.0.1:8642/?n=tok#/setup/alpha?model=sonnet")
 
 
 class TestMonitorAdd:

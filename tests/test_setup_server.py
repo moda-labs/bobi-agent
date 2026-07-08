@@ -1304,6 +1304,25 @@ class TestIntro:
         library = str((home / "agents").resolve())
         assert data["default_location"] == str((home / "agents" / "new-agent" / "src").resolve())
         assert data["scan_dir"] == library
+        assert data["source_roots"] == [library]
+
+    def test_intro_scans_configured_source_roots(self, project, home):
+        import yaml
+
+        from bobi import paths
+
+        extra = home / "sources"
+        _seed_team(extra, "field-ops", parent="teams")
+        cfg = paths.ensure_global_config()
+        raw = yaml.safe_load(cfg.read_text()) or {}
+        raw["sources"] = [str(extra / "teams")]
+        cfg.write_text(yaml.dump(raw))
+
+        c = _client(SetupState(), project, home_root=home)
+        data = c.get("/api/intro").json()
+
+        assert str((extra / "teams").resolve()) in data["source_roots"]
+        assert "field-ops" in {t["name"] for t in data["teams"]}
 
     def test_intro_finds_team_at_library_root(self, project, home):
         # A scanned folder itself may be a team — show the agent.yaml name, not
@@ -1365,6 +1384,26 @@ class TestIntro:
         d = c.get("/api/teams", params={"dir": "work/agents"}).json()
         assert d["dir"] == str((home / "work" / "agents").resolve())
         assert "triage-bot" in {t["name"] for t in d["teams"]}
+
+    def test_source_roots_adds_persistent_scan_root(self, project, home):
+        import yaml
+
+        from bobi import paths
+
+        c = _client(SetupState(), project, home_root=home)
+        root = home / "work" / "agents"
+
+        r = c.post("/api/source-roots", json={"dir": str(root)})
+
+        assert r.status_code == 200
+        assert str(root.resolve()) in r.json()["source_roots"]
+        raw = yaml.safe_load(paths.global_config_path().read_text()) or {}
+        assert str(root.resolve()) in raw["sources"]
+
+    def test_source_roots_rejects_path_outside_home(self, project, home):
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/source-roots", json={"dir": "/etc"})
+        assert r.status_code == 400
 
     def test_start_open_rejects_fork_inside_source(self, project, home):
         src = home / "agents" / "pa" / "src"

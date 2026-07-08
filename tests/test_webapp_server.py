@@ -136,10 +136,11 @@ class TestSetupHosting:
         c = _client()
         r = self._open(c, monkeypatch)
         assert r.status_code == 200
-        assert r.json() == {"url": "/setup/", "name": "new-team",
+        assert r.json() == {"url": "/setup/new-team/", "name": "new-team",
                             "resumed": False}
         cur = c.get("/api/setup/current").json()
-        assert cur == {"active": True, "name": "new-team"}
+        assert cur == {"active": True, "name": "new-team",
+                       "sessions": ["new-team"]}
         # setup state persisted under the slot's run root
         from bobi.setup.state import SetupState
         from bobi import paths
@@ -152,14 +153,47 @@ class TestSetupHosting:
         assert self._open(c, monkeypatch).json()["resumed"] is False
         assert self._open(c, monkeypatch).json()["resumed"] is True
 
+    def test_open_passes_model_to_hosted_setup_app(self, bobi_install,
+                                                   monkeypatch):
+        from fastapi import FastAPI
+
+        seen = {}
+
+        def fake_build_app(*args, **kwargs):
+            seen["model"] = kwargs.get("model")
+            return FastAPI()
+
+        monkeypatch.setattr(server, "_claude_available", lambda: True)
+        monkeypatch.setattr("bobi.setup.webui.server.build_app", fake_build_app)
+
+        c = _client()
+        r = c.post("/api/setup/open",
+                   json={"name": "new-team", "model": "sonnet"})
+
+        assert r.status_code == 200
+        assert seen["model"] == "sonnet"
+
     def test_hosted_page_serves_with_base_and_token(self, bobi_install,
                                                     monkeypatch):
         c = _client()
         self._open(c, monkeypatch)
-        r = c.get("/setup/")
+        r = c.get("/setup/new-team/")
         assert r.status_code == 200
         assert TOKEN in r.text
-        assert '"/setup/static/app.js"' in r.text
+        assert '"/setup/new-team/static/app.js"' in r.text
+
+    def test_hosted_setup_supports_concurrent_sessions(
+            self, bobi_install, monkeypatch):
+        c = _client()
+        assert self._open(c, monkeypatch, name="alpha").json()["url"] \
+            == "/setup/alpha/"
+        assert self._open(c, monkeypatch, name="beta").json()["url"] \
+            == "/setup/beta/"
+        cur = c.get("/api/setup/current").json()
+        assert cur == {"active": True, "name": "alpha",
+                       "sessions": ["alpha", "beta"]}
+        assert c.get("/setup/alpha/api/state").json()["team_name"] == "alpha"
+        assert c.get("/setup/beta/api/state").json()["team_name"] == "beta"
 
     def test_hosted_api_requires_token(self, bobi_install, monkeypatch):
         # The mounted sub-app must still enforce its /api token check even
@@ -173,8 +207,8 @@ class TestSetupHosting:
         assert c.post("/api/setup/open",
                       json={"name": "new-team"}).status_code == 200
         bare = TestClient(app, base_url="http://127.0.0.1")
-        assert bare.get("/setup/api/state").status_code == 403
-        assert c.get("/setup/api/state").status_code == 200
+        assert bare.get("/setup/new-team/api/state").status_code == 403
+        assert c.get("/setup/new-team/api/state").status_code == 200
 
     def test_hosted_finish_returns_home_without_launching(self, bobi_install,
                                                           monkeypatch):
@@ -187,7 +221,7 @@ class TestSetupHosting:
         monkeypatch.setattr(service, "spawn_team", fail_start)
         c = _client()
         self._open(c, monkeypatch)
-        body = c.post("/setup/api/finish").json()
+        body = c.post("/setup/new-team/api/finish").json()
         assert body["finished"] is True
         assert body["redirect"] == "/#/"
         # The onboarding slot is released: current reports inactive and
@@ -209,7 +243,8 @@ class TestSetupHosting:
                            json={"name": bobi_install.agent_name,
                                  "mode": "open"})
         assert r.status_code == 200
-        assert r.json()["url"].startswith("/setup/?open=")
+        assert r.json()["url"].startswith(
+            f"/setup/{bobi_install.agent_name}/?open=")
         assert str(src) in r.json()["url"]
 
     def test_open_mode_requires_source(self, bobi_install, monkeypatch):
@@ -242,9 +277,9 @@ class TestSetupHosting:
         c = _client()
         self._open(c, monkeypatch)   # slot "new-team"
         # Name the team through the real flow (mutates the parked state).
-        r = c.post("/setup/api/rename", json={"name": "eng-team"})
+        r = c.post("/setup/new-team/api/rename", json={"name": "eng-team"})
         assert r.status_code == 200
-        body = c.post("/setup/api/finish").json()
+        body = c.post("/setup/new-team/api/finish").json()
         assert body["redirect"] == "/#/"
         assert not paths.agent_dir("new-team").exists()
         assert paths.agent_run_root("eng-team").is_dir()
@@ -260,17 +295,18 @@ class TestSetupHosting:
         c = _client()
         self._open(c, monkeypatch, name="new-agent")
         old_src = paths.agent_source_dir("new-agent")
-        r = c.post("/setup/api/start", json={"mode": "create",
-                                             "location": str(old_src)})
+        r = c.post("/setup/new-agent/api/start",
+                   json={"mode": "create", "location": str(old_src)})
         assert r.status_code == 200
         old_src.mkdir(parents=True, exist_ok=True)
         (old_src / "agent.yaml").write_text("agent: new-agent\n")
-        r = c.post("/setup/api/rename", json={"name": "Field Ops"})
+        r = c.post("/setup/new-agent/api/rename",
+                   json={"name": "Field Ops"})
         assert r.status_code == 200
         assert not old_src.exists()
         assert paths.agent_source_dir("field-ops").is_dir()
 
-        body = c.post("/setup/api/finish").json()
+        body = c.post("/setup/new-agent/api/finish").json()
         assert body["redirect"] == "/#/"
         assert not paths.agent_dir("new-agent").exists()
         assert paths.agent_source_dir("field-ops").is_dir()
@@ -286,13 +322,14 @@ class TestSetupHosting:
         existing_src = paths.agent_source_dir("field-ops")
         existing_src.mkdir(parents=True)
         (existing_src / "agent.yaml").write_text("agent: field-ops\n")
-        r = c.post("/setup/api/start", json={"mode": "create",
-                                             "location": str(custom_src)})
+        r = c.post("/setup/new-agent/api/start",
+                   json={"mode": "create", "location": str(custom_src)})
         assert r.status_code == 200
-        r = c.post("/setup/api/rename", json={"name": "Field Ops"})
+        r = c.post("/setup/new-agent/api/rename",
+                   json={"name": "Field Ops"})
         assert r.status_code == 200
 
-        body = c.post("/setup/api/finish").json()
+        body = c.post("/setup/new-agent/api/finish").json()
         assert body["redirect"] == "/#/"
         assert paths.agent_run_root("new-agent").is_dir()
         assert not paths.agent_run_root("field-ops").exists()

@@ -21,6 +21,7 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -28,8 +29,6 @@ from fastapi.responses import JSONResponse
 from bobi import paths
 from bobi.chat_history import read_chat, read_transcript_messages, safe_name
 from bobi.webui_common.security import (
-    LEGACY_AGENTUI_TOKEN_HEADER,
-    LEGACY_SETUP_TOKEN_HEADER,
     WEBUI_TOKEN_HEADER,
     install_security,
 )
@@ -192,22 +191,23 @@ def dashboard_snapshot() -> dict:
 
 
 class _SetupHost:
-    """ASGI slot for the active onboarding session's setup app.
+    """ASGI router for hosted onboarding sessions.
 
-    The unified app hosts ONE onboarding at a time (an explicit MVP
-    decision): POST /api/setup/open builds the standard setup app for a
-    named slot and parks it here; /setup/* requests forward to it. With no
-    active session, /setup/* redirects to the shell, which shows the
-    create form."""
+    Each named slot gets its own setup app at `/setup/<slot>/...`, so two
+    browser tabs can create or edit different teams concurrently."""
 
     def __init__(self):
-        self.app = None
-        self.name: str | None = None
-        self.project: Path | None = None
+        self.sessions: dict[str, object] = {}
 
     async def __call__(self, scope, receive, send):
-        if self.app is not None:
-            await self.app(scope, receive, send)
+        name = self._session_name(scope)
+        app = self.sessions.get(name or "")
+        if app is not None and name is not None:
+            root = (scope.get("root_path") or "").rstrip("/")
+            prefix = f"{root}/{quote(name)}"
+            child_scope = dict(scope)
+            child_scope["root_path"] = prefix
+            await app(child_scope, receive, send)
             return
         if scope["type"] != "http":
             return
@@ -217,6 +217,23 @@ class _SetupHost:
             "headers": [(b"location", b"/#/setup")],
         })
         await send({"type": "http.response.body", "body": b""})
+
+    def _session_name(self, scope) -> str | None:
+        root = (scope.get("root_path") or "").rstrip("/")
+        path = scope.get("path") or ""
+        if root and path.startswith(root):
+            path = path[len(root):]
+        first = path.lstrip("/").split("/", 1)[0]
+        return unquote(first) if safe_name(unquote(first)) else None
+
+    def put(self, name: str, app) -> None:
+        self.sessions[name] = app
+
+    def release(self, name: str) -> None:
+        self.sessions.pop(name, None)
+
+    def names(self) -> list[str]:
+        return sorted(self.sessions)
 
 
 def _claude_available() -> bool:
@@ -234,8 +251,6 @@ def build_app(*, token: str) -> FastAPI:
         app,
         secret=token,
         header_name=WEBUI_TOKEN_HEADER,
-        legacy_header_names=(LEGACY_AGENTUI_TOKEN_HEADER,
-                             LEGACY_SETUP_TOKEN_HEADER),
         error_message="bad or missing token",
     )
     serve_index(app, STATIC_DIR / "index.html", {"{{TOKEN}}": token})
@@ -310,7 +325,9 @@ def build_app(*, token: str) -> FastAPI:
 
     @app.get("/api/setup/current")
     def setup_current() -> dict:
-        return {"active": setup_host.app is not None, "name": setup_host.name}
+        names = setup_host.names()
+        return {"active": bool(names), "name": names[0] if names else None,
+                "sessions": names}
 
     @app.post("/api/setup/open")
     def setup_open(payload: dict) -> JSONResponse:
@@ -320,6 +337,7 @@ def build_app(*, token: str) -> FastAPI:
 
         name = (payload.get("name") or "").strip() or "new-agent"
         mode = (payload.get("mode") or "create").strip()
+        model = (payload.get("model") or "").strip() or None
         if not safe_name(name):
             return JSONResponse({"error": "bad name"}, status_code=400)
         if mode not in ("create", "open"):
@@ -359,9 +377,7 @@ def build_app(*, token: str) -> FastAPI:
             # Finish returns to the home dashboard; the user starts the
             # team from its card there (launch stays a deliberate action).
             # Release the slot so /setup/ starts clean next time.
-            setup_host.app = None
-            setup_host.name = None
-            setup_host.project = None
+            setup_host.release(name)
             # The slot was opened under a placeholder name but the team got
             # its real name during setup (template pick, auto-name, rename).
             # A slot IS its team (#526: agents/<name>/), so move the whole
@@ -389,21 +405,21 @@ def build_app(*, token: str) -> FastAPI:
                             pass
             return {"redirect": "/#/"}
 
-        setup_host.app = build_setup_app(state, project, nonce=token,
-                                         base_path="/setup",
-                                         on_finish=on_finish)
-        setup_host.name = name
-        setup_host.project = project
+        setup_base = f"/setup/{quote(name)}"
+        setup_host.put(
+            name,
+            build_setup_app(state, project, nonce=token,
+                            base_path=setup_base, model=model,
+                            on_finish=on_finish),
+        )
 
         # Edit-an-existing-team entry: a fresh session deep-links the SPA
         # into open mode for the slot's source (the SPA drives /api/start,
         # which owns the copy/reverse-fill semantics). A resumed session is
         # already mid-flow — don't re-open over it.
-        url = "/setup/"
+        url = f"{setup_base}/"
         if mode == "open" and not resumed:
-            from urllib.parse import quote
-
-            url = f"/setup/?open={quote(str(src))}"
+            url = f"{setup_base}/?open={quote(str(src))}"
         return JSONResponse({"url": url, "name": name, "resumed": resumed})
 
     # --- subagents (sessions inside one agent) + chat -------------------
