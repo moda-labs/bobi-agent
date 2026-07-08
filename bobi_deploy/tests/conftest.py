@@ -25,6 +25,26 @@ for _entry in (str(_SRC),) + (
 import pytest
 
 
+def make_repo(tmp_path: Path, agent_yaml: str, *, deployments: bool = False) -> Path:
+    """A minimal bobi source root (checkout: scripts/ + Dockerfile) + one team.
+
+    The ONE scaffold for "a checkout find_repo_root accepts" - build and deploy
+    suites share it so a change to the checkout markers updates both."""
+    from textwrap import dedent
+
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "provision-instance.sh").write_text("#!/usr/bin/env bash\n")
+    (repo / "scripts" / "destroy-instance.sh").write_text("#!/usr/bin/env bash\n")
+    (repo / "Dockerfile").write_text("FROM scratch\n")
+    pkg = repo / "agents" / "eng-team"
+    pkg.mkdir(parents=True)
+    pkg.joinpath("agent.yaml").write_text(dedent(agent_yaml))
+    if deployments:
+        (repo / "deployments").mkdir()
+    return repo
+
+
 @pytest.fixture(autouse=True)
 def _isolate_environ():
     """No test may leak an os.environ mutation into the next.

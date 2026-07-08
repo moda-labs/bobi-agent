@@ -5,8 +5,11 @@ force-includes must also live in the sdist, or the wheel build dies with
 "Forced include not found" (this happened for 0.22.0 when bundled-template
 dirs under agents/ were force-included into the wheel but agents/ was missing
 from the sdist include list).
+
+The deploy-asset guards (Dockerfile, docker/, deploy scripts) live in
+bobi_deploy/tests/test_packaging.py - those assets ship in the deploy plugin's
+wheel, not this one (#707).
 """
-import re
 from pathlib import Path
 
 try:
@@ -51,65 +54,22 @@ def test_force_included_template_paths_exist_on_disk():
     assert not missing, f"force-include sources missing on disk: {missing}"
 
 
-# --- deploy assets (binary-mode `bobi deploy`) -------------------------
-
-def test_deploy_assets_force_included_under_deploy_dir():
-    """`bobi deploy` resolves its mechanics from bobi/_deploy in an
-    installed wheel (binary mode). Guard that the Dockerfile + docker/ + scripts/
-    are force-included there — a broken mapping silently disables binary deploy."""
+def test_no_deploy_assets_in_public_wheel():
+    """The public wheel ships no container-build assets (#707): no bobi/_deploy
+    force-includes, no root Dockerfile/docker/scripts in the sdist. Their home
+    is the bobi-deploy wheel (bobi_deploy/tests/test_packaging.py guards it)."""
     cfg = _config()
-    force_include = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
-    wanted = {
-        "Dockerfile": "bobi/_deploy/Dockerfile",
-        "docker/docker-entrypoint.sh": "bobi/_deploy/docker/docker-entrypoint.sh",
-        "scripts/provision-instance.sh": "bobi/_deploy/scripts/provision-instance.sh",
-        "scripts/destroy-instance.sh": "bobi/_deploy/scripts/destroy-instance.sh",
-    }
-    for src, dest in wanted.items():
-        assert force_include.get(src) == dest, (
-            f"deploy asset '{src}' must force-include to '{dest}' (got "
-            f"{force_include.get(src)!r}) — binary `bobi deploy` needs it."
-        )
-
-
-# (A real `python -m build` + wheel-inspection guard lived here, but `build`
-# isn't in the unit-test venv and the actual wheel is built for real by
-# container.yml + release.yml (build-wheel); the config-level guards above —
-# force-include mapping + in-sdist + source-exists — already catch every way the
-# deploy assets can drop out of the wheel.)
-
-
-# --- Dockerfile build modes (binary deploy + lean image) --------------------
-
-def test_dockerfile_has_source_and_pypi_build_modes():
-    """One Dockerfile, BOBI_BUILD={source|pypi}. Guard the stages + the
-    arg-selected builder so binary mode can't silently regress to source-only."""
-    df = (PYPROJECT.parent / "Dockerfile").read_text()
-    assert "FROM builder-base AS builder-source" in df
-    assert "FROM builder-base AS builder-pypi" in df
-    assert "FROM builder-${BOBI_BUILD} AS builder" in df
-    assert "ARG BOBI_BUILD" in df
-
-
-def test_dockerfile_pypi_stage_installs_fastembed_not_kb_extra():
-    """The pypi builder must install fastembed EXPLICITLY, never `bobi[kb]`
-    — some published `[kb]` extras stale-list sentence-transformers → torch +
-    ~2 GB CUDA the dark CPU instance never uses (and that blows the build)."""
-    df = (PYPROJECT.parent / "Dockerfile").read_text()
-    pypi = df.split("AS builder-pypi", 1)[1].split("AS builder", 1)[0]
-    # The actual install invocation — skip comment lines, which legitimately
-    # mention [kb]/sentence-transformers to say "don't use them".
-    install = " ".join(l for l in pypi.splitlines() if not l.lstrip().startswith("#"))
-    assert "fastembed" in install and "sqlite-vec" in install
-    assert "bobi[kb]" not in install
-
-
-def test_dockerfile_pins_aichat_version():
-    """aichat (the baked LLM gateway CLI) must be pinned to an exact version so
-    two builds of the same commit produce identical layers (cf. #380). A floating
-    download would let an upstream bump land with no diff to point at."""
-    df = (PYPROJECT.parent / "Dockerfile").read_text()
-    assert re.search(r"ARG AICHAT_VERSION=\d+\.\d+\.\d+", df), \
-        "AICHAT_VERSION must be pinned to an exact x.y.z"
-    # The install URL must reference the pinned arg, not a floating tag.
-    assert "aichat-v${AICHAT_VERSION}-" in df and "releases/download/v${AICHAT_VERSION}/" in df
+    targets = cfg["tool"]["hatch"]["build"]["targets"]
+    offenders = [
+        f"{src} -> {dest}"
+        for src, dest in targets["wheel"].get("force-include", {}).items()
+        if "_deploy" in dest or src.split("/", 1)[0] in ("Dockerfile", "docker", "scripts")
+    ]
+    offenders += [
+        entry for entry in targets["sdist"]["include"]
+        if entry.split("/", 1)[0] in ("Dockerfile", "docker", "scripts")
+    ]
+    assert not offenders, (
+        "container-build assets crept back into the public distribution "
+        "(they belong in the bobi-deploy wheel, #707): " + ", ".join(offenders)
+    )

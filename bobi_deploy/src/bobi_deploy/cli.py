@@ -15,6 +15,55 @@ import click
 
 
 @click.command()
+@click.argument("team")
+@click.option("--tag", "tags", multiple=True,
+              help="Image tag (repeatable). Default: bobi-<team>:latest.")
+@click.option("--push", is_flag=True,
+              help="docker push each tag after the build (local docker "
+                   "credential helpers - GHCR/GAR/ECR all work).")
+@click.option("--build", "build_mode",
+              type=click.Choice(["source", "pypi", "wheel"]), default=None,
+              help="Framework build mode. Default: source in a bobi checkout, "
+                   "pypi (pinned to this CLI's version) otherwise.")
+@click.option("--bobi-version", "bobi_version", default=None,
+              help="Published bobi version to pin in pypi mode "
+                   "(default: this CLI's own version).")
+@click.option("--brains", default=None,
+              help="Comma-separated brains to verify guide-only dependency "
+                   "bootstraps under (default: claude).")
+def build(team, tags, push, build_mode, bobi_version, brains):
+    """Render an agent team into a ready-to-run Docker image.
+
+    TEAM is a team directory (holds agent.yaml), a registry name[@version]
+    ref, or a bare name under agents/. The team's declared dependencies
+    (build:, tool_library:, guide-only deps) bake into the image; the team
+    definition itself is delivered at boot per the container contract.
+
+    Usage:
+        bobi build ./my-team --tag ghcr.io/acme/my-team:1 --push
+        bobi build agents/eng-team --tag bobi-eng-team:dev
+    """
+    from bobi.compose import ComposeError
+    from bobi.dep_bootstrap import BootstrapError
+
+    from bobi_deploy.build import BuildError, build_team_image
+    try:
+        result = build_team_image(
+            team, tags=list(tags), push=push, build_mode=build_mode,
+            bobi_version=bobi_version,
+            brains=[b.strip() for b in brains.split(",") if b.strip()]
+            if brains else None)
+    except (BuildError, BootstrapError, ComposeError) as exc:
+        raise click.ClickException(str(exc))
+    except subprocess.CalledProcessError as exc:
+        raise click.ClickException(f"command failed: {exc}")
+    what = "Built + pushed" if push else "Built"
+    flavor = "team-flavored" if result.team_deps else "generic"
+    click.echo(f"{what} {', '.join(result.tags)} "
+               f"({flavor}, {result.mode} mode) from {result.team_dir}")
+
+
+@click.command()
 @click.argument("name")
 @click.option("--team", default=None,
               help="Local team package (agents/<team>) → ssh-push delivery.")
@@ -129,7 +178,7 @@ def deploy_init(team, fleet, tenant, event_server, auth, force):
         bobi deploy-init                          # every team under agents/
         bobi deploy-init eng-team --fleet acme --tenant prod
     """
-    from bobi.build import BuildError, installed_bobi_version
+    from bobi_deploy.build import BuildError, installed_bobi_version
     from bobi_deploy import scaffold as scaffold_mod
 
     project_path = Path.cwd()

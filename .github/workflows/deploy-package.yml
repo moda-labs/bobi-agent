@@ -37,7 +37,10 @@ jobs:
         run: pip install -e ".[dev]" -e ./bobi_deploy
 
       - name: Run bobi-deploy unit tests
-        run: pytest bobi_deploy/tests/ --timeout=30 -q
+        # Docker-marked tests (real image builds) run in container.yml under a
+        # longer timeout; partition by marker, not directory, so a future
+        # unmarked integration test cannot fall between the two jobs.
+        run: pytest bobi_deploy/tests/ -m "not docker" --timeout=30 -q
 
   # The phase-1 repo-split exit criterion (two installable packages, one repo):
   # `pip install bobi` alone must have NO deploy commands; installing the
@@ -60,17 +63,37 @@ jobs:
           python -m build --wheel --outdir dist/ .
           python -m build --wheel --outdir dist-deploy/ ./bobi_deploy
 
+      - name: Deploy assets ship in the deploy wheel only (#707)
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import glob, tomllib, zipfile
+          pub = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist()
+          dep = zipfile.ZipFile(glob.glob('dist-deploy/*.whl')[0]).namelist()
+          assert not [n for n in pub if '/_deploy/' in n], 'docker assets leaked into the public wheel'
+          with open('bobi_deploy/pyproject.toml', 'rb') as f:
+              cfg = tomllib.load(f)
+          need = set(cfg['tool']['hatch']['build']['targets']['wheel']['force-include'].values())
+          missing = need - set(dep)
+          assert not missing, f'deploy wheel is missing bundled assets: {missing}'
+          PY
+
       - name: bobi alone → local product only (no deploy commands)
         run: |
           set -euo pipefail
           python -m venv /tmp/bobi-only && /tmp/bobi-only/bin/pip install --quiet dist/*.whl
           help="$(/tmp/bobi-only/bin/bobi --help)"
-          for cmd in deploy deploy-init destroy; do
+          for cmd in build deploy deploy-init destroy; do
             if echo "$help" | grep -qE "^  ${cmd}( |$)"; then
               echo "::error::'bobi ${cmd}' present without the bobi-deploy package"; exit 1
             fi
           done
-          ! /tmp/bobi-only/bin/bobi deploy --help >/dev/null 2>&1
+          if /tmp/bobi-only/bin/bobi deploy --help >/dev/null 2>&1; then
+            echo "::error::'bobi deploy --help' succeeded without the bobi-deploy package"; exit 1
+          fi
+          if /tmp/bobi-only/bin/bobi build --help >/dev/null 2>&1; then
+            echo "::error::'bobi build --help' succeeded without the bobi-deploy package"; exit 1
+          fi
 
       - name: bobi + bobi-deploy → deploy commands appear via entry points
         run: |
@@ -78,10 +101,11 @@ jobs:
           python -m venv /tmp/bobi-full
           /tmp/bobi-full/bin/pip install --quiet dist/*.whl dist-deploy/*.whl
           help="$(/tmp/bobi-full/bin/bobi --help)"
-          for cmd in deploy deploy-init destroy; do
+          for cmd in build deploy deploy-init destroy; do
             echo "$help" | grep -qE "^  ${cmd}( |$)" \
               || { echo "::error::'bobi ${cmd}' missing with bobi-deploy installed"; exit 1; }
           done
+          /tmp/bobi-full/bin/bobi build --help >/dev/null
           /tmp/bobi-full/bin/bobi deploy --help >/dev/null
           /tmp/bobi-full/bin/bobi deploy-init --help >/dev/null
           /tmp/bobi-full/bin/bobi destroy --help >/dev/null

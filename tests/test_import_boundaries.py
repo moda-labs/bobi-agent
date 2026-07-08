@@ -108,6 +108,63 @@ class TestBobiNeverImportsBobiDeploy:
         )
 
 
+# Container-build tooling tokens that mark deploy IP. The scan is over EVERY
+# file under bobi/ (not just .py) so a shell script or template cannot dodge
+# it. Each allowlisted file carries the dual-use reason that keeps it public.
+_CONTAINER_TOKEN_RE = re.compile(r"\b(docker|dockerfile|flyctl)\b", re.IGNORECASE)
+CONTAINER_TOKEN_ALLOWLIST = {
+    # Renders the team-deps hook script per the container contract (the
+    # guide-dep bootstrap runs `python -m bobi.dep_bootstrap` INSIDE the
+    # image, whose installed bobi is the public wheel). Renders shell, never
+    # invokes docker.
+    "bobi/build_render.py",
+    # The public agent.yaml schema: BuildSpec documents the raw-Dockerfile
+    # escape hatch a team may declare next to its agent.yaml.
+    "bobi/config.py",
+}
+
+
+class TestNoContainerBuildInPublicPackage:
+    """The image engine is deploy IP (#707): everything that assembles a
+    docker build context or invokes docker lives in the deploy plugin. New
+    container-build code cannot silently land public - either it belongs in
+    bobi_deploy/, or it is genuinely dual-use and gets an explicit allowlist
+    entry here with its reason."""
+
+    def _files(self):
+        files = [f for f in sorted(BOBI_PACKAGE.rglob("*"))
+                 if f.is_file() and "__pycache__" not in f.parts]
+        assert files, f"no files found under {BOBI_PACKAGE}"
+        return files
+
+    def test_no_container_build_tokens(self):
+        offenders = []
+        for f in self._files():
+            rel = str(f.relative_to(REPO_ROOT))
+            if rel in CONTAINER_TOKEN_ALLOWLIST:
+                continue
+            text = f.read_text(encoding="utf-8", errors="ignore")
+            for lineno, line in enumerate(text.splitlines(), 1):
+                if _CONTAINER_TOKEN_RE.search(line):
+                    offenders.append(f"{rel}:{lineno}: {line.strip()}")
+        assert not offenders, (
+            "container-build tokens in the public package - move the code to "
+            "bobi_deploy/, or allowlist the file here with its dual-use "
+            "reason:\n" + "\n".join(offenders)
+        )
+
+    def test_allowlist_entries_stay_justified(self):
+        """Keep the allowlist honest in both directions: every entry must
+        still exist AND still contain a token - a stale entry is a hole the
+        next offender hides in."""
+        for rel in sorted(CONTAINER_TOKEN_ALLOWLIST):
+            f = REPO_ROOT / rel
+            assert f.is_file(), f"allowlisted {rel} no longer exists - remove it"
+            assert _CONTAINER_TOKEN_RE.search(
+                f.read_text(encoding="utf-8", errors="ignore")
+            ), f"allowlisted {rel} has no container tokens left - remove it"
+
+
 # Every compile unit wrangler/tsc would accept from src/ (allowJs + jsx are
 # enabled in tsconfig), so a stray .js or .tsx file cannot dodge the scan.
 _TS_SOURCE_GLOBS = ("*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.mts")

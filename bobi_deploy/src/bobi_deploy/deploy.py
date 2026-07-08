@@ -42,12 +42,9 @@ from pathlib import Path
 
 import yaml
 
-from bobi.build import (
-    BuildAssets,
-    BuildError,
-    resolve_assets,
-    resolve_team_dir,
-)
+from bobi.build import BuildError, resolve_team_dir
+
+from bobi_deploy.build import BuildAssets, resolve_assets
 from bobi.config import (
     DEFAULT_EVENT_SERVER,
     parse_env_file,
@@ -811,7 +808,7 @@ def _render_team_deps_into_context(project_path: Path, cfg: DeployConfig,
     # `bobi deploy` never runs the bootstrap agent (OQ1: bootstrap at image
     # build) - a guide-only dependency (guide, no pinned install) must not be
     # silently dropped from the image, so it refuses instead.
-    from bobi.build import GuideDepsError, stage_team_deps
+    from bobi_deploy.build import GuideDepsError, stage_team_deps
     try:
         return stage_team_deps(
             team_dir, project_path,
