@@ -49,7 +49,13 @@ def _needs_build(es_dir: Path) -> bool:
     dist = es_dir / "dist" / "local.js"
     if not dist.exists():
         return True
-    src_mtime = max(f.stat().st_mtime for f in (es_dir / "src").rglob("*.ts"))
+    # local.ts (src/) plus the events-core workspace package (core/src/) both
+    # feed the bundle.
+    sources = [
+        f for pattern in ("src/**/*.ts", "core/src/**/*.ts")
+        for f in es_dir.glob(pattern)
+    ]
+    src_mtime = max(f.stat().st_mtime for f in sources)
     return dist.stat().st_mtime < src_mtime
 
 

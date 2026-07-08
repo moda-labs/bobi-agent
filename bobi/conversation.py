@@ -5,7 +5,7 @@ A conversation reference is an opaque string the agent echoes back verbatim
 Adapters in the event server build refs; this module parses them. The agent
 never learns platform addressing semantics.
 
-Grammar (mirrors ``event-server/src/conversation.ts``)::
+Grammar (mirrors ``event-server/core/src/conversation.ts``)::
 
     <source>:<scope>:<chat_type>:<chat_id>[:thread:<thread_id>]
 

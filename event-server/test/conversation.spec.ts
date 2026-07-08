@@ -4,7 +4,7 @@ import {
 	parseConversation,
 	slackChatType,
 	slackConversation,
-} from "../src/conversation";
+} from "@moda-labs/bobi-events-core/conversation";
 
 // GOLDEN VECTOR - keep identical to tests/test_conversation.py. The grammar
 // is hand-mirrored across TS and Python; this shared vector turns drift into

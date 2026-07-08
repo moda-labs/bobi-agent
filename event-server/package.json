@@ -2,6 +2,9 @@
 	"name": "event-server",
 	"version": "0.0.0",
 	"private": true,
+	"workspaces": [
+		"core"
+	],
 	"scripts": {
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
@@ -12,9 +15,7 @@
 		"cf-typegen": "wrangler types"
 	},
 	"dependencies": {
-		"@chat-adapter/slack": "^4.30.0",
-		"@chat-adapter/state-memory": "^4.30.0",
-		"chat": "^4.30.0",
+		"@moda-labs/bobi-events-core": "*",
 		"ws": "^8.18.0"
 	},
 	"devDependencies": {

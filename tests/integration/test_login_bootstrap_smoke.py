@@ -7,7 +7,7 @@ bug fixed in #386 (commit 42f96be).
 
 The bug: `bobi/auth_bootstrap.py::_extract_code` read the message text from
 `event["fields"]["text"]`, but the live Slack adapter
-(`event-server/src/adapters/chat-sdk-slack.ts`) puts the text at the event TOP
+(`event-server/core/src/adapters/chat-sdk-slack.ts`) puts the text at the event TOP
 LEVEL and in `payload["text"]` - `fields` carries only
 channel/channel_type/user_id/ts. The old unit tests passed because they
 hand-built events with `text` inside `fields`, a shape the real system never
@@ -49,7 +49,9 @@ from bobi import auth_bootstrap as ab
 # --- generate the event from the real adapter (chat-sdk-slack.ts) -----------
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-ADAPTER_TS = REPO_ROOT / "event-server" / "src" / "adapters" / "chat-sdk-slack.ts"
+ADAPTER_TS = (
+    REPO_ROOT / "event-server" / "core" / "src" / "adapters" / "chat-sdk-slack.ts"
+)
 # chat-sdk-slack.ts imports @chat-adapter/slack; bundling it requires the
 # event-server's node_modules (populated by `npm ci`), regardless of where the
 # esbuild binary itself comes from.

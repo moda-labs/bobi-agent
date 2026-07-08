@@ -59,10 +59,10 @@ import {
 	resetIngestRateLimiter,
 	INGEST_RATE_LIMIT,
 	INGEST_MAX_BODY_BYTES,
-} from "../src/core";
+} from "@moda-labs/bobi-events-core";
 import { hmacHex } from "./helpers";
-import { bridgeSlackWebhook } from "../src/adapters/chat-sdk-slack";
-import { setWhatsAppApiUrl } from "../src/channels";
+import { bridgeSlackWebhook } from "@moda-labs/bobi-events-core/adapters/chat-sdk-slack";
+import { setWhatsAppApiUrl } from "@moda-labs/bobi-events-core/channels";
 
 afterEach(() => vi.unstubAllGlobals());
 

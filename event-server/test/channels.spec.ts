@@ -3,7 +3,7 @@ import {
 	chunkForChannel,
 	truncateForChannel,
 	type ChannelCapabilities,
-} from "../src/channels";
+} from "@moda-labs/bobi-events-core/channels";
 
 // Small budgets keep the fixtures readable; the algorithm is budget-agnostic.
 function caps(maxLength: number, lengthUnit: "chars" | "utf16" = "utf16"): ChannelCapabilities {

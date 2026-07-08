@@ -2098,7 +2098,7 @@ def ingest_token_create(topic, name):
     """Mint a token bound to TOPIC (source/type form, e.g. alert/firing).
 
     Topic rules are enforced server-side (validateIngestTopic in
-    event-server/src/core.ts, the single source of truth); a rejection
+    event-server/core/src/core.ts, the single source of truth); a rejection
     surfaces its reason verbatim.
     """
     project_path = _detect_project_root()

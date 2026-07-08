@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { constantTimeEqual, type NormalizedEvent, namespaceSubKey, sha256Hex } from "./core";
+import { constantTimeEqual, type NormalizedEvent, namespaceSubKey, sha256Hex } from "@moda-labs/bobi-events-core";
 import {
 	INTERNAL_HEADER,
 	INTERNAL_WS_QUERY_PARAM,

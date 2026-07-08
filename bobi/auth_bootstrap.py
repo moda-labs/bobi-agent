@@ -188,7 +188,7 @@ def _extract_code(event: dict, channel: str) -> str | None:
     # Filter to the login channel; a workspace subscription sees every channel.
     if channel and ev_channel and ev_channel != channel:
         return None
-    # The real Slack adapter (event-server/src/adapters/chat-sdk-slack.ts) puts the
+    # The real Slack adapter (event-server/core/src/adapters/chat-sdk-slack.ts) puts the
     # message text at the event TOP LEVEL and in `payload.text`; `fields` carries only
     # channel/channel_type/user_id/ts. Read all three so we match the live shape
     # (top-level first) while staying tolerant of older event variants.

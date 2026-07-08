@@ -28,7 +28,7 @@ services:
     #
     # IMPORTANT — do NOT put a DM id here. DMs are delivered on the bare
     # workspace topic (slack:<team>), never on a channel-scoped topic
-    # (slack:<team>:<channel>) — see event-server/src/adapters/chat-sdk-slack.ts. Set
+    # (slack:<team>:<channel>) — see event-server/core/src/adapters/chat-sdk-slack.ts. Set
     # `channels`, and the agent subscribes ONLY to the scoped topics and never
     # receives DMs. A DM-first assistant must leave this EMPTY (whole-workspace
     # subscription) and rely on the bot only being in its principal's DM.

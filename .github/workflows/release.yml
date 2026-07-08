@@ -75,7 +75,7 @@ jobs:
   #   * NO Slack / event-server network — the Slack post and event-bus wait are
   #     stubbed; the code is the synthetic one we feed in.
   # The mock auth-code event uses the REAL Slack adapter output shape, generated
-  # from event-server/src/adapters/chat-sdk-slack.ts (so adapter + bootstrap
+  # from event-server/core/src/adapters/chat-sdk-slack.ts (so adapter + bootstrap
   # can't drift), exactly as tests/integration/test_login_bootstrap_smoke.py does.
   subscription-login-smoke:
     name: Subscription-login smoke (mock code, no creds)

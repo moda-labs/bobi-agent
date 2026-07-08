@@ -37,15 +37,15 @@ import {
 	handleTestSeedResourceGrants,
 	envIngestTokenRecords,
 	getAuthRejectionCounters,
-} from "./core";
+} from "@moda-labs/bobi-events-core";
 import {
 	isExemptFromBreaker,
 	recordDelivery,
 	drainPaused,
 	conversationKey,
 	buildLoopDetectedEvent,
-} from "./circuit-breaker";
-import { setSlackApiUrl, setWhatsAppApiUrl } from "./channels";
+} from "@moda-labs/bobi-events-core/circuit-breaker";
+import { setSlackApiUrl, setWhatsAppApiUrl } from "@moda-labs/bobi-events-core/channels";
 
 // Integration-test seams: point the Slack Web API / Meta Graph API at local
 // stubs. Unset in production, where the platform defaults apply.

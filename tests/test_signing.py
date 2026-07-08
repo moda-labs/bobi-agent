@@ -1,7 +1,7 @@
 """Bubble signing — unit tests + cross-language parity vector.
 
 The HMAC canonicalization here MUST stay byte-for-byte identical to the
-verifier in event-server/src/core.ts. The GOLDEN vector below is asserted in
+verifier in event-server/core/src/core.ts. The GOLDEN vector below is asserted in
 BOTH this file and event-server/test/core.spec.ts ("bubble signature parity
 vector") — if either side drifts (separator handling, key sort, METHOD casing,
 path/query inclusion), one of the two suites fails instead of producing silent
