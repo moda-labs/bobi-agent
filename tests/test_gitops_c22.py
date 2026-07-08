@@ -411,8 +411,8 @@ def test_release_targets_only_the_named_brain_canaries():
     assert "scripts/fleet.sh list" not in script
     assert "render-team-deps.py" not in script
     assert "scripts/canary-smoke.sh" in script
-    # UI reachability gate, per-canary in the loop (deployment name + its app).
-    assert 'bobi agent "$name" ui --app "$app" --check' in script
+    assert "agent UI reachable" not in script
+    assert "bobi agent" not in script
     # load-bearing flags from the provisioner (one-volume + zstd boot bug)
     assert "--ha=false" in script
     assert "--depot=false" in script

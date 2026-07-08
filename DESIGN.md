@@ -465,19 +465,16 @@ language verbatim**: warm light chrome for the roster + composer, the single dar
 CRT slab for the chat transcript (the machine writes in the dark), amber accent,
 mono labels, system fonts, no build step.
 
-- **Two run modes, one app.** Local `bobi agent <name> ui` binds `127.0.0.1` + a
-  per-launch token and opens a browser, exactly like setup. In-container it's
-  **on by default** (the entrypoint sets `BOBI_UI=1`; disable with
-  `BOBI_UI=0`) — the manager binds the Fly **6PN** address in a daemon
-  thread, and the named `ui` command resolves the app, reads the token off
-  the machine, runs `fly proxy`, and opens the browser. Being image behavior
-  (not a per-instance flag) means existing instances get it on their next deploy
-  — which is what lets the release canary gate on UI reachability.
-- **No public ingress.** The Fly box stays dark (no `[http_service]`); 6PN
-  reachability via `fly proxy` is the trust boundary, and a token (env
-  `BOBI_UI_TOKEN`, else auto-written to `run/state/ui.token`) is
-  defense-in-depth. In both modes the browser talks to *localhost*, so the same
-  loopback Host guard + token check as setup applies unchanged.
+- **Local UI, remote control-plane administration.** Local
+  `bobi agent <name> ui` binds `127.0.0.1` + a per-launch token and opens a
+  browser, exactly like setup. In-container it's **on by default** (the
+  entrypoint sets `BOBI_UI=1`; disable with `BOBI_UI=0`) — the manager binds the
+  Fly **6PN** address in a daemon thread for the control plane. The CLI no
+  longer exposes a `ui <deployment>` tunnel.
+- **No public ingress.** The Fly box stays dark (no `[http_service]`); private
+  network reachability plus a token (env `BOBI_UI_TOKEN`, else auto-written to
+  `run/state/ui.token`) is defense-in-depth. Local browser access still uses the
+  same loopback Host guard + token check as setup.
 
 ## Unified web app (`bobi app`) — #525
 

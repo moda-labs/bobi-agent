@@ -22,8 +22,7 @@ from pathlib import Path
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 # bobi_deploy is src-layout, so the repo root alone only exposes it as a
 # namespace shadow that loses to any editable install; pin its src dir
-# explicitly so THIS checkout's copy wins too (tests/test_agentui_remote.py
-# imports it).
+# explicitly so THIS checkout's copy wins too.
 _PIN_DIRS = [_REPO_ROOT]
 if (Path(_REPO_ROOT) / "bobi_deploy" / "src").is_dir():
     _PIN_DIRS.append(str(Path(_REPO_ROOT) / "bobi_deploy" / "src"))

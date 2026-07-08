@@ -99,27 +99,24 @@ def test_missing_agent_errors_without_cwd_fallback(tmp_path, monkeypatch):
     assert "package/agent.yaml" in result.output
 
 
-def test_agent_ui_app_does_not_require_local_install(tmp_path, monkeypatch):
+def test_agent_ui_deployment_mode_is_removed(tmp_path, monkeypatch):
     monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
-    calls = []
+    result = CliRunner().invoke(
+        main, ["agent", "canary", "ui", "ci-canary"])
 
-    def fake_run(**kwargs):
-        calls.append(kwargs)
-        return 0
+    assert result.exit_code != 0
+    assert "`bobi agent <name> ui <deployment>` was removed" in result.output
+    assert "control plane" in result.output
 
-    monkeypatch.setattr("bobi.agentui.remote.run", fake_run)
+
+def test_agent_ui_removed_app_flag_reports_control_plane(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     result = CliRunner().invoke(
         main, ["agent", "canary", "ui", "--app", "ci-canary", "--check"])
 
-    assert result.exit_code == 0, result.output
-    assert calls == [{
-        "name": None,
-        "app": "ci-canary",
-        "local_port": None,
-        "remote_port": None,
-        "open_browser": True,
-        "check": True,
-    }]
+    assert result.exit_code != 0
+    assert "`bobi agent <name> ui <deployment>` was removed" in result.output
+    assert "control plane" in result.output
 
 
 def test_agent_ui_local_deep_links_unified_app(tmp_path, monkeypatch):

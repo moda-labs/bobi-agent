@@ -962,36 +962,28 @@ def app_run():
 
 
 @main.command()
-@click.argument("name", required=False)
-@click.option("--app", default=None,
-              help="Target Fly app directly (skip deployment-name resolution).")
-@click.option("--port", "local_port", default=None, type=int,
-              help="Local port for the tunnel (default: the remote UI port).")
-@click.option("--remote-port", default=None, type=int,
-              help="UI port inside the container (default: read from the instance, else 8080).")
+@click.argument("deployment", required=False)
+@click.option("--app", default=None, hidden=True)
+@click.option("--port", "local_port", default=None, type=int, hidden=True)
+@click.option("--remote-port", default=None, type=int, hidden=True)
 @click.option("--no-browser", is_flag=True, help="Don't open a browser window.")
-@click.option("--check", is_flag=True,
-              help="Remote: probe /api/dashboard through the tunnel once and exit (a smoke check).")
+@click.option("--check", is_flag=True, hidden=True)
 @click.pass_context
-def ui(ctx, name, app, local_port, remote_port, no_browser, check):
+def ui(ctx, deployment, app, local_port, remote_port, no_browser, check):
     """View and chat with an agent team's agents in a web UI.
 
     \b
     Local agent:  bobi agent eng ui
-    Deployed:     bobi agent eng ui <deployment>      # tunnels in via `fly proxy`
-                  bobi agent eng ui --app my-bobi-eng
 
     Local mode serves a card per active agent on 127.0.0.1 and talks to the
     running team over the event server (so the team must already be started).
-    Remote mode resolves the Fly app, reads the UI port + token off the machine,
-    starts `fly proxy`, and opens the browser. Ctrl-C to stop.
+    Deployed instances are administered through the control plane.
     """
-    # Remote mode: a deployment name or --app means "tunnel to a Fly instance".
-    if name or app:
-        from bobi.agentui import remote
-        raise SystemExit(remote.run(
-            name=name, app=app, local_port=local_port,
-            remote_port=remote_port, open_browser=not no_browser, check=check))
+    if deployment or app or local_port or remote_port or check:
+        raise click.UsageError(
+            "`bobi agent <name> ui <deployment>` was removed. "
+            "Deployed instances are administered through the control plane."
+        )
 
     # Local mode: bind the registry + event-server root so the cross-process
     # `deliver` behind the chat reaches the same team start command runs.

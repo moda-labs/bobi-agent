@@ -376,10 +376,10 @@ fi
 
 # --- 5. Hand off to the manager as the non-root user ------------------------
 # Agent UI on by default IN THE CONTAINER (the manager starts it on the private
-# 6PN; reach it with `bobi agent <name> ui <deployment>` / `fly proxy`). It's image
-# behavior, not a per-instance flag, so existing instances pick it up on their
-# next image swap. Disable with BOBI_UI=0 in the Fly env. The dark instance
-# has no public route, so this exposes nothing — see DESIGN.md "Agent UI".
+# 6PN for control-plane administration). It's image behavior, not a per-instance
+# flag, so existing instances pick it up on their next image swap. Disable with
+# BOBI_UI=0 in the Fly env. The dark instance has no public route, so this
+# exposes nothing — see DESIGN.md "Agent UI".
 export BOBI_UI="${BOBI_UI:-1}"
 log "Starting manager under self-heal watchdog (user=${APP_USER}, agent=${AGENT_NAME}, run=${RUN_ROOT}, home=${HOME}, bobi_home=${BOBI_HOME}, claude_config=${CLAUDE_CONFIG_DIR})"
 # #464: launch the manager under `bobi supervise` instead of directly.
