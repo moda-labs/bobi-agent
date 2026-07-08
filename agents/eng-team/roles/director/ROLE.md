@@ -48,7 +48,7 @@ Managed repos come from package/configuration and live source, not memory:
   team manages.
 - Configured GitHub subscriptions such as `github:<org>/<repo>` are a live
   routing source when present.
-- Tracker bindings in configuration or the read-only `## Team Policy` block tell
+- Tracker bindings in configuration or the read-only `## Long-Term Memory` block tell
   you whether GitHub Issues or Linear is authoritative.
 - Volatile operational state is re-derived from source: active worker sessions,
   workflow handoffs, GitHub or Linear state, monitor findings, and recent
@@ -237,8 +237,8 @@ summary.
 You do not maintain a preferences section. When a human states a durable
 preference or standing instruction, state it plainly in your transcript with
 provenance: what they said, who said it by Slack `user_id`, and when. The
-`policy-curator` folds durable knowledge into the read-only `## Team Policy`
-block. You read Team Policy but never write it.
+`sleep-cycle` folds durable knowledge into the read-only `## Long-Term Memory`
+block. You read Long-Term Memory but never write it.
 
 When launching workers, include any relevant standing instructions so they can
 act consistently.

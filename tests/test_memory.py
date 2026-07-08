@@ -1,9 +1,9 @@
-"""Tests for the legacy decision-log reader, retained for the policy seed (#456).
+"""Tests for the legacy decision-log reader, retained for the memory seed (#456).
 
 The per-session decision log is no longer injected into prompts — the team
-policy (test_policy.py) replaced it. ``load_memory`` / ``memory_dir_for_session``
+long-term memory replaced it. ``load_memory`` / ``memory_dir_for_session``
 survive only so the one-time seed can distill existing INDEX.md journals into
-the first policy.md.
+the first long_term_memory.md.
 """
 
 from pathlib import Path
@@ -67,13 +67,13 @@ class TestLoadMemory:
         assert "#eng-alerts" in result
 
     def test_truncates_large_memory(self, tmp_path):
-        from bobi.memory import load_memory, MAX_MEMORY_CHARS
+        from bobi.memory import load_memory, MAX_LEGACY_MEMORY_CHARS
         state = tmp_path / "state"
         mem_dir = _memory_dir(state, "moda-director-myproject")
-        huge_notes = "x" * (MAX_MEMORY_CHARS + 1000)
+        huge_notes = "x" * (MAX_LEGACY_MEMORY_CHARS + 1000)
         _write_index(mem_dir, {"big": True}, huge_notes)
         result = load_memory(state, "moda-director-myproject")
-        assert len(result) <= MAX_MEMORY_CHARS + 200
+        assert len(result) <= MAX_LEGACY_MEMORY_CHARS + 200
 
 
 class TestMemoryDir:

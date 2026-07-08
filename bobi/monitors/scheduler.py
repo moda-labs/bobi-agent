@@ -48,12 +48,12 @@ Monitor flavors:
     verdict, and converts it into conditions. The check agent only observes
     and reports — dedup and publishing happen here, on the same path as
     every other flavor. The manager never sees the check process itself.
-  - Curator (`curator: true`) — the one flavor whose agent WRITES an artifact
-    (policy.md) instead of returning a verdict (#456). The scheduler does the
+  - Sleep cycle (`sleep_cycle: true`) — the one flavor whose agent WRITES an artifact
+    (long_term_memory.md) instead of returning a verdict (#456). The scheduler does the
     deterministic half (window the transcript delta on messages.id since a
-    success-advanced cursor, apply the per-run input cap), launches the curator
+    success-advanced cursor, apply the per-run input cap), launches the sleep_cycle
     agent with the rendered delta, and on a successful run advances the cursor
-    and publishes `system/policy.updated` directly — bypassing _reconcile dedup
+    and publishes `system/memory.updated` directly — bypassing _reconcile dedup
     because a completion signal is not a deduped finding.
 """
 
@@ -160,6 +160,28 @@ def _default_publish(event: str, data: dict) -> bool:
     return post_event(event, data)
 
 
+def _resolve_monitor_role(monitor) -> str:
+    """Resolve the role for a monitor-launched subagent.
+
+    Monitor-local ``role`` wins. If omitted, use the installed agent's
+    ``entry_point`` so framework defaults can run without duplicating a role in
+    every monitor record.
+    """
+    role = getattr(monitor, "role", "") or ""
+    if role:
+        return role
+    try:
+        from bobi.config import Config
+        from bobi.paths import bound_root as get_project_root
+        root = get_project_root()
+        if root:
+            cfg = Config.load(root)
+            return cfg.entry_point or ""
+    except Exception:
+        pass
+    return ""
+
+
 def _parse_verdict(output: str) -> dict | None:
     """Extract the trailing verdict JSON a check process printed, or None.
 
@@ -189,18 +211,7 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
     process exits. The check agent only observes — converting the verdict to
     conditions, dedup, and publishing all happen in the scheduler.
     """
-    role = getattr(monitor, "role", "") or ""
-    if not role:
-        try:
-            from bobi.config import Config
-            from bobi.paths import bound_root as get_project_root
-            root = get_project_root()
-            if root:
-                cfg = Config.load(root)
-                role = cfg.entry_point
-        except Exception:
-            pass
-
+    role = _resolve_monitor_role(monitor)
     from bobi import paths
     root = paths.bobi_root()
     cmd = [
@@ -251,16 +262,16 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
                      name=f"check-wait-{monitor.name}").start()
 
 
-def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result) -> None:
-    """Launch the out-of-band curator agent with a pre-rendered task (#456).
+def _default_spawn_sleep_cycle(monitor, cwd: str | None, task: str, on_result) -> None:
+    """Launch the out-of-band sleep cycle agent with a pre-rendered task (#456).
 
-    Mirrors _default_spawn_check, but the agent WRITES policy.md (its Write tool
+    Mirrors _default_spawn_check, but the agent WRITES long_term_memory.md (its Write tool
     is available because adhoc launches run permission_mode=bypassPermissions)
     and prints a JSON summary instead of a verdict. The waiter thread hands the
     parsed summary (or None) to ``on_result`` when the process exits. The
     scheduler — not the agent — owns the cursor advance and the publish.
     """
-    role = getattr(monitor, "role", "") or ""
+    role = _resolve_monitor_role(monitor)
     from bobi import paths
     root = paths.bobi_root()
     cmd = [
@@ -270,6 +281,7 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result) -> No
         *(["--role", role] if role else []),
         "--non-interactive",
         "--wait",
+        "--agent-wait",
         "--task", task,
     ]
 
@@ -281,7 +293,7 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result) -> No
                                     text=True, start_new_session=True,
                                     cwd=str(root))
     except OSError as e:
-        log.error(f"Failed to spawn curator for monitor {monitor.name}: {e}")
+        log.error(f"Failed to spawn sleep_cycle for monitor {monitor.name}: {e}")
         on_result(None)
         return
 
@@ -292,7 +304,7 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result) -> No
             out, _ = proc.communicate(timeout=budget)
         except subprocess.TimeoutExpired:
             proc.kill()
-            log.error(f"Curator for monitor {monitor.name} exceeded {budget}s — killed")
+            log.error(f"Sleep cycle for monitor {monitor.name} exceeded {budget}s — killed")
             on_result(None)
             return
         if out:
@@ -301,20 +313,23 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result) -> No
                     lf.write(out)
             except OSError:
                 pass
-        from bobi.monitors import curator as curator_mod
-        on_result(curator_mod.parse_result(out))
+        from bobi.monitors import sleep_cycle as sleep_cycle_mod
+        on_result(sleep_cycle_mod.parse_result(out))
 
     threading.Thread(target=_wait, daemon=True,
-                     name=f"curator-wait-{monitor.name}").start()
+                     name=f"sleep_cycle-wait-{monitor.name}").start()
 
 
 class MonitorScheduler:
     def __init__(self, publish=None, state_path: Path | None = None,
                  now=None, registry_loader=None, spawn_check=None,
-                 project_path: Path | None = None, spawn_curator=None):
+                 project_path: Path | None = None, spawn_sleep_cycle=None,
+                 spawn_curator=None):
         self.publish = publish or _default_publish
         self.spawn_check = spawn_check or _default_spawn_check
-        self.spawn_curator = spawn_curator or _default_spawn_curator
+        self.spawn_sleep_cycle = (
+            spawn_sleep_cycle or spawn_curator or _default_spawn_sleep_cycle
+        )
         self.state_path = Path(state_path) if state_path else _monitor_state_path()
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._project_path = project_path
@@ -456,6 +471,7 @@ class MonitorScheduler:
         detect out-of-band: nothing reconciles here, the waiter thread calls
         back into _reconcile when the verdict lands.
         """
+        sleep_cycle_spawned = False
         if monitor.notify:
             # Scheduled notification — keyed to the due time, so the shared
             # dedup path never suppresses it.
@@ -467,10 +483,11 @@ class MonitorScheduler:
             conditions = self._command_conditions(monitor)
         elif monitor.check:
             conditions = self._check_conditions(monitor, registry)
-        elif monitor.curator:
-            # The curator writes an artifact, not a verdict — it does not flow
+        elif monitor.sleep_cycle:
+            # The sleep_cycle writes an artifact, not a verdict — it does not flow
             # through _reconcile. The cursor advance + publish happen on result.
-            self._spawn_curator(monitor, registry.projects_for(monitor))
+            sleep_cycle_spawned = self._spawn_sleep_cycle(
+                monitor, registry.projects_for(monitor))
             conditions = None
         else:
             self._spawn_check(monitor, registry.projects_for(monitor))
@@ -480,7 +497,10 @@ class MonitorScheduler:
             self._reconcile(monitor, conditions)
 
         with self._state_lock:
-            self.state.setdefault(monitor.state_key, {})["last_run"] = now.isoformat()
+            entry = self.state.setdefault(monitor.state_key, {})
+            entry["last_run"] = now.isoformat()
+            if monitor.sleep_cycle and sleep_cycle_spawned:
+                entry["last_spawn"] = now.isoformat()
             self._save_state()
 
     def _reconcile(self, monitor, conditions: list) -> None:
@@ -627,7 +647,7 @@ class MonitorScheduler:
         return [Condition(key=key, data={"summary": summary, "text": summary,
                                          **details})]
 
-    # --- curator flavor (#456) -----------------------------------------
+    # --- sleep_cycle flavor (#456) -----------------------------------------
 
     def _project_root(self, projects: list[Path]):
         """The bound project root for path resolution — the first applicable
@@ -636,107 +656,112 @@ class MonitorScheduler:
             return projects[0]
         return self._project_path
 
-    def _load_curator_prompt(self, root) -> str:
-        """The curator agent's working instructions. Team override first
-        (<run>/package/prompts/curator.md), framework default otherwise —
+    def _load_sleep_cycle_prompt(self, root) -> str:
+        """The sleep cycle agent's working instructions. Team override first
+        (<run>/package/prompts/sleep_cycle.md), then the legacy
+        <run>/package/prompts/curator.md override, framework default otherwise —
         "what counts as durable" is domain-flavored (Q1), so a team can replace
         it without touching the framework."""
         from bobi import paths
-        from bobi.prompts import CURATOR_PATH
+        from bobi.prompts import SLEEP_CYCLE_PATH
         if root:
-            override = paths.package_dir(root) / "prompts" / "curator.md"
-            try:
-                if override.is_file():
-                    return override.read_text()
-            except OSError:
-                pass
+            prompts_dir = paths.package_dir(root) / "prompts"
+            for name in ("sleep_cycle.md", "curator.md"):
+                override = prompts_dir / name
+                try:
+                    if override.is_file():
+                        return override.read_text()
+                except OSError:
+                    pass
         try:
-            return CURATOR_PATH.read_text()
+            return SLEEP_CYCLE_PATH.read_text()
         except OSError:
-            log.error("Curator prompt missing at %s", CURATOR_PATH)
+            log.error("Sleep cycle prompt missing at %s", SLEEP_CYCLE_PATH)
             return ""
 
-    def _spawn_curator(self, monitor, projects: list[Path]) -> None:
+    def _spawn_sleep_cycle(self, monitor, projects: list[Path]) -> bool:
         """Window the transcript delta, apply the input cap, and launch the
-        curator agent with the rendered delta (#456).
+        sleep cycle agent with the rendered delta (#456).
 
         The scheduler owns the deterministic half — read the success-advanced
         cursor, index new transcript lines, select messages oldest-first by id
-        under MAX_CURATOR_INPUT_CHARS (deferring the overflow, truncating an
+        under MAX_SLEEP_CYCLE_INPUT_CHARS (deferring the overflow, truncating an
         oversized oldest message) — so the cursor / cap / no-silent-skip
         invariants live in plain code, never behind the model. The agent does
-        the judgment and rewrites policy.md; _on_curator_result advances the
+        the judgment and rewrites long_term_memory.md; _on_sleep_cycle_result advances the
         cursor and publishes on success.
         """
         from bobi import history, paths
-        from bobi.memory import collect_legacy_journals, load_policy
-        from bobi.monitors import curator as curator_mod
+        from bobi.memory import collect_legacy_journals, load_long_term_memory
+        from bobi.monitors import sleep_cycle as sleep_cycle_mod
 
         root = self._project_root(projects)
+        paths.migrate_long_term_memory_state(root)
         state_dir = paths.state_path(root)
-        cursor_path = paths.policy_cursor_path(root)
-        cursor = curator_mod.read_cursor(cursor_path)
+        cursor_path = paths.long_term_memory_cursor_path(root)
+        cursor = sleep_cycle_mod.read_cursor(cursor_path)
 
         try:
             history.index()  # incremental — only new JSONL lines
         except Exception as e:
-            log.warning("Curator transcript index failed for %s: %s", monitor.name, e)
+            log.warning("Sleep cycle transcript index failed for %s: %s", monitor.name, e)
 
         rows = history.messages_since(cursor)
 
-        # One-time seed (#456): on the very first run (no policy.md yet) distill
-        # the existing per-session decision-log journals into the first policy.md
+        # One-time seed (#456): on the very first run (no long_term_memory.md yet) distill
+        # the existing per-session decision-log journals into the first long_term_memory.md
         # so accumulated knowledge isn't discarded at rollout. Guarded on
-        # policy.md absence → idempotent: once written, the seed never re-fires.
+        # long_term_memory.md absence → idempotent: once written, the seed never re-fires.
         seed = ""
-        if not paths.policy_path(root).is_file():
-            seed = collect_legacy_journals(state_dir, curator_mod.MAX_SEED_INPUT_CHARS)
+        if not paths.long_term_memory_path(root).is_file():
+            seed = collect_legacy_journals(state_dir, sleep_cycle_mod.MAX_SEED_INPUT_CHARS)
 
         if not rows and not seed:
             log.info("Monitor %s due — no new transcript messages since cursor %d "
                      "and nothing to seed", monitor.name, cursor)
-            return
+            return False
 
-        ingested, highest_id, flags = curator_mod.select_messages(
-            rows, curator_mod.MAX_CURATOR_INPUT_CHARS)
+        ingested, highest_id, flags = sleep_cycle_mod.select_messages(
+            rows, sleep_cycle_mod.MAX_SLEEP_CYCLE_INPUT_CHARS)
         if highest_id is None and not seed:
             log.info("Monitor %s: nothing ingestable this run", monitor.name)
-            return
+            return False
 
-        transcript = curator_mod.render_transcript(ingested)
+        transcript = sleep_cycle_mod.render_transcript(ingested)
         try:
-            current_policy = load_policy(state_dir)
+            current_memory = load_long_term_memory(state_dir)
         except Exception:
-            current_policy = ""
-        task = curator_mod.build_curator_task(
-            self._load_curator_prompt(root), transcript, current_policy, flags, seed=seed)
+            current_memory = ""
+        task = sleep_cycle_mod.build_sleep_cycle_task(
+            self._load_sleep_cycle_prompt(root), transcript, current_memory, flags, seed=seed)
         if seed:
-            log.info("Monitor %s: seeding first policy.md from %d chars of legacy "
+            log.info("Monitor %s: seeding first long_term_memory.md from %d chars of legacy "
                      "journals", monitor.name, len(seed))
 
         cwd = str(projects[0]) if projects else None
-        log.info("Monitor %s due — spawning curator over %d new message(s) "
+        log.info("Monitor %s due — spawning sleep_cycle over %d new message(s) "
                  "(highest id %d, deferred=%s)",
                  monitor.name, len(ingested), highest_id, flags.get("input_truncated"))
-        self.spawn_curator(
+        self.spawn_sleep_cycle(
             monitor, cwd, task,
-            lambda result: self._on_curator_result(
+            lambda result: self._on_sleep_cycle_result(
                 monitor, result, highest_id, cursor_path),
         )
+        return True
 
-    def _on_curator_result(self, monitor, result: dict | None,
+    def _on_sleep_cycle_result(self, monitor, result: dict | None,
                            highest_id: int | None, cursor_path: Path) -> None:
-        """Waiter-thread callback for a finished curator run.
+        """Waiter-thread callback for a finished sleep cycle run.
 
         Advances the cursor ONLY on success (a failed/indeterminate run leaves
         it unmoved so the same window is re-read next interval — no transcript
-        skipped). Publishes `system/policy.updated` only when the run actually
-        changed policy.md.
+        skipped). Publishes `system/memory.updated` only when the run actually
+        changed long_term_memory.md.
         """
-        from bobi.monitors import curator as curator_mod
+        from bobi.monitors import sleep_cycle as sleep_cycle_mod
 
         if not isinstance(result, dict) or not result.get("success"):
-            log.warning("Monitor %s: curator run failed/indeterminate — cursor "
+            log.warning("Monitor %s: sleep cycle run failed/indeterminate — cursor "
                         "NOT advanced, retrying next interval", monitor.name)
             return
 
@@ -745,39 +770,42 @@ class MonitorScheduler:
         # reads the real transcript delta normally.
         if highest_id is not None:
             try:
-                curator_mod.write_cursor(cursor_path, highest_id)
+                sleep_cycle_mod.write_cursor(cursor_path, highest_id)
             except OSError as e:
-                log.error("Monitor %s: failed to advance curator cursor: %s",
+                log.error("Monitor %s: failed to advance sleep_cycle cursor: %s",
                           monitor.name, e)
 
         if result.get("lossy_drops"):
-            log.warning("Monitor %s: curator made %s LOSSY drop(s) of still-valid "
-                        "items for space — raise MAX_POLICY_CHARS / build the "
+            log.warning("Monitor %s: sleep_cycle made %s LOSSY drop(s) of still-valid "
+                        "items for space — raise MAX_MEMORY_CHARS / build the "
                         "decisions-spill: %s", monitor.name,
                         result.get("lossy_drops"), result.get("summary", ""))
 
         if result.get("updated"):
-            self._publish_policy_updated(monitor, result)
+            self._publish_memory_updated(monitor, result)
         else:
-            log.info("Monitor %s: curator found nothing durable — no publish",
+            log.info("Monitor %s: sleep_cycle found nothing durable — no publish",
                      monitor.name)
 
-    def _publish_policy_updated(self, monitor, result: dict) -> None:
+    def _publish_memory_updated(self, monitor, result: dict) -> None:
         """Publish the completion event directly (bypassing _reconcile dedup).
 
         A completion signal is not a deduped finding — two runs with the same
         summary must both deliver. The drain-side filter (events/drain.py)
-        enforces passive-vs-active: a non-urgent policy.updated publishes for
+        enforces passive-vs-active: a non-urgent memory.updated publishes for
         observability but is suppressed before the inbox push; urgent ones push.
         """
-        event = monitor.event or "system/policy.updated"
+        event = monitor.event or "system/memory.updated"
         payload = {
             "monitor": monitor.name,
             "summary": str(result.get("summary", "")),
             "bytes": int(result.get("bytes", 0) or 0),
             "urgent": bool(result.get("urgent", False)),
         }
-        if self.publish(event, payload):
+        published = self.publish(event, payload)
+        if event != "system/policy.updated":
+            self.publish("system/policy.updated", payload)
+        if published:
             log.info("Monitor %s published %s (urgent=%s)",
                      monitor.name, event, payload["urgent"])
         else:

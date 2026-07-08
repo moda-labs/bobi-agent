@@ -45,14 +45,19 @@ def _is_inbox_event(event: dict) -> bool:
 
 
 def _is_policy_update(event: dict) -> bool:
-    """Whether an event is a ``policy.updated`` completion signal (#456).
+    """Whether an event is a ``memory.updated`` completion signal (#456).
 
-    The policy-curator publishes ``system/policy.updated`` whenever it rewrites
-    ``policy.md``. ``post_event`` routes it onto both the bare ``policy.updated``
-    and the source-qualified ``system/policy.updated`` topic, so match either.
+    The sleep-cycle publishes ``system/memory.updated`` whenever it rewrites
+    ``long_term_memory.md``. ``post_event`` routes it onto both the bare ``memory.updated``
+    and the source-qualified ``system/memory.updated`` topic, so match either.
     """
     etype = str(event.get("type", ""))
-    return etype == "policy.updated" or etype.endswith("/policy.updated")
+    return (
+        etype == "memory.updated"
+        or etype.endswith("/memory.updated")
+        or etype == "policy.updated"
+        or etype.endswith("/policy.updated")
+    )
 
 
 def _thread_key(event: dict) -> tuple[str, str, str]:
@@ -189,9 +194,9 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                     reply_to=payload.get("reply_to", ""),
                 ))
             elif _is_policy_update(e):
-                # Passive-by-default delivery (#456). The curator publishes
-                # policy.updated for observability on every rewrite, but working
-                # agents already re-read policy.md on their next rebuilt prompt —
+                # Passive-by-default delivery (#456). The sleep_cycle publishes
+                # memory.updated for observability on every rewrite, but working
+                # agents already re-read long_term_memory.md on their next rebuilt prompt —
                 # so a routine distillation must NOT push an inbox message that
                 # interrupts every agent mid-task. Only an urgent update (a
                 # reversed decision that invalidates in-flight work) is pushed
@@ -199,15 +204,15 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 # only gates the inbox push.
                 payload = e.get("payload") or e.get("fields") or {}
                 if not bool(payload.get("urgent", False)):
-                    log.debug("Suppressing non-urgent policy.updated inbox push "
+                    log.debug("Suppressing non-urgent memory.updated inbox push "
                               "for %s (passive re-read on next prompt)", session_name)
                     continue
                 summary = str(payload.get("summary", "")).strip()
                 inbox.push(Message(
                     id=_msg_id(),
-                    sender="policy-curator",
-                    text=(f"policy.md updated — {summary}\n"
-                          "Re-read run/state/policy.md and reconcile any "
+                    sender="sleep-cycle",
+                    text=(f"long_term_memory.md updated — {summary}\n"
+                          "Re-read run/state/long_term_memory.md and reconcile any "
                           "in-flight plan against it."),
                 ))
             else:

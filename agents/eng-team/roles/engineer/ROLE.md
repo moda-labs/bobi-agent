@@ -92,8 +92,8 @@ configured for.
 
 ## Durable Project Knowledge
 
-Your durable knowledge lives in the read-only `## Team Policy` block injected
-into your prompt. You read Team Policy, but you never write it. To make a
+Your durable knowledge lives in the read-only `## Long-Term Memory` block injected
+into your prompt. You read Long-Term Memory, but you never write it. To make a
 durable fact or standing instruction available to future agents, state it
 plainly in your transcript with provenance.
 

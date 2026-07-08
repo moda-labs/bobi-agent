@@ -115,6 +115,124 @@ class TestInputReadyWake:
         assert elapsed < 0.3
 
     @pytest.mark.asyncio
+    async def test_message_waits_through_long_not_ready_period(self, session, monkeypatch):
+        """A queued baton must survive a long rotation/reconnect wait.
+
+        The old readiness wait had a hard deadline and returned "session not
+        ready", dropping the queued message even if the session recovered later.
+        """
+        monkeypatch.setattr("bobi.session.SESSION_UNREACHABLE_ALERT_AFTER", 0.02)
+        monkeypatch.setattr("bobi.session.SESSION_READY_WAIT_POLL", 0.01)
+        monkeypatch.setattr(
+            "bobi.session._emit_session_unreachable_alert",
+            lambda *a, **k: None,
+        )
+        session._set_state("working")
+        session._input_ready.clear()
+        _fake_client(session, drain_response="preserved")
+
+        msg = _make_msg(wait=True)
+
+        async def transition():
+            await asyncio.sleep(0.08)
+            session._set_state("waiting_input")
+
+        asyncio.create_task(transition())
+        await session._process_message(msg)
+
+        session.inbox.respond.assert_called_once_with(msg, "preserved")
+
+    @pytest.mark.asyncio
+    async def test_unreachable_wait_emits_single_liveness_alert(self, session, monkeypatch):
+        """Waiting roughly two minutes for readiness emits a best-effort alert."""
+        monkeypatch.setattr("bobi.session.SESSION_UNREACHABLE_ALERT_AFTER", 0.0)
+        monkeypatch.setattr("bobi.session.SESSION_READY_WAIT_POLL", 0.01)
+        alerts = []
+        monkeypatch.setattr(
+            "bobi.session._emit_session_unreachable_alert",
+            lambda **payload: alerts.append(payload),
+        )
+        session._set_state("working")
+        session._input_ready.clear()
+        _fake_client(session)
+
+        msg = _make_msg(wait=False)
+
+        async def transition():
+            await asyncio.sleep(0.07)
+            session._set_state("waiting_input")
+
+        asyncio.create_task(transition())
+        await session._process_message(msg)
+
+        assert len(alerts) == 1
+        assert alerts[0]["session"] == session.name
+        assert alerts[0]["state"] == "working"
+        assert alerts[0]["message_id"] == msg.id
+
+    @pytest.mark.asyncio
+    async def test_stale_ready_event_does_not_spin_or_drop_message(self, session, monkeypatch):
+        """A stale readiness event while still working must not busy-loop."""
+        monkeypatch.setattr("bobi.session.SESSION_UNREACHABLE_ALERT_AFTER", 0.02)
+        monkeypatch.setattr("bobi.session.SESSION_READY_WAIT_POLL", 0.01)
+        monkeypatch.setattr(
+            "bobi.session._emit_session_unreachable_alert",
+            lambda *a, **k: None,
+        )
+        session._set_state("working")
+        # Simulate a stale event left set while the state still says not ready.
+        session._input_ready.set()
+        _fake_client(session, drain_response="after stale event")
+
+        msg = _make_msg(wait=True)
+
+        async def transition():
+            await asyncio.sleep(0.05)
+            session._set_state("waiting_input")
+
+        asyncio.create_task(transition())
+        await asyncio.wait_for(session._process_message(msg), timeout=1.0)
+
+        session.inbox.respond.assert_called_once_with(msg, "after stale event")
+
+    @pytest.mark.asyncio
+    async def test_unreachable_alert_rearms_after_terminal_wait(self, session, monkeypatch):
+        """A terminal wait exit must not suppress future unreachable alerts."""
+        monkeypatch.setattr("bobi.session.SESSION_UNREACHABLE_ALERT_AFTER", 0.0)
+        monkeypatch.setattr("bobi.session.SESSION_READY_WAIT_POLL", 0.01)
+        alerts = []
+        monkeypatch.setattr(
+            "bobi.session._emit_session_unreachable_alert",
+            lambda **payload: alerts.append(payload),
+        )
+
+        session._set_state("working")
+        session._input_ready.clear()
+
+        async def stop():
+            await asyncio.sleep(0.02)
+            session._set_state("error")
+
+        asyncio.create_task(stop())
+        await session._process_message(_make_msg(wait=True))
+
+        assert len(alerts) == 1
+        assert session._unreachable_alert_active is False
+
+        session._set_state("working")
+        session._input_ready.clear()
+        _fake_client(session, drain_response="rearmed")
+
+        async def recover():
+            await asyncio.sleep(0.02)
+            session._set_state("waiting_input")
+
+        asyncio.create_task(recover())
+        await session._process_message(_make_msg(wait=True))
+
+        assert len(alerts) == 2
+
+    @pytest.mark.asyncio
     async def test_nonblocking_msg_on_stopped(self, session):
         """Non-blocking message on stopped session returns without error."""
         session._set_state("stopped")

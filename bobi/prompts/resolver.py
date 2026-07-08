@@ -160,10 +160,10 @@ def build_startup_prompt(
 
     project = Path(project_path)
 
-    # Team policy is team-scoped (#456) — injected for every agent regardless of
+    # Long-term memory is team-scoped (#456) — injected for every agent regardless of
     # session. session_name is retained in the signature for back-compat but no
     # longer selects a per-session journal.
-    policy_section = _load_policy_section(project)
+    memory_section = _load_long_term_memory_section(project)
 
     try:
         slot_name = paths.agent_name_for_root(project)
@@ -174,21 +174,26 @@ def build_startup_prompt(
         f"You are a bobi {role} for {slot_name}. "
         f"Act directly using your tools.\n\n{prompt}",
     ]
-    if policy_section:
-        parts.append(policy_section)
+    if memory_section:
+        parts.append(memory_section)
     parts.append(f"## Available workflows\n\n{workflows}")
     return "\n\n".join(parts)
 
 
-def _load_policy_section(project: Path) -> str:
-    """Load the team policy.md and format it read-only for prompt injection (#456)."""
+def _load_long_term_memory_section(project: Path) -> str:
+    """Load the team long_term_memory.md and format it read-only for prompt injection (#456)."""
     try:
-        from bobi.memory import load_policy, format_policy_prompt
-        content = load_policy(paths.state_path(project))
-        return format_policy_prompt(content)
+        from bobi.memory import load_long_term_memory, format_long_term_memory_prompt
+        content = load_long_term_memory(paths.state_path(project))
+        return format_long_term_memory_prompt(content)
     except Exception:
-        log.debug("Failed to load policy for %s", project, exc_info=True)
+        log.debug("Failed to load long-term memory for %s", project, exc_info=True)
         return ""
+
+
+def _load_policy_section(project: Path) -> str:
+    """Deprecated alias for one release."""
+    return _load_long_term_memory_section(project)
 
 
 def list_workflows(project_path: Path | str, agent_name: str | None = None) -> str:

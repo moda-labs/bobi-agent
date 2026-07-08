@@ -608,13 +608,13 @@ class TestContextForEvents:
 
 
 # ---------------------------------------------------------------------------
-# messages_since — the policy-curator delta cursor (#456)
+# messages_since — the sleep-cycle delta cursor (#456)
 # ---------------------------------------------------------------------------
 
 class TestMessagesSince:
     """Window on messages.id, not conversations.started_at and not timestamp.
 
-    These are the R2/R3/R4 regressions: the curator must re-select a long-lived
+    These are the R2/R3/R4 regressions: the sleep_cycle must re-select a long-lived
     session's new messages, and an id cursor must be skip-free where a timestamp
     cursor was not (tool-call tie-rows + empty-timestamp rows)."""
 

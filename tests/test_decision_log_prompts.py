@@ -5,10 +5,10 @@ which resurrected stale launch records on restart, so durable knowledge
 became a prompt-level concept.
 
 #456/#460: the framework base contract is now the **team-policy** model - a
-curator-maintained, read-only ``policy.md`` injected as ``## Team Policy`` -
+sleep_cycle-maintained, read-only ``long_term_memory.md`` injected as ``## Long-Term Memory`` -
 replacing the old agent-maintained decision log (the bloat source behind the
 rotation wedge). Durable knowledge is made persistent by stating it plainly in
-the transcript (the ``policy-curator`` distills it); agents never self-maintain
+the transcript (the ``sleep-cycle`` distills it); agents never self-maintain
 a per-session log. Volatile operational state (live leads, in-flight tickets)
 is re-derived from source (GitHub/Linear/``agents list``), not stored. The
 eng-team director and engineer role prompts have been migrated to this model;
@@ -30,14 +30,14 @@ class TestBasePolicyContract:
         self.text = BASE_PROMPT.read_text()
         self.lower = self.text.lower()
 
-    def test_has_team_policy_section(self):
-        assert "## team policy" in self.lower, (
-            "Base prompt must have a Team Policy section"
+    def test_has_long_term_memory_section(self):
+        assert "## long-term memory" in self.lower, (
+            "Base prompt must have a Long-Term Memory section"
         )
 
     def test_policy_is_read_only(self):
         assert "read-only" in self.lower or "read only" in self.lower, (
-            "Base prompt must state Team Policy is injected read-only"
+            "Base prompt must state Long-Term Memory is injected read-only"
         )
 
     def test_agents_do_not_write_policy(self):
@@ -45,9 +45,9 @@ class TestBasePolicyContract:
             "Base prompt must tell agents they do not write the policy"
         )
 
-    def test_curator_is_single_writer(self):
-        assert "policy-curator" in self.lower or "curator" in self.lower, (
-            "Base prompt must name the policy-curator as the writer"
+    def test_sleep_cycle_is_single_writer(self):
+        assert "sleep-cycle" in self.lower or "sleep_cycle" in self.lower, (
+            "Base prompt must name the sleep-cycle as the writer"
         )
 
     def test_knowledge_made_durable_via_transcript(self):
@@ -88,9 +88,9 @@ class TestDirectorManagedFromSource:
             "Director prompt must derive managed repos from package/configuration"
         )
 
-    def test_reads_team_policy_block(self):
-        assert "team policy" in self.lower, (
-            "Director prompt must reference the read-only Team Policy block"
+    def test_reads_long_term_memory_block(self):
+        assert "long-term memory" in self.lower, (
+            "Director prompt must reference the read-only Long-Term Memory block"
         )
 
     def test_does_not_write_policy(self):
@@ -211,7 +211,7 @@ class TestDirectorListFromLiveSource:
 
 
 class TestDirectorHumanPreferences:
-    """Human preferences flow to the curated Team Policy via the transcript."""
+    """Human preferences flow to the curated Long-Term Memory via the transcript."""
 
     def setup_method(self):
         self.text = DIRECTOR_PROMPT.read_text()
@@ -241,17 +241,17 @@ class TestDirectorHumanPreferences:
             "Director must NOT maintain a preferences section itself"
         )
 
-    def test_preferences_fold_into_team_policy(self):
+    def test_preferences_fold_into_long_term_memory(self):
         pref_pos = self.lower.find("human preferences and standing instructions")
         assert pref_pos != -1
         pref_text = self.lower[pref_pos:pref_pos + 800]
-        assert "policy-curator" in pref_text and "team policy" in pref_text, (
-            "Preferences must be folded into the read-only Team Policy by the curator"
+        assert "sleep-cycle" in pref_text and "long-term memory" in pref_text, (
+            "Preferences must be folded into the read-only Long-Term Memory by the sleep_cycle"
         )
 
 
 class TestEngineerDurableKnowledge:
-    """Engineer durable knowledge is the read-only Team Policy, not a log."""
+    """Engineer durable knowledge is the read-only Long-Term Memory, not a log."""
 
     def setup_method(self):
         self.text = ENGINEER_PROMPT.read_text()
@@ -267,9 +267,9 @@ class TestEngineerDurableKnowledge:
             "Engineer prompt must not reference INDEX.md under the policy model"
         )
 
-    def test_reads_team_policy_block(self):
-        assert "team policy" in self.lower, (
-            "Engineer prompt must reference the read-only Team Policy block"
+    def test_reads_long_term_memory_block(self):
+        assert "long-term memory" in self.lower, (
+            "Engineer prompt must reference the read-only Long-Term Memory block"
         )
 
     def test_durability_via_transcript(self):

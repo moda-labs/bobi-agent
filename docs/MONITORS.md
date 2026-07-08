@@ -39,7 +39,7 @@ Code lives in `bobi/monitors/`:
 | `registry.py` | Merges monitors from framework defaults + team package + user config |
 | `scheduler.py` | Background thread: reload, run due monitors, dedup, publish |
 | `*_checks.py` | Native check runners, auto-discovered by glob (`script_cache`, `tool_poll`, …) |
-| `curator.py` | The one flavor that writes an artifact instead of returning a verdict |
+| `sleep_cycle.py` | The one flavor that writes an artifact instead of returning a verdict |
 
 ## Defining a monitor
 
@@ -78,8 +78,8 @@ every tick, so monitors added at runtime take effect without a restart.
   interpretation, the scheduler spawns a short-lived check agent that observes
   and returns a verdict. Costs an LLM call per interval; use when diffable JSON
   isn't available.
-- **Curator** (`curator: true`) - the one flavor whose agent *writes* an
-  artifact (`policy.md`) instead of returning a verdict.
+- **Sleep cycle** (`sleep_cycle: true`) - the one flavor whose agent *writes* an
+  artifact (`long_term_memory.md`) instead of returning a verdict.
 
 ## Scheduling
 

@@ -322,9 +322,9 @@ def test_prune_drops_inherited(project):
     assert (dest / "roles" / "director").exists()
     mons = [m["name"] for m in
             yaml.safe_load((dest / "monitors" / "defaults.yaml").read_text())["monitors"]]
-    # policy-curator is a framework default (#471), seeded as the base layer, so
+    # sleep-cycle is a framework default (#471), seeded as the base layer, so
     # it leads the list; the inherited `drop-me` is gone, `keep` survives.
-    assert mons == ["policy-curator", "keep"]
+    assert mons == ["sleep-cycle", "keep"]
 
 
 def test_prune_nothing_warns(project):
@@ -338,21 +338,21 @@ def test_prune_nothing_warns(project):
 
 # --- framework-default monitors (#471) ---------------------------------------
 
-# An eng-team-shaped policy-curator record, byte-identical to what the
+# An eng-team-shaped sleep-cycle record, byte-identical to what the
 # framework now seeds (bobi/monitors/framework_defaults.yaml). Used to prove
 # that removing a team's own copy is a no-op.
-_POLICY_CURATOR_RECORD = (
-    "  - name: policy-curator\n"
+_POLICY_SLEEP_CYCLE_RECORD = (
+    "  - name: sleep-cycle\n"
     "    description: >\n"
     "      Distill new agent transcripts since the last run into the team's\n"
-    "      policy.md (#456). Runs out-of-band on an interval; the curator agent\n"
-    "      works from a dedicated prompt (bobi/prompts/curator.md, team-\n"
+    "      long_term_memory.md (#456). Runs out-of-band on an interval; the sleep cycle agent\n"
+    "      works from a dedicated prompt (bobi/prompts/sleep_cycle.md, team-\n"
     "      overridable) — this description is a human-readable label, not the\n"
-    "      agent's working instructions. The `curator: true` marker routes this\n"
-    "      monitor to the artifact-writing curator path, not the verdict path.\n"
+    "      agent's working instructions. The `sleep_cycle: true` marker routes this\n"
+    "      monitor to the artifact-writing sleep_cycle path, not the verdict path.\n"
     "    interval: 6h\n"
-    "    event: system/policy.updated\n"
-    "    curator: true\n"
+    "    event: system/memory.updated\n"
+    "    sleep_cycle: true\n"
 )
 
 
@@ -360,60 +360,88 @@ def _composed_monitors(dest: Path) -> list[dict]:
     return yaml.safe_load((dest / "monitors" / "defaults.yaml").read_text())["monitors"]
 
 
-def test_framework_curator_seeded_for_team_with_no_monitors(project):
-    # A brand-new team that declares NO monitors still composes with the curator.
+def test_framework_sleep_cycle_seeded_for_team_with_no_monitors(project):
+    # A brand-new team that declares NO monitors still composes with the sleep_cycle.
     leaf = _team(project, "solo", 'version: "1.0.0"\nentry_point: director\n')
     dest, _ = _compose(project, leaf)
     mons = {m["name"]: m for m in _composed_monitors(dest)}
-    assert "policy-curator" in mons
-    assert mons["policy-curator"]["interval"] == "6h"
-    assert mons["policy-curator"]["curator"] is True
+    assert "sleep-cycle" in mons
+    assert mons["sleep-cycle"]["interval"] == "6h"
+    assert mons["sleep-cycle"]["sleep_cycle"] is True
 
 
-def test_framework_curator_prune_opts_out(project):
-    # `prune: { monitors: [policy-curator] }` removes the framework default.
+def test_framework_sleep_cycle_prune_opts_out(project):
+    # `prune: { monitors: [sleep-cycle] }` removes the framework default.
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'prune:\n  monitors: [sleep-cycle]\n')
+    dest, _ = _compose(project, leaf)
+    names = [m["name"] for m in _composed_monitors(dest)]
+    assert "sleep-cycle" not in names
+
+
+def test_framework_sleep_cycle_legacy_prune_opts_out(project):
+    # Legacy packages may still prune the old framework default name for one
+    # release; it must target the renamed sleep-cycle monitor.
     leaf = _team(project, "solo",
                  'version: "1.0.0"\nentry_point: director\n'
                  'prune:\n  monitors: [policy-curator]\n')
     dest, _ = _compose(project, leaf)
     names = [m["name"] for m in _composed_monitors(dest)]
+    assert "sleep-cycle" not in names
     assert "policy-curator" not in names
 
 
-def test_framework_curator_prune_precedence_in_from_chain(project):
+def test_framework_sleep_cycle_prune_precedence_in_from_chain(project):
     # A leaf in a `from:` chain can prune the framework default — it is the
     # most-base inherited layer, so the leaf prune reaches it (#471 decision 5).
     _team(project, "core", 'version: "1.0.0"\n',
           monitors="monitors:\n  - {name: keep, interval: 1h}\n")
     leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
-                 'prune:\n  monitors: [policy-curator]\n')
+                 'prune:\n  monitors: [sleep-cycle]\n')
     dest, _ = _compose(project, leaf)
     names = [m["name"] for m in _composed_monitors(dest)]
     assert names == ["keep"]  # framework default pruned, base monitor survives
 
 
-def test_framework_curator_team_override_wins(project):
-    # A team's own policy-curator record overlays the framework default — the
+def test_framework_sleep_cycle_team_override_wins(project):
+    # A team's own sleep-cycle record overlays the framework default — the
     # framework seed is the BASE, so the team's interval wins.
     leaf = _team(project, "solo", 'version: "1.0.0"\nentry_point: director\n',
-                 monitors="monitors:\n  - {name: policy-curator, interval: 12h}\n")
+                 monitors="monitors:\n  - {name: sleep-cycle, interval: 12h}\n")
     dest, _ = _compose(project, leaf)
     mons = {m["name"]: m for m in _composed_monitors(dest)}
-    assert mons["policy-curator"]["interval"] == "12h"
+    assert mons["sleep-cycle"]["interval"] == "12h"
     # Untouched framework fields survive the overlay.
-    assert mons["policy-curator"]["curator"] is True
-    assert mons["policy-curator"]["event"] == "system/policy.updated"
+    assert mons["sleep-cycle"]["sleep_cycle"] is True
+    assert mons["sleep-cycle"]["event"] == "system/memory.updated"
 
 
-def test_removing_team_curator_entry_is_byte_identical(project):
+def test_framework_sleep_cycle_legacy_override_wins_without_duplicate(project):
+    # Existing packages may still override the old policy-curator name. Compose
+    # normalizes it to sleep-cycle so the framework default is overridden instead
+    # of creating two writers for the same long_term_memory.md artifact.
+    leaf = _team(project, "solo", 'version: "1.0.0"\nentry_point: director\n',
+                 monitors="monitors:\n"
+                          "  - {name: policy-curator, interval: 12h, curator: true}\n")
+    dest, _ = _compose(project, leaf)
+    mons = _composed_monitors(dest)
+    names = [m["name"] for m in mons]
+    assert names == ["sleep-cycle"]
+    assert mons[0]["interval"] == "12h"
+    assert mons[0]["sleep_cycle"] is True
+    assert "curator" not in mons[0]
+
+
+def test_removing_team_sleep_cycle_entry_is_byte_identical(project):
     # Acceptance (#471 decision 4): the live eng-team must be neutral before/after
-    # removing the eng-team policy-curator entry. Compose an eng-team-shaped
+    # removing the eng-team sleep-cycle entry. Compose an eng-team-shaped
     # team WITH and WITHOUT the redundant record; the monitor files must be equal.
     other = ("monitors:\n"
              "  - {name: pr-conflict-check, interval: 15m, check: pr_conflicts}\n"
              "  - {name: disk-free-check, interval: 5m, check: disk_free}\n")
     with_entry = _team(project, "with", 'version: "1.0.0"\n',
-                       monitors=other + _POLICY_CURATOR_RECORD)
+                       monitors=other + _POLICY_SLEEP_CYCLE_RECORD)
     without_entry = _team(project, "without", 'version: "1.0.0"\n',
                           monitors=other)
     dest_with, _ = _compose(project, with_entry, dest=project / "out-with")

@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import time
 import threading
 from pathlib import Path
 
@@ -98,6 +99,45 @@ from bobi.transient import (  # noqa: F401  (re-exported for back-compat)
     is_transient_api_error,
 )
 
+# Liveness guard for queued work while a session is temporarily not ready
+# (active turn, rotation, reconnect, or recovery). The message must remain
+# queued until the session recovers; after this window, emit a best-effort
+# operator alert so the stuck state is visible.
+SESSION_UNREACHABLE_ALERT_AFTER = 120.0
+SESSION_READY_WAIT_POLL = 1.0
+
+
+def _emit_session_unreachable_alert(
+    *,
+    session: str,
+    state: str,
+    message_id: str,
+    sender: str,
+    wait: bool,
+    elapsed: float,
+) -> None:
+    """Emit a best-effort alert for a queued message stuck behind readiness."""
+    try:
+        from bobi.events.publish import post_event
+        post_event(
+            "system/session.unreachable",
+            {
+                "session": session,
+                "state": state,
+                "message_id": message_id,
+                "sender": sender,
+                "wait": wait,
+                "elapsed_seconds": round(elapsed, 1),
+                "text": (
+                    f"Session '{session}' has been unreachable for "
+                    f"{elapsed:.0f}s while a queued message waits; current "
+                    f"state: {state}."
+                ),
+            },
+        )
+    except Exception:
+        log.warning("Failed to emit session unreachable alert", exc_info=True)
+
 
 class Session:
     """A Claude Code session with an inbox for receiving messages."""
@@ -156,6 +196,7 @@ class Session:
         self._rotate_pending = False
         self._rotate_reason = "context_cap"
         self._rotation_count = 0
+        self._unreachable_alert_active = False
 
     def detect_state(self) -> str:
         return self._state
@@ -407,29 +448,31 @@ class Session:
         )
 
     def _rebuild_system_prompt(self) -> dict:
-        """Rebuild the system prompt, reloading the team policy (#456).
+        """Rebuild the system prompt, reloading long-term memory (#456).
 
-        A rotated session re-reads policy.md here — the passive pickup path for
-        a curator update (no inbox push needed for a routine distillation).
+        A rotated session re-reads long_term_memory.md here — the passive pickup path for
+        a sleep_cycle update (no inbox push needed for a routine distillation).
         """
         try:
-            from bobi.subagent import _load_policy_prompt
-            policy_prompt = _load_policy_prompt()
+            from bobi.subagent import _load_long_term_memory_prompt
+            memory_prompt = _load_long_term_memory_prompt()
             if isinstance(self._system_prompt, dict):
                 base_append = self._system_prompt.get("append", "")
-                # Strip a previously-injected policy section so it isn't doubled
+                # Strip a previously-injected memory section so it isn't doubled
                 # across rotations.
-                if "## Team Policy" in base_append:
-                    base_append = base_append.split("## Team Policy")[0].rstrip()
-                if policy_prompt:
+                for heading in ("## Long-Term Memory", "## Team Policy"):
+                    if heading in base_append:
+                        base_append = base_append.split(heading)[0].rstrip()
+                        break
+                if memory_prompt:
                     new_append = (
-                        f"{base_append}\n\n{policy_prompt}" if base_append else policy_prompt
+                        f"{base_append}\n\n{memory_prompt}" if base_append else memory_prompt
                     )
                 else:
                     new_append = base_append
                 return {**self._system_prompt, "append": new_append}
         except Exception:
-            log.debug("Failed to reload policy for '%s'", self.name, exc_info=True)
+            log.debug("Failed to reload long-term memory for '%s'", self.name, exc_info=True)
         return self._system_prompt
 
     async def _drain_turn(self) -> str:
@@ -552,17 +595,45 @@ class Session:
 
     async def _process_message(self, msg: Message) -> None:
         """Wait for ready state, inject a message, and optionally respond."""
-        deadline = 300.0  # seconds
+        wait_started = time.monotonic()
+        alerted_unreachable = False
         while self._state not in ("waiting_input", "stopped", "error"):
+            elapsed = time.monotonic() - wait_started
+            if (
+                not self._unreachable_alert_active
+                and not alerted_unreachable
+                and elapsed >= SESSION_UNREACHABLE_ALERT_AFTER
+            ):
+                _emit_session_unreachable_alert(
+                    session=self.name,
+                    state=self._state,
+                    message_id=msg.id,
+                    sender=msg.sender,
+                    wait=msg.wait,
+                    elapsed=elapsed,
+                )
+                alerted_unreachable = True
+                self._unreachable_alert_active = True
             if self._input_ready:
-                try:
-                    await asyncio.wait_for(self._input_ready.wait(), timeout=deadline)
-                except asyncio.TimeoutError:
-                    pass
-                break
+                if self._input_ready.is_set():
+                    # A set event with a still-not-ready state is stale. Do not
+                    # clear it here: a real ready transition could race between
+                    # the loop condition and this branch. Sleep briefly instead
+                    # so stale events cannot spin the loop.
+                    await asyncio.sleep(SESSION_READY_WAIT_POLL)
+                else:
+                    try:
+                        await asyncio.wait_for(
+                            self._input_ready.wait(),
+                            timeout=SESSION_READY_WAIT_POLL,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
             else:
                 # Fallback: no event yet (shouldn't happen after _run)
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(SESSION_READY_WAIT_POLL)
+
+        self._unreachable_alert_active = False
 
         if self._state in ("stopped", "error"):
             # Dropping the message means no turn runs, so clear any Slack

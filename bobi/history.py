@@ -297,7 +297,7 @@ def session_messages(session_id: str) -> list[dict]:
 def messages_since(cursor: int, limit: int | None = None) -> list[dict]:
     """Return indexed messages with ``id > cursor``, oldest-first by row id.
 
-    The delta the policy-curator (#456) ingests each run, across *all*
+    The delta the sleep cycle (#456) ingests each run, across *all*
     sessions. Keyed on the table's unique autoincrement ``messages.id`` — NOT a
     message ``timestamp`` (non-unique across tool-call tie-rows, sometimes
     empty) and NOT ``conversations.started_at`` (write-once, so a long-lived
@@ -308,7 +308,7 @@ def messages_since(cursor: int, limit: int | None = None) -> list[dict]:
 
     The caller groups the returned rows by ``session_id`` to reconstruct
     per-session context. ``limit`` bounds the row count (an over-fetch guard);
-    the curator's char/message budget is applied on top of this.
+    the sleep cycle's char/message budget is applied on top of this.
     """
     if not _db_path().exists():
         return []
