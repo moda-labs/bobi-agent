@@ -86,7 +86,10 @@ describe("DiscordGatewaySession handshake", () => {
 
 	it("RESUMEs instead of IDENTIFYing when constructed with resume state", () => {
 		const s = session({
-			resume: { sessionId: "sess-1", resumeGatewayUrl: "wss://resume.example", lastSeq: 42 },
+			resume: {
+				sessionId: "sess-1", resumeGatewayUrl: "wss://resume.example",
+				lastSeq: 42, botUserId: BOT_USER,
+			},
 		});
 		const [resume] = sent(s.onFrame(HELLO));
 		expect(resume.op).toBe(GatewayOp.RESUME);
@@ -101,18 +104,31 @@ describe("DiscordGatewaySession handshake", () => {
 		expect(s.isReady()).toBe(true);
 		expect(s.botUserId()).toBe(BOT_USER);
 		expect(s.state()).toEqual({
-			sessionId: "sess-1", resumeGatewayUrl: "wss://resume.example", lastSeq: 1,
+			sessionId: "sess-1", resumeGatewayUrl: "wss://resume.example",
+			lastSeq: 1, botUserId: BOT_USER,
 		});
 	});
 
-	it("signals connected on RESUMED", () => {
+	it("signals connected on RESUMED and keeps the bot user for classification", () => {
+		// Only READY carries the bot user; a resumed session must inherit it
+		// from the persisted state or mentions silently stop classifying.
 		const s = session({
-			resume: { sessionId: "sess-1", resumeGatewayUrl: "wss://r", lastSeq: 42 },
+			resume: {
+				sessionId: "sess-1", resumeGatewayUrl: "wss://r",
+				lastSeq: 42, botUserId: BOT_USER,
+			},
 		});
 		s.onFrame(HELLO);
 		expect(s.onFrame(dispatch("RESUMED", {}, 43))).toEqual([
 			{ kind: "connected", resumed: true },
 		]);
+		expect(s.botUserId()).toBe(BOT_USER);
+
+		const actions = s.onFrame(dispatch("MESSAGE_CREATE", guildMessage({
+			mentions: [{ id: BOT_USER }],
+		}), 44));
+		expect(actions).toHaveLength(1);
+		expect(actions[0].kind).toBe("deliver");
 	});
 
 	it("ignores malformed frames instead of dying", () => {

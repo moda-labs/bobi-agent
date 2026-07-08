@@ -64,6 +64,10 @@ export interface GatewayResumeState {
 	sessionId: string;
 	resumeGatewayUrl: string;
 	lastSeq: number | null;
+	// The connection's own bot user id. Only READY carries it (RESUMED does
+	// not), so it must survive resumes - the normalizer needs it to classify
+	// mentions and replies.
+	botUserId: string;
 }
 
 export type GatewayAction =
@@ -111,6 +115,7 @@ export class DiscordGatewaySession {
 		this.sessionId = opts.resume?.sessionId ?? "";
 		this.resumeGatewayUrl = opts.resume?.resumeGatewayUrl ?? "";
 		this.lastSeq = opts.resume?.lastSeq ?? null;
+		this.botUser = opts.resume?.botUserId ?? "";
 		this.resuming = Boolean(opts.resume?.sessionId);
 	}
 
@@ -121,6 +126,7 @@ export class DiscordGatewaySession {
 			sessionId: this.sessionId,
 			resumeGatewayUrl: this.resumeGatewayUrl,
 			lastSeq: this.lastSeq,
+			botUserId: this.botUser,
 		};
 	}
 

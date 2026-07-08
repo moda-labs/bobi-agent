@@ -1144,7 +1144,8 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     from bobi.events.drain import drain_loop
     from bobi.events.server import (
         ensure_running, ensure_bubble, register, register_slack_workspaces,
-        register_whatsapp_numbers, authorize_resources, BubbleRejected,
+        register_whatsapp_numbers, register_discord_apps, authorize_resources,
+        BubbleRejected,
     )
 
     cfg = Config.load(project_path)
@@ -1160,14 +1161,16 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     cursor_path = session_cursor_path(project_path, session_name)
     active_subscriptions = list(subscribe)
 
-    def _register_channel_credentials(url: str, bubble: dict) -> list[str]:
-        """Signed chat-channel registrations (#487/#656): write the
-        bubble-scoped send credentials (and, for WhatsApp, the resource
-        grant). Best-effort - a registration hiccup must not block startup.
-        Slack keeps an unsigned fallback (the global self-reply record);
-        WhatsApp is signed-only, no unsigned use case exists. Returns the
-        WhatsApp pnids the server actually registered, so the caller can
-        drop unbacked ``whatsapp:<pnid>`` topics before register/PUT."""
+    def _register_channel_credentials(url: str, bubble: dict) -> tuple[list[str], list[str]]:
+        """Signed chat-channel registrations (#487/#656/#2): write the
+        bubble-scoped send credentials (and, for WhatsApp/Discord, the
+        resource grant). Best-effort - a registration hiccup must not block
+        startup. Slack keeps an unsigned fallback (the global self-reply
+        record); WhatsApp and Discord are signed-only, no unsigned use case
+        exists. Returns the (WhatsApp pnids, Discord application ids) the
+        server actually registered, so the caller can drop unbacked
+        ``whatsapp:<pnid>`` / ``discord:<application_id>`` topics before
+        register/PUT."""
         try:
             register_slack_workspaces(
                 url, cfg,
@@ -1176,23 +1179,29 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         except Exception as e:
             log.info("Signed Slack registration unavailable (%s) — unsigned", e)
             register_slack_workspaces(url, cfg)
-        return register_whatsapp_numbers(
+        wa_pnids = register_whatsapp_numbers(
             url, cfg,
             bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
         )
+        discord_apps = register_discord_apps(
+            url, cfg,
+            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+        )
+        return wa_pnids, discord_apps
 
     def _authorize_subscriptions(url: str, bubble: dict) -> list[str]:
         """#488: obtain resource grants BEFORE register/PUT so the server's grant
-        check passes. The signed Slack/WhatsApp registrations write BOTH the
-        bubble-scoped outbound records (#487/#656) and their resource grants;
-        github/linear are authorized via /resources/authorize. Returns
-        ``subscribe`` filtered to drop any global topic we could not authorize
-        (so register/PUT is never hard-rejected for a topic we already know is
-        unbacked)."""
-        wa_pnids = _register_channel_credentials(url, bubble) if has_external else None
+        check passes. The signed Slack/WhatsApp/Discord registrations write
+        BOTH the bubble-scoped outbound records (#487/#656/#2) and their
+        resource grants; github/linear are authorized via /resources/authorize.
+        Returns ``subscribe`` filtered to drop any global topic we could not
+        authorize (so register/PUT is never hard-rejected for a topic we
+        already know is unbacked)."""
+        registered = _register_channel_credentials(url, bubble) if has_external else None
         return authorize_resources(
             url, cfg, subscribe, bubble["bubble_id"], bubble["bubble_key"],
-            whatsapp_registered=wa_pnids,
+            whatsapp_registered=registered[0] if registered else None,
+            discord_registered=registered[1] if registered else None,
         )
 
     def _register_with_retry(url: str, attempts: int = register_attempts) -> tuple[str, str]:
@@ -1271,7 +1280,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         else:
             try:
                 _bubble = ensure_bubble(es_url, project_path)
-                _wa_pnids = (
+                _registered = (
                     _register_channel_credentials(es_url, _bubble)
                     if has_external else None
                 )
@@ -1279,7 +1288,8 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
                     es_url, cfg, subscribe,
                     _bubble["bubble_id"], _bubble["bubble_key"],
                     filter_unauthorized=False,
-                    whatsapp_registered=_wa_pnids,
+                    whatsapp_registered=_registered[0] if _registered else None,
+                    discord_registered=_registered[1] if _registered else None,
                 )
                 from bobi import http as pooled
                 resp = pooled.put(
@@ -1317,7 +1327,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         # a github/linear topic we can't authorize is dropped from the PUT.
         try:
             _bubble = ensure_bubble(es_url, project_path)
-            _wa_pnids = (
+            _registered = (
                 _register_channel_credentials(es_url, _bubble)
                 if has_external else None
             )
@@ -1325,7 +1335,8 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
                 es_url, cfg, subscribe,
                 _bubble["bubble_id"], _bubble["bubble_key"],
                 filter_unauthorized=False,
-                whatsapp_registered=_wa_pnids,
+                whatsapp_registered=_registered[0] if _registered else None,
+                discord_registered=_registered[1] if _registered else None,
             )
         except Exception as e:
             log.info("Pre-PUT resource authorization unavailable (%s)", e)

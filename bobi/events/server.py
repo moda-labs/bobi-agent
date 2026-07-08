@@ -237,6 +237,15 @@ def ensure_running(port: int, webhook_secret: str | None = None,
         env["BOBI_ES_WHATSAPP_APP_SECRET"] = env["WHATSAPP_APP_SECRET"]
     if env.get("WHATSAPP_VERIFY_TOKEN"):
         env["BOBI_ES_WHATSAPP_VERIFY_TOKEN"] = env["WHATSAPP_VERIFY_TOKEN"]
+    # Discord Gateway (#2): the local server holds the persistent inbound
+    # WebSocket, so it needs the bot credential at boot. Same unprefixed ->
+    # BOBI_ES_* re-map as WhatsApp.
+    if env.get("DISCORD_BOT_TOKEN"):
+        env["BOBI_ES_DISCORD_BOT_TOKEN"] = env["DISCORD_BOT_TOKEN"]
+    if env.get("DISCORD_APPLICATION_ID"):
+        env["BOBI_ES_DISCORD_APPLICATION_ID"] = env["DISCORD_APPLICATION_ID"]
+    if env.get("DISCORD_MESSAGE_CONTENT"):
+        env["BOBI_ES_DISCORD_MESSAGE_CONTENT"] = env["DISCORD_MESSAGE_CONTENT"]
     if bind:
         env["BOBI_ES_BIND"] = bind
     if extra_env:
@@ -323,7 +332,8 @@ def _seed_test_resource_grant(base_url: str, service: str, resource: str,
 def authorize_resources(base_url: str, cfg, subscribe: list[str],
                         bubble_id: str, bubble_key: str,
                         *, filter_unauthorized: bool = True,
-                        whatsapp_registered: list[str] | None = None) -> list[str]:
+                        whatsapp_registered: list[str] | None = None,
+                        discord_registered: list[str] | None = None) -> list[str]:
     """Obtain a bubble-scoped resource grant for each global ``github:``/``linear:``
     topic in ``subscribe`` so the subsequent ``register`` / ``update_subscriptions``
     passes the server's #488 grant check.
@@ -337,11 +347,13 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
 
     ``whatsapp_registered`` is the pnid list :func:`register_whatsapp_numbers`
     returned when the caller just ran it (``None`` means no registration was
-    attempted). A ``whatsapp:<pnid>`` topic the registration did not back is
+    attempted); ``discord_registered`` is the application-id list from
+    :func:`register_discord_apps`, same contract. A ``whatsapp:<pnid>`` or
+    ``discord:<application_id>`` topic the registration did not back is
     treated exactly like a rejected github/linear credential: the grant the
     server checks is written BY that registration, so keeping the topic would
     hard-reject the whole atomic register/PUT (#488) and stall delivery for
-    every channel, not just WhatsApp.
+    every channel, not just that one.
 
     When ``filter_unauthorized`` is false, authorization is still attempted, but
     unverified topics are kept. This is used for saved deployments: the server
@@ -353,11 +365,19 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
     if not (bubble_id and bubble_key):
         return list(subscribe)  # can't sign — leave the set unchanged
 
+    # Channels whose grant is written by a signed registration this caller may
+    # have just run: None means no registration was attempted (keep the topic),
+    # a list means only its members are backed.
+    registered_by_service = {
+        "whatsapp": whatsapp_registered,
+        "discord": discord_registered,
+    }
+
     kept: list[str] = []
     unbacked: list[str] = []
     for sub in subscribe:
         service = sub.split(":", 1)[0] if ":" in sub else ""
-        if service in ("github", "linear", "slack", "whatsapp") and ":" in sub:
+        if service in ("github", "linear", "slack", "whatsapp", "discord") and ":" in sub:
             resource = sub.split(":", 1)[1]
             try:
                 if _seed_test_resource_grant(base_url, service, resource, bubble_id, bubble_key):
@@ -365,20 +385,22 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                     continue
             except Exception as e:
                 log.debug("Test resource-grant seed failed for %r: %s", sub, e)
-        if service == "whatsapp" and whatsapp_registered is not None and ":" in sub:
-            if sub.split(":", 1)[1] not in whatsapp_registered:
+        registered = registered_by_service.get(service)
+        if registered is not None and ":" in sub:
+            if sub.split(":", 1)[1] not in registered:
                 action = "dropping it from" if filter_unauthorized else "keeping it in"
                 log.warning(
-                    "WhatsApp registration did not back %r — %s this session's "
+                    "%s registration did not back %r - %s this session's "
                     "subscriptions (a resource grant is required, #488)",
-                    sub, action,
+                    service, sub, action,
                 )
                 unbacked.append(sub)
                 if not filter_unauthorized:
                     kept.append(sub)
                 continue
         if service not in _RESOURCE_CRED_KEYS:
-            # Non-global, or slack/whatsapp (granted via their registrations).
+            # Non-global, or slack/whatsapp/discord (granted via their
+            # registrations).
             kept.append(sub)
             continue
         resource = sub.split(":", 1)[1]
@@ -730,4 +752,44 @@ def register_whatsapp_numbers(base_url: str, cfg, bubble_id: str = "",
         return [pnid]
     except Exception as e:
         log.warning("WhatsApp number registration failed for %s: %s", pnid, e)
+        return []
+
+
+def register_discord_apps(base_url: str, cfg, bubble_id: str = "",
+                          bubble_key: str = "") -> list[str]:
+    """Register the agent's Discord app with the event server (#2).
+
+    Signed-only mirror of :func:`register_whatsapp_numbers`: the server
+    verifies the bot token against the Discord API, stores the bubble-scoped
+    send credential ``/channels/send`` resolves, and writes the
+    ``discord:<application_id>`` resource grant that lets this bubble
+    subscribe to the app's inbound topic. On the local runtime a successful
+    registration also starts the app's Gateway connection (inbound Discord
+    messages arrive over a persistent WebSocket, not a webhook). Without a
+    bubble key there is nothing to register. Best-effort: logs and continues
+    on any failure so a registration hiccup never blocks startup. Returns the
+    application ids registered.
+    """
+    try:
+        token = cfg.credential("discord", "bot_token")
+        app_id = cfg.credential("discord", "application_id")
+    except Exception:
+        return []
+    if not (token and app_id and bubble_id and bubble_key):
+        return []
+    try:
+        from bobi.events.signing import signed_request
+        resp = signed_request(
+            base_url, "POST", "/discord/apps",
+            {"application_id": app_id, "bot_token": token},
+            bubble_id, bubble_key, timeout=10.0,
+        )
+        if resp.status_code != 200:
+            log.warning("Discord app registration rejected for %s: HTTP %d",
+                        app_id, resp.status_code)
+            return []
+        log.info("Registered Discord app %s with event server", app_id)
+        return [app_id]
+    except Exception as e:
+        log.warning("Discord app registration failed for %s: %s", app_id, e)
         return []
