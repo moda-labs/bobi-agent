@@ -1152,6 +1152,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     es_key = state.get("api_key", "")
     es_deployment = state.get("deployment_id", "")
     cursor_path = session_cursor_path(project_path, session_name)
+    active_subscriptions = list(subscribe)
 
     def _register_channel_credentials(url: str, bubble: dict) -> list[str]:
         """Signed chat-channel registrations (#487/#656): write the
@@ -1189,6 +1190,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         )
 
     def _register_with_retry(url: str, attempts: int = register_attempts) -> tuple[str, str]:
+        nonlocal active_subscriptions
         last_err: Exception | None = None
         for attempt in range(attempts):
             try:
@@ -1211,6 +1213,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
                         bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
                     )
                 save_deployment_state(project_path, session_name, dep, key)
+                active_subscriptions = list(authorized)
                 # A fresh deployment starts a fresh seq space — a leftover
                 # cursor would skip or mis-replay events on first connect.
                 cursor_path.unlink(missing_ok=True)
@@ -1283,6 +1286,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
                     timeout=10.0,
                 )
                 resp.raise_for_status()
+                active_subscriptions = list(authorized)
             except Exception as e:
                 log.warning("Subscription sync failed, re-registering: %s", e)
                 cursor_path.unlink(missing_ok=True)
@@ -1332,6 +1336,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
                 timeout=10.0,
             )
             resp.raise_for_status()
+            active_subscriptions = list(authorized)
         except Exception as e:
             log.info("Subscription update failed (%s) — re-registering", e)
             es_deployment, es_key = _register_with_retry(es_url)
@@ -1359,7 +1364,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         from bobi import http as pooled
         pooled.put(
             f"{es_url}/deployments/{es_deployment}/subscriptions",
-            json={"replace": subscribe},
+            json={"replace": active_subscriptions},
             headers={
                 "Authorization": f"Bearer {es_key}",
                 "Content-Type": "application/json",

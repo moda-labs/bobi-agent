@@ -19,6 +19,7 @@ from bobi.config import Config, ServiceConfig
 from bobi.events.server import (
     authorize_resources,
     register,
+    BubbleRejected,
     UnauthorizedTopics,
 )
 from bobi.subagent import _start_event_subscription
@@ -119,6 +120,48 @@ def test_authorize_resources_drops_topic_on_server_denial():
             ["github:o/r"], "bub_test", "bkey_test",
         )
     assert kept == []  # denied → dropped
+
+
+def test_authorize_resources_warns_with_unbacked_global_topics(caplog):
+    """A failed grant authorization must leave one loud summary listing the
+    affected global subscriptions, so startup cannot look subscribed while the
+    backing grant is missing."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": "forbidden"})
+
+    mock_http = httpx.Client(transport=httpx.MockTransport(handler))
+    with patch.object(pooled, "_client", mock_http), caplog.at_level("WARNING"):
+        kept = authorize_resources(
+            "https://es.invalid", _cfg(github_token="ghp_x", linear_key="lin_y"),
+            ["github:o/r", "linear:ENG", "inbox/self"],
+            "bub_test", "bkey_test",
+        )
+
+    assert kept == ["inbox/self"]
+    assert "Global event subscriptions without resource grants were dropped" in caplog.text
+    assert "github:o/r" in caplog.text
+    assert "linear:ENG" in caplog.text
+
+
+def test_authorize_resources_transport_warning_does_not_log_credentials(caplog):
+    """Transport failures should say which topic is unbacked without copying
+    credential-shaped values from config or exception text into logs."""
+    secret = "ghp_secret_should_not_log"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise RuntimeError(f"upstream failed with {secret}")
+
+    mock_http = httpx.Client(transport=httpx.MockTransport(handler))
+    with patch.object(pooled, "_client", mock_http), caplog.at_level("WARNING"):
+        kept = authorize_resources(
+            "https://es.invalid", _cfg(github_token=secret),
+            ["github:o/r"],
+            "bub_test", "bkey_test",
+        )
+
+    assert kept == []
+    assert "github:o/r" in caplog.text
+    assert secret not in caplog.text
 
 
 def test_authorize_resources_never_calls_for_slack_or_nonglobal():
@@ -259,9 +302,10 @@ def test_startup_authorizes_resources_before_register(tmp_path):
     """_start_event_subscription must authorize resource grants before it
     registers the deployment, so a github:/linear: topic has its grant by the
     time the server checks it."""
-    ms = tmp_path / ".bobi"
-    ms.mkdir()
-    (ms / "agent.yaml").write_text(
+    from bobi import paths
+
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text(
         "agent: test\nentry_point: manager\nevent_server: https://es.invalid\n"
         "services:\n  - name: github\n    credentials:\n      token: ghp_x\n"
     )
@@ -289,3 +333,52 @@ def test_startup_authorizes_resources_before_register(tmp_path):
         _start_event_subscription("sess", ["github:o/r"], tmp_path)
 
     assert order.index("authorize") < order.index("register")
+
+
+def test_startup_reauthorizes_resources_after_forced_bubble_remint(tmp_path):
+    """If the event server rejects the on-disk bubble, startup must force a
+    re-mint and authorize resource grants with the new bubble before the
+    successful register. Otherwise global topics can be registered without the
+    grants that delivery requires."""
+    from bobi import paths
+
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text(
+        "agent: test\nentry_point: manager\nevent_server: https://es.invalid\n"
+        "services:\n  - name: github\n    credentials:\n      token: ghp_x\n"
+    )
+
+    auth_bubbles = []
+    register_bubbles = []
+
+    def fake_ensure_bubble(url, project_path, force_remint_of=""):
+        assert url == "https://es.invalid"
+        if force_remint_of:
+            assert force_remint_of == "bub_old"
+            return {"bubble_id": "bub_new", "bubble_key": "bkey_new"}
+        return {"bubble_id": "bub_old", "bubble_key": "bkey_old"}
+
+    def fake_authorize(url, cfg, subscribe, bubble_id, bubble_key, **kw):
+        auth_bubbles.append((bubble_id, bubble_key))
+        return list(subscribe)
+
+    def fake_register(url, name, subscriptions, bubble_id="", bubble_key="", **kw):
+        register_bubbles.append((bubble_id, bubble_key, list(subscriptions)))
+        if len(register_bubbles) == 1:
+            raise BubbleRejected("stale bubble")
+        return ("dep-1", "key-1")
+
+    with patch("bobi.events.server.ensure_bubble", side_effect=fake_ensure_bubble), \
+         patch("bobi.events.server.register_slack_workspaces", return_value=[]), \
+         patch("bobi.events.server.register_whatsapp_numbers", return_value=[]), \
+         patch("bobi.events.server.authorize_resources", side_effect=fake_authorize), \
+         patch("bobi.events.server.register", side_effect=fake_register), \
+         patch("bobi.events.client.EventServerClient"), \
+         patch("bobi.events.drain.drain_loop"):
+        _start_event_subscription("sess", ["github:o/r"], tmp_path)
+
+    assert auth_bubbles == [("bub_old", "bkey_old"), ("bub_new", "bkey_new")]
+    assert register_bubbles == [
+        ("bub_old", "bkey_old", ["github:o/r"]),
+        ("bub_new", "bkey_new", ["github:o/r"]),
+    ]
