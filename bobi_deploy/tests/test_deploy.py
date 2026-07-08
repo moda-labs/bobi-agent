@@ -945,7 +945,7 @@ def test_binary_mode_pins_bobi_version_as_build_arg(repo, recorder, monkeypatch,
     monkeypatch.setattr(B, "find_repo_root",
                         lambda p=None: (_ for _ in ()).throw(B.BuildError("x")))
     monkeypatch.setattr(B, "_packaged_deploy_dir", lambda: pkg)
-    monkeypatch.setattr(B, "_bobi_version", lambda: "1.2.3")
+    monkeypatch.setattr(B, "installed_bobi_version", lambda: "1.2.3")
     D.deploy(repo, "eng")
     prov = next(c for c in _flat(recorder) if "provision-instance.sh" in c)
     assert "--build-arg" in prov and "BOBI_VERSION=1.2.3" in prov

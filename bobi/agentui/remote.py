@@ -136,7 +136,13 @@ def run(name: str | None = None, *, app: str | None = None,
         open_browser: bool = True, check: bool = False) -> int:
     """Resolve → fetch token/port → `fly proxy` → open browser (or, with
     ``check``, probe /api/dashboard once and exit)."""
-    from bobi_deploy import deploy
+    try:
+        from bobi_deploy import deploy
+    except ImportError:
+        print("Tunneling to a deployed instance needs the bobi-deploy package "
+              "(it resolves the Fly app exactly as `bobi deploy` does). "
+              "Install it alongside bobi and re-run.", file=sys.stderr)
+        return 1
     deploy.preflight_fly_or_exit()                  # flyctl installed + logged in
     target = resolve_app(name, app)
     if not deploy.fly_app_exists(target):

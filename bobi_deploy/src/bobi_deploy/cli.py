@@ -13,8 +13,6 @@ from pathlib import Path
 
 import click
 
-from bobi.build import BuildError
-
 
 @click.command()
 @click.argument("name")
@@ -66,6 +64,7 @@ def deploy(name, team, team_url, fleet, env_file, auth, event_server, region,
         bobi deploy eng-team            # uses deployments/eng-team.yaml
         bobi deploy my-team --team my-team   # local package, ssh-push
     """
+    from bobi.build import BuildError
     from bobi_deploy import deploy as deploy_mod
     project_path = Path.cwd()
 
@@ -130,7 +129,7 @@ def deploy_init(team, fleet, tenant, event_server, auth, force):
         bobi deploy-init                          # every team under agents/
         bobi deploy-init eng-team --fleet acme --tenant prod
     """
-    from bobi.build import _bobi_version
+    from bobi.build import BuildError, installed_bobi_version
     from bobi_deploy import scaffold as scaffold_mod
 
     project_path = Path.cwd()
@@ -143,7 +142,7 @@ def deploy_init(team, fleet, tenant, event_server, auth, force):
             "Pass a TEAM name or run from your agent-teams repo root.")
 
     try:
-        version = _bobi_version()
+        version = installed_bobi_version()
     except BuildError:
         version = "<version>"  # bobi not pip-installed; user pins manually
 
@@ -177,6 +176,7 @@ def destroy(name, fleet, yes):
         bobi destroy eng-team
         bobi destroy eng-team --yes
     """
+    from bobi.build import BuildError
     from bobi_deploy import deploy as deploy_mod
     deploy_mod.preflight_fly_or_exit()
 

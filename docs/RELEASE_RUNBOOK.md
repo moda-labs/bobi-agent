@@ -9,8 +9,14 @@ Fly-hosted agents.
 > to PyPI. A `uv tool install bobi` from the next release therefore has no
 > `bobi deploy` - decide the bobi-deploy distribution channel (private index
 > per the split plan, or temporary PyPI publish) before cutting a release that
-> external deploy users depend on. CI and this runbook's fleet steps are
-> unaffected (they install both packages from the checkout).
+> external deploy users depend on, and raise bobi_deploy/pyproject.toml's
+> `bobi>=` floor to that release (0.40.0 satisfies the pin but predates the
+> bobi.build/bobi.config seams it imports). Until the name is published or
+> claimed, `bobi-deploy` is squattable on PyPI and `deploy-init`-scaffolded
+> fleet workflows pip-install it by name - claim the name (or rename the
+> package) before any scaffold reaches an external repo. CI and this
+> runbook's fleet steps are unaffected (they install both packages from the
+> checkout).
 
 ## 1. Sync `bobi`
 

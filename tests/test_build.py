@@ -263,7 +263,7 @@ def test_binary_mode_pins_pypi_version(tmp_path, recorder, monkeypatch):
         B, "find_repo_root",
         lambda p=None: (_ for _ in ()).throw(B.BuildError("no checkout")))
     monkeypatch.setattr(B, "_packaged_deploy_dir", lambda: pkg)
-    monkeypatch.setattr(B, "_bobi_version", lambda: "9.9.9")
+    monkeypatch.setattr(B, "installed_bobi_version", lambda: "9.9.9")
 
     result = B.build_team_image(str(team), project_path=tmp_path / "elsewhere")
     (cmd,) = _builds(recorder)
@@ -286,7 +286,7 @@ def test_explicit_bobi_version_wins(tmp_path, recorder, monkeypatch):
     """The wrapper's BOBI_VERSION contract: an explicit pin overrides the
     installed version (which may be unpublished in a dev checkout)."""
     repo = _make_repo(tmp_path, BAKING_TEAM)
-    monkeypatch.setattr(B, "_bobi_version", lambda: "0.0.0.dev0")
+    monkeypatch.setattr(B, "installed_bobi_version", lambda: "0.0.0.dev0")
     B.build_team_image(str(repo / "agents" / "eng-team"), project_path=repo,
                        build_mode="pypi", bobi_version="0.38.0")
     (cmd,) = _builds(recorder)
@@ -295,7 +295,7 @@ def test_explicit_bobi_version_wins(tmp_path, recorder, monkeypatch):
 
 def test_source_checkout_can_force_pypi_mode(tmp_path, recorder, monkeypatch):
     repo = _make_repo(tmp_path, BAKING_TEAM)
-    monkeypatch.setattr(B, "_bobi_version", lambda: "9.9.9")
+    monkeypatch.setattr(B, "installed_bobi_version", lambda: "9.9.9")
     B.build_team_image(str(repo / "agents" / "eng-team"), project_path=repo,
                        build_mode="pypi")
     (cmd,) = _builds(recorder)
@@ -429,7 +429,7 @@ def test_resolve_assets_binary_mode_from_packaged(tmp_path, monkeypatch):
     monkeypatch.setattr(B, "find_repo_root",
                         lambda p=None: (_ for _ in ()).throw(B.BuildError("x")))
     monkeypatch.setattr(B, "_packaged_deploy_dir", lambda: pkg)
-    monkeypatch.setattr(B, "_bobi_version", lambda: "9.9.9")
+    monkeypatch.setattr(B, "installed_bobi_version", lambda: "9.9.9")
 
     staging = tmp_path / "staging"
     staging.mkdir()
@@ -442,16 +442,10 @@ def test_resolve_assets_binary_mode_from_packaged(tmp_path, monkeypatch):
     assert a.provision_sh == pkg / "scripts" / "provision-instance.sh"
 
 
-def test_local_package_dir_requires_agent_yaml(tmp_path):
-    repo = _make_repo(tmp_path, GENERIC_TEAM)
-    with pytest.raises(B.BuildError, match="not found"):
-        B.local_package_dir(repo, "nope")
-
-
-def test_local_package_dir_accepts_a_path(tmp_path):
+def test_resolve_team_dir_accepts_a_literal_path(tmp_path):
     repo = _make_repo(tmp_path, GENERIC_TEAM)
     team = tmp_path / "somewhere" / "myteam"
     team.mkdir(parents=True)
     (team / "agent.yaml").write_text("agent: myteam\n")
-    assert B.local_package_dir(repo, str(team)) == team.resolve()
+    assert B.resolve_team_dir(repo, str(team)) == team.resolve()
 

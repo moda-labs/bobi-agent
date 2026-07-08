@@ -134,7 +134,7 @@ def _packaged_deploy_dir() -> Path | None:
     return None
 
 
-def _bobi_version() -> str:
+def installed_bobi_version() -> str:
     """The installed bobi version — pinned into the PyPI instance image so
     the built instance runs the same code as the binary that built it."""
     from importlib.metadata import PackageNotFoundError, version
@@ -154,6 +154,9 @@ def resolve_assets(project_path: Path, staging: Path | None = None) -> BuildAsse
     binary-mode build context is assembled there (Dockerfile.pypi + docker/)."""
     try:
         repo = find_repo_root(project_path)
+    except BuildError:
+        repo = None
+    if repo is not None:
         return BuildAssets(
             mode="source",
             provision_sh=repo / "scripts" / "provision-instance.sh",
@@ -163,8 +166,6 @@ def resolve_assets(project_path: Path, staging: Path | None = None) -> BuildAsse
             build_args={},
             run_cwd=repo,
         )
-    except BuildError:
-        pass
 
     pkg = _packaged_deploy_dir()
     if pkg is None:
@@ -190,25 +191,12 @@ def resolve_assets(project_path: Path, staging: Path | None = None) -> BuildAsse
         # `pypi` builder + the version to install (the source builder is the
         # Dockerfile's default, used in a checkout).
         build_args={"BOBI_BUILD": "pypi",
-                    "BOBI_VERSION": _bobi_version()},
+                    "BOBI_VERSION": installed_bobi_version()},
         run_cwd=None,
     )
 
 
 # --- team package resolution --------------------------------------------------
-
-def local_package_dir(base: Path, team: str) -> Path:
-    """Resolve a local team package (the ssh-push source). `team` may be a path
-    to a team dir, or a name found under `base/agents/<team>` or `base/<team>`."""
-    for cand in (Path(team), base / "agents" / team, base / team):
-        if (cand / "agent.yaml").exists():
-            return cand.resolve()
-    raise BuildError(
-        f"local team '{team}' not found — looked for agent.yaml in '{team}', "
-        f"'{base}/agents/{team}', and '{base}/{team}'. For ssh-push delivery, "
-        "point `team:` at a local package directory holding agent.yaml."
-    )
-
 
 def resolve_team_dir(project_path: Path, team: str) -> Path:
     """Resolve a team ref to a **flat, ready-to-ship** package dir.
@@ -276,9 +264,9 @@ def _resolve_team_package(project_path: Path, team: str) -> Path:
       3. bare name, no local dir → fetch latest into the shared cache.
     """
     from bobi import registry
-    # A team ref that is itself a path to a package dir wins literally — mirrors
-    # local_package_dir's first candidate (`Path(team)`) and avoids mis-splitting
-    # a filesystem path that happens to contain '@' (e.g. `/work@v2/eng-team`).
+    # A team ref that is itself a path to a package dir wins literally — avoids
+    # mis-splitting a filesystem path that happens to contain '@'
+    # (e.g. `/work@v2/eng-team`).
     if (Path(team) / "agent.yaml").exists():
         return Path(team).resolve()
     name, version = registry.split_team_ref(team)
@@ -294,7 +282,7 @@ def _resolve_team_package(project_path: Path, team: str) -> Path:
             raise BuildError(
                 f"could not resolve pinned team '{name}@{version}': {e}"
             ) from e
-    # Bare name: a local checkout wins (unchanged), exactly like local_package_dir.
+    # Bare name: a local checkout wins (unchanged).
     for cand in (project_path / "agents" / name, project_path / name):
         if (cand / "agent.yaml").exists():
             return cand.resolve()
@@ -461,7 +449,7 @@ def _pypi_version(bobi_version: str | None) -> str:
     """The version a pypi-mode image installs: an explicit pin, else the
     version of the bobi running this command (the image runs the same code as
     the CLI that built it). Warns on a version PyPI can't serve."""
-    version = bobi_version or _bobi_version()
+    version = bobi_version or installed_bobi_version()
     if not re.fullmatch(r"\d+(\.\d+)*", version):
         log.warning(
             "pypi build mode pins bobi==%s, which does not look like a "

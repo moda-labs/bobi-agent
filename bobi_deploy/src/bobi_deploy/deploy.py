@@ -350,13 +350,8 @@ def _secret_sets(cfg: DeployConfig,
 
 # --- secret resolution -------------------------------------------------------
 
-def resolve_env_file(cfg: DeployConfig, project_path: Path,
-                     out_dir: Path, *, live: set[str] | None = None) -> Path:
-    """Materialize the resolved secrets into the KEY=VALUE env-file that
-    provision-instance.sh consumes (mode 0600). Thin wrapper over
-    resolve_secret_values — see it for sourcing, the declared-set filter, and the
-    live-aware required check."""
-    values = resolve_secret_values(cfg, project_path, live=live)
+def _write_instance_env(out_dir: Path, values: dict[str, str]) -> Path:
+    """Write the KEY=VALUE env-file provision-instance.sh consumes (mode 0600)."""
     out = out_dir / "instance.env"
     write_env_file(out, values)
     try:
@@ -364,6 +359,15 @@ def resolve_env_file(cfg: DeployConfig, project_path: Path,
     except OSError:
         pass
     return out
+
+
+def resolve_env_file(cfg: DeployConfig, project_path: Path,
+                     out_dir: Path, *, live: set[str] | None = None) -> Path:
+    """Materialize the resolved secrets into the provisioner's env-file. Thin
+    wrapper over resolve_secret_values — see it for sourcing, the declared-set
+    filter, and the live-aware required check."""
+    return _write_instance_env(
+        out_dir, resolve_secret_values(cfg, project_path, live=live))
 
 
 def resolve_secret_values(cfg: DeployConfig, project_path: Path,
@@ -642,7 +646,6 @@ def fly_instance_running(app: str) -> bool:
     this (not mere existence): an app that exists but has no started machine is
     HALF-PROVISIONED (a deploy that failed mid-build) and must re-provision, not
     take the ssh update path (which errors 'no started VMs'). Caught in e2e."""
-    import json
     proc = subprocess.run([_fly_bin(), "machine", "list", "-a", app, "--json"],
                           capture_output=True, text=True)
     if proc.returncode != 0:
@@ -658,7 +661,6 @@ def _fly_machine_ids(app: str) -> list[str]:
     """The app's machine IDs. `fly machine restart` requires an explicit ID when
     not attached to a TTY (a bare `-a <app>` errors 'a machine ID must be
     specified' — caught in the live ssh-push e2e), so resolve them first."""
-    import json
     proc = subprocess.run(
         [_fly_bin(), "machine", "list", "-a", app, "--json"],
         capture_output=True, text=True, check=True,
@@ -1039,12 +1041,7 @@ def deploy(project_path: Path, name: str, overrides: dict | None = None) -> Depl
         if app_exists:
             _, volume_env_pruned = reconcile_live_secrets(
                 cfg, project_path, app, values, live or set(), prune=prune)
-        env_file = Path(tmp) / "instance.env"
-        write_env_file(env_file, values)
-        try:
-            os.chmod(env_file, 0o600)
-        except OSError:
-            pass
+        env_file = _write_instance_env(Path(tmp), values)
         # Provision when there's no running instance — covers a brand-new app AND a
         # half-provisioned one (app/volume exist but the image build failed, so no
         # started machine). Only ssh-update an instance that's actually up.

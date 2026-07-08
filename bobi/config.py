@@ -106,12 +106,8 @@ def find_env_var_refs(project_path: Path) -> list[EnvVarRef]:
     optional one to the same name.
     """
     from bobi import paths
-    agent_yaml = paths.agent_yaml_path(project_path)
-    if not agent_yaml.exists():
-        return []
     refs: dict[str, EnvVarRef] = {}
-    for token in _ENV_VAR_RE.findall(agent_yaml.read_text()):
-        ref = parse_env_ref(token)
+    for ref in _scan_env_refs(paths.agent_yaml_path(project_path)):
         prior = refs.get(ref.name)
         if prior is None or (ref.required and not prior.required):
             refs[ref.name] = ref
@@ -123,18 +119,28 @@ def find_required_env_vars(project_path: Path) -> list[str]:
     return [r.name for r in find_env_var_refs(project_path) if r.required]
 
 
-def scan_required_vars(agent_yaml: Path) -> list[str]:
-    """Return the bare ${VAR} secret names a package's agent.yaml requires.
-
-    Like find_required_env_vars but for an arbitrary (not-yet-installed)
-    package file. A bare ${VAR} is required; ${VAR:-default} carries its own
-    fallback (a ':' in the captured name) and is optional, so it's excluded.
-    """
+def _scan_env_refs(agent_yaml: Path) -> list[EnvVarRef]:
+    """Every ${VAR} reference in an arbitrary (not-yet-installed) package
+    file, in order, un-deduped. The one file-level scan the filters below and
+    find_env_var_refs build on."""
     if not agent_yaml.exists():
         return []
-    return [ref.name
-            for ref in map(parse_env_ref, _ENV_VAR_RE.findall(agent_yaml.read_text()))
-            if ref.required]
+    return [parse_env_ref(t) for t in _ENV_VAR_RE.findall(agent_yaml.read_text())]
+
+
+def _dedup(names: list[str]) -> list[str]:
+    return list(dict.fromkeys(names))
+
+
+def scan_required_vars(agent_yaml: Path) -> list[str]:
+    """The bare ${VAR} secret names a package's agent.yaml requires.
+
+    Like find_required_env_vars but for a package file that isn't installed
+    yet. A bare ${VAR} is required; ${VAR:-default} carries its own fallback
+    (a ':' in the captured name) and is optional, so it's excluded. De-duped,
+    order preserved.
+    """
+    return _dedup([r.name for r in _scan_env_refs(agent_yaml) if r.required])
 
 
 def scan_declared_vars(agent_yaml: Path) -> list[str]:
@@ -146,12 +152,7 @@ def scan_declared_vars(agent_yaml: Path) -> list[str]:
     it doubles as the prune authority and the env-file filter. De-duped, order
     preserved.
     """
-    if not agent_yaml.exists():
-        return []
-    seen: dict[str, None] = {}
-    for v in _ENV_VAR_RE.findall(agent_yaml.read_text()):
-        seen.setdefault(parse_env_ref(v).name, None)  # ${VAR:-x} -> VAR
-    return list(seen)
+    return _dedup([r.name for r in _scan_env_refs(agent_yaml)])
 
 
 def _interpolate_env(value, env: dict[str, str] | None = None):

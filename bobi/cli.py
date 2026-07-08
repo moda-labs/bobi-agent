@@ -213,7 +213,60 @@ def _attach_runtime_log(root: Path) -> None:
 
 
 
-@click.group(invoke_without_command=True)
+class _PluginGroup(click.Group):
+    """A click Group that also serves plugin commands, lazily.
+
+    Plugins register under the `bobi.commands` entry-point group — the seam
+    separately-installed packages deliver commands through (e.g. bobi-deploy
+    adds `bobi deploy` / `deploy-init` / `destroy`). Without such a package
+    installed, the CLI is the local product only.
+
+    Lazy on purpose: the entry-point scan reads metadata for every installed
+    distribution and ep.load() imports the plugin, so neither may run at
+    import time — `import bobi.cli` happens in hot paths that never dispatch
+    a plugin command (monitor-scheduler subprocesses, the webapp daemon).
+    The scan runs only when a command name misses the built-ins or the
+    command list is actually rendered (--help, completion); a plugin loads
+    only when ITS command runs. A plugin can never shadow a built-in, and a
+    broken plugin must not take the CLI down with it (warn and move on).
+    """
+
+    _plugin_eps: dict | None = None
+
+    def _plugins(self) -> dict:
+        if self._plugin_eps is None:
+            from importlib.metadata import entry_points
+            eps = {}
+            for ep in entry_points(group="bobi.commands"):
+                if ep.name in self.commands:  # built-ins win
+                    logging.getLogger(__name__).warning(
+                        "CLI plugin '%s' (%s) collides with a built-in "
+                        "command — ignored", ep.name, ep.value)
+                    continue
+                eps[ep.name] = ep
+            self._plugin_eps = eps
+        return self._plugin_eps
+
+    def list_commands(self, ctx):
+        return sorted(set(super().list_commands(ctx)) | set(self._plugins()))
+
+    def get_command(self, ctx, name):
+        cmd = super().get_command(ctx, name)
+        if cmd is not None:
+            return cmd
+        ep = self._plugins().get(name)
+        if ep is None:
+            return None
+        try:
+            return ep.load()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "failed to load CLI plugin '%s' (%s)", name, ep.value,
+                exc_info=True)
+            return None
+
+
+@click.group(cls=_PluginGroup, invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="bobi")
 @click.pass_context
 def main(ctx):
@@ -3272,33 +3325,6 @@ for _old_top_level in [
     "event-server", "login-bootstrap", "install",
 ]:
     main.commands.pop(_old_top_level, None)
-
-
-def _load_command_plugins() -> None:
-    """Mount CLI plugins registered under the `bobi.commands` entry-point group.
-
-    This is the seam separately-installed packages deliver commands through —
-    e.g. bobi-deploy adds `bobi deploy` / `deploy-init` / `destroy`. Without
-    such a package installed, the CLI is the local product only. A plugin can
-    never shadow a built-in, and a broken plugin must not take the CLI down
-    with it (warn and move on).
-    """
-    from importlib.metadata import entry_points
-    for ep in entry_points(group="bobi.commands"):
-        if ep.name in main.commands:
-            logging.getLogger(__name__).warning(
-                "CLI plugin '%s' (%s) collides with a built-in command — ignored",
-                ep.name, ep.value)
-            continue
-        try:
-            main.add_command(ep.load(), name=ep.name)
-        except Exception:
-            logging.getLogger(__name__).warning(
-                "failed to load CLI plugin '%s' (%s)", ep.name, ep.value,
-                exc_info=True)
-
-
-_load_command_plugins()
 
 
 if __name__ == "__main__":

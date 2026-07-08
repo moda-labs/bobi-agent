@@ -172,7 +172,10 @@ def _command_error(tokens: tuple[str, ...]) -> str | None:
     command = tokens[1]
     if command.startswith("-"):
         return None
-    if command not in cli_main.commands:
+    # Resolve through the group, not `.commands`: plugin commands (the
+    # `bobi.commands` entry points, e.g. bobi-deploy's deploy/destroy) are
+    # served lazily by _PluginGroup.get_command and never live in the dict.
+    if cli_main.get_command(None, command) is None:
         return f"`bobi {command}` is not a public top-level command"
 
     if command == "agents":

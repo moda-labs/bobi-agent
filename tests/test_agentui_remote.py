@@ -7,6 +7,11 @@ import types
 
 import pytest
 
+# The tunnel is glue over the deploy engine (bobi_deploy, a separate
+# package scheduled for deletion with this module); without it there is
+# nothing to test.
+pytest.importorskip("bobi_deploy")
+
 from bobi.agentui import remote
 
 

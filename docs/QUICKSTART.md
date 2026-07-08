@@ -290,8 +290,11 @@ Read https://github.com/moda-labs/bobi-agent/blob/main/docs/CONTAINERIZED_DEPLOY
 
 Or do it by hand:
 
-**1. Use a released Bobi version.** Deploy from a normal `uv tool install
-bobi` / Homebrew install (the instance image pins the version you're running).
+**1. Use a released Bobi version, plus the deploy plugin.** Deploy from a
+normal `uv tool install bobi` / Homebrew install (the instance image pins the
+version you're running). The `deploy`/`destroy` commands ship in the separate
+`bobi-deploy` package - install it alongside bobi (from a source checkout:
+`pip install ./bobi_deploy`) and they appear in the CLI.
 
 **2. Set up Fly.** If you've never used Fly:
 

@@ -117,7 +117,7 @@ def test_bare_name_no_local_fetches_latest(project, monkeypatch):
 
 def test_team_as_filesystem_path_with_at_is_not_mis_split(project, monkeypatch):
     """A `team:` that is a literal path containing '@' must resolve to that dir,
-    not be mis-parsed as name@version (regression: local_package_dir never split)."""
+    not be mis-parsed as name@version (regression: path resolution never split)."""
     weird = project / "checkout@v2" / "eng-team"
     weird.mkdir(parents=True)
     weird.joinpath("agent.yaml").write_text("agent: eng-team\nentry_point: manager\n")

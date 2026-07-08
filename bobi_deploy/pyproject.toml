@@ -10,6 +10,11 @@ authors = [
 
 dependencies = [
     # The one allowed direction: bobi-deploy imports bobi, never the reverse.
+    # This floor MUST be raised to the first bobi release that ships the
+    # carve-out seams (bobi.build.resolve_team_dir/resolve_assets,
+    # bobi.config.scan_*) before this wheel is published anywhere - 0.40.0
+    # satisfies the pin but lacks those APIs. It stays at the in-repo
+    # version until then so editable co-installs resolve.
     "bobi>=0.40",
     "click>=8.1",
     "pyyaml>=6.0",
