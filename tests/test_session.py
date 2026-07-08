@@ -93,17 +93,22 @@ class TestInputReadyWake:
         session._set_state("waiting_input")
         _fake_client(session)
 
+        acked = []
         msg = _make_msg(wait=True)
+        msg.ack = lambda: acked.append(msg.id)
         await session._process_message(msg)
 
         session.inbox.respond.assert_called_once_with(msg, "response text")
+        assert acked == ["m1"]
 
     @pytest.mark.asyncio
     async def test_wake_on_stopped(self, session):
         """Message is rejected when session transitions to stopped."""
         session._set_state("working")
 
+        acked = []
         msg = _make_msg(wait=True)
+        msg.ack = lambda: acked.append(msg.id)
 
         async def transition():
             await asyncio.sleep(0.05)
@@ -113,13 +118,16 @@ class TestInputReadyWake:
         await session._process_message(msg)
 
         session.inbox.respond.assert_called_once_with(msg, "session stopped")
+        assert acked == []
 
     @pytest.mark.asyncio
     async def test_wake_on_error(self, session):
         """Message is rejected when session transitions to error."""
         session._set_state("working")
 
+        acked = []
         msg = _make_msg(wait=True)
+        msg.ack = lambda: acked.append(msg.id)
 
         async def transition():
             await asyncio.sleep(0.05)
@@ -129,6 +137,20 @@ class TestInputReadyWake:
         await session._process_message(msg)
 
         session.inbox.respond.assert_called_once_with(msg, "session error")
+        assert acked == []
+
+    @pytest.mark.asyncio
+    async def test_terminal_drop_logs_warning(self, session, caplog):
+        """Terminal-state drops should be visible and replayable."""
+        session._set_state("error")
+        msg = Message(id="m1", sender="slack", text="hello from a user", wait=False)
+        msg.ack = MagicMock()
+
+        await session._process_message(msg)
+
+        msg.ack.assert_not_called()
+        assert "Dropping inbox message" in caplog.text
+        assert "state=error" in caplog.text
 
     @pytest.mark.asyncio
     async def test_no_poll_latency(self, session):

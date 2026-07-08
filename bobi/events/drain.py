@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from queue import SimpleQueue
 from typing import TYPE_CHECKING, Callable
@@ -18,6 +19,68 @@ DRAIN_INTERVAL = 2
 # session can stop its drain thread cleanly on shutdown (the loop otherwise
 # blocks forever on queue.get()).
 _DRAIN_STOP = object()
+
+
+class _CursorAckTracker:
+    """Advance the cursor only when all older pushed messages are complete."""
+
+    def __init__(self, cursor_ack: "Callable[[int], None] | None") -> None:
+        self._cursor_ack = cursor_ack
+        self._outstanding: dict[int, int] = {}
+        self._completed: set[int] = set()
+        self._last_acked = 0
+        self._lock = threading.Lock()
+
+    def track(self, seq: int) -> "Callable[[], None] | None":
+        if not self._cursor_ack or seq <= 0:
+            return None
+        with self._lock:
+            self._outstanding[seq] = self._outstanding.get(seq, 0) + 1
+
+        called = False
+        called_lock = threading.Lock()
+
+        def complete() -> None:
+            nonlocal called
+            with called_lock:
+                if called:
+                    return
+                called = True
+            self.complete(seq)
+
+        return complete
+
+    def complete(self, seq: int) -> None:
+        if not self._cursor_ack or seq <= 0:
+            return
+        with self._lock:
+            count = self._outstanding.get(seq, 0)
+            if count > 1:
+                self._outstanding[seq] = count - 1
+            else:
+                self._outstanding.pop(seq, None)
+                self._completed.add(seq)
+            self._flush_locked()
+
+    def complete_unpushed(self, seq: int) -> None:
+        if not self._cursor_ack or seq <= 0:
+            return
+        with self._lock:
+            self._completed.add(seq)
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        if not self._completed:
+            return
+        floor = min(self._outstanding) - 1 if self._outstanding else max(self._completed)
+        eligible = [seq for seq in self._completed if seq <= floor]
+        if not eligible:
+            return
+        seq = max(eligible)
+        if seq > self._last_acked:
+            self._cursor_ack(seq)
+            self._last_acked = seq
+        self._completed = {s for s in self._completed if s > self._last_acked}
 
 
 def _get_project_root():
@@ -64,6 +127,17 @@ def _without_placeholder_fields(event: dict) -> dict:
     fields = dict(event.get("fields", {}))
     fields.pop("placeholder_ts", None)
     return dict(event, fields=fields)
+
+
+def _push_inbox(inbox: object, msg: object, priority: bool = False) -> None:
+    """Push to real Inbox or test doubles that predate priority support."""
+    if not priority:
+        inbox.push(msg)  # type: ignore[attr-defined]
+        return
+    try:
+        inbox.push(msg, priority=True)  # type: ignore[attr-defined]
+    except TypeError:
+        inbox.push(msg)  # type: ignore[attr-defined]
 
 
 def _prepare_chat_events(events: list[dict]) -> list[dict]:
@@ -124,6 +198,7 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
     from bobi.inbox import get_local_inbox, Message, _msg_id
 
     log.info("Drain loop active — delivering events to session inbox")
+    ack_tracker = _CursorAckTracker(cursor_ack)
 
     while True:
         event = queue.get()
@@ -155,19 +230,25 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
         # them raw and skip auto-dispatch (they're not external triggers to
         # route) and skip formatting (the text is the message itself).
         external: list[dict] = []
+        skipped_seqs: list[int] = []
+        pushed = False
         for e in batch:
+            seq = int(e.get("seq", 0) or 0)
             if _is_inbox_event(e):
                 payload = e.get("payload") or {}
                 text = payload.get("text", "")
                 if not text:
+                    skipped_seqs.append(seq)
                     continue
-                inbox.push(Message(
+                _push_inbox(inbox, Message(
                     id=payload.get("id") or _msg_id(),
                     sender=payload.get("sender", ""),
                     text=text,
                     wait=bool(payload.get("wait", False)),
                     reply_to=payload.get("reply_to", ""),
+                    ack=ack_tracker.track(seq),
                 ))
+                pushed = True
             elif _is_policy_update(e):
                 # Passive-by-default delivery (#456). The curator publishes
                 # policy.updated for observability on every rewrite, but working
@@ -181,26 +262,34 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 if not bool(payload.get("urgent", False)):
                     log.debug("Suppressing non-urgent policy.updated inbox push "
                               "for %s (passive re-read on next prompt)", session_name)
+                    skipped_seqs.append(seq)
                     continue
                 summary = str(payload.get("summary", "")).strip()
-                inbox.push(Message(
+                _push_inbox(inbox, Message(
                     id=_msg_id(),
                     sender="policy-curator",
                     text=(f"policy.md updated — {summary}\n"
                           "Re-read run/state/policy.md and reconcile any "
                           "in-flight plan against it."),
+                    ack=ack_tracker.track(seq),
                 ))
+                pushed = True
             else:
                 external.append(e)
 
         if not external:
+            for seq in skipped_seqs:
+                ack_tracker.complete_unpushed(seq)
+            if not pushed:
+                max_seq = max((int(e.get("seq", 0) or 0) for e in batch), default=0)
+                ack_tracker.complete_unpushed(max_seq)
             if stop_after:
                 return
             continue
 
-        # Single pass: auto-dispatch + group by delivery class.
-        # Bulk events are delivered first so the agent sees context
-        # before interactive messages that may need an immediate reply.
+        # Single pass: auto-dispatch + group by delivery class. Chat is pushed
+        # first so an idle session blocked in recv() wakes for the interactive
+        # message instead of grabbing bulk before the priority item exists.
         bulk_events: list[tuple[bool, dict]] = []
         chat_events: list[tuple[bool, dict]] = []
         for e in external:
@@ -216,6 +305,7 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                                   "delivering it un-dispatched", e.get("type"))
             if reactor_result == "deduped":
                 log.info("Dropping duplicate event delivery %s", e.get("type"))
+                skipped_seqs.append(int(e.get("seq", 0) or 0))
                 continue
             target = chat_events if e.get("delivery") == "chat" else bulk_events
             target.append((reactor_result, e))
@@ -229,7 +319,7 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 for (dispatched, _), prepared_ev in zip(chat_events, prepared)
             ]
 
-        for group in [bulk_events, chat_events]:
+        for group, priority in [(chat_events, True), (bulk_events, False)]:
             if not group:
                 continue
 
@@ -243,16 +333,27 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 lines.append(formatted)
             text = "\n\n".join(lines)
 
-            log.info(f"Delivering {len(group)} event(s) to {session_name}")
-            inbox.push(Message(id=_msg_id(), sender="event-bus", text=text))
+            max_seq = max((int(e.get("seq", 0) or 0) for _, e in group), default=0)
+            log.info("Delivering %d event(s) to %s (max_seq=%s)",
+                     len(group), session_name, max_seq or "none")
+            _push_inbox(
+                inbox,
+                Message(
+                    id=_msg_id(),
+                    sender="event-bus",
+                    text=text,
+                    ack=ack_tracker.track(max_seq),
+                ),
+                priority=priority,
+            )
+            pushed = True
 
-        # Advance cursor and ACK only AFTER all events in this batch have
-        # been delivered to the inbox — a crash before here means the
-        # server replays the events on reconnect (#278 bug 2).
-        if cursor_ack:
-            max_seq = max((e.get("seq", 0) for e in batch), default=0)
-            if max_seq > 0:
-                cursor_ack(max_seq)
+        for seq in skipped_seqs:
+            ack_tracker.complete_unpushed(seq)
+
+        if not pushed:
+            max_seq = max((int(e.get("seq", 0) or 0) for e in batch), default=0)
+            ack_tracker.complete_unpushed(max_seq)
 
         if stop_after:
             return

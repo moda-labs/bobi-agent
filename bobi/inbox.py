@@ -25,8 +25,9 @@ import queue
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,9 @@ class Message:
     # fire-and-forget messages. The request's ``id`` is the correlation id the
     # reply carries back.
     reply_to: str = ""
+    # Completion callback used by the event drain to ACK the event-server cursor
+    # only after the session has actually processed this inbox message.
+    ack: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +85,8 @@ class Inbox:
 
     def __init__(self, session_name: str) -> None:
         self.session_name = session_name
-        self._queue: queue.SimpleQueue[Message] = queue.SimpleQueue()
+        self._queue: queue.PriorityQueue[tuple[int, int, Message]] = queue.PriorityQueue()
+        self._counter = 0
         self._closed = False
 
     def start(self) -> None:
@@ -89,14 +94,17 @@ class Inbox:
         register_local_inbox(self.session_name, self)
         log.info(f"Inbox for '{self.session_name}' active")
 
-    def push(self, msg: Message) -> None:
+    def push(self, msg: Message, priority: bool = False) -> None:
         """Enqueue a message for the session's run loop to pick up."""
-        self._queue.put(msg)
+        self._counter += 1
+        # Lower priority values are returned first. The counter preserves FIFO
+        # ordering within chat and normal classes.
+        self._queue.put((0 if priority else 1, self._counter, msg))
 
     def recv(self, timeout: float = 2.0) -> Message | None:
         """Block until a message arrives. Returns None on timeout."""
         try:
-            return self._queue.get(timeout=timeout)
+            return self._queue.get(timeout=timeout)[2]
         except queue.Empty:
             return None
 

@@ -122,7 +122,8 @@ class TestDrainLoop:
                                           delivery="chat",
                                           text="hello", channel="D123", workspace="T123"))
 
-        # Bulk group is pushed first, then the chat group — two pushes.
+        # Chat group is pushed first so an idle receiver wakes on the priority
+        # message before bulk exists in the queue.
         inbox = _CaptureInbox(stop_after=2)
         register_local_inbox("moda-mgr-test", inbox)
         try:
@@ -133,8 +134,8 @@ class TestDrainLoop:
             unregister_local_inbox("moda-mgr-test")
 
         assert len(inbox.messages) == 2
-        github_text = inbox.messages[0].text
-        slack_text = inbox.messages[1].text
+        slack_text = inbox.messages[0].text
+        github_text = inbox.messages[1].text
         assert "task.opened" in github_text
         assert "task.assigned" in github_text
         assert "slack.dm" not in github_text
@@ -222,7 +223,7 @@ class TestDrainLoopWithReactor:
 
 
 class TestCursorAckAfterDelivery:
-    """cursor_ack callback is called AFTER delivery, not before (#278)."""
+    """cursor_ack callback is called after inbox messages finish processing."""
 
     def test_cursor_ack_called_with_max_seq(self):
         from bobi.events.drain import drain_loop, _DRAIN_STOP
@@ -242,8 +243,10 @@ class TestCursorAckAfterDelivery:
         finally:
             unregister_local_inbox("test-ack")
 
-        # Both events delivered in one batch; cursor_ack gets the max seq.
+        # Both events delivered in one batch, but ACK waits for message completion.
         assert len(inbox.messages) >= 1
+        assert acked == []
+        inbox.messages[0].ack()
         assert acked == [7]
 
     def test_cursor_ack_not_called_for_zero_seq(self):
@@ -264,8 +267,8 @@ class TestCursorAckAfterDelivery:
 
         assert acked == []
 
-    def test_cursor_ack_called_after_inbox_push(self):
-        """Ensures cursor_ack fires AFTER inbox.push, not before."""
+    def test_cursor_ack_called_after_message_ack(self):
+        """Ensures cursor_ack fires only after the session processes the message."""
         from bobi.events.drain import drain_loop, _DRAIN_STOP
 
         order = []
@@ -292,7 +295,62 @@ class TestCursorAckAfterDelivery:
         finally:
             unregister_local_inbox("test-ack-order")
 
+        assert order == ["push"]
+        inbox.messages[0].ack()
         assert order == ["push", "ack"]
+
+    def test_cursor_ack_watermark_waits_for_older_bulk_before_newer_chat(self):
+        from bobi.events.drain import drain_loop, _DRAIN_STOP
+
+        q = SimpleQueue()
+        q.put({"type": "push", "source": "github", "delivery": "bulk",
+               "seq": 5, "data": {"issue_id": "1"}})
+        q.put({"type": "mention", "source": "slack", "delivery": "chat",
+               "seq": 7, "data": {"text": "help"}})
+        q.put(_DRAIN_STOP)
+
+        acked = []
+        inbox = _CaptureInbox()
+        register_local_inbox("test-ack-watermark", inbox)
+        try:
+            drain_loop("test-ack-watermark", queue=q,
+                       cursor_ack=lambda seq: acked.append(seq))
+        finally:
+            unregister_local_inbox("test-ack-watermark")
+
+        assert len(inbox.messages) == 2
+        chat, bulk = inbox.messages
+
+        chat.ack()
+        assert acked == []
+
+        bulk.ack()
+        assert acked == [7]
+
+    def test_cursor_ack_includes_suppressed_events_after_pushed_message(self):
+        from bobi.events.drain import drain_loop, _DRAIN_STOP
+
+        q = SimpleQueue()
+        q.put({"type": "push", "source": "github", "delivery": "bulk",
+               "seq": 5, "data": {"issue_id": "1"}})
+        q.put({"type": "policy.updated", "source": "system", "delivery": "bulk",
+               "seq": 7, "payload": {"urgent": False}})
+        q.put(_DRAIN_STOP)
+
+        acked = []
+        inbox = _CaptureInbox()
+        register_local_inbox("test-ack-suppressed", inbox)
+        try:
+            drain_loop("test-ack-suppressed", queue=q,
+                       cursor_ack=lambda seq: acked.append(seq))
+        finally:
+            unregister_local_inbox("test-ack-suppressed")
+
+        assert len(inbox.messages) == 1
+        assert acked == []
+
+        inbox.messages[0].ack()
+        assert acked == [7]
 
 
 class TestFormatBatching:

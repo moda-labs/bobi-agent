@@ -735,6 +735,14 @@ class Session:
             # Dropping the message means no turn runs, so clear any Slack
             # "thinking…" indicator here — _drain_turn (which normally clears
             # it) is never reached.
+            log.warning(
+                "Dropping inbox message for session '%s' in terminal state=%s "
+                "sender=%s text=%r",
+                self.name,
+                self._state,
+                msg.sender,
+                msg.text[:120],
+            )
             self._stop_status_indicators()
             if msg.wait:
                 self.inbox.respond(msg, f"session {self._state}")
@@ -755,6 +763,8 @@ class Session:
             self._rotate_reason = "manual"
             if msg.wait:
                 self.inbox.respond(msg, "compaction requested; rotating at next idle")
+            if msg.ack:
+                msg.ack()
             return
 
         try:
@@ -797,6 +807,9 @@ class Session:
             if msg.wait:
                 self.inbox.respond(msg, f"error: {e}")
             self._set_state("error")
+        finally:
+            if msg.ack:
+                msg.ack()
 
     async def _inbox_loop(self) -> None:
         loop = asyncio.get_running_loop()

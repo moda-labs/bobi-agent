@@ -61,6 +61,20 @@ class TestInboxQueue:
         assert received == [f"msg-{i}" for i in range(5)]
         inbox.close()
 
+    def test_priority_messages_are_received_before_normal_messages(self):
+        inbox = Inbox("test-priority")
+        inbox.push(Message(id="bulk-1", sender="event-bus", text="bulk 1"))
+        inbox.push(Message(id="chat-1", sender="event-bus", text="chat 1"), priority=True)
+        inbox.push(Message(id="bulk-2", sender="event-bus", text="bulk 2"))
+        inbox.push(Message(id="chat-2", sender="event-bus", text="chat 2"), priority=True)
+
+        received = []
+        while (m := inbox.recv(timeout=0.2)) is not None:
+            received.append(m.text)
+
+        assert received == ["chat 1", "chat 2", "bulk 1", "bulk 2"]
+        inbox.close()
+
 
 class TestLocalInboxRegistry:
     """start()/close() make a session addressable in-process for its drain."""
