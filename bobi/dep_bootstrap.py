@@ -452,7 +452,7 @@ def render_team_deps(team_dir: "Path", project_path: "Path | None" = None, *,
     frozen.
 
     `cfg`/`deps` let a caller that already composed the team and resolved its
-    dependency set (build.py:stage_team_deps) pass them in, avoiding a second
+    dependency set (the deploy plugin's stage_team_deps) pass them in, avoiding a second
     chain walk + registry fetch; omitted, they are computed here as before.
     """
     from pathlib import Path
