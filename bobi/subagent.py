@@ -1717,8 +1717,9 @@ def _run_verdict_agent_blocking(
     max_turns: int,
     fresh: bool = False,
     no_verdict_hint: str = "",
+    role: str = "monitor",
 ) -> tuple[Any, AgentResult | None, str]:
-    """Shared retry core for one-shot verdict agents (checks and gates).
+    """Shared retry core for one-shot verdict agents (checks, gates, curator).
 
     Runs the supervised agent up to ``attempts`` times and hands its final
     text to ``parse``; a run that errors or parses to None is indeterminate
@@ -1738,7 +1739,7 @@ def _run_verdict_agent_blocking(
             result = asyncio.run(
                 asyncio.wait_for(
                     _run_agent_supervised(prompt, cwd, run_key, phase, timeout,
-                                          role="monitor", max_turns=max_turns,
+                                          role=role, max_turns=max_turns,
                                           fresh=fresh),
                     timeout=timeout,
                 )
@@ -1913,6 +1914,66 @@ def run_gate_blocking(
         raw_output=result.final_text, duration_ms=result.duration_ms,
         total_cost_usd=result.total_cost_usd,
     )
+
+
+# ---------------------------------------------------------------------------
+# Non-interactive policy curator (#456, #695)
+# ---------------------------------------------------------------------------
+
+# The curator's full task (prompt + current policy + transcript delta) arrives
+# inline in the prompt; it writes policy.md and prints a summary, so a modest
+# cap covers the write plus any re-reads without letting a run balloon.
+CURATOR_MAX_TURNS = 10
+
+
+def run_curator_blocking(
+    task: str,
+    cwd: str,
+    name: str | None = None,
+    timeout: int = CHECK_TIMEOUT,
+    attempts: int = 2,
+) -> tuple[dict | None, str]:
+    """Run the one-shot curator agent (#456) and parse its JSON summary.
+
+    The curator must NOT ride ``run_check_blocking`` (#695): the check
+    runner wraps the task in finding-verdict instructions, rejects the
+    curator's ``{"success": ..., "updated": ...}`` summary as "no verdict",
+    and prints its own finding JSON - the scheduler would then read every
+    curator run as failed and never advance the policy cursor.
+
+    Runs with role "curator", not "monitor": distillation judgment matters
+    more than poll cost, so the cheap ``roles.monitor.model`` default must
+    not apply; teams can still pin ``roles.curator.model``. Session-fresh
+    like the gate - each run is a stateless full rewrite of policy.md.
+
+    Returns ``(summary, error)``: the parsed summary dict on a clean run,
+    or ``(None, error)`` after exhausting attempts - indeterminate, never
+    "all clear", so the caller must not advance the cursor.
+    """
+    import hashlib
+
+    from bobi.monitors import curator as curator_mod
+
+    short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
+    slug = name or f"curator-{short_hash}"
+    phase = "curator"
+    session = _session_name(slug, role="curator", phase=phase)
+
+    registry = get_registry()
+    registry.register(SessionEntry(
+        name=session, session_id="", role="curator",
+        run_key=slug, title="policy curator", phase=phase,
+        cwd=cwd, status="starting",
+    ))
+
+    summary, _result, error = _run_verdict_agent_blocking(
+        task, cwd, slug, phase, session, curator_mod.parse_result,
+        timeout=timeout, attempts=attempts, max_turns=CURATOR_MAX_TURNS,
+        fresh=True, role="curator",
+    )
+    if summary is None:
+        return None, error
+    return summary, ""
 
 
 # ---------------------------------------------------------------------------

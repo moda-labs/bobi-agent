@@ -87,14 +87,18 @@ every tick, so monitors added at runtime take effect without a restart.
 - **Curator** (`curator: true`) - the one flavor whose agent *writes* an
   artifact (`policy.md`) instead of returning a verdict. Curator input can be
   large, so the scheduler writes the rendered task to `run/state/curator/` and
-  passes the spawned agent a short "read this file" task pointer.
+  spawns the dedicated `monitors curator --request <file>` command (like the
+  gate's `monitors gate`), never `subagents launch` - its `--wait` path wraps
+  the task in check-verdict semantics that swallow the curator's summary
+  (#695). The curator agent runs with role `curator`, not the cheap-model
+  `monitor` role - distillation judgment matters more than poll cost; pin its
+  model with `roles: {curator: {model: ...}}`.
 
 Out-of-band monitor agents must not inline large context into the spawn command.
 Use the request-file pattern instead: write the full context under `run/state/`,
-pass a short absolute-path pointer in `--task` or a dedicated `--request`
-argument, and delete the file from the subprocess cleanup hook. The scheduler
-rejects any monitor-agent argv element over 100KB before `Popen`, well below
-Linux's per-argument cap.
+pass the absolute path in a dedicated `--request` argument, and delete the file
+from the subprocess cleanup hook. The scheduler rejects any monitor-agent argv
+element over 100KB before `Popen`, well below Linux's per-argument cap.
 
 ## The relevance gate: judging "about X" without paying per tick
 
