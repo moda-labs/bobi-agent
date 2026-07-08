@@ -15,7 +15,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from bobi.env import agent_spawn_env
+from bobi.env import child_agent_env
 from bobi.mcp_handshake import preflight_timeout
 
 log = logging.getLogger(__name__)
@@ -442,9 +442,8 @@ async def _async_probe_mcp(
             "strict_mcp_config": True,
             "max_turns": 0,
             # Probe in the same environment agents are spawned in so preflight can
-            # never be green when the runtime PATH would fail to resolve a bare
-            # command (MDS-64).
-            "env": agent_spawn_env(),
+            # never be green when the runtime PATH or runtime .env would differ.
+            "env": child_agent_env(project_path),
         },
     )
     get_mcp_status = getattr(client, "get_mcp_status", None)

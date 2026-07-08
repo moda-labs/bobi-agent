@@ -525,6 +525,22 @@ def test_config_load_dotenv_values_do_not_leak_between_projects(tmp_path, monkey
     assert Config.load(second).credential("slack", "bot_token") == "xoxb-second"
 
 
+def test_config_load_does_not_mutate_process_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("CONFIG_ONLY_TOKEN", raising=False)
+    _write_agent_yaml(tmp_path, """
+        services:
+          - name: slack
+            credentials:
+              bot_token: ${CONFIG_ONLY_TOKEN}
+    """)
+    (tmp_path / ".env").write_text("CONFIG_ONLY_TOKEN=xoxb-config-only\n")
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.credential("slack", "bot_token") == "xoxb-config-only"
+    assert "CONFIG_ONLY_TOKEN" not in os.environ
+
+
 def test_venn_services_property(tmp_path):
     config_dir = tmp_path / "package"
     config_dir.mkdir()

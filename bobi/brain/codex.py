@@ -152,6 +152,7 @@ class _CodexSession:
         model: str = "",
         runner=None,
         mcp_servers: dict | None = None,
+        mcp_env: dict[str, str] | None = None,
     ) -> None:
         self._cwd = cwd or "."
         self._instructions = instructions
@@ -163,6 +164,7 @@ class _CodexSession:
         # Codex has no live status introspection, so the preflight probe reaches
         # each server directly through get_mcp_status below (#428 Stage 4).
         self._mcp_servers = mcp_servers or {}
+        self._mcp_env = mcp_env
 
     async def get_mcp_status(self) -> dict:
         """A Claude-``get_mcp_status``-shaped MCP status for the preflight probe.
@@ -173,16 +175,17 @@ class _CodexSession:
         wires up actually answer). Keeps ``validate._async_probe_mcp`` a single
         loop across brains instead of warn-degrading for Codex.
 
-        Probes under the runtime agent-spawn env so a bare-command stdio server
-        resolves on the same PATH it will launch under (parity with the Claude
-        probe, which passes the same env into the SDK)."""
+        Probes under the caller-provided runtime env when present so a
+        bare-command stdio server and its credentials match the environment
+        validate passes to other brains. Falls back to the generic spawn env for
+        direct uses outside validation."""
         from bobi.env import agent_spawn_env
         from bobi.mcp_handshake import preflight_timeout, probe_servers
 
         return await probe_servers(
             self._mcp_servers,
             timeout=preflight_timeout(),
-            env=agent_spawn_env(),
+            env=self._mcp_env or agent_spawn_env(),
         )
 
     async def connect(self, prompt: str | None = None) -> None:
@@ -311,4 +314,5 @@ class CodexBrain:
             # don't apply to Codex; only a model override is honored.
             model=model,
             mcp_servers=mcp_servers,
+            mcp_env=opts.get("env") if isinstance(opts.get("env"), dict) else None,
         )

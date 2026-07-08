@@ -43,7 +43,9 @@ GUIDE_TEAM = """
       - name: cowsay
         guide: |
           Install the `cowsay` command-line tool from the Debian `cowsay` apt
-          package, system-wide (as root), so the `cowsay` binary is on PATH.
+          package, system-wide (as root), so `command -v cowsay` passes in a
+          fresh non-login shell. Debian may place the binary under /usr/games;
+          if so, add a stable /usr/local/bin/cowsay symlink.
         success: command -v cowsay
 """
 

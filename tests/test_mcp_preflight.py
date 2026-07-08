@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import os
 
 import pytest
 
@@ -20,9 +21,11 @@ class _FakeClient:
     HANG_CONNECT = False
     HANG_STATUS = False
     HANG_DISCONNECT = False
+    LAST_OPTIONS = None
 
     def __init__(self, options=None):
         self.options = options
+        _FakeClient.LAST_OPTIONS = options
         self._snapshots = list(_FakeClient.SNAPSHOTS)
         self.connects = 0
 
@@ -79,6 +82,7 @@ def _install_fake_client(monkeypatch, snapshots, interval=0.0):
     _FakeClient.HANG_CONNECT = False
     _FakeClient.HANG_STATUS = False
     _FakeClient.HANG_DISCONNECT = False
+    _FakeClient.LAST_OPTIONS = None
     monkeypatch.setattr(bobi.brain, "get_brain", lambda: _FakeClaudeBrain())
     monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "claude")
     # Don't actually sleep between polls.
@@ -104,6 +108,24 @@ class TestPollRace:
         assert len(results) == 1
         assert results[0].ok is True
         assert "3 tools" in results[0].detail
+
+    def test_probe_env_includes_runtime_dotenv(self, monkeypatch, tmp_path):
+        snapshots = [
+            {"mcpServers": [{"name": "secure", "status": "connected",
+                             "tools": []}]},
+        ]
+        _install_fake_client(monkeypatch, snapshots)
+        monkeypatch.delenv("SECURE_MCP_TOKEN", raising=False)
+        (tmp_path / "package").mkdir()
+        (tmp_path / ".env").write_text("SECURE_MCP_TOKEN=from-dotenv\n")
+
+        asyncio.run(
+            _async_probe_mcp(["secure"], {"secure": {"type": "stdio",
+                             "command": "/abs/secure"}}, tmp_path)
+        )
+
+        assert _FakeClient.LAST_OPTIONS["env"]["SECURE_MCP_TOKEN"] == "from-dotenv"
+        assert "SECURE_MCP_TOKEN" not in os.environ
 
     def test_failed_settles_immediately(self, monkeypatch, tmp_path):
         snapshots = [
@@ -290,11 +312,16 @@ class TestPollRace:
         # Redirect config.toml render (make_session side effect) off the real home.
         monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
         monkeypatch.setenv("BOBI_MCP_PREFLIGHT_TIMEOUT", "60")
+        monkeypatch.delenv("CODEX_MCP_TOKEN", raising=False)
+        (tmp_path / "package").mkdir()
+        (tmp_path / ".env").write_text("CODEX_MCP_TOKEN=from-dotenv\n")
         monkeypatch.setattr(bobi.brain, "get_brain", lambda: CodexBrain())
         seen_timeouts = []
+        seen_envs = []
 
         async def _fake_probe(mcp_servers, timeout=10.0, env=None):
             seen_timeouts.append(timeout)
+            seen_envs.append(env)
             return {"mcpServers": [
                 {"name": n, "status": "connected", "tools": ["t1", "t2"],
                  "error": None}
@@ -312,6 +339,8 @@ class TestPollRace:
         assert results[0].name == "weather"
         assert "2 tools" in results[0].detail
         assert seen_timeouts == [60.0]
+        assert seen_envs[0]["CODEX_MCP_TOKEN"] == "from-dotenv"
+        assert "CODEX_MCP_TOKEN" not in os.environ
 
     def test_codex_brain_reports_failed_handshake(self, monkeypatch, tmp_path):
         """A codex server that fails initialize is a blocking failure (per-brain
