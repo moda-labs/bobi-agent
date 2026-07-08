@@ -178,6 +178,19 @@ brain:
 If the gateway needs auth, put `ANTHROPIC_AUTH_TOKEN` in the team's runtime
 `.env`. See `skills/create-agent.md` for the details.
 
+Individual roles can declare their own model, applied whenever an agent
+launches with that role (subagents, workflow steps, monitor checks):
+
+```yaml
+roles:
+  monitor: {model: haiku}    # cheap observe-and-report checks
+  planner: {model: opus}
+```
+
+Role models pick a model within the team's brain, never a different brain.
+Precedence: `--model` launch flag > step `model:` > `roles.<role>.model` >
+`brain.model` > provider default.
+
 Workflow steps can override the team default for that step:
 
 ```yaml

@@ -97,6 +97,22 @@ def _resolve_workspace_note(project: Path | None) -> str:
     )
 
 
+_MODEL_PASSTHROUGH_NOTE = (
+    "## Passing Through Model Requests\n\n"
+    "When a user asks for a specific model on a task or feature (e.g. "
+    '"use opus for this", "run this on haiku"), pass `--model <alias>` '
+    "through to `subagents launch` for that work:\n\n"
+    "```bash\n"
+    "bobi agent <agent> subagents launch -w adhoc --role engineer "
+    "--model opus \\\n"
+    '  --task "..."\n'
+    "```\n\n"
+    "The launch flag wins over `roles.<role>.model` and `brain.model`. "
+    "Only apply it to the requested work - don't carry a one-off model "
+    "request into unrelated dispatches."
+)
+
+
 def resolve_agent_prompt(
     role: str,
     project_path: Path | str,
@@ -176,6 +192,7 @@ def build_startup_prompt(
     ]
     if memory_section:
         parts.append(memory_section)
+    parts.append(_MODEL_PASSTHROUGH_NOTE)
     parts.append(f"## Available workflows\n\n{workflows}")
     return "\n\n".join(parts)
 
