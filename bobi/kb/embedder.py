@@ -17,17 +17,17 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
-def _state_dir() -> Path:
+def _state_dir(root: Path | None = None) -> Path:
     from bobi import paths
-    return paths.state_dir()
+    return paths.state_dir(root)
 
 
-def _pid_path() -> Path:
-    return _state_dir() / "embedding-sidecar.pid"
+def _pid_path(root: Path | None = None) -> Path:
+    return _state_dir(root) / "embedding-sidecar.pid"
 
 
-def _port_path() -> Path:
-    return _state_dir() / "embedding-sidecar.port"
+def _port_path(root: Path | None = None) -> Path:
+    return _state_dir(root) / "embedding-sidecar.port"
 
 
 def _log_path() -> Path:
@@ -132,11 +132,15 @@ def embed(texts: list[str]) -> list[list[float]]:
     return embeddings
 
 
-def stop() -> None:
-    """Stop the sidecar if running."""
+def stop(root: Path | None = None) -> None:
+    """Stop the sidecar if running.
+
+    ``root`` selects the team whose sidecar state to read; None means the
+    process's bound root (in-team callers).
+    """
     global _verified_port
     _verified_port = None
-    pid_p = _pid_path()
+    pid_p = _pid_path(root)
     if not pid_p.exists():
         return
     try:
@@ -146,4 +150,4 @@ def stop() -> None:
     except (ValueError, ProcessLookupError, OSError):
         pass
     pid_p.unlink(missing_ok=True)
-    _port_path().unlink(missing_ok=True)
+    _port_path(root).unlink(missing_ok=True)

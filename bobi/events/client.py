@@ -43,7 +43,8 @@ def _save_cursor(seq: int, path: Path | None = None) -> None:
     path.write_text(json.dumps({"last_seen": seq}))
 
 
-def _log_event(event: dict, session_id: str = "") -> None:
+def _log_event(event: dict, session_id: str = "",
+               state_dir: Path | None = None) -> None:
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "type": event.get("type", ""),
@@ -59,7 +60,7 @@ def _log_event(event: dict, session_id: str = "") -> None:
         entry["deployment_id"] = deployment_id
 
     filename = f"events-{session_id or 'default'}.jsonl"
-    path = _state_path(filename)
+    path = (state_dir / filename) if state_dir is not None else _state_path(filename)
     prefix = ""
     if path.exists() and path.stat().st_size > 0:
         with open(path, "rb") as f:
@@ -424,7 +425,12 @@ class EventServerClient:
             if msg_type in ("event", "replay"):
                 data = msg.get("data", {})
 
-                _log_event(data, session_id=self.deployment_id)
+                # An explicit cursor pins the whole client to that team's
+                # state dir (the reply channel in an unbound multi-team host);
+                # without one, the bound-root default applies.
+                _log_event(data, session_id=self.deployment_id,
+                           state_dir=self.cursor_path.parent
+                           if self.cursor_path else None)
                 seq = data.get("seq") or 0
                 if seq > self._max_enqueued_seq:
                     self._max_enqueued_seq = seq

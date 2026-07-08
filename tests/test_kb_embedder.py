@@ -18,8 +18,8 @@ def state_dir(tmp_path, monkeypatch):
     """Redirect sidecar state files to a temp directory."""
     sd = tmp_path / ".bobi" / "state"
     sd.mkdir(parents=True)
-    monkeypatch.setattr(embedder, "_state_dir", lambda: sd)
-    monkeypatch.setattr("bobi.kb.embedder._state_dir", lambda: sd)
+    monkeypatch.setattr(embedder, "_state_dir", lambda root=None: sd)
+    monkeypatch.setattr("bobi.kb.embedder._state_dir", lambda root=None: sd)
     return sd
 
 
@@ -27,7 +27,7 @@ def state_dir(tmp_path, monkeypatch):
 def mock_project_root(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "bobi.kb.embedder._state_dir",
-        lambda: tmp_path / ".bobi" / "state",
+        lambda root=None: tmp_path / ".bobi" / "state",
     )
     (tmp_path / ".bobi" / "state").mkdir(parents=True, exist_ok=True)
     return tmp_path

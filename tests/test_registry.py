@@ -100,12 +100,12 @@ class TestSessionRegistry:
 
     def test_handoff_path(self, tmp_path, monkeypatch):
         paths.bind_root(tmp_path)
-        path = SessionRegistry.handoff_path("agent-42", "setup")
+        path = SessionRegistry().handoff_path("agent-42", "setup")
         assert path == tmp_path / "state" / "sessions" / "agent-42" / "handoff-setup.yaml"
 
     def test_log_path(self, tmp_path, monkeypatch):
         paths.bind_root(tmp_path)
-        path = SessionRegistry.log_path("agent-42")
+        path = SessionRegistry().log_path("agent-42")
         assert path == tmp_path / "state" / "sessions" / "agent-42" / "log.jsonl"
 
     def test_cross_process_visibility(self, tmp_path, monkeypatch):

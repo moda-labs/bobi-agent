@@ -194,11 +194,13 @@ class _ReplyChannel:
         self.cursor_path.unlink(missing_ok=True)
         # The shared EventServerClient also writes a per-deployment events log
         # (events/client.py _log_event). For a throwaway reply channel that's
-        # pure litter — drop it so asks don't accumulate state/ files.
+        # pure litter — drop it so asks don't accumulate state/ files. The
+        # cursor lives in the team's state dir, so its parent IS that dir (no
+        # process-global root read).
         try:
-            from bobi import paths
             deployment_id = self.client.deployment_id  # type: ignore[attr-defined]
-            (paths.state_dir() / f"events-{deployment_id}.jsonl").unlink(missing_ok=True)
+            (self.cursor_path.parent / f"events-{deployment_id}.jsonl").unlink(
+                missing_ok=True)
         except Exception:
             log.debug("Reply channel events-log cleanup failed", exc_info=True)
 
@@ -242,7 +244,7 @@ def _open_reply_channel(project_path: Path) -> "_ReplyChannel | None":
     q: queue.SimpleQueue = queue.SimpleQueue()
     # A dedicated cursor file: the default (shared) cursor.json belongs to the
     # process's main subscription, and a fresh deployment has its own seq space.
-    cursor_path = paths.state_dir() / f"reply-cursor-{token}.json"
+    cursor_path = paths.state_dir(project_path) / f"reply-cursor-{token}.json"
     client = EventServerClient(
         server_url=es_url,
         deployment_id=deployment_id,
@@ -283,6 +285,8 @@ def deliver(
     sender: str = "",
     wait: bool = False,
     timeout: int = 300,
+    *,
+    root: Path | None = None,
 ) -> tuple[bool, str]:
     """Deliver a message to a session by name over the event server.
 
@@ -294,13 +298,17 @@ def deliver(
     until the target replies (correlated on the message id) or ``timeout``
     elapses.
 
-    Returns (success, response_text). Signature is frozen — call sites
-    (cli.py message/ask, subagent handoffs, monitors) must not change.
+    ``root`` selects the target team's runtime root; None means the process's
+    bound root. Positional call sites (cli.py message/ask, subagent handoffs,
+    monitors) are frozen — the keyword-only root must not disturb them.
+
+    Returns (success, response_text).
     """
     from bobi.paths import bobi_root
-    from bobi.sdk import get_registry, pid_alive
+    from bobi.sdk import SessionRegistry, pid_alive
 
-    entry = get_registry().get(to)
+    project_path = root if root is not None else bobi_root()
+    entry = SessionRegistry(project_path).get(to)
     if not entry:
         return False, f"session '{to}' not found"
 
@@ -317,7 +325,6 @@ def deliver(
 
     from bobi.events.publish import publish_inbox
 
-    project_path = bobi_root()
     msg_id = _msg_id()
 
     if not wait:

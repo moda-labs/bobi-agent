@@ -1,7 +1,9 @@
 """Tests for the unified web app server — security, the dashboard snapshot,
-and the per-agent lifecycle endpoints. Service-core calls are monkeypatched;
-the dashboard reads a real (temp) BOBI_HOME via the bobi_install fixture."""
+and the per-agent lifecycle endpoints. Most classes monkeypatch service-core
+calls and read a real (temp) BOBI_HOME via the bobi_install fixture;
+TestMultiAgentRealService runs the real service layer on purpose (#706)."""
 
+import pytest
 import yaml
 from fastapi.testclient import TestClient
 
@@ -524,3 +526,55 @@ class TestLifecycle:
         r = _client().post(f"/api/agents/{bobi_install.agent_name}/restart")
         assert r.status_code == 200
         assert calls == ["stop", "spawn"]
+
+
+class TestMultiAgentRealService:
+    """Regression tests for #706: one webapp process serves service-backed
+    endpoints for MULTIPLE agents.
+
+    No service monkeypatching here on purpose. The bug was the process-global
+    runtime bind (`service._bind` -> `paths.bind_root`, which refuses to rebind
+    to a second root), and only real service calls exercise it - the mocked
+    tests above never see the bind."""
+
+    @pytest.fixture
+    def two_agents(self, tmp_path, monkeypatch):
+        from bobi import paths
+
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        # The webapp daemon process never binds a runtime root; start unbound.
+        paths.bind_root(None)
+        names = ["alpha-team", "beta-team"]
+        for name in names:
+            pkg = home / "agents" / name / "run" / "package"
+            pkg.mkdir(parents=True)
+            (pkg / "agent.yaml").write_text(yaml.dump({
+                "version": "0.0.1",
+                "agent": name,
+                "entry_point": "director",
+            }))
+        yield names
+        paths.bind_root(None)
+
+    def test_roster_serves_both_agents(self, two_agents):
+        c = _client()
+        for name in two_agents:
+            r = c.get(f"/api/agents/{name}/subagents")
+            assert r.status_code == 200, f"{name}: {r.text}"
+            assert r.json()["subagents"] == []
+
+    def test_stop_serves_both_agents(self, two_agents):
+        c = _client()
+        for name in two_agents:
+            r = c.post(f"/api/agents/{name}/stop")
+            assert r.status_code == 200, f"{name}: {r.text}"
+            assert r.json()["ok"] is True
+
+    def test_webapp_process_stays_unbound(self, two_agents):
+        from bobi import paths
+
+        c = _client()
+        for name in two_agents:
+            assert c.get(f"/api/agents/{name}/subagents").status_code == 200
+        assert paths.bound_root() is None
