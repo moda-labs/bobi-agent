@@ -52,6 +52,9 @@
   let _prevSig = null;     // per-card HTML signatures — diff to re-render only what changed
   let _prevPhase;          // last interview phase — drives the phase-banner ease-in
   let _prevGathered = null; // last N/5 — drives the meter tick-up
+  let _connRefreshSig = ""; // service list already queued for connection-card refresh
+  let _connRefreshPending = false;
+  let _connRefreshNextSig = "";
 
   // --- connection state --------------------------------------------------
   // The page is useless without its local setup server. If that server dies
@@ -928,6 +931,52 @@
     _connData = await getJSON("/api/connect");
     renderUniCards();
   }
+  function connectionRefreshSig() {
+    const spec = (S && S.spec) || {};
+    const services = spec.services || [];
+    const mcpServers = spec.mcp_servers || {};
+    if (!services.length && !Object.keys(mcpServers).length) return "";
+    return JSON.stringify({
+      services: services.map(s => (s && s.name) || s),
+      mcp_servers: mcpServers,
+    });
+  }
+  function runUniConnectionsRefresh(sig) {
+    _connRefreshSig = sig;
+    _connRefreshPending = true;
+    refreshUniConnections()
+      .catch(() => {
+        if (_connRefreshSig === sig) _connRefreshSig = "";
+      })
+      .finally(() => {
+        _connRefreshPending = false;
+        const next = _connRefreshNextSig;
+        _connRefreshNextSig = "";
+        if (next && next !== _connRefreshSig) runUniConnectionsRefresh(next);
+        else if (!next && !connectionRefreshSig()) {
+          _connRefreshSig = "";
+          _connData = null;
+          renderUniCards();
+        }
+      });
+  }
+  function requestUniConnectionsRefresh() {
+    const sig = connectionRefreshSig();
+    if (!sig) {
+      _connRefreshSig = "";
+      _connRefreshNextSig = "";
+      _connData = null;
+      renderUniCards();
+      return;
+    }
+    if (_connRefreshPending) {
+      if (sig !== _connRefreshSig) _connRefreshNextSig = sig;
+      else _connRefreshNextSig = "";
+      return;
+    }
+    if (sig === _connRefreshSig) return;
+    runUniConnectionsRefresh(sig);
+  }
   async function setChat(key) {
     const r = await postJSON("/api/chat", { channel: key });
     if (!r.ok) { toast(r.data.error || "couldn't set"); return; }
@@ -1049,6 +1098,17 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
     body.innerHTML = html;
     body.scrollTop = body.scrollHeight;
   }
+  function reconcileUserBubbles() {
+    const chbody = $("#chbody");
+    const youEls = chbody ? chbody.querySelectorAll(".msg.you") : [];
+    let yi = 0;
+    for (const m of (S && S.messages) || []) {
+      if (m.role === "user") {
+        if (youEls[yi] && youEls[yi].textContent !== m.content) youEls[yi].textContent = m.content;
+        yi++;
+      }
+    }
+  }
   // A typewriter that reveals buffered text character-by-character regardless
   // of how chunky the network deltas are. Honors reduced-motion.
   function makeTypewriter(el) {
@@ -1093,7 +1153,12 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
       redacted: () => toast("Scrubbed a secret from that message — add credentials in the connection setup, not the chat."),
       delta: (d) => tw.push(d.text),
       error: (d) => toast(d.message || "something broke"),
-      state: (st) => { S = st; },
+      state: (st) => {
+        S = st;
+        reconcileUserBubbles();
+        renderUniCards();
+        requestUniConnectionsRefresh();
+      },
     });
     await tw.finish();
     streaming = false;
@@ -1108,21 +1173,13 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
       if (finalText) { sb.textContent = finalText; sb.removeAttribute("id"); }
       else sb.remove();
       // Reconcile user bubbles with authoritative server state (handles redaction).
-      const chbody = $("#chbody");
-      const youEls = chbody ? chbody.querySelectorAll(".msg.you") : [];
-      let yi = 0;
-      for (const m of S.messages) {
-        if (m.role === "user") {
-          if (youEls[yi] && youEls[yi].textContent !== m.content) youEls[yi].textContent = m.content;
-          yi++;
-        }
-      }
+      reconcileUserBubbles();
     } else {
       renderMessages();
     }
     updateCue();
     renderUniCards();
-    if ((S.spec.services || []).length) refreshUniConnections();
+    requestUniConnectionsRefresh();
     if (pendingSend) { const m = pendingSend; pendingSend = null; sendMessage(m); }
   }
 
