@@ -507,12 +507,12 @@ def test_deploy_flatten_carries_overlay_workspace(project):
     # The real deploy-path regression: a `from:` overlay's workspace must ride the
     # flattened tarball, else the per-principal assistant-context.md never reaches
     # the box (and the assistant runs context-less).
-    from bobi import deploy
+    from bobi import build
     _team(project, "pa", 'version: "1.0.0"\nentry_point: assistant\n',
           workspace={"assistant-context.md": "TEMPLATE"})
     _team(project, "zpa", 'from: pa\nversion: "1.0.0"\nentry_point: assistant\n',
           workspace={"assistant-context.md": "ZACHS"})
-    flat = deploy.resolve_team_dir(project, "zpa")
+    flat = build.resolve_team_dir(project, "zpa")
     assert (flat / "workspace" / "assistant-context.md").read_text() == "ZACHS"
 
 
@@ -536,12 +536,12 @@ def test_reject_path_from_allows_name_ref(tmp_path):
 
 
 def test_deploy_resolve_team_dir_flattens_chain(project):
-    from bobi import deploy
+    from bobi import build
     _team(project, "core", 'version: "1.0.0"\nentry_point: director\n'
           'build:\n  apt: [nodejs]\n', tools={"github.md": "gh"})
     _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
           'build:\n  npm: [codex]\n', tools={"linear.md": "lin"})
-    out = deploy.resolve_team_dir(project, "moda")
+    out = build.resolve_team_dir(project, "moda")
     cfg = yaml.safe_load((out / "agent.yaml").read_text())
     assert "from" not in cfg
     assert cfg["build"]["apt"] == ["nodejs"] and cfg["build"]["npm"] == ["codex"]
@@ -551,9 +551,9 @@ def test_deploy_resolve_team_dir_flattens_chain(project):
 
 
 def test_deploy_resolve_team_dir_passthrough_no_from(project):
-    from bobi import deploy
+    from bobi import build
     src = _team(project, "solo", 'version: "1.0.0"\nentry_point: director\n')
-    out = deploy.resolve_team_dir(project, "solo")
+    out = build.resolve_team_dir(project, "solo")
     assert out == src.resolve()  # unchanged when there's no `from:`
 
 
@@ -589,7 +589,9 @@ def test_eng_team_core_installs_standalone(tmp_path):
 def test_synthetic_outside_org_overlay_composes(tmp_path):
     """A third org reuses eng-team without forking: `from: eng-team`
     + a thin overlay (no gstack, a Jira-flavored tracker note, Go house style).
-    Proves cross-org reuse is append-only (#452 §6)."""
+    Proves cross-org reuse is append-only (#452 §6). The overlay brings its OWN
+    node toolchain for its npm linter — core eng-team bakes only jq (+ gh), since
+    codex is a Node-free static binary in the base image (#428)."""
     proj = tmp_path
     (proj / "agents").mkdir()
     shutil.copytree(ENG_TEAM_CORE, proj / "agents" / "eng-team")
@@ -597,7 +599,7 @@ def test_synthetic_outside_org_overlay_composes(tmp_path):
     _write(acme / "agent.yaml",
            f'from: eng-team@{ENG_TEAM_CORE_VERSION}\nversion: "0.1.0"\n'
            'services:\n  - {name: jira, required: true}\n'
-           'build:\n  npm: [some-linter]\n')
+           'build:\n  apt: [nodejs, npm]\n  npm: [some-linter]\n')
     _write(acme / "roles" / "engineer" / "ROLE.md",
            "## Acme house bindings\nUse Jira for tracking; Go/Rust house style.")
     _write(acme / "tools" / "jira.md", "jira guide")
@@ -606,9 +608,10 @@ def test_synthetic_outside_org_overlay_composes(tmp_path):
     dest = paths.package_dir(proj)
     compose.compose(chain, dest)
     cfg = yaml.safe_load((dest / "agent.yaml").read_text())
-    # core services + the overlay's jira; core's generic build accreted the linter.
+    # core services + the overlay's jira; build accretes base-first (core jq, then
+    # the overlay's own node toolchain) and the overlay's npm linter.
     assert {s["name"] for s in cfg["services"]} == {"github", "slack", "jira"}
-    assert cfg["build"]["apt"] == ["nodejs", "npm", "jq"]      # inherited from core
+    assert cfg["build"]["apt"] == ["jq", "nodejs", "npm"]      # core jq + overlay node
     assert cfg["build"]["npm"] == ["some-linter"]             # overlay delta
     assert "from" not in cfg
     # engineer role = core craft + acme house bindings appended.

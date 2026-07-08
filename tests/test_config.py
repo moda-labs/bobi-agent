@@ -4,7 +4,9 @@ import os
 from pathlib import Path
 from textwrap import dedent
 
-from bobi.config import Config, ServiceConfig, load_deployment_state, save_deployment_state, load_dotenv, find_required_env_vars
+from bobi.config import (Config, ServiceConfig, find_env_var_refs,
+                         find_required_env_vars, load_deployment_state,
+                         load_dotenv, save_deployment_state)
 
 
 def test_defaults_when_no_config(tmp_path):
@@ -159,6 +161,105 @@ def test_agent_yaml_missing_env_var_becomes_empty(tmp_path):
 
     cfg = Config.load(tmp_path)
     assert cfg.venn_api_key == ""
+
+
+def test_agent_yaml_optional_env_var_uses_fallback(tmp_path):
+    """${VAR:-default} resolves to the fallback when VAR is unset; ${VAR:-}
+    resolves to "" (an optional value with no fallback)."""
+    config_dir = tmp_path / "package"
+    config_dir.mkdir()
+    (config_dir / "agent.yaml").write_text(dedent("""
+        entry_point: manager
+        venn_api_key: ${NONEXISTENT_VAR_12345:-venn_fallback}
+        event_server: ${NONEXISTENT_EVENT_SERVER_12345:-}
+    """))
+
+    cfg = Config.load(tmp_path)
+    assert cfg.venn_api_key == "venn_fallback"
+    assert cfg.event_server_url == ""
+
+
+def test_agent_yaml_optional_env_var_prefers_environment(tmp_path, monkeypatch):
+    """A SET var wins over its ${VAR:-default} fallback (regression: the raw
+    'VAR:-default' token used to be looked up in the environment verbatim, so
+    optional refs always resolved to "")."""
+    monkeypatch.setenv("TEST_OPT_EVENT_SERVER", "wss://events.example.com")
+
+    config_dir = tmp_path / "package"
+    config_dir.mkdir()
+    (config_dir / "agent.yaml").write_text(dedent("""
+        entry_point: manager
+        event_server: ${TEST_OPT_EVENT_SERVER:-}
+    """))
+
+    cfg = Config.load(tmp_path)
+    assert cfg.event_server_url == "wss://events.example.com"
+
+
+def test_launch_admission_config_defaults_disabled(tmp_path):
+    _write_agent_yaml(tmp_path, """
+        entry_point: manager
+    """)
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.launch_admission["enabled"] is False
+    assert cfg.launch_admission["max_starting_agents"] == 1
+    assert cfg.launch_admission["load_per_cpu_soft_limit"] == 1.5
+    assert cfg.launch_admission["load_per_cpu_hard_limit"] == 2.0
+    assert cfg.launch_admission["min_memory_available_mb"] == 512
+    assert cfg.launch_admission["init_failure_window_seconds"] == 600
+    assert cfg.launch_admission["init_failure_backoff_threshold"] == 2
+
+
+def test_launch_admission_config_parsed_from_yaml(tmp_path):
+    _write_agent_yaml(tmp_path, """
+        entry_point: manager
+        launch_admission:
+          enabled: true
+          max_starting_agents: 2
+          load_per_cpu_soft_limit: 1.25
+          load_per_cpu_hard_limit: 1.75
+          min_memory_available_mb: 1024
+          init_failure_window_seconds: 300
+          init_failure_backoff_threshold: 3
+    """)
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.launch_admission == {
+        "enabled": True,
+        "max_starting_agents": 2,
+        "load_per_cpu_soft_limit": 1.25,
+        "load_per_cpu_hard_limit": 1.75,
+        "min_memory_available_mb": 1024,
+        "init_failure_window_seconds": 300,
+        "init_failure_backoff_threshold": 3,
+    }
+
+
+def test_launch_admission_config_clamps_invalid_values(tmp_path):
+    _write_agent_yaml(tmp_path, """
+        entry_point: manager
+        launch_admission:
+          enabled: "false"
+          max_starting_agents: 0
+          load_per_cpu_soft_limit: -1
+          load_per_cpu_hard_limit: -2
+          min_memory_available_mb: -100
+          init_failure_window_seconds: 0
+          init_failure_backoff_threshold: 0
+    """)
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.launch_admission["enabled"] is False
+    assert cfg.launch_admission["max_starting_agents"] == 1
+    assert cfg.launch_admission["load_per_cpu_soft_limit"] == 0.1
+    assert cfg.launch_admission["load_per_cpu_hard_limit"] == 0.1
+    assert cfg.launch_admission["min_memory_available_mb"] == 0
+    assert cfg.launch_admission["init_failure_window_seconds"] == 1
+    assert cfg.launch_admission["init_failure_backoff_threshold"] == 1
 
 
 def test_agent_yaml_services_as_strings(tmp_path):
@@ -356,6 +457,36 @@ def test_find_required_env_vars_no_config(tmp_path):
     assert find_required_env_vars(tmp_path) == []
 
 
+def test_find_env_var_refs_required_vs_optional(tmp_path):
+    """Bare ${VAR} refs are required; ${VAR:-default} refs are optional and
+    carry their fallback. Names are de-duped, plain (no ':-default' suffix),
+    and in order of first appearance."""
+    config_dir = tmp_path / "package"
+    config_dir.mkdir()
+    (config_dir / "agent.yaml").write_text(dedent("""
+        event_server: ${BOBI_EVENT_SERVER:-}
+        model: ${OPTIONAL_MODEL:-sonnet}
+        services:
+          - name: slack
+            credentials:
+              bot_token: ${SLACK_BOT_TOKEN}
+              extra: ${SLACK_BOT_TOKEN}
+    """))
+
+    refs = find_env_var_refs(tmp_path)
+    assert [r.name for r in refs] == [
+        "BOBI_EVENT_SERVER", "OPTIONAL_MODEL", "SLACK_BOT_TOKEN"]
+    by_name = {r.name: r for r in refs}
+    assert not by_name["BOBI_EVENT_SERVER"].required
+    assert by_name["BOBI_EVENT_SERVER"].default == ""
+    assert not by_name["OPTIONAL_MODEL"].required
+    assert by_name["OPTIONAL_MODEL"].default == "sonnet"
+    assert by_name["SLACK_BOT_TOKEN"].required
+
+    # find_required_env_vars keeps only the bare (required) refs.
+    assert find_required_env_vars(tmp_path) == ["SLACK_BOT_TOKEN"]
+
+
 def test_dotenv_resolves_in_config(tmp_path, monkeypatch):
     """Full integration: .env values resolve through ${VAR} in agent.yaml."""
     config_dir = tmp_path / "package"
@@ -374,6 +505,40 @@ def test_dotenv_resolves_in_config(tmp_path, monkeypatch):
     cfg = Config.load(tmp_path)
     assert cfg.credential("slack", "bot_token") == "xoxb-from-dotenv"
     monkeypatch.delenv("TEST_DOTENV_TOKEN")
+
+
+def test_config_load_dotenv_values_do_not_leak_between_projects(tmp_path, monkeypatch):
+    monkeypatch.delenv("SHARED_SLACK_TOKEN", raising=False)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    for root, token in [(first, "xoxb-first"), (second, "xoxb-second")]:
+        _write_agent_yaml(root, """
+            services:
+              - name: slack
+                events: true
+                credentials:
+                  bot_token: ${SHARED_SLACK_TOKEN}
+        """)
+        (root / ".env").write_text(f"SHARED_SLACK_TOKEN={token}\n")
+
+    assert Config.load(first).credential("slack", "bot_token") == "xoxb-first"
+    assert Config.load(second).credential("slack", "bot_token") == "xoxb-second"
+
+
+def test_config_load_does_not_mutate_process_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("CONFIG_ONLY_TOKEN", raising=False)
+    _write_agent_yaml(tmp_path, """
+        services:
+          - name: slack
+            credentials:
+              bot_token: ${CONFIG_ONLY_TOKEN}
+    """)
+    (tmp_path / ".env").write_text("CONFIG_ONLY_TOKEN=xoxb-config-only\n")
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.credential("slack", "bot_token") == "xoxb-config-only"
+    assert "CONFIG_ONLY_TOKEN" not in os.environ
 
 
 def test_venn_services_property(tmp_path):
@@ -573,3 +738,21 @@ def test_run_requires_checks_command_not_found():
 def test_run_requires_checks_empty():
     from bobi.config import run_requires_checks
     assert run_requires_checks([]) == []
+
+
+# --- package-file env-ref scanning (scan_* — the not-yet-installed variant) ---
+
+def test_scan_required_vars_excludes_defaulted(tmp_path):
+    from bobi.config import scan_required_vars
+
+    y = tmp_path / "agent.yaml"
+    y.write_text("a: ${REQUIRED}\nb: ${OPTIONAL:-x}\nc: literal\n")
+    assert scan_required_vars(y) == ["REQUIRED"]
+
+
+def test_scan_declared_vars_keeps_optional_refs(tmp_path):
+    from bobi.config import scan_declared_vars
+
+    y = tmp_path / "agent.yaml"
+    y.write_text("a: ${REQUIRED}\nb: ${OPTIONAL:-x}\nc: ${REQUIRED}\n")
+    assert scan_declared_vars(y) == ["REQUIRED", "OPTIONAL"]

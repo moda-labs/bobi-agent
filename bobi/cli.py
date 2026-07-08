@@ -13,56 +13,58 @@ truststore.inject_into_ssl()
 import click
 
 from bobi import paths
+from bobi.install import (
+    install_pack as _install_pack,
+    write_install_gitignore as _write_install_gitignore,
+)
 
 from .__version__ import __version__
 
 _PACKAGE_DIR = Path(__file__).parent
 
+# Prompt hints for framework-level env vars an agent.yaml may reference.
+# These are not credentials in the secret sense, so tell the user what a
+# blank answer means instead of implying a value is required.
+_ENV_VAR_HINTS = {
+    "BOBI_EVENT_SERVER":
+        "event server URL - leave blank to auto-start the local server",
+}
+
+
+def _interactive_terminal() -> bool:
+    """True when both ends of the session are a real terminal.
+
+    Split out so tests can stub interactivity (the test runner replaces
+    stdin/stdout with pipes).
+    """
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
 
 def _print_startup_info(project_path: Path, pid: int, log_file: Path):
     """Print a startup summary with environment info."""
-    from .config import Config
+    from bobi.service import build_startup_info
 
-    cfg = Config.load(project_path)
+    info = build_startup_info(project_path, pid, log_file)
 
     W = 16  # column width for labels
     lines = []
-    lines.append(f"bobi v{__version__}")
-    agent_name = paths.agent_name_for_root(project_path)
-    lines.append(f"  {'slot':<{W}}{agent_name} ({project_path})")
-    lines.append(f"  {'pid':<{W}}{pid}")
-
-    if cfg.agent:
-        lines.append(f"  {'package':<{W}}{cfg.agent}")
-
-    if cfg.event_server_url:
-        label = "remote" if not cfg.event_server_url.startswith("http://localhost") else "local"
-        lines.append(f"  {'event server':<{W}}{cfg.event_server_url} ({label})")
-    else:
-        lines.append(f"  {'event server':<{W}}localhost:8080 (auto)")
-
-    try:
-        import logging as _lg
-        _lg.getLogger("bobi.workflow").setLevel(_lg.WARNING)
-        from bobi.workflow.triggers import WorkflowDispatcher
-        dispatcher = WorkflowDispatcher()
-        dispatcher.load_all_workflows(project_path, agent_name=cfg.agent)
-        wf_names = sorted(set(wf.name for wf, _ in dispatcher.workflows))
-        if wf_names:
-            lines.append(f"  {'workflows':<{W}}{', '.join(wf_names)}")
-    except Exception:
-        pass
-
-    try:
-        from bobi.monitors.registry import MonitorRegistry
-        registry = MonitorRegistry.load(project_path=project_path)
-        mon_names = sorted(m.name for m in registry.all_monitors())
-        if mon_names:
-            lines.append(f"  {'monitors':<{W}}{', '.join(mon_names)}")
-    except Exception:
-        pass
-
-    lines.append(f"  {'logs':<{W}}{log_file}")
+    lines.append(f"bobi v{info.version}")
+    lines.append(f"  {'slot':<{W}}{info.agent_name} ({info.project_path})")
+    lines.append(f"  {'pid':<{W}}{info.pid}")
+    if info.package:
+        lines.append(f"  {'package':<{W}}{info.package}")
+    lines.append(
+        f"  {'event server':<{W}}{info.event_server_url} ({info.event_server_label})"
+    )
+    if info.ingress_warning:
+        lines.append(f"  {'ingress':<{W}}WARNING: {info.ingress_warning}")
+        if info.ingress_hint:
+            lines.append(f"  {'':<{W}}{info.ingress_hint}")
+    if info.workflows:
+        lines.append(f"  {'workflows':<{W}}{', '.join(info.workflows)}")
+    if info.monitors:
+        lines.append(f"  {'monitors':<{W}}{', '.join(info.monitors)}")
+    lines.append(f"  {'logs':<{W}}{info.log_file}")
 
     click.echo("\n".join(lines))
 
@@ -168,7 +170,33 @@ def _bind_agent_runtime(name: str) -> Path:
         raise click.UsageError(str(e))
     paths.bind_root(root)
     _attach_runtime_log(root)
+    _pin_team_brain(root)
     return root
+
+
+def _pin_team_brain(root: Path) -> None:
+    """Select the team's brain for the CLI process itself (#655).
+
+    Sessions this process runs directly (the `--wait` completion check, ad-hoc
+    verdict agents) must use the team's configured brain, not the framework
+    default - a gateway team's check would otherwise hit real Anthropic with
+    the gateway's token. Detached children don't rely on this: their env is
+    rewritten by ``child_agent_env()``. Direct CLI sessions still need runtime
+    .env credentials (for example gateway auth) in this process, so this CLI
+    runtime-binding path loads them explicitly instead of hiding that side
+    effect inside ``Config.load()``.
+    """
+    from bobi.brain import set_process_brain_from_config
+    from bobi.config import Config, load_dotenv
+    try:
+        load_dotenv(root)
+        cfg = Config.load(root)
+    except Exception as e:  # noqa: BLE001 — `stop`/`status` must still work
+        logging.getLogger(__name__).warning(
+            "Could not load team config from %s to select its brain (%s); "
+            "sessions run by this command use the framework default.", root, e)
+        return
+    set_process_brain_from_config(cfg)
 
 
 def _attach_runtime_log(root: Path) -> None:
@@ -185,9 +213,63 @@ def _attach_runtime_log(root: Path) -> None:
 
 
 
-@click.group()
+class _PluginGroup(click.Group):
+    """A click Group that also serves plugin commands, lazily.
+
+    Plugins register under the `bobi.commands` entry-point group — the seam
+    separately-installed packages deliver commands through (e.g. bobi-deploy
+    adds `bobi deploy` / `deploy-init` / `destroy`). Without such a package
+    installed, the CLI is the local product only.
+
+    Lazy on purpose: the entry-point scan reads metadata for every installed
+    distribution and ep.load() imports the plugin, so neither may run at
+    import time — `import bobi.cli` happens in hot paths that never dispatch
+    a plugin command (monitor-scheduler subprocesses, the webapp daemon).
+    The scan runs only when a command name misses the built-ins or the
+    command list is actually rendered (--help, completion); a plugin loads
+    only when ITS command runs. A plugin can never shadow a built-in, and a
+    broken plugin must not take the CLI down with it (warn and move on).
+    """
+
+    _plugin_eps: dict | None = None
+
+    def _plugins(self) -> dict:
+        if self._plugin_eps is None:
+            from importlib.metadata import entry_points
+            eps = {}
+            for ep in entry_points(group="bobi.commands"):
+                if ep.name in self.commands:  # built-ins win
+                    logging.getLogger(__name__).warning(
+                        "CLI plugin '%s' (%s) collides with a built-in "
+                        "command — ignored", ep.name, ep.value)
+                    continue
+                eps[ep.name] = ep
+            self._plugin_eps = eps
+        return self._plugin_eps
+
+    def list_commands(self, ctx):
+        return sorted(set(super().list_commands(ctx)) | set(self._plugins()))
+
+    def get_command(self, ctx, name):
+        cmd = super().get_command(ctx, name)
+        if cmd is not None:
+            return cmd
+        ep = self._plugins().get(name)
+        if ep is None:
+            return None
+        try:
+            return ep.load()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "failed to load CLI plugin '%s' (%s)", name, ep.value,
+                exc_info=True)
+            return None
+
+
+@click.group(cls=_PluginGroup, invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="bobi")
-def main():
+@click.pass_context
+def main(ctx):
     """Bobi — build teams of event-driven AI agents."""
     logging.basicConfig(
         level=logging.INFO,
@@ -197,6 +279,14 @@ def main():
     )
     # Top-level commands are machine/repo scoped. Runtime identity is bound by
     # `bobi agent <name> ...` or inherited BOBI_ROOT in child processes.
+    if ctx.invoked_subcommand is None:
+        from bobi.webapp import daemon
+
+        try:
+            st = daemon.start(open_browser=True)
+        except RuntimeError as e:
+            raise click.ClickException(str(e))
+        click.echo(f"bobi app is running at {st.url} (pid {st.pid})")
     return
 
 
@@ -281,149 +371,9 @@ def _run_from_config(project_path: Path, cfg: "Config",
     and SIGTERM triggers a graceful shutdown within the container's grace
     period.
     """
-    import atexit
-    import signal
-    import threading
-
-    from bobi.sdk import set_project_root
-    set_project_root(project_path)
-
-    # Select the team's agent brain (#485) for this process and its subagents.
-    from bobi.brain import set_process_brain
-    set_process_brain(cfg.brain_kind)
-
-    agent_name = cfg.agent
-    role = cfg.entry_point or "manager"
-
-    from bobi.events.subscriptions import discover_subscriptions
-    subscribe = discover_subscriptions(project_path)
-    subscribe += [s for s in (extra_subscribe or []) if s not in subscribe]
-
-    # Subscribe to every effective monitor's event topic so the coordinator
-    # receives monitor findings regardless of adapter configuration. Current
-    # event servers route a posted finding onto both the bare type and the
-    # source-qualified "monitor/<type>" topic; monitor_subscription_keys
-    # subscribes to both forms.
-    from bobi.events.subscriptions import monitor_subscription_keys
-    from bobi.monitors.registry import MonitorRegistry
-    monitor_events = [
-        m.event for m in MonitorRegistry.load(project_path=project_path).effective_monitors()
-    ]
-    for key in monitor_subscription_keys(monitor_events):
-        if key not in subscribe:
-            subscribe.append(key)
-
-    # Subscribe to sub-agent lifecycle topics so a detached agent's
-    # completion/failure is delivered back to this entry point (MDS-65 RC#1).
-    # Without this, _emit_session_finished posts session.completed/failed that
-    # nothing consumes — completions reach the launcher only via blocking
-    # --wait, which pins a concurrency slot. Lifecycle events are delivered to
-    # the inbox like monitor findings; they are never an auto-dispatch trigger.
-    from bobi.events.subscriptions import lifecycle_subscription_keys
-    for key in lifecycle_subscription_keys():
-        if key not in subscribe:
-            subscribe.append(key)
-
-    state_dir = paths.state_dir(project_path)
-
-    from bobi.state_version import ensure_state_version
-    ensure_state_version(project_path)
-
-    pid_str = str(os.getpid())
-    (state_dir / "manager.pid").write_text(pid_str)
-
-    def _cleanup():
-        pid_file = state_dir / "manager.pid"
-        try:
-            if pid_file.exists() and pid_file.read_text().strip() == pid_str:
-                pid_file.unlink(missing_ok=True)
-        except OSError:
-            pass
-        from bobi import manager_health
-        manager_health.stop()
-        from bobi import http as pooled_http
-        pooled_http.close()
-    atexit.register(_cleanup)
-
-    log = logging.getLogger(__name__)
-
-    def _handle_term(signum, frame):
-        log.info("Received SIGTERM — shutting down gracefully")
-        _cleanup()
-        raise SystemExit(0)
-    signal.signal(signal.SIGTERM, _handle_term)
-
-    # --- Health endpoint (always started; essential in foreground/container
-    # mode for liveness probes, useful in daemon mode for doctor checks) ---
-    from bobi import manager_health
-    health_port = manager_health.start(
-        state_dir, paths.agent_name_for_root(project_path),
-        manager_session=_manager_session_name(project_path, role),
-    )
-    log.info("Manager health endpoint on port %d", health_port)
-
-    # --- Agent UI (opt-in via BOBI_UI) — a daemon-thread web dashboard
-    # for chatting with the live team. Binds the Fly 6PN address so an operator
-    # reaches it with `fly proxy`; never started unless explicitly enabled, so
-    # a plain local start opens no extra port. ---
-    if os.environ.get("BOBI_UI"):
-        try:
-            from bobi.agentui import server as agentui_server
-            ui_port = agentui_server.start_in_thread(project_path,
-                                                     state_dir=state_dir)
-            log.info("Agent UI on port %d (reach it with `fly proxy`)", ui_port)
-        except Exception as e:  # never let the UI take down the manager
-            log.warning("Agent UI failed to start: %s", e)
-
-    log.info("Bobi starting for %s (role=%s)",
-             paths.agent_name_for_root(project_path), role)
-
-    has_monitors = (
-        paths.monitors_dir(project_path).is_dir()
-        or cfg.monitors
-    )
-    if has_monitors:
-        from bobi.monitors.scheduler import MonitorScheduler
-        monitor_scheduler = MonitorScheduler(project_path=project_path)
-        monitor_scheduler.start()
-        log.info("Monitor scheduler started")
-
-    from bobi.prompts.resolver import build_startup_prompt
-    from bobi.subagent import spawn_adhoc
-
-    session_name = _manager_session_name(project_path, role)
-    task = build_startup_prompt(role, project_path, agent_name=agent_name,
-                                session_name=session_name)
-
-    # Dead-man reconcile on wake (MDS-65 §4.6): close any run stranded while no
-    # manager was alive — a crash recorded with no terminal event, a swallowed
-    # completion POST, or a run past its deadline. Each closed run re-emits an
-    # honest agent/session.{completed,failed} that the manager (subscribed just
-    # above) receives in its inbox, so the requester's thread is closed instead
-    # of hanging. Best-effort: a reconcile failure must never block startup.
-    try:
-        from bobi.reconcile import reconcile_sessions
-        # Exclude this manager's own session: the previous manager process's
-        # exit is not a sub-agent failure, and the new manager re-claims the
-        # entry just below.
-        reconciled = reconcile_sessions(exclude_names={session_name})
-        if reconciled:
-            log.info("Reconciled %d stranded run(s) on startup: %s",
-                     len(reconciled), [r["name"] for r in reconciled])
-    except Exception:
-        log.debug("Startup reconcile failed", exc_info=True)
-
-    log.info("Bobi running for %s", paths.agent_name_for_root(project_path))
-    # The manager Session subscribes to inbox/<self> (always-on) plus the
-    # discovered external resource + monitor topics. One deployment, one cursor.
-    spawn_adhoc(
-        cwd=str(project_path),
-        task=task,
-        name=session_name,
-        persistent=True,
-        role=role,
-        mcp_servers=cfg.mcp_servers or None,
-        subscribe=subscribe,
+    from bobi.service import run_manager_from_config
+    return run_manager_from_config(
+        project_path, cfg, extra_subscribe=extra_subscribe, foreground=foreground
     )
 
 
@@ -442,33 +392,63 @@ def start(foreground, fresh, subscribe):
         bobi agent eng start --foreground
         bobi agent eng start --subscribe linear:MOD
     """
-    from bobi.config import Config
+    from bobi.service import (
+        AlreadyRunning,
+        LaunchTimeout,
+        NestedRuntimeError,
+        NoAgentInstalled,
+        PreflightFailed,
+        run_team_foreground,
+        spawn_team,
+    )
+
     project_path = _detect_project_root()
 
-    cfg = Config.load(project_path)
-    if not cfg.agent:
+    click.echo("Running preflight checks...")
+    try:
+        if foreground:
+            root = logging.getLogger()
+            root.handlers = [
+                h for h in root.handlers if not isinstance(h, logging.FileHandler)
+            ]
+            run_team_foreground(project_path, fresh=fresh, subscribe=list(subscribe))
+            return
+        result = spawn_team(project_path, fresh=fresh, subscribe=list(subscribe))
+    except NoAgentInstalled as exc:
         click.echo("No agent installed. Run `bobi agents install <path> --name <name>` first.", err=True)
-        available = _list_agent_packs(project_path)
-        if available:
+        if exc.available:
             click.echo("Available packs to install:", err=True)
-            for name, source in available:
+            for name, source in exc.available:
                 click.echo(f"  {name:20s} [{source}]", err=True)
         raise SystemExit(1)
-
-    extra_subscribe = list(subscribe)
-
-    click.echo("Running preflight checks...")
-    # Run preflight checks in foreground before forking
-    from bobi.validate import validate_config
-    validation = validate_config(project_path)
-    if validation.checks:
+    except PreflightFailed as exc:
+        validation = exc.validation
         click.echo("Preflight:")
         click.echo(validation.format())
-        if not validation.ok:
-            click.echo("\nStartup blocked — fix the issues above.", err=True)
-            raise SystemExit(1)
-        # Proceeding path only: warn about optional services that failed
-        # preflight so a degraded start isn't mistaken for a clean one.
+        click.echo("\nStartup blocked — fix the issues above.", err=True)
+        raise SystemExit(1)
+    except AlreadyRunning as exc:
+        click.echo(
+            f"Already running (pid {exc.pid}). "
+            f"Use `bobi agent {paths.agent_name_for_root(project_path)} restart`."
+        )
+        return
+    except NestedRuntimeError as exc:
+        click.echo(
+            f"A manager is already running at {exc.ancestor} (pid {exc.pid}). "
+            f"Sub-agents in {paths.agent_name_for_root(project_path)} will register with that runtime. "
+            f"Stop the ancestor first if you need an independent instance here.",
+            err=True,
+        )
+        raise SystemExit(1)
+    except LaunchTimeout as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1)
+
+    validation = result.validation
+    if getattr(validation, "checks", None):
+        click.echo("Preflight:")
+        click.echo(validation.format())
         degraded = [c for c in validation.checks if not c.ok and not c.required]
         if degraded:
             names = ", ".join(c.name for c in degraded)
@@ -477,76 +457,11 @@ def start(foreground, fresh, subscribe):
                 f"until configured: {names}.",
                 err=True,
             )
-
-    pid_path = paths.manager_pid_path(project_path)
-    pid_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # In foreground/PID-1 mode (containers), skip the "already running"
-    # check — stale PID files from a previous container run are expected
-    # and the new process IS the only manager.
-    if not foreground and pid_path.exists():
-        try:
-            pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)
-            click.echo(f"Already running (pid {pid}). Use `bobi agent {paths.agent_name_for_root(project_path)} restart`.")
-            return
-        except (ProcessLookupError, ValueError):
-            pid_path.unlink(missing_ok=True)
-
-    # Prevent nested runtimes
-    from bobi.sdk import find_runtime_root
-    ancestor = find_runtime_root(project_path.parent)
-    if ancestor and ancestor != project_path:
-        ancestor_pid_path = paths.manager_pid_path(ancestor)
-        try:
-            anc_pid = int(ancestor_pid_path.read_text().strip())
-        except (ValueError, OSError):
-            anc_pid = 0
-        click.echo(
-            f"A manager is already running at {ancestor} (pid {anc_pid}). "
-            f"Sub-agents in {paths.agent_name_for_root(project_path)} will register with that runtime. "
-            f"Stop the ancestor first if you need an independent instance here.",
-            err=True,
-        )
-        raise SystemExit(1)
-
     if fresh:
-        _clear_manager_session(project_path)
-    else:
-        from bobi.sdk import check_image_rotation
-        if check_image_rotation(_manager_session_name(project_path), project_path):
-            click.echo("Installed image changed — rotating session.")
-
-    if foreground:
-        # In foreground/container mode, log to stdout/stderr only —
-        # drop file handlers and keep stream handlers.
-        root = logging.getLogger()
-        root.handlers = [h for h in root.handlers
-                         if not isinstance(h, logging.FileHandler)]
-        _run_from_config(project_path, cfg, extra_subscribe=extra_subscribe,
-                         foreground=True)
-    else:
-        log_file = _project_state_dir(project_path) / "manager.log"
-        env = os.environ.copy()
-        venv_bin = str(Path(sys.executable).parent)
-        local_bin = str(Path.home() / ".local" / "bin")
-        env["PATH"] = f"{venv_bin}:{local_bin}:{env.get('PATH', '')}"
-        env["PYTHONUNBUFFERED"] = "1"
-        cmd = [
-            sys.executable, "-m", "bobi.cli",
-            "agent", paths.agent_name_for_root(project_path), "start", "--foreground",
-        ]
-        if fresh:
-            cmd.append("--fresh")
-        for s in subscribe:
-            cmd.extend(["--subscribe", s])
-        with open(log_file, "a") as lf:
-            proc = subprocess.Popen(
-                cmd, stdout=lf, stderr=lf,
-                cwd=str(project_path), env=env,
-                start_new_session=True,
-            )
-        _print_startup_info(project_path, proc.pid, log_file)
+        click.echo("Cleared manager session — starting fresh.")
+    elif result.image_rotated:
+        click.echo("Installed image changed — rotating session.")
+    _print_startup_info(project_path, result.startup.pid, result.startup.log_file)
 
 
 @main.command(context_settings={"ignore_unknown_options": True})
@@ -587,177 +502,100 @@ def supervise(start_args):
     raise SystemExit(supervisor.run())
 
 
-def _install_pack(pack_dir: Path, project_path: Path,
-                  local_source: bool = True, *, pinned: bool = False) -> None:
-    """Compose the pack's `from:` chain into run/package/ for runtime use.
+def _materialize_local_deps(pack_dir: Path, project_path: Path, *,
+                            non_interactive: bool) -> None:
+    """Drive the local brain to install the team's declared deps (#428 Stage 5).
 
-    The installed copy is a frozen runtime image: install regenerates it
-    verbatim from the pack source every time, including agent.yaml.
-    Machine- and runtime-specific variance enters through ${VAR}
-    references resolved from run/.env, never by editing the
-    installed copy.
-
-    A team may declare `from: <base-team>`; compose then walks the chain
-    (base → … → leaf) and merges the layers into one flat image (#446/#451).
-    A team with no `from:` composes to a single-layer image identical in
-    content to the team itself — the common case is unchanged. ``pinned``
-    resolves the chain registry-only at locked versions (CI/deploy).
+    The `--with-deps` post-compose pass: resolve the team's full dependency set,
+    verify what's already satisfied (idempotent skip), preview a plan, confirm,
+    then materialize the rest on THIS host under the team's brain. `host:`
+    capabilities are surfaced as a guided fix, never attempted, and sudo is only
+    used behind an explicit confirm. Partial failure is non-fatal — doctor and
+    the dispatch preflight still gate — so this never raises into install.
     """
-    import shutil
+    from bobi import local_deps
+    from bobi.brain import DEFAULT_BRAIN
+    from bobi.build_render import _workspace_root
+    from bobi.config import Config
+    from bobi.env import child_agent_env
+    from bobi.host_caps import host_caps_for_deps
+    from bobi.tool_library import resolve_team_dependencies
 
-    from bobi import compose as _compose
-
-    dest = paths.package_dir(project_path)
-    dest.mkdir(parents=True, exist_ok=True)
-
-    locked = _read_compose_lock(dest) if pinned else None
-    chain = _compose.resolve_chain(pack_dir, project_path, pinned=pinned,
-                                   locked=locked)
-
-    # Clear the previously frozen copy of each surface the composed chain
-    # contributes, so a re-install drops stale files (e.g. a tool the new chain
-    # no longer ships). A surface NO layer contributes is left untouched — the
-    # pre-compose install semantics — so package-added files (e.g. an extra
-    # `package/workflows/*.yaml`) survive a reinstall of the same team.
-    contributed = {sub for layer in chain
-                   for sub in ["roles", "tools", "workflows", "monitors", "context"]
-                   if (layer.dir / sub).is_dir()}
-    for sub in contributed:
-        d = dest / sub
-        if d.exists():
-            shutil.rmtree(d)
-
-    prov = _compose.compose(chain, dest)
-
-    # Seed workspace leaf → base (seed-if-absent), so an overlay's own template
-    # wins and the base only fills files the overlay doesn't supply. (Mirrors the
-    # deploy flatten's leaf-wins merge_workspace; user edits already on disk are
-    # never overwritten regardless of order.)
-    for layer in reversed(chain):
-        _seed_workspace(layer.dir, project_path)
-
-    # The leaf's directory name is the installed agent name (the team a user
-    # named on the CLI), regardless of how deep its `from:` chain runs.
-    cfg = _read_yaml(dest / "agent.yaml")
-    cfg.setdefault("agent", pack_dir.name)
-    _write_yaml(dest / "agent.yaml", cfg)
-
-    _write_compose_lock(dest, chain, prov)
-    _write_install_manifest(dest, pack_dir, local_source)
-
-
-def _read_yaml(path: Path) -> dict:
-    import yaml as _yaml
-    if not path.exists():
-        return {}
-    return _yaml.safe_load(path.read_text()) or {}
-
-
-def _write_yaml(path: Path, data: dict) -> None:
-    import yaml as _yaml
-    path.write_text(_yaml.dump(data, default_flow_style=False, sort_keys=False))
-
-
-def _read_compose_lock(dest: Path) -> dict[str, str]:
-    """The {team_name: version} map recorded by the last compose, used by
-    `install --pinned` to pin otherwise-floating `latest` refs reproducibly."""
-    import json as _json
-    f = dest / "compose-lock.json"
-    if not f.exists():
-        return {}
+    click.echo()
     try:
-        data = _json.loads(f.read_text())
-    except (OSError, ValueError):
-        return {}
-    locked = {}
-    for layer in data.get("chain", []):
-        ref, ver = layer.get("ref"), layer.get("version")
-        if ref and ver:
-            name = ref.split("@", 1)[0]
-            locked[name] = ver
-    return locked
-
-
-def _write_compose_lock(dest: Path, chain, prov) -> None:
-    """Record the resolved `from:` chain + provenance so a deploy/outside-org
-    install is reproducible and `doctor` can flag a drifted local sibling."""
-    import json as _json
-    (dest / "compose-lock.json").write_text(_json.dumps({
-        "chain": prov.chain,
-        "provenance": prov.items,
-        "warnings": prov.warnings,
-    }, indent=1))
-
-
-def _seed_workspace(pack_dir: Path, project_path: Path) -> None:
-    """Seed <run>/workspace/ from the pack's workspace/ templates.
-
-    Workspace files are user-owned domain content (context the user fills
-    in, directories agents write into). Unlike the frozen image, each file
-    is copied only if absent — reinstall never overwrites user edits.
-    """
-    import shutil
-
-    src = pack_dir / "workspace"
-    if not src.is_dir():
+        deps = resolve_team_dependencies(pack_dir, _workspace_root(pack_dir))
+    except Exception as e:  # noqa: BLE001 — a dep-resolution failure is non-fatal
+        click.echo(f"Could not resolve dependencies (--with-deps skipped): {e}",
+                   err=True)
         return
-    dest = paths.workspace_dir(project_path)
-    for f in sorted(src.rglob("*")):
-        rel = f.relative_to(src)
-        target = dest / rel
-        if f.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-        elif not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(f, target)
+    if not deps:
+        click.echo("--with-deps: this team declares no dependencies.")
+        return
 
+    # The team's declared brain drives the install, else the local default.
+    try:
+        brain = Config.load(project_path).brain_kind() or DEFAULT_BRAIN
+    except Exception:
+        brain = DEFAULT_BRAIN
 
-def _write_install_manifest(dest: Path, pack_dir: Path,
-                            local_source: bool) -> None:
-    """Record a hash of every installed file so doctor can flag drift.
+    # Bind the installed runtime so the brain session + `success` checks resolve
+    # this team's paths and credentials (its run/.env).
+    paths.bind_root(project_path)
+    base_env = child_agent_env(project_path)
 
-    Edits to a frozen image are lost on the next install; the manifest
-    lets `bobi agent <name> doctor` warn before that happens.
-    """
-    import hashlib
-    import json as _json
+    plan = local_deps.plan_dependencies(deps, brain=brain, base_env=base_env)
+    unmet_caps = [c for c in host_caps_for_deps(deps) if c.satisfied() is False]
 
-    files = {}
-    for subdir in ["roles", "tools", "workflows", "monitors", "context"]:
-        d = dest / subdir
-        if d.is_dir():
-            for f in sorted(d.rglob("*")):
-                if f.is_file() and "__pycache__" not in f.parts:
-                    files[f.relative_to(dest).as_posix()] = \
-                        hashlib.sha256(f.read_bytes()).hexdigest()
-    for name in ["agent.yaml", "agent.md"]:
-        f = dest / name
-        if f.exists():
-            files[name] = hashlib.sha256(f.read_bytes()).hexdigest()
+    click.echo(f"Dependency check (brain: {brain}):")
+    for dp in plan.satisfied:
+        click.echo(f"  [ok]   {dp.dep.name} — already satisfied, skipping")
+    for dp in plan.todo:
+        sudo = " (may need sudo)" if dp.needs_sudo else ""
+        click.echo(f"  [todo] {dp.dep.name} — will materialize{sudo}")
+    for dp in plan.unmaterializable:
+        click.echo(f"  [warn] {dp.dep.name} — unsatisfied but has no install/"
+                   f"guide to materialize from; fix manually")
+    for cap in unmet_caps:
+        click.echo(f"  [host] {cap.spec} — host capability, provision manually: "
+                   f"`{cap.fix_command()}`")
 
-    (dest / "install-manifest.json").write_text(_json.dumps({
-        "agent": pack_dir.name,
-        "source": str(pack_dir),
-        "frozen": local_source,
-        "files": files,
-    }, indent=1))
+    if not plan.todo:
+        click.echo("Nothing to install.")
+        return
 
+    if not non_interactive and not click.confirm(
+            f"\nInstall {len(plan.todo)} dependency(ies) on this machine?",
+            default=True):
+        click.echo("Skipped dependency materialization.")
+        return
 
-def _write_install_gitignore(project_path: Path, local_source: bool) -> None:
-    """Write package/.gitignore based on which install path was taken.
+    allow_sudo = False
+    if plan.needs_sudo:
+        if non_interactive:
+            click.echo("Some steps may need sudo; skipping sudo "
+                       "(non-interactive). Re-run interactively to allow it.")
+        else:
+            allow_sudo = click.confirm(
+                "Some steps may require sudo (system packages). Allow sudo?",
+                default=False)
 
-    Runtime state is always ignored. When the team source lives in the
-    repo (local source of truth), the installed copies are build artifacts
-    and get ignored too. A downloaded team's installed copy IS the source
-    of truth, so it stays check-in-able. Install owns this file and
-    rewrites it each run so switching paths doesn't leave stale entries.
-    """
-    entries = [".gitignore", "install-manifest.json", "compose-lock.json"]
-    if local_source:
-        entries += ["roles/", "tools/", "workflows/", "monitors/", "context/",
-                    "agent.md", "agent.yaml"]
-    gitignore = paths.package_dir(project_path) / ".gitignore"
-    gitignore.write_text("\n".join(entries) + "\n")
+    results = local_deps.install_dependencies(
+        plan.todo, brain=brain, allow_sudo=allow_sudo, base_env=base_env)
+
+    click.echo("\nDependency materialization:")
+    for r in results:
+        glyph = "ok" if r.ok else "FAIL"
+        click.echo(f"  [{glyph}] {r.dep}"
+                   + (f" — {r.detail}" if r.detail and not r.ok else ""))
+        for cmd in r.transcript:
+            click.echo(f"         ran: {cmd}")
+    failed = [r.dep for r in results if not r.ok]
+    if failed:
+        slot = paths.agent_name_for_root(project_path)
+        click.echo(f"\n{len(failed)} dependency(ies) not satisfied: "
+                   f"{', '.join(failed)}. The team still installed; fix these "
+                   f"and re-run `bobi agents install ... --with-deps`, or "
+                   f"`bobi agent {slot} doctor`.", err=True)
 
 
 @main.command("login-bootstrap")
@@ -804,7 +642,14 @@ def login_bootstrap(channel, timeout):
               help="Resolve any `from:` base teams registry-only at locked "
                    "versions (ignore local sibling checkouts). For "
                    "reproducible CI/deploy installs.")
-def install(pack, slot_name, non_interactive, pinned):
+@click.option("--with-deps", "with_deps", is_flag=True,
+              help="After composing, drive the local brain to install the "
+                   "team's declared dependencies on THIS machine (#428): each "
+                   "dependency's `success` is verified, already-satisfied ones "
+                   "are skipped, and nothing runs sudo without an explicit "
+                   "confirm. Mutates the host — previews a plan and confirms "
+                   "first.")
+def install(pack, slot_name, non_interactive, pinned, with_deps):
     """Install a Bobi Agent into the machine-wide Bobi home.
 
     PACK is a local directory path, a local `.tar.gz` archive, a public
@@ -908,29 +753,29 @@ def install(pack, slot_name, non_interactive, pinned):
     if parts:
         click.echo("\n".join(parts))
 
-    # Collect required env vars and write run/.env
-    from bobi.config import (find_required_env_vars, parse_env_file,
-                                  write_env_file)
-    env_vars = find_required_env_vars(project_path)
-    if env_vars:
+    # Collect referenced env vars and write run/.env
+    from bobi.config import find_env_var_refs, parse_env_file, write_env_file
+    env_refs = find_env_var_refs(project_path)
+    if env_refs:
         env_file = paths.env_path(project_path)
         existing = parse_env_file(env_file)
 
         click.echo()
-        missing = [v for v in env_vars if v not in existing and v not in os.environ]
+        missing = [r for r in env_refs
+                   if r.name not in existing and r.name not in os.environ]
 
         if non_interactive:
             # Pull values from the environment — never prompt.
-            for var in env_vars:
-                if var not in existing and var in os.environ:
-                    existing[var] = os.environ[var]
-            # A bare ${VAR} is a required secret; ${VAR:-default}/${VAR:+alt}
-            # (a ':' in the captured reference) carries its own fallback and is
-            # optional. Fail fast on missing required secrets so a container
-            # entrypoint (`install --non-interactive && start`) never marches
-            # into a broken start with empty credentials.
-            required_missing = [v for v in missing if ":" not in v]
-            optional_missing = [v for v in missing if ":" in v]
+            for ref in env_refs:
+                if ref.name not in existing and ref.name in os.environ:
+                    existing[ref.name] = os.environ[ref.name]
+            # A bare ${VAR} is a required secret; ${VAR:-default} carries its
+            # own fallback and is optional. Fail fast on missing required
+            # secrets so a container entrypoint (`install --non-interactive
+            # && start`) never marches into a broken start with empty
+            # credentials.
+            required_missing = [r.name for r in missing if r.required]
+            optional_missing = [r.name for r in missing if not r.required]
             if required_missing:
                 click.echo(
                     "Error: required secrets missing from the environment: "
@@ -946,16 +791,23 @@ def install(pack, slot_name, non_interactive, pinned):
             write_env_file(env_file, existing)
         elif missing:
             click.echo("This agent needs credentials:")
-            for var in missing:
+            for ref in missing:
+                hint = _ENV_VAR_HINTS.get(
+                    ref.name, "" if ref.required else "optional")
+                label = f"  {ref.name} ({hint})" if hint else f"  {ref.name}"
                 try:
-                    value = click.prompt(f"  {var}", default="", show_default=False)
+                    value = click.prompt(label, default="", show_default=False)
                 except (EOFError, click.Abort):
                     value = ""
                 if value:
-                    existing[var] = value
+                    existing[ref.name] = value
 
             write_env_file(env_file, existing)
             click.echo(f"Credentials saved to {env_file}")
+
+    if with_deps:
+        _materialize_local_deps(pack_dir, project_path,
+                                non_interactive=non_interactive)
 
     if local_source:
         try:
@@ -969,179 +821,52 @@ def install(pack, slot_name, non_interactive, pinned):
     click.echo(f"Run `bobi agent {agent_name} start` to launch.")
 
 
-@main.command()
-@click.argument("name")
-@click.option("--team", default=None,
-              help="Local team package (agents/<team>) → ssh-push delivery.")
-@click.option("--team-url", default=None,
-              help="Published team .tar.gz URL → HTTPS-fetch delivery.")
-@click.option("--fleet", default=None, help="Fleet namespace (app = <fleet>-<name>).")
-@click.option("--env-file", "env_file", default=None,
-              help="KEY=VALUE secrets file (overrides secrets.env-file).")
-@click.option("--auth", default=None, type=click.Choice(["api_key", "subscription"]))
-@click.option("--event-server", "event_server", default=None, help="Event server URL.")
-@click.option("--region", default=None, help="Fly region.")
-@click.option("--memory", default=None, help="Machine memory, e.g. 8gb.")
-@click.option("--cpus", default=None, type=int, help="Shared vCPUs.")
-@click.option("--volume-size", "volume_size", default=None, type=int, help="Volume GB.")
-@click.option("--login-channel", "login_channel", default=None,
-              help="Subscription mode: Slack channel for first-boot login (C23).")
-@click.option("--claude-version", "claude_version", default=None,
-              help="Pin the claude CLI version baked into the image.")
-@click.option("--org", default=None, help="Fly org slug.")
-@click.option("--rebuild", is_flag=True,
-              help="In-place update: force an image rebuild instead of a hot-push "
-                   "(also automatic when a team's build: deps change — #379).")
-@click.option("--no-prune", "no_prune", is_flag=True,
-              help="Don't remove live Fly secrets that aren't declared in the "
-                   "team's agent.yaml. By default an update reconciles to the "
-                   "declared set, pruning undeclared secrets (#385).")
-def deploy(name, team, team_url, fleet, env_file, auth, event_server, region,
-           memory, cpus, volume_size, login_channel, claude_version, org,
-           rebuild, no_prune):
-    """Provision or update ONE instance — the deployment primitive.
+@main.command("build")
+@click.argument("team")
+@click.option("--tag", "tags", multiple=True,
+              help="Image tag (repeatable). Default: bobi-<team>:latest.")
+@click.option("--push", is_flag=True,
+              help="docker push each tag after the build (local docker "
+                   "credential helpers - GHCR/GAR/ECR all work).")
+@click.option("--build", "build_mode",
+              type=click.Choice(["source", "pypi", "wheel"]), default=None,
+              help="Framework build mode. Default: source in a bobi checkout, "
+                   "pypi (pinned to this CLI's version) otherwise.")
+@click.option("--bobi-version", "bobi_version", default=None,
+              help="Published bobi version to pin in pypi mode "
+                   "(default: this CLI's own version).")
+@click.option("--brains", default=None,
+              help="Comma-separated brains to verify guide-only dependency "
+                   "bootstraps under (default: claude).")
+def build(team, tags, push, build_mode, bobi_version, brains):
+    """Render an agent team into a ready-to-run Docker image.
 
-    NAME selects the deployment: deployments/<name>.yaml (merged over
-    deployments/defaults.yaml and built-ins), or — with no file — the local
-    package agents/<name> (ssh-push). Flags override the resolved config.
-
-    Idempotent: no Fly app yet → provision; app exists → in-place update.
-    Two delivery modes, picked by the team source:
-      team:     <name>  local package  → ssh-push (build, push over fly ssh, start)
-      team-url: <url>   published tarball → HTTPS-fetch at first boot
-
-    Works from the binary alone — no checkout. In a bobi checkout the image
-    builds from source; otherwise it builds from PyPI (the bundled deploy assets).
-    Composes with orchestration on top — a GitHub Action / Terraform / a for-loop
-    calls this per instance; the looping/diffing lives there, never here.
+    TEAM is a team directory (holds agent.yaml), a registry name[@version]
+    ref, or a bare name under agents/. The team's declared dependencies
+    (build:, tool_library:, guide-only deps) bake into the image; the team
+    definition itself is delivered at boot per the container contract.
 
     Usage:
-        bobi deploy eng-team            # uses deployments/eng-team.yaml
-        bobi deploy my-team --team my-team   # local package, ssh-push
+        bobi build ./my-team --tag ghcr.io/acme/my-team:1 --push
+        bobi build agents/eng-team --tag bobi-eng-team:dev
     """
-    from bobi import deploy as deploy_mod
-    project_path = Path.cwd()
-
-    overrides = {
-        "team": team, "team_url": team_url, "fleet": fleet, "auth": auth,
-        "event_server": event_server, "region": region, "memory": memory,
-        "cpus": cpus, "volume_size": volume_size, "login_channel": login_channel,
-        "claude_version": claude_version, "org": org,
-        "rebuild": rebuild, "no_prune": no_prune,
-    }
-    if env_file:
-        overrides["secrets_env_file"] = env_file
-
+    from bobi.build import BuildError, build_team_image
+    from bobi.compose import ComposeError
+    from bobi.dep_bootstrap import BootstrapError
     try:
-        cfg = deploy_mod.load_deploy_config(project_path, name, overrides)
-    except deploy_mod.DeployError as e:
-        raise click.UsageError(str(e))
-
-    # Preflight: guide the user (or an agent) through Fly setup before we build.
-    deploy_mod.preflight_fly_or_exit()
-
-    click.echo(
-        f"Deploying '{name}' → app {cfg.app_name} "
-        f"(fleet {cfg.fleet_stamp}, {cfg.delivery} delivery)"
-    )
-    try:
-        deploy_mod.deploy(project_path, name, overrides)
-    except deploy_mod.DeployError as e:
-        click.echo(f"Deploy failed: {e}", err=True)
-        raise SystemExit(1)
-    except subprocess.CalledProcessError as e:
-        click.echo(f"Deploy failed (exit {e.returncode}).", err=True)
-        raise SystemExit(1)
-    click.echo(f"Deployed '{name}' (app {cfg.app_name}).")
-
-
-@main.command("deploy-init")
-@click.argument("team", required=False)
-@click.option("--fleet", default="myfleet",
-              help="Fleet namespace (app names become <fleet>-<team>).")
-@click.option("--tenant", default="prod",
-              help="Default GitHub Environment that holds the secrets.")
-@click.option("--event-server", "event_server", default=None,
-              help="Event server URL (omit for the shared moda Worker).")
-@click.option("--auth", default="api_key",
-              type=click.Choice(["api_key", "subscription"]),
-              help="Auth mode written into the deployment(s) and reflected in the "
-                   "printed secret list (subscription drops ANTHROPIC_API_KEY).")
-@click.option("--force", is_flag=True, help="Overwrite existing scaffold files.")
-def deploy_init(team, fleet, tenant, event_server, auth, force):
-    """Scaffold CI deploy automation for this repo's agent teams (bring-your-own-repo).
-
-    Generates a standalone .github/workflows/deploy-agent-teams.yml (installs
-    bobi from PyPI — no framework checkout needed) + a deployments/ skeleton,
-    then prints the exact `fly`/`gh` commands to wire the Fly token and per-key
-    secrets, derived from each team's declared ${VAR} set so the list is correct.
-    Non-destructive: existing files are skipped unless --force.
-
-    TEAM scopes to one team under agents/; omit to scaffold every team found.
-
-    Usage:
-        bobi deploy-init                          # every team under agents/
-        bobi deploy-init eng-team --fleet acme --tenant prod
-    """
-    from bobi import scaffold as scaffold_mod
-    from bobi.deploy import _bobi_version, DeployError
-
-    project_path = Path.cwd()
-    if team and not (project_path / "agents" / team / "agent.yaml").is_file():
-        raise click.UsageError(f"no agents/{team}/agent.yaml found.")
-    teams = [team] if team else scaffold_mod.discover_teams(project_path)
-    if not teams:
-        raise click.UsageError(
-            "no teams found under agents/ (expected agents/<team>/agent.yaml). "
-            "Pass a TEAM name or run from your agent-teams repo root.")
-
-    try:
-        version = _bobi_version()
-    except DeployError:
-        version = "<version>"  # bobi not pip-installed; user pins manually
-
-    result = scaffold_mod.scaffold(
-        project_path, teams=teams, fleet=fleet, tenant=tenant,
-        event_server=event_server, auth=auth, force=force, version=version)
-
-    for p in result.written:
-        click.echo(f"  wrote   {p.relative_to(project_path)}")
-    for p in result.skipped:
-        click.echo(f"  skipped {p.relative_to(project_path)} "
-                   "(exists; --force to overwrite)")
-    if not result.written:
-        click.echo("Nothing written (all files already exist).")
-    click.echo("")
-    click.echo(scaffold_mod.next_steps(result))
-
-
-@main.command()
-@click.argument("name")
-@click.option("--fleet", default=None, help="Fleet namespace (app = <fleet>-<name>).")
-@click.option("--yes", is_flag=True, help="Skip the typed-confirmation (automation).")
-def destroy(name, fleet, yes):
-    """Tear down ONE instance — its Fly app AND its volume.
-
-    Resolves NAME → app <fleet>-<name> (from deployments/<name>.yaml or --fleet)
-    and destroys it. The volume is the only copy of the instance's state, so this
-    keeps a typed-confirmation; --yes is for automation.
-
-    Usage:
-        bobi destroy eng-team
-        bobi destroy eng-team --yes
-    """
-    from bobi import deploy as deploy_mod
-    deploy_mod.preflight_fly_or_exit()
-
-    overrides = {"fleet": fleet} if fleet else None
-    try:
-        app = deploy_mod.destroy(Path.cwd(), name, overrides, assume_yes=yes)
-    except deploy_mod.DeployError as e:
-        raise click.UsageError(str(e))
-    except subprocess.CalledProcessError as e:
-        click.echo(f"Destroy failed (exit {e.returncode}).", err=True)
-        raise SystemExit(1)
-    click.echo(f"Destroyed '{name}' (app {app}).")
+        result = build_team_image(
+            team, tags=list(tags), push=push, build_mode=build_mode,
+            bobi_version=bobi_version,
+            brains=[b.strip() for b in brains.split(",") if b.strip()]
+            if brains else None)
+    except (BuildError, BootstrapError, ComposeError) as exc:
+        raise click.ClickException(str(exc))
+    except subprocess.CalledProcessError as exc:
+        raise click.ClickException(f"command failed: {exc}")
+    what = "Built + pushed" if push else "Built"
+    flavor = "team-flavored" if result.team_deps else "generic"
+    click.echo(f"{what} {', '.join(result.tags)} "
+               f"({flavor}, {result.mode} mode) from {result.team_dir}")
 
 
 @main.command()
@@ -1158,87 +883,129 @@ def setup(name, model, resume):
     review and install. Interrupt anytime — `--resume` picks up where you
     left off.
     """
-    agent_name = name or "new-agent"
-    project_path = paths.agent_run_root(agent_name)
-    project_path.mkdir(parents=True, exist_ok=True)
-    paths.workspace_dir(project_path).mkdir(parents=True, exist_ok=True)
+    del resume
+    from urllib.parse import quote, urlencode
+    import webbrowser
 
-    # Setup is often the very first command a new user runs — fail with
-    # a pointed message instead of a spawn error deep in the SDK.
-    import shutil as _shutil
-    from bobi.sdk import get_cli_path
-    if not _shutil.which("claude") and not Path(get_cli_path()).exists():
-        raise click.UsageError(
-            "the Claude Code CLI is required for setup — install it first "
-            "(https://claude.com/claude-code), then re-run `bobi setup`.")
+    from bobi.webapp import daemon
 
-    if not resume:
-        from bobi.setup.state import SetupState
-        from bobi.setup.actions import installed_team_name
+    try:
+        st = daemon.start(open_browser=False)
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
+    target = st.url + (f"#/setup/{quote(name)}" if name else "#/setup")
+    if model:
+        target += "?" + urlencode({"model": model})
+    webbrowser.open(target)
+    click.echo(f"bobi setup is open at {target}")
 
-        in_progress = SetupState.load(project_path)
-        if in_progress and not in_progress.finished:
-            click.confirm(
-                f"An interrupted setup exists (stage: {in_progress.stage.value}) "
-                "— resume it with `bobi setup --resume`. Start over "
-                "and discard it?", abort=True)
 
-        name = installed_team_name(project_path)
-        if name:
-            click.confirm(
-                f"'{name}' is already installed here — setup can replace it. "
-                "Continue?", abort=True)
-        if not in_progress and agent_name:
-            state = SetupState(team_name=agent_name)
-            state.save(project_path)
+@main.group("app")
+def app_group():
+    """Manage the Bobi web app (dashboard for all your agents)."""
 
-    from bobi.setup import run_setup
-    raise SystemExit(run_setup(project_path, model=model, resume=resume))
+
+@app_group.command("start")
+@click.option("--no-browser", is_flag=True, help="Don't open a browser.")
+def app_start(no_browser):
+    """Start the web app in the background (idempotent)."""
+    from bobi.webapp import daemon
+
+    try:
+        st = daemon.start(open_browser=not no_browser)
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"bobi app is running at {st.url} (pid {st.pid})")
+
+
+@app_group.command("stop")
+def app_stop():
+    """Stop the web app daemon."""
+    from bobi.webapp import daemon
+
+    st = daemon.stop()
+    click.echo(f"Stopped (pid {st.pid})." if st.pid else "Not running.")
+
+
+@app_group.command("restart")
+def app_restart():
+    """Restart the web app daemon."""
+    from bobi.webapp import daemon
+
+    daemon.stop()
+    try:
+        st = daemon.start(open_browser=False)
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"bobi app is running at {st.url} (pid {st.pid})")
+
+
+@app_group.command("status")
+def app_status():
+    """Show whether the web app daemon is running."""
+    from bobi.webapp import daemon
+
+    st = daemon.status()
+    if st.running:
+        click.echo(f"Running at {st.url} (pid {st.pid})")
+    else:
+        click.echo("Not running. Start it with `bobi app start`.")
+        raise SystemExit(1)
+
+
+@app_group.command("run", hidden=True)
+def app_run():
+    """Run the web app server in the foreground (the daemon child)."""
+    from bobi.webapp import daemon
+
+    raise SystemExit(daemon.run_foreground())
 
 
 @main.command()
-@click.argument("name", required=False)
-@click.option("--app", default=None,
-              help="Target Fly app directly (skip deployment-name resolution).")
-@click.option("--port", "local_port", default=None, type=int,
-              help="Local port for the tunnel (default: the remote UI port).")
-@click.option("--remote-port", default=None, type=int,
-              help="UI port inside the container (default: read from the instance, else 8080).")
+@click.argument("deployment", required=False)
+@click.option("--app", default=None, hidden=True)
+@click.option("--port", "local_port", default=None, type=int, hidden=True)
+@click.option("--remote-port", default=None, type=int, hidden=True)
 @click.option("--no-browser", is_flag=True, help="Don't open a browser window.")
-@click.option("--check", is_flag=True,
-              help="Remote: probe /api/agents through the tunnel once and exit (a smoke check).")
+@click.option("--check", is_flag=True, hidden=True)
 @click.pass_context
-def ui(ctx, name, app, local_port, remote_port, no_browser, check):
+def ui(ctx, deployment, app, local_port, remote_port, no_browser, check):
     """View and chat with an agent team's agents in a web UI.
 
     \b
     Local agent:  bobi agent eng ui
-    Deployed:     bobi agent eng ui <deployment>      # tunnels in via `fly proxy`
-                  bobi agent eng ui --app my-bobi-eng
 
     Local mode serves a card per active agent on 127.0.0.1 and talks to the
     running team over the event server (so the team must already be started).
-    Remote mode resolves the Fly app, reads the UI port + token off the machine,
-    starts `fly proxy`, and opens the browser. Ctrl-C to stop.
+    Deployed instances are administered through the control plane.
     """
-    # Remote mode: a deployment name or --app means "tunnel to a Fly instance".
-    if name or app:
-        from bobi.agentui import remote
-        raise SystemExit(remote.run(
-            name=name, app=app, local_port=local_port,
-            remote_port=remote_port, open_browser=not no_browser, check=check))
+    if deployment or app or local_port or remote_port or check:
+        raise click.UsageError(
+            "`bobi agent <name> ui <deployment>` was removed. "
+            "Deployed instances are administered through the control plane."
+        )
 
     # Local mode: bind the registry + event-server root so the cross-process
     # `deliver` behind the chat reaches the same team start command runs.
     selected = ""
     if ctx.parent is not None and isinstance(ctx.parent.obj, dict):
         selected = str(ctx.parent.obj.get("agent") or "")
-    project_path = _bind_agent_runtime(selected) if selected else _detect_project_root()
-    from bobi.sdk import set_project_root
-    set_project_root(project_path)
-    from bobi.agentui import server as agentui_server
-    raise SystemExit(agentui_server.serve(
-        project_path, mode="local", open_browser=not no_browser))
+    if not selected:
+        raise click.UsageError("local UI requires `bobi agent <name> ui`")
+
+    from urllib.parse import quote
+    import webbrowser
+
+    from bobi.webapp import daemon
+
+    try:
+        st = daemon.start(open_browser=False)
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
+    target = st.url + f"#/agents/{quote(selected)}"
+    if not no_browser:
+        webbrowser.open(target)
+    click.echo(f"bobi app is running at {target} (pid {st.pid})")
 
 
 def _manager_session_name(project_path: Path, role: str | None = None) -> str:
@@ -1247,13 +1014,8 @@ def _manager_session_name(project_path: Path, role: str | None = None) -> str:
     The single definition of the manager naming convention — start, --fresh,
     and transcript lookup all resolve the same name through here.
     """
-    if role is None:
-        from bobi.config import Config
-        try:
-            role = Config.load(project_path).entry_point or "manager"
-        except Exception:
-            role = "manager"
-    return f"bobi-{paths.agent_name_for_root(project_path)}-{role}"
+    from bobi.service import manager_session_name
+    return manager_session_name(project_path, role)
 
 
 def _clear_manager_session(project_path: Path) -> None:
@@ -1264,14 +1026,8 @@ def _clear_manager_session(project_path: Path) -> None:
     api_key points at a now-orphaned deployment in the old bubble) would split
     the restarted sessions across bubbles.
     """
-    import shutil
-    from bobi import paths
-    from bobi.config import clear_bubble_state
-    from bobi.sdk import save_session_id
-    save_session_id(_manager_session_name(project_path), "")
-    clear_bubble_state(project_path)
-    for sub in ("deployments", "cursors"):
-        shutil.rmtree(paths.state_path(project_path) / sub, ignore_errors=True)
+    from bobi.service import clear_manager_session
+    clear_manager_session(project_path)
     click.echo("Cleared manager session — starting fresh.")
 
 
@@ -1341,22 +1097,31 @@ def stop(force):
         _systemctl("stop")
         return
 
-    pid_path = _find_pid_path()
-    if pid_path:
-        _stop_manager_pid(pid_path, force)
+    project_path = _ensure_root_bound()
+    from bobi.service import stop_team
+
+    result = stop_team(project_path, force=force)
+    if result.invalid_pid:
+        click.echo("Invalid PID file — cleaning up.")
+    elif result.stale:
+        click.echo(f"Process {result.pid} not found — cleaning up stale PID file.")
+    elif result.permission_denied:
+        click.echo(f"No permission to signal process {result.pid}.", err=True)
+    elif result.stopped:
+        click.echo(f"Stopping bobi (pid {result.pid})...")
+        click.echo("Stopped.")
+    elif result.killed:
+        click.echo(f"Stopping bobi (pid {result.pid})...")
+        click.echo("Killed.")
+    elif result.still_running:
+        click.echo(f"Stopping bobi (pid {result.pid})...")
+        click.echo("Process didn't exit — try: bobi agent <name> stop --force")
     else:
         click.echo("No PID file found — bobi is not running.")
 
-    project_path = _ensure_root_bound()
-    from bobi.kb.embedder import stop as stop_embedder
-    stop_embedder()
-
-    # Check if the local event server is still running
-    from bobi.events.server import health
-    es_port = _selected_local_event_server_port(project_path)
-    if health(f"http://localhost:{es_port}"):
+    if result.event_server_running:
         click.echo(
-            f"Event server is still running on port {es_port}. "
+            f"Event server is still running on port {result.event_server_port}. "
             "Use `bobi agent <name> event-server stop` to stop it."
         )
 
@@ -1399,29 +1164,9 @@ def _resolve_address(to: str | None) -> str | None:
     package's entry_point role, then the literal role "manager".
     Anything else → used as-is (exact session name).
     """
-    from bobi.sdk import get_registry, set_project_root
-
     project_path = _detect_project_root()
-    if project_path:
-        set_project_root(project_path)
-
-    registry = get_registry()
-    if to is None or to == "manager":
-        from bobi.config import Config
-        entry_point = ""
-        if project_path:
-            entry_point = Config.load(project_path).entry_point
-        roles = [r for r in dict.fromkeys([entry_point, "manager"]) if r]
-        for role in roles:
-            managers = registry.get_by_role(role)
-            active = [m for m in managers
-                      if m.status in ("idle", "running", "starting")]
-            if active:
-                return active[0].name
-            if managers:
-                return managers[0].name
-        return None
-    return to
+    from bobi.service import resolve_address
+    return resolve_address(project_path, to)
 
 
 @main.command()
@@ -1437,22 +1182,23 @@ def message(text, to, wait, timeout):
         bobi agent eng message --to eng-42-implement "try a different approach"
         bobi agent eng message --to manager "status?" --wait
     """
-    from bobi.inbox import deliver
+    from bobi.service import MessageDeliveryError, send_message
 
-    address = _resolve_address(to)
-    if not address:
-        target = to or "manager"
-        click.echo(f"No active session found for '{target}'.", err=True)
-        raise SystemExit(1)
-
-    ok, response = deliver(address, text, sender="cli", wait=wait, timeout=timeout)
-    if ok:
-        if wait and response:
-            click.echo(response)
+    project_path = _detect_project_root()
+    try:
+        result = send_message(
+            project_path, text, wait=wait, session=to, timeout=timeout, sender="cli"
+        )
+        if wait and result.response:
+            click.echo(result.response)
         else:
-            click.echo(f"Sent to {address}")
-    else:
-        click.echo(f"Failed: {response}", err=True)
+            click.echo(f"Sent to {result.address}")
+    except MessageDeliveryError as exc:
+        msg = str(exc)
+        if msg.startswith("No active session"):
+            click.echo(msg, err=True)
+        else:
+            click.echo(f"Failed: {msg}", err=True)
         raise SystemExit(1)
 
 
@@ -1495,154 +1241,93 @@ def compact(to):
 @click.option("--source", default="engineer", help="Source identifier")
 def ask(question, timeout, source):
     """Ask the manager a question (alias for: message --wait)."""
-    from bobi.inbox import deliver
+    from bobi.service import MessageDeliveryError, send_message
 
-    address = _resolve_address("manager")
-    if not address:
-        click.echo("No active manager session found.", err=True)
-        raise SystemExit(1)
-
-    ok, response = deliver(address, question, sender=source, wait=True, timeout=timeout)
-    if ok:
-        click.echo(response)
-    else:
-        click.echo(f"Failed: {response}", err=True)
-        raise SystemExit(1)
-
-
-@main.command("slack-reply")
-@click.argument("text")
-@click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
-@click.option("--channel", "-c", required=True, help="Slack channel ID (e.g. D0B51JP1N4C)")
-@click.option("--thread", "-t", default="", help="Thread timestamp to reply in")
-@click.option("--edit", "edit_ts", default="", help="Placeholder message ts to edit instead of posting new")
-def slack_reply(text, workspace, channel, thread, edit_ts):
-    """Post a message to Slack. Used by the manager to reply to Slack events.
-
-    Usage:
-        bobi slack-reply -w T0952RZRZ0X -c D0B51JP1N4C "Hello"
-        bobi slack-reply -w T0952RZRZ0X -c C123 -t 1780165787.159589 "Thread reply"
-        bobi slack-reply -w T0952RZRZ0X -c C123 -t 171.42 --edit 171.99 "Real response"
-    """
-    import httpx
-
-    from .slack import post_slack_message, update_slack_message, set_thread_status
-
-    token = ""
     project_path = _detect_project_root()
-    if project_path:
-        from .config import Config
-        cfg = Config.load(project_path)
-        token = cfg.credential("slack", "bot_token")
-    if not token:
-        click.echo("No bot token configured (set credentials.bot_token under the slack service in agent.yaml)", err=True)
-        sys.exit(1)
-
     try:
-        if edit_ts:
-            update_slack_message(token, channel, edit_ts, text)
-            if thread:
-                set_thread_status(token, channel, thread, "")
-                # Stop the background refresh loop (if one is running).
-                from .events.channels import stop_refresh_loop
-                stop_refresh_loop(channel, thread)
-            click.echo(f"Updated {edit_ts} in {channel}")
-        else:
-            post_slack_message(token, channel, text, thread_ts=thread)
-            click.echo(f"Sent to {channel}")
-    except RuntimeError as e:
-        click.echo(str(e), err=True)
-        sys.exit(1)
-    except (httpx.HTTPError, OSError, TimeoutError) as e:
-        click.echo(f"Failed: {e}", err=True)
-        sys.exit(1)
-
-
-@main.command("slack-upload-file")
-@click.argument("file_path", type=click.Path(exists=True))
-@click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
-@click.option("--channel", "-c", required=True, help="Slack channel ID")
-@click.option("--thread", "-t", default="", help="Thread timestamp to upload into")
-@click.option("--title", default="", help="File title in Slack")
-@click.option("--comment", default="", help="Initial comment with the file")
-@click.option("--filename", default="", help="Override filename (default: basename of path)")
-def slack_upload_file(file_path, workspace, channel, thread, title, comment, filename):
-    """Upload a file to Slack.
-
-    Usage:
-        bobi slack-upload-file ./screenshot.png -w T0952RZRZ0X -c C123
-        bobi slack-upload-file ./report.pdf -w T0952RZRZ0X -c C123 -t 171.42 --title "Report"
-    """
-    import httpx
-    from pathlib import Path
-
-    from .slack import upload_slack_file
-
-    token = ""
-    project_path = _detect_project_root()
-    if project_path:
-        from .config import Config
-        cfg = Config.load(project_path)
-        token = cfg.credential("slack", "bot_token")
-    if not token:
-        click.echo("No bot token configured (set credentials.bot_token under the slack service in agent.yaml)", err=True)
-        sys.exit(1)
-
-    p = Path(file_path)
-    file_data = p.read_bytes()
-    fname = filename or p.name
-
-    try:
-        upload_slack_file(
-            token, channel, file_data, fname,
-            title=title, thread_ts=thread, initial_comment=comment,
+        result = send_message(
+            project_path, question, wait=True, session="manager",
+            timeout=timeout, sender=source,
         )
-        click.echo(f"Uploaded {fname} to {channel}")
-    except RuntimeError as e:
+        click.echo(result.response)
+    except MessageDeliveryError as exc:
+        msg = str(exc)
+        if msg.startswith("No active session"):
+            click.echo("No active manager session found.", err=True)
+        else:
+            click.echo(f"Failed: {msg}", err=True)
+        raise SystemExit(1)
+
+
+def _parse_conversation_or_exit(conversation):
+    """Parse a conversation reference, exiting with a clear error if invalid."""
+    from .conversation import parse_conversation
+
+    conv = parse_conversation(conversation)
+    if conv is None:
+        click.echo(f"Invalid conversation reference: {conversation}", err=True)
+        sys.exit(1)
+    return conv
+
+
+def _gateway_call(fn, *args, **kwargs):
+    """Run a gateway client call, exiting with its message on failure."""
+    from .events.gateway import GatewayError
+
+    try:
+        return fn(*args, **kwargs)
+    except GatewayError as e:
         click.echo(str(e), err=True)
+        click.echo(
+            "(replies go through the event server's channel gateway; make "
+            "sure the agent is started so the server is running and its "
+            "chat workspace is registered)",
+            err=True,
+        )
         sys.exit(1)
-    except (httpx.HTTPError, OSError, TimeoutError) as e:
-        click.echo(f"Failed: {e}", err=True)
-        sys.exit(1)
 
 
-@main.command("slack-read-thread")
-@click.option("--workspace", "-w", required=True, help="Slack workspace ID (e.g. T0952RZRZ0X)")
-@click.option("--channel", "-c", required=True, help="Slack channel ID")
-@click.option("--thread", "-t", required=True, help="Thread timestamp to read")
-@click.option("--limit", "-n", default=100, help="Max messages to fetch (default: 100)")
-@click.option("--json-output", "as_json", is_flag=True, help="Output as JSON")
-def slack_read_thread(workspace, channel, thread, limit, as_json):
-    """Read all messages in a Slack thread.
+def _unescape_shell_literals(text):
+    """Turn literal ``\\n`` / ``\\t`` escapes into real characters.
 
-    Usage:
-        bobi slack-read-thread -w T0952RZRZ0X -c C123 -t 1780165787.159589
-        bobi slack-read-thread -w T0952RZRZ0X -c C123 -t 171.42 --json-output
+    Reply text often arrives through shell arguments where newlines survive
+    only as two-character escapes; rendering them literally mangles
+    multi-line messages. (Previously done by bobi.slack.format_slack_message
+    on the old direct-send path.)
     """
+    return text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+
+
+def _channels_reply_send(conversation, text, edit_ref, files=None):
+    """Send a reply through the channel gateway (#190 Phase 2).
+
+    Text goes out as raw markdown; the gateway owns formatting, truncation,
+    and clearing the typing indicator. Mode ``final`` resolves the response
+    context: it edits ``edit_ref`` when given, else posts, then clears the
+    thinking indicator.
+    """
+    from .events.gateway import channels_send
+
+    result = _gateway_call(
+        channels_send, _detect_project_root(), conversation,
+        _unescape_shell_literals(text),
+        mode="final", edit_ref=edit_ref, files=files,
+    )
+    if edit_ref:
+        click.echo(f"Updated {edit_ref} in {conversation}")
+    else:
+        click.echo(f"Sent to {conversation}")
+    return result
+
+
+def _read_conversation(conversation, limit, as_json):
+    """Fetch and render a conversation's messages via the gateway."""
     import json as _json
 
-    import httpx
+    from .events.gateway import channels_history
 
-    from .slack import fetch_slack_thread
-
-    token = ""
-    project_path = _detect_project_root()
-    if project_path:
-        from .config import Config
-        cfg = Config.load(project_path)
-        token = cfg.credential("slack", "bot_token")
-    if not token:
-        click.echo("No bot token configured (set credentials.bot_token under the slack service in agent.yaml)", err=True)
-        sys.exit(1)
-
-    try:
-        messages = fetch_slack_thread(token, channel, thread, limit=limit)
-    except RuntimeError as e:
-        click.echo(str(e), err=True)
-        sys.exit(1)
-    except (httpx.HTTPError, OSError, TimeoutError) as e:
-        click.echo(f"Failed: {e}", err=True)
-        sys.exit(1)
+    messages = _gateway_call(
+        channels_history, _detect_project_root(), conversation, limit)
 
     if as_json:
         click.echo(_json.dumps(messages, indent=2))
@@ -1660,12 +1345,79 @@ def slack_read_thread(workspace, channel, thread, limit, as_json):
         click.echo(f"\n{len(messages)} message(s)")
 
 
+@main.command("reply")
+@click.argument("conversation")
+@click.argument("text", required=False)
+@click.option("--edit", "edit_ref", default="", help="Message ref (ts) to edit instead of posting new")
+@click.option("--file", "file_path", type=click.Path(exists=True), default=None,
+              help="Upload a file into the conversation (TEXT becomes its comment)")
+@click.option("--title", default="", help="File title (with --file)")
+def reply(conversation, text, edit_ref, file_path, title):
+    """Reply into a conversation, on whatever chat channel it came from.
+
+    CONVERSATION is the ``conversation`` reference carried on the inbound
+    event - echo it back verbatim. Reads TEXT from stdin when omitted.
+    Write plain markdown; the gateway converts it for the channel.
+
+    Usage:
+        bobi reply slack:T0952RZRZ0X:dm:D0B51JP1N4C "Hello"
+        bobi reply slack:T0952RZRZ0X:channel:C123:thread:171.42 "Thread reply"
+        bobi reply slack:T0952RZRZ0X:channel:C123:thread:171.42 --edit 171.99 "Real response"
+        bobi reply slack:T0952RZRZ0X:channel:C123:thread:171.42 --file report.pdf "Here's the report"
+        bobi reply slack:T0952RZRZ0X:channel:C123:thread:171.42 --edit 171.99 --file out.png "Done - see attached"
+    """
+    _parse_conversation_or_exit(conversation)
+
+    if text is None:
+        # Fail fast on an interactive terminal instead of blocking on EOF
+        # (a piped comment also works alongside --file).
+        if not sys.stdin.isatty():
+            text = click.get_text_stream("stdin").read().rstrip("\n")
+        elif file_path is None:
+            click.echo("No text to send (pass TEXT or pipe via stdin)", err=True)
+            sys.exit(1)
+    text = (text or "").strip()
+    if not text and file_path is None:
+        click.echo("No text to send (pass TEXT or pipe via stdin)", err=True)
+        sys.exit(1)
+    if edit_ref and file_path and not text:
+        # The gateway edits the target message with TEXT, then attaches the
+        # file - without text there is nothing to put in the edited message.
+        click.echo("--edit with --file requires TEXT", err=True)
+        sys.exit(1)
+
+    files = None
+    if file_path is not None:
+        from pathlib import Path
+
+        from .events.gateway import file_payload
+        files = [file_payload(Path(file_path), title=title)]
+
+    _channels_reply_send(conversation, text, edit_ref, files)
+
+
+@main.command("read-conversation")
+@click.argument("conversation")
+@click.option("--limit", "-n", default=100, help="Max messages to fetch (default: 100)")
+@click.option("--json-output", "as_json", is_flag=True, help="Output as JSON")
+def read_conversation(conversation, limit, as_json):
+    """Read the messages of a conversation (e.g. the Slack thread it anchors).
+
+    Usage:
+        bobi read-conversation slack:T0952RZRZ0X:channel:C123:thread:171.42
+        bobi read-conversation slack:T0952RZRZ0X:dm:D456:thread:171.42 --json-output
+    """
+    _parse_conversation_or_exit(conversation)
+    _read_conversation(conversation, limit, as_json)
+
+
 @main.command("create-slack-bot")
-@click.option("--app-name", default="bobi agent",
-              help="Display name for the Slack app")
+@click.option("--app-name", default=None,
+              help='Display name for the Slack app (default: "bobi agent"; '
+                   "prompted when run interactively)")
 @click.option("--event-server", default="",
               help="Event server base URL (default: the configured server, "
-                   "else the bobi cloud)")
+                   "else prompted interactively, else the bobi cloud)")
 @click.option("--format", "fmt", type=click.Choice(["yaml", "json"]),
               default="yaml", help="Manifest output format")
 @click.option("--output", "-o", "output", type=click.Path(), default="",
@@ -1692,14 +1444,21 @@ def create_slack_bot(app_name, event_server, fmt, output, show_url, open_browser
         bobi create-slack-bot --event-server https://my-worker.workers.dev
         bobi create-slack-bot --no-open                # just print the link
     """
+    from .config import DEFAULT_EVENT_SERVER
     from .slack_manifest import (
         create_app_url, manifest_to_json, render_manifest, webhook_url,
     )
 
+    interactive = _interactive_terminal()
+
+    if app_name is None:
+        app_name = (click.prompt("Slack app display name", default="bobi agent")
+                    if interactive else "bobi agent")
+
     if not event_server:
         # Resolve from the project config when run inside an install; this
         # command also works before any Bobi Agent is installed, so a missing
-        # root is fine; use the bobi cloud below when no runtime is selected.
+        # root is fine.
         try:
             project_path = _detect_project_root()
         except click.UsageError:
@@ -1707,8 +1466,23 @@ def create_slack_bot(app_name, event_server, fmt, output, show_url, open_browser
         if project_path:
             from .config import Config
             event_server = Config.load(project_path).event_server_url
+    if not event_server and interactive:
+        # No configured server: let the user pick before the manifest is
+        # rendered and the create page opens. Slack must be able to reach
+        # this URL from the internet, so a laptop running the local event
+        # server needs a public tunnel in front of localhost:8080.
+        click.echo("Where should Slack send events (the app's request URL)?")
+        click.echo("  Press Enter to use the bobi cloud event server, or type "
+                   "your own URL.")
+        click.echo("  Running the agent on this machine with the local event "
+                   "server? Slack can't reach localhost - put a public tunnel "
+                   "(e.g. cloudflared or ngrok) in front of localhost:8080 "
+                   "and enter the tunnel URL.")
+        event_server = click.prompt("Event server URL",
+                                    default=DEFAULT_EVENT_SERVER)
+        click.echo("")
     if not event_server:
-        from .deploy import DEFAULT_EVENT_SERVER
+        # Non-interactive with nothing configured: the bobi cloud.
         event_server = DEFAULT_EVENT_SERVER
 
     manifest_yaml = render_manifest(app_name, event_server)
@@ -1901,30 +1675,21 @@ def _print_transcript_entry(line: str) -> None:
 @main.command()
 def status():
     """Show active agents — manager + engineer sub-agents."""
-    from bobi.sdk import load_session_id, get_registry
-
     project_path = _detect_project_root()
-    running = False
-    pid_path = _find_pid_path()
-    if pid_path and pid_path.exists():
-        try:
-            pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)
-            running = True
-        except (ValueError, ProcessLookupError, PermissionError):
-            pass
 
     if not project_path:
         click.echo("No Bobi Agent runtime selected. Use `bobi agents list`, then `bobi agent <name> status`.")
         raise SystemExit(1)
 
-    if running:
-        click.echo(f"  Agent: running (pid {pid})")
+    from bobi.service import team_status
+
+    result = team_status(project_path)
+    if result.manager_running:
+        click.echo(f"  Agent: running (pid {result.manager_pid})")
     else:
         click.echo("  Agent: stopped")
 
-    registry = get_registry()
-    active = registry.list_active()
+    active = result.active_agents
     if not active:
         click.echo("  Sub-agents: none active")
         return
@@ -2160,10 +1925,7 @@ def skill(name):
     click.echo(path.read_text())
 
 
-@main.command()
-@click.option("--tail", default=20, help="Number of recent entries to show")
-@click.option("--decisions-only", is_flag=True, help="Show only manager decisions")
-def events(tail, decisions_only):
+def _show_events(tail: int, decisions_only: bool) -> None:
     """Show recent events and manager decisions as a unified timeline."""
     project_path = _detect_project_root()
 
@@ -2242,6 +2004,151 @@ def events(tail, decisions_only):
         click.echo(f"\n  ⚠ {malformed} malformed line(s) skipped", err=True)
 
 
+def _parse_event_publish_payload(json_payload: str | None) -> dict:
+    if json_payload is None:
+        stdin = click.get_text_stream("stdin")
+        if stdin.isatty():
+            raise click.UsageError("Provide payload with --json or stdin.")
+        raw = stdin.read()
+    else:
+        raw = json_payload
+    raw = raw.strip()
+    if not raw:
+        raise click.UsageError("Provide payload with --json or stdin.")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise click.UsageError(f"Payload must be valid JSON: {exc.msg}.") from exc
+    if not isinstance(payload, dict):
+        raise click.UsageError("Payload must be a JSON object.")
+    return payload
+
+
+def _validate_event_publish_topic(topic: str) -> str:
+    source, sep, etype = topic.partition("/")
+    if not sep or not source or not etype:
+        raise click.UsageError(
+            "Topic must use source/type form, e.g. alert/firing."
+        )
+    reserved_sources = {"github", "linear", "slack"}
+    if source in reserved_sources:
+        raise click.UsageError(
+            "github, linear, and slack sources are reserved for webhooks."
+        )
+    global_prefixes = ("github:", "linear:", "slack:")
+    if (
+        topic.startswith(global_prefixes)
+        or source.startswith(global_prefixes)
+        or etype.startswith(global_prefixes)
+    ):
+        raise click.UsageError(
+            "github:, linear:, and slack: topics are reserved for webhooks."
+        )
+    return topic
+
+
+@main.group(invoke_without_command=True)
+@click.option("--tail", default=20, help="Number of recent entries to show")
+@click.option("--decisions-only", is_flag=True, help="Show only manager decisions")
+@click.pass_context
+def events(ctx, tail, decisions_only):
+    """Show recent events and manager decisions as a unified timeline."""
+    if ctx.invoked_subcommand is not None:
+        return
+    _show_events(tail, decisions_only)
+
+
+@events.command("publish")
+@click.argument("topic")
+@click.option("--json", "json_payload", default=None,
+              help="JSON object payload. If omitted, payload is read from stdin.")
+def events_publish(topic, json_payload):
+    """Publish a signed custom-topic event."""
+    project_path = _detect_project_root()
+    topic = _validate_event_publish_topic(topic)
+    payload = _parse_event_publish_payload(json_payload)
+
+    from bobi.events.publish import post_event
+    if not post_event(topic, payload, project_path=project_path):
+        click.echo(
+            "Publish failed. Ensure the agent is started, bubble credentials "
+            "are minted, and the event server accepted the signed publish.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    click.echo(f"Published {topic}")
+
+
+@events.group("ingest-token")
+def ingest_token():
+    """Manage scoped ingest tokens for POST /webhooks/ingest/<topic>.
+
+    An ingest token lets an external system that can only send static
+    headers (alerting, CI, SaaS webhooks) publish plain JSON to one topic
+    in this instance's bubble. The server stores only a hash; the token is
+    shown once at creation.
+    """
+
+
+@ingest_token.command("create")
+@click.argument("topic")
+@click.option("--name", default=None, help="Optional label shown in list output.")
+def ingest_token_create(topic, name):
+    """Mint a token bound to TOPIC (source/type form, e.g. alert/firing).
+
+    Topic rules are enforced server-side (validateIngestTopic in
+    event-server/src/core.ts, the single source of truth); a rejection
+    surfaces its reason verbatim.
+    """
+    project_path = _detect_project_root()
+
+    from bobi.events.ingest_tokens import IngestTokenError, create_token
+    try:
+        minted = create_token(topic, name=name, project_path=project_path)
+    except IngestTokenError as e:
+        raise click.ClickException(str(e))
+
+    click.echo(f"Ingest token for {minted.get('topic', topic)} "
+               f"(id {minted.get('id', '?')}):")
+    click.echo(f"\n  {minted.get('token', '')}\n")
+    click.echo("Shown once - store it in the external system now. Send events with:")
+    click.echo(f'  curl -H "Authorization: Bearer <token>" -d \'{{"title":"..."}}\' '
+               f"<event-server>/webhooks/ingest/{topic}")
+
+
+@ingest_token.command("list")
+def ingest_token_list():
+    """List this instance's ingest tokens (never shows the tokens themselves)."""
+    project_path = _detect_project_root()
+
+    from bobi.events.ingest_tokens import IngestTokenError, list_tokens
+    try:
+        tokens = list_tokens(project_path=project_path)
+    except IngestTokenError as e:
+        raise click.ClickException(str(e))
+
+    if not tokens:
+        click.echo("No ingest tokens.")
+        return
+    for t in tokens:
+        label = f"  ({t['name']})" if t.get("name") else ""
+        click.echo(f"{t.get('id', '?')}  {t.get('topic', '?')}{label}  "
+                   f"created {t.get('created_at', '?')}")
+
+
+@ingest_token.command("revoke")
+@click.argument("token_id")
+def ingest_token_revoke(token_id):
+    """Revoke an ingest token by id. Takes effect immediately."""
+    project_path = _detect_project_root()
+
+    from bobi.events.ingest_tokens import IngestTokenError, revoke_token
+    try:
+        revoke_token(token_id, project_path=project_path)
+    except IngestTokenError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"Revoked {token_id}")
 
 
 
@@ -2746,6 +2653,75 @@ def monitor_approve_script(name):
         raise SystemExit(1)
 
 
+@monitors.command("gate", hidden=True)
+@click.option("--request", "request_path", required=True,
+              help="Path to the gate request JSON written by the scheduler.")
+def monitor_gate(request_path):
+    """Internal: judge new monitor items against a relevance criterion (#630).
+
+    Scheduler plumbing, launched out-of-band by _default_spawn_gate. Reads
+    {"criterion": ..., "name": ..., "items": [{"key": ..., "data": ...}]}
+    from the request file, runs the cheap-model gate agent, and prints the
+    verdict as a single JSON line: {"success": ..., "relevant": [...]}.
+    """
+    from .subagent import run_gate_blocking
+
+    project_path = _detect_project_root()
+    try:
+        request = json.loads(Path(request_path).read_text())
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        click.echo(f"Bad gate request file: {e}", err=True)
+        raise SystemExit(1)
+
+    criterion = str(request.get("criterion", ""))
+    items = request.get("items") or []
+    if not criterion or not isinstance(items, list) or not items:
+        click.echo("Gate request needs a criterion and a non-empty items list.",
+                   err=True)
+        raise SystemExit(1)
+
+    result = run_gate_blocking(
+        criterion, items, cwd=str(project_path),
+        name=request.get("name") or None,
+    )
+    click.echo(json.dumps({"success": result.success,
+                           "relevant": result.relevant}))
+    if not result.success:
+        click.echo(f"Gate failed: {result.error}", err=True)
+        raise SystemExit(1)
+
+
+@monitors.command("curator", hidden=True)
+@click.option("--request", "request_path", required=True,
+              help="Path to the rendered sleep-cycle task written by the scheduler.")
+def monitor_curator(request_path):
+    """Internal: distill the transcript delta into long_term_memory.md (#456).
+
+    Scheduler plumbing, launched out-of-band by _default_spawn_sleep_cycle.
+    Reads the full rendered task (prompt + current memory + transcript delta)
+    from the request file, runs the sleep-cycle agent, and prints its
+    summary as a single JSON line: {"success": ..., "updated": ...}.
+    """
+    from .subagent import run_curator_blocking
+
+    project_path = _detect_project_root()
+    try:
+        task = Path(request_path).read_text()
+    except OSError as e:
+        click.echo(f"Bad sleep-cycle request file: {e}", err=True)
+        raise SystemExit(1)
+    if not task.strip():
+        click.echo("Sleep-cycle request file is empty.", err=True)
+        raise SystemExit(1)
+
+    summary, error = run_curator_blocking(task, cwd=str(project_path))
+    if summary is None:
+        click.echo(json.dumps({"success": False, "summary": error}))
+        click.echo(f"Curator failed: {error}", err=True)
+        raise SystemExit(1)
+    click.echo(json.dumps(summary))
+
+
 main.add_command(monitors)
 
 
@@ -2871,8 +2847,12 @@ main.add_command(event_server_cmd)
               help="Keep the agent alive after initial task, accepting inbox messages")
 @click.option("--subscribe", multiple=True,
               help="Subscribe to event topics (e.g. moda-labs/bobi-agent, slack:T123)")
+@click.option("--model", default="",
+              help="Model override for this launch (provider-native, e.g. haiku, "
+                   "opus, or a full model ID). Wins over step and role config.")
 def subagents_launch(workflow, role, run_key, task, timeout, wait, agent_wait,
-                     post_event, requested_by, non_interactive, persistent, subscribe):
+                     post_event, requested_by, non_interactive, persistent,
+                     subscribe, model):
     """Launch a sub-agent with a workflow and role.
 
     Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
@@ -2890,12 +2870,14 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, agent_wait,
                     requested_by=requested_by,
                     interactive=not non_interactive,
                     persistent=persistent,
-                    subscribe=list(subscribe))
+                    subscribe=list(subscribe),
+                    model=model)
 
 
 def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
                     agent_wait=False, post_event=None, requested_by=None,
-                    interactive=True, persistent=False, subscribe=None):
+                    interactive=True, persistent=False, subscribe=None,
+                    model=""):
     """Dispatch logic for the agent command."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
@@ -2924,7 +2906,8 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
         _run_agent_wait(cwd=cwd, task=task, workflow=workflow, role=role,
                         run_key=run_key, timeout=timeout,
                         requested_by=requested_by, interactive=interactive,
-                        persistent=persistent, subscribe=subscribe or [])
+                        persistent=persistent, subscribe=subscribe or [],
+                        model=model)
         return
 
     requester: dict = {}
@@ -2949,20 +2932,17 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
         persistent=persistent,
         subscribe=subscribe or [],
         run_key=run_key,
+        model=model,
     )
     click.echo(f"Agent started: {session_name}")
 
 
+
 def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
                     run_key: str | None, timeout: int, requested_by,
-                    interactive: bool, persistent: bool,
-                    subscribe: list[str]) -> None:
-    """Run a real agent synchronously and print its final text.
-
-    Monitor checks use ``_run_check`` because they must be read-only verdict
-    producers. The sleep cycle must run the actual adhoc role so it can rewrite
-    ``long_term_memory.md`` and emit its JSON summary as final output.
-    """
+                    interactive: bool, persistent: bool, subscribe: list[str],
+                    model: str = "") -> None:
+    """Run a real agent synchronously and print its final text."""
     if workflow != "adhoc":
         click.echo("--agent-wait only supports adhoc workflow runs", err=True)
         raise SystemExit(1)
@@ -2987,7 +2967,7 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
     result = spawn_adhoc(
         cwd=cwd, task=task, timeout=timeout, name=run_key,
         requested_by=requester, persistent=False, role=role,
-        subscribe=subscribe,
+        subscribe=subscribe, model=model,
     )
     if result.final_text:
         click.echo(result.final_text)
@@ -2995,7 +2975,6 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
         if result.error:
             click.echo(f"Agent failed: {result.error}", err=True)
         raise SystemExit(1)
-
 
 
 def _run_check(cwd: str, task: str, timeout: int, post_event: str | None) -> None:

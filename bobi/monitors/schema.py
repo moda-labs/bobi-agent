@@ -22,7 +22,7 @@ class Condition:
 # need no schema change.
 _RESERVED = {"name", "description", "interval", "event", "check", "command",
              "enabled", "at", "tz", "days", "notify", "role", "sleep_cycle",
-             "curator"}
+             "curator", "relevance"}
 
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -135,9 +135,11 @@ class Monitor:
     event: str = ""
     check: str = ""
     command: str = ""
+    relevance: str = ""
     notify: bool = False
     role: str = ""
     sleep_cycle: bool = False
+    curator: bool = False
     enabled: bool = True
     extra: dict = field(default_factory=dict)
     source: str = "user"
@@ -164,9 +166,11 @@ class Monitor:
             event=raw.get("event", f"monitor/{raw['name']}"),
             check=raw.get("check", ""),
             command=raw.get("command", ""),
+            relevance=str(raw.get("relevance", "") or ""),
             notify=bool(raw.get("notify", False)),
             role=raw.get("role", ""),
             sleep_cycle=bool(raw.get("sleep_cycle", raw.get("curator", False))),
+            curator=bool(raw.get("curator", False)),
             enabled=raw.get("enabled", True),
             extra=extra,
             source=source,
@@ -192,16 +196,28 @@ class Monitor:
             record["check"] = self.check
         if self.command:
             record["command"] = self.command
+        if self.relevance:
+            record["relevance"] = self.relevance
         if self.notify:
             record["notify"] = True
         if self.role:
             record["role"] = self.role
-        if self.sleep_cycle:
+        if self.sleep_cycle or self.curator:
             record["sleep_cycle"] = True
         if not self.enabled:
             record["enabled"] = False
         record.update(self.extra)
         return record
+
+    @property
+    def gated(self) -> bool:
+        """Whether conditions pass through the relevance gate (#630): a
+        `relevance:` criterion on a mechanical detector. The single source of
+        truth for both the runtime routing (scheduler.run_monitor) and
+        validation (_check_monitor_relevance) - the two must never drift.
+        """
+        return (bool(self.relevance) and not self.notify
+                and bool(self.command or self.check))
 
     @property
     def interval_seconds(self) -> int:
@@ -217,6 +233,10 @@ class Monitor:
         """Weekdays this monitor's `at:` is gated to, as Python weekday ints
         (Monday=0 … Sunday=6). Empty set = every day (no gating)."""
         return parse_days(self.days)
+
+    def __post_init__(self) -> None:
+        if self.curator:
+            self.sleep_cycle = True
 
     @property
     def tzinfo(self):

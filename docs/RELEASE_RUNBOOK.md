@@ -4,10 +4,26 @@ This is the production bugfix release recipe for `bobi` plus the Moda
 agent-team fleet. Use it when a fix has merged to `main` and needs to reach the
 Fly-hosted agents.
 
+> **Repo-split phase 1 caveat:** the deploy commands now live in the separate
+> `bobi-deploy` package (`bobi_deploy/`, its own wheel). It is NOT on PyPI and
+> real releases never go there - anything published to PyPI is public forever,
+> which conflicts with this package going closed-source, and a stale public
+> copy next to a private index is a dependency-confusion setup. Distribution
+> is a private index or git+ssh pin only. A `uv tool install bobi` from the
+> next release therefore has no `bobi deploy`; that is the product line.
+> Before the first private-channel release: raise bobi_deploy/pyproject.toml's
+> `bobi>=` floor to the bobi release that ships the carve-out seams (0.40.0
+> satisfies the pin but predates bobi.build/bobi.config). And claim the
+> `bobi-deploy` name on PyPI with a defensive stub (or rename the package):
+> it is squattable today and `deploy-init`-scaffolded fleet workflows
+> pip-install it by name inside CI jobs holding FLY_API_TOKEN. CI and this
+> runbook's fleet steps are unaffected (they install both packages from the
+> checkout).
+
 ## 1. Sync `bobi`
 
 ```bash
-cd ~/dev/bobi
+cd ~/dev/bobi-agent
 git switch main
 git pull --ff-only
 git status --short
@@ -69,6 +85,14 @@ gh run list --repo moda-labs/bobi-agent --workflow release.yml --limit 3 \
 gh run watch <run-id> --repo moda-labs/bobi-agent --interval 20
 ```
 
+The release workflow deploys the Cloudflare event server, then checks the
+authoritative fleet event-server URL by fetching `<event_server>/health`. Set
+the repo variable `FLEET_EVENT_SERVER_URL` when production fleet config lives
+outside this repo; otherwise the workflow falls back to this repo's
+`deployments/defaults.yaml`. The health payload must report the wheel version
+and source git SHA just deployed. If this fails, stop: production is pointed at a
+different Worker or the new Worker has not propagated.
+
 Do not continue to the Moda fleet pin until the release workflow is green,
 including:
 
@@ -76,11 +100,30 @@ including:
 - release wheel build
 - canary build/smoke
 - PyPI publish
+- GHCR base image publish (`ghcr.io/moda-labs/bobi:<version>`; `:latest` moves
+  when this version is the repo's latest non-prerelease release)
 - event server deploy
+- event server identity check against the fleet `event_server` URL
 - fleet roll jobs
 
 If PyPI was just published, allow a short propagation delay before installing
 the new version from another repo.
+
+One-time setup (first release only): the first push creates the GHCR package
+as private. Make it public in the package settings
+(github.com/orgs/moda-labs/packages) so consumers can pull without a token;
+visibility persists across releases.
+
+Spot-check the published base image AS A CONSUMER - log out of GHCR first so
+the pull proves anonymous access works (a logged-in maintainer pull succeeds
+even while the package is still private):
+
+```bash
+docker logout ghcr.io
+docker run --rm --entrypoint bobi ghcr.io/moda-labs/bobi:<version> --version
+```
+
+The full run contract is in `docs/CONTAINERIZED_DEPLOYMENT.md`.
 
 ## 3. Bump `moda-agents`
 
@@ -98,6 +141,17 @@ Update both pins:
 
 - `.github/workflows/deploy-agent-teams.yml`: `BOBI_VERSION`
 - `.github/workflows/lint.yml`: pinned `pip install "bobi==..."`
+
+Worker identity check: if the event-server Worker name or URL changes, move all
+external entry points together before validating the release:
+
+- `moda-agents` `deployments/defaults.yaml` `event_server`
+- Slack app request URLs
+- GitHub App webhook URL
+- Linear webhook URL
+
+After any move, fetch the fleet URL directly and confirm `/health` reports the
+release version/SHA that the `bobi-agent` release workflow deployed.
 
 Verify compose against the exact released package:
 
@@ -173,15 +227,15 @@ Known failure signatures:
   canary smoke.
 - `Separator is not found/found, and chunk is longer than limit`: Codex JSON
   stream reader limit regression.
-- Slack placeholder stays at `Evaluating...`: event reached Slack, but the
-  brain/session has not completed the turn.
+- Slack typing indicator stays active: event reached Slack, but the
+  brain/session has not completed the turn or did not clear typing on reply.
 
 ## 5. Validate Slack E2E with Venn
 
 Use the local Venn CLI and the repo `.env` without printing secrets:
 
 ```bash
-cd ~/dev/bobi
+cd ~/dev/bobi-agent
 set -a; source .env; set +a
 ```
 

@@ -78,6 +78,7 @@ class TestNotifyStepSchema:
                 if: "status == done"
                 goto: work
                 else: work
+                max_iterations: 1
         """))
         wf = load_workflow(f)
         assert len(wf.steps) == 3

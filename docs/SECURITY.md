@@ -105,11 +105,16 @@ therefore runs untrusted-author code against your credentials.
 
 Enforced: bubble HMAC on publish/join, per-resource proof-of-access grants
 (fail-closed at delivery), bubble-scoped outbound Slack, internal Worker-to-DO auth,
-loopback-only local server, and webhook signature verification (GitHub, Slack).
+loopback-only local server, and webhook signature verification (GitHub, Slack,
+Linear, WhatsApp - one pipeline with a structural verify slot per source, #639).
 
 Known v1 boundary: inbound global webhook topics are grant-gated but tenancy is
 coarse - a `linear:<team>` key can collide across two organizations. Binding inbound
 webhooks to a specific account is the multi-tenant hardening tracked in **#239**.
-Running a shared or public event server is a deliberate step: serve over TLS, set
-`WEBHOOK_SECRET` and the Slack signing secret, and keep the Linear webhook URL
-secret.
+Running a shared or public event server is a deliberate step: serve over TLS and
+set every provider webhook secret (`WEBHOOK_SECRET`, `SLACK_SIGNING_SECRET`,
+`LINEAR_WEBHOOK_SECRET`, `WHATSAPP_APP_SECRET` - plus `WHATSAPP_VERIFY_TOKEN`
+for Meta's GET handshake) so every inbound route verifies. An unset github/
+slack/linear secret admits that provider unverified, visible on `/health` as
+`webhook_unverified`; WhatsApp FAILS CLOSED instead (an unverified WhatsApp
+event would open an outbound send path, not just inject a notification).

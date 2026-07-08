@@ -64,7 +64,7 @@ def _drain_one_batch(events):
     delivered = []
 
     class _CaptureInbox:
-        def push(self, msg):
+        def push(self, msg, priority=False):
             delivered.append(msg.text)
 
     register_local_inbox("manager", _CaptureInbox())

@@ -84,6 +84,7 @@ turn, then reads a handoff file. This is the only step type that uses the LLM.
 ```yaml
   - name: pickup
     agent: engineer
+    model: sonnet
     prompt: |
       Move the issue to In Progress. Explore the codebase, classify
       complexity, write the handoff.
@@ -97,6 +98,43 @@ turn, then reads a handoff file. This is the only step type that uses the LLM.
 1800) is the declared deadline carried into the registry for the reconciler's
 dead-man check.
 
+`model` is optional. When omitted, a prompt step uses the acting role's
+configured model (`roles.<role>.model` in `agent.yaml`), then the team default
+(`brain.model`), then the provider default. An explicit `--model` on
+`subagents launch` wins over all of them for the whole run:
+
+```yaml
+brain:
+  kind: codex
+  model: gpt-5-codex
+roles:
+  prospect-targeter: {model: gpt-5-mini}
+```
+
+Set `model` on an individual prompt step when that step should use a different
+provider-specific model or alias. For Claude-backed teams, aliases such as
+`haiku`, `sonnet`, and `opus` are accepted, as are full Claude model IDs:
+
+```yaml
+steps:
+  - name: discover
+    agent: prospect-targeter
+    model: haiku
+    prompt: "Find companies matching the wedge..."
+```
+
+Model changes are prompt-step boundaries. When a workflow reaches a prompt
+step whose model differs from the session's current model, the engine
+continues the same session natively on the new model when the brain supports
+it (Claude does), keeping the full conversation. On brains without that
+capability, when the step switches back to the provider default, or when the
+step also changes `agent:` (a new agent never inherits another agent's
+transcript), it falls back to a fresh session seeded with the accumulated
+workflow context, so the handoff chain remains intact either way. Note that
+native continuation carries the full transcript into the new model's context,
+so a step that switches a long conversation onto a pricier model pays for
+that history in input tokens.
+
 ### Route step
 
 Deterministic branch, no LLM. Evaluates `if:` and jumps to `goto:` when true or
@@ -108,6 +146,11 @@ Deterministic branch, no LLM. Evaluates `if:` and jumps to `goto:` when true or
     goto: spec
     else: implement
 ```
+
+Route steps that jump to themselves or an earlier step are capped at 3 visits by
+default. Use `max_iterations` or its alias `max_visits` to set a different
+positive integer cap. When the cap is exhausted, the workflow fails unless
+`on_exhausted` names a later step to continue with.
 
 ### Await step
 

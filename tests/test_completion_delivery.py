@@ -87,6 +87,7 @@ def _sdk_module(client):
 @pytest.fixture(autouse=True)
 def bound_root(tmp_path, monkeypatch):
     monkeypatch.setattr("bobi.paths._root", tmp_path)
+    monkeypatch.setenv("BOBI_BRAIN", "claude")
 
 
 def _register(run_key, phase, role=""):
@@ -98,7 +99,7 @@ def _register(run_key, phase, role=""):
 
 
 async def _run(client, run_key, phase):
-    with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+    with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
          patch(f"{SDK_PATCH}.save_session_id"), \
          patch(f"{SDK_PATCH}.log_activity"), \
          patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
@@ -166,6 +167,10 @@ class TestHonestTerminalStatus:
         client = FakeClient([[]])  # no ResultMessage
         result = await _run(client, "LOST-1", "implement")
         assert result.success is False
+        assert result.error == (
+            "network drop: response stream ended before turn result "
+            "(no ResultMessage)"
+        )
         assert get_registry().get(name).status == TERMINAL_FAILED
 
 

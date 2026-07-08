@@ -14,6 +14,11 @@ name: Release
 #                                CANARY-OK end-to-end. THIS is the gate.
 #   5. publish                   needs build-canary → upload the SAME wheel to PyPI
 #                                and update/smoke Homebrew.
+#   6. publish-image             needs a canary that actually RAN → build the base
+#      + publish-manifest        image per-arch (natively, no QEMU) FROM the same
+#                                wheel and publish ghcr.io/moda-labs/bobi:<version>
+#                                (#609); :latest tracks the repo's latest
+#                                non-prerelease release.
 #
 # Why the canary is built from the WHEEL, not source: it then proves the exact
 # artifact we publish actually boots and answers — catching wheel/sdist packaging
@@ -53,6 +58,11 @@ permissions:
   contents: read
   id-token: write
 
+env:
+  # The ONE automation-side definition of the published base-image name
+  # (docs necessarily repeat it for consumers).
+  IMAGE: ghcr.io/moda-labs/bobi
+
 jobs:
   # --------------------------------------------------------------------------
   # Subscription-login smoke (#388). GATE the release on a verified subscription
@@ -65,19 +75,27 @@ jobs:
   #   * NO Slack / event-server network — the Slack post and event-bus wait are
   #     stubbed; the code is the synthetic one we feed in.
   # The mock auth-code event uses the REAL Slack adapter output shape, generated
-  # from event-server/src/adapters/slack.ts (so adapter + bootstrap can't drift),
-  # exactly as tests/integration/test_login_bootstrap_smoke.py does.
+  # from event-server/src/adapters/chat-sdk-slack.ts (so adapter + bootstrap
+  # can't drift), exactly as tests/integration/test_login_bootstrap_smoke.py does.
   subscription-login-smoke:
     name: Subscription-login smoke (mock code, no creds)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Node is needed only to GENERATE the auth-code event from slack.ts via
-      # the adapter's own logic (esbuild type-erasure). No event-server deploy.
+      # Node is needed only to GENERATE the auth-code event from
+      # chat-sdk-slack.ts via the adapter's own logic (esbuild bundle).
+      # No event-server deploy.
       - uses: actions/setup-node@v5
         with:
           node-version: "20"
+
+      # chat-sdk-slack.ts imports @chat-adapter/slack; the smoke bundles the
+      # adapter with esbuild, so the event-server deps must be installed
+      # (otherwise the test skips and the gate is meaningless).
+      - name: Install event-server Node dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: event-server
 
       - uses: actions/setup-python@v5
         with:
@@ -108,6 +126,16 @@ jobs:
   build-wheel:
     name: Build the release wheel
     runs-on: ubuntu-latest
+    # version: the release version, read from the wheel FILENAME - the released
+    # bytes are the single source of truth, never a ref name (a dispatch from a
+    # branch must not mint a bogus tag). claude-version: the floating `stable`
+    # channel resolved ONCE to an exact version, so the canary image and every
+    # published arch bake the identical claude CLI (the Dockerfile default
+    # would re-resolve the channel at each build).
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      claude-version: ${{ steps.meta.outputs.claude-version }}
+      source-sha: ${{ steps.meta.outputs.source-sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -135,20 +163,45 @@ jobs:
           name: dist
           path: dist/
 
+      - name: Resolve release version + claude CLI pin
+        id: meta
+        run: |
+          set -euo pipefail
+          whl="$(basename dist/*.whl)"
+          echo "version=$(echo "$whl" | cut -d- -f2)" >> "$GITHUB_OUTPUT"
+          echo "source-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          curl -fsSL https://claude.ai/install.sh | bash -s -- stable
+          echo "claude-version=$("$HOME/.local/bin/claude" --version | awk '{print $1}')" \
+            >> "$GITHUB_OUTPUT"
+
   # --------------------------------------------------------------------------
-  # THE GATE: deploy ci-canary from an image built FROM the just-built wheel, then
-  # a functional `ask` proves it answers CANARY-OK end-to-end through the PROD event
-  # server. A broken wheel/image fails here and blocks PyPI/Homebrew publish.
+  # THE GATE: deploy the brain canaries from an image built FROM the just-built
+  # wheel, then a functional `ask` proves each answers CANARY-OK end-to-end
+  # through the PROD event server. A broken wheel/image fails here and blocks
+  # PyPI/Homebrew publish.
+  #
+  # Both brains are hard gates at parity (#428): ci-canary (Claude) and
+  # ci-codex-smoke (Codex) run through the identical path (same base image, same
+  # wheel) — codex ships in the base image, so no flavored image is needed. If
+  # either can't answer, the release aborts.
   build-canary:
     name: Build canary from the wheel + smoke
     needs: [subscription-login-smoke, build-wheel, deploy-event-server]
     runs-on: ubuntu-latest
+    # smoked=true only when the functional gate actually RAN. The job also
+    # succeeds when FLY_API_TOKEN is unset (fleet not wired), and PyPI has an
+    # external backstop for that case (trusted-publisher config) - but the
+    # GHCR push authenticates with the always-present GITHUB_TOKEN, so
+    # publish-image must require this output, not just job success.
+    outputs:
+      smoked: ${{ steps.canary.outputs.smoked }}
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      CLAUDE_PIN: ${{ needs.build-wheel.outputs.claude-version }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
+          ref: ${{ needs.build-wheel.outputs.source-sha }}
 
       - name: Stage the prebuilt wheel into the build context
         uses: actions/download-artifact@v4
@@ -158,14 +211,7 @@ jobs:
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
-      # Needed for `bobi agent <name> ui --check`.
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install bobi
-        run: pip install -e .
-
-      - name: Build the canary image from the wheel + smoke it
+      - name: Build the brain canary images from the wheel + smoke them
         id: canary
         run: |
           set -euo pipefail
@@ -177,43 +223,61 @@ jobs:
           # `flyctl`. Detect either (same pattern as deploy.py / fleet.sh).
           FLY="$(command -v fly || command -v flyctl)" \
             || { echo "::error::neither 'fly' nor 'flyctl' found on PATH"; exit 1; }
+          export FLY
           FLEET_PREFIX="$(sed -nE 's#^fleet:[[:space:]]*([^[:space:]#]+).*#\1#p' \
                             deployments/defaults.yaml | head -n1)"
           [ -n "${FLEET_PREFIX:-}" ] || { echo "::error::no fleet set in deployments/defaults.yaml"; exit 1; }
 
-          canary="${FLEET_PREFIX}-canary"
-          "$FLY" status -a "$canary" >/dev/null
+          # The brain canaries, each a hard gate at parity (#428). Fields are
+          # <deployment>:<app>:<policy>, where deployment is the deployments/<name>.yaml
+          # name and app is its Fly app.
+          #   required  — must exist; its absence is a misconfiguration that fails.
+          #   bootstrap — may not be provisioned yet; warn+skip until it is, THEN it
+          #               is a hard gate. This is the one-time window after this PR
+          #               merges but before `bobi deploy codex-smoke` (+ the
+          #               CODEX_SMOKE__OPENAI_API_KEY secret) stands ci-codex-smoke up.
+          canaries=(
+            "canary:${FLEET_PREFIX}-canary:required"
+            "codex-smoke:${FLEET_PREFIX}-codex-smoke:bootstrap"
+          )
 
-          # Build + deploy the generic image FROM THE WHEEL (dist/ is in the build
-          # context; builder-wheel installs it). Round-trip live config; swap image.
-          echo "::group::build + deploy $canary (generic base, from the wheel)"
-          cfg="$(mktemp -t "fly-$canary-XXXX.toml")"
-          "$FLY" config save -a "$canary" -c "$cfg" --yes
-          "$FLY" deploy "$PWD" --config "$cfg" --dockerfile "$PWD/Dockerfile" \
-            --build-arg BOBI_BUILD=wheel \
-            --depot=false --ha=false --wait-timeout 10m --remote-only -a "$canary"
-          rm -f "$cfg"
-          echo "::endgroup::"
+          for spec in "${canaries[@]}"; do
+            IFS=: read -r _deployment app policy <<<"$spec"
+            if ! "$FLY" status -a "$app" >/dev/null 2>&1; then
+              if [ "$policy" = required ]; then
+                echo "::error::$app does not exist — the release canary gate cannot run"
+                exit 1
+              fi
+              echo "::warning::$app not provisioned yet — skipping its gate (bootstrap window: run 'bobi deploy codex-smoke' once and set CODEX_SMOKE__OPENAI_API_KEY in the canary Environment; then it is a hard gate)"
+              continue
+            fi
 
-          # Functional canary gate — ask the freshly-built canary and assert it
-          # answers CANARY-OK end-to-end through the PROD event server. A broken
-          # image aborts the whole release here. The deploy only waited for the
-          # manager HEALTHCHECK (up BEFORE the session is ready) and the canary
-          # auto-suspends, so canary-smoke.sh starts the machine and polls the
-          # ask with a generous budget that covers a cold first boot.
-          echo "::group::smoke $canary (functional ask)"
-          FLY="$FLY" scripts/canary-smoke.sh "$canary"
-          echo "::endgroup::"
-          # Agent-UI reachability gate: tunnel in exactly as `bobi agent <name> ui
-          # <deployment>` does for an operator — resolve the app, read the UI
-          # token off the machine, `fly proxy`, GET /api/agents — and assert it
-          # answers. Proves the in-container UI is on, the 6PN bind works, the
-          # token is readable, and the proxy reaches it. `--check` is bounded
-          # (it never blocks) and `timeout` is a belt-and-suspenders cap so a
-          # stuck tunnel can't hang the release.
-          echo "::group::smoke $canary (agent UI reachable)"
-          timeout 150 bobi agent canary ui --app "$canary" --check
-          echo "::endgroup::"
+            # Build + deploy the generic image FROM THE WHEEL (dist/ is in the build
+            # context; builder-wheel installs it). Round-trip live config; swap image.
+            echo "::group::build + deploy $app (generic base, from the wheel)"
+            cfg="$(mktemp -t "fly-$app-XXXX.toml")"
+            "$FLY" config save -a "$app" -c "$cfg" --yes
+            "$FLY" deploy "$PWD" --config "$cfg" --dockerfile "$PWD/Dockerfile" \
+              --build-arg BOBI_BUILD=wheel \
+              --build-arg CLAUDE_VERSION="$CLAUDE_PIN" \
+              --depot=false --ha=false --wait-timeout 10m --remote-only -a "$app"
+            rm -f "$cfg"
+            echo "::endgroup::"
+
+            # Functional canary gate — ask the freshly-built canary and assert it
+            # answers CANARY-OK end-to-end through the PROD event server. A broken
+            # image aborts the whole release here. The deploy only waited for the
+            # manager HEALTHCHECK (up BEFORE the session is ready) and the canary
+            # auto-suspends, so canary-smoke.sh starts the machine and polls the
+            # ask with a generous budget that covers a cold first boot.
+            echo "::group::smoke $app (functional ask)"
+            scripts/canary-smoke.sh "$app"
+            echo "::endgroup::"
+          done
+
+          # Reached only when the gate genuinely ran (the FLY_API_TOKEN-unset
+          # path exits above without setting it).
+          echo "smoked=true" >> "$GITHUB_OUTPUT"
 
   # --------------------------------------------------------------------------
   # Publish the SAME wheel the canary proved — gated on build-canary, NOT the fleet
@@ -236,6 +300,141 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
 
   # --------------------------------------------------------------------------
+  # Publish the base image to GHCR (#609), per arch. Built FROM the SAME wheel
+  # the canary proved (BOBI_BUILD=wheel) with the SAME resolved claude pin, so
+  # ghcr.io/moda-labs/bobi:<version> is the artifact the gate exercised: a
+  # consumer on their own orchestrator can `docker run` it or `FROM` it without
+  # vendoring our Dockerfile.
+  #
+  # Each arch builds NATIVELY (arm64 on ubuntu-24.04-arm, free for public
+  # repos) - never under QEMU: the runtime stage executes the fetched binaries
+  # (`claude --version` et al), and the Bun-compiled claude binary is known to
+  # segfault under qemu-user emulation. The legs push per-arch tags
+  # (:<version>-amd64/-arm64); publish-manifest stitches them into the public
+  # multi-arch tag.
+  #
+  # Gates, both required because GHCR auth is the always-present GITHUB_TOKEN
+  # (no external backstop like PyPI's trusted-publisher config):
+  #   * a canary that actually RAN (build-canary.outputs.smoked) - plain job
+  #     success also covers the fleet-not-wired skip;
+  #   * a release-tag-shaped ref - a bare dispatch from a branch would bake an
+  #     UNRELEASED wheel whose version collides with an already-published tag.
+  publish-image:
+    name: Build base image (${{ matrix.platform }})
+    needs: [build-wheel, build-canary]
+    if: >-
+      needs.build-canary.outputs.smoked == 'true' &&
+      (github.event_name == 'release' ||
+       startsWith(github.event.inputs.ref || github.ref_name, 'v'))
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.build-wheel.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build-wheel.outputs.source-sha }}
+
+      - name: Assert the ref matches the wheel version
+        # The image tag always comes from the wheel (the released bytes). This
+        # catches the residual mismatch: a v-prefixed ref whose checkout builds
+        # a different version than the ref names.
+        env:
+          REF: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          [ "$REF" = "v${VERSION}" ] || [ "$REF" = "${VERSION}" ] \
+            || { echo "::error::ref '$REF' does not match wheel version '${VERSION}'; refusing to publish"; exit 1; }
+
+      # The SAME artifact the canary smoked and PyPI publishes - do NOT
+      # rebuild. builder-wheel installs dist/*.whl (re-included in
+      # .dockerignore).
+      - name: Stage the proven wheel into the build context
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push the ${{ matrix.platform }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          build-args: |
+            BOBI_BUILD=wheel
+            CLAUDE_VERSION=${{ needs.build-wheel.outputs.claude-version }}
+          # Keep the pyproject-keyed deps layer warm across releases (the
+          # Dockerfile orders layers stable→volatile precisely for this).
+          cache-from: type=gha,scope=base-image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=base-image-${{ matrix.arch }}
+          # No provenance attestation: it adds unknown/unknown manifest entries
+          # that confuse `docker run` UIs and downstream FROM digest pinning.
+          provenance: false
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}-${{ matrix.arch }}
+
+  # --------------------------------------------------------------------------
+  # Stitch the per-arch images into the public multi-arch tags. :latest moves
+  # only when the version being published IS the repo's latest non-prerelease
+  # release (GitHub's releases/latest), which is correct by construction:
+  # prerelease publishes and re-runs of an OLD release's run can never move
+  # it, and a workflow_dispatch re-push of the newest tag restores it after a
+  # transient failure.
+  publish-manifest:
+    name: Publish base image manifest to GHCR
+    needs: [build-wheel, publish-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.build-wheel.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create the multi-arch manifest (+ :latest when newest release)
+        run: |
+          set -euo pipefail
+          tags=(-t "${IMAGE}:${VERSION}")
+          latest_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          if [ "$latest_release" = "v${VERSION}" ]; then
+            tags+=(-t "${IMAGE}:latest")
+          else
+            echo "::notice::v${VERSION} is not the latest release (latest: ${latest_release:-none}); :latest not moved"
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            "${IMAGE}:${VERSION}-amd64" "${IMAGE}:${VERSION}-arm64"
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+
+  # --------------------------------------------------------------------------
   # Deploy the Cloudflare event server before the canary. The canary proves the
   # exact wheel against the live event bus, so event-server-only fixes must be
   # live before that functional gate runs. PyPI publish and fleet roll remain
@@ -250,7 +449,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
+          ref: ${{ needs.build-wheel.outputs.source-sha }}
 
       - uses: actions/setup-node@v5
         with:
@@ -262,6 +461,36 @@ jobs:
 
       - run: npx vitest run
 
+      - name: Stamp event-server release metadata
+        run: |
+          set -euo pipefail
+          release_sha="${{ needs.build-wheel.outputs.source-sha }}"
+          {
+            echo "BOBI_RELEASE_VERSION=${{ needs.build-wheel.outputs.version }}"
+            echo "BOBI_RELEASE_SHA=$release_sha"
+          } >> "$GITHUB_ENV"
+          BOBI_RELEASE_VERSION="${{ needs.build-wheel.outputs.version }}" \
+          BOBI_RELEASE_SHA="$release_sha" \
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("wrangler.jsonc")
+          text = path.read_text()
+          replacements = {
+              '"BOBI_RELEASE_VERSION": "dev"':
+                  f'"BOBI_RELEASE_VERSION": {json.dumps(os.environ["BOBI_RELEASE_VERSION"])}',
+              '"BOBI_RELEASE_SHA": "dev"':
+                  f'"BOBI_RELEASE_SHA": {json.dumps(os.environ["BOBI_RELEASE_SHA"])}',
+          }
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f"missing release metadata placeholder: {old}")
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+
       - name: Deploy to Cloudflare
         uses: cloudflare/wrangler-action@v4
         with:
@@ -270,23 +499,81 @@ jobs:
           workingDirectory: event-server
           command: deploy
 
+      - name: Verify fleet event server is the deployed Worker
+        env:
+          FLEET_EVENT_SERVER_URL: ${{ vars.FLEET_EVENT_SERVER_URL }}
+        run: |
+          set -euo pipefail
+          event_server="${FLEET_EVENT_SERVER_URL:-}"
+          if [ -z "$event_server" ]; then
+            event_server="$(python3 - <<'PY'
+          from pathlib import Path
+
+          for raw in Path("../deployments/defaults.yaml").read_text().splitlines():
+              line = raw.split("#", 1)[0].strip()
+              if not line.startswith("event_server:"):
+                  continue
+              value = line.split(":", 1)[1].strip().strip('"').strip("'")
+              print(value)
+              break
+          PY
+            )"
+          fi
+          [ -n "$event_server" ] || { echo "::error::no event_server set in deployments/defaults.yaml"; exit 1; }
+          case "$event_server" in
+            http://*|https://*) ;;
+            *) echo "::error::event_server must resolve to an http(s) URL, got: $event_server"; exit 1;;
+          esac
+          event_server="${event_server%/}"
+
+          expected_version="${BOBI_RELEASE_VERSION:?}"
+          expected_sha="${BOBI_RELEASE_SHA:?}"
+          last_health=""
+
+          for attempt in {1..30}; do
+            if last_health="$(curl -fsS --max-time 10 "$event_server/health" 2>/dev/null)"; then
+              actual="$(HEALTH="$last_health" python3 - <<'PY'
+          import json
+          import os
+
+          try:
+              health = json.loads(os.environ["HEALTH"])
+              release = health.get("release") or {}
+              print(f"{release.get('version', '')}\t{release.get('sha', '')}")
+          except Exception:
+              print("\t")
+          PY
+              )"
+              actual_version="${actual%%$'\t'*}"
+              actual_sha="${actual#*$'\t'}"
+              if [ "$actual_version" = "$expected_version" ] && [ "$actual_sha" = "$expected_sha" ]; then
+                echo "Verified $event_server serves event-server $actual_version@$actual_sha"
+                exit 0
+              fi
+              echo "Waiting for $event_server to serve $expected_version@$expected_sha (attempt $attempt/30; got ${actual_version:-missing}@${actual_sha:-missing})"
+            else
+              echo "Waiting for $event_server/health to respond (attempt $attempt/30)"
+            fi
+            sleep 10
+          done
+
+          echo "::error::fleet event_server drift: $event_server/health did not report release $expected_version@$expected_sha after deploy"
+          echo "Last health payload: ${last_health:-<none>}"
+          exit 1
+
   # --------------------------------------------------------------------------
   # Bump the Homebrew formula to the freshly-published version.
   update-homebrew:
     name: Update Homebrew formula
-    needs: publish
+    # build-wheel is in `needs` for its version output (from the wheel
+    # filename, the same single source of truth publish-image uses) - the
+    # execution ordering already flows through publish.
+    needs: [publish, build-wheel]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
-
-      - name: Extract version from the release tag
-        id: version
-        # Prefer the Release's tag; fall back to the ref name for a manual dispatch.
-        env:
-          TAG: ${{ github.event.release.tag_name || github.ref_name }}
-        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          ref: ${{ needs.build-wheel.outputs.source-sha }}
 
       - name: Trigger Homebrew formula update
         uses: peter-evans/repository-dispatch@v4
@@ -294,9 +581,9 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           repository: moda-labs/homebrew-bobi-agent
           event-type: pypi-release
-          client-payload: '{"version": "${{ steps.version.outputs.version }}"}'
+          client-payload: '{"version": "${{ needs.build-wheel.outputs.version }}"}'
 
       - name: Smoke Homebrew bottle URLs
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: scripts/smoke-homebrew-bottles.sh "${{ steps.version.outputs.version }}"
+        run: scripts/smoke-homebrew-bottles.sh "${{ needs.build-wheel.outputs.version }}"

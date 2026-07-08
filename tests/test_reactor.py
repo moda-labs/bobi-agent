@@ -1,7 +1,7 @@
 """Tests for event reactor — deterministic auto-dispatch of workflows on event match."""
 
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -52,6 +52,19 @@ class TestAutoDispatchRule:
             "fields": {"review_state": "changes_requested", "number": 42},
         }
         assert rule.matches(event) is True
+
+    def test_positional_match_argument_still_works(self):
+        rule = AutoDispatchRule(
+            "github.pull_request_review",
+            "pr-feedback",
+            {"review_state": "changes_requested"},
+        )
+        event = {
+            "type": "github.pull_request_review",
+            "fields": {"review_state": "approved"},
+        }
+        assert rule.task is None
+        assert rule.matches(event) is False
 
     def test_rejects_when_field_condition_fails(self):
         rule = AutoDispatchRule(
@@ -437,6 +450,56 @@ class TestEventReactor:
         assert "moda-labs/test" in task
 
     @patch("bobi.subagent.launch_agent")
+    def test_rule_task_template_overrides_default_task(self, mock_launch):
+        mock_launch.return_value = "wf-alert-triage-test"
+        rules = [
+            AutoDispatchRule(
+                event="alert.firing",
+                workflow="triage",
+                task="Triage firing alert: ${{ input.title }} "
+                     "(severity: ${{ input.severity }})",
+            ),
+        ]
+        reactor = EventReactor(rules=rules, cwd="/tmp")
+        event = {
+            "type": "alert.firing",
+            "topics": ["alert:firing"],
+            "fields": {
+                "title": "API latency high",
+                "severity": "critical",
+            },
+        }
+
+        assert reactor.process(event) == "dispatched"
+
+        _wait_calls(mock_launch, 1)
+        assert mock_launch.call_args[1]["task"] == (
+            "Triage firing alert: API latency high (severity: critical)"
+        )
+
+    @patch("bobi.subagent.launch_agent")
+    def test_rule_task_template_resolves_missing_fields_to_empty(self, mock_launch):
+        mock_launch.return_value = "wf-alert-triage-test"
+        rules = [
+            AutoDispatchRule(
+                event="alert.firing",
+                workflow="triage",
+                task="Triage ${{ input.title }} for ${{ input.owner }}",
+            ),
+        ]
+        reactor = EventReactor(rules=rules, cwd="/tmp")
+        event = {
+            "type": "alert.firing",
+            "topics": ["alert:firing"],
+            "fields": {"title": "API latency high"},
+        }
+
+        assert reactor.process(event) == "dispatched"
+
+        _wait_calls(mock_launch, 1)
+        assert mock_launch.call_args[1]["task"] == "Triage API latency high for "
+
+    @patch("bobi.subagent.launch_agent")
     def test_empty_rules_never_dispatches(self, mock_launch):
         reactor = EventReactor(rules=[], cwd="/tmp")
         event = self._make_review_event()
@@ -574,6 +637,28 @@ class TestEventReactorFromConfig:
         reactor = EventReactor.from_config(config, cwd="/tmp/project")
         assert reactor.rules[0].cooldown == 1800  # default 30 min
 
+    def test_from_config_parses_task_template(self):
+        config = [
+            {
+                "event": "alert.firing",
+                "workflow": "triage",
+                "task": "Triage ${{ input.title }}",
+            },
+        ]
+        reactor = EventReactor.from_config(config, cwd="/tmp/project")
+        assert reactor.rules[0].task == "Triage ${{ input.title }}"
+
+    def test_from_config_rejects_non_string_task_template(self):
+        config = [
+            {
+                "event": "alert.firing",
+                "workflow": "triage",
+                "task": ["Triage ${{ input.title }}"],
+            },
+        ]
+        with pytest.raises(TypeError, match="non-string task template"):
+            EventReactor.from_config(config, cwd="/tmp/project")
+
     def test_from_config_suppress_rule(self):
         config = [
             {
@@ -600,6 +685,19 @@ class TestEventReactorFromConfig:
         reactor = EventReactor.from_config(config, cwd="/tmp/project")
         assert reactor.rules[0].allow_self_authored is True
 
+    def test_from_config_parses_dedup_only(self):
+        """dedup_only tracks duplicate deliveries without dispatching."""
+        config = [
+            {
+                "event": "github.issue_comment",
+                "workflow": "pr-comment-event-dedup",
+                "dedup_only": True,
+            },
+        ]
+        reactor = EventReactor.from_config(config, cwd="/tmp/project")
+        assert reactor.rules[0].dedup_only is True
+        assert reactor.rules[0].workflow == "pr-comment-event-dedup"
+
     def test_from_config_hygiene_flags_default(self):
         """Self-author skip is on by default (allow_self_authored defaults
         False)."""
@@ -618,6 +716,38 @@ class TestEventReactorFromConfig:
         reactor = EventReactor.from_config(config, cwd="/tmp/project",
                                            self_login="bobi")
         assert reactor.self_login == "bobi"
+
+    @patch("bobi.subagent.launch_agent")
+    def test_dedup_only_records_first_and_dedups_redelivery(self, mock_launch):
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="pr-comment-event-dedup",
+            match={"is_pull_request": True},
+            cooldown=1800,
+            dedup_only=True,
+            allow_self_authored=True,
+        )
+        reactor = EventReactor(rules=[rule], cwd="/tmp/project",
+                               self_login="bobi")
+        first = {
+            "type": "github.issue_comment",
+            "id": "delivery-1",
+            "topics": ["github:moda-labs/test"],
+            "fields": {
+                "number": 42,
+                "is_pull_request": True,
+                "comment_id": 123,
+                "sender": "bobi",
+            },
+        }
+        redelivery = {
+            **first,
+            "id": "delivery-2",
+        }
+
+        assert reactor.process(first) is None
+        assert reactor.process(redelivery) == "deduped"
+        mock_launch.assert_not_called()
 
 
 class TestConfigAutoDispatch:
@@ -687,7 +817,8 @@ class TestPrFeedbackDispatchHygiene:
         ]
 
     def _issue_comment_event(self, *, sender="reviewer1",
-                             comment_id=1, number=410, delivery="d1"):
+                             comment_id=1, number=410, delivery="d1",
+                             comment_body="Please add a test."):
         fields = {
             "action": "created",
             "number": number,
@@ -695,6 +826,7 @@ class TestPrFeedbackDispatchHygiene:
             "sender": sender,
             "is_pull_request": True,
             "comment_id": comment_id,
+            "comment_body": comment_body,
         }
         return {
             "type": "github.issue_comment",

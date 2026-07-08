@@ -14,9 +14,14 @@ loop drives — the manager already injects between turns — at the cost of a
 process spawn per turn. A hot ``app-server`` session is a later optimization.
 
 MVP scope / known gaps (tracked in the spec): no per-message cost in dollars
-(token counts only); MCP servers are not yet forwarded (Codex reads
-``~/.codex/config.toml``); the system prompt is prepended to the first turn of a
-fresh thread rather than written as ``AGENTS.md``.
+(token counts only); the system prompt is prepended to the first turn of a fresh
+thread rather than written as ``AGENTS.md``.
+
+MCP servers (#428 Stage 4): Codex reads them from ``~/.codex/config.toml`` at
+process start (nothing rides the CLI invocation), so :meth:`CodexBrain.make_session`
+renders the team's effective ``mcp_servers`` (splatted into ``options`` by
+``subagent.py``) to that file before the first ``codex exec`` runs. See
+``bobi.brain.codex_config``.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
     AssistantText,
+    BrainCapabilities,
     BrainCost,
     BrainMessage,
     BrainSession,
@@ -47,6 +53,7 @@ _EXEC_FLAGS = (
 # only 64 KiB, which turns a healthy long NDJSON event into a ValueError from
 # StreamReader.readline().
 _CODEX_STREAM_LIMIT = 16 * 1024 * 1024
+_CODEX_TERMINATE_TIMEOUT = 5.0
 
 
 def _instructions(system_prompt: Any) -> str:
@@ -84,10 +91,14 @@ async def _spawn_codex(argv: list[str], cwd: str) -> AsyncIterator[dict]:
         limit=_CODEX_STREAM_LIMIT,
     )
     assert proc.stdout is not None
+    assert proc.stderr is not None
+    stderr_task = asyncio.create_task(proc.stderr.read())
+    exhausted = False
     try:
         while True:
             line = await proc.stdout.readline()
             if not line:
+                exhausted = True
                 break
             s = line.decode("utf-8", "replace").strip()
             if not s:
@@ -97,12 +108,34 @@ async def _spawn_codex(argv: list[str], cwd: str) -> AsyncIterator[dict]:
             except json.JSONDecodeError:
                 continue
     finally:
-        if proc.returncode is None:
+        if not exhausted and proc.returncode is None:
             try:
                 proc.terminate()
             except ProcessLookupError:
                 pass
+            try:
+                await asyncio.wait_for(
+                    proc.wait(), timeout=_CODEX_TERMINATE_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
         await proc.wait()
+        try:
+            stderr = await asyncio.wait_for(
+                stderr_task, timeout=_CODEX_TERMINATE_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            stderr_task.cancel()
+            stderr = b""
+        if exhausted and proc.returncode:
+            detail = stderr.decode("utf-8", "replace").strip()
+            tail = detail[-2000:] if detail else "no stderr"
+            raise RuntimeError(
+                f"codex subprocess exited {proc.returncode}: {tail}"
+            )
 
 
 class _CodexSession:
@@ -118,6 +151,8 @@ class _CodexSession:
         resume: str | None = None,
         model: str = "",
         runner=None,
+        mcp_servers: dict | None = None,
+        mcp_env: dict[str, str] | None = None,
     ) -> None:
         self._cwd = cwd or "."
         self._instructions = instructions
@@ -125,6 +160,33 @@ class _CodexSession:
         self._model = model
         self._runner = runner or _spawn_codex
         self._pending: str | None = None
+        # Effective MCP servers (rendered into config.toml at make_session).
+        # Codex has no live status introspection, so the preflight probe reaches
+        # each server directly through get_mcp_status below (#428 Stage 4).
+        self._mcp_servers = mcp_servers or {}
+        self._mcp_env = mcp_env
+
+    async def get_mcp_status(self) -> dict:
+        """A Claude-``get_mcp_status``-shaped MCP status for the preflight probe.
+
+        Codex reads MCP from ``~/.codex/config.toml`` and can't report live
+        status, so this runs a direct ``initialize`` + ``tools/list`` handshake
+        against each configured server (proving the same servers config.toml
+        wires up actually answer). Keeps ``validate._async_probe_mcp`` a single
+        loop across brains instead of warn-degrading for Codex.
+
+        Probes under the caller-provided runtime env when present so a
+        bare-command stdio server and its credentials match the environment
+        validate passes to other brains. Falls back to the generic spawn env for
+        direct uses outside validation."""
+        from bobi.env import agent_spawn_env
+        from bobi.mcp_handshake import preflight_timeout, probe_servers
+
+        return await probe_servers(
+            self._mcp_servers,
+            timeout=preflight_timeout(),
+            env=self._mcp_env or agent_spawn_env(),
+        )
 
     async def connect(self, prompt: str | None = None) -> None:
         # No persistent process — just stash any startup prompt for the first
@@ -209,6 +271,13 @@ class CodexBrain:
 
     name = "codex"
     provider = "openai"
+    # ``codex exec resume <thread> -m <other-model>`` genuinely switches the
+    # thread's model with the transcript intact - verified 2026-07-04 on
+    # codex-cli 0.142.2 (#649): the rollout records turn_context model
+    # gpt-5.4 then gpt-5.5, and the resumed turn recalled conversation-only
+    # state. Note the usable model set depends on the account's auth mode
+    # (ChatGPT-plan auth rejects some models with a 400 at turn start).
+    capabilities = BrainCapabilities(cross_model_resume=True)
 
     def make_session(
         self,
@@ -218,12 +287,32 @@ class CodexBrain:
         resume: str | None = None,
         options: dict | None = None,
     ) -> BrainSession:
+        from bobi.brain import resolve_model_option
+
         opts = options or {}
+        model = resolve_model_option(str(opts.get("model", "") or ""))
+        # Codex reads MCP servers from ~/.codex/config.toml, not from the CLI
+        # invocation, so render the team's effective mcp_servers to disk before
+        # the session's first `codex exec`. Render when there is a set to write OR
+        # a stale bobi-managed block to clear (a team that dropped its MCP deps);
+        # otherwise never touch the file. The write is idempotent (a no-op when
+        # unchanged) but errors PROPAGATE: a codex team that declares MCP and
+        # can't render config would silently run MCP-less, so surface it rather
+        # than pass preflight and fail at runtime.
+        from bobi.brain.codex_config import (
+            codex_home, config_has_managed_block, write_codex_config,
+        )
+        mcp_servers = opts.get("mcp_servers") or {}
+        home = codex_home()
+        if mcp_servers or config_has_managed_block(home):
+            write_codex_config(mcp_servers, home)
         return _CodexSession(
             cwd=cwd or ".",
             instructions=_instructions(system_prompt),
             resume=resume,
             # Claude-specific options (skills/hooks/permission_mode/max_turns)
             # don't apply to Codex; only a model override is honored.
-            model=str(opts.get("model", "") or ""),
+            model=model,
+            mcp_servers=mcp_servers,
+            mcp_env=opts.get("env") if isinstance(opts.get("env"), dict) else None,
         )

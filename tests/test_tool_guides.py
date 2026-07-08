@@ -108,6 +108,13 @@ def _split_invocation(invocation: str) -> list[str]:
         return invocation.split()
 
 
+def test_linear_setup_documents_worker_webhook_secret():
+    text = (REPO_ROOT / "skills" / "linear-setup.md").read_text()
+    assert "<event-server-url>/webhooks/linear" in text
+    assert "LINEAR_WEBHOOK_SECRET" in text
+    assert "wrangler secret put LINEAR_WEBHOOK_SECRET" in text
+
+
 def _extract_bobi_tokens(line: str) -> tuple[str, ...] | None:
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
@@ -165,7 +172,10 @@ def _command_error(tokens: tuple[str, ...]) -> str | None:
     command = tokens[1]
     if command.startswith("-"):
         return None
-    if command not in cli_main.commands:
+    # Resolve through the group, not `.commands`: plugin commands (the
+    # `bobi.commands` entry points, e.g. bobi-deploy's deploy/destroy) are
+    # served lazily by _PluginGroup.get_command and never live in the dict.
+    if cli_main.get_command(None, command) is None:
         return f"`bobi {command}` is not a public top-level command"
 
     if command == "agents":

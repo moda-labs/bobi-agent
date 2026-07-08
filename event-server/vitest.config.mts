@@ -13,6 +13,8 @@ export default defineWorkersConfig({
 				miniflare: {
 					bindings: {
 						INTERNAL_DO_SECRET: "test-internal-secret",
+						BOBI_RELEASE_VERSION: "test-version",
+						BOBI_RELEASE_SHA: "test-sha",
 					},
 				},
 			},

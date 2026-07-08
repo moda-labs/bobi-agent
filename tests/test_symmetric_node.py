@@ -34,6 +34,82 @@ class TestBuildSubscriptions:
         assert "slack:T123" in subs
         assert "linear:MOD" in subs
 
+    def test_interpolates_agent_yaml_subscribe_entries(self, tmp_path, monkeypatch):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.env_path(tmp_path).write_text("ALERT_TOPIC=alert/firing\n")
+        monkeypatch.setenv("ORG_REPO_TOPIC", "github:org/repo")
+        monkeypatch.delenv("FALLBACK_TOPIC", raising=False)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "subscribe:\n"
+            "  - ${ORG_REPO_TOPIC}\n"
+            "  - ${ALERT_TOPIC}\n"
+            "  - ${FALLBACK_TOPIC:-linear:MOD}\n"
+            "  - slack:T123\n"
+        )
+
+        subs = discover_subscriptions(tmp_path)
+
+        assert subs == [
+            "github:org/repo",
+            "alert/firing",
+            "linear:MOD",
+            "slack:T123",
+        ]
+
+    def test_interpolated_subscriptions_do_not_leak_between_projects(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("SHARED_TOPIC", raising=False)
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        for root, topic in [(first, "github:first/repo"), (second, "github:second/repo")]:
+            paths.package_dir(root).mkdir(parents=True)
+            paths.env_path(root).write_text(f"SHARED_TOPIC={topic}\n")
+            paths.agent_yaml_path(root).write_text("subscribe:\n  - ${SHARED_TOPIC}\n")
+
+        assert discover_subscriptions(first) == ["github:first/repo"]
+        assert discover_subscriptions(second) == ["github:second/repo"]
+
+    def test_fallback_dotenv_does_not_satisfy_later_explicit_subscribe(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("FALLBACK_LEAK_TOPIC", raising=False)
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        paths.package_dir(first).mkdir(parents=True)
+        paths.env_path(first).write_text("FALLBACK_LEAK_TOPIC=github:first/repo\n")
+        paths.agent_yaml_path(first).write_text("agent: first\n")
+        paths.package_dir(second).mkdir(parents=True)
+        paths.agent_yaml_path(second).write_text(
+            "subscribe:\n  - ${FALLBACK_LEAK_TOPIC}\n"
+        )
+
+        assert discover_subscriptions(first) == ["first"]
+        assert discover_subscriptions(second) == ["second"]
+
+    def test_ignores_empty_or_invalid_explicit_subscriptions(self, tmp_path, monkeypatch):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        monkeypatch.delenv("MISSING_TOPIC", raising=False)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "subscribe:\n"
+            "  - ${MISSING_TOPIC}\n"
+            "  - ${OPTIONAL_TOPIC:-}\n"
+            "  - 123\n"
+        )
+
+        subs = discover_subscriptions(tmp_path)
+
+        assert subs == [tmp_path.name]
+
+    def test_accepts_scalar_interpolated_subscribe_entry(self, tmp_path, monkeypatch):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        monkeypatch.setenv("SCALAR_TOPIC", "slack:T123")
+        paths.agent_yaml_path(tmp_path).write_text("subscribe: ${SCALAR_TOPIC}\n")
+
+        subs = discover_subscriptions(tmp_path)
+
+        assert subs == ["slack:T123"]
+
     def test_fallback_to_dir_name(self, tmp_path):
         subs = discover_subscriptions(tmp_path)
         assert tmp_path.name in subs
@@ -53,7 +129,7 @@ class TestDrainLoop:
         pushed = []
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 pushed.append(msg)
 
         def mock_formatter(event):
@@ -86,7 +162,7 @@ class TestDrainLoop:
         pushed = []
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 pushed.append(msg)
 
         register_local_inbox("test-session", _CaptureInbox())

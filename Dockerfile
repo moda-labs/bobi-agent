@@ -5,7 +5,8 @@
 # ONE image, every tenant. Identity lives entirely in the mounted volume
 # (project root + $HOME) and env vars — see docs/design/CONTAINERIZED_INSTANCES.md
 # §2 (the instance contract). Nothing reaches in; the manager reaches out to the
-# event server over WSS only.
+# event server over WSS for control-plane traffic. First KB use may also fetch
+# the fastembed model over HTTPS into the mounted volume cache.
 #
 # ONE Dockerfile, three BUILD modes (BOBI_BUILD build-arg) — the runtime stage
 # is shared, so there's nothing to keep in sync:
@@ -22,7 +23,7 @@
 #   * Runs the agent as a NON-ROOT user. Claude Code refuses bypassPermissions
 #     as root unless IS_SANDBOX=1; we drop privileges to `bobi` first.
 #   * No Node.js. The `claude` CLI is the native standalone binary (no npm).
-#   * fastembed model baked into the image at build (cold-start speed; immutable).
+#   * fastembed cache lives on the mounted volume; first KB use downloads it.
 #   * Pinned `claude` CLI; auto-updater disabled so the image version is frozen.
 #   * `bobi agent <name> start --foreground` as the entrypoint (C2); no tini — Fly's
 #     init is PID 1 (tini-on-Fly is a known boot-failure trigger).
@@ -115,20 +116,6 @@ RUN /opt/venv/bin/pip install --no-cache-dir --no-deps /dist/*.whl
 FROM builder-${BOBI_BUILD} AS builder
 
 #####################################################################
-# model-baker — pre-download the fastembed model. Keyed ONLY on the  #
-# pinned fastembed version, so this (the slowest layer — a multi-     #
-# minute model download) stays cached across every code/framework    #
-# change. Runtime COPYs the baked model in BELOW the volatile venv,   #
-# so a code-only rebuild never re-bakes it. (Install fastembed alone, #
-# never `[kb]` — see builder-source for the torch-bloat rationale.)   #
-#####################################################################
-FROM python:3.11-slim AS model-baker
-ENV HF_HOME=/opt/bobi/models
-RUN pip install --no-cache-dir "fastembed>=0.4" \
-    && python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2')" \
-    && chmod -R a+rX /opt/bobi/models
-
-#####################################################################
 # Runtime — slim image, no build tools, no Node. (Shared by both.)  #
 #####################################################################
 FROM python:3.11-slim AS runtime
@@ -141,11 +128,15 @@ ARG BOBI_UID=10001
 # Pinned aichat (the general-purpose LLM gateway CLI). Bump deliberately via
 # `gh api repos/sigoden/aichat/releases/latest --jq .tag_name`.
 ARG AICHAT_VERSION=0.30.0
+# Pinned Codex CLI - the second first-class agent brain (#428/#485). Bump via
+# `gh release view --repo openai/codex --json tagName`.
+ARG CODEX_VERSION=rust-v0.142.5
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PATH="/opt/venv/bin:/home/bobi/.local/bin:${PATH}" \
-    HF_HOME=/opt/bobi/models \
+    HF_HOME=/data/.bobi/cache/huggingface \
+    FASTEMBED_CACHE_PATH=/data/.bobi/cache/fastembed \
     DISABLE_AUTOUPDATER=1 \
     HOME=/home/bobi \
     DATA_DIR=/data \
@@ -160,20 +151,23 @@ ENV PYTHONUNBUFFERED=1 \
 #   curl, ca-certificates — fetch the claude installer; TLS
 #   gosu                  — drop privileges from root setup to the bobi user
 #   git                   — agents clone/operate on repos
+#   ripgrep, bubblewrap   — the Codex CLI's runtime helpers (code search + its
+#                           sandbox). The standalone codex binary uses these from
+#                           PATH; distro packages keep the image Node-free.
 # NB: no tini. Fly Machines (the deploy target) inject their own PID-1 init that
 # reaps zombies + forwards signals, and layering tini on top is a documented
 # cause of "failed to spawn ... No such file or directory" boot failures there.
 # For other container runtimes, run with an init (e.g. `docker run --init`).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        curl ca-certificates gosu git \
+        curl ca-certificates gosu git ripgrep bubblewrap \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root runtime user (see header: bypassPermissions-as-root guard).
 RUN useradd --create-home --uid ${BOBI_UID} --shell /bin/bash bobi
 
 # Layers are ordered stable → volatile so a code-only rebuild touches only the
-# last (cheap) layers — the model download and `claude` fetch stay cached. See
+# last (cheap) layers — pinned CLI fetches stay cached. See
 # docs/design/CUSTOM_AGENT_DEPS.md §"three clocks" for the ordering rationale.
 
 # --- stable layers (cached across code/framework changes) ----------#
@@ -202,11 +196,24 @@ RUN arch="$(dpkg --print-architecture)" \
     && chmod +x /usr/local/bin/aichat \
     && aichat --version
 
-# Baked fastembed embedding model (cold-start speed; immutable). HF_HOME points
-# here at both build and run, so it's a cache hit at runtime. Copied from
-# model-baker, whose only cache key is the fastembed version — so an ordinary
-# code change never re-downloads the model.
-COPY --from=model-baker /opt/bobi/models /opt/bobi/models
+# Codex CLI (#428): the second first-class agent brain, alongside native `claude`,
+# so a `brain: codex` team - or the upcoming per-task brain switch - runs on the
+# generic image at full parity with Claude, with NO per-team bake. The npm package
+# only vendors this same musl-static binary behind a Node shim; we take the binary
+# straight from GitHub releases, so the image stays Node-free (its rg/bwrap helpers
+# are the distro packages installed above). Pinned, arch-detected, system-wide on
+# PATH. Cache key is CODEX_VERSION alone, so a code-only rebuild never re-fetches.
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+         amd64) target=x86_64-unknown-linux-musl ;; \
+         arm64) target=aarch64-unknown-linux-musl ;; \
+         *) echo "codex: unsupported arch $arch" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://github.com/openai/codex/releases/download/${CODEX_VERSION}/codex-${target}.tar.gz" \
+       | tar -xz -C /usr/local/bin \
+    && mv "/usr/local/bin/codex-${target}" /usr/local/bin/codex \
+    && chmod +x /usr/local/bin/codex \
+    && codex --version
 
 # --- team-deps hook (C24 team-flavored images) ---------------------#
 # A team's baked host tools (node, codex, gstack, …) as ONE stable layer,

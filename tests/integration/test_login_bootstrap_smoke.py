@@ -7,19 +7,20 @@ bug fixed in #386 (commit 42f96be).
 
 The bug: `bobi/auth_bootstrap.py::_extract_code` read the message text from
 `event["fields"]["text"]`, but the live Slack adapter
-(`event-server/src/adapters/slack.ts`) puts the text at the event TOP LEVEL and
-in `payload["text"]` — `fields` carries only channel/channel_type/user_id/ts.
-The old unit tests passed because they hand-built events with `text` inside
-`fields`, a shape the real system never emits (a classic integration gap).
+(`event-server/src/adapters/chat-sdk-slack.ts`) puts the text at the event TOP
+LEVEL and in `payload["text"]` - `fields` carries only
+channel/channel_type/user_id/ts. The old unit tests passed because they
+hand-built events with `text` inside `fields`, a shape the real system never
+emits (a classic integration gap).
 
 What this smoke does differently:
 
   * It GENERATES the auth-code event by running the adapter's OWN logic
-    (`normalizeSlackWebhook` from slack.ts) through Node + esbuild, rather than
-    hand-authoring the event dict. So the bootstrap extractor and the adapter
-    cannot drift apart again — if slack.ts moves `text`, this test regenerates
-    against the new shape and the extractor must keep up (or the explicit
-    shape-pin assertions below fail loudly).
+    (`bridgeSlackWebhook` from chat-sdk-slack.ts) through Node + esbuild,
+    rather than hand-authoring the event dict. So the bootstrap extractor and
+    the adapter cannot drift apart again - if chat-sdk-slack.ts moves `text`,
+    this test regenerates against the new shape and the extractor must keep up
+    (or the explicit shape-pin assertions below fail loudly).
 
   * It exercises the real PTY driver end-to-end: a stand-in `claude auth login`
     process is spawned on a PTY that prints the OAuth URL, then BLOCKS reading a
@@ -45,10 +46,16 @@ import pytest
 from bobi import auth_bootstrap as ab
 
 
-# --- generate the event from the real adapter (slack.ts) --------------------
+# --- generate the event from the real adapter (chat-sdk-slack.ts) -----------
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SLACK_TS = REPO_ROOT / "event-server" / "src" / "adapters" / "slack.ts"
+ADAPTER_TS = REPO_ROOT / "event-server" / "src" / "adapters" / "chat-sdk-slack.ts"
+# chat-sdk-slack.ts imports @chat-adapter/slack; bundling it requires the
+# event-server's node_modules (populated by `npm ci`), regardless of where the
+# esbuild binary itself comes from.
+CHAT_ADAPTER_PKG = (
+    REPO_ROOT / "event-server" / "node_modules" / "@chat-adapter" / "slack" / "package.json"
+)
 
 # The code the human "pastes" back, and the DM conversation id it arrives on.
 AUTH_CODE = "abc123#xyz789"
@@ -82,7 +89,7 @@ def _esbuild_dir() -> Path | None:
             ["npm", "install", "--no-audit", "--no-fund", "--silent", "esbuild"],
             cwd=str(cache), check=True, capture_output=True, timeout=180,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutError, OSError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         return None
     if (cache / "node_modules" / "esbuild" / "package.json").exists():
         return cache
@@ -90,21 +97,37 @@ def _esbuild_dir() -> Path | None:
 
 
 def _generate_adapter_event(code: str, channel: str) -> dict:
-    """Run slack.ts::normalizeSlackWebhook on a real DM webhook and return the
-    normalized event the live system would emit for that pasted code."""
-    if not SLACK_TS.exists():  # pragma: no cover - sanity
-        pytest.skip(f"slack.ts not found at {SLACK_TS}")
+    """Run chat-sdk-slack.ts::bridgeSlackWebhook on a real DM webhook and
+    return the normalized event the live system would emit for that pasted
+    code."""
+    if not ADAPTER_TS.exists():  # pragma: no cover - sanity
+        pytest.skip(f"chat-sdk-slack.ts not found at {ADAPTER_TS}")
+    if not CHAT_ADAPTER_PKG.exists():
+        pytest.skip(
+            "@chat-adapter/slack not installed - run `npm ci` in event-server/ "
+            "to bundle chat-sdk-slack.ts"
+        )
     es_dir = _esbuild_dir()
     if es_dir is None:
-        pytest.skip("Node/npm/esbuild unavailable — cannot generate event from slack.ts")
+        pytest.skip("Node/npm/esbuild unavailable - cannot generate event from chat-sdk-slack.ts")
 
     driver = textwrap.dedent(
         """
         const esbuild = require("esbuild");
-        const fs = require("fs");
-        const src = fs.readFileSync(process.argv[1], "utf8");
-        // Transpile the REAL adapter (TS type-erasure only) and run its logic.
-        const out = esbuild.transformSync(src, { loader: "ts", format: "esm" }).code;
+        // BUNDLE the REAL adapter (not just type-erase it) so its imports
+        // resolve and run: chat-sdk-slack.ts imports ../conversation and
+        // @chat-adapter/slack, which a bare `data:` URL module cannot resolve
+        // (ERR_UNSUPPORTED_RESOLVE_REQUEST). Bundling inlines those deps
+        // (resolved from the adapter's own directory, so the event-server's
+        // node_modules), so bridgeSlackWebhook runs its actual logic - the
+        // whole point of generating the event from the adapter.
+        const out = esbuild.buildSync({
+          entryPoints: [process.argv[1]],
+          bundle: true,
+          format: "esm",
+          platform: "node",
+          write: false,
+        }).outputFiles[0].text;
         const mod = "data:text/javascript;base64," + Buffer.from(out).toString("base64");
         import(mod).then((m) => {
           // A genuine Slack event_callback webhook for a DM carrying the code.
@@ -121,13 +144,13 @@ def _generate_adapter_event(code: str, channel: str) -> dict:
               ts: "1779500000.000100",
             },
           };
-          const res = m.normalizeSlackWebhook(webhook, "B0SELFBOT");
+          const res = m.bridgeSlackWebhook(JSON.stringify(webhook), "B0SELFBOT");
           process.stdout.write(JSON.stringify(res.event));
         });
         """
     )
     proc = subprocess.run(
-        ["node", "--input-type=commonjs", "-e", driver, str(SLACK_TS), channel, code],
+        ["node", "--input-type=commonjs", "-e", driver, str(ADAPTER_TS), channel, code],
         cwd=str(es_dir), capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0, f"node driver failed: {proc.stderr}"
@@ -143,8 +166,8 @@ def adapter_event() -> dict:
 
 def test_generated_event_matches_real_adapter_shape(adapter_event):
     """Document + pin the live shape: text TOP-LEVEL and in payload, NEVER in
-    fields. If slack.ts moves text, this fails loudly so the extractor below
-    cannot silently drift again."""
+    fields. If chat-sdk-slack.ts moves text, this fails loudly so the extractor
+    below cannot silently drift again."""
     ev = adapter_event
     assert ev["source"] == "slack"
     assert ev["type"] == "slack.dm"
@@ -205,6 +228,7 @@ def test_full_bootstrap_smoke_real_event_through_pty(adapter_event, tmp_path, mo
     package = project / "package"
     package.mkdir(parents=True)
     monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("BOBI_BRAIN", "claude")
     (package / "agent.yaml").write_text(
         "agent: test\n"
         "event_server_url: wss://example\n"

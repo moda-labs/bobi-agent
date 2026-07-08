@@ -47,6 +47,43 @@ def _fake_client(session, drain_response="response text"):
     session._drain_turn = fake_drain
 
 
+def test_emit_session_unreachable_alert_posts_expected_event(monkeypatch):
+    from bobi import session as session_mod
+
+    posted = []
+    monkeypatch.setattr(
+        "bobi.events.publish.post_event",
+        lambda event_type, payload: posted.append((event_type, payload)),
+    )
+
+    session_mod._emit_session_unreachable_alert(
+        session="director",
+        state="working",
+        message_id="msg-1",
+        sender="inbox",
+        wait=True,
+        elapsed=121.25,
+    )
+
+    assert posted == [
+        (
+            "system/session.unreachable",
+            {
+                "session": "director",
+                "state": "working",
+                "message_id": "msg-1",
+                "sender": "inbox",
+                "wait": True,
+                "elapsed_seconds": 121.2,
+                "text": (
+                    "Session 'director' has been unreachable for 121s while "
+                    "a queued message waits; current state: working."
+                ),
+            },
+        )
+    ]
+
+
 class TestInputReadyWake:
     """Verify _process_message wakes on asyncio.Event transitions."""
 
@@ -217,11 +254,45 @@ class TestInputReadyWake:
         await session._process_message(_make_msg(wait=True))
 
         assert len(alerts) == 1
-        assert session._unreachable_alert_active is False
 
         session._set_state("working")
         session._input_ready.clear()
         _fake_client(session, drain_response="rearmed")
+
+        async def recover():
+            await asyncio.sleep(0.02)
+            session._set_state("waiting_input")
+
+        asyncio.create_task(recover())
+        await session._process_message(_make_msg(wait=True))
+
+        assert len(alerts) == 2
+
+    @pytest.mark.asyncio
+    async def test_unreachable_alert_rearms_after_cancelled_wait(self, session, monkeypatch):
+        """A cancelled wait must not leave alert suppression stuck on."""
+        monkeypatch.setattr("bobi.session.SESSION_UNREACHABLE_ALERT_AFTER", 0.0)
+        monkeypatch.setattr("bobi.session.SESSION_READY_WAIT_POLL", 0.01)
+        alerts = []
+        monkeypatch.setattr(
+            "bobi.session._emit_session_unreachable_alert",
+            lambda **payload: alerts.append(payload),
+        )
+        session._set_state("working")
+        session._input_ready.clear()
+
+        task = asyncio.create_task(session._process_message(_make_msg(wait=True)))
+        await asyncio.sleep(0.02)
+
+        assert len(alerts) == 1
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        session._set_state("working")
+        session._input_ready.clear()
+        _fake_client(session, drain_response="after cancel")
 
         async def recover():
             await asyncio.sleep(0.02)
@@ -242,6 +313,101 @@ class TestInputReadyWake:
 
         # No respond call expected for non-blocking messages
         session.inbox.respond.assert_not_called()
+
+
+class TestMessageAck:
+    """ACK-after-processing (#688): a message confirms completion via its
+    ``on_done`` callback, which the drain wires to the event-server cursor.
+    A message that was NOT processed must not ack, so a restart replays it."""
+
+    @pytest.mark.asyncio
+    async def test_processed_message_acks_once(self, session):
+        session._set_state("waiting_input")
+        _fake_client(session)
+        acked = []
+        msg = _make_msg(wait=False)
+        msg.on_done = lambda: acked.append(True)
+
+        await session._process_message(msg)
+
+        assert acked == [True]
+
+    @pytest.mark.asyncio
+    async def test_drop_on_stopped_does_not_ack(self, session):
+        session._set_state("stopped")
+        acked = []
+        msg = _make_msg(wait=True)
+        msg.on_done = lambda: acked.append(True)
+
+        await session._process_message(msg)
+
+        assert acked == [], "dropped message acked - restart would not replay it"
+
+    @pytest.mark.asyncio
+    async def test_failed_turn_does_not_ack(self, session):
+        session._set_state("waiting_input")
+
+        class BrokenClient:
+            async def query(self, text):
+                raise RuntimeError("boom")
+
+        session._client = BrokenClient()
+        acked = []
+        msg = _make_msg(wait=False)
+        msg.on_done = lambda: acked.append(True)
+
+        await session._process_message(msg)
+
+        assert acked == []
+
+    @pytest.mark.asyncio
+    async def test_compact_sentinel_acks(self, session):
+        from bobi.session import COMPACT_SENTINEL
+        session._set_state("waiting_input")
+        acked = []
+        msg = Message(id="m1", sender="cli", text=COMPACT_SENTINEL)
+        msg.on_done = lambda: acked.append(True)
+
+        await session._process_message(msg)
+
+        assert acked == [True]
+
+    @pytest.mark.asyncio
+    async def test_ack_failure_does_not_break_processing(self, session):
+        session._set_state("waiting_input")
+        _fake_client(session)
+        msg = _make_msg(wait=True)
+
+        def broken_ack():
+            raise RuntimeError("cursor write failed")
+
+        msg.on_done = broken_ack
+
+        await session._process_message(msg)
+
+        session.inbox.respond.assert_called_once_with(msg, "response text")
+
+
+class TestLoudDrops:
+    """#688: silently discarding a message on stopped/error left no trace to
+    debug message loss from. The drop must log who and what was dropped."""
+
+    @pytest.mark.asyncio
+    async def test_drop_on_stopped_logs_warning(self, session, caplog):
+        import logging
+        session._set_state("stopped")
+        msg = Message(id="m1", sender="event-bus", text="hey are you alive?")
+
+        with caplog.at_level(logging.WARNING, logger="bobi.session"):
+            await session._process_message(msg)
+
+        dropped = [r for r in caplog.records if "dropping" in r.message.lower()]
+        assert dropped, "message dropped with no log line"
+        line = dropped[0].message
+        assert session.name in line
+        assert "stopped" in line
+        assert "event-bus" in line
+        assert "hey are you alive?" in line
 
 
 class TestSetState:

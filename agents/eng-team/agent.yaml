@@ -1,12 +1,12 @@
-version: "1.1.2"
+version: "1.1.4"
 
 entry_point: director
 chat: slack
 max_concurrent_agents: 8
 
-# Cloud event server URL in production (.env), empty for an
+# Cloud event server URL in production (.env); optional - unset means an
 # auto-started local server.
-event_server: ${BOBI_EVENT_SERVER}
+event_server: ${BOBI_EVENT_SERVER:-}
 
 services:
   - name: github
@@ -42,21 +42,21 @@ requires:
 
 # Container build (C24 team-flavored images): bake the host tools the `requires`
 # gate above demands into a per-team image, so a dark Fly instance can actually
-# dispatch (the bare base ships no Node, and a container has no TTY to run
-# `requires.fix` interactively). CI renders this to a Docker hook layer that sits
-# BELOW the framework wheel — a code-only release rebuilds only the wheel, not
-# these tools (bobi/build_render.py). `apt`/`npm` install as root; `run`
-# steps install as the bobi user into the IMAGE home. `verify: requires`
-# re-runs the checks above at build, failing CI if a tool is missing.
+# dispatch (a container has no TTY to run `requires.fix` interactively). CI
+# renders this to a Docker hook layer that sits BELOW the framework wheel — a
+# code-only release rebuilds only the wheel, not these tools
+# (bobi/build_render.py). `apt` installs as root; `verify: requires` re-runs the
+# checks above at build, failing CI if a tool is missing.
 #
-# Core ships only the generic eng base (nodejs/npm/jq + the GitHub CLI). nodejs/
-# npm are here so an overlay's `npm:` deps compose on top via list-merge. apt
-# (nodejs/jq) isn't pinned: exact Debian versions get pruned from the mirror
-# (breaking rebuilds); it tracks the pinned base image's Debian trixie instead.
+# Core bakes only `jq` (+ the GitHub CLI below); the base image already ships
+# git, claude, and codex (the Codex CLI is a Node-free static binary, #428/#573),
+# so no nodejs/npm is needed here. apt versions aren't pinned: exact Debian
+# versions get pruned from the mirror (breaking rebuilds), so this tracks the
+# pinned base image's Debian instead. An overlay that genuinely needs an npm/node
+# toolchain declares nodejs/npm in its OWN `build.apt` (list-merged on top),
+# rather than every eng-derived team carrying Node it never uses.
 build:
-  # jq pairs with gh for JSON wrangling; nodejs/npm are the base an overlay's
-  # npm toolchain (codex/bun/etc.) composes onto.
-  apt: [nodejs, npm, jq]
+  apt: [jq]  # pairs with gh for JSON wrangling
   run_root:
     # The GitHub CLI (`gh`) isn't in Debian apt — add its official repo. `gh` is
     # the core eng workflow's primary GitHub interface; it auths via GH_TOKEN.
@@ -91,28 +91,34 @@ auto_dispatch:
     suppress: true
     allow_self_authored: true
 
-  # pr-feedback guards (issue #411): the bot's OWN comments are skipped by
-  # DEFAULT (no flag needed — the lead posts a "Rendered spec" link per spec
-  # policy that must not spin up a feedback engineer). Draft PRs are NOT
-  # skipped — a held draft is exactly where feedback discussion belongs, and
-  # the self-author skip already stops the only loop that matters (per review,
-  # underminedsk 2026-06-22). The self-author skip needs the bot's GitHub
-  # login, resolved at startup via `gh api user`.
+  # Formal changes-requested reviews still dispatch deterministically. PR
+  # comments are routed by director markdown policy below, because question-only
+  # comments need direct answers rather than feedback workers.
   - event: github.pull_request_review
     match:
       review_state: changes_requested
     workflow: pr-feedback
     cooldown: 1800
 
+  # PR comments are delivered to the director for markdown-policy routing:
+  # question-only comments are answered directly; actionable requested-change
+  # text routes to pr-feedback. These structural dedup rules do not classify
+  # text or launch workers. They only drop redeliveries of the same stable
+  # comment id so one webhook + monitor replay cannot make the director act
+  # twice on the same visible comment.
   - event: github.pull_request_review_comment
-    workflow: pr-feedback
+    workflow: pr-comment-event-dedup
     cooldown: 1800
+    dedup_only: true
+    allow_self_authored: true
 
   - event: github.issue_comment
     match:
       is_pull_request: true
-    workflow: pr-feedback
+    workflow: pr-comment-event-dedup
     cooldown: 1800
+    dedup_only: true
+    allow_self_authored: true
 
   # issue-lifecycle / pr-closed legitimately react to the bot's OWN actions
   # (the bot self-assigns issues to start work; the bot merges PRs and that

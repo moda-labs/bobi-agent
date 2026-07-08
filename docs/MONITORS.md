@@ -26,9 +26,12 @@ detect ──► conditions ──► dedup vs persisted state ──► publish
 ```
 
 Every flavor is just a *condition detector*. What happens to detected
-conditions is one shared path: dedup, then publish. Nothing is injected
-in-process - findings travel through the event server's topic routing, so they
-land in `events.jsonl`, get seq/replay durability, and reach every subscriber
+conditions is one shared path: dedup, then publish. A command/check monitor
+with a `relevance:` criterion inserts one step between them - new conditions
+are judged by a short cheap-model gate agent, and only relevant ones publish
+(see "The relevance gate" below). Nothing is injected in-process - findings
+travel through the event server's topic routing, so they land in
+`events.jsonl`, get seq/replay durability, and reach every subscriber
 identically. See `docs/EVENT_SERVER.md` for the bus itself.
 
 Code lives in `bobi/monitors/`:
@@ -77,9 +80,74 @@ every tick, so monitors added at runtime take effect without a restart.
 - **Description-only** (`description:`, no command) - when output needs
   interpretation, the scheduler spawns a short-lived check agent that observes
   and returns a verdict. Costs an LLM call per interval; use when diffable JSON
-  isn't available.
+  isn't available. Check agents run with role `monitor`, so
+  `roles: {monitor: {model: haiku}}` in `agent.yaml` puts every check on a
+  cheap model instead of the manager's (setup-generated packs ship this
+  default).
 - **Sleep cycle** (`sleep_cycle: true`) - the one flavor whose agent *writes* an
-  artifact (`long_term_memory.md`) instead of returning a verdict.
+  artifact (`long_term_memory.md`) instead of returning a verdict. Sleep-cycle
+  input can be large, so the scheduler writes the rendered task to `run/state/sleep-cycle/` and
+  spawns the dedicated `monitors curator --request <file>` command (like the
+  gate's `monitors gate`), never `subagents launch` - its `--wait` path wraps
+  the task in check-verdict semantics that can swallow the summary
+  (#695). The sleep-cycle agent runs with role `curator`, not the cheap-model
+  `monitor` role - distillation judgment matters more than poll cost; pin its
+  model with `roles: {curator: {model: ...}}`.
+
+Out-of-band monitor agents must not inline large context into the spawn command.
+Use the request-file pattern instead: write the full context under `run/state/`,
+pass the absolute path in a dedicated `--request` argument, and delete the file
+from the subprocess cleanup hook. The scheduler rejects any monitor-agent argv
+element over 100KB before `Popen`, well below Linux's per-argument cap.
+
+## The relevance gate: judging "about X" without paying per tick
+
+A command or check monitor may add a `relevance:` criterion - the two-tier
+semantic gate. Use it when the *pull* is mechanical but the *match* is a
+judgment call ("emails about billing problems"):
+
+```yaml
+- name: billing-emails
+  check: venn_poll
+  interval: 5m
+  service: work-gmail
+  tool: list_messages
+  query: '{"maxResults": 10, "q": "is:unread"}'
+  id_field: id
+  relevance: "emails about billing problems, refunds, or payment failures"
+  event: monitor/email.billing
+```
+
+The tick order is dedup first, judge second: the mechanical detector runs at
+$0, the scheduler diffs against active keys, and only *new* items ride to a
+short-lived gate agent (role `monitor`, so the cheap-model default applies;
+small turn cap, items inline, verdict only). Relevant items publish their
+event normally - the expensive reasoning happens in the manager, on real hits
+only. Irrelevant items are recorded active *without* publishing, so each item
+is judged exactly once. A tick with nothing new never touches a model.
+
+Failure semantics mirror checks: an indeterminate gate (error, no verdict)
+records nothing, so the same items are re-detected as new and re-judged next
+interval (three consecutive indeterminate verdicts escalate to an error log).
+A judged-relevant item whose publish failed is parked in `pending_publish`
+and retried mechanically at $0 - never re-sent to the model, whose second
+opinion on a borderline item could differ. A relevant verdict publishes even
+if the item has since left the poll window: it was real when detected.
+Editing `relevance:` does not re-judge items already seen - recorded keys
+stay recorded.
+
+Two operational constraints: a batch is capped at 20 items per gate call
+(overflow stays new for the next interval), and deferred items are only
+re-judged if the detector still reports them - so keep the poll window wide
+enough to cover a burst across a couple of intervals (e.g. `maxResults` well
+above the expected per-interval inflow). Item content is untrusted input to
+a model: the gate prompt instructs the model to treat it as data, but a
+crafted item could still skew a batch verdict - see `docs/SECURITY.md` for
+the prompt-injection posture.
+
+Compared to a description-only monitor, which re-reasons the whole state every
+interval, the gate costs one cheap call only on ticks with new items. Reserve
+description-only for output that cannot be pulled mechanically at all.
 
 ## Scheduling
 
@@ -114,6 +182,12 @@ reconcile path (`scheduler.py`):
 - A condition is recorded active **only after its event actually publishes**, so
   a failed publish (event server briefly down) retries next interval instead of
   being lost.
+- Out-of-band agent failures publish `system/monitor.error` with the monitor
+  name, flavor, reason (`spawn-failed`, `timeout`, or
+  `indeterminate-result`), and detail. The drain loop actively delivers the
+  first failure for each monitor/flavor/reason to the director inbox and
+  throttles repeated identical failures there so observability does not become
+  inbox spam. The failure is also written to `manager.log`.
 
 Scheduler-owned state (last-run times, active condition keys) lives in
 `run/state/monitor_state.json`, rewritten wholesale each tick.

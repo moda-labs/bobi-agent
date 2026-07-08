@@ -1,6 +1,6 @@
 [project]
 name = "bobi"
-version = "0.35.4"
+version = "0.40.0"
 description = "Build teams of event-driven AI agents"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -30,6 +30,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "jinja2>=3.1",
     "claude-agent-sdk>=0.2.87",
+    "mcp>=1.23.0",
     "apsw>=3.40",
 ]
 
@@ -76,10 +77,11 @@ packages = ["bobi"]
 # copy into the framework wheel would pin a team to the framework release and
 # defeat independent team versioning. `bobi setup` lists teams from the
 # registry (and, in a source checkout, the repo's `agents/` dir for dev).
-# Bundle the Fly deploy assets so `bobi deploy` works from the binary alone
-# — no repo checkout. The one Dockerfile builds in `pypi` mode (installs bobi
-# from PyPI), so its build context is just these files; bobi/deploy.py
-# resolves them from here in "binary mode".
+# Bundle the Fly deploy assets so `bobi build` (and, with the bobi-deploy
+# package installed, `bobi deploy`) works from the binary alone — no repo
+# checkout. The one Dockerfile builds in `pypi` mode (installs bobi from
+# PyPI), so its build context is just these files; bobi/build.py resolves
+# them from here in "binary mode".
 "Dockerfile" = "bobi/_deploy/Dockerfile"
 "docker/docker-entrypoint.sh" = "bobi/_deploy/docker/docker-entrypoint.sh"
 "docker/healthcheck.sh" = "bobi/_deploy/docker/healthcheck.sh"
@@ -106,7 +108,7 @@ markers = [
     "claude: test requires a real Claude CLI session (deselected in integration-fast)",
     "local_only: test only runs against the local Node.js event server backend",
     "docker: test builds/runs the instance container image (needs a docker daemon; deselected in integration-fast)",
-    "live: test makes a real Claude API call + hits a live event server (gated to nightly/push, not PRs)",
+    "live: test hits a live external API (Claude, Slack, ...); gated by credentials/env, not run on PRs",
 ]
 
 [build-system]

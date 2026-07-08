@@ -12,10 +12,13 @@ Bobi is an event-driven AI agent framework.
 - `skills/bobi.md`: CLI command reference.
 - `skills/create-agent.md`: agent team authoring guidance.
 - `skills/slack-setup.md`: Slack integration setup.
+- `skills/whatsapp-setup.md`: WhatsApp (Meta Cloud API) integration setup.
 - `skills/linear-setup.md`: Linear integration setup.
 - `docs/EVENT_SERVER.md`: event-server architecture, topics, and security model.
 - `docs/MONITORS.md`: monitor scheduler and the `script_cache` token-saving runner.
 - `docs/WORKFLOW_ENGINE.md`: workflow state machine, step types, suspend/resume.
+- `docs/TOOL_LIBRARY.md`: unified dependency model - declaring tools/skills/MCP
+  deps (pinned `install:` vs guide-only), the catalog, and how they bake + verify.
 - `docs/SECURITY.md`: overall security model (trust, credentials, prompt-injection).
 - `docs/TICKETING_POLICY.md`: Linear/GitHub ticketing conventions.
 - `docs/RELEASE_RUNBOOK.md`: release process and checklist.
@@ -63,13 +66,44 @@ Bobi is an event-driven AI agent framework.
 
 - Never auto-add your agent name as co-author in commit messages.
 
+## Development Lifecycle
+
+Skills own the SDLC stages. Default path for any ticketed change:
+
+1. **Scope and design**: write the design into the GitHub issue (see
+   `docs/TICKETING_POLICY.md`). Design docs live in issues, not in `docs/`.
+2. **Build**: `/build <issue#>` runs the full cycle for one ticket: scope from
+   the issue, worktree from fresh `main`, implement with tests, verify, review,
+   PR. Prefer it over ad-hoc implementation for anything ticketed.
+3. **Debug**: for bugs and CI failures, `/investigate` to root-cause before
+   writing a fix. Reproduce with a failing test first (see Bug fixes above).
+4. **Verify**: `/verify` after any nontrivial runtime change. Exercise the real
+   flow end-to-end (isolated `BOBI_HOME`, real agent sessions), not just the
+   test suite. `/build` runs this as its verification stage.
+5. **Review**: `/code-review high` on the working diff before opening a PR;
+   apply confirmed findings. `/build` runs this as its review stage. Use
+   `/simplify` for a quality-only pass when a diff has grown organically.
+6. **Ship**: open the PR from `/build`, or manually per Release Rules below.
+   No version or changelog edits in feature PRs.
+7. **Continuity**: `/handoff` at the end of a session with unfinished work so
+   a fresh session can resume; handoff files stay local and uncommitted.
+
+Standalone stages (debugging an existing bug, reviewing someone else's diff)
+use the individual skills directly; `/build` is the umbrella for new work.
+
 ## Development Setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,kb]" -e ./bobi_deploy
 ```
+
+Use this install for broad non-integration test runs. It matches the CI `Unit
+tests` job and includes the knowledge-base dependencies imported during test
+collection (`bobi_deploy` is the deploy-plugin package; its tests live in
+`bobi_deploy/tests/`). Use `.[dev]` only for focused e2e work that does not
+collect the KB test surface.
 
 ## Worktree Policy
 
@@ -85,7 +119,7 @@ pip install -e ".[dev]"
 ## Tests
 
 ```bash
-pytest tests/ --ignore=tests/integration/  # unit tests
+pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q  # unit tests
 pytest tests/                              # full suite, includes integration tests
 ```
 

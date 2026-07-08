@@ -53,6 +53,42 @@ def _needs_build(es_dir: Path) -> bool:
     return dist.stat().st_mtime < src_mtime
 
 
+def _needs_install(es_dir: Path) -> bool:
+    """Whether local event-server runtime dependencies are missing."""
+    return not (es_dir / "node_modules").exists()
+
+
+def _esbuild_package(es_dir: Path) -> str:
+    try:
+        package = json.loads((es_dir / "package.json").read_text())
+    except (json.JSONDecodeError, OSError):
+        return "esbuild"
+    version = package.get("devDependencies", {}).get("esbuild", "")
+    return f"esbuild@{version}" if version else "esbuild"
+
+
+def _build_local(es_dir: Path) -> None:
+    esbuild_bin = es_dir / "node_modules" / ".bin" / "esbuild"
+    if esbuild_bin.exists():
+        _run_npm(["npm", "run", "build:local"], es_dir)
+        return
+    _run_npm([
+        "npm", "exec", "--yes",
+        "--cache", str(es_dir / ".npm-cache"),
+        "--package", _esbuild_package(es_dir),
+        "--",
+        "esbuild", "src/local.ts",
+        "--bundle",
+        "--platform=node",
+        "--target=node20",
+        "--outfile=dist/local.js",
+        # Bundle everything except ws: the Chat SDK packages are ESM-only,
+        # which a CJS bundle cannot require() at runtime. ws stays external
+        # for its optional native addons (bufferutil, utf-8-validate).
+        "--external:ws",
+    ], es_dir)
+
+
 def health(base_url: str, timeout: float = 2) -> dict | None:
     """Probe an event server's /health endpoint.
 
@@ -102,8 +138,9 @@ def _run_npm(args: list[str], es_dir: Path) -> None:
         )
 
 
-def ensure_running(port: int, webhook_secret: str = "",
-                   slack_signing_secret: str = "",
+def ensure_running(port: int, webhook_secret: str | None = None,
+                   slack_signing_secret: str | None = None,
+                   linear_webhook_secret: str | None = None,
                    bind: str = "",
                    project_path: Path | None = None,
                    extra_env: dict[str, str] | None = None) -> str:
@@ -144,13 +181,13 @@ def ensure_running(port: int, webhook_secret: str = "",
 
     es_dir = _find_event_server_dir()
 
-    if not (es_dir / "node_modules").exists():
+    if _needs_install(es_dir):
         log.info("Installing event server dependencies...")
-        _run_npm(["npm", "install", "--no-audit", "--no-fund"], es_dir)
+        _run_npm(["npm", "install", "--omit=dev", "--no-audit", "--no-fund"], es_dir)
 
     if _needs_build(es_dir):
         log.info("Building local event server...")
-        _run_npm(["npm", "run", "build:local"], es_dir)
+        _build_local(es_dir)
 
     from bobi import paths
     state = paths.state_dir(project_path)
@@ -159,10 +196,28 @@ def ensure_running(port: int, webhook_secret: str = "",
 
     env = dict(os.environ)
     env["BOBI_ES_PORT"] = str(port)
-    if webhook_secret:
-        env["BOBI_ES_WEBHOOK_SECRET"] = webhook_secret
-    if slack_signing_secret:
-        env["BOBI_ES_SLACK_SIGNING_SECRET"] = slack_signing_secret
+    resolved_webhook_secret = webhook_secret or ""
+    resolved_slack_signing_secret = (
+        env.get("SLACK_SIGNING_SECRET", "")
+        if slack_signing_secret is None else slack_signing_secret
+    )
+    resolved_linear_webhook_secret = (
+        env.get("LINEAR_WEBHOOK_SECRET", "")
+        if linear_webhook_secret is None else linear_webhook_secret
+    )
+    if resolved_webhook_secret:
+        env["BOBI_ES_WEBHOOK_SECRET"] = resolved_webhook_secret
+    if resolved_slack_signing_secret:
+        env["BOBI_ES_SLACK_SIGNING_SECRET"] = resolved_slack_signing_secret
+    if resolved_linear_webhook_secret:
+        env["BOBI_ES_LINEAR_WEBHOOK_SECRET"] = resolved_linear_webhook_secret
+    # WhatsApp inbound verification (#656): the runtime .env carries the
+    # unprefixed vars (the connector card captures them); the local server
+    # reads only BOBI_ES_*.
+    if env.get("WHATSAPP_APP_SECRET"):
+        env["BOBI_ES_WHATSAPP_APP_SECRET"] = env["WHATSAPP_APP_SECRET"]
+    if env.get("WHATSAPP_VERIFY_TOKEN"):
+        env["BOBI_ES_WHATSAPP_VERIFY_TOKEN"] = env["WHATSAPP_VERIFY_TOKEN"]
     if bind:
         env["BOBI_ES_BIND"] = bind
     if extra_env:
@@ -214,17 +269,12 @@ def _authorize_one_resource(base_url: str, service: str, resource: str,
     """POST /resources/authorize for a single resource. Returns True iff the
     server granted (200). The credential is signed-over and transmitted but is
     NEVER logged here (the server stores only the grant)."""
-    from bobi import http as pooled
-    from bobi.events.signing import serialize_body, sign_headers
+    from bobi.events.signing import signed_request
 
-    body = serialize_body({"service": service, "resource": resource, "credential": credential})
-    headers = {"Content-Type": "application/json"}
-    headers.update(sign_headers(bubble_id, bubble_key, "POST", "/resources/authorize", body))
-    resp = pooled.post(
-        f"{base_url}/resources/authorize",
-        content=body,
-        headers=headers,
-        timeout=10.0,
+    resp = signed_request(
+        base_url, "POST", "/resources/authorize",
+        {"service": service, "resource": resource, "credential": credential},
+        bubble_id, bubble_key, timeout=10.0,
     )
     return resp.status_code == 200
 
@@ -237,27 +287,24 @@ def _seed_test_resource_grant(base_url: str, service: str, resource: str,
     without live GitHub/Linear/Slack credentials. The server route is disabled
     unless it was started with a matching test secret.
     """
-    from bobi import http as pooled
-    from bobi.events.signing import serialize_body, sign_headers
+    from bobi.events.signing import signed_request
 
     secret = os.environ.get("BOBI_ES_TEST_GRANTS_SECRET", "")
     if not secret:
         return False
-    body = serialize_body({"grants": [{"service": service, "resource": resource}]})
-    headers = {"Content-Type": "application/json", "x-moda-test-secret": secret}
-    headers.update(sign_headers(bubble_id, bubble_key, "POST", "/__test/resource-grants", body))
-    resp = pooled.post(
-        f"{base_url}/__test/resource-grants",
-        content=body,
-        headers=headers,
-        timeout=5.0,
+    resp = signed_request(
+        base_url, "POST", "/__test/resource-grants",
+        {"grants": [{"service": service, "resource": resource}]},
+        bubble_id, bubble_key, timeout=5.0,
+        extra_headers={"x-moda-test-secret": secret},
     )
     return resp.status_code == 200
 
 
 def authorize_resources(base_url: str, cfg, subscribe: list[str],
                         bubble_id: str, bubble_key: str,
-                        *, filter_unauthorized: bool = True) -> list[str]:
+                        *, filter_unauthorized: bool = True,
+                        whatsapp_registered: list[str] | None = None) -> list[str]:
     """Obtain a bubble-scoped resource grant for each global ``github:``/``linear:``
     topic in ``subscribe`` so the subsequent ``register`` / ``update_subscriptions``
     passes the server's #488 grant check.
@@ -268,6 +315,14 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
     we successfully authorized. A topic whose credential is MISSING or REJECTED
     by the upstream is logged LOUDLY and DROPPED, so it never triggers the
     server's hard-reject during fresh registration.
+
+    ``whatsapp_registered`` is the pnid list :func:`register_whatsapp_numbers`
+    returned when the caller just ran it (``None`` means no registration was
+    attempted). A ``whatsapp:<pnid>`` topic the registration did not back is
+    treated exactly like a rejected github/linear credential: the grant the
+    server checks is written BY that registration, so keeping the topic would
+    hard-reject the whole atomic register/PUT (#488) and stall delivery for
+    every channel, not just WhatsApp.
 
     When ``filter_unauthorized`` is false, authorization is still attempted, but
     unverified topics are kept. This is used for saved deployments: the server
@@ -280,9 +335,10 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
         return list(subscribe)  # can't sign — leave the set unchanged
 
     kept: list[str] = []
+    unbacked: list[str] = []
     for sub in subscribe:
         service = sub.split(":", 1)[0] if ":" in sub else ""
-        if service in ("github", "linear", "slack") and ":" in sub:
+        if service in ("github", "linear", "slack", "whatsapp") and ":" in sub:
             resource = sub.split(":", 1)[1]
             try:
                 if _seed_test_resource_grant(base_url, service, resource, bubble_id, bubble_key):
@@ -290,8 +346,21 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                     continue
             except Exception as e:
                 log.debug("Test resource-grant seed failed for %r: %s", sub, e)
+        if service == "whatsapp" and whatsapp_registered is not None and ":" in sub:
+            if sub.split(":", 1)[1] not in whatsapp_registered:
+                action = "dropping it from" if filter_unauthorized else "keeping it in"
+                log.warning(
+                    "WhatsApp registration did not back %r — %s this session's "
+                    "subscriptions (a resource grant is required, #488)",
+                    sub, action,
+                )
+                unbacked.append(sub)
+                if not filter_unauthorized:
+                    kept.append(sub)
+                continue
         if service not in _RESOURCE_CRED_KEYS:
-            kept.append(sub)  # non-global, or slack (granted via workspace reg)
+            # Non-global, or slack/whatsapp (granted via their registrations).
+            kept.append(sub)
             continue
         resource = sub.split(":", 1)[1]
         cfg_service, cred_key = _RESOURCE_CRED_KEYS[service]
@@ -306,6 +375,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                 "session's subscriptions (a resource grant is required, #488)",
                 service, sub, action,
             )
+            unbacked.append(sub)
             if not filter_unauthorized:
                 kept.append(sub)
             continue
@@ -315,7 +385,11 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
             )
         except Exception as e:  # transport hiccup — drop, never block startup
             action = "dropping" if filter_unauthorized else "keeping"
-            log.warning("Resource authorize failed for %r: %s — %s", sub, e, action)
+            log.warning(
+                "Resource authorize failed for %r: %s — %s",
+                sub, type(e).__name__, action,
+            )
+            unbacked.append(sub)
             if not filter_unauthorized:
                 kept.append(sub)
             continue
@@ -328,33 +402,30 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                 "%s credential cannot read it; %s subscriptions (#488)",
                 sub, service, action,
             )
+            unbacked.append(sub)
             if not filter_unauthorized:
                 kept.append(sub)
+    if unbacked:
+        action = "dropped" if filter_unauthorized else "kept"
+        log.warning(
+            "Global event subscriptions without resource grants were %s: %s",
+            action, sorted(unbacked),
+        )
     return kept
 
 
 def _post_register(base_url: str, name: str, subscriptions: list[str],
                    bubble_id: str = "", bubble_key: str = "") -> dict:
     """POST /deployments. MINT when no bubble_key (server generates a bubble +
-    returns its key once); JOIN when signed with an existing bubble's key.
-
-    Signs over the exact transmitted bytes (content=, not json=) so the
-    server's HMAC verification reproduces the signature. Raises BubbleRejected
-    on a 403 join so callers can re-mint.
+    returns its key once, sent unsigned); JOIN when signed with an existing
+    bubble's key. Raises BubbleRejected on a 403 join so callers can re-mint.
     """
-    from bobi import http as pooled
-    from bobi.events.signing import serialize_body, sign_headers
+    from bobi.events.signing import signed_request
 
-    body = serialize_body({"name": name, "subscriptions": subscriptions})
-    headers = {"Content-Type": "application/json"}
-    if bubble_key:
-        headers.update(sign_headers(bubble_id, bubble_key, "POST", "/deployments", body))
-
-    resp = pooled.post(
-        f"{base_url}/deployments",
-        content=body,
-        headers=headers,
-        timeout=REGISTER_TIMEOUT,
+    resp = signed_request(
+        base_url, "POST", "/deployments",
+        {"name": name, "subscriptions": subscriptions},
+        bubble_id, bubble_key, timeout=REGISTER_TIMEOUT,
     )
     if resp.status_code == 403:
         raise BubbleRejected(f"join rejected for bubble {bubble_id}")
@@ -553,12 +624,10 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
     When ``bubble_key`` is supplied the request is HMAC-signed (same scheme as
     :func:`_post_register`). A signed registration tells the server to ALSO
     store a bubble-scoped workspace record, which is the only credential
-    outbound ``POST /slack/send`` will accept (#487) — so this bubble can send
+    outbound channel sends accept (#487) - so this bubble can send
     through its own Slack bot. The global record (inbound self-reply loop
     prevention) is written either way, so an unsigned call still works.
     """
-    from bobi import http as pooled
-
     try:
         token = cfg.credential("slack", "bot_token")
     except Exception:
@@ -589,22 +658,13 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
             record["app_id"] = app_id
         if signing_secret:
             record["signing_secret"] = signing_secret
-        # Sign over the EXACT transmitted bytes (content=, not json=) when we
-        # hold a bubble key, so the server reproduces the HMAC and writes the
-        # bubble-scoped record outbound /slack/send requires. Unsigned otherwise
-        # (still writes the global self-reply record).
-        from bobi.events.signing import serialize_body, sign_headers
-        body = serialize_body(record)
-        headers = {"Content-Type": "application/json"}
-        if bubble_key:
-            headers.update(
-                sign_headers(bubble_id, bubble_key, "POST", "/slack/workspaces", body)
-            )
-        pooled.post(
-            f"{base_url}/slack/workspaces",
-            content=body,
-            headers=headers,
-            timeout=10.0,
+        # Signed when we hold a bubble key, so the server writes the
+        # bubble-scoped record outbound channel sends require. Unsigned
+        # otherwise (still writes the global self-reply record).
+        from bobi.events.signing import signed_request
+        signed_request(
+            base_url, "POST", "/slack/workspaces", record,
+            bubble_id, bubble_key, timeout=10.0,
         )
         log.info(
             "Registered Slack workspace %s (app %s) with event server "
@@ -613,4 +673,42 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
         return [team_id]
     except Exception as e:
         log.warning("Slack workspace registration failed for %s: %s", team_id, e)
+        return []
+
+
+def register_whatsapp_numbers(base_url: str, cfg, bubble_id: str = "",
+                              bubble_key: str = "") -> list[str]:
+    """Register the agent's WhatsApp number with the event server (#656).
+
+    Signed-only mirror of :func:`register_slack_workspaces`: the server
+    verifies the access token against the Meta Graph API, stores the
+    bubble-scoped send credential ``/channels/send`` resolves, and writes the
+    ``whatsapp:<phone_number_id>`` resource grant that lets this bubble
+    subscribe to the number's inbound topic. Without a bubble key there is
+    nothing to register (no unsigned/global use case), so this is a no-op.
+    Best-effort: logs and continues on any failure so a registration hiccup
+    never blocks startup. Returns the phone number ids registered.
+    """
+    try:
+        token = cfg.credential("whatsapp", "access_token")
+        pnid = cfg.credential("whatsapp", "phone_number_id")
+    except Exception:
+        return []
+    if not (token and pnid and bubble_id and bubble_key):
+        return []
+    try:
+        from bobi.events.signing import signed_request
+        resp = signed_request(
+            base_url, "POST", "/whatsapp/numbers",
+            {"phone_number_id": pnid, "access_token": token},
+            bubble_id, bubble_key, timeout=10.0,
+        )
+        if resp.status_code != 200:
+            log.warning("WhatsApp number registration rejected for %s: HTTP %d",
+                        pnid, resp.status_code)
+            return []
+        log.info("Registered WhatsApp number %s with event server", pnid)
+        return [pnid]
+    except Exception as e:
+        log.warning("WhatsApp number registration failed for %s: %s", pnid, e)
         return []

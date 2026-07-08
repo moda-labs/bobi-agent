@@ -2,6 +2,7 @@ import { SELF, env } from "cloudflare:test";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import worker from "../src/index";
 import { buildBubbleSignature, parseGlobalTopic } from "../src/core";
+import { hmacHex } from "./helpers";
 import {
 	INTERNAL_HEADER,
 	INTERNAL_WS_QUERY_PARAM,
@@ -121,8 +122,18 @@ describe("event-server", () => {
 	it("health check returns ok", async () => {
 		const response = await SELF.fetch("https://example.com/health");
 		expect(response.status).toBe(200);
-		const body = await response.json() as { status: string };
+		const body = await response.json() as {
+			status: string;
+			auth: string;
+			release: { version: string; sha: string };
+			worker: { version_id: string | null; version_tag: string | null; version_timestamp: string | null };
+		};
 		expect(body.status).toBe("ok");
+		expect(body.auth).toBe("hmac");
+		expect(body.release).toEqual({ version: "test-version", sha: "test-sha" });
+		expect(typeof body.worker.version_id === "string" || body.worker.version_id === null).toBe(true);
+		expect(typeof body.worker.version_tag === "string" || body.worker.version_tag === null).toBe(true);
+		expect(typeof body.worker.version_timestamp === "string" || body.worker.version_timestamp === null).toBe(true);
 	});
 
 	it("returns 404 for unknown routes", async () => {
@@ -233,43 +244,60 @@ describe("event-server", () => {
 		expect(response.status).toBe(400);
 	});
 
-	it("rejects slack send without channel or text (signed, reaches 400)", async () => {
-		const bubble = await mintBubble();
-		const body = JSON.stringify({ text: "hello" });
-		const headers = await bubbleHeaders(
-			bubble.bubble_id, bubble.bubble_key, "POST", "/slack/send", body,
-		);
-		const response = await SELF.fetch("https://example.com/slack/send", {
-			method: "POST",
-			headers: { "content-type": "application/json", ...headers },
-			body,
-		});
-		expect(response.status).toBe(400);
-	});
-
-	// #487: outbound send must be authenticated.
-	it("rejects unsigned slack send with 403", async () => {
+	it("returns 404 for removed legacy slack send route", async () => {
 		const response = await SELF.fetch("https://example.com/slack/send", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ workspace: "T1", channel: "C1", text: "hello" }),
 		});
+		expect(response.status).toBe(404);
+	});
+
+	// #629: channel gateway endpoints share the mandatory bubble-signed auth.
+	it("rejects unsigned channels typing with 403", async () => {
+		const response = await SELF.fetch("https://example.com/channels/typing", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ conversation: "slack:T1:dm:D1", on: true }),
+		});
 		expect(response.status).toBe(403);
 	});
 
-	it("rejects slack send with a bad signature (403)", async () => {
+	it("signed channels typing reaches the handler (400: no workspace)", async () => {
 		const bubble = await mintBubble();
-		const body = JSON.stringify({ workspace: "T1", channel: "C1", text: "hi" });
+		const body = JSON.stringify({ conversation: "slack:T1:dm:D1:thread:1.2", on: true });
 		const headers = await bubbleHeaders(
-			bubble.bubble_id, bubble.bubble_key, "POST", "/slack/send", body,
+			bubble.bubble_id, bubble.bubble_key, "POST", "/channels/typing", body,
 		);
-		headers["x-moda-signature"] = "deadbeef";
-		const response = await SELF.fetch("https://example.com/slack/send", {
+		const response = await SELF.fetch("https://example.com/channels/typing", {
 			method: "POST",
 			headers: { "content-type": "application/json", ...headers },
 			body,
 		});
+		expect(response.status).toBe(400);
+		const data = await response.json() as { error: string };
+		expect(data.error).toContain("no send credential");
+	});
+
+	it("rejects unsigned channels history with 403", async () => {
+		const response = await SELF.fetch(
+			"https://example.com/channels/history?conversation=slack%3AT1%3Adm%3AD1&limit=5",
+		);
 		expect(response.status).toBe(403);
+	});
+
+	// The GET signature covers the full path INCLUDING the query string, with
+	// an empty body.
+	it("signed channels history reaches the handler (400: no workspace)", async () => {
+		const bubble = await mintBubble();
+		const path = "/channels/history?conversation=slack%3AT1%3Adm%3AD1%3Athread%3A1.2&limit=5";
+		const headers = await bubbleHeaders(
+			bubble.bubble_id, bubble.bubble_key, "GET", path, "",
+		);
+		const response = await SELF.fetch(`https://example.com${path}`, { headers });
+		expect(response.status).toBe(400);
+		const data = await response.json() as { error: string };
+		expect(data.error).toContain("no send credential");
 	});
 });
 
@@ -358,91 +386,11 @@ describe("cloudflare deployment deregistration", () => {
 	});
 });
 
-describe("slack send error handling", () => {
-	it("returns 502 when slack API fetch fails", async () => {
-		const bubble = await mintBubble();
-		stubSlackFetch("T_FAIL", "B_FAIL", "A_FAIL", "fail");
-		// Register a workspace SIGNED so the bubble-scoped record exists.
-		const regBody = JSON.stringify({ workspace_id: "T_FAIL", bot_token: "xoxb-fake-token" });
-		const regHeaders = await bubbleHeaders(
-			bubble.bubble_id, bubble.bubble_key, "POST", "/slack/workspaces", regBody,
-		);
-		const regResponse = await SELF.fetch("https://example.com/slack/workspaces", {
-			method: "POST",
-			headers: { "content-type": "application/json", ...regHeaders },
-			body: regBody,
-		});
-		expect(regResponse.status).toBe(200);
-
-		// Now send (signed) — the fetch to slack.com will fail in the test sandbox
-		const sendBody = JSON.stringify({ workspace: "T_FAIL", channel: "C123", text: "hello" });
-		const sendHeaders = await bubbleHeaders(
-			bubble.bubble_id, bubble.bubble_key, "POST", "/slack/send", sendBody,
-		);
-		const response = await SELF.fetch("https://example.com/slack/send", {
-			method: "POST",
-			headers: { "content-type": "application/json", ...sendHeaders },
-			body: sendBody,
-		});
-
-		// Should get 502, not 500 — the try/catch maps fetch failures to 502
-		expect(response.status).toBe(502);
-		const body = await response.json() as { ok: boolean; error: string };
-		expect(body.ok).toBe(false);
-		expect(body.error).toBeTruthy();
-	});
-
-	// #487 end-to-end isolation through the Worker route: a workspace registered
-	// by bubble B cannot be used by bubble A.
-	it("does not let bubble A send through bubble B's workspace (400)", async () => {
-		const bubbleB = await mintBubble();
-		const bubbleA = await mintBubble();
-		stubSlackFetch("T_ISO", "B_ISO", "A_ISO");
-
-		// B registers T_ISO (signed → scoped to B).
-		const regBody = JSON.stringify({ workspace_id: "T_ISO", bot_token: "xoxb-B-token" });
-		const regHeaders = await bubbleHeaders(
-			bubbleB.bubble_id, bubbleB.bubble_key, "POST", "/slack/workspaces", regBody,
-		);
-		const reg = await SELF.fetch("https://example.com/slack/workspaces", {
-			method: "POST",
-			headers: { "content-type": "application/json", ...regHeaders },
-			body: regBody,
-		});
-		expect(reg.status).toBe(200);
-
-		// A (valid signature, different bubble) tries to send through T_ISO → 400.
-		const sendBody = JSON.stringify({ workspace: "T_ISO", channel: "C1", text: "hi" });
-		const sendHeaders = await bubbleHeaders(
-			bubbleA.bubble_id, bubbleA.bubble_key, "POST", "/slack/send", sendBody,
-		);
-		const response = await SELF.fetch("https://example.com/slack/send", {
-			method: "POST",
-			headers: { "content-type": "application/json", ...sendHeaders },
-			body: sendBody,
-		});
-		expect(response.status).toBe(400);
-		const body = await response.json() as { error: string };
-		expect(body.error).toContain("bot token");
-	});
-});
-
 describe("github webhook signature verification", () => {
 	const secret = "test-webhook-secret";
 
 	async function sign(body: string): Promise<string> {
-		const key = await crypto.subtle.importKey(
-			"raw",
-			new TextEncoder().encode(secret),
-			{ name: "HMAC", hash: "SHA-256" },
-			false,
-			["sign"],
-		);
-		const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
-		const hex = Array.from(new Uint8Array(sig))
-			.map((b) => b.toString(16).padStart(2, "0"))
-			.join("");
-		return `sha256=${hex}`;
+		return `sha256=${await hmacHex(secret, body)}`;
 	}
 
 	it("rejects github webhook with invalid signature when WEBHOOK_SECRET is set", async () => {
@@ -484,6 +432,35 @@ describe("github webhook signature verification", () => {
 		expect(response.status).toBe(200);
 	});
 
+	it("serves Meta's GET subscribe handshake as raw text on the Worker (#656)", async () => {
+		const envWithToken = { ...env, WHATSAPP_VERIFY_TOKEN: "vt-worker" };
+		const ok = await worker.fetch(
+			new Request("https://example.com/webhooks/whatsapp"
+				+ "?hub.mode=subscribe&hub.verify_token=vt-worker&hub.challenge=987654"),
+			envWithToken,
+			{} as ExecutionContext,
+		);
+		expect(ok.status).toBe(200);
+		// RAW text, never JSON-quoted - Meta compares the echo byte-for-byte.
+		expect(await ok.text()).toBe("987654");
+
+		const bad = await worker.fetch(
+			new Request("https://example.com/webhooks/whatsapp"
+				+ "?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=987654"),
+			envWithToken,
+			{} as ExecutionContext,
+		);
+		expect(bad.status).toBe(403);
+
+		// GET on a source without a handshake still 404s.
+		const github = await worker.fetch(
+			new Request("https://example.com/webhooks/github?x=1"),
+			envWithToken,
+			{} as ExecutionContext,
+		);
+		expect(github.status).toBe(404);
+	});
+
 	it("accepts github webhook without signature when WEBHOOK_SECRET is not set", async () => {
 		const response = await SELF.fetch("https://example.com/webhooks/github", {
 			method: "POST",
@@ -494,6 +471,130 @@ describe("github webhook signature verification", () => {
 			body: JSON.stringify({ action: "opened", repository: { full_name: "org/repo" } }),
 		});
 		expect(response.status).toBe(200);
+	});
+});
+
+// #639: the linear route verifies through the pipeline's structural verify
+// slot — before it, linear webhooks were delivered with no signature check.
+describe("linear webhook signature verification", () => {
+	const secret = "test-linear-secret";
+
+	function sign(body: string): Promise<string> {
+		return hmacHex(secret, body);
+	}
+
+	function linearPayload(webhookTimestamp = Date.now()): string {
+		return JSON.stringify({
+			action: "update",
+			type: "Issue",
+			data: { title: "t", team: { key: "ENG" } },
+			webhookTimestamp,
+		});
+	}
+
+	async function post(body: string, signature: string | null): Promise<Response> {
+		const envWithSecret = { ...env, LINEAR_WEBHOOK_SECRET: secret };
+		return worker.fetch(
+			new Request("https://example.com/webhooks/linear", {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					...(signature !== null ? { "linear-signature": signature } : {}),
+				},
+				body,
+			}),
+			envWithSecret,
+			{} as ExecutionContext,
+		);
+	}
+
+	it("rejects linear webhook with an invalid signature when LINEAR_WEBHOOK_SECRET is set", async () => {
+		const response = await post(linearPayload(), "deadbeef");
+		expect(response.status).toBe(401);
+	});
+
+	it("rejects linear webhook with no signature header when LINEAR_WEBHOOK_SECRET is set", async () => {
+		const response = await post(linearPayload(), null);
+		expect(response.status).toBe(401);
+	});
+
+	it("rejects a replayed linear webhook (stale signed webhookTimestamp)", async () => {
+		const body = linearPayload(Date.now() - 3600_000);
+		const response = await post(body, await sign(body));
+		expect(response.status).toBe(401);
+	});
+
+	it("accepts linear webhook with a valid signature", async () => {
+		const body = linearPayload();
+		const response = await post(body, await sign(body));
+		expect(response.status).toBe(200);
+	});
+
+	it("accepts linear webhook without signature when LINEAR_WEBHOOK_SECRET is not set", async () => {
+		const response = await SELF.fetch("https://example.com/webhooks/linear", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: linearPayload(),
+		});
+		expect(response.status).toBe(200);
+	});
+});
+
+// #639: transport-level proof the slack route rejects a bad signature (the
+// per-app secret resolution itself is unit-tested in core.spec.ts).
+describe("slack webhook signature verification", () => {
+	const secret = "test-slack-secret";
+
+	async function signSlack(timestamp: string, body: string): Promise<string> {
+		return `v0=${await hmacHex(secret, `v0:${timestamp}:${body}`)}`;
+	}
+
+	const eventBody = JSON.stringify({
+		type: "event_callback",
+		event: { type: "message", user: "U1", channel: "D1", channel_type: "im", text: "hi", ts: "1.1" },
+	});
+
+	async function post(headers: Record<string, string>, body = eventBody): Promise<Response> {
+		const envWithSecret = { ...env, SLACK_SIGNING_SECRET: secret };
+		return worker.fetch(
+			new Request("https://example.com/webhooks/slack", {
+				method: "POST",
+				headers: { "content-type": "application/json", ...headers },
+				body,
+			}),
+			envWithSecret,
+			{} as ExecutionContext,
+		);
+	}
+
+	it("rejects slack event with an invalid signature when a signing secret is set", async () => {
+		const response = await post({
+			"x-slack-request-timestamp": String(Math.floor(Date.now() / 1000)),
+			"x-slack-signature": "v0=deadbeef",
+		});
+		expect(response.status).toBe(401);
+	});
+
+	it("rejects slack event with no signature headers when a signing secret is set", async () => {
+		const response = await post({});
+		expect(response.status).toBe(401);
+	});
+
+	it("accepts slack event with a valid signature", async () => {
+		const timestamp = String(Math.floor(Date.now() / 1000));
+		const response = await post({
+			"x-slack-request-timestamp": timestamp,
+			"x-slack-signature": await signSlack(timestamp, eventBody),
+		});
+		expect(response.status).toBe(200);
+	});
+
+	it("answers url_verification unsigned even when a signing secret is set", async () => {
+		// The handshake carries no signing headers; the pipeline's preVerify
+		// stage must short-circuit it before the signature check.
+		const response = await post({}, JSON.stringify({ type: "url_verification", challenge: "c1" }));
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ challenge: "c1" });
 	});
 });
 
@@ -711,6 +812,44 @@ describe("#489 internal DeploymentSession auth", () => {
 			}),
 		);
 		expect(event.status).toBe(200);
+	});
+
+	it("deduplicates direct DO /event posts by normalized event id", async () => {
+		const deploymentId = "direct-dedupe";
+		const stub = directStub(deploymentId);
+		const init = await stub.fetch(
+			new Request("https://internal/init", {
+				method: "POST",
+				headers: { [INTERNAL_HEADER]: env.INTERNAL_DO_SECRET },
+				body: JSON.stringify({ deployment_id: deploymentId, subscriptions: ["test:topic"] }),
+			}),
+		);
+		expect(init.status).toBe(200);
+
+		const event = {
+			v: 2,
+			id: "evt-duplicate",
+			source: "test",
+			type: "test.event",
+			topics: ["test:topic"],
+			delivery: "bulk",
+			text: "dedupe me",
+			timestamp: new Date().toISOString(),
+			payload: { ok: true },
+		};
+		for (let i = 0; i < 2; i++) {
+			const response = await stub.fetch(
+				new Request("https://internal/event", {
+					method: "POST",
+					headers: { [INTERNAL_HEADER]: env.INTERNAL_DO_SECRET },
+					body: JSON.stringify(event),
+				}),
+			);
+			expect(response.status).toBe(200);
+		}
+
+		expect(await env.EVENTS.get(`events:${deploymentId}:1`)).toBeTruthy();
+		expect(await env.EVENTS.get(`events:${deploymentId}:2`)).toBeNull();
 	});
 
 	it("accepts direct DO websocket upgrades with the internal subprotocol token", async () => {
@@ -1112,5 +1251,122 @@ describe("#488 resource-grant authorization (route + delivery)", () => {
 			body: depBody,
 		});
 		expect(depRes.status).toBe(400);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #640 — scoped ingest tokens over the real Worker transport: signed
+// mint/list/revoke routes plus the /webhooks/ingest/<topic> ingress. The
+// behavioral matrix lives in core.spec.ts; these prove the KV storage adapter
+// and route wiring end to end.
+// ---------------------------------------------------------------------------
+describe("ingest tokens over HTTP (#640)", () => {
+	async function signedFetch(
+		b: MintedBubble,
+		method: string,
+		path: string,
+		body = "",
+	): Promise<Response> {
+		const headers = await bubbleHeaders(b.bubble_id, b.bubble_key, method, path, body);
+		return SELF.fetch(`https://example.com${path}`, {
+			method,
+			headers: body ? { "content-type": "application/json", ...headers } : headers,
+			...(body ? { body } : {}),
+		});
+	}
+
+	it("rejects unsigned and badly-signed token management requests", async () => {
+		const unsigned = await SELF.fetch("https://example.com/ingest-tokens", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ topic: "alert/firing" }),
+		});
+		expect(unsigned.status).toBe(403);
+
+		const b = await mintBubble(["alert/firing"]);
+		const body = JSON.stringify({ topic: "alert/firing" });
+		const headers = await bubbleHeaders(b.bubble_id, "bkey_wrong", "POST", "/ingest-tokens", body);
+		const badKey = await SELF.fetch("https://example.com/ingest-tokens", {
+			method: "POST",
+			headers: { "content-type": "application/json", ...headers },
+			body,
+		});
+		expect(badKey.status).toBe(403);
+	});
+
+	it("mint → ingest → list → revoke → 403, end to end through KV", async () => {
+		// The minting bubble also subscribes to the bound topic, so a delivered
+		// ingest fans out within the bubble (delivered_to >= 1).
+		const b = await mintBubble(["alert/firing"]);
+
+		const mint = await signedFetch(b, "POST", "/ingest-tokens",
+			JSON.stringify({ topic: "alert/firing", name: "oncall" }));
+		expect(mint.status).toBe(201);
+		const minted = await mint.json() as { id: string; token: string; topic: string };
+		expect(minted.token).toMatch(/^ingt_/);
+		expect(minted.topic).toBe("alert/firing");
+
+		const ok = await SELF.fetch("https://example.com/webhooks/ingest/alert/firing", {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${minted.token}` },
+			body: JSON.stringify({ title: "disk full" }),
+		});
+		expect(ok.status).toBe(200);
+		expect(await ok.json()).toMatchObject({ delivered_to: 1 });
+
+		// Bound to alert/firing only — a different topic is an opaque 403.
+		const crossTopic = await SELF.fetch("https://example.com/webhooks/ingest/alert/resolved", {
+			method: "POST",
+			headers: { authorization: `Bearer ${minted.token}` },
+			body: "{}",
+		});
+		expect(crossTopic.status).toBe(403);
+
+		const list = await signedFetch(b, "GET", "/ingest-tokens");
+		expect(list.status).toBe(200);
+		const listed = await list.json() as { tokens: Record<string, unknown>[] };
+		expect(listed.tokens).toHaveLength(1);
+		expect(listed.tokens[0]).toMatchObject({ id: minted.id, topic: "alert/firing", name: "oncall" });
+		expect(listed.tokens[0]).not.toHaveProperty("token");
+		expect(listed.tokens[0]).not.toHaveProperty("token_hash");
+
+		const revoke = await signedFetch(b, "DELETE", `/ingest-tokens/${minted.id}`);
+		expect(revoke.status).toBe(200);
+
+		const afterRevoke = await SELF.fetch("https://example.com/webhooks/ingest/alert/firing", {
+			method: "POST",
+			headers: { authorization: `Bearer ${minted.token}` },
+			body: "{}",
+		});
+		expect(afterRevoke.status).toBe(403);
+	});
+
+	it("missing token 403s and a topicless ingest path 404s", async () => {
+		const noToken = await SELF.fetch("https://example.com/webhooks/ingest/alert/firing", {
+			method: "POST",
+			body: "{}",
+		});
+		expect(noToken.status).toBe(403);
+
+		const noTopic = await SELF.fetch("https://example.com/webhooks/ingest", {
+			method: "POST",
+			body: "{}",
+		});
+		expect(noTopic.status).toBe(404);
+	});
+
+	it("one bubble cannot list or revoke another bubble's tokens", async () => {
+		const owner = await mintBubble(["alert/firing"]);
+		const other = await mintBubble(["alert/firing"]);
+
+		const mint = await signedFetch(owner, "POST", "/ingest-tokens",
+			JSON.stringify({ topic: "alert/firing" }));
+		const minted = await mint.json() as { id: string };
+
+		const list = await signedFetch(other, "GET", "/ingest-tokens");
+		expect((await list.json() as { tokens: unknown[] }).tokens).toHaveLength(0);
+
+		const revoke = await signedFetch(other, "DELETE", `/ingest-tokens/${minted.id}`);
+		expect(revoke.status).toBe(404);
 	});
 });

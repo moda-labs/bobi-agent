@@ -8,28 +8,34 @@ import {
 	type BubbleRecord,
 	type SlackWorkspaceRecord,
 	type ResourceGrant,
+	type IngestTokenRecord,
+	type WebhookDeliveryRecord,
 	type HandlerResult,
 	subscriptionKeysForEvent,
 	namespaceSubKey,
 	admittedDeploymentIds,
 	handleAuthorizeResource,
-	verifyGitHubSignature,
-	verifySlackSignature,
 	readBubbleAuthHeaders,
 	hasBubbleSignature,
 	hasPartialBubbleSignature,
 	authenticateBubble,
-	handleGitHubWebhook,
-	handleLinearWebhook,
-	handleSlackWebhook,
+	handleWebhookRequest,
+	handleWebhookHandshake,
+	matchWebhookSource,
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
 	handleDeregisterDeployment,
 	handleTopicEvent,
-	handleSlackSend,
+	handleIngestTokenCreate,
+	handleIngestTokenList,
+	handleIngestTokenRevoke,
+	handleChannelsSend,
+	handleChannelsTyping,
+	handleChannelsHistory,
 	handleSlackWorkspaceRegister,
+	handleWhatsAppNumberRegister,
 	handleTestSeedResourceGrants,
-	slackSigningSecretFor,
+	envIngestTokenRecords,
 	getAuthRejectionCounters,
 } from "./core";
 import {
@@ -39,6 +45,12 @@ import {
 	conversationKey,
 	buildLoopDetectedEvent,
 } from "./circuit-breaker";
+import { setSlackApiUrl, setWhatsAppApiUrl } from "./channels";
+
+// Integration-test seams: point the Slack Web API / Meta Graph API at local
+// stubs. Unset in production, where the platform defaults apply.
+setSlackApiUrl(process.env.BOBI_ES_SLACK_API_URL);
+setWhatsAppApiUrl(process.env.BOBI_ES_WHATSAPP_API_URL);
 
 const MAX_BUFFER = 10_000;
 
@@ -75,13 +87,33 @@ const apiKeyIndex = new Map<string, string>();
 const subscriptionIndex = new Map<string, Set<string>>();
 const bubbles = new Map<string, BubbleRecord>();
 const slackWorkspaces = new Map<string, SlackWorkspaceRecord>();
+const channelState = new Map<string, Record<string, unknown>>();
 // Resource grants (#488), keyed `service:resource:bubbleId`. In-memory and
 // strongly consistent, so the Worker's KV-propagation race never applies here.
 const resourceGrants = new Map<string, ResourceGrant>();
+// Scoped ingest tokens (#640), keyed by token HASH (the only lookup the hot
+// path needs); list/revoke scan per bubble — token counts are tiny.
+const ingestTokens = new Map<string, IngestTokenRecord>();
+const webhookDeliveries = new Map<string, WebhookDeliveryRecord>();
+const ENV_PENDING_BUBBLE_ID = "__env_ingest_tokens_pending__";
+let envIngestTokensAttached = false;
 
 const webhookSecret = process.env.BOBI_ES_WEBHOOK_SECRET || "";
 const slackSigningSecret = process.env.BOBI_ES_SLACK_SIGNING_SECRET || "";
+const linearWebhookSecret = process.env.BOBI_ES_LINEAR_WEBHOOK_SECRET || "";
+const whatsappAppSecret = process.env.BOBI_ES_WHATSAPP_APP_SECRET || "";
+const whatsappVerifyToken = process.env.BOBI_ES_WHATSAPP_VERIFY_TOKEN || "";
+
+const webhookSecrets = {
+	github: webhookSecret,
+	slack: slackSigningSecret,
+	linear: linearWebhookSecret,
+	whatsapp: whatsappAppSecret,
+	whatsappVerifyToken,
+};
 const testGrantsSecret = process.env.BOBI_ES_TEST_GRANTS_SECRET || "";
+const releaseVersion = process.env.BOBI_RELEASE_VERSION || "local";
+const releaseSha = process.env.BOBI_RELEASE_SHA || "local";
 
 // ---------------------------------------------------------------------------
 // Map-based storage adapter
@@ -135,6 +167,32 @@ const storage: StorageAdapter = {
 
 	async hasResourceGrant(service: string, resource: string, bubbleId: string): Promise<boolean> {
 		return resourceGrants.has(`${service}:${resource}:${bubbleId}`);
+	},
+
+	async putIngestToken(record: IngestTokenRecord): Promise<void> {
+		ingestTokens.set(record.token_hash, record);
+	},
+
+	async getIngestTokenByHash(hash: string): Promise<IngestTokenRecord | null> {
+		const record = ingestTokens.get(hash) || null;
+		if (record?.bubble_id === ENV_PENDING_BUBBLE_ID) return null;
+		return record;
+	},
+
+	async listIngestTokens(bubbleId: string): Promise<IngestTokenRecord[]> {
+		return [...ingestTokens.values()].filter((r) => r.bubble_id === bubbleId);
+	},
+
+	async deleteIngestToken(record: IngestTokenRecord): Promise<void> {
+		ingestTokens.delete(record.token_hash);
+	},
+
+	async getWebhookDelivery(source: string, deliveryKey: string): Promise<WebhookDeliveryRecord | null> {
+		return webhookDeliveries.get(`${source}:${deliveryKey}`) || null;
+	},
+
+	async putWebhookDelivery(record: WebhookDeliveryRecord): Promise<void> {
+		webhookDeliveries.set(`${record.source}:${record.delivery_key}`, record);
 	},
 
 	async putDeployment(record: DeploymentRecord): Promise<void> {
@@ -280,10 +338,45 @@ const storage: StorageAdapter = {
 		slackWorkspaces.set(workspaceId, record);
 	},
 
-	async initDeploymentSession(): Promise<void> {
-		// no-op for local — deployment is fully initialized in putDeployment
+	async getChannelState(key: string): Promise<Record<string, unknown> | null> {
+		return channelState.get(key) || null;
+	},
+
+	async putChannelState(key: string, value: Record<string, unknown>): Promise<void> {
+		channelState.set(key, value);
+	},
+
+	async initDeploymentSession(deploymentId: string): Promise<void> {
+		// Deployment subscriptions have been indexed by now. Attach env-managed
+		// ingest tokens lazily to the first real local bubble so restarts preserve
+		// sender credentials without persisting plaintext.
+		if (!envIngestTokensAttached) {
+			const dep = deployments.get(deploymentId);
+			if (dep) attachEnvIngestTokens(dep.bubbleId);
+		}
 	},
 };
+
+async function seedEnvIngestTokens() {
+	const configured = process.env.BOBI_ES_INGEST_TOKENS || "";
+	if (!configured.trim()) return;
+	const records = await envIngestTokenRecords(configured, ENV_PENDING_BUBBLE_ID);
+	for (const record of records) {
+		await storage.putIngestToken(record);
+	}
+	console.log(`seeded ${records.length} env-managed ingest token(s) from BOBI_ES_INGEST_TOKENS`);
+}
+
+function attachEnvIngestTokens(bubbleId: string) {
+	let attached = 0;
+	for (const record of ingestTokens.values()) {
+		if (record.env_managed && record.bubble_id === ENV_PENDING_BUBBLE_ID) {
+			record.bubble_id = bubbleId;
+			attached++;
+		}
+	}
+	if (attached > 0) envIngestTokensAttached = true;
+}
 
 // ---------------------------------------------------------------------------
 // Node.js HTTP helpers
@@ -315,6 +408,39 @@ function respond(res: http.ServerResponse, result: HandlerResult) {
 	json(res, result.body, result.status);
 }
 
+// Shared prologue of every mandatory bubble-signed route: read the exact wire
+// bytes (the signature covers them), parse JSON, authenticate. Writes the
+// error response and returns null on failure. A GET carries an empty body,
+// which verifies and parses as {}.
+async function bubbleAuthedJson(
+	req: http.IncomingMessage,
+	res: http.ServerResponse,
+	url: URL,
+): Promise<{ bubble: BubbleRecord; data: Record<string, unknown> } | null> {
+	const body = await readBody(req);
+	let data: Record<string, unknown> = {};
+	if (body) {
+		const parsed = parseJson(body);
+		if (!parsed) {
+			json(res, { error: "invalid JSON" }, 400);
+			return null;
+		}
+		data = parsed;
+	}
+	const ctx = readBubbleAuthHeaders(
+		(n) => req.headers[n] as string | undefined,
+		req.method || "GET",
+		url.pathname + url.search,
+		body,
+	);
+	const bubble = await authenticateBubble(storage, ctx);
+	if (!bubble) {
+		json(res, { error: "forbidden" }, 403);
+		return null;
+	}
+	return { bubble, data };
+}
+
 // ---------------------------------------------------------------------------
 // Routing table
 // ---------------------------------------------------------------------------
@@ -330,68 +456,50 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 			mode: "local",
 			deployments: deployments.size,
 			auth: "hmac",
+			release: {
+				version: releaseVersion,
+				sha: releaseSha,
+			},
 			bubbles: bubbles.size,
 			rejections: getAuthRejectionCounters(),
 		});
 	}
 
-	if (method === "POST" && path === "/webhooks/github") {
-		const body = await readBody(req);
-
-		if (webhookSecret) {
-			const sigHeader = (req.headers["x-hub-signature-256"] as string) || "";
-			const valid = await verifyGitHubSignature(webhookSecret, new TextEncoder().encode(body), sigHeader);
-			if (!valid) return json(res, { error: "invalid signature" }, 401);
+	// Inbound webhooks — one pipeline for every source (#639), shared with the
+	// Worker: the core matches the route, verifies the exact wire bytes (the
+	// verify slot is structural), normalizes, and delivers. matchWebhookSource
+	// returns null for an unregistered path, which 404s below WITHOUT
+	// consuming the request body.
+	// Provider GET handshakes (#656): Meta verifies a webhook URL with a GET
+	// whose challenge must echo back as RAW text (JSON-quoting breaks its
+	// byte comparison), so this responds outside respond()/JSON.
+	if (method === "GET") {
+		const handshakeRoute = matchWebhookSource(path);
+		if (handshakeRoute) {
+			const h = handleWebhookHandshake(
+				handshakeRoute.source, (n) => url.searchParams.get(n) || "", webhookSecrets);
+			if (h) {
+				res.writeHead(h.status, { "Content-Type": "text/plain" });
+				res.end(h.text);
+				return;
+			}
 		}
-
-		const payload = parseJson(body);
-		if (!payload) return json(res, { error: "invalid JSON" }, 400);
-
-		const eventHeader = (req.headers["x-github-event"] as string) || "unknown";
-		const deliveryId = (req.headers["x-github-delivery"] as string) || crypto.randomUUID();
-
-		return respond(res, await handleGitHubWebhook(storage, eventHeader, deliveryId, payload));
 	}
 
-	if (method === "POST" && path === "/webhooks/linear") {
+	const webhookRoute = method === "POST" ? matchWebhookSource(path) : null;
+	if (webhookRoute) {
 		const body = await readBody(req);
-		const payload = parseJson(body);
-		if (!payload) return json(res, { error: "invalid JSON" }, 400);
-		return respond(res, await handleLinearWebhook(storage, payload));
-	}
-
-	if (method === "POST" && (path === "/webhooks/slack" || path === "/webhooks/slack/")) {
-		const body = await readBody(req);
-		const payload = parseJson(body);
-		if (!payload) return json(res, { error: "invalid JSON" }, 400);
-
-		// url_verification must be handled before BOTH the retry short-circuit
-		// and the signature check: it carries no signing headers, and Slack
-		// retries a failed handshake with x-slack-retry-num set — so swallowing
-		// retries here would leave the request URL permanently unverified.
-		if ((payload as Record<string, unknown>).type === "url_verification") {
-			return json(res, { challenge: (payload as Record<string, unknown>).challenge });
-		}
-
-		// Dedup retried EVENT deliveries so the agent doesn't double-process.
-		if (req.headers["x-slack-retry-num"]) {
-			return json(res, { ok: true });
-		}
-
-		// Per-app signing secret (by api_app_id), falling back to the global one.
-		const appSecret = await slackSigningSecretFor(
+		const result = await handleWebhookRequest(
 			storage,
-			payload as Record<string, unknown>,
-			slackSigningSecret,
+			webhookRoute.source,
+			{
+				rawBody: body,
+				header: (n) => (req.headers[n.toLowerCase()] as string) || "",
+				subpath: webhookRoute.subpath,
+			},
+			webhookSecrets,
 		);
-		if (appSecret) {
-			const timestamp = (req.headers["x-slack-request-timestamp"] as string) || "";
-			const signature = (req.headers["x-slack-signature"] as string) || "";
-			const valid = await verifySlackSignature(appSecret, timestamp, body, signature);
-			if (!valid) return json(res, { error: "invalid signature" }, 401);
-		}
-
-		return respond(res, await handleSlackWebhook(storage, payload));
+		if (result) return respond(res, result);
 	}
 
 	if (method === "POST" && path === "/deployments") {
@@ -468,36 +576,66 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		return respond(res, await handleSlackWorkspaceRegister(storage, data, bubbleId));
 	}
 
-	if (method === "POST" && path === "/slack/send") {
-		const body = await readBody(req);
-		const data = parseJson(body);
-		if (!data) return json(res, { error: "invalid JSON" }, 400);
-		const ctx = readBubbleAuthHeaders(
-			(n) => req.headers[n] as string | undefined,
-			method,
-			url.pathname + url.search,
-			body,
-		);
-		const bubble = await authenticateBubble(storage, ctx);
-		if (!bubble) return json(res, { error: "forbidden" }, 403);
-		return respond(res, await handleSlackSend(storage, data, bubble.id));
+	if (method === "POST" && path === "/whatsapp/numbers") {
+		// Signed-only (#656): no unsigned global-record use case exists, so
+		// the mandatory bubble-auth prologue applies.
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleWhatsAppNumberRegister(storage, auth.data, auth.bubble.id));
+	}
+
+	if (method === "POST" && path === "/channels/send") {
+		// Channel-agnostic send (#618) - mandatory bubble auth.
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleChannelsSend(storage, auth.data, auth.bubble.id));
+	}
+
+	if (method === "POST" && path === "/channels/typing") {
+		// Set/clear a channel's thinking indicator (#629).
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleChannelsTyping(storage, auth.data, auth.bubble.id));
+	}
+
+	if (method === "GET" && path === "/channels/history") {
+		// Read a conversation's messages (#629). The signature covers the full
+		// path INCLUDING the query string, with an empty body.
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		const conversation = url.searchParams.get("conversation") || "";
+		const limit = parseInt(url.searchParams.get("limit") || "100", 10);
+		return respond(res, await handleChannelsHistory(storage, conversation, limit, auth.bubble.id));
 	}
 
 	if (method === "POST" && path === "/resources/authorize") {
 		// Mandatory bubble auth; the credential in the body is verified once and
-		// never persisted/logged (mirrors /slack/send wiring).
-		const body = await readBody(req);
-		const data = parseJson(body);
-		if (!data) return json(res, { error: "invalid JSON" }, 400);
-		const ctx = readBubbleAuthHeaders(
-			(n) => req.headers[n] as string | undefined,
-			method,
-			url.pathname + url.search,
-			body,
-		);
-		const bubble = await authenticateBubble(storage, ctx);
-		if (!bubble) return json(res, { error: "forbidden" }, 403);
-		return respond(res, await handleAuthorizeResource(storage, data, bubble.id));
+		// never persisted/logged.
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleAuthorizeResource(storage, auth.data, auth.bubble.id));
+	}
+
+	// Scoped ingest tokens (#640) — mint/list/revoke, mandatory bubble auth
+	// (mirrors /resources/authorize). The mint response is the only place the
+	// plaintext token ever appears.
+	if (method === "POST" && path === "/ingest-tokens") {
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleIngestTokenCreate(storage, auth.data, auth.bubble.id));
+	}
+
+	if (method === "GET" && path === "/ingest-tokens") {
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleIngestTokenList(storage, auth.bubble.id));
+	}
+
+	const ingestTokenMatch = path.match(/^\/ingest-tokens\/([^/]+)$/);
+	if (method === "DELETE" && ingestTokenMatch) {
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		return respond(res, await handleIngestTokenRevoke(storage, ingestTokenMatch[1], auth.bubble.id));
 	}
 
 	if (method === "POST" && path === "/__test/resource-grants" && testGrantsSecret) {
@@ -668,13 +806,21 @@ server.on("upgrade", (req, socket, head) => handleUpgrade(req, socket, head, wss
 const evictionTimer = setInterval(evictStaleDeployments, EVICTION_SWEEP_MS);
 evictionTimer.unref();
 
-server.listen(port, bind, () => {
-	if (bind === "127.0.0.1" || bind === "::1") {
-		console.log(
-			`bobi event server (local) listening on ${bind}:${port} ` +
-				`(loopback-only; set BOBI_ES_BIND to serve remotely)`,
-		);
-	} else {
-		console.log(`bobi event server (local) listening on ${bind}:${port}`);
-	}
+async function main() {
+	await seedEnvIngestTokens();
+	server.listen(port, bind, () => {
+		if (bind === "127.0.0.1" || bind === "::1") {
+			console.log(
+				`bobi event server (local) listening on ${bind}:${port} ` +
+					`(loopback-only; set BOBI_ES_BIND to serve remotely)`,
+			);
+		} else {
+			console.log(`bobi event server (local) listening on ${bind}:${port}`);
+		}
+	});
+}
+
+main().catch((err) => {
+	console.error("Failed to start local event server:", err);
+	process.exit(1);
 });

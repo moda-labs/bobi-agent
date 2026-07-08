@@ -90,6 +90,141 @@ class TestCheckEntryPoint:
         assert "defaulting" in result.detail
 
 
+class TestCheckRoles:
+    """roles: misconfiguration fails silently at runtime, so validate must
+    surface it (#617 review finding)."""
+
+    def _check(self, cfg, tmp_path):
+        from bobi.validate import _check_roles
+        return _check_roles(cfg, tmp_path)
+
+    def test_valid_roles_pass(self, tmp_path):
+        (tmp_path / "package" / "roles" / "reviewer").mkdir(parents=True)
+        cfg = Config(roles={"reviewer": {"model": "opus"},
+                            "monitor": {"model": "haiku"}})
+        assert self._check(cfg, tmp_path) == []
+
+    def test_non_dict_entry_warns(self, tmp_path):
+        cfg = Config(roles={"reviewer": "opus"})
+        results = self._check(cfg, tmp_path)
+        assert len(results) == 1
+        assert not results[0].ok
+        assert not results[0].required  # warning, not blocking
+        assert "must be a mapping" in results[0].detail
+
+    def test_unknown_role_name_warns(self, tmp_path):
+        (tmp_path / "package" / "roles" / "reviewer").mkdir(parents=True)
+        cfg = Config(roles={"moniter": {"model": "haiku"}})  # typo
+        results = self._check(cfg, tmp_path)
+        assert len(results) == 1
+        assert not results[0].ok
+        assert not results[0].required
+        assert "unknown role" in results[0].detail
+        assert "monitor" in results[0].hint  # built-in listed as known
+
+    def test_monitor_is_builtin_even_without_role_dir(self, tmp_path):
+        (tmp_path / "package" / "roles" / "reviewer").mkdir(parents=True)
+        cfg = Config(roles={"monitor": {"model": "haiku"}})
+        assert self._check(cfg, tmp_path) == []
+
+    def test_no_role_dirs_skips_name_check(self, tmp_path):
+        cfg = Config(roles={"anything": {"model": "haiku"}})
+        assert self._check(cfg, tmp_path) == []
+
+    def test_empty_roles_pass(self, tmp_path):
+        assert self._check(Config(), tmp_path) == []
+
+
+class TestCheckBrain:
+    """kind: gateway without a resolvable base_url fails every session at its
+    first turn, so validate must block it (#655)."""
+
+    def _check(self, cfg):
+        from bobi.validate import _check_brain
+        return _check_brain(cfg)
+
+    def test_gateway_with_base_url_passes(self):
+        cfg = Config(brain={"kind": "gateway",
+                            "base_url": "http://localhost:4000"})
+        results = self._check(cfg)
+        assert len(results) == 1
+        assert results[0].ok
+
+    def test_gateway_without_base_url_blocks(self):
+        cfg = Config(brain={"kind": "gateway", "model": "qwen3:14b"})
+        results = self._check(cfg)
+        assert len(results) == 1
+        assert not results[0].ok
+        assert results[0].required  # blocking, not a warning
+        assert "base_url" in results[0].detail
+
+    def test_uninterpolated_base_url_blocks(self):
+        # Config interpolation turns an unset ${VAR} into "" - same failure.
+        cfg = Config(brain={"kind": "gateway", "base_url": ""})
+        assert not self._check(cfg)[0].ok
+
+    def test_other_brains_are_not_checked(self):
+        assert self._check(Config()) == []
+        assert self._check(Config(brain={"kind": "codex"})) == []
+        # unknown kinds fail loud at get_brain(), not here
+        assert self._check(Config(brain={"kind": "gemini"})) == []
+
+
+class TestCheckMonitorRelevance:
+    """relevance: on an ungateable monitor flavor is silently ignored at
+    runtime, so validate must surface it (#630)."""
+
+    def _check(self, tmp_path, monitors):
+        import yaml
+        from bobi.validate import _check_monitor_relevance
+        pkg = tmp_path / "package"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "agent.yaml").write_text("entry_point: manager\n")
+        (pkg / "monitors.yaml").write_text(yaml.dump({"monitors": monitors}))
+        return _check_monitor_relevance(tmp_path)
+
+    def test_relevance_on_check_monitor_passes(self, tmp_path):
+        results = self._check(tmp_path, [
+            {"name": "billing", "check": "venn_poll", "interval": "5m",
+             "relevance": "about billing"}])
+        assert results == []
+
+    def test_relevance_on_command_monitor_passes(self, tmp_path):
+        results = self._check(tmp_path, [
+            {"name": "billing", "command": "echo '[]'",
+             "relevance": "about billing"}])
+        assert results == []
+
+    def test_relevance_on_description_only_warns(self, tmp_path):
+        results = self._check(tmp_path, [
+            {"name": "watch", "description": "watch the inbox",
+             "relevance": "about billing"}])
+        assert len(results) == 1
+        assert not results[0].ok
+        assert not results[0].required  # warning, not blocking
+        assert "ignored" in results[0].detail
+
+    def test_relevance_on_notify_warns(self, tmp_path):
+        results = self._check(tmp_path, [
+            {"name": "roundup", "notify": True, "command": "echo '[]'",
+             "relevance": "about billing"}])
+        assert len(results) == 1
+        assert not results[0].ok
+
+    def test_relevance_on_command_plus_curator_passes(self, tmp_path):
+        """run_monitor's elif chain routes command before curator, so this
+        combo IS gated at runtime - validate must not claim otherwise."""
+        results = self._check(tmp_path, [
+            {"name": "combo", "command": "echo '[]'", "curator": True,
+             "relevance": "about billing"}])
+        assert results == []
+
+    def test_no_relevance_no_warnings(self, tmp_path):
+        results = self._check(tmp_path, [
+            {"name": "watch", "description": "watch the inbox"}])
+        assert results == []
+
+
 class TestCheckServiceCredentials:
 
     def test_slack_with_token(self):

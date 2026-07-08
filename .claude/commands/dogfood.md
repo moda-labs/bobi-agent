@@ -75,6 +75,8 @@ fully, also run the container/Fly sections:
   change.
 - Fly rollout: run Section 10 only with `BOBI_DOGFOOD_FLY=1`; report it as
   **not covered** when skipped.
+- Live Slack gateway: run Section 3c only with `BOBI_DOGFOOD_SLACK=1`; report
+  it as **not covered** when skipped.
 
 ## Phase 2: Feature Scan
 
@@ -180,6 +182,30 @@ TEST 3b.8: DELETE deployment with api_key → 200; wrong key → 403
 ```
 
 Teardown: stop wrangler/workerd and verify the selected wrangler port is free.
+
+### Section 3c: Live Slack Gateway
+
+Skip unless `BOBI_DOGFOOD_SLACK=1` and `$REPO/.bobi-dogfood.env` provides
+`SLACK_BOT_TOKEN` and `SLACK_TEST_CHANNEL` (a dev-workspace bot with
+`chat:write`, `files:write`, `channels:history`, invited to the sacrificial
+test channel). When skipped, report live Slack as **not covered**.
+
+This is the recurring soak for the channel gateway (#190/#643): it proves the
+real Slack API accepts what the gateway sends (`markdown_text` on postMessage
+AND chat.update, placeholder edits, file uploads, over-budget chunking). The
+assertions live in pytest so shell runs, dogfood, and future CI share one
+code path.
+
+```
+TEST 3c.1: set -a; source "$REPO/.bobi-dogfood.env"; set +a
+           pytest tests/integration/test_slack_live.py -m live → all pass
+TEST 3c.2: open the test channel in Slack and eyeball the thread this run
+           created (root message is labeled "Live gateway soak `soak-<ts>`"):
+           the edited placeholder renders headers/bold/code as markdown, the
+           files are attached, and the over-budget reply arrives as several
+           messages with no _(truncated)_ marker and no broken code fences.
+           Rendering fidelity is the one thing the pytest file cannot assert.
+```
 
 ### Section 4: Workflows and Roles
 

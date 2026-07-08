@@ -1,8 +1,8 @@
-"""Workflow orchestrator — deterministic state machine driving one agent session.
+"""Workflow orchestrator — deterministic state machine driving agent sessions.
 
-One Claude Code session persists across all steps. The agent accumulates
-context as it progresses — what it learns in setup carries into pickup,
-pickup insights carry into implement.
+One brain session persists across steps until a prompt step changes the
+effective model. Workflow handoffs carry structured context across steps and
+across any model switch.
 
 One registry entry per workflow. One log file. One session ID.
 
@@ -30,6 +30,9 @@ from bobi.sdk import (
 from bobi.subagent import (
     AgentResult,
     _emit_lifecycle_event,
+    _network_drop_error,
+    _timeout_error,
+    _tool_crash_error,
 )
 from bobi.workflow.schema import Workflow, StepDef
 from bobi.workflow.state import WorkflowRun
@@ -156,8 +159,13 @@ def run_workflow(
     interactive: bool = True,
     role: str = "",
     input_fields: dict | None = None,
+    model: str = "",
 ) -> bool:
-    """Execute a workflow end-to-end with a single agent session."""
+    """Execute a workflow end-to-end with a single agent session.
+
+    ``model`` is an explicit launch override: like ``--role``, it wins over
+    every step-level and config-level model for the whole run.
+    """
     run_key = run_key or "adhoc"
     requested_by = requested_by or {}
     started_at = time.time()
@@ -206,6 +214,7 @@ def run_workflow(
         _run_workflow_async(
             workflow, task, repo, work_cwd, run_key, session_name,
             registry, ctx, requested_by, timeout, interactive, role=role,
+            launch_model=model,
         )
     )
 
@@ -283,11 +292,21 @@ def resume_workflow(
         "text": f"Workflow {workflow.name} resumed for {run_key}",
     })
 
+    # A launch-time --model override survives suspension via the _runtime
+    # scope; without it the resume would re-resolve to the config default,
+    # trip the model-mismatch guard, and both discard the saved session and
+    # silently change the run's model.
+    runtime_scope = run.variable_scopes.get("_runtime", {})
+    launch_model = (
+        str(runtime_scope.get("launch_model", "") or "")
+        if isinstance(runtime_scope, dict) else ""
+    )
+
     success = asyncio.run(
         _run_workflow_async(
             workflow, f"Resuming workflow from step {step_idx}", repo, cwd,
             run_key, session_name, registry, ctx, requested_by, timeout,
-            interactive, start_step=step_idx,
+            interactive, start_step=step_idx, launch_model=launch_model,
         )
     )
 
@@ -330,9 +349,12 @@ async def _run_workflow_async(
     interactive: bool = True,
     start_step: int = 0,
     role: str = "",
+    launch_model: str = "",
 ) -> bool:
     """Async core: one brain session for all steps."""
-    from bobi.brain import get_brain
+    from bobi.brain import (
+        continuation_token, get_brain, get_process_brain_model, resolve_model,
+    )
 
     _brain = get_brain()
     saved_id = load_session_id(session_name)
@@ -341,13 +363,59 @@ async def _run_workflow_async(
     from bobi.prompts.resolver import resolve_agent_prompt
 
     project_root = _find_project_root(cwd)
+    from bobi.config import Config
+    try:
+        team_cfg = Config.load(project_root)
+    except Exception:
+        team_cfg = None
 
-    def _make_session(resume_id=None, agent_name=""):
+    def _effective_step_model(step: StepDef | None) -> str:
+        # Launch flag > step override > acting role's configured model >
+        # team default (#617). The acting role mirrors prompt resolution:
+        # a forced --role wins, else the step's agent, else the inherited one.
+        if launch_model:
+            return launch_model
+        if step and step.model:
+            return step.model
+        step_role = role or ((step.agent if step else "") or current_agent)
+        return resolve_model(team_cfg, role=step_role)
+
+    def _is_prompt_step(step: StepDef) -> bool:
+        return not (
+            step.condition or step.action or step.notify or step.await_event
+        )
+
+    def _first_prompt_step() -> StepDef | None:
+        for candidate in workflow.steps[start_step:]:
+            if _is_prompt_step(candidate):
+                return candidate
+        return None
+
+    def _continuation_prompt(step: StepDef) -> str:
+        scopes = {
+            name: data for name, data in ctx.scopes.items()
+            if name != "_runtime"
+        }
+        context_yaml = yaml.safe_dump(scopes, sort_keys=True).strip()
+        return (
+            f"Continue workflow `{workflow.name}` for issue #{run_key}. "
+            f"The next step is `{step.name}`. Use this workflow context from "
+            "the original input and prior handoffs:\n\n"
+            "```yaml\n"
+            f"{context_yaml}\n"
+            "```"
+        )
+
+    def _make_session(resume_id=None, agent_name="", model=""):
         agent_prompt = ""
         if agent_name:
             agent_prompt = resolve_agent_prompt(agent_name, project_root, interactive=interactive)
         else:
             agent_prompt = resolve_agent_prompt("", project_root, interactive=interactive)
+
+        options = {"max_turns": 200, "skills": "all"}
+        if model:
+            options["model"] = model
 
         return _brain.make_session(
             cwd=cwd,
@@ -366,7 +434,7 @@ async def _run_workflow_async(
                 ),
             },
             resume=resume_id,
-            options={"max_turns": 200, "skills": "all"},
+            options=options,
         )
 
     _emit_lifecycle_event("agent/session.started", {
@@ -381,28 +449,52 @@ async def _run_workflow_async(
             if s.agent:
                 first_agent = s.agent
                 break
+    current_agent = first_agent
+    first_prompt_step = _first_prompt_step()
+    first_prompt_model = _effective_step_model(first_prompt_step)
+    runtime_scope = ctx.scopes.get("_runtime", {})
+    saved_session_model = (
+        str(runtime_scope.get("model", "") or "")
+        if isinstance(runtime_scope, dict) else ""
+    )
+    visit_counts = (
+        dict(runtime_scope.get("visits", {}) or {})
+        if isinstance(runtime_scope, dict) else {}
+    )
+    # A fresh session always runs the next step's model; only a genuinely
+    # resumable session stays on the one it was suspended under.
+    current_model = (
+        saved_session_model if (saved_id and saved_session_model)
+        else first_prompt_model
+    )
 
-    # Try resume, fall back to fresh session
-    for attempt in range(2):
-        resume_id = saved_id if attempt == 0 else None
-        client = _make_session(resume_id, agent_name=first_agent)
-        try:
-            initial_prompt = task if not resume_id else None
-            await client.connect(initial_prompt)
-            if resume_id:
-                await client.query(task)
-            await _drain_response(client, session_name, run_key)
-            break
-        except Exception as e:
-            if resume_id and attempt == 0:
-                log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
-                save_session_id(session_name, "")
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-                continue
-            raise
+    if saved_id and (saved_session_model or start_step > 0):
+        # The model the saved session ran under: the recorded one, else (for
+        # a run suspended before models were tracked) the process default it
+        # must have used. A start_step=0 run with no record has nothing to
+        # guard against.
+        resume_from_model = saved_session_model or get_process_brain_model()
+        token = continuation_token(
+            _brain, session_id=saved_id,
+            from_model=resume_from_model, to_model=first_prompt_model,
+        )
+        if not token:
+            log.info(
+                "Saved workflow session model %r differs from next step model "
+                "%r; starting a fresh session.",
+                resume_from_model or "<default>",
+                first_prompt_model or "<default>",
+            )
+            saved_id = ""
+            current_model = first_prompt_model
+        elif resume_from_model != first_prompt_model:
+            log.info(
+                "Saved workflow session continues natively from model %r "
+                "to %r.",
+                resume_from_model or "<default>",
+                first_prompt_model or "<default>",
+            )
+            current_model = first_prompt_model
 
     # Terminal-emit outcome (MDS-65 RC#2). The `finally` emits the honest
     # lifecycle event for this session: session.completed on success/suspend,
@@ -417,16 +509,94 @@ async def _run_workflow_async(
     # terminal in the registry (the reconciler leaves "waiting" alone).
     suspended = False
 
-    try:
+    # Try resume, fall back to fresh session
+    for attempt in range(2):
+        resume_id = (saved_id or None) if attempt == 0 else None
+        client = _make_session(
+            resume_id, agent_name=current_agent, model=current_model,
+        )
+        try:
+            if resume_id:
+                initial_prompt = None
+            elif start_step > 0 and first_prompt_step is not None:
+                # Any fresh session on a RESUMED run (model guard, cleared
+                # session id, or a stale-resume retry) re-injects the
+                # persisted scopes rather than starting with the bare
+                # "Resuming workflow" task.
+                initial_prompt = _continuation_prompt(first_prompt_step)
+            else:
+                initial_prompt = task
+            await client.connect(initial_prompt)
+            if resume_id:
+                await client.query(task)
+            _, drain_error = await _drain_response(
+                client, session_name, run_key, model=current_model,
+            )
+            if drain_error:
+                raise RuntimeError(drain_error)
+            break
+        except Exception as e:
+            if resume_id and attempt == 0:
+                log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
+                save_session_id(session_name, "")
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                continue
+            run_failed, failure_error = True, str(e)
+            break
 
-        registry.update(session_name, status="running",
-                        session_id=saved_id or "")
+    try:
+        if run_failed:
+            return False
+
+        # save_session_id inside the drain already recorded the session id
+        # the run actually got (resume mints a fresh id; a retry-fresh start
+        # replaces the stale one) - do not write the pre-resume id back.
+        registry.update(session_name, status="running")
 
         step_idx = start_step
         failed_step = ""
 
+        def _exhaust_step(step: StepDef) -> tuple[int, str]:
+            error = (
+                f"Step {step.name} exceeded max_iterations="
+                f"{step.max_iterations}"
+            )
+            log.error("%s in workflow %s", error, workflow.name)
+            _emit_lifecycle_event("agent/step.exhausted", {
+                "run_key": run_key,
+                "workflow": workflow.name,
+                "step": step.name,
+                "visits": visit_counts[step.name],
+                "max_iterations": step.max_iterations,
+                "on_exhausted": step.on_exhausted,
+                "text": error,
+            }, blocking=True)
+            if step.on_exhausted:
+                jump = workflow.step_index(step.on_exhausted)
+                if jump >= 0:
+                    return jump, ""
+                error = (
+                    f"{error}; on_exhausted target "
+                    f"{step.on_exhausted!r} was not found"
+                )
+            return -1, error
+
         while step_idx < len(workflow.steps):
             step = workflow.steps[step_idx]
+            visit_counts[step.name] = int(visit_counts.get(step.name, 0)) + 1
+
+            if step.max_iterations and visit_counts[step.name] > step.max_iterations:
+                exhausted_jump, error = _exhaust_step(step)
+                if exhausted_jump >= 0:
+                    step_idx = exhausted_jump
+                    continue
+                failed_step = step.name
+                run_failed, failure_error = True, error
+                _emit_step_failed(run_key, workflow.name, step.name, error)
+                return False
 
             # Route step — deterministic, no LLM
             if step.condition:
@@ -436,6 +606,21 @@ async def _run_workflow_async(
                 if target:
                     jump = workflow.step_index(target)
                     if jump >= 0:
+                        if (
+                            step.max_iterations
+                            and jump <= step_idx
+                            and visit_counts[step.name] >= step.max_iterations
+                        ):
+                            exhausted_jump, error = _exhaust_step(step)
+                            if exhausted_jump >= 0:
+                                step_idx = exhausted_jump
+                                continue
+                            failed_step = step.name
+                            run_failed, failure_error = True, error
+                            _emit_step_failed(
+                                run_key, workflow.name, step.name, error,
+                            )
+                            return False
                         step_idx = jump
                         continue
                 step_idx += 1
@@ -474,6 +659,11 @@ async def _run_workflow_async(
                 run.suspended_at_step = step_idx + 1
                 run.await_event = step.await_event
                 run.session_name = session_name
+                ctx.set_scope("_runtime", {
+                    "model": current_model,
+                    "launch_model": launch_model,
+                    "visits": visit_counts,
+                })
                 run.variable_scopes = ctx.scopes
                 run.repo = repo
                 run.cwd = cwd
@@ -500,6 +690,73 @@ async def _run_workflow_async(
             step_start = time.time()
             registry.update(session_name, phase=step.name)
 
+            step_model = _effective_step_model(step)
+            if step_model != current_model:
+                # Continue the live session natively on the new model when
+                # the brain supports it (#642); otherwise fresh + re-inject
+                # the workflow scopes as YAML (lossy fallback). An agent
+                # change always starts fresh: the new agent must not inherit
+                # the previous agent's transcript under its system prompt
+                # (e.g. a reviewer step contaminated by the builder's
+                # reasoning).
+                next_agent = (
+                    current_agent if role else (step.agent or current_agent)
+                )
+                token = ""
+                if next_agent == current_agent:
+                    token = continuation_token(
+                        _brain, session_id=load_session_id(session_name),
+                        from_model=current_model, to_model=step_model,
+                    )
+                log.info(
+                    "Step %s: switching model from %r to %r (%s)",
+                    step.name, current_model or "<default>",
+                    step_model or "<default>",
+                    "native resume" if token else "fresh session",
+                )
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                current_model = step_model
+                current_agent = next_agent
+                if token:
+                    client = _make_session(
+                        resume_id=token, agent_name=current_agent,
+                        model=current_model,
+                    )
+                    try:
+                        await client.connect(None)
+                    except Exception as e:
+                        # Stale/unresumable session: fall back to the fresh
+                        # path below instead of failing the whole run.
+                        log.warning(
+                            "Native resume failed at step %s (stale "
+                            "session?), retrying fresh: %s", step.name, e,
+                        )
+                        save_session_id(session_name, "")
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
+                        token = ""
+                if not token:
+                    client = _make_session(
+                        resume_id=None, agent_name=current_agent,
+                        model=current_model,
+                    )
+                    await client.connect(_continuation_prompt(step))
+                    _, drain_error = await _drain_response(
+                        client, session_name, run_key, model=current_model,
+                    )
+                    if drain_error:
+                        failed_step = step.name
+                        run_failed, failure_error = True, drain_error
+                        _emit_step_failed(
+                            run_key, workflow.name, step.name, drain_error,
+                        )
+                        return False
+
             _emit_lifecycle_event("agent/step.started", {
                 "run_key": run_key,
                 "workflow": workflow.name,
@@ -512,13 +769,15 @@ async def _run_workflow_async(
             log.info(f"Step {step.name}: injecting prompt ({len(prompt)} chars)")
 
             await client.query(prompt)
-            final_text = await _drain_response(client, session_name, run_key)
+            final_text, drain_error = await _drain_response(
+                client, session_name, run_key, model=current_model,
+            )
 
             if final_text is None:
                 failed_step = step.name
-                run_failed, failure_error = True, "connection lost"
+                run_failed, failure_error = True, drain_error
                 _emit_step_failed(run_key, workflow.name, step.name,
-                                  "connection lost")
+                                  drain_error)
                 return False
 
             # Validate handoff
@@ -534,7 +793,8 @@ async def _run_workflow_async(
                     f"Please update your handoff file with these fields and confirm."
                 )
                 await client.query(fix_prompt)
-                await _drain_response(client, session_name, run_key)
+                await _drain_response(client, session_name, run_key,
+                                      model=current_model)
                 handoff = _read_handoff(session_name, step.name)
                 missing = _validate_handoff(step, handoff)
 
@@ -618,8 +878,15 @@ async def _run_workflow_async(
             pass
 
 
-async def _drain_response(client, session_name: str, run_key: str) -> str | None:
-    """Drain one turn of the agent's response. Returns final text or None."""
+async def _drain_response(
+    client, session_name: str, run_key: str, *, model: str,
+) -> tuple[str | None, str]:
+    """Drain one turn. Returns ``(final_text, error)``.
+
+    ``model`` is required: it is the model the session currently runs under,
+    and every save must record it so the store's model record stays in step
+    with mid-run switches (#642).
+    """
     from bobi.brain import AssistantText, TurnResult
 
     final_text = ""
@@ -631,13 +898,21 @@ async def _drain_response(client, session_name: str, run_key: str) -> str | None
                     log_activity("response", {"text": final_text[:500]},
                                  session=session_name)
             elif isinstance(msg, TurnResult):
-                save_session_id(session_name, msg.session_id)
+                save_session_id(session_name, msg.session_id, model=model)
                 log_activity("stop", {"session_id": msg.session_id},
                              session=session_name)
-                return final_text
+                if msg.is_error:
+                    return None, msg.result_text or "turn failed"
+                return final_text, ""
+    except asyncio.TimeoutError:
+        error = _timeout_error()
+        log.error(f"Drain timeout: {error}")
+        return None, error
     except Exception as e:
-        log.error(f"Drain error: {e}")
-    return None
+        error = _tool_crash_error(e)
+        log.error(f"Drain error: {error}")
+        return None, error
+    return None, _network_drop_error()
 
 
 def _emit_step_failed(run_key, workflow_name, step_name, error):

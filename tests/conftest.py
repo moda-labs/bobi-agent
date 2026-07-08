@@ -20,13 +20,22 @@ from pathlib import Path
 # CLI over the event server. Anchored on this file's own location so it always
 # matches the tests actually being run, in a worktree or the primary checkout.
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
-if _REPO_ROOT not in sys.path[:1]:
-    sys.path.insert(0, _REPO_ROOT)
+# bobi_deploy is src-layout, so the repo root alone only exposes it as a
+# namespace shadow that loses to any editable install; pin its src dir
+# explicitly so THIS checkout's copy wins too.
+_PIN_DIRS = [_REPO_ROOT]
+if (Path(_REPO_ROOT) / "bobi_deploy" / "src").is_dir():
+    _PIN_DIRS.append(str(Path(_REPO_ROOT) / "bobi_deploy" / "src"))
+for _d in reversed(_PIN_DIRS):
+    if _d not in sys.path[: len(_PIN_DIRS)]:
+        sys.path.insert(0, _d)
 _existing_pythonpath = os.environ.get("PYTHONPATH", "")
-if _REPO_ROOT not in _existing_pythonpath.split(os.pathsep):
-    os.environ["PYTHONPATH"] = (
-        _REPO_ROOT + (os.pathsep + _existing_pythonpath if _existing_pythonpath else "")
-    )
+for _d in reversed(_PIN_DIRS):
+    if _d not in _existing_pythonpath.split(os.pathsep):
+        _existing_pythonpath = (
+            _d + (os.pathsep + _existing_pythonpath if _existing_pythonpath else "")
+        )
+os.environ["PYTHONPATH"] = _existing_pythonpath
 # Stop a spawned `python -m bobi.cli` / `python -c` from prepending its
 # cwd to sys.path ahead of PYTHONPATH (Python 3.11+). The harness runs
 # subprocesses from the temp project dir — harmless there — but if cwd ever is
@@ -37,6 +46,25 @@ os.environ["PYTHONSAFEPATH"] = "1"
 import asyncio
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_environ():
+    """No test may leak an os.environ mutation into the next.
+
+    Several code paths write os.environ directly and by design — e.g.
+    ``actions.save_credential`` does ``os.environ[var] = value`` so a live setup
+    process can use a just-saved secret immediately. ``monkeypatch`` cannot undo
+    a write the app makes on its own, so a leaked ``SLACK_BOT_TOKEN`` /
+    ``LINEAR_API_KEY`` / ``BOBI_ROOT`` silently changes a later test's
+    build/author/missing-credentials behavior (an order-dependent flake under
+    pytest-randomly). Snapshot the environment before every test and restore it
+    after. Defined first so it wraps every other fixture and the test body.
+    """
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
 
 
 @pytest.fixture(autouse=True)

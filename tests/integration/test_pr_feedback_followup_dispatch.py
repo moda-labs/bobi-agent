@@ -1,26 +1,8 @@
-"""Integration test for issue #326 — follow-up PR comments must each dispatch.
+"""PR comments should reach the director instead of auto-dispatching.
 
-Reproduces the production bug: a reviewer drops several comments on the same
-PR over time, but only the *first* triggers a ``pr-feedback`` dispatch; the
-follow-ups are silently dropped.
-
-This drives the REAL pipeline against the SHIPPED config:
-
-    real eng-team agent.yaml `auto_dispatch` rules
-        → EventReactor.from_config
-        → drain_loop (the actual event-drain path)
-        → launch_agent (mocked, so no live Claude session spawns)
-
-Root cause (reactor.py): ``AutoDispatchRule.dedup_key`` keys on
-``workflow:topic:number`` — PR-level, comment-agnostic. With the 1800s
-``cooldown`` on the pr-feedback rules, any second comment on the same PR
-inside the window collapses onto the first key and is treated as a duplicate
-(``process`` returns None → no dispatch). Distinct comments are not
-duplicates: the key must include a per-delivery discriminator.
-
-This test asserts every distinct human comment dispatches. It FAILS against
-the comment-agnostic dedup key (only the first dispatches) and PASSES once the
-key incorporates the event's unique delivery id.
+Question-only and actionable PR comments are both visible to the director. The
+eng-team markdown policy decides whether to answer directly or launch
+pr-feedback, so the shipped auto_dispatch config must not consume comments.
 """
 
 import queue
@@ -35,15 +17,6 @@ from bobi.events.reactor import EventReactor
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 ENG_TEAM_AGENT_YAML = PACKAGE_ROOT / "agents" / "eng-team" / "agent.yaml"
-
-
-def _wait_calls(mock, n, timeout=2.0):
-    """Auto-dispatch offloads launch_agent to a daemon thread; wait for it."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if mock.call_count >= n:
-            return
-        time.sleep(0.005)
 
 
 class _OneShotQueue:
@@ -71,27 +44,35 @@ class _OneShotQueue:
 
 
 def _reactor_from_shipped_config():
-    """Build a reactor from the REAL eng-team auto_dispatch rules."""
+    """Build a reactor from the real eng-team auto_dispatch rules."""
     cfg = yaml.safe_load(ENG_TEAM_AGENT_YAML.read_text())
     rules = cfg.get("auto_dispatch", [])
     assert rules, "eng-team agent.yaml must define auto_dispatch rules"
+    pr_comment_events = {"github.issue_comment", "github.pull_request_review_comment"}
+    pr_comment_rules = [r for r in rules if r.get("event") in pr_comment_events]
+    assert pr_comment_rules, "PR comment redelivery must have structural dedup"
+    assert all(r.get("dedup_only") for r in pr_comment_rules), (
+        "PR comments must only be deduped structurally, not auto-dispatched"
+    )
     return EventReactor.from_config(rules, cwd="/tmp/proj-326")
 
 
-def _human_pr_comment(*, number, delivery_id, body):
-    """A human follow-up comment on a PR (github.issue_comment, is_pull_request)."""
+def _human_pr_comment(*, number, delivery_id, comment_id, body):
+    """A human follow-up comment on a PR."""
     return {
         "type": "github.issue_comment",
-        "id": delivery_id,            # unique per webhook delivery / replay-stable
+        "id": delivery_id,
         "source": "github",
         "delivery": "bulk",
         "topics": ["github:moda-labs/bobi"],
-        "text": f"[moda-labs/bobi] comment PR #{number}",
+        "text": f"[moda-labs/bobi] comment PR #{number}: {body}",
         "fields": {
             "action": "created",
             "number": number,
             "is_pull_request": True,
             "sender": "underminedsk",
+            "comment_id": comment_id,
+            "comment_body": body,
             "title": "Some PR",
         },
     }
@@ -105,7 +86,7 @@ def _drain_one_batch(events, reactor):
     delivered = []
 
     class _CaptureInbox:
-        def push(self, msg):
+        def push(self, msg, priority=False):
             delivered.append(msg.text)
 
     def fake_formatter(event):
@@ -125,12 +106,7 @@ def _drain_one_batch(events, reactor):
 
 
 def _drain_sequentially(events, reactor):
-    """Drive each event through its own drain batch on one shared reactor.
-
-    Models a reviewer dropping comments over time: each arrives in a separate
-    batch, so the reactor's cooldown state carries across them exactly as it
-    does in production.
-    """
+    """Drive each event through its own drain batch on one shared reactor."""
     delivered = []
     for event in events:
         delivered.extend(_drain_one_batch([event], reactor))
@@ -138,53 +114,20 @@ def _drain_sequentially(events, reactor):
 
 
 @patch("bobi.subagent.launch_agent")
-def test_followup_pr_comments_each_dispatch(mock_launch):
-    """Two distinct human comments on the same PR → two pr-feedback dispatches.
-
-    The first comment on PR #294 dispatches; the follow-up (distinct delivery
-    id, same PR, within the 1800s cooldown) must ALSO dispatch. The bug drops
-    the second.
-    """
-    mock_launch.return_value = "wf-pr-feedback-326"
+def test_followup_pr_comments_reach_director_without_auto_dispatch(mock_launch):
     reactor = _reactor_from_shipped_config()
 
     first = _human_pr_comment(
-        number=294, delivery_id="delivery-aaa", body="Please add a null check.")
+        number=294, delivery_id="delivery-aaa", comment_id=1,
+        body="Please add a null check.")
     followup = _human_pr_comment(
-        number=294, delivery_id="delivery-bbb", body="Also rename this method.")
+        number=294, delivery_id="delivery-bbb", comment_id=2,
+        body="Why is this helper needed?")
 
     delivered = _drain_sequentially([first, followup], reactor)
 
-    # Both comments reach the inbox (delivery is never the gap)...
     assert len(delivered) == 2
-    # ...and BOTH must auto-dispatch pr-feedback (not just the first).
-    _wait_calls(mock_launch, 2)
-    assert mock_launch.call_count == 2, (
-        "follow-up PR comment was dropped — only the first dispatched "
-        "(issue #326: dedup key is comment-agnostic so the cooldown "
-        "swallows the second distinct comment)"
-    )
-
-
-@patch("bobi.subagent.launch_agent")
-def test_redelivery_of_same_comment_still_dedups(mock_launch):
-    """Genuine redelivery of the SAME comment (stable id) must NOT re-dispatch.
-
-    Guards the fix against over-correction: the dedup must still suppress a
-    replay of the identical event so we don't double-handle one comment.
-    """
-    mock_launch.return_value = "wf-pr-feedback-326"
-    reactor = _reactor_from_shipped_config()
-
-    comment = _human_pr_comment(
-        number=294, delivery_id="delivery-aaa", body="Please add a null check.")
-    # Same event delivered twice (same delivery id) — e.g. stream replay.
-    redelivery = _human_pr_comment(
-        number=294, delivery_id="delivery-aaa", body="Please add a null check.")
-
-    _drain_sequentially([comment, redelivery], reactor)
-
-    _wait_calls(mock_launch, 1)
-    assert mock_launch.call_count == 1, (
-        "redelivery of the identical comment should dedup to a single dispatch"
-    )
+    assert "Please add a null check." in delivered[0]
+    assert "Why is this helper needed?" in delivered[1]
+    time.sleep(0.1)
+    mock_launch.assert_not_called()

@@ -14,10 +14,14 @@ monkeypatch ``claude_agent_sdk.ClaudeSDKClient`` continue to take effect.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
     AssistantText,
+    BrainCapabilities,
     BrainCost,
     BrainMessage,
     BrainSession,
@@ -25,6 +29,12 @@ from bobi.brain.base import (
     StreamDelta,
     TurnResult,
 )
+
+log = logging.getLogger(__name__)
+
+DEFAULT_INITIALIZE_TIMEOUT_MS = 180_000
+DEFAULT_CONNECT_ATTEMPTS = 3
+DEFAULT_CONNECT_BACKOFF_SECONDS = 2.0
 
 
 def _delta_text(event: Any) -> str:
@@ -47,13 +57,55 @@ class _ClaudeSession:
 
     provider = "anthropic"
 
-    def __init__(self, options: Any) -> None:
+    def __init__(self, options: Any, provider: str = "anthropic") -> None:
+        self._options = options
+        # Instance label follows the factory (GatewayBrain sessions attribute
+        # their costs to "gateway", not real Anthropic spend).
+        self.provider = provider
+        self._client = self._new_client()
+
+    def _new_client(self) -> Any:
         from claude_agent_sdk import ClaudeSDKClient
 
-        self._options = options
-        self._client = ClaudeSDKClient(options)
+        return ClaudeSDKClient(self._options)
 
     async def connect(self, prompt: str | None = None) -> None:
+        _configure_initialize_timeout()
+        attempts = _env_int("BOBI_CLAUDE_CONNECT_ATTEMPTS", DEFAULT_CONNECT_ATTEMPTS)
+        backoff = _env_float(
+            "BOBI_CLAUDE_CONNECT_BACKOFF_SECONDS",
+            DEFAULT_CONNECT_BACKOFF_SECONDS,
+        )
+
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            if attempt > 1:
+                self._client = self._new_client()
+            try:
+                await self._connect_once(prompt)
+                return
+            except Exception as exc:
+                last_error = exc
+                should_retry = attempt < attempts and _is_initialize_timeout(exc)
+                if not should_retry:
+                    raise
+                try:
+                    await self._client.disconnect()
+                except Exception:
+                    log.debug("Claude connect cleanup failed", exc_info=True)
+                log.warning(
+                    "Claude initialize timed out during connect; retrying "
+                    "(attempt %s/%s)",
+                    attempt + 1,
+                    attempts,
+                )
+                if backoff > 0:
+                    await asyncio.sleep(backoff * attempt)
+
+        if last_error is not None:
+            raise last_error
+
+    async def _connect_once(self, prompt: str | None = None) -> None:
         # Match the historical call shape: a bare connect() when there is no
         # connect-prompt (the SDK defaults prompt to None), an explicit
         # connect(prompt) otherwise. Keeps no-arg fakes/clients working.
@@ -134,11 +186,60 @@ def _result_to_turn(msg: Any) -> TurnResult:
     )
 
 
+def _configure_initialize_timeout() -> None:
+    """Raise the SDK initialize deadline unless the operator set it already.
+
+    The Claude SDK reads ``CLAUDE_CODE_STREAM_CLOSE_TIMEOUT`` during
+    ``connect()`` and uses it as the initialize control-request timeout. Keep
+    that public SDK knob authoritative, while giving Bobi a clearer alias.
+    """
+    if os.environ.get("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"):
+        return
+    timeout_ms = _env_int(
+        "BOBI_CLAUDE_INITIALIZE_TIMEOUT_MS",
+        DEFAULT_INITIALIZE_TIMEOUT_MS,
+    )
+    os.environ["CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"] = str(timeout_ms)
+
+
+def _is_initialize_timeout(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "control request timeout" in text and "initialize" in text
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("Invalid %s=%r; using %s", name, raw, default)
+        return default
+    return max(value, 1)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warning("Invalid %s=%r; using %s", name, raw, default)
+        return default
+    return max(value, 0.0)
+
+
 class ClaudeBrain:
     """Factory for Claude Code sessions (the default brain)."""
 
     name = "claude"
     provider = "anthropic"
+    # The Claude CLI accepts --resume together with a different --model, so a
+    # session's transcript continues under the new model (#642; verified live
+    # by tests/integration/test_cross_model_resume.py).
+    capabilities = BrainCapabilities(cross_model_resume=True)
 
     def make_session(
         self,
@@ -152,7 +253,9 @@ class ClaudeBrain:
 
         from bobi.sdk import get_cli_path
 
-        extra = dict(options or {})
+        from bobi.brain import with_default_model_option
+
+        extra = with_default_model_option(options)
         # Defaults every call site shared; an explicit value in ``options`` wins.
         extra.setdefault("permission_mode", "bypassPermissions")
         kwargs = dict(cwd=cwd, cli_path=get_cli_path(), resume=resume, **extra)
@@ -161,7 +264,7 @@ class ClaudeBrain:
         # the SDK's own default.
         if system_prompt is not None:
             kwargs["system_prompt"] = system_prompt
-        return _ClaudeSession(ClaudeAgentOptions(**kwargs))
+        return _ClaudeSession(ClaudeAgentOptions(**kwargs), provider=self.provider)
 
     async def stream_once(
         self,
@@ -189,7 +292,16 @@ class ClaudeBrain:
 
         from bobi.sdk import get_cli_path
 
+        _configure_initialize_timeout()
+        attempts = _env_int("BOBI_CLAUDE_CONNECT_ATTEMPTS", DEFAULT_CONNECT_ATTEMPTS)
+        backoff = _env_float(
+            "BOBI_CLAUDE_CONNECT_BACKOFF_SECONDS",
+            DEFAULT_CONNECT_BACKOFF_SECONDS,
+        )
+        from bobi.brain import resolve_model_option
+
         extra = dict(options or {})
+        model = resolve_model_option(model)
         extra.setdefault("permission_mode", "bypassPermissions")
         extra.setdefault("include_partial_messages", True)
         opts = ClaudeAgentOptions(
@@ -199,15 +311,37 @@ class ClaudeBrain:
             system_prompt=system_prompt,
             **extra,
         )
-        async for msg in query(prompt=user_prompt, options=opts):
-            if isinstance(msg, StreamEvent):
-                yield StreamDelta(text=_delta_text(msg.event))
-            elif isinstance(msg, AssistantMessage):
-                yield AssistantText(
-                    text="\n".join(
-                        b.text for b in msg.content if isinstance(b, TextBlock)
-                    ),
-                    usage=getattr(msg, "usage", None),
+
+        for attempt in range(1, attempts + 1):
+            yielded_message = False
+            try:
+                async for msg in query(prompt=user_prompt, options=opts):
+                    yielded_message = True
+                    if isinstance(msg, StreamEvent):
+                        yield StreamDelta(text=_delta_text(msg.event))
+                    elif isinstance(msg, AssistantMessage):
+                        yield AssistantText(
+                            text="\n".join(
+                                b.text for b in msg.content if isinstance(b, TextBlock)
+                            ),
+                            usage=getattr(msg, "usage", None),
+                        )
+                    elif isinstance(msg, ResultMessage):
+                        yield _result_to_turn(msg)
+                return
+            except Exception as exc:
+                should_retry = (
+                    not yielded_message
+                    and attempt < attempts
+                    and _is_initialize_timeout(exc)
                 )
-            elif isinstance(msg, ResultMessage):
-                yield _result_to_turn(msg)
+                if not should_retry:
+                    raise
+                log.warning(
+                    "Claude initialize timed out during stream; retrying "
+                    "(attempt %s/%s)",
+                    attempt + 1,
+                    attempts,
+                )
+                if backoff > 0:
+                    await asyncio.sleep(backoff * attempt)

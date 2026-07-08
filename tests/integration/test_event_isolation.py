@@ -55,7 +55,7 @@ set_project_root(project)
 import bobi.inbox as inbox
 
 class _CaptureInbox:
-    def push(self, msg):
+    def push(self, msg, priority=False):
         with open(out, "a") as f:
             f.write(json.dumps({"session": session, "text": msg.text}) + "\\n")
             f.flush()

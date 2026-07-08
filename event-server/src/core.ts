@@ -7,6 +7,10 @@ export interface NormalizedEvent {
 	topics: string[];
 	delivery: "chat" | "bulk";
 	text: string;
+	// Channel-agnostic reply address (#618). Set by chat adapters; the agent
+	// echoes it back verbatim to /channels/send (via `bobi reply`) instead of
+	// assembling platform-specific routing fields. See conversation.ts.
+	conversation?: string;
 	fields?: Record<string, string | number | boolean>;
 	run_key?: string;
 	payload: Record<string, unknown>;
@@ -62,7 +66,7 @@ export interface ResourceGrant {
 	id: string;
 	account_id: string | null; // null in MVP; account layer fills it later
 	bubble_id: string;
-	service: "github" | "linear" | "slack";
+	service: "github" | "linear" | "slack" | "whatsapp";
 	resource: string;
 	granted_by: "upstream_token_verification" | "test_seed";
 	// Linear: the team's organization id, recorded so a future fix can
@@ -71,6 +75,29 @@ export interface ResourceGrant {
 	organization_id?: string | null;
 	created_at: string;
 	expires_at: string | null; // null = no expiry in MVP (not enforced yet)
+}
+
+// A scoped ingest token (#640): a revocable credential bound to one
+// (bubble, topic) pair, minted by the instance for external systems that can
+// only send static headers (alerting, CI, SaaS webhooks). The server stores
+// ONLY the SHA-256 hash of the token — the token itself transits exactly once,
+// in the mint response, over TLS. A leaked token exposes one topic's ingress
+// in one bubble, never bubble membership or the bubble key.
+export interface IngestTokenRecord {
+	id: string;
+	bubble_id: string;
+	topic: string;
+	token_hash: string;
+	name?: string;
+	env_managed?: boolean;
+	created_at: string;
+}
+
+export interface WebhookDeliveryRecord {
+	source: string;
+	delivery_id: string;
+	delivery_key: string;
+	received_at: string;
 }
 
 export interface SlackBotRecord {
@@ -205,6 +232,21 @@ export interface StorageAdapter {
 	putResourceGrant(grant: ResourceGrant): Promise<void>;
 	hasResourceGrant(service: string, resource: string, bubbleId: string): Promise<boolean>;
 	getDeploymentById(id: string): Promise<DeploymentRecord | null>;
+	// Generic per-channel state (#656): credential records and message-window
+	// bookkeeping for channels beyond Slack. One store so a new channel never
+	// adds storage methods (the Slack workspace store predates this).
+	getChannelState(key: string): Promise<Record<string, unknown> | null>;
+	putChannelState(key: string, value: Record<string, unknown>): Promise<void>;
+	// Scoped ingest tokens (#640). Lookup at request time is by token HASH —
+	// the store never sees a plaintext token. Listing is per-bubble (revoke
+	// resolves the id inside the caller's own list, so one bubble can never
+	// address another bubble's tokens).
+	putIngestToken(record: IngestTokenRecord): Promise<void>;
+	getIngestTokenByHash(hash: string): Promise<IngestTokenRecord | null>;
+	listIngestTokens(bubbleId: string): Promise<IngestTokenRecord[]>;
+	deleteIngestToken(record: IngestTokenRecord): Promise<void>;
+	getWebhookDelivery(source: string, deliveryKey: string): Promise<WebhookDeliveryRecord | null>;
+	putWebhookDelivery(record: WebhookDeliveryRecord): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +257,18 @@ export interface StorageAdapter {
 export interface HandlerResult {
 	status: number;
 	body: unknown;
+}
+
+// The bare topic plus its source-qualified spelling (e.g. "monitor/support.email")
+// so subscriptions written either way match (#235). The single helper both
+// createTopicEvent and createIngestEvent route through, so the two spellings
+// can never drift between the signed-publish and token-ingest paths.
+export function sourceQualifiedTopics(topic: string, source?: string): string[] {
+	const topics = [topic];
+	if (source && !topic.startsWith(`${source}/`)) {
+		topics.push(`${source}/${topic}`);
+	}
+	return topics;
 }
 
 export function createTopicEvent(
@@ -235,11 +289,7 @@ export function createTopicEvent(
 	// to the body when POSTing (see the Python event publisher) — without
 	// this, "source/type" subscriptions silently never match (#235).
 	if (topics.length === 0) {
-		topics.push(topic);
-		const source = body.source as string | undefined;
-		if (source && !topic.startsWith(`${source}/`)) {
-			topics.push(`${source}/${topic}`);
-		}
+		topics.push(...sourceQualifiedTopics(topic, body.source as string | undefined));
 	}
 
 	const text = (body.text as string) || "";
@@ -253,6 +303,11 @@ export function createTopicEvent(
 		topics,
 		delivery: (body.delivery as "chat" | "bulk") || "bulk",
 		text,
+		// Reply address survives publish/forward: an agent re-publishing a chat
+		// event must not strip the field the receiver needs for `bobi reply`.
+		...(typeof body.conversation === "string" && body.conversation
+			? { conversation: body.conversation }
+			: {}),
 		fields: body.fields as Record<string, string | number | boolean> | undefined,
 		run_key: body.run_key as string | undefined,
 		payload,
@@ -267,11 +322,13 @@ export function createTopicEvent(
 
 import { normalizeGitHubWebhook } from "./adapters/github";
 import { normalizeLinearWebhook } from "./adapters/linear";
-import { normalizeSlackWebhook } from "./adapters/slack";
+import { bridgeSlackWebhook } from "./adapters/chat-sdk-slack";
+import { normalizeWhatsAppWebhook } from "./adapters/whatsapp";
+import { chunkForChannel, getChannelAdapter, slackApiUrl, truncateForChannel, whatsappApi, type OutboundFile } from "./channels";
+import { parseConversation, type Conversation } from "./conversation";
 
 export { normalizeGitHubWebhook as normalizeGitHubPayload } from "./adapters/github";
 export { normalizeLinearWebhook as normalizeLinearPayload } from "./adapters/linear";
-export { normalizeSlackWebhook as normalizeSlackPayload } from "./adapters/slack";
 
 // ---------------------------------------------------------------------------
 // Routing — topics-based (v2)
@@ -282,7 +339,7 @@ export { normalizeSlackWebhook as normalizeSlackPayload } from "./adapters/slack
 // accepted cross-tenant read hole, to be closed by #239 (inbound subscription
 // auth). Slack inbound rides this path, so it keeps working. Everything else
 // (inbox/*, reply/*, monitor/*, agent/*, custom topics) is bubble-scoped.
-const GLOBAL_TOPIC_PREFIXES = ["github:", "linear:", "slack:"];
+const GLOBAL_TOPIC_PREFIXES = ["github:", "linear:", "slack:", "whatsapp:"];
 
 export function isGlobalTopic(key: string): boolean {
 	return GLOBAL_TOPIC_PREFIXES.some((p) => key.startsWith(p));
@@ -348,6 +405,12 @@ export function subscriptionKeysForEvent(event: NormalizedEvent): string[] {
 // Signature verification
 // ---------------------------------------------------------------------------
 
+function bytesToHex(buffer: ArrayBuffer): string {
+	return Array.from(new Uint8Array(buffer))
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+}
+
 async function hmacSha256Hex(secret: string, data: Uint8Array | string): Promise<string> {
 	const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
 	const key = await crypto.subtle.importKey(
@@ -357,10 +420,16 @@ async function hmacSha256Hex(secret: string, data: Uint8Array | string): Promise
 		false,
 		["sign"],
 	);
-	const sig = await crypto.subtle.sign("HMAC", key, bytes);
-	return Array.from(new Uint8Array(sig))
-		.map((b) => b.toString(16).padStart(2, "0"))
-		.join("");
+	return bytesToHex(await crypto.subtle.sign("HMAC", key, bytes));
+}
+
+// SHA-256 hex digest — the one-way transform between a plaintext ingest token
+// (on the wire) and the stored token_hash. Lookup by digest also gives a
+// constant-time-safe comparison for free: the attacker-controlled token is
+// hashed before any store access, so no stored byte is ever compared
+// positionally against attacker input.
+export async function sha256Hex(data: string): Promise<string> {
+	return bytesToHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(data)));
 }
 
 // Constant-time string compare. Portable across Node and the Cloudflare
@@ -473,6 +542,34 @@ export async function verifyGitHubSignature(
 	return constantTimeEqual(expected, signatureHeader);
 }
 
+// Linear replay window for the signed webhookTimestamp (ms since epoch),
+// matching the ±300s the slack and bubble verifiers use.
+const LINEAR_REPLAY_WINDOW_MS = 300_000;
+
+// Linear signs the raw body with HMAC-SHA256 (hex) in the `linear-signature`
+// header. `webhookTimestamp` is the payload's signed timestamp field; like
+// verifySlackSignature, the freshness window lives INSIDE the verifier so a
+// direct caller cannot get signature validation without replay protection.
+// FAIL CLOSED on a missing or non-numeric timestamp: the signature covers the
+// body, so its absence in a signed payload still leaves the request replayable
+// forever if admitted.
+export async function verifyLinearSignature(
+	secret: string,
+	body: string,
+	signatureHeader: string,
+	webhookTimestamp: unknown,
+): Promise<boolean> {
+	if (!signatureHeader) return false;
+	if (
+		typeof webhookTimestamp !== "number" ||
+		Math.abs(Date.now() - webhookTimestamp) > LINEAR_REPLAY_WINDOW_MS
+	) {
+		return false;
+	}
+	const expected = await hmacSha256Hex(secret, body);
+	return constantTimeEqual(expected, signatureHeader);
+}
+
 // A request carrying bubble-signing headers (x-moda-*) plus the exact wire
 // bytes the signature covers. Entry files (local.ts / index.ts) build this from
 // the incoming request; the raw body and full path (pathname + search) MUST be
@@ -534,12 +631,20 @@ export interface AuthRejectionCounters {
 	bad_signature: number;
 	stale_timestamp: number;
 	unknown_bubble: number;
+	// Inbound webhook pipeline (#639): requests admitted because the provider's
+	// secret is unconfigured, and requests rejected by a source's verify slot.
+	// Both surface on /health so a provider silently running unverified — or a
+	// rotated secret 401-flooding — is visible without grepping logs.
+	webhook_unverified: number;
+	webhook_bad_signature: number;
 }
 
 const _rejectionCounters: AuthRejectionCounters = {
 	bad_signature: 0,
 	stale_timestamp: 0,
 	unknown_bubble: 0,
+	webhook_unverified: 0,
+	webhook_bad_signature: 0,
 };
 
 export function getAuthRejectionCounters(): AuthRejectionCounters {
@@ -550,6 +655,8 @@ export function resetAuthRejectionCounters(): void {
 	_rejectionCounters.bad_signature = 0;
 	_rejectionCounters.stale_timestamp = 0;
 	_rejectionCounters.unknown_bubble = 0;
+	_rejectionCounters.webhook_unverified = 0;
+	_rejectionCounters.webhook_bad_signature = 0;
 }
 
 // Resolve and verify the bubble that signed a request. Returns the bubble on a
@@ -597,33 +704,6 @@ function randomToken(prefix: string): string {
 	return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
-export interface SlackSendResult {
-	ok: boolean;
-	error?: string;
-	ts?: string;
-	[key: string]: unknown;
-}
-
-export async function sendSlackMessage(
-	botToken: string,
-	channel: string,
-	text: string,
-	threadTs?: string,
-): Promise<SlackSendResult> {
-	const body: Record<string, unknown> = { channel, text };
-	if (threadTs) body.thread_ts = threadTs;
-
-	const resp = await fetch("https://slack.com/api/chat.postMessage", {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${botToken}`,
-			"Content-Type": "application/json",
-		},
-		body: JSON.stringify(body),
-	});
-	return (await resp.json()) as SlackSendResult;
-}
-
 // ---------------------------------------------------------------------------
 // Transport-agnostic handlers
 // ---------------------------------------------------------------------------
@@ -653,14 +733,44 @@ export async function handleGitHubWebhook(
 export async function handleLinearWebhook(
 	storage: StorageAdapter,
 	payload: Record<string, unknown>,
+	deliveryId = "",
+	waitUntil?: (promise: Promise<unknown>) => void,
 ): Promise<HandlerResult> {
-	const event = normalizeLinearWebhook(payload);
-	const delivered = await storage.deliver(event);
+	const deliveryKey = deliveryId ? await sha256Hex(deliveryId) : "";
+	if (deliveryId) {
+		const existing = await storage.getWebhookDelivery("linear", deliveryKey);
+		if (existing) return { status: 200, body: { ok: true } };
+	}
+	const event = normalizeLinearWebhook(payload, deliveryId);
+	const delivery = storage.deliver(event).then(async (delivered) => {
+		if (deliveryId) {
+			await storage.putWebhookDelivery({
+				source: "linear",
+				delivery_id: deliveryId,
+				delivery_key: deliveryKey,
+				received_at: new Date().toISOString(),
+			});
+		}
+		return delivered;
+	});
+	if (waitUntil) {
+		waitUntil(delivery.then(() => undefined).catch((err: unknown) => {
+			console.error("linear webhook delivery failed", err);
+		}));
+		return { status: 200, body: { queued: true } };
+	}
+	const delivered = await delivery;
 	return { status: 200, body: { delivered_to: delivered } };
 }
 
+// `body` is the raw webhook JSON string; `payload` its parsed form (the
+// pipeline parses once before verification and passes both). Normalization
+// runs through the Chat SDK bridge (#628) — the hand-rolled
+// normalizeSlackWebhook remains only as the golden parity reference until
+// the bridge has soaked (#629).
 export async function handleSlackWebhook(
 	storage: StorageAdapter,
+	body: string,
 	payload: Record<string, unknown>,
 ): Promise<HandlerResult> {
 	const teamId = (payload.team_id as string) || "";
@@ -678,7 +788,7 @@ export async function handleSlackWebhook(
 		selfBotUserIds = workspaceBotUserIds(ws, apiAppId);
 	}
 
-	const result = normalizeSlackWebhook(payload, selfBotIds, selfBotUserIds);
+	const result = bridgeSlackWebhook(body, selfBotIds, selfBotUserIds, payload);
 
 	if (result.challenge !== undefined) {
 		return { status: 200, body: { challenge: result.challenge } };
@@ -689,6 +799,498 @@ export async function handleSlackWebhook(
 
 	const delivered = await storage.deliver(result.event);
 	return { status: 200, body: { delivered_to: delivered } };
+}
+
+// ---------------------------------------------------------------------------
+// Inbound webhook pipeline (#639)
+//
+// One pipeline for every inbound webhook source, shared by both transports
+// (the Worker and the local server):
+//
+//   route (/webhooks/<source>) -> verifier -> normalizer -> deliver()
+//
+// A source registers a REQUIRED verify slot plus a handler; the verify field
+// is non-optional by type, so a route cannot exist without verification by
+// construction. Transport entry files call handleWebhookRequest and never
+// stitch verification per-route themselves.
+// ---------------------------------------------------------------------------
+
+// Transport-neutral view of the inbound request. `rawBody` is the exact wire
+// bytes (signatures cover them — never a re-serialization); `header` is a
+// case-insensitive lookup returning "" when absent; `subpath` is the matched
+// route's topic remainder from matchWebhookSource ("" for exact provider
+// routes). Required — a transport cannot forget to thread it.
+export interface InboundWebhookRequest {
+	rawBody: string;
+	header(name: string): string;
+	subpath: string;
+}
+
+// Provider verification secrets, resolved by the transport (Worker env vars /
+// BOBI_ES_* process env), keyed by source name. An empty secret means
+// verification is not configured for that provider and its webhooks are
+// admitted unverified — the pre-#639 contract for github and slack, kept for
+// zero-config local development. Unverified admission is counted on /health
+// (webhook_unverified) so a misconfigured public server is visible.
+export interface WebhookSecrets {
+	github?: string;
+	slack?: string;
+	linear?: string;
+	/** Meta app secret - verifies X-Hub-Signature-256 on POSTed events. */
+	whatsapp?: string;
+	/** Operator-chosen token echoed back in Meta's GET subscribe handshake. */
+	whatsappVerifyToken?: string;
+}
+
+// Per-request pipeline context: the seam a verify slot uses to hand its
+// verified principal to the handler. The ingest verifier stashes the token
+// record here so its handler delivers on the token's binding — never on
+// anything re-derived from the request.
+export interface WebhookRequestContext {
+	ingestToken?: IngestTokenRecord;
+	waitUntil?: (promise: Promise<unknown>) => void;
+}
+
+export interface WebhookRequestOptions {
+	waitUntil?: (promise: Promise<unknown>) => void;
+}
+
+interface WebhookSource {
+	// GET subscription handshake (#656): some providers (Meta) verify the
+	// webhook URL with a GET carrying a challenge to echo back as RAW text.
+	// Registered here so both transports serve it from one definition; absent
+	// means the source has no GET surface (the transport 404s).
+	handshake?(
+		query: (name: string) => string,
+		secrets: WebhookSecrets,
+	): WebhookHandshakeResult;
+	// Registered route shape: exact (`/webhooks/<source>`, the default) or
+	// topic (`/webhooks/<source>/<topic>` with a required, slash-bearing
+	// remainder). Part of the single route grammar in matchWebhookSource.
+	topicRoute?: true;
+	// Reject bodies longer than this BEFORE JSON.parse (413). Measured in
+	// UTF-16 code units of the raw body — a lower bound on bytes, so nothing
+	// under the cap is ever falsely rejected and any parse-scale attack body
+	// is caught. Set for sources whose senders are untrusted at request time
+	// (ingest); provider bodies are bounded upstream by their platforms.
+	maxBodyBytes?: number;
+	// Short-circuit responses that must run BEFORE signature verification.
+	// Slack needs this: url_verification carries no signing headers (and its
+	// retries must still answer the challenge), and retried event deliveries
+	// dedup to {ok} without reprocessing.
+	preVerify?(
+		req: InboundWebhookRequest,
+		payload: Record<string, unknown>,
+	): HandlerResult | null;
+	// REQUIRED verification slot — null admits the request, a HandlerResult
+	// rejects it. Runs over the exact wire bytes. `secret` is the source's own
+	// entry from WebhookSecrets, resolved by the pipeline so a verifier can
+	// never read another provider's key.
+	verify(
+		storage: StorageAdapter,
+		req: InboundWebhookRequest,
+		payload: Record<string, unknown>,
+		secret: string,
+		ctx: WebhookRequestContext,
+	): Promise<HandlerResult | null>;
+	// Normalize + deliver.
+	handle(
+		storage: StorageAdapter,
+		req: InboundWebhookRequest,
+		payload: Record<string, unknown>,
+		ctx: WebhookRequestContext,
+	): Promise<HandlerResult>;
+}
+
+const INVALID_SIGNATURE: HandlerResult = { status: 401, body: { error: "invalid signature" } };
+const INVALID_JSON: HandlerResult = { status: 400, body: { error: "invalid JSON" } };
+// Ingest rejections are an opaque 403 (per #640 acceptance): missing, unknown,
+// revoked, and wrong-topic tokens are indistinguishable to the caller.
+const INGEST_FORBIDDEN: HandlerResult = { status: 403, body: { error: "forbidden" } };
+
+// Ingest request-size cap. Generic publishes have no explicit byte cap today
+// (they are bubble-signed, so the publisher is trusted); ingest is the first
+// surface where the sender holds only a topic-scoped credential, so it gets
+// an explicit one. Sized for alerting/CI/SaaS webhook payloads with headroom.
+export const INGEST_MAX_BODY_BYTES = 256 * 1024;
+
+// Per-token fixed-window rate limit. In-memory: authoritative on the local
+// server (single process); per-isolate on the Worker, where it still bounds
+// abuse per point of presence — a shared Durable Object limiter is deliberate
+// non-scope for #640.
+export const INGEST_RATE_LIMIT = 60;
+export const INGEST_RATE_WINDOW_MS = 60_000;
+const _ingestRateWindows = new Map<string, { start: number; count: number }>();
+
+// Entries for tokens that stop sending (revoked, retired CI tokens) would
+// otherwise accrete forever in this long-lived process; sweep expired windows
+// once the map is large. O(n) only when the sweep fires.
+const INGEST_RATE_SWEEP_THRESHOLD = 1024;
+
+function ingestRateAllow(tokenId: string): boolean {
+	const now = Date.now();
+	if (_ingestRateWindows.size > INGEST_RATE_SWEEP_THRESHOLD) {
+		for (const [id, w] of _ingestRateWindows) {
+			if (now - w.start >= INGEST_RATE_WINDOW_MS) _ingestRateWindows.delete(id);
+		}
+	}
+	const win = _ingestRateWindows.get(tokenId);
+	if (!win || now - win.start >= INGEST_RATE_WINDOW_MS) {
+		_ingestRateWindows.set(tokenId, { start: now, count: 1 });
+		return true;
+	}
+	win.count++;
+	return win.count <= INGEST_RATE_LIMIT;
+}
+
+export function resetIngestRateLimiter(): void {
+	_ingestRateWindows.clear();
+}
+
+// Build the event an ingest request delivers: the raw JSON body rides as the
+// payload with its top-level primitives mirrored into `fields`, on exactly the
+// token's bound topic (bubble-scoped). Deliberately NOT createTopicEvent: that
+// helper trusts routing fields in the body (repo/team_key/workspace → global
+// topics), and an ingest body is attacker-adjacent external input that must
+// never influence routing beyond the token's binding.
+export function createIngestEvent(
+	topic: string,
+	body: Record<string, unknown>,
+	bubbleId: string,
+): NormalizedEvent {
+	const fields: Record<string, string | number | boolean> = {};
+	for (const [k, v] of Object.entries(body)) {
+		if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+			fields[k] = v;
+		}
+	}
+	return {
+		v: 2,
+		id: crypto.randomUUID(),
+		source: "ingest",
+		type: topic,
+		timestamp: new Date().toISOString(),
+		// Bare topic plus the source-qualified form, mirroring createTopicEvent's
+		// fallback (#235), so both subscription spellings match.
+		topics: [topic, `ingest/${topic}`],
+		delivery: "bulk",
+		text: typeof body.text === "string" ? body.text : "",
+		fields,
+		payload: body,
+		bubble_id: bubbleId,
+	};
+}
+
+// A GET-handshake response. `text` is written as the RAW response body
+// (text/plain) - Meta compares the echoed challenge byte-for-byte, so it must
+// never be JSON-quoted.
+export interface WebhookHandshakeResult {
+	status: number;
+	text: string;
+}
+
+// Serve a provider's GET verification handshake, if it defines one. Returns
+// null when the source has no handshake (or is unregistered) - the transport
+// falls through to its native 404.
+export function handleWebhookHandshake(
+	source: string,
+	query: (name: string) => string,
+	secrets: WebhookSecrets,
+): WebhookHandshakeResult | null {
+	const def = WEBHOOK_SOURCES[source];
+	if (!def?.handshake) return null;
+	return def.handshake(query, secrets);
+}
+
+const WEBHOOK_SOURCES: Record<string, WebhookSource> = {
+	github: {
+		async verify(_storage, req, _payload, secret) {
+			if (!secret) return unverifiedAdmission();
+			const valid = await verifyGitHubSignature(
+				secret,
+				new TextEncoder().encode(req.rawBody),
+				req.header("x-hub-signature-256"),
+			);
+			return valid ? null : INVALID_SIGNATURE;
+		},
+		handle(storage, req, payload) {
+			return handleGitHubWebhook(
+				storage,
+				req.header("x-github-event") || "unknown",
+				req.header("x-github-delivery") || crypto.randomUUID(),
+				payload,
+			);
+		},
+	},
+
+	linear: {
+		async verify(_storage, req, payload, secret) {
+			if (!secret) return unverifiedAdmission();
+			const valid = await verifyLinearSignature(
+				secret,
+				req.rawBody,
+				req.header("linear-signature"),
+				payload.webhookTimestamp,
+			);
+			return valid ? null : INVALID_SIGNATURE;
+		},
+		handle(storage, req, payload, ctx) {
+			return handleLinearWebhook(
+				storage,
+				payload,
+				req.header("linear-delivery"),
+				ctx.waitUntil,
+			);
+		},
+	},
+
+	slack: {
+		preVerify(req, payload) {
+			// url_verification must run before BOTH the retry short-circuit and the
+			// signature check: it carries no signing headers, and Slack retries a
+			// failed handshake with x-slack-retry-num set — swallowing retries here
+			// would leave the request URL permanently unverified.
+			if (payload.type === "url_verification") {
+				return { status: 200, body: { challenge: payload.challenge } };
+			}
+			// Dedup retried EVENT deliveries so the agent doesn't double-process.
+			if (req.header("x-slack-retry-num")) {
+				return { status: 200, body: { ok: true } };
+			}
+			return null;
+		},
+		async verify(storage, req, payload, secret) {
+			// Verify against the AUTHORING app's signing secret (resolved by
+			// api_app_id), falling back to the global secret for legacy single-app
+			// deployments. A second app in the workspace signs with its OWN secret;
+			// validating only the global one 401'd it (and dropped its login DM).
+			const signingSecret = await slackSigningSecretFor(storage, payload, secret);
+			if (!signingSecret) return unverifiedAdmission();
+			const valid = await verifySlackSignature(
+				signingSecret,
+				req.header("x-slack-request-timestamp"),
+				req.rawBody,
+				req.header("x-slack-signature"),
+			);
+			return valid ? null : INVALID_SIGNATURE;
+		},
+		handle(storage, req, payload) {
+			return handleSlackWebhook(storage, req.rawBody, payload);
+		},
+	},
+
+	whatsapp: {
+		// Meta verifies the webhook URL with a GET subscribe handshake; the
+		// challenge must echo back as raw text. An unset verify token rejects:
+		// echoing for anyone would let a third party bind our URL to their app.
+		handshake(query, secrets) {
+			const token = secrets.whatsappVerifyToken || "";
+			if (
+				token
+				&& query("hub.mode") === "subscribe"
+				&& constantTimeEqual(token, query("hub.verify_token"))
+			) {
+				return { status: 200, text: query("hub.challenge") };
+			}
+			return { status: 403, text: "forbidden" };
+		},
+		async verify(_storage, req, _payload, secret) {
+			// FAIL CLOSED, unlike github/slack: an unverified WhatsApp event is
+			// not a read-only notification - it injects a chat message that
+			// drives an outbound reply through the operator's real number and
+			// opens the conversation's 24h send window. Meta always signs, and
+			// there is no legacy-unverified deployment base to stay compatible
+			// with, so a missing secret rejects instead of admitting.
+			if (!secret) {
+				return {
+					status: 401,
+					body: { error: "whatsapp webhook verification not configured (set the app secret)" },
+				};
+			}
+			// Meta signs exactly like GitHub: HMAC-SHA256 over the raw body in
+			// x-hub-signature-256 - one verifier serves both.
+			const valid = await verifyGitHubSignature(
+				secret,
+				new TextEncoder().encode(req.rawBody),
+				req.header("x-hub-signature-256"),
+			);
+			return valid ? null : INVALID_SIGNATURE;
+		},
+		handle(storage, _req, payload) {
+			return handleWhatsAppWebhook(storage, payload);
+		},
+	},
+
+	// Generic ingress (#640): POST /webhooks/ingest/<topic> with
+	// `Authorization: Bearer <ingest token>`. The verify slot is the token
+	// check itself — existence, topic binding, rate limit — so the structural
+	// guarantee (#639) holds: this route cannot exist unverified. The body
+	// size cap is declared here but enforced by the pipeline BEFORE the body
+	// is parsed.
+	ingest: {
+		topicRoute: true,
+		maxBodyBytes: INGEST_MAX_BODY_BYTES,
+		async verify(storage, req, _payload, _secret, ctx) {
+			// RFC 7235: the auth scheme is case-insensitive; several webhook
+			// senders emit "bearer".
+			const m = req.header("authorization").match(/^Bearer\s+(\S+)\s*$/i);
+			if (!m) return INGEST_FORBIDDEN;
+			const record = await storage.getIngestTokenByHash(await sha256Hex(m[1]));
+			// One opaque 403 for unknown/revoked AND wrong-topic: a topic-A token
+			// probing topic B learns nothing beyond "not authorized here".
+			if (!record || record.topic !== req.subpath) return INGEST_FORBIDDEN;
+			if (!ingestRateAllow(record.id)) {
+				return { status: 429, body: { error: "rate limited" } };
+			}
+			ctx.ingestToken = record;
+			return null;
+		},
+		async handle(storage, _req, payload, ctx) {
+			// The verified token is the ONLY routing input — topic and bubble come
+			// from its binding, never from the path or body. The verify slot set
+			// it; a missing record here is a pipeline invariant violation, not a
+			// client error.
+			const record = ctx.ingestToken;
+			if (!record) return { status: 500, body: { error: "internal error" } };
+			const event = createIngestEvent(record.topic, payload, record.bubble_id);
+			const delivered = await storage.deliver(event);
+			return { status: 200, body: { delivered_to: delivered } };
+		},
+	},
+};
+
+// Storage key for a conversation's message-window bookkeeping (#656). Written
+// on every inbound message; read by handleChannelsSend when the channel
+// declares a messageWindow. Channel-generic so future windowed channels reuse
+// it.
+export function channelWindowKey(source: string, scope: string, chatId: string): string {
+	return `window:${source}:${scope}:${chatId}`;
+}
+
+export async function handleWhatsAppWebhook(
+	storage: StorageAdapter,
+	payload: Record<string, unknown>,
+): Promise<HandlerResult> {
+	const { events } = normalizeWhatsAppWebhook(payload);
+
+	// Record the customer-service window: each inbound message re-opens 24h of
+	// free-form replies for its conversation (checked at send time). Stamp the
+	// message's OWN timestamp (newest per conversation) and never regress an
+	// existing record - Meta redelivers failed webhooks for days, and a stale
+	// redelivery must not falsely reopen a closed window.
+	const latest = new Map<string, number>();
+	for (const event of events) {
+		const ref = event.conversation;
+		if (!ref) continue;
+		const ts = Date.parse(String(event.fields?.message_timestamp ?? ""));
+		const stamp = Number.isNaN(ts) ? Date.now() : ts;
+		if (stamp > (latest.get(ref) ?? 0)) latest.set(ref, stamp);
+	}
+	for (const [ref, stamp] of latest) {
+		const conv = parseConversation(ref);
+		if (!conv) continue;
+		const key = channelWindowKey(conv.source, conv.scope, conv.chatId);
+		const existing = await storage.getChannelState(key);
+		const prev = Date.parse((existing?.last_inbound as string) || "");
+		if (!Number.isNaN(prev) && prev >= stamp) continue;
+		await storage.putChannelState(key, { last_inbound: new Date(stamp).toISOString() });
+	}
+
+	let delivered = 0;
+	for (const event of events) {
+		delivered += await storage.deliver(event);
+	}
+	return { status: 200, body: { ok: true, delivered_to: delivered } };
+}
+
+// An admit-without-verification, counted so /health surfaces a provider
+// running unverified (the misconfiguration class this pipeline exists to
+// close). Returns null — the pipeline admits the request.
+function unverifiedAdmission(): null {
+	_rejectionCounters.webhook_unverified++;
+	return null;
+}
+
+// A matched webhook route: the registered source plus, for topic routes, the
+// slash-bearing remainder of the path (`/webhooks/ingest/alert/firing` →
+// subpath "alert/firing"). Exact provider routes always carry subpath "".
+export interface WebhookRouteMatch {
+	source: string;
+	subpath: string;
+}
+
+// Match a request path against the registered webhook routes — the single
+// route grammar both transports use; they gate the body read on this, so an
+// unregistered path 404s without ever consuming the request body. Exact
+// sources match `/webhooks/<source>` only (AT MOST one trailing slash, the
+// pre-#640 grammar — `/webhooks/github//` stays a 404); topic sources REQUIRE
+// a non-empty remainder, which may itself contain slashes, again with at most
+// one trailing slash tolerated.
+export function matchWebhookSource(path: string): WebhookRouteMatch | null {
+	const m = path.match(/^\/webhooks\/([^/]+)(?:\/(.*))?$/);
+	if (!m) return null;
+	const source = m[1];
+	const def = WEBHOOK_SOURCES[source];
+	if (!def) return null;
+	if (def.topicRoute) {
+		// A remainder that still ends in "/" after stripping one had multiple
+		// trailing slashes — malformed, and no mintable topic could match it.
+		const rest = (m[2] ?? "").replace(/\/$/, "");
+		return rest && !rest.endsWith("/") ? { source, subpath: rest } : null;
+	}
+	// Exact route: the remainder must be absent (`/webhooks/github`) or empty
+	// (`/webhooks/github/`) on the wire — anything else, including `//`, 404s.
+	return m[2] === undefined || m[2] === "" ? { source, subpath: "" } : null;
+}
+
+// Run an inbound webhook through the pipeline. Returns null for an
+// unregistered source (the transport falls through to its native 404;
+// transports that gate on matchWebhookSource never hit this).
+export async function handleWebhookRequest(
+	storage: StorageAdapter,
+	source: string,
+	req: InboundWebhookRequest,
+	secrets: WebhookSecrets,
+	options: WebhookRequestOptions = {},
+): Promise<HandlerResult | null> {
+	const def = WEBHOOK_SOURCES[source];
+	if (!def) return null;
+
+	// Size gate BEFORE parse: for a capped source, an oversize body must never
+	// reach JSON.parse — the cap exists to bound work done for an untrusted
+	// sender, and parsing is the work.
+	if (def.maxBodyBytes && req.rawBody.length > def.maxBodyBytes) {
+		return { status: 413, body: { error: "payload too large" } };
+	}
+
+	let payload: unknown;
+	try {
+		payload = JSON.parse(req.rawBody);
+	} catch {
+		return INVALID_JSON;
+	}
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+		return INVALID_JSON;
+	}
+	const body = payload as Record<string, unknown>;
+
+	const early = def.preVerify?.(req, body);
+	if (early) return early;
+
+	const ctx: WebhookRequestContext = { waitUntil: options.waitUntil };
+	const secret = secrets[source as keyof WebhookSecrets] || "";
+	const rejected = await def.verify(storage, req, body, secret, ctx);
+	if (rejected) {
+		// Only auth failures feed the /health signature counter — policy
+		// rejections from a VALID credential (429 rate limit) must not read as
+		// a provider secret misconfiguration.
+		if (rejected.status === 401 || rejected.status === 403) {
+			_rejectionCounters.webhook_bad_signature++;
+		}
+		return rejected;
+	}
+
+	return def.handle(storage, req, body, ctx);
 }
 
 // Register a deployment into a bubble — MINT or JOIN.
@@ -891,8 +1493,158 @@ export async function handleTopicEvent(
 	}
 
 	const event = createTopicEvent(topic, body, bubble.id);
+	if (event.topics.some((key) => isGlobalTopic(key))) {
+		return { status: 400, body: { error: "global topics are webhook-only" } };
+	}
 	const delivered = await storage.deliver(event);
 	return { status: 200, body: { delivered_to: delivered } };
+}
+
+// ---------------------------------------------------------------------------
+// Scoped ingest tokens (#640) — mint / list / revoke. Every handler takes the
+// AUTHENTICATED bubble id (entry files reject unsigned or bad-signature
+// requests with an opaque 403 before calling these, mirroring
+// /resources/authorize), so a token is only ever visible to — and only ever
+// binds — the bubble that minted it.
+// ---------------------------------------------------------------------------
+
+// An ingest topic in the token store: `source/type` form like a CLI publish
+// topic (e.g. "alert/firing"), from a charset that never URL-encodes so the
+// wire path and the stored binding compare byte-for-byte. The first segment
+// must not impersonate a webhook provider, and the `:` exclusion structurally
+// rules out every global (github:/linear:/slack:) routing key.
+const INGEST_TOPIC_SEGMENT_RE = /^[A-Za-z0-9_.-]+$/;
+const INGEST_TOPIC_MAX_LENGTH = 200;
+const INGEST_RESERVED_SOURCES = new Set(["github", "linear", "slack"]);
+
+export function validateIngestTopic(topic: string): string | null {
+	if (!topic || topic.length > INGEST_TOPIC_MAX_LENGTH) {
+		return "topic must be 1-200 characters";
+	}
+	const segments = topic.split("/");
+	if (segments.length < 2) {
+		return "topic must use source/type form, e.g. alert/firing";
+	}
+	if (!segments.every((s) => INGEST_TOPIC_SEGMENT_RE.test(s))) {
+		return "topic segments must be non-empty [A-Za-z0-9_.-]";
+	}
+	if (INGEST_RESERVED_SOURCES.has(segments[0])) {
+		return "github, linear, and slack sources are reserved for webhooks";
+	}
+	return null;
+}
+
+export async function envIngestTokenRecords(
+	envValue: string,
+	bubbleId: string,
+	now = new Date().toISOString(),
+): Promise<IngestTokenRecord[]> {
+	const records: IngestTokenRecord[] = [];
+	for (const rawBinding of envValue.split(",")) {
+		const binding = rawBinding.trim();
+		if (!binding) continue;
+
+		const eq = binding.indexOf("=");
+		if (eq <= 0 || eq === binding.length - 1) {
+			throw new Error("BOBI_ES_INGEST_TOKENS entries must use topic=token");
+		}
+		const topic = binding.slice(0, eq).trim();
+		const token = binding.slice(eq + 1).trim();
+		const invalid = validateIngestTopic(topic);
+		if (invalid) {
+			throw new Error(`BOBI_ES_INGEST_TOKENS invalid topic ${JSON.stringify(topic)}: ${invalid}`);
+		}
+		if (!token) {
+			throw new Error(`BOBI_ES_INGEST_TOKENS token for ${JSON.stringify(topic)} must not be empty`);
+		}
+		const tokenHash = await sha256Hex(token);
+		records.push({
+			id: crypto.randomUUID(),
+			bubble_id: bubbleId,
+			topic,
+			token_hash: tokenHash,
+			name: "BOBI_ES_INGEST_TOKENS",
+			env_managed: true,
+			created_at: now,
+		});
+	}
+	return records;
+}
+
+export async function handleIngestTokenCreate(
+	storage: StorageAdapter,
+	body: Record<string, unknown>,
+	bubbleId: string,
+): Promise<HandlerResult> {
+	const topic = typeof body.topic === "string" ? body.topic.trim() : "";
+	const name = typeof body.name === "string" && body.name ? body.name : undefined;
+	const invalid = validateIngestTopic(topic);
+	if (invalid) return { status: 400, body: { error: invalid } };
+
+	const token = randomToken("ingt");
+	const record: IngestTokenRecord = {
+		id: crypto.randomUUID(),
+		bubble_id: bubbleId,
+		topic,
+		token_hash: await sha256Hex(token),
+		...(name ? { name } : {}),
+		created_at: new Date().toISOString(),
+	};
+	await storage.putIngestToken(record);
+
+	// The plaintext token appears here and nowhere else — it is never stored
+	// and never recoverable from list.
+	return {
+		status: 201,
+		body: {
+			id: record.id,
+			topic: record.topic,
+			...(name ? { name } : {}),
+			token,
+			created_at: record.created_at,
+		},
+	};
+}
+
+export async function handleIngestTokenList(
+	storage: StorageAdapter,
+	bubbleId: string,
+): Promise<HandlerResult> {
+	const records = await storage.listIngestTokens(bubbleId);
+	return {
+		status: 200,
+		body: {
+			tokens: records.map((r) => ({
+				id: r.id,
+				topic: r.topic,
+				...(r.name ? { name: r.name } : {}),
+				...(r.env_managed ? { env_managed: true } : {}),
+				created_at: r.created_at,
+			})),
+		},
+	};
+}
+
+export async function handleIngestTokenRevoke(
+	storage: StorageAdapter,
+	tokenId: string,
+	bubbleId: string,
+): Promise<HandlerResult> {
+	// Resolve the id inside the caller's OWN token list — another bubble's
+	// token id yields the same 404 as a nonexistent one.
+	const records = await storage.listIngestTokens(bubbleId);
+	const record = records.find((r) => r.id === tokenId);
+	if (!record) return { status: 404, body: { error: "not found" } };
+	if (record.env_managed) {
+		return {
+			status: 400,
+			body: {
+				error: "env-managed ingest tokens are rotated by changing BOBI_ES_INGEST_TOKENS and restarting",
+			},
+		};
+	}
+	await storage.deleteIngestToken(record);
+	return { status: 200, body: { ok: true } };
 }
 
 // ---------------------------------------------------------------------------
@@ -953,10 +1705,10 @@ const LINEAR_KEY_RE = /^[A-Za-z0-9_-]+$/;
 // owner/repo shape (each segment non-empty, no extra slashes).
 const GITHUB_SLUG_RE = /^[^/\s]+\/[^/\s]+$/;
 
-// POST /resources/authorize handler. `bubbleId` is the AUTHENTICATED bubble —
+// POST /resources/authorize handler. `bubbleId` is the AUTHENTICATED bubble -
 // the entry file rejects an unsigned / partial / bad-signature request with an
-// opaque 403 BEFORE calling this (mandatory auth, mirroring how /slack/send is
-// wired). Verifies the upstream credential once, then stores ONLY a grant.
+// opaque 403 BEFORE calling this. Verifies the upstream credential once, then
+// stores ONLY a grant.
 //
 // The credential is NEVER logged and NEVER stored: the route is excluded from
 // body logging, and a verification failure logs `{service, reason}` only.
@@ -1031,7 +1783,8 @@ export async function handleTestSeedResourceGrants(
 		const grant = raw as Record<string, unknown>;
 		const service = typeof grant.service === "string" ? grant.service : "";
 		const rawResource = typeof grant.resource === "string" ? grant.resource.trim() : "";
-		if ((service !== "github" && service !== "linear" && service !== "slack") || !rawResource) {
+		if ((service !== "github" && service !== "linear" && service !== "slack"
+			&& service !== "whatsapp") || !rawResource) {
 			return { status: 400, body: { error: "invalid_request" } };
 		}
 		const resource = normalizeResource(service, rawResource);
@@ -1107,47 +1860,33 @@ export async function admittedDeploymentIds(
 }
 
 // Storage key for a bubble-scoped Slack workspace registration. Outbound
-// /slack/send reads ONLY this key — never the bare global `slack_workspace:<id>`
-// that drives inbound self-reply — so one bubble can never send through a
+// channel sends read ONLY this key - never the bare global `slack_workspace:<id>`
+// that drives inbound self-reply - so one bubble can never send through a
 // workspace another bubble registered. With the KV adapter's `slack_workspace:`
 // prefix this yields `slack_workspace:${bubbleId}:${workspaceId}`.
 export function bubbleScopedWorkspaceKey(bubbleId: string, workspaceId: string): string {
 	return `${bubbleId}:${workspaceId}`;
 }
 
-// `bubbleId` is the AUTHENTICATED bubble (the entry files reject an unsigned or
-// bad-signature request with 403 before calling this). The Slack credentials
-// are looked up under that bubble's scope only — the outbound tenancy boundary.
-export async function handleSlackSend(
+// Resolve the sending bot's token for an outbound Slack send. Bubble-scoped
+// lookup ONLY - no fallback to the global workspace store. A workspace
+// registered by another bubble (or only inbound-registered) is absent here and
+// yields the same empty result as a truly unknown workspace, so an attacker
+// can't probe which workspaces another bubble registered.
+//
+// Pick the sending bot's token: by app_id, then bot_id, then the single
+// registered bot, then the legacy workspace token. With several bots in a
+// workspace, "the workspace's bot_token" is ambiguous.
+async function resolveSlackSendToken(
 	storage: StorageAdapter,
-	body: Record<string, unknown>,
 	bubbleId: string,
-): Promise<HandlerResult> {
-	const channel = body.channel as string;
-	const text = body.text as string;
-	if (!channel || !text) {
-		return { status: 400, body: { error: "channel and text required" } };
-	}
-
-	const workspaceId = body.workspace as string;
-	if (!workspaceId) {
-		return { status: 400, body: { error: "no bot token for workspace" } };
-	}
-
-	// Bubble-scoped lookup ONLY — no fallback to the global workspace store.
-	// A workspace registered by another bubble (or only inbound-registered) is
-	// absent here and returns the same opaque 400 as a truly unknown workspace,
-	// so an attacker can't probe which workspaces another bubble registered.
+	workspaceId: string,
+	appId: string,
+	botId: string,
+): Promise<string> {
+	if (!workspaceId) return "";
 	const ws = await storage.getSlackWorkspace(bubbleScopedWorkspaceKey(bubbleId, workspaceId));
-	if (!ws) {
-		return { status: 400, body: { error: "no bot token for workspace" } };
-	}
-
-	// Pick the sending bot's token: by app_id, then bot_id, then the single
-	// registered bot, then the legacy workspace token. With several bots in a
-	// workspace, "the workspace's bot_token" is ambiguous.
-	const appId = (body.app_id as string) || "";
-	const botId = (body.bot_id as string) || "";
+	if (!ws) return "";
 	let botToken = ws.bot_token || "";
 	if (appId && ws.bots?.[appId]) {
 		botToken = ws.bots[appId].bot_token;
@@ -1158,27 +1897,388 @@ export async function handleSlackSend(
 		const vals = Object.values(ws.bots);
 		if (vals.length >= 1) botToken = vals[0].bot_token;
 	}
-	if (!botToken) {
-		return { status: 400, body: { error: "no bot token for workspace" } };
+	return botToken;
+}
+
+// Resolve the sending credential for a conversation's channel, scoped to the
+// AUTHENTICATED bubble. The switch is the single place Phase 3 extends when a
+// new channel brings its own credential store.
+async function resolveChannelSendToken(
+	storage: StorageAdapter,
+	bubbleId: string,
+	conv: Conversation,
+	body: Record<string, unknown>,
+): Promise<string> {
+	if (conv.source === "slack") {
+		return resolveSlackSendToken(
+			storage,
+			bubbleId,
+			conv.scope,
+			(body.app_id as string) || "",
+			(body.bot_id as string) || "",
+		);
 	}
+	if (conv.source === "whatsapp") {
+		// Bubble-scoped lookup only, same tenancy boundary as Slack: a number
+		// registered by another bubble is indistinguishable from an unknown one.
+		const rec = await storage.getChannelState(whatsappNumberKey(bubbleId, conv.scope));
+		return (rec?.access_token as string) || "";
+	}
+	return "";
+}
+
+// Storage key for a bubble-scoped WhatsApp number registration (#656). There
+// is no global record: unlike Slack, our own sends never come back as inbound
+// message webhooks, so no self-reply loop prevention is needed.
+export function whatsappNumberKey(bubbleId: string, phoneNumberId: string): string {
+	return `whatsapp_number:${bubbleId}:${phoneNumberId}`;
+}
+
+// POST /whatsapp/numbers - registration mirror of handleSlackWorkspaceRegister,
+// but signed-only: there is no unsigned (global) use case, so an
+// unauthenticated registration is rejected outright. Verifies the access token
+// against the Graph API (the phone-number node must be readable with it), then
+// stores the bubble-scoped send credential and writes the whatsapp resource
+// grant that lets this bubble subscribe to `whatsapp:<pnid>` (#488).
+export async function handleWhatsAppNumberRegister(
+	storage: StorageAdapter,
+	body: Record<string, unknown>,
+	bubbleId?: string,
+): Promise<HandlerResult> {
+	const phoneNumberId = body.phone_number_id as string;
+	const accessToken = body.access_token as string;
+	if (!phoneNumberId || !accessToken) {
+		return { status: 400, body: { error: "phone_number_id and access_token required" } };
+	}
+	if (!bubbleId) {
+		return { status: 403, body: { error: "forbidden" } };
+	}
+
+	try {
+		const data = await whatsappApi(
+			accessToken,
+			`${encodeURIComponent(phoneNumberId)}?fields=id`,
+			{ method: "GET" },
+		);
+		if (String(data.id ?? "") !== phoneNumberId) {
+			return { status: 403, body: { error: "forbidden" } };
+		}
+	} catch {
+		return { status: 403, body: { error: "forbidden" } };
+	}
+
+	await storage.putChannelState(whatsappNumberKey(bubbleId, phoneNumberId), {
+		access_token: accessToken,
+	});
+	// Upstream token verification IS the proof of access, same convergence as
+	// Slack (#488 §6): the grant gates inbound `whatsapp:<pnid>` delivery.
+	await storage.putResourceGrant({
+		id: `whatsapp:${phoneNumberId}:${bubbleId}`,
+		account_id: null,
+		bubble_id: bubbleId,
+		service: "whatsapp",
+		resource: phoneNumberId,
+		granted_by: "upstream_token_verification",
+		organization_id: null,
+		created_at: new Date().toISOString(),
+		expires_at: null,
+	});
+
+	return { status: 200, body: { ok: true, phone_number_id: phoneNumberId } };
+}
+
+// One outbound file on /channels/send: { name, content_b64, title? }.
+function decodeOutboundFiles(raw: unknown): OutboundFile[] | null {
+	if (raw === undefined) return [];
+	if (!Array.isArray(raw)) return null;
+	const files: OutboundFile[] = [];
+	for (const item of raw) {
+		if (!item || typeof item !== "object") return null;
+		const f = item as Record<string, unknown>;
+		if (typeof f.name !== "string" || !f.name || typeof f.content_b64 !== "string" || !f.content_b64) {
+			return null;
+		}
+		let data: Uint8Array;
+		try {
+			data = Uint8Array.from(atob(f.content_b64), (c) => c.charCodeAt(0));
+		} catch {
+			return null;
+		}
+		files.push({
+			name: f.name,
+			data,
+			...(typeof f.title === "string" && f.title ? { title: f.title } : {}),
+		});
+	}
+	return files;
+}
+
+// Channel-agnostic outbound send (#618, #629):
+//   { conversation, text?, mode?, edit_ref?, files? }
+// Parses the conversation reference and delegates to the channel's adapter.
+// `bubbleId` is the authenticated bubble; credentials resolve only under its
+// scope.
+//
+// Text arrives as raw markdown — formatting is the gateway's job (the Slack
+// adapter delivers it natively via markdown_text). Modes:
+//   post    post a new message
+//   update  edit the message named by edit_ref (e.g. a placeholder)
+//   final   resolve the response context: edit edit_ref when given, else
+//           post; then clear the typing indicator either way
+// Capability degradation happens here: update on a channel without edit
+// support becomes a follow-up post; typing on a channel without indicators
+// is a silent no-op.
+// Spacing between follow-up chunk posts (#651): chunked sends fire several
+// posts into one channel back-to-back, and chat platforms rate-limit sustained
+// per-channel posting (Slack: ~1/sec with burst allowance).
+const CHUNK_SPACING_MS = 300;
+
+export async function handleChannelsSend(
+	storage: StorageAdapter,
+	body: Record<string, unknown>,
+	bubbleId: string,
+): Promise<HandlerResult> {
+	const ref = body.conversation;
+	const text = body.text;
+	// Explicit string checks: a non-string conversation (array, number) must
+	// be a 400, not a TypeError escaping the handler as a 500.
+	if (typeof ref !== "string" || !ref) {
+		return { status: 400, body: { error: "conversation required" } };
+	}
+	const files = decodeOutboundFiles(body.files);
+	if (files === null) {
+		return { status: 400, body: { error: "invalid files: expected [{name, content_b64, title?}]" } };
+	}
+	// Text is required unless files carry the payload (it then becomes the
+	// upload comment). A present-but-non-string text is always a 400.
+	if (text !== undefined && typeof text !== "string") {
+		return { status: 400, body: { error: "text must be a string" } };
+	}
+	if (!text && files.length === 0) {
+		return { status: 400, body: { error: "text or files required" } };
+	}
+	const conv = parseConversation(ref);
+	if (!conv) {
+		return { status: 400, body: { error: "invalid conversation reference" } };
+	}
+	const adapter = getChannelAdapter(conv.source);
+	if (!adapter) {
+		return { status: 400, body: { error: `unsupported channel: ${conv.source}` } };
+	}
+
+	const mode = (body.mode as string) || "post";
+	if (mode !== "post" && mode !== "update" && mode !== "final") {
+		return { status: 400, body: { error: `invalid mode: ${mode}` } };
+	}
+	const editRef = (body.edit_ref as string) || "";
+	if (mode === "update" && !editRef) {
+		return { status: 400, body: { error: "edit_ref required for mode: update" } };
+	}
+
+	const caps = adapter.descriptor.capabilities;
+
+	// The credential and window-state reads are independent; start both
+	// together and keep the credential error's precedence.
+	const [botToken, windowState] = await Promise.all([
+		resolveChannelSendToken(storage, bubbleId, conv, body),
+		caps.messageWindow
+			? storage.getChannelState(channelWindowKey(conv.source, conv.scope, conv.chatId))
+			: Promise.resolve(null),
+	]);
+	if (!botToken) {
+		return { status: 400, body: { error: `no send credential registered for ${conv.source}:${conv.scope}` } };
+	}
+
+	// Message-window enforcement (#656): a windowed channel (WhatsApp's 24h
+	// customer-service window) only accepts free-form replies for N hours
+	// after the user's last inbound message. A KNOWN-stale window fails with
+	// a TYPED error so the agent can report the situation instead of a
+	// mystery platform rejection. A MISSING record passes through: it can
+	// mean KV replication lag right after a fresh inbound (Workers), so
+	// rejecting would break the most common flow - the platform itself is
+	// the authoritative enforcer and its rejection surfaces as a send error.
+	// Template messaging (the outside-window escape hatch) is a follow-up.
+	if (caps.messageWindow) {
+		const state = windowState;
+		const last = Date.parse((state?.last_inbound as string) || "");
+		if (!Number.isNaN(last)
+			&& Date.now() - last > caps.messageWindow.hours * 3600_000) {
+			return {
+				status: 400,
+				body: {
+					error: "outside_message_window",
+					detail: `no inbound message from this user in the last `
+						+ `${caps.messageWindow.hours}h; free-form replies are closed`
+						+ (caps.messageWindow.outsideWindow === "template"
+							? " (template messages are not supported yet)"
+							: ""),
+				},
+			};
+		}
+	}
+
+	const rawText = (text as string) || "";
 
 	let result;
 	try {
-		result = await sendSlackMessage(botToken, channel, text, body.thread_ts as string | undefined);
+		if (files.length > 0) {
+			// File sends stay single-message: the text is a comment or a
+			// placeholder replacement, so over-budget text truncates.
+			const outText = truncateForChannel(rawText, caps);
+			if (!adapter.uploadFiles || !caps.files) {
+				return { status: 400, body: { error: `channel ${conv.source} does not support files` } };
+			}
+			// A file reply that resolves a placeholder: a message cannot be
+			// edited INTO a file share, so replace the placeholder text first,
+			// then attach the file without a duplicate comment.
+			if (editRef && (mode === "update" || mode === "final")) {
+				if (!outText) {
+					return { status: 400, body: { error: "text required when edit_ref is combined with files" } };
+				}
+				if (adapter.update && caps.edit) {
+					const edited = await adapter.update(botToken, conv, editRef, outText);
+					if (!edited.ok) {
+						return { status: 502, body: { ok: false, error: edited.error } };
+					}
+				}
+				result = await adapter.uploadFiles(botToken, conv, files);
+			} else {
+				result = await adapter.uploadFiles(botToken, conv, files, outText || undefined);
+			}
+		} else {
+			// Editing a placeholder degrades to a follow-up post on a channel
+			// without edit support - one degradation rule for update and final.
+			// mode "post" always posts, even if a stray edit_ref is present.
+			const wantsEdit = Boolean(editRef) && (mode === "update" || mode === "final");
+			const editOrSend = (txt: string) =>
+				wantsEdit && adapter.update && caps.edit
+					? adapter.update(botToken, conv, editRef, txt)
+					: adapter.send(botToken, conv, txt);
+
+			if (editRef && mode === "update") {
+				// Streaming rewrite of one message: chunking would post a new
+				// message on every tick, so the budget stays truncation-enforced
+				// until the final send.
+				result = await editOrSend(truncateForChannel(rawText, caps));
+			} else {
+				// Terminal send (post, or final resolving a placeholder):
+				// over-budget text goes out whole as natural-boundary chunks.
+				// The first chunk carries the message identity (placeholder
+				// edit, returned ts); later chunks are follow-up posts in the
+				// same conversation, lightly paced for channel rate limits.
+				const chunks = chunkForChannel(rawText, caps);
+				result = await editOrSend(chunks[0]);
+				for (let i = 1; result.ok && i < chunks.length; i++) {
+					await new Promise((r) => setTimeout(r, CHUNK_SPACING_MS));
+					const follow = await adapter.send(botToken, conv, chunks[i]);
+					if (!follow.ok) {
+						// Chunks 1..i are already visible: clear the typing
+						// indicator (the reply IS partially delivered) and
+						// surface an error a caller will not blindly retry.
+						if ((mode === "update" || mode === "final") && adapter.typing && caps.typing) {
+							await adapter.typing(botToken, conv, false);
+						}
+						return {
+							status: 502,
+							body: {
+								ok: false,
+								ts: result.ts,
+								error: `chunk ${i + 1}/${chunks.length} failed after partial delivery `
+									+ `(do not resend; the reply is partially visible): ${follow.error}`,
+							},
+						};
+					}
+				}
+			}
+		}
 	} catch (err) {
 		return { status: 502, body: { ok: false, error: String(err) } };
 	}
 	if (!result.ok) {
 		return { status: 502, body: { ok: false, error: result.error } };
 	}
+	// Resolving a response context (placeholder edit or final reply) also
+	// clears the "is thinking..." indicator the placeholder flow set.
+	if ((mode === "update" || mode === "final") && adapter.typing && caps.typing) {
+		await adapter.typing(botToken, conv, false);
+	}
 	return { status: 200, body: { ok: true, ts: result.ts } };
+}
+
+// POST /channels/typing (#629): { conversation, on }. Sets or clears the
+// channel's thinking/typing indicator. A channel without typing support is a
+// silent no-op (200, supported: false) — capability degradation is the
+// gateway's job, not the caller's.
+export async function handleChannelsTyping(
+	storage: StorageAdapter,
+	body: Record<string, unknown>,
+	bubbleId: string,
+): Promise<HandlerResult> {
+	const ref = body.conversation;
+	if (typeof ref !== "string" || !ref || typeof body.on !== "boolean") {
+		return { status: 400, body: { error: "conversation and on required" } };
+	}
+	const conv = parseConversation(ref);
+	if (!conv) {
+		return { status: 400, body: { error: "invalid conversation reference" } };
+	}
+	const adapter = getChannelAdapter(conv.source);
+	if (!adapter) {
+		return { status: 400, body: { error: `unsupported channel: ${conv.source}` } };
+	}
+	if (!adapter.typing || !adapter.descriptor.capabilities.typing) {
+		return { status: 200, body: { ok: true, supported: false } };
+	}
+	const botToken = await resolveChannelSendToken(storage, bubbleId, conv, body);
+	if (!botToken) {
+		return { status: 400, body: { error: `no send credential registered for ${conv.source}:${conv.scope}` } };
+	}
+	await adapter.typing(botToken, conv, body.on);
+	return { status: 200, body: { ok: true, supported: true } };
+}
+
+// GET /channels/history (#629): ?conversation=...&limit=... — read the
+// messages of a conversation (Slack: the thread the ref anchors). Returns
+// { ok, messages: [{user, text, ts, files?}] } oldest-first.
+export async function handleChannelsHistory(
+	storage: StorageAdapter,
+	conversationRef: string,
+	limit: number,
+	bubbleId: string,
+): Promise<HandlerResult> {
+	if (!conversationRef) {
+		return { status: 400, body: { error: "conversation required" } };
+	}
+	const conv = parseConversation(conversationRef);
+	if (!conv) {
+		return { status: 400, body: { error: "invalid conversation reference" } };
+	}
+	const adapter = getChannelAdapter(conv.source);
+	if (!adapter) {
+		return { status: 400, body: { error: `unsupported channel: ${conv.source}` } };
+	}
+	if (!adapter.fetchConversation) {
+		return { status: 400, body: { error: `channel ${conv.source} does not support history` } };
+	}
+	const botToken = await resolveChannelSendToken(storage, bubbleId, conv, {});
+	if (!botToken) {
+		return { status: 400, body: { error: `no send credential registered for ${conv.source}:${conv.scope}` } };
+	}
+	const capped = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 1000) : 100;
+	let messages;
+	try {
+		messages = await adapter.fetchConversation(botToken, conv, capped);
+	} catch (err) {
+		return { status: 502, body: { ok: false, error: String(err) } };
+	}
+	return { status: 200, body: { ok: true, messages } };
 }
 
 // `bubbleId`, when present, is the AUTHENTICATED bubble that signed the
 // registration. The global record (bare workspaceId) is ALWAYS written so
-// inbound webhook self-reply loop prevention keeps working for any client —
+// inbound webhook self-reply loop prevention keeps working for any client -
 // signed or not. The bubble-scoped record is written ONLY for an authenticated
-// bubble, and is the only store outbound /slack/send reads.
+// bubble, and is the only store outbound channel sends read.
 export async function handleSlackWorkspaceRegister(
 	storage: StorageAdapter,
 	body: Record<string, unknown>,
@@ -1199,7 +2299,7 @@ export async function handleSlackWorkspaceRegister(
 	const signingSecret = (body.signing_secret as string) || undefined;
 	if (bubbleId) {
 		try {
-			const resp = await fetch("https://slack.com/api/auth.test", {
+			const resp = await fetch(`${slackApiUrl()}auth.test`, {
 				headers: { Authorization: `Bearer ${botToken}` },
 			});
 			const data = (await resp.json()) as Record<string, unknown>;
@@ -1212,7 +2312,7 @@ export async function handleSlackWorkspaceRegister(
 		}
 	} else if (!botId) {
 		try {
-			const resp = await fetch("https://slack.com/api/auth.test", {
+			const resp = await fetch(`${slackApiUrl()}auth.test`, {
 				headers: { Authorization: `Bearer ${botToken}` },
 			});
 			const data = (await resp.json()) as Record<string, unknown>;
@@ -1227,7 +2327,7 @@ export async function handleSlackWorkspaceRegister(
 	if (!appId && botId) {
 		try {
 			const resp = await fetch(
-				`https://slack.com/api/bots.info?bot=${encodeURIComponent(botId)}`,
+				`${slackApiUrl()}bots.info?bot=${encodeURIComponent(botId)}`,
 				{ headers: { Authorization: `Bearer ${botToken}` } },
 			);
 			const data = (await resp.json()) as Record<string, unknown>;
@@ -1273,12 +2373,12 @@ export async function handleSlackWorkspaceRegister(
 		};
 	};
 
-	// Global record — drives inbound webhook self-reply loop prevention. ALWAYS
+	// Global record - drives inbound webhook self-reply loop prevention. ALWAYS
 	// written so a client that doesn't (yet) sign keeps loop prevention.
 	const globalExisting = await storage.getSlackWorkspace(workspaceId);
 	await storage.putSlackWorkspace(workspaceId, mergeBot(globalExisting));
 
-	// Bubble-scoped record — the ONLY store outbound /slack/send reads. Written
+	// Bubble-scoped record - the ONLY store outbound channel sends read. Written
 	// only for an authenticated bubble, so that bubble (and no other) can send
 	// through this workspace.
 	if (bubbleId) {

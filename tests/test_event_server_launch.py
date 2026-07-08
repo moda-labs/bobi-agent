@@ -10,6 +10,7 @@ Containerized instances (#336) must never start Node when
 """
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -37,6 +38,136 @@ def test_npm_failure_surfaces_stderr(tmp_path, monkeypatch, caplog):
 
     with pytest.raises(RuntimeError, match="ENOSPC"):
         es.ensure_running(8080, project_path=tmp_path)
+
+
+def test_existing_node_modules_without_esbuild_uses_npm_exec(tmp_path, monkeypatch):
+    es_dir = tmp_path / "event-server"
+    (es_dir / "node_modules").mkdir(parents=True)
+    (es_dir / "src").mkdir()
+    (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
+    (es_dir / "package.json").write_text("{}")
+    paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    health_calls = {"count": 0}
+
+    def fake_health(*args, **kwargs):
+        health_calls["count"] += 1
+        if health_calls["count"] == 1:
+            return None
+        return {"status": "ok"}
+
+    class FakePopen:
+        pid = 12345
+
+    monkeypatch.setattr(es.subprocess, "run", fake_run)
+    monkeypatch.setattr(es.subprocess, "Popen", lambda *a, **k: FakePopen())
+    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
+    monkeypatch.setattr(es, "health", fake_health)
+
+    result = es.ensure_running(8080, project_path=tmp_path)
+
+    assert result == "started"
+    assert calls[0][:6] == [
+        "npm", "exec", "--yes", "--cache", str(es_dir / ".npm-cache"), "--package"
+    ]
+
+
+def test_setup_webhook_secrets_are_forwarded_to_local_server(tmp_path, monkeypatch):
+    es_dir = tmp_path / "event-server"
+    (es_dir / "dist").mkdir(parents=True)
+    dist = es_dir / "dist" / "local.js"
+    dist.write_text("console.log('ok')\n")
+    (es_dir / "src").mkdir()
+    (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
+    os.utime(dist, (dist.stat().st_atime, dist.stat().st_mtime + 1))
+    (es_dir / "node_modules").mkdir()
+    (es_dir / "package.json").write_text("{}")
+    paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+
+    captured: dict = {}
+    health_calls = {"count": 0}
+
+    def fake_health(*args, **kwargs):
+        health_calls["count"] += 1
+        if health_calls["count"] == 1:
+            return None
+        return {"status": "ok"}
+
+    class FakePopen:
+        pid = 12345
+
+    def fake_popen(*args, **kwargs):
+        captured["env"] = kwargs["env"]
+        return FakePopen()
+
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "slack-secret")
+    monkeypatch.setenv("LINEAR_WEBHOOK_SECRET", "linear-secret")
+    monkeypatch.setattr(es.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
+    monkeypatch.setattr(es, "health", fake_health)
+
+    result = es.ensure_running(8080, project_path=tmp_path)
+
+    assert result == "started"
+    env = captured["env"]
+    assert "BOBI_ES_WEBHOOK_SECRET" not in env
+    assert env["BOBI_ES_SLACK_SIGNING_SECRET"] == "slack-secret"
+    assert env["BOBI_ES_LINEAR_WEBHOOK_SECRET"] == "linear-secret"
+
+
+def test_explicit_webhook_secrets_override_setup_env(tmp_path, monkeypatch):
+    es_dir = tmp_path / "event-server"
+    (es_dir / "dist").mkdir(parents=True)
+    dist = es_dir / "dist" / "local.js"
+    dist.write_text("console.log('ok')\n")
+    (es_dir / "src").mkdir()
+    (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
+    os.utime(dist, (dist.stat().st_atime, dist.stat().st_mtime + 1))
+    (es_dir / "node_modules").mkdir()
+    (es_dir / "package.json").write_text("{}")
+    paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+
+    captured: dict = {}
+    health_calls = {"count": 0}
+
+    def fake_health(*args, **kwargs):
+        health_calls["count"] += 1
+        if health_calls["count"] == 1:
+            return None
+        return {"status": "ok"}
+
+    class FakePopen:
+        pid = 12345
+
+    def fake_popen(*args, **kwargs):
+        captured["env"] = kwargs["env"]
+        return FakePopen()
+
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "ambient-slack")
+    monkeypatch.setenv("LINEAR_WEBHOOK_SECRET", "ambient-linear")
+    monkeypatch.setattr(es.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
+    monkeypatch.setattr(es, "health", fake_health)
+
+    result = es.ensure_running(
+        8080,
+        webhook_secret="explicit-github",
+        slack_signing_secret="",
+        linear_webhook_secret="explicit-linear",
+        project_path=tmp_path,
+    )
+
+    assert result == "started"
+    env = captured["env"]
+    assert env["BOBI_ES_WEBHOOK_SECRET"] == "explicit-github"
+    assert "BOBI_ES_SLACK_SIGNING_SECRET" not in env
+    assert env["BOBI_ES_LINEAR_WEBHOOK_SECRET"] == "explicit-linear"
 
 
 # ── Remote-URL guard (containerized-6) ──────────────────────────────
@@ -116,12 +247,13 @@ class _StubCfg:
 
 
 def _capture_post(monkeypatch):
-    """Patch pooled.post + Slack lookups; return a dict the call records into."""
+    """Patch pooled.request + Slack lookups; return a dict the call records into."""
     import bobi.http as pooled
 
     captured: dict = {}
 
-    def fake_post(url, **kwargs):
+    def fake_request(method, url, **kwargs):
+        captured["method"] = method
         captured["url"] = url
         captured["kwargs"] = kwargs
 
@@ -133,7 +265,7 @@ def _capture_post(monkeypatch):
 
         return _Resp()
 
-    monkeypatch.setattr(pooled, "post", fake_post)
+    monkeypatch.setattr(pooled, "request", fake_request)
     monkeypatch.setattr(es, "_slack_auth_info", lambda token: ("T_TEAM", "B_BOT", "U_BOT"))
     monkeypatch.setattr(es, "_slack_app_id", lambda token, bot_id: "A_APP")
     return captured
@@ -142,7 +274,7 @@ def _capture_post(monkeypatch):
 def test_slack_registration_signs_when_bubble_key_present(monkeypatch):
     """A bubble-keyed registration carries x-moda-* headers and sends raw bytes
     (content=), so the server reproduces the HMAC and writes the bubble-scoped
-    record outbound /slack/send needs (#487)."""
+    record outbound channel sends need (#487)."""
     captured = _capture_post(monkeypatch)
     cfg = _StubCfg({("slack", "bot_token"): "xoxb-tok",
                     ("slack", "signing_secret"): "sek"})

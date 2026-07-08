@@ -2,8 +2,9 @@
 
 One screen: an objective-guided conversation (left) while the team materializes
 as cards (right); special setup (Venn, native tokens, Slack) opens popups. The
-Finish button appears only once all five things are gathered — goal, roles,
-automations, connections, chat.
+Finish button is always clickable — an incomplete spec (fewer than five of
+goal, roles, automations, connections, chat gathered) gets a confirmation
+popup instead of a grayed-out button. Workflows is a sixth, optional card.
 """
 
 from playwright.sync_api import expect
@@ -11,9 +12,8 @@ from playwright.sync_api import expect
 GOAL_MSG = "triage our github issues and route to the right engineer"
 
 
-def _seed_library_team(home, name="legacy-bot"):
-    """Write a minimal valid team source into the BOBI_HOME/agents library."""
-    src = home / "agents" / name / "src"
+def _write_team_source(src, name):
+    """Write a minimal valid team source at src."""
     (src / "roles" / "lead").mkdir(parents=True)
     (src / "agent.yaml").write_text(
         "agent: " + name + "\nversion: 0.1.0\nentry_point: lead\n"
@@ -21,6 +21,11 @@ def _seed_library_team(home, name="legacy-bot"):
     (src / "agent.md").write_text("# " + name + "\n\nWatch the repo.\n")
     (src / "roles" / "lead" / "ROLE.md").write_text("# Lead\n\nRoute issues.\n")
     return src
+
+
+def _seed_library_team(home, name="legacy-bot"):
+    """Write a minimal valid team source into the BOBI_HOME/agents library."""
+    return _write_team_source(home / "agents" / name / "src", name)
 
 
 def _enter(page, url):
@@ -35,11 +40,12 @@ def test_shows_chat_and_team_panel(page, bobi_url):
     _enter(page, bobi_url)
     expect(page.locator(".uni-chat #chinput")).to_be_visible()
     expect(page.locator(".uni-panel .up-title")).to_have_text("Your team")
-    # Five cards: goal, roles, automations, connections, chat.
-    expect(page.locator(".ucard")).to_have_count(5)
+    # Six cards: goal, roles, workflows (optional), automations, connections, chat.
+    expect(page.locator(".ucard")).to_have_count(6)
+    expect(page.locator(".ucard", has_text="Workflows")).to_contain_text("optional")
     expect(page.locator("#uni-meter")).to_have_text("0/5 gathered")
-    # Finish is gated — not shown yet.
-    expect(page.locator("#uni-foot [data-go='build']")).to_have_count(0)
+    # Finish is a soft gate — always present, never grayed out.
+    expect(page.locator("#uni-finish")).to_be_enabled()
 
 
 def test_cards_materialize_after_goal(page, bobi_url):
@@ -54,33 +60,60 @@ def test_cards_materialize_after_goal(page, bobi_url):
     expect(page.locator(".uconn", has_text="GitHub")).to_be_visible()
 
 
-def test_finish_appears_only_when_everything_gathered(page, bobi_url):
+def test_finish_soft_gate_confirms_when_incomplete(page, bobi_url):
     _enter(page, bobi_url)
     page.fill("#chinput", GOAL_MSG)               # goal + roles (services need connection)
     page.click("#chsend")
     expect(page.locator("#uni-meter")).to_have_text("2/5 gathered", timeout=10_000)
-    expect(page.locator("#uni-foot [data-go='build']")).to_have_count(0)
+
+    # Finish stays clickable, but an incomplete spec asks before moving on.
+    page.click("#uni-finish")
+    ov = page.locator("#finish-ov")
+    expect(ov).to_be_visible()
+    expect(ov).to_contain_text("2 of 5 gathered")
+    ov.locator("#fin-stay").click()               # "Keep setting up" backs out
+    expect(page.locator("#finish-ov")).to_have_count(0)
+    expect(page.locator("#chinput")).to_be_visible()
 
     page.fill("#chinput", "yes, automatically flag stale PRs")   # automations
     page.click("#chsend")
     expect(page.locator("#uni-meter")).to_have_text("3/5 gathered", timeout=10_000)
-    expect(page.locator("#uni-foot [data-go='build']")).to_have_count(0)
 
     # Connect the implied GitHub service so connections count as gathered.
     github_row = page.locator(".uconn", has_text="GitHub")
     expect(github_row).to_be_visible(timeout=5_000)
     github_row.locator("[data-secretopen]").click()
-    ov = page.locator("#secret-ov")
-    ov.locator("input[data-secret='GITHUB_TOKEN']").fill("ghp_" + "t" * 36)
-    ov.get_by_role("button", name="Connect").click()
-    expect(ov).to_have_count(0, timeout=10_000)
+    sov = page.locator("#secret-ov")
+    sov.locator("input[data-secret='GITHUB_TOKEN']").fill("ghp_" + "t" * 36)
+    sov.get_by_role("button", name="Connect").click()
+    expect(sov).to_have_count(0, timeout=10_000)
     expect(page.locator("#uni-meter")).to_have_text("4/5 gathered", timeout=5_000)
-    expect(page.locator("#uni-foot [data-go='build']")).to_have_count(0)
 
     page.fill("#chinput", "I'll just use the command line")      # chat
     page.click("#chsend")
     expect(page.locator("#uni-meter")).to_have_text("5/5 gathered", timeout=10_000)
-    expect(page.locator("#uni-foot [data-go='build']")).to_be_visible()
+    # Complete spec: Finish goes straight to the build, no confirmation.
+    page.click("#uni-finish")
+    expect(page.locator("#finish-ov")).to_have_count(0)
+    expect(page.locator("#genfiles")).to_be_visible(timeout=10_000)
+
+
+def test_workflows_card_fills_and_shows_yaml(page, bobi_url):
+    _enter(page, bobi_url)
+    page.fill("#chinput", GOAL_MSG + " — and codify the issue lifecycle workflow")
+    page.click("#chsend")
+    card = page.locator(".ucard", has_text="Workflows")
+    expect(card).to_contain_text("issue-lifecycle", timeout=10_000)
+    expect(card.locator(".wf-hitl")).to_be_visible()   # the human-approval badge
+    # Clicking the flow opens its generated YAML, read-only, in the dark slab.
+    card.locator("[data-wfopen]").click()
+    ov = page.locator("#wf-ov")
+    expect(ov).to_be_visible()
+    expect(ov.locator("#wf-path")).to_have_text("workflows/issue-lifecycle.yaml")
+    expect(ov.locator("#wf-code")).to_contain_text("await: approval", timeout=5_000)
+    expect(ov.locator("#wf-code")).to_contain_text("agent: triager")
+    page.keyboard.press("Escape")
+    expect(page.locator("#wf-ov")).to_have_count(0)
 
 
 def test_finish_builds_to_file_browser(page, bobi_url):
@@ -96,9 +129,8 @@ def test_finish_builds_to_file_browser(page, bobi_url):
     ov.locator("input[data-secret='GITHUB_TOKEN']").fill("ghp_" + "t" * 36)
     ov.get_by_role("button", name="Connect").click()
     expect(ov).to_have_count(0, timeout=10_000)
-    finish = page.locator("#uni-foot [data-go='build']")
-    expect(finish).to_be_visible(timeout=10_000)
-    finish.click()
+    expect(page.locator("#uni-meter")).to_have_text("5/5 gathered", timeout=10_000)
+    page.click("#uni-finish")
     # The post-build screen is a read-only Preview: the generated files read
     # live from disk, with Open-folder and Finish actions.
     expect(page.locator(".filesdone")).to_be_visible(timeout=20_000)
@@ -109,18 +141,29 @@ def test_finish_builds_to_file_browser(page, bobi_url):
     expect(page.locator("#fd-tree .tnode", has_text="agent.yaml")).to_be_visible()
     page.locator("#fd-tree .tnode", has_text="agent.yaml").click()
     expect(page.locator("#fd-code")).to_contain_text("agent:")
-    # Finish lands on the completion screen offering two deployment paths —
-    # local (`bobi agent <name> start`) and cloud (the Fly provisioner) — plus a Done
-    # button into the team hub (the server stays alive — it's re-entrant now).
+    # Finish lands on the "All set" screen: the check + headline share one
+    # line, and the next steps are a carousel — test locally, then deploy
+    # (chat is CLI here, so there's no Slack step). Exit affordances (home /
+    # close) stay visible on every step.
     page.click("#fd-finish")
     expect(page.locator(".done-wrap")).to_be_visible(timeout=10_000)
+    expect(page.locator(".done-head .eyebrow")).to_have_text("All set")
+    expect(page.locator(".done-head h1")).to_contain_text("is ready")
+    expect(page.locator(".ns-dot")).to_have_count(2)
+    expect(page.locator("#ns-home")).to_be_visible()
+    expect(page.locator("#ns-close")).to_be_visible()
+    # Step 1: try it in the terminal — start/status/ask commands, copyable.
+    expect(page.locator(".ns-step h2")).to_contain_text("terminal")
+    expect(page.locator(".ns-step .cmd-text").first).to_contain_text("bobi agent")
+    # Step 2: deploy — local always-on and Fly.io, each with an agent prompt.
+    page.click("#ns-next")
     expect(page.locator(".deploy-opt", has_text="Local")).to_contain_text(
-        "bobi agent")
+        "always-on service")
     expect(page.locator(".deploy-opt", has_text="Cloud")).to_contain_text(
         "provision-instance.sh")
-    expect(page.locator("#done-home")).to_be_visible()
-    # Done goes to the team hub, where the freshly built team is listed.
-    page.click("#done-home")
+    # The last step's Next becomes Done and goes to the team hub.
+    expect(page.locator("#ns-next")).to_have_text("Done →")
+    page.click("#ns-next")
     expect(page.locator(".home-grid")).to_be_visible(timeout=10_000)
 
 
@@ -176,6 +219,7 @@ def test_venn_is_an_account_connection_with_per_service_rows(page, bobi_url):
     expect(ov.locator("#venn-key")).to_be_visible()             # paste the key
     expect(ov.locator("[data-vennconnect]")).to_be_visible()    # connect button
     expect(ov.locator(".steps li").first).to_be_visible()
+    expect(ov.locator(".steps li").first.locator("a[href='https://app.venn.ai']")).to_have_text("app.venn.ai")
 
 
 def test_chat_card_select_and_slack_setup(page, bobi_url):
@@ -244,6 +288,74 @@ def test_welcome_leads_to_intro_with_custom_and_starts_editor(page, bobi_url):
     page.click("[data-newteam]")
     expect(page.locator("#chinput")).to_be_visible(timeout=5_000)
     expect(page.locator(".uni-panel .up-title")).to_have_text("Your team")
+
+
+def test_template_lands_in_library_slot_and_shows_on_hub(page, bobi, monkeypatch):
+    # The eng-team-template bug: picking a template used to bury its source at
+    # agents/new-agent/src/<name>, one level deeper than the hub scan reads, so
+    # the finished team never appeared on the home screen. Clicking a template
+    # row must land it in its own library slot and the hub must list it.
+    # The registry is faked in-process: the server thread shares this
+    # interpreter, so monkeypatching open_mode is visible to it.
+    from bobi.setup import open_mode
+
+    def fake_list_registry_teams(proj):
+        return [{"name": "eng-team", "description": "An engineering team.",
+                 "official": True, "registry": "test"}]
+
+    def fake_fetch_into(proj, name, dest):
+        stage = _write_team_source(bobi.home / "stage" / name, name)
+        open_mode.copy_into(stage, dest)
+
+    monkeypatch.setattr(open_mode, "list_registry_teams", fake_list_registry_teams)
+    monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
+
+    page.goto(bobi.url)
+    page.click("#welcome-go")
+    row = page.locator("[data-template='eng-team']")
+    expect(row).to_be_visible(timeout=5_000)       # template list loads lazily
+    row.click()
+    expect(page.locator("#chinput")).to_be_visible(timeout=5_000)  # in the editor
+    # The source landed in the template's own library slot.
+    slot = bobi.home / "agents" / "eng-team" / "src"
+    assert (slot / "agent.yaml").is_file()
+    # And the hub lists it.
+    page.click(".brand[data-home]")
+    expect(page.locator(".hcard", has_text="eng-team")).to_be_visible()
+
+
+def test_template_at_custom_location_lands_in_child_folder(page, bobi,
+                                                           monkeypatch):
+    # A user-picked folder is a container: the template lands in a child named
+    # after it (and stays visible on the hub via the session's source_dir).
+    from bobi.setup import open_mode
+
+    def fake_list_registry_teams(proj):
+        return [{"name": "eng-team", "description": "An engineering team.",
+                 "official": True, "registry": "test"}]
+
+    def fake_fetch_into(proj, name, dest):
+        stage = _write_team_source(bobi.home / "stage" / name, name)
+        open_mode.copy_into(stage, dest)
+
+    monkeypatch.setattr(open_mode, "list_registry_teams", fake_list_registry_teams)
+    monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
+
+    page.goto(bobi.url)
+    page.click("#welcome-go")
+    # Change the location to home/projects via the picker.
+    page.click("#loc-change")
+    page.click(".pnode.up")
+    page.locator(".pnode", has_text="projects").click()
+    page.click("#pick-use")
+    expect(page.locator("#loc-path")).to_have_text(str(bobi.home / "projects"))
+    row = page.locator("[data-template='eng-team']")
+    expect(row).to_be_visible(timeout=5_000)
+    row.click()
+    expect(page.locator("#chinput")).to_be_visible(timeout=5_000)
+    assert (bobi.home / "projects" / "eng-team" / "agent.yaml").is_file()
+    page.click(".brand[data-home]")
+    expect(page.locator(".hcard", has_text="eng-team")).to_be_visible()
 
 
 def test_change_location_picker_updates_fyi(page, bobi):
@@ -322,3 +434,53 @@ def test_disconnect_overlay_when_server_dies(page, bobi):
     expect(page.locator("#disc-ov")).to_be_visible(timeout=8_000)
     expect(page.get_by_role("heading", name="Setup server disconnected")
            ).to_be_visible()
+
+
+def test_finish_early_move_on_builds_partial_spec(page, bobi_url):
+    # The risky half of the soft gate: "Move on" at 2/5 must actually build.
+    _enter(page, bobi_url)
+    page.fill("#chinput", GOAL_MSG)
+    page.click("#chsend")
+    expect(page.locator("#uni-meter")).to_have_text("2/5 gathered", timeout=10_000)
+    page.click("#uni-finish")
+    page.locator("#fin-go").click()
+    expect(page.locator("#genfiles")).to_be_visible(timeout=10_000)
+    expect(page.locator(".filesdone")).to_be_visible(timeout=20_000)
+
+
+def test_slack_step_saves_channel_and_close_ends_setup(page, bobi_url):
+    # Slack chat adds the third carousel step; its channel input talks to the
+    # live server, and Close & end setup leaves the static goodbye.
+    _enter(page, bobi_url)
+    page.fill("#chinput", GOAL_MSG + ", automatically flag stale PRs, "
+              "and we'll talk to it in slack")
+    page.click("#chsend")
+    github_row = page.locator(".uconn", has_text="GitHub")
+    expect(github_row).to_be_visible(timeout=10_000)
+    github_row.locator("[data-secretopen]").click()
+    ov = page.locator("#secret-ov")
+    ov.locator("input[data-secret='GITHUB_TOKEN']").fill("ghp_" + "t" * 36)
+    ov.get_by_role("button", name="Connect").click()
+    expect(ov).to_have_count(0, timeout=10_000)
+    chat = page.locator(".ucard", has_text="Chat")
+    chat.locator("[data-secretopen='slack']").click()
+    ov2 = page.locator("#secret-ov")
+    ov2.locator("input[data-secret='SLACK_BOT_TOKEN']").fill("xoxb-" + "1" * 24)
+    ov2.get_by_role("button", name="Connect").click()
+    expect(ov2).to_have_count(0, timeout=10_000)
+    expect(page.locator("#uni-meter")).to_have_text("5/5 gathered", timeout=10_000)
+    page.click("#uni-finish")
+    expect(page.locator(".filesdone")).to_be_visible(timeout=20_000)
+    page.click("#fd-finish")
+    expect(page.locator(".done-wrap")).to_be_visible(timeout=10_000)
+    expect(page.locator(".ns-dot")).to_have_count(3)
+    # Jump to the Slack step, save a channel ID against the live server.
+    page.locator(".ns-dot", has_text="Finalize Slack").click()
+    page.fill("#ns-slackch", "C0ABC123")
+    page.click("#ns-slacksave")
+    expect(page.locator("#ns-slackstatus")).to_contain_text(
+        "channel saved", timeout=10_000)
+    # Close & end setup → the static goodbye (no server-dependent buttons).
+    page.click("#ns-close")
+    expect(page.get_by_role("heading", name="is installed")).to_be_visible(
+        timeout=10_000)

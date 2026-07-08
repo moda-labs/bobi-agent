@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import os
 
 import pytest
 
@@ -17,19 +18,30 @@ from bobi.config import Config
 
 class _FakeClient:
     """Fake ClaudeSDKClient: returns scripted get_mcp_status() snapshots."""
+    HANG_CONNECT = False
+    HANG_STATUS = False
+    HANG_DISCONNECT = False
+    LAST_OPTIONS = None
 
     def __init__(self, options=None):
         self.options = options
+        _FakeClient.LAST_OPTIONS = options
         self._snapshots = list(_FakeClient.SNAPSHOTS)
         self.connects = 0
 
     async def connect(self):
+        if _FakeClient.HANG_CONNECT:
+            await asyncio.sleep(10)
         self.connects += 1
 
     async def disconnect(self):
+        if _FakeClient.HANG_DISCONNECT:
+            await asyncio.sleep(10)
         pass
 
     async def get_mcp_status(self):
+        if _FakeClient.HANG_STATUS:
+            await asyncio.sleep(10)
         # Return the next scripted snapshot; repeat the last one forever.
         if len(self._snapshots) > 1:
             return self._snapshots.pop(0)
@@ -37,8 +49,12 @@ class _FakeClient:
 
 
 class _FakeBrainWithoutMcpStatus:
-    name = "codex"
-    provider = "openai"
+    """A hypothetical brain that exposes no MCP status introspection at all —
+    the generic fallback path. (Both shipped brains support it: Claude natively,
+    Codex via a direct handshake, see the codex test below.)"""
+
+    name = "future"
+    provider = "future"
 
     def make_session(self, **kwargs):
         class Session:
@@ -63,6 +79,10 @@ def _install_fake_client(monkeypatch, snapshots, interval=0.0):
     import bobi.brain
 
     _FakeClient.SNAPSHOTS = snapshots
+    _FakeClient.HANG_CONNECT = False
+    _FakeClient.HANG_STATUS = False
+    _FakeClient.HANG_DISCONNECT = False
+    _FakeClient.LAST_OPTIONS = None
     monkeypatch.setattr(bobi.brain, "get_brain", lambda: _FakeClaudeBrain())
     monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "claude")
     # Don't actually sleep between polls.
@@ -89,6 +109,24 @@ class TestPollRace:
         assert results[0].ok is True
         assert "3 tools" in results[0].detail
 
+    def test_probe_env_includes_runtime_dotenv(self, monkeypatch, tmp_path):
+        snapshots = [
+            {"mcpServers": [{"name": "secure", "status": "connected",
+                             "tools": []}]},
+        ]
+        _install_fake_client(monkeypatch, snapshots)
+        monkeypatch.delenv("SECURE_MCP_TOKEN", raising=False)
+        (tmp_path / "package").mkdir()
+        (tmp_path / ".env").write_text("SECURE_MCP_TOKEN=from-dotenv\n")
+
+        asyncio.run(
+            _async_probe_mcp(["secure"], {"secure": {"type": "stdio",
+                             "command": "/abs/secure"}}, tmp_path)
+        )
+
+        assert _FakeClient.LAST_OPTIONS["env"]["SECURE_MCP_TOKEN"] == "from-dotenv"
+        assert "SECURE_MCP_TOKEN" not in os.environ
+
     def test_failed_settles_immediately(self, monkeypatch, tmp_path):
         snapshots = [
             {"mcpServers": [{"name": "x", "status": "failed",
@@ -107,14 +145,115 @@ class TestPollRace:
             {"mcpServers": [{"name": "slow", "status": "pending"}]},
         ]
         _install_fake_client(monkeypatch, snapshots)
-        # Keep the poll budget tiny so the test is fast but still bounded.
-        monkeypatch.setattr(validate, "MCP_PROBE_MAX_POLLS", 3)
+        # Keep the derived poll budget tiny so the test is fast but bounded.
+        monkeypatch.setenv("BOBI_MCP_PREFLIGHT_TIMEOUT", "3")
         results = asyncio.run(
             _async_probe_mcp(["slow"], {"slow": {"type": "stdio",
                              "command": "/abs/slow"}}, tmp_path)
         )
         assert results[0].ok is False
         assert "pending" in results[0].detail
+
+    def test_default_poll_budget_remains_twenty_polls(
+        self, monkeypatch, tmp_path
+    ):
+        snapshots = [
+            {"mcpServers": [{"name": "slow", "status": "pending"}]}
+            for _ in range(20)
+        ] + [
+            {"mcpServers": [{"name": "slow", "status": "connected",
+                             "tools": []}]},
+        ]
+        _install_fake_client(monkeypatch, snapshots, interval=0.5)
+        sleeps = []
+
+        async def fake_sleep(duration):
+            sleeps.append(duration)
+
+        monkeypatch.delenv("BOBI_MCP_PREFLIGHT_TIMEOUT", raising=False)
+        monkeypatch.setattr(validate.asyncio, "sleep", fake_sleep)
+        results = asyncio.run(
+            _async_probe_mcp(["slow"], {"slow": {"type": "stdio",
+                             "command": "/abs/slow"}}, tmp_path)
+        )
+        assert results[0].ok is True
+        assert sleeps == [0.5] * 20
+
+    def test_env_timeout_derives_poll_budget(self, monkeypatch, tmp_path):
+        snapshots = [
+            {"mcpServers": [{"name": "slow", "status": "pending"}]},
+            {"mcpServers": [{"name": "slow", "status": "pending"}]},
+            {"mcpServers": [{"name": "slow", "status": "connected",
+                             "tools": []}]},
+        ]
+        _install_fake_client(monkeypatch, snapshots, interval=0.5)
+        sleeps = []
+
+        async def fake_sleep(duration):
+            sleeps.append(duration)
+
+        monkeypatch.setenv("BOBI_MCP_PREFLIGHT_TIMEOUT", "1")
+        monkeypatch.setattr(validate.asyncio, "sleep", fake_sleep)
+        results = asyncio.run(
+            _async_probe_mcp(["slow"], {"slow": {"type": "stdio",
+                             "command": "/abs/slow"}}, tmp_path)
+        )
+        assert results[0].ok is True
+        assert sleeps == [0.5, 0.5]
+
+    def test_env_timeout_bounds_status_call(self, monkeypatch, tmp_path):
+        snapshots = [
+            {"mcpServers": [{"name": "slow", "status": "pending"}]},
+        ]
+        _install_fake_client(monkeypatch, snapshots, interval=0.01)
+        _FakeClient.HANG_STATUS = True
+        monkeypatch.setenv("BOBI_MCP_PREFLIGHT_TIMEOUT", "0.05")
+
+        results = validate._probe_mcp_servers(
+            ["slow"], {"slow": {"type": "stdio", "command": "/abs/slow"}},
+            tmp_path,
+        )
+        assert len(results) == 1
+        assert results[0].ok is False
+        assert "timed out" in results[0].detail
+
+    def test_deadline_after_sleep_reports_pending(
+        self, monkeypatch, tmp_path
+    ):
+        snapshots = [
+            {"mcpServers": [{"name": "slow", "status": "pending"}]},
+            {"mcpServers": [{"name": "slow", "status": "connected",
+                             "tools": []}]},
+        ]
+        _install_fake_client(monkeypatch, snapshots, interval=0.02)
+        monkeypatch.setenv("BOBI_MCP_PREFLIGHT_TIMEOUT", "0.01")
+
+        results = validate._probe_mcp_servers(
+            ["slow"], {"slow": {"type": "stdio", "command": "/abs/slow"}},
+            tmp_path,
+        )
+        assert len(results) == 1
+        assert results[0].ok is False
+        assert "pending" in results[0].detail
+
+    def test_timeout_does_not_hang_on_disconnect(
+        self, monkeypatch, tmp_path
+    ):
+        snapshots = [
+            {"mcpServers": [{"name": "slow", "status": "pending"}]},
+        ]
+        _install_fake_client(monkeypatch, snapshots, interval=0.01)
+        _FakeClient.HANG_STATUS = True
+        _FakeClient.HANG_DISCONNECT = True
+        monkeypatch.setenv("BOBI_MCP_PREFLIGHT_TIMEOUT", "0.05")
+
+        results = validate._probe_mcp_servers(
+            ["slow"], {"slow": {"type": "stdio", "command": "/abs/slow"}},
+            tmp_path,
+        )
+        assert len(results) == 1
+        assert results[0].ok is False
+        assert "timed out" in results[0].detail
 
     def test_one_connect_for_many_servers(self, monkeypatch, tmp_path):
         """D-63b: a single connect()/poll judges every server."""
@@ -159,7 +298,74 @@ class TestPollRace:
         assert len(results) == 1
         assert results[0].ok is False
         assert results[0].required is False
-        assert "not supported for codex brain" in results[0].detail
+        assert "not supported for future brain" in results[0].detail
+
+    def test_codex_brain_probes_via_direct_handshake(
+        self, monkeypatch, tmp_path
+    ):
+        """#428 Stage 4: Codex no longer warn-degrades — its get_mcp_status runs a
+        real initialize handshake, so the single-loop probe judges it like Claude.
+        A connected server → an ok CheckResult with the tool count."""
+        import bobi.brain
+        from bobi.brain.codex import CodexBrain
+
+        # Redirect config.toml render (make_session side effect) off the real home.
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+        monkeypatch.setenv("BOBI_MCP_PREFLIGHT_TIMEOUT", "60")
+        monkeypatch.delenv("CODEX_MCP_TOKEN", raising=False)
+        (tmp_path / "package").mkdir()
+        (tmp_path / ".env").write_text("CODEX_MCP_TOKEN=from-dotenv\n")
+        monkeypatch.setattr(bobi.brain, "get_brain", lambda: CodexBrain())
+        seen_timeouts = []
+        seen_envs = []
+
+        async def _fake_probe(mcp_servers, timeout=10.0, env=None):
+            seen_timeouts.append(timeout)
+            seen_envs.append(env)
+            return {"mcpServers": [
+                {"name": n, "status": "connected", "tools": ["t1", "t2"],
+                 "error": None}
+                for n in mcp_servers
+            ]}
+        monkeypatch.setattr("bobi.mcp_handshake.probe_servers", _fake_probe)
+        monkeypatch.setattr(validate, "MCP_PROBE_POLL_INTERVAL", 0.0)
+
+        results = asyncio.run(
+            _async_probe_mcp(["weather"], {"weather": {
+                "type": "stdio", "command": "/abs/weather-mcp"}}, tmp_path)
+        )
+        assert len(results) == 1
+        assert results[0].ok is True
+        assert results[0].name == "weather"
+        assert "2 tools" in results[0].detail
+        assert seen_timeouts == [60.0]
+        assert seen_envs[0]["CODEX_MCP_TOKEN"] == "from-dotenv"
+        assert "CODEX_MCP_TOKEN" not in os.environ
+
+    def test_codex_brain_reports_failed_handshake(self, monkeypatch, tmp_path):
+        """A codex server that fails initialize is a blocking failure (per-brain
+        success is the handshake, not a warn)."""
+        import bobi.brain
+        from bobi.brain.codex import CodexBrain
+
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+        monkeypatch.setattr(bobi.brain, "get_brain", lambda: CodexBrain())
+
+        async def _fake_probe(mcp_servers, timeout=10.0, env=None):
+            return {"mcpServers": [
+                {"name": n, "status": "failed", "tools": [],
+                 "error": "spawn /abs/weather-mcp ENOENT"}
+                for n in mcp_servers
+            ]}
+        monkeypatch.setattr("bobi.mcp_handshake.probe_servers", _fake_probe)
+        monkeypatch.setattr(validate, "MCP_PROBE_POLL_INTERVAL", 0.0)
+
+        results = asyncio.run(
+            _async_probe_mcp(["weather"], {"weather": {
+                "type": "stdio", "command": "/abs/weather-mcp"}}, tmp_path)
+        )
+        assert results[0].ok is False
+        assert "ENOENT" in results[0].detail
 
 
 class TestBareNameWarning:

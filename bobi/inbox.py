@@ -20,13 +20,15 @@ sites don't change.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import queue
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +48,12 @@ class Message:
     # fire-and-forget messages. The request's ``id`` is the correlation id the
     # reply carries back.
     reply_to: str = ""
+    # Invoked when the session finishes processing this message. The drain
+    # loop wires it to the event-server cursor so an event is ACKed only once
+    # processed, never at inbox-push time - a restart replays anything still
+    # queued (#688). In-memory only; never crosses the wire.
+    on_done: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False)
 
 
 # ---------------------------------------------------------------------------
@@ -77,11 +85,20 @@ def get_local_inbox(name: str) -> "Inbox | None":
 
 
 class Inbox:
-    """In-memory message queue drained by a session's run loop."""
+    """In-memory message queue drained by a session's run loop.
+
+    Two delivery classes (#688): priority (chat channel messages, where a
+    human is waiting) and normal (everything else - bulk webhooks, agent
+    inbox messages). Priority messages are received first; ordering is FIFO
+    within each class, enforced by a monotonic tie-break counter so equal
+    priorities never compare ``Message`` objects.
+    """
 
     def __init__(self, session_name: str) -> None:
         self.session_name = session_name
-        self._queue: queue.SimpleQueue[Message] = queue.SimpleQueue()
+        self._queue: queue.PriorityQueue[tuple[int, int, Message]] = (
+            queue.PriorityQueue())
+        self._counter = itertools.count()
         self._closed = False
 
     def start(self) -> None:
@@ -89,16 +106,20 @@ class Inbox:
         register_local_inbox(self.session_name, self)
         log.info(f"Inbox for '{self.session_name}' active")
 
-    def push(self, msg: Message) -> None:
+    def push(self, msg: Message, priority: bool = False) -> None:
         """Enqueue a message for the session's run loop to pick up."""
-        self._queue.put(msg)
+        self._queue.put((0 if priority else 1, next(self._counter), msg))
 
     def recv(self, timeout: float = 2.0) -> Message | None:
         """Block until a message arrives. Returns None on timeout."""
         try:
-            return self._queue.get(timeout=timeout)
+            return self._queue.get(timeout=timeout)[2]
         except queue.Empty:
             return None
+
+    def empty(self) -> bool:
+        """Whether nothing is queued right now (racy, best-effort)."""
+        return self._queue.empty()
 
     def respond(self, msg: "Message", response: str) -> None:
         """Return a reply for a wait-mode message to its waiting sender.
@@ -182,14 +203,6 @@ class _ReplyChannel:
             log.debug("Reply channel events-log cleanup failed", exc_info=True)
 
 
-def _event_server_url(project_path: Path) -> str:
-    try:
-        from bobi.config import Config
-        return Config.load(project_path).event_server_url or "http://localhost:8080"
-    except Exception:
-        return "http://localhost:8080"
-
-
 def _open_reply_channel(project_path: Path) -> "_ReplyChannel | None":
     """Subscribe to a fresh ``reply/<uuid>`` topic and return its channel.
 
@@ -199,6 +212,7 @@ def _open_reply_channel(project_path: Path) -> "_ReplyChannel | None":
     """
     from bobi import paths
     from bobi.events.client import EventServerClient
+    from bobi.events.publish import _event_server_url
     from bobi.events.server import BubbleRejected, ensure_bubble, register
 
     token = secrets.token_hex(8)

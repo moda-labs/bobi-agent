@@ -10,7 +10,7 @@ events like ticket updates, incoming emails, GitHub PRs, Slack messages, or any
 webhook, acting on their own when something changes. Agents coordinate, delegate,
 and spin up new sub-agents on their own whenever the work calls for it.
 
-They also get more useful the more you use them: a built-in sleep_cycle distills each
+They also get more useful the more you use them: a built-in sleep cycle distills each
 session into durable facts and preferences that carry into future runs, so an
 agent learns how you like to work and adapts its behavior over time. You extend an
 agent just by telling it what you want - hand it new tasks or responsibilities in
@@ -23,8 +23,8 @@ too).
 
 ## What you can build
 
-You define what an agent is for; the framework has no opinion. A few shapes it
-takes:
+You define what an agent is for; the framework has no opinion. Here are a few examples of
+agents you can build:
 
 - **Agentic Engineering Team** - triage issues, open PRs through a required review-and-CI
   workflow, and watch for merge conflicts and stale PRs across repos. Ships as the
@@ -108,6 +108,11 @@ See [scripts/install.sh](scripts/install.sh) for what the installer does.
 
 `eng-team` is the ready-to-use engineering agent that ships with Bobi - install it
 to get a working team you can customize, or build your own for any domain (below).
+It is preconfigured for GitHub and Slack, so `bobi agents install` will ask for
+the required `GH_TOKEN`, `SLACK_BOT_TOKEN`, and `SLACK_SIGNING_SECRET` secrets
+(`SLACK_CHANNELS` is optional). Authenticate the GitHub CLI or provide a token
+with repo access, and see the [Slack setup guide](skills/slack-setup.md) for the
+bot token and signing secret.
 
 ```bash
 # Install the ready-to-use engineering agent and start it
@@ -118,10 +123,18 @@ bobi agent eng-team start
 bobi agent eng-team ask "What can I help with right now?"
 
 # Hand it a one-off task
-bobi agent eng-team subagents launch --role engineer --task "Fix the login bug"
+bobi agent eng-team subagents launch -w adhoc --role engineer --task "Fix the login bug"
 ```
 
-Prefer to design your own agent from scratch? Run the interactive wizard:
+Prefer a visual home for all of this? The unified web app opens as a
+dashboard of every agent on your machine - create a team in a guided
+conversation, launch it, and chat with its agents, all in the browser:
+
+```bash
+bobi app start        # runs in the background; stop/restart/status manage it
+```
+
+Prefer to design your own agent from scratch in a standalone wizard? Run:
 
 ```bash
 bobi setup            # go from an idea to a runnable agent, interactively
@@ -143,10 +156,37 @@ the top of its `agent.yaml`:
 ```yaml
 brain:
   kind: codex          # omit the block entirely for Claude Code (the default)
+  model: gpt-5-codex   # optional: provider-specific model or alias
 ```
 
 Make sure the matching CLI is installed and authenticated (see
 [Set up an agent runtime](#1-set-up-an-agent-runtime) above).
+For Claude-backed teams, `model` can be an alias such as `haiku`, `sonnet`, or
+`opus`, or a full Claude model ID.
+
+To run a team on **local or self-hosted models**, use `kind: gateway` - it
+drives the Claude CLI against any Anthropic-compatible endpoint (LiteLLM,
+Ollama's Anthropic-compat API):
+
+```yaml
+brain:
+  kind: gateway
+  base_url: ${LLM_GATEWAY_URL}   # the /v1/messages-compatible endpoint
+  model: qwen3:14b               # gateway-native model id
+```
+
+If the gateway needs auth, put `ANTHROPIC_AUTH_TOKEN` in the team's runtime
+`.env`. See `skills/create-agent.md` for the details.
+
+Workflow steps can override the team default for that step:
+
+```yaml
+steps:
+  - name: discover
+    agent: prospect-targeter
+    model: haiku
+    prompt: "Find companies matching the wedge..."
+```
 
 Don't want to edit YAML by hand? Paste this into your Claude Code or Codex
 session:
@@ -168,8 +208,17 @@ commit this file); you can also supply them as environment variables.
 
 You don't run the event server yourself - `bobi agent <name> start` launches a
 local one automatically. To receive webhooks from the public internet (Slack,
-GitHub, Linear), point the agent at a deployed event server: the shared Bobi
-cloud Worker by default, or your own Cloudflare Worker.
+GitHub, Linear), use the **Webhook ingress** row in `bobi setup`'s Connections
+card. It can keep the team local-only, verify a quick tunnel such as
+cloudflared/ngrok to `localhost:8080`, or save a durable HTTPS event server
+(`BOBI_EVENT_SERVER`) such as the shared Bobi cloud Worker or your own
+Cloudflare Worker. Setup-authored `agent.yaml` files reference that optional
+environment variable so verified public ingress is used when present, while an
+unset value leaves the automatic local event server path unchanged.
+
+If you already run the local event server behind a Cloudflare tunnel, use the
+quick tunnel option; the wizard does not replace that topology, it validates and
+persists the tunnel URL for webhook-backed services.
 
 ### Talk to your agent from Slack (optional)
 
@@ -180,6 +229,10 @@ Slack app and point it at your agent:
 ```bash
 bobi create-slack-bot --app-name "Bobi"
 ```
+
+If you built the team with `bobi setup` and picked Slack as its chat, the
+setup completion screen walks you through this - scopes on-screen, a dedicated
+channel saved for the team, and a test message to prove the wiring.
 
 Full walkthrough: **[Slack setup](skills/slack-setup.md)**.
 
@@ -195,7 +248,9 @@ Full walkthrough: **[Slack setup](skills/slack-setup.md)**.
   Cloudflare account) ingests webhooks from GitHub, Slack, Linear, and anything
   else, then fans them out to the agents subscribed to each topic.
 - **Runtime-agnostic brains.** Each agent is a Claude Code or OpenAI Codex
-  session; choose per agent with `brain: {kind: claude|codex}`.
+  session; choose per agent with `brain: {kind: claude|codex}`, or point a
+  team at local models via an Anthropic-compatible gateway with
+  `brain: {kind: gateway}`.
 - **Deterministic workflows.** YAML DAGs force multi-step work through a fixed
   recipe with role routing - code review before merge, CI before PRs - instead of
   trusting the model to remember.
@@ -216,6 +271,7 @@ bobi agent <name> message "update"        # fire-and-forget
 # Observe
 bobi agent <name> status                  # active agents
 bobi agent <name> events                  # recent events and decisions
+bobi agent <name> events publish alert/firing --json '{"title":"x"}'
 bobi agent <name> transcript show <sess>  # session transcript
 bobi agent <name> doctor                  # system health check
 ```
@@ -249,7 +305,10 @@ always-on shift is the real productivity unlock, and Bobi makes it one command.
 an always-on instance on a cloud VM - no Dockerfile to write, no server to
 configure.
 
-**Prerequisites.** Cloud deployment targets [Fly](https://fly.io) Machines, so you
+**Prerequisites.** The deploy commands ship in the separate `bobi-deploy`
+package (this repo's `bobi_deploy/`; from a checkout: `pip install ./bobi_deploy`) -
+installing it alongside `bobi` adds `deploy`/`deploy-init`/`destroy` to the CLI.
+Cloud deployment targets [Fly](https://fly.io) Machines, so you also
 need a Fly.io account and a Fly API token (`flyctl` authenticated via
 `fly auth login`). First time on Fly? `bobi deploy` preflights your setup and
 prints exactly what to do - install `flyctl`, sign up or log in, and clear the
@@ -262,8 +321,9 @@ bobi deploy eng-team
 The command provisions the machine, ships the image, and starts the agent; run it
 again and it updates the instance in place. Behind it:
 
-- **Immutable image.** The framework, a pinned agent runtime, and the embedding
-  model are baked into one image - the image is the unit of update.
+- **Immutable image.** The framework and pinned agent runtimes are baked into one
+  image - the image is the unit of update. The embedding model downloads on first
+  KB use into the durable volume cache.
 - **Durable state.** Credentials and session transcripts live on a mounted volume,
   so they survive image updates and the agent resumes where it left off.
 - **Self-managing.** A machine restart policy plus a supervision watchdog keep the
@@ -309,6 +369,8 @@ the prompt-injection surface, and trusted team code. Event-bus internals:
 
 | Goal | Read |
 |---|---|
+| Understand how Bobi works | [docs/OVERVIEW.md](docs/OVERVIEW.md) - the core concepts in 5 minutes |
+| Go from zero to a deployed agent | [docs/QUICKSTART.md](docs/QUICKSTART.md) - step-by-step quickstart |
 | Run and operate Bobi | [skills/bobi.md](skills/bobi.md) - full CLI reference |
 | Build your own agent | [skills/create-agent.md](skills/create-agent.md) · [docs/BUILDING_AGENT_TEAMS.md](docs/BUILDING_AGENT_TEAMS.md) |
 | Understand the event bus | [docs/EVENT_SERVER.md](docs/EVENT_SERVER.md) — architecture, topics, security |

@@ -10,6 +10,18 @@ from bobi.events.adapters import detect
 log = logging.getLogger(__name__)
 
 
+def _normalize_explicit_subscriptions(value) -> list[str]:
+    """Return non-empty string subscription keys from a YAML subscribe value."""
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, list):
+        candidates = value
+    else:
+        return []
+    return [item.strip() for item in candidates
+            if isinstance(item, str) and item.strip()]
+
+
 def discover_subscriptions(project_path: Path) -> list[str]:
     """Build subscription keys by auto-detecting event sources.
 
@@ -22,10 +34,13 @@ def discover_subscriptions(project_path: Path) -> list[str]:
     agent_yaml = paths.agent_yaml_path(project_path)
     if agent_yaml.exists():
         try:
+            from bobi.config import _interpolate_env, project_env
             raw = yaml.safe_load(agent_yaml.read_text()) or {}
-            explicit = raw.get("subscribe", [])
+            explicit = _normalize_explicit_subscriptions(
+                _interpolate_env(raw.get("subscribe", []), project_env(project_path))
+            )
             if explicit:
-                return list(explicit)
+                return explicit
         except Exception:
             pass
 

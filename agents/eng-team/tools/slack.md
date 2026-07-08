@@ -1,41 +1,39 @@
-# Slack
+# Chat (Slack)
 
-Send and receive Slack messages, files, and images via `bobi` CLI.
+Send and receive chat messages, files, and images via `bobi` CLI.
+
+Every chat event carries a `conversation:` line - the reply address. Echo it
+back verbatim; never assemble platform addressing yourself.
 
 ## Reply in a thread
 
 ```bash
-bobi slack-reply -w <workspace> -c <channel> -t <thread_ts> "message"
+bobi reply <conversation> "message"
 ```
 
-Always reply in the thread — use the event's `ts` as `thread_ts` if no
-`thread_ts` is present (starts a thread on the original message).
-
-## Send a new message
-
-Omit `-t` to post a new top-level message instead of a threaded reply:
+The conversation reference already anchors the originating thread. When the
+event carries a `placeholder_ts` field, resolve the placeholder instead of
+posting a new message:
 
 ```bash
-bobi slack-reply -w <workspace> -c <channel> "message"
+bobi reply <conversation> --edit <placeholder_ts> "message"
 ```
 
 ## Upload a file or image
 
 ```bash
-bobi slack-upload-file <file_path> -w <workspace> -c <channel>
-bobi slack-upload-file ./screenshot.png -w <workspace> -c <channel> -t <thread_ts> --title "Screenshot" --comment "Here's what I see"
+bobi reply <conversation> --file <file_path> "optional comment"
+bobi reply <conversation> --file ./screenshot.png --title "Screenshot" "Here's what I see"
 ```
-
-Options: `--title`, `--comment`, `--thread/-t`, `--filename` (override name).
 
 ## Read a thread
 
-Fetch all messages (and file metadata) in a Slack thread:
+Fetch all messages (and file metadata) in the conversation:
 
 ```bash
-bobi slack-read-thread -w <workspace> -c <channel> -t <thread_ts>
-bobi slack-read-thread -w <workspace> -c <channel> -t <thread_ts> --json-output
-bobi slack-read-thread -w <workspace> -c <channel> -t <thread_ts> -n 50
+bobi read-conversation <conversation>
+bobi read-conversation <conversation> --json-output
+bobi read-conversation <conversation> -n 50
 ```
 
 ## Receiving files and images
@@ -54,7 +52,7 @@ Parse with `json.loads(event.fields.files)`. To download a file, use the
 
 - One thread = one person. Never leak one user's context into another thread.
 - Keep responses concise and conversational.
-- Use markdown formatting sparingly — Slack renders it differently than GitHub.
+- Write plain markdown - the gateway converts it for the channel.
 - For code snippets longer than one line, use triple-backtick blocks.
 - When receiving images, consider passing them to vision models for analysis.
 - File downloads require the bot token for authentication.

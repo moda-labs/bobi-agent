@@ -1,7 +1,7 @@
 """Integration tests for the bobi instance image (containerized-8 / #338).
 
 These verify the image contract from docs/CONTAINERIZED_DEPLOYMENT.md §2 (The image):
-non-root agent, no Node, native `claude` CLI on PATH, fastembed model baked in,
+non-root agent, no Node, native `claude` CLI on PATH, fastembed's runtime cache,
 and the entrypoint's auth-mode guards. They build the image once per session.
 
 The full acceptance criterion — a `docker run` reaching a healthy manager that
@@ -81,10 +81,25 @@ def test_claude_cli_present_and_native(image: str):
 
 
 @requires_docker
+@pytest.mark.timeout(1900)
+def test_codex_cli_present_and_native(image: str):
+    """The native `codex` binary is on PATH and runnable - the second first-class
+    brain baked alongside `claude`, so a `brain: codex` team (or the per-task
+    brain switch) runs on the generic image at parity with Claude (#428). Taken
+    from the GitHub-release musl binary, NOT npm, so it needs no Node (asserted by
+    test_no_node_runtime)."""
+    proc = _run("docker", "run", "--rm", "--entrypoint", "codex", image, "--version")
+    assert proc.returncode == 0, proc.stderr
+    assert "codex" in (proc.stdout + proc.stderr).lower()
+
+
+@requires_docker
 @pytest.mark.timeout(120)
 def test_no_node_runtime(image: str):
-    """No Node.js in the image — the claude CLI is native and the local event
-    server (Node) is never run in deployed instances (C6)."""
+    """No Node.js in the image — both the claude and codex CLIs are native
+    binaries and the local event server (Node) is never run in deployed
+    instances (C6). Codex ships via npm upstream but we bake the standalone
+    musl binary precisely to keep this invariant."""
     proc = _run(
         "docker", "run", "--rm", "--entrypoint", "sh", image,
         "-c", "command -v node && echo HAS_NODE || echo NO_NODE",
@@ -94,13 +109,39 @@ def test_no_node_runtime(image: str):
 
 @requires_docker
 @pytest.mark.timeout(120)
-def test_fastembed_model_baked(image: str):
-    """The embedding model is pre-downloaded into the image at HF_HOME."""
+def test_fastembed_cache_downloads_on_first_use(image: str):
+    """The image should not bake the model; first KB use downloads to /data."""
     proc = _run(
         "docker", "run", "--rm", "--entrypoint", "sh", image,
-        "-c", "test -n \"$(ls -A /opt/bobi/models 2>/dev/null)\" && echo BAKED || echo EMPTY",
+        "-c",
+        "test \"$FASTEMBED_CACHE_PATH\" = /data/.bobi/cache/fastembed "
+        "&& test ! -e /opt/bobi/models "
+        "&& echo FIRST_USE_CACHE",
     )
-    assert "BAKED" in proc.stdout, proc.stdout + proc.stderr
+    assert "FIRST_USE_CACHE" in proc.stdout, proc.stdout + proc.stderr
+
+
+@requires_docker
+@pytest.mark.timeout(120)
+def test_fastembed_cache_writable_on_existing_volume(image: str, tmp_path: Path):
+    """Existing stamped volumes still get the new runtime cache chowned."""
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / ".bobi-owned").write_text("")
+
+    proc = _run(
+        "docker", "run", "--rm",
+        "-v", f"{data}:/data",
+        "-e", "BOBI_AUTH=api_key",
+        "-e", "BOBI_AGENT=pytest",
+        "-e", "ANTHROPIC_API_KEY=dummy",
+        "--entrypoint", "sh", image,
+        "-c",
+        "timeout 3 /usr/local/bin/docker-entrypoint.sh >/tmp/entrypoint.log 2>&1 || true; "
+        "gosu bobi sh -c 'test -w \"$FASTEMBED_CACHE_PATH\" && test -w \"$HF_HOME\"' "
+        "&& echo CACHE_WRITABLE",
+    )
+    assert "CACHE_WRITABLE" in proc.stdout, proc.stdout + proc.stderr
 
 
 @requires_docker
@@ -250,7 +291,7 @@ def test_unresolvable_team_fails_loudly(image: str, tmp_path: Path):
         _run("docker", "rm", "-f", name)
 
 
-SMOKE_TEAM = REPO_ROOT / "tests" / "fixtures" / "smoke-team"
+SMOKE_TEAM = REPO_ROOT / "tests" / "fixtures" / "claude-smoke"
 
 
 @requires_docker
@@ -268,7 +309,7 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
     Spins up an EPHEMERAL event server (the real Worker code via `wrangler dev`,
     bound to 0.0.0.0) so CI never touches a production deployment — the
     container reaches it via host.docker.internal and mints its own bubble.
-    Installs the dependency-free smoke-team fixture so preflight needs no
+    Installs the dependency-free claude-smoke fixture so preflight needs no
     service secrets.
     """
     import time
@@ -304,7 +345,7 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
             "docker", "run", "-d", "--name", name,
             "--network", "host",
             "-e", "BOBI_AUTH=api_key",
-            "-e", "BOBI_AGENT=smoke",
+            "-e", "BOBI_AGENT=claude-smoke",
             "-e", f"ANTHROPIC_API_KEY={os.environ['ANTHROPIC_API_KEY']}",
             "-e", f"BOBI_EVENT_SERVER={container_es_url}",
             "-e", "BOBI_TEAM=/mnt/team",
@@ -333,14 +374,106 @@ def test_image_ask_roundtrip(image: str, tmp_path: Path):
         # Run as the bobi user from the selected runtime root.
         ask = _run(
             "docker", "exec", "-u", "bobi",
-            "-w", "/data/.bobi/agents/smoke/run", name,
-            "bobi", "agent", "smoke", "ask", "Reply with the single word: pong",
+            "-w", "/data/.bobi/agents/claude-smoke/run", name,
+            "bobi", "agent", "claude-smoke", "ask", "Reply with the single word: pong",
             timeout=180,
         )
         if ask.returncode != 0 or "pong" not in ask.stdout.lower():
             logs = _run("docker", "logs", name)
             pytest.fail(
                 f"ask failed (rc={ask.returncode})\n"
+                f"STDOUT: {ask.stdout}\nSTDERR: {ask.stderr}\n"
+                f"--- container logs ---\n{logs.stdout}\n{logs.stderr}"
+            )
+    finally:
+        _run("docker", "rm", "-f", name)
+        stop_wrangler()
+
+
+# The Codex analog of SMOKE_TEAM (both dependency-free, github-only). Codex now
+# ships in the base image, so this needs no flavored image - it boots on the same
+# base `image` as the Claude round-trip, just with brain: codex.
+CODEX_SMOKE_TEAM = REPO_ROOT / "tests" / "fixtures" / "codex-smoke"
+
+
+@requires_docker
+@pytest.mark.live
+@pytest.mark.skipif(
+    not os.environ.get("OPENAI_API_KEY"),
+    reason="live codex round-trip needs a real OPENAI_API_KEY for the Codex call",
+)
+@pytest.mark.timeout(600)
+def test_image_codex_ask_roundtrip(image: str, tmp_path: Path):
+    """Live: bobi works e2e with Codex as the brain - the symmetric analog of the
+    Claude `test_image_ask_roundtrip` (#428).
+
+    Boots the base image (which now bakes the Codex CLI) with BOBI_AUTH=api_key +
+    OPENAI_API_KEY (the entrypoint materializes ~/.codex/auth.json from the key),
+    reaches a healthy manager, and completes one named ask round-trip against the
+    real OpenAI API. Same ephemeral wrangler-dev event server as the Claude
+    round-trip; the dependency-free codex-smoke team needs no secrets.
+    """
+    import sys
+    import time
+
+    if sys.platform != "linux":
+        pytest.skip("live round-trip needs Linux (--network host reaches the host)")
+
+    from .test_event_server import _has_wrangler, _start_wrangler_server
+
+    if not _has_wrangler():
+        pytest.skip("wrangler not installed (run `npm ci` in event-server/)")
+
+    base_url, port, stop_wrangler = _start_wrangler_server()
+    container_es_url = f"http://127.0.0.1:{port}"
+
+    vol = tmp_path / "data"
+    vol.mkdir()
+    name = "bobi-codex-acceptance"
+    _run("docker", "rm", "-f", name)
+    try:
+        up = _run(
+            "docker", "run", "-d", "--name", name,
+            "--network", "host",
+            "-e", "BOBI_AUTH=api_key",
+            "-e", "BOBI_AGENT=codex-smoke",
+            "-e", f"OPENAI_API_KEY={os.environ['OPENAI_API_KEY']}",
+            "-e", f"BOBI_EVENT_SERVER={container_es_url}",
+            "-e", "BOBI_TEAM=/mnt/team",
+            "-v", f"{vol}:/data",
+            "-v", f"{CODEX_SMOKE_TEAM}:/mnt/team:ro",
+            image,
+        )
+        assert up.returncode == 0, up.stderr
+
+        # Wait for the container to report healthy (HEALTHCHECK probes /health).
+        deadline = time.time() + 300
+        status = ""
+        while time.time() < deadline:
+            insp = _run(
+                "docker", "inspect", "-f", "{{json .State.Health.Status}}", name
+            )
+            status = insp.stdout.strip().strip('"')
+            if status == "healthy":
+                break
+            if status == "unhealthy":
+                logs = _run("docker", "logs", name)
+                pytest.fail(f"container unhealthy:\n{logs.stdout}\n{logs.stderr}")
+            time.sleep(5)
+        assert status == "healthy", f"never became healthy (last={status!r})"
+
+        # Run as the bobi user from the codex-smoke runtime root.
+        ask = _run(
+            "docker", "exec", "-u", "bobi",
+            "-w", "/data/.bobi/agents/codex-smoke/run", name,
+            "bobi", "agent", "codex-smoke", "ask",
+            "Reply with the single word: pong",
+            timeout=180,
+        )
+        if ask.returncode != 0 or "pong" not in ask.stdout.lower():
+            logs = _run("docker", "logs", name)
+            pytest.fail(
+                f"codex ask failed (rc={ask.returncode})\n"
                 f"STDOUT: {ask.stdout}\nSTDERR: {ask.stderr}\n"
                 f"--- container logs ---\n{logs.stdout}\n{logs.stderr}"
             )

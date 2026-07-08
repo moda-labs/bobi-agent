@@ -8,15 +8,29 @@ events to `<event-server>/webhooks/slack`, and bobi replies via the Web API.
 **Time:** ~2 minutes — the app is stamped out from a manifest, so you don't
 hand-pick scopes or wire the event URL yourself.
 
+Built the team with `bobi setup` and chose Slack as its chat? The setup
+completion screen walks this whole flow for you: it shows the required scopes,
+links the app-creation walkthrough, saves the team's dedicated channel, and
+posts a test message end to end. This page is the manual/CLI path and the
+reference.
+
 ## 1. Generate a manifest and create the app
 
 ```bash
 bobi create-slack-bot --app-name "Agent Dispatch"
 ```
 
-This prints a Slack app manifest plus a one-click create link. The request URL
-is filled in from your project config when run inside an install, otherwise the
-bobi cloud event server (override with `--event-server https://…`).
+This prints a Slack app manifest plus a one-click create link. Run
+interactively, it asks for the app name and the event server URL before
+rendering anything: press Enter to use the bobi cloud event server, or enter
+your own URL. If the agent runs on your own machine with the local event
+server, Slack can't reach localhost - put a public tunnel (cloudflared, ngrok)
+in front of `localhost:8080` and enter the tunnel URL.
+
+Scripted or piped, there are no prompts: the request URL comes from your
+project config when run inside an install, otherwise the bobi cloud event
+server (override either with `--event-server https://…` /
+`--app-name <name>`).
 
 Then create the app one of three ways:
 
@@ -89,6 +103,12 @@ The bot only sees (and posts to) channels it's a member of. In each channel:
 ```
 
 DMs work out of the box — the manifest enables the Messages tab.
+
+To scope the bot to one dedicated channel, save it as `SLACK_CHANNELS` in the
+agent's `run/.env`. Setup-authored `agent.yaml` files read it via
+`channels: ${SLACK_CHANNELS:-}` (unset means no scoping); the setup completion
+screen saves it for you, resolving a `#name` to its channel ID via the bot
+token, and can post a test message to prove token + channel + membership.
 
 ## Create with the Slack CLI
 

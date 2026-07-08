@@ -181,6 +181,42 @@ _NATIVE = [
         aliases=("slackbot",),
     ),
     Connector(
+        key="whatsapp", name="WhatsApp", kind="native",
+        summary="Chat with the agent over WhatsApp (Meta Cloud API).",
+        scopes=("send and receive messages",
+                "reply within Meta's 24h customer-service window"),
+        methods=(
+            AuthMethod(
+                key="token", label="Cloud API token",
+                summary="A Meta app with the WhatsApp product; the agent "
+                        "replies to users who message it.",
+                steps=(
+                    "Create a Meta app at developers.facebook.com and add "
+                    "the WhatsApp product; note the Phone number ID.",
+                    "Create a permanent System User access token with the "
+                    "whatsapp_business_messaging permission.",
+                    "Point the app's webhook at your event server's "
+                    "/webhooks/whatsapp with a verify token of your choice.",
+                    "Full walkthrough: skills/whatsapp-setup.md.",
+                ),
+                secrets=(
+                    Secret("WHATSAPP_ACCESS_TOKEN", "Cloud API access token",
+                           "EAAG…"),
+                    Secret("WHATSAPP_PHONE_NUMBER_ID", "Phone number ID",
+                           "digits only"),
+                    Secret("WHATSAPP_APP_SECRET", "Meta app secret", "",
+                           "Required to receive events - the server rejects "
+                           "unverified WhatsApp webhooks.", optional=True),
+                    Secret("WHATSAPP_VERIFY_TOKEN", "Webhook verify token", "",
+                           "Any string you choose; must match the Meta "
+                           "webhook config.", optional=True),
+                ),
+                docs_url="https://developers.facebook.com/docs/whatsapp/cloud-api",
+            ),
+        ),
+        aliases=("meta-whatsapp", "wa"),
+    ),
+    Connector(
         key="linear", name="Linear", kind="native",
         summary="Read and update issues, projects, and cycles.",
         scopes=("read/write issues", "receive webhooks"),
@@ -192,10 +228,19 @@ _NATIVE = [
                     "Open Linear → Settings → API → Personal API keys → "
                     "New key.",
                     "Copy the key and paste it below.",
-                    "For webhooks: Settings → API → Webhooks → point one at "
-                    "your event server (optional).",
+                    "For webhooks: Settings → API → Webhooks → New webhook → "
+                    "set the URL to <event-server>/webhooks/linear, then copy "
+                    "its signing secret below (optional).",
+                    "For a custom Cloudflare Worker event server, also run "
+                    "`wrangler secret put LINEAR_WEBHOOK_SECRET` with the same "
+                    "signing secret.",
                 ),
-                secrets=(Secret("LINEAR_API_KEY", "API key", "lin_api_…"),),
+                secrets=(
+                    Secret("LINEAR_API_KEY", "API key", "lin_api_…"),
+                    Secret("LINEAR_WEBHOOK_SECRET", "Webhook signing secret", "",
+                           "Optional; only to verify Linear events via the "
+                           "event server.", optional=True),
+                ),
                 docs_url="https://linear.app/settings/api",
             ),
         ),
@@ -607,6 +652,39 @@ def venn_connected_names(project: Path, key: str | None = None) -> set[str] | No
     return {s.server_name.lower() for s in servers if s.connected}
 
 
+def _with_declared_vars(conn: Connector,
+                        declared: dict[str, str]) -> Connector:
+    """A copy of `conn` whose secret var names are replaced by the ${VAR}
+    names the team's own agent.yaml declares — the pack is authoritative
+    for naming; the catalog vars are only authoring defaults for packs
+    setup writes itself.
+
+    Mapping rule per secret: a declared credential key matches a catalog
+    secret whose var name contains it (bot_token → SLACK_BOT_TOKEN); if the
+    pack declares exactly one var and the method has exactly one required
+    secret, they pair directly. Unmatched secrets keep their catalog name.
+    """
+    from dataclasses import replace
+
+    if not declared:
+        return conn
+
+    def _map_secret(secret: Secret, method: AuthMethod) -> Secret:
+        for key, var in declared.items():
+            if key.upper() in secret.var.upper():
+                return replace(secret, var=var)
+        required = [s for s in method.secrets if not s.optional]
+        if len(declared) == 1 and len(required) == 1 and secret is required[0]:
+            return replace(secret, var=next(iter(declared.values())))
+        return secret
+
+    methods = tuple(
+        replace(m, secrets=tuple(_map_secret(s, m) for s in m.secrets))
+        for m in conn.methods
+    )
+    return replace(conn, methods=methods)
+
+
 def _present_vars(connector: Connector, env: dict) -> set:
     """Which of this connector's secret vars are already set (env or process)."""
     present = set()
@@ -641,6 +719,10 @@ def cards_for(service_names, project: Path,
         if conn.key in seen:
             continue
         seen.add(conn.key)
+        if isinstance(raw, dict) and raw.get("credential_vars"):
+            # An opened/template pack declares its own ${VAR} names —
+            # capture under those, not the catalog's authoring defaults.
+            conn = _with_declared_vars(conn, raw["credential_vars"])
 
         if conn.kind == "venn":
             vc = (any(n in connected for n in conn.names())

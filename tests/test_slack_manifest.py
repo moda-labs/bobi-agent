@@ -1,7 +1,7 @@
 """Tests for slack_manifest — manifest rendering, JSON conversion, deep link.
 
 The manifest is the one source of truth for the scopes + events the bobi
-Slack adapter (event-server/src/adapters/slack.ts) consumes. These tests pin
+Slack adapter (event-server/src/adapters/chat-sdk-slack.ts) consumes. These tests pin
 that the rendered manifest stays wired to the event server's /webhooks/slack
 path and carries every event the adapter normalizes.
 """
@@ -14,7 +14,7 @@ import yaml
 from click.testing import CliRunner
 
 from bobi.cli import main
-from bobi.deploy import DEFAULT_EVENT_SERVER
+from bobi.config import DEFAULT_EVENT_SERVER
 from bobi.slack_manifest import (
     WEBHOOK_PATH,
     create_app_url,
@@ -166,3 +166,50 @@ def test_cli_default_stays_quiet_when_not_a_tty(monkeypatch, tmp_path):
         result = runner.invoke(main, ["create-slack-bot", "--app-name", "Bot"])
     assert result.exit_code == 0, result.output
     assert launched == []
+
+
+def test_cli_interactive_prompts_for_name_and_event_server(monkeypatch, tmp_path):
+    """At a real terminal, the command asks for the app name and the event
+    server URL (with the localhost-tunnel guidance) BEFORE rendering the
+    manifest; typed answers land in it."""
+    monkeypatch.setattr("bobi.cli._interactive_terminal", lambda: True)
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(
+            main, ["create-slack-bot", "--no-open"],
+            input="My Bot\nhttps://tunnel.example.com\n",
+        )
+    assert result.exit_code == 0, result.output
+    assert "Slack app display name" in result.output
+    assert "localhost:8080" in result.output  # the tunnel guidance
+    assert "https://tunnel.example.com/webhooks/slack" in result.output
+    assert "name: My Bot" in result.output
+
+
+def test_cli_interactive_enter_accepts_cloud_default(monkeypatch, tmp_path):
+    """Pressing Enter at both prompts uses the default name and the bobi
+    cloud event server."""
+    monkeypatch.setattr("bobi.cli._interactive_terminal", lambda: True)
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(
+            main, ["create-slack-bot", "--no-open"], input="\n\n")
+    assert result.exit_code == 0, result.output
+    assert f"{DEFAULT_EVENT_SERVER}/webhooks/slack" in result.output
+    assert "name: bobi agent" in result.output
+
+
+def test_cli_flags_answer_the_interactive_questions(monkeypatch, tmp_path):
+    """--app-name/--event-server pre-answer the prompts: no input is
+    consumed even at a real terminal (no input given, so a prompt would
+    abort)."""
+    monkeypatch.setattr("bobi.cli._interactive_terminal", lambda: True)
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(main, [
+            "create-slack-bot", "--no-open",
+            "--app-name", "Bot", "--event-server", EVENT_SERVER,
+        ])
+    assert result.exit_code == 0, result.output
+    assert "Slack app display name" not in result.output
+    assert f"{EVENT_SERVER}/webhooks/slack" in result.output

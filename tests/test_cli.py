@@ -9,7 +9,7 @@ from click.testing import CliRunner
 from bobi.__version__ import __version__
 from bobi import paths
 from bobi.cli import main
-from bobi.subagent import CheckResult
+from bobi.subagent import CheckResult, GateResult
 from tests.conftest import TEST_AGENT_NAME
 
 
@@ -18,6 +18,23 @@ def test_version_flag():
     assert result.exit_code == 0
     assert "bobi" in result.output
     assert __version__ in result.output
+
+
+def test_bare_bobi_starts_app(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        "bobi.webapp.daemon.start",
+        lambda open_browser=True: calls.append(open_browser)
+        or type("Status", (), {"url": "http://127.0.0.1:8642/?n=tok",
+                               "pid": 1234})(),
+    )
+
+    result = CliRunner().invoke(main, [])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [True]
+    assert "bobi app is running at http://127.0.0.1:8642/?n=tok" in result.output
 
 
 def test_top_level_help_is_machine_scoped():
@@ -46,6 +63,34 @@ def test_agent_help_lists_runtime_commands(bobi_install):
         assert cmd in result.output
 
 
+def test_agent_group_pins_team_brain_for_cli_process(bobi_install, monkeypatch):
+    """`bobi agent <name> ...` must select the team's brain for sessions the
+    CLI process itself runs - a gateway team's `--wait` completion check
+    otherwise hits real Anthropic with the gateway's token (#655)."""
+    import os
+    import yaml
+
+    for var in ("BOBI_BRAIN", "BOBI_BRAIN_MODEL",
+                "BOBI_GATEWAY_BASE_URL", "BOBI_GATEWAY_SMALL_MODEL",
+                "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    agent_yaml = bobi_install.repo_path / "package" / "agent.yaml"
+    cfg = yaml.safe_load(agent_yaml.read_text())
+    cfg["brain"] = {"kind": "gateway", "base_url": "http://localhost:4000",
+                    "model": "qwen3:14b"}
+    agent_yaml.write_text(yaml.dump(cfg))
+    (bobi_install.repo_path / ".env").write_text(
+        "ANTHROPIC_AUTH_TOKEN=from-runtime-dotenv\n")
+
+    result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "status"])
+
+    assert result.exit_code == 0, result.output
+    assert os.environ.get("BOBI_BRAIN") == "gateway"
+    assert os.environ.get("BOBI_BRAIN_MODEL") == "qwen3:14b"
+    assert os.environ.get("BOBI_GATEWAY_BASE_URL") == "http://localhost:4000"
+    assert os.environ.get("ANTHROPIC_AUTH_TOKEN") == "from-runtime-dotenv"
+
+
 def test_missing_agent_errors_without_cwd_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     result = CliRunner().invoke(main, ["agent", "missing", "status"])
@@ -54,27 +99,43 @@ def test_missing_agent_errors_without_cwd_fallback(tmp_path, monkeypatch):
     assert "package/agent.yaml" in result.output
 
 
-def test_agent_ui_app_does_not_require_local_install(tmp_path, monkeypatch):
+def test_agent_ui_deployment_mode_is_removed(tmp_path, monkeypatch):
     monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
-    calls = []
+    result = CliRunner().invoke(
+        main, ["agent", "canary", "ui", "ci-canary"])
 
-    def fake_run(**kwargs):
-        calls.append(kwargs)
-        return 0
+    assert result.exit_code != 0
+    assert "`bobi agent <name> ui <deployment>` was removed" in result.output
+    assert "control plane" in result.output
 
-    monkeypatch.setattr("bobi.agentui.remote.run", fake_run)
+
+def test_agent_ui_removed_app_flag_reports_control_plane(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     result = CliRunner().invoke(
         main, ["agent", "canary", "ui", "--app", "ci-canary", "--check"])
 
+    assert result.exit_code != 0
+    assert "`bobi agent <name> ui <deployment>` was removed" in result.output
+    assert "control plane" in result.output
+
+
+def test_agent_ui_local_deep_links_unified_app(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+    opened = {}
+
+    monkeypatch.setattr(
+        "bobi.webapp.daemon.start",
+        lambda open_browser=True: type(
+            "Status", (), {"url": "http://127.0.0.1:8642/?n=tok",
+                           "pid": 1234})(),
+    )
+    monkeypatch.setattr("webbrowser.open",
+                        lambda url: opened.setdefault("url", url))
+
+    result = CliRunner().invoke(main, ["agent", "canary", "ui"])
+
     assert result.exit_code == 0, result.output
-    assert calls == [{
-        "name": None,
-        "app": "ci-canary",
-        "local_port": None,
-        "remote_port": None,
-        "open_browser": True,
-        "check": True,
-    }]
+    assert opened["url"] == "http://127.0.0.1:8642/?n=tok#/agents/canary"
 
 
 def test_agents_list_without_installs_is_empty(tmp_path, monkeypatch):
@@ -176,6 +237,59 @@ class TestSubagents:
         }
 
 
+class TestMonitorGate:
+    """`monitors gate` is the scheduler's relevance-gate plumbing (#630):
+    read the request file, run the gate agent, print the verdict line."""
+
+    def _request(self, tmp_path, **overrides):
+        payload = {"criterion": "about billing", "name": "gate-billing",
+                   "items": [{"key": "m1", "data": {"subject": "refund"}}]}
+        payload.update(overrides)
+        req = tmp_path / "req.json"
+        req.write_text(json.dumps(payload))
+        return req
+
+    def test_prints_verdict_line(self, bobi_install, tmp_path):
+        gate = GateResult(success=True, relevant=["m1"])
+        with patch("bobi.subagent.run_gate_blocking", return_value=gate) as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "monitors", "gate",
+                "--request", str(self._request(tmp_path)),
+            ])
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output.strip().splitlines()[-1])
+        assert verdict == {"success": True, "relevant": ["m1"]}
+        assert mock.call_args[0][0] == "about billing"
+        assert mock.call_args[0][1] == [{"key": "m1",
+                                         "data": {"subject": "refund"}}]
+        assert mock.call_args[1]["name"] == "gate-billing"
+
+    def test_gate_failure_exits_nonzero_with_verdict(self, bobi_install, tmp_path):
+        gate = GateResult(success=False, error="no verdict")
+        with patch("bobi.subagent.run_gate_blocking", return_value=gate):
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "monitors", "gate",
+                "--request", str(self._request(tmp_path)),
+            ])
+        assert result.exit_code == 1
+        # The verdict line still prints so the scheduler parses "success": false.
+        assert '"success": false' in result.output
+
+    def test_missing_request_file_fails(self, bobi_install, tmp_path):
+        result = CliRunner().invoke(main, [
+            "agent", TEST_AGENT_NAME, "monitors", "gate",
+            "--request", str(tmp_path / "nope.json"),
+        ])
+        assert result.exit_code == 1
+
+    def test_empty_items_rejected(self, bobi_install, tmp_path):
+        result = CliRunner().invoke(main, [
+            "agent", TEST_AGENT_NAME, "monitors", "gate",
+            "--request", str(self._request(tmp_path, items=[])),
+        ])
+        assert result.exit_code == 1
+
+
 class TestEventsCommand:
     def _run_events(self, bobi_install):
         return CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "events"])
@@ -238,6 +352,133 @@ class TestEventsCommand:
         assert result.exit_code == 0, result.output
         assert "legacy_push" not in result.output
         assert "new_pr" in result.output
+
+    def test_publish_reads_payload_from_stdin(self, bobi_install):
+        with patch("bobi.events.publish.post_event", return_value=True) as post:
+            result = CliRunner().invoke(
+                main,
+                ["agent", TEST_AGENT_NAME, "events", "publish", "alert/firing"],
+                input='{"title":"x"}',
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Published alert/firing" in result.output
+        post.assert_called_once_with(
+            "alert/firing",
+            {"title": "x"},
+            project_path=bobi_install.repo_path,
+        )
+
+    def test_publish_reads_payload_from_json_option(self, bobi_install):
+        with patch("bobi.events.publish.post_event", return_value=True) as post:
+            result = CliRunner().invoke(
+                main,
+                [
+                    "agent", TEST_AGENT_NAME, "events", "publish",
+                    "alert/firing", "--json", '{"title":"x"}',
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        post.assert_called_once_with(
+            "alert/firing",
+            {"title": "x"},
+            project_path=bobi_install.repo_path,
+        )
+
+    def test_publish_rejects_non_object_payload(self, bobi_install):
+        result = CliRunner().invoke(
+            main,
+            ["agent", TEST_AGENT_NAME, "events", "publish", "alert/firing"],
+            input='["x"]',
+        )
+
+        assert result.exit_code != 0
+        assert "Payload must be a JSON object" in result.output
+
+    def test_publish_rejects_bare_topic(self, bobi_install):
+        result = CliRunner().invoke(
+            main,
+            [
+                "agent", TEST_AGENT_NAME, "events", "publish",
+                "firing", "--json", '{"title":"x"}',
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "source/type" in result.output
+
+    def test_publish_rejects_global_topic_prefixes(self, bobi_install):
+        for topic in [
+            "github:org/repo",
+            "linear:TEAM/firing",
+            "slack:T123/firing",
+            "alert/github:org",
+        ]:
+            result = CliRunner().invoke(
+                main,
+                [
+                    "agent", TEST_AGENT_NAME, "events", "publish",
+                    topic, "--json", '{"title":"x"}',
+                ],
+            )
+
+            assert result.exit_code != 0
+            assert "reserved for webhooks" in result.output
+
+    def test_publish_rejects_webhook_source_labels(self, bobi_install):
+        for topic in [
+            "github/firing",
+            "linear/firing",
+            "slack/firing",
+        ]:
+            result = CliRunner().invoke(
+                main,
+                [
+                    "agent", TEST_AGENT_NAME, "events", "publish",
+                    topic, "--json", '{"title":"x"}',
+                ],
+            )
+
+            assert result.exit_code != 0
+            assert "sources are reserved for webhooks" in result.output
+
+    def test_publish_without_payload_does_not_read_interactive_stdin(
+        self,
+        bobi_install,
+        monkeypatch,
+    ):
+        class TtyStdin:
+            @staticmethod
+            def isatty():
+                return True
+
+            @staticmethod
+            def read():
+                raise AssertionError("interactive stdin should not be read")
+
+        monkeypatch.setattr("click.get_text_stream", lambda name: TtyStdin())
+        result = CliRunner().invoke(
+            main,
+            ["agent", TEST_AGENT_NAME, "events", "publish", "alert/firing"],
+        )
+
+        assert result.exit_code != 0
+        assert "Provide payload with --json or stdin" in result.output
+
+    def test_publish_reports_rejected_publish(self, bobi_install):
+        with patch("bobi.events.publish.post_event", return_value=False):
+            result = CliRunner().invoke(
+                main,
+                [
+                    "agent", TEST_AGENT_NAME, "events", "publish",
+                    "alert/firing", "--json", '{"title":"x"}',
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "Publish failed" in result.output
+        assert "bubble credentials" in result.output
 
 
 class TestEventServerCommand:
@@ -305,77 +546,54 @@ class TestSetupCommand:
         monkeypatch.setenv("BOBI_HOME", str(home))
         return home
 
-    def test_missing_claude_cli_fails_with_hint(self, tmp_path, monkeypatch):
+    def _patch_app(self, monkeypatch):
+        seen = {}
+
+        monkeypatch.setattr(
+            "bobi.webapp.daemon.start",
+            lambda open_browser=True: seen.setdefault("open_browser", open_browser)
+            or type("Status", (), {"url": "http://127.0.0.1:8642/?n=tok",
+                                   "pid": 1234})(),
+        )
+        monkeypatch.setattr("webbrowser.open",
+                            lambda url: seen.setdefault("url", url))
+        return seen
+
+    def test_setup_opens_named_unified_app_route(self, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        monkeypatch.setattr("shutil.which", lambda name: None)
-        monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/nonexistent/claude")
+        seen = self._patch_app(monkeypatch)
+
         result = CliRunner().invoke(main, ["setup", "alpha"])
-        assert result.exit_code != 0
-        assert "Claude Code CLI" in result.output
+
+        assert result.exit_code == 0, result.output
+        assert seen["open_browser"] is False
+        assert seen["url"] == "http://127.0.0.1:8642/?n=tok#/setup/alpha"
+        assert "bobi setup is open at" in result.output
 
     def test_help(self):
         result = CliRunner().invoke(main, ["setup", "--help"])
         assert result.exit_code == 0
         assert "--resume" in result.output
 
-    def test_runs_setup_against_agent_run_root(self, tmp_path, monkeypatch):
+    def test_setup_without_name_opens_create_route(self, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
-        seen = {}
+        seen = self._patch_app(monkeypatch)
 
-        def fake_run_setup(project_path, model=None, resume=False):
-            seen.update(project=project_path, model=model, resume=resume)
-            return 0
+        result = CliRunner().invoke(main, ["setup"])
 
-        monkeypatch.setattr("bobi.setup.run_setup", fake_run_setup)
+        assert result.exit_code == 0, result.output
+        assert seen["url"] == "http://127.0.0.1:8642/?n=tok#/setup"
+
+    def test_setup_options_are_accepted_for_compatibility(self, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        seen = self._patch_app(monkeypatch)
+
         result = CliRunner().invoke(
-            main, ["setup", "alpha", "--model", "sonnet"])
+            main, ["setup", "alpha", "--resume", "--model", "sonnet"])
+
         assert result.exit_code == 0, result.output
-        assert seen["project"] == paths.agent_run_root("alpha")
-        assert seen["model"] == "sonnet"
-        assert seen["resume"] is False
-
-    def test_interrupted_setup_requires_confirmation(self, tmp_path, monkeypatch):
-        from bobi.setup.state import SetupState, Stage
-
-        self._home(tmp_path, monkeypatch)
-        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
-        called = {}
-        monkeypatch.setattr("bobi.setup.run_setup",
-                            lambda *a, **k: called.setdefault("ran", True) and 0)
-        project = paths.agent_run_root("alpha")
-        paths.state_dir(project)
-        SetupState(stage=Stage.DESIGN, team_name="alpha").save(project)
-
-        declined = CliRunner().invoke(main, ["setup", "alpha"], input="n\n")
-        assert declined.exit_code != 0
-        assert "--resume" in declined.output
-        assert "ran" not in called
-
-    def test_existing_install_requires_confirmation(self, tmp_path, monkeypatch):
-        self._home(tmp_path, monkeypatch)
-        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
-        called = {}
-        monkeypatch.setattr("bobi.setup.run_setup",
-                            lambda *a, **k: called.setdefault("ran", True) and 0)
-        project = paths.agent_run_root("alpha")
-        package = paths.package_dir(project)
-        package.mkdir(parents=True)
-        (package / "agent.yaml").write_text("agent: alpha\n")
-
-        declined = CliRunner().invoke(main, ["setup", "alpha"], input="n\n")
-        assert declined.exit_code != 0
-        assert "ran" not in called
-        accepted = CliRunner().invoke(main, ["setup", "alpha"], input="y\n")
-        assert accepted.exit_code == 0, accepted.output
-        assert called.get("ran") is True
-
-    def test_resume_skips_confirmation(self, tmp_path, monkeypatch):
-        self._home(tmp_path, monkeypatch)
-        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
-        monkeypatch.setattr("bobi.setup.run_setup", lambda *a, **k: 0)
-        result = CliRunner().invoke(main, ["setup", "alpha", "--resume"])
-        assert result.exit_code == 0, result.output
+        assert seen["url"] == (
+            "http://127.0.0.1:8642/?n=tok#/setup/alpha?model=sonnet")
 
 
 class TestMonitorAdd:

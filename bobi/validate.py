@@ -9,21 +9,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from bobi.env import agent_spawn_env
+from bobi.env import child_agent_env
+from bobi.mcp_handshake import preflight_timeout
 
 log = logging.getLogger(__name__)
 
 # Stdio MCP servers spawn a subprocess and run their MCP `initialize` handshake
 # (~1–2s), so a single status read catches them mid-spawn in the `pending`
 # window and false-fails them (MDS-63). Poll until each target server leaves
-# `pending`, bounded by a hard ~10s ceiling (0.5s × 20).
+# `pending`, bounded by BOBI_MCP_PREFLIGHT_TIMEOUT (default 10s).
 MCP_PROBE_POLL_INTERVAL = 0.5
-MCP_PROBE_MAX_POLLS = 20
+
+
+def _mcp_probe_max_polls() -> int:
+    timeout = preflight_timeout()
+    if MCP_PROBE_POLL_INTERVAL <= 0:
+        return math.ceil(timeout)
+    return math.ceil(timeout / MCP_PROBE_POLL_INTERVAL)
 
 
 def supports_unicode(stream=None) -> bool:
@@ -102,6 +110,9 @@ def validate_config(project_path: Path) -> ValidationResult:
     checks: list[CheckResult] = []
 
     checks.append(_check_entry_point(cfg, project_path))
+    checks.extend(_check_brain(cfg))
+    checks.extend(_check_roles(cfg, project_path))
+    checks.extend(_check_monitor_relevance(project_path))
     checks.extend(_check_service_credentials(cfg))
     checks.extend(_check_venn_services(cfg))
     checks.extend(_check_mcp_servers(cfg, project_path))
@@ -132,6 +143,99 @@ def _check_entry_point(cfg, project_path: Path) -> CheckResult:
         )
 
     return CheckResult("entry_point", ok=True, detail=cfg.entry_point)
+
+
+def _check_brain(cfg) -> list[CheckResult]:
+    """Validate the `brain:` block where a bad value fails mid-session (#655).
+
+    Unknown kinds already fail loud at session construction (``get_brain``
+    raises), so only `kind: gateway` needs a validate-time check: without a
+    resolvable `base_url` every session would 404/hang at its first turn.
+    A `${VAR}` that didn't resolve interpolates to "" and lands here too.
+    The auth token (``ANTHROPIC_AUTH_TOKEN``) is deliberately not required -
+    Ollama serves unauthenticated.
+    """
+    if cfg.brain_kind != "gateway":
+        return []
+    if not cfg.brain_base_url:
+        return [CheckResult(
+            "brain.gateway", ok=False,
+            detail="kind: gateway requires brain.base_url",
+            hint="set brain.base_url to the Anthropic-compatible endpoint "
+                 "(e.g. http://localhost:4000 or ${LLM_GATEWAY_URL} with the "
+                 "variable in the runtime .env)",
+        )]
+    return [CheckResult("brain.gateway", ok=True, detail=cfg.brain_base_url)]
+
+
+# Roles the runtime uses without a roles/ prompt directory. Monitor checks
+# always launch as role "monitor" (bobi/subagent.py run_check_blocking), so
+# roles.monitor.* is meaningful in every pack.
+_BUILTIN_ROLES = {"monitor"}
+
+
+def _check_roles(cfg, project_path: Path) -> list[CheckResult]:
+    """Validate the `roles:` mapping (#617).
+
+    A misconfigured entry fails silently at runtime (the agent just runs on
+    the default model), so surface shape errors and unknown role names here
+    as warnings.
+    """
+    if not isinstance(cfg.roles, dict) or not cfg.roles:
+        return []
+
+    from bobi import paths
+    installed_roles = paths.roles_dir(project_path)
+    known = set(_BUILTIN_ROLES)
+    if installed_roles.is_dir():
+        known.update(p.name for p in installed_roles.iterdir() if p.is_dir())
+
+    checks = []
+    for name, entry in cfg.roles.items():
+        if not isinstance(entry, dict):
+            checks.append(CheckResult(
+                f"roles.{name}", ok=False, required=False,
+                detail=f"must be a mapping, got {type(entry).__name__}",
+                hint=f"write `roles: {{{name}: {{model: {entry}}}}}`",
+            ))
+            continue
+        # Only warn about unknown names when the pack ships role dirs to
+        # check against; a dirless pack can't distinguish typo from intent.
+        if installed_roles.is_dir() and name not in known:
+            checks.append(CheckResult(
+                f"roles.{name}", ok=False, required=False,
+                detail="unknown role name; its model override will never apply",
+                hint=f"known roles: {', '.join(sorted(known))}",
+            ))
+    return checks
+
+
+def _check_monitor_relevance(project_path: Path) -> list[CheckResult]:
+    """Warn when `relevance:` is set on a monitor flavor it cannot gate (#630).
+
+    The relevance gate only applies to mechanical detectors (`command:` or
+    `check:`); on flavors without one (notify, description-only, curator-only)
+    the key is silently ignored at runtime, so surface it here as a warning.
+    """
+    try:
+        from bobi.monitors.registry import MonitorRegistry
+        monitors = MonitorRegistry.load(project_path=project_path).effective_monitors()
+    except Exception:
+        return []  # monitor config problems surface through their own paths
+
+    checks = []
+    for m in monitors:
+        # Monitor.gated is the same predicate the scheduler routes on, so
+        # validate can never drift from the runtime.
+        if not m.relevance or m.gated:
+            continue
+        checks.append(CheckResult(
+            f"monitors.{m.name}", ok=False, required=False,
+            detail="relevance: is ignored on this flavor",
+            hint="the relevance gate needs a mechanical detector "
+                 "(command: or check:, e.g. tool_poll/venn_poll)",
+        ))
+    return checks
 
 
 def _check_service_credentials(cfg) -> list[CheckResult]:
@@ -272,6 +376,16 @@ def _probe_mcp_servers(
     """Connect once via the Claude SDK and judge every named server."""
     try:
         return asyncio.run(_async_probe_mcp(names, all_servers, project_path))
+    except asyncio.TimeoutError:
+        timeout = preflight_timeout()
+        return [
+            CheckResult(
+                name, ok=False,
+                detail=f"mcp — probe timed out after {timeout:g}s",
+                hint="Check server URL/command and credentials",
+            )
+            for name in names
+        ]
     except Exception as e:
         return [
             CheckResult(
@@ -328,9 +442,8 @@ async def _async_probe_mcp(
             "strict_mcp_config": True,
             "max_turns": 0,
             # Probe in the same environment agents are spawned in so preflight can
-            # never be green when the runtime PATH would fail to resolve a bare
-            # command (MDS-64).
-            "env": agent_spawn_env(),
+            # never be green when the runtime PATH or runtime .env would differ.
+            "env": child_agent_env(project_path),
         },
     )
     get_mcp_status = getattr(client, "get_mcp_status", None)
@@ -345,15 +458,25 @@ async def _async_probe_mcp(
             for name in names
         ]
     try:
-        await client.connect()
-        status = await get_mcp_status()
+        timeout = preflight_timeout()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        async def wait_remaining(awaitable_factory):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            return await asyncio.wait_for(awaitable_factory(), timeout=remaining)
+
+        await wait_remaining(client.connect)
+        status = await wait_remaining(get_mcp_status)
 
         # MDS-63: poll until every target server leaves the `pending` spawn
         # window (or the bounded budget elapses). Servers that genuinely
         # failed / need-auth report on the first non-pending poll, so real
         # failures add no latency.
         targets = set(names)
-        for _ in range(MCP_PROBE_MAX_POLLS):
+        for _ in range(_mcp_probe_max_polls()):
             servers = {s.get("name"): s for s in status.get("mcpServers", [])}
             still_pending = [
                 n for n in targets
@@ -361,13 +484,20 @@ async def _async_probe_mcp(
             ]
             if not still_pending:
                 break
-            await asyncio.sleep(MCP_PROBE_POLL_INTERVAL)
-            status = await get_mcp_status()
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(MCP_PROBE_POLL_INTERVAL, remaining))
+            try:
+                status = await wait_remaining(get_mcp_status)
+            except asyncio.TimeoutError:
+                break
 
         servers = {s.get("name"): s for s in status.get("mcpServers", [])}
         return [_judge_mcp_server(name, servers.get(name)) for name in names]
     finally:
         try:
-            await client.disconnect()
+            disconnect_timeout = min(1.0, max(0.05, preflight_timeout()))
+            await asyncio.wait_for(client.disconnect(), timeout=disconnect_timeout)
         except Exception:
             pass

@@ -16,6 +16,36 @@ import yaml
 log = logging.getLogger(__name__)
 
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
+_DOTENV_LOADED: dict[str, str] = {}
+
+# The shared moda-hosted event server. Mirrors provision-instance.sh's default
+# so every surface (setup, Slack manifest, deploy) agrees on where instances
+# phone home when no event server is configured.
+DEFAULT_EVENT_SERVER = "https://bobi-events.modalabs.workers.dev"
+
+
+@dataclass(frozen=True)
+class EnvVarRef:
+    """One ${VAR} reference in agent.yaml.
+
+    A bare ``${VAR}`` is a required secret; ``${VAR:-default}`` carries its
+    own fallback and is optional.
+    """
+
+    name: str
+    default: str = ""
+    required: bool = True
+
+
+def parse_env_ref(token: str) -> EnvVarRef:
+    """Parse the inside of a ``${...}`` reference into an EnvVarRef."""
+    if ":" not in token:
+        return EnvVarRef(name=token)
+    name, sep, default = token.partition(":-")
+    if sep:
+        return EnvVarRef(name=name, default=default, required=False)
+    # Any other ':' form is treated as optional with no fallback.
+    return EnvVarRef(name=token.split(":", 1)[0], required=False)
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -50,28 +80,95 @@ def load_dotenv(project_path: Path) -> None:
     for key, value in parse_env_file(paths.env_path(project_path)).items():
         if key not in os.environ:
             os.environ[key] = value
+            _DOTENV_LOADED[key] = value
+
+
+def project_env(project_path: Path) -> dict[str, str]:
+    """Return process env overlaid onto this runtime's .env.
+
+    Values previously injected into ``os.environ`` by ``load_dotenv`` are not
+    treated as real process env here, which keeps one runtime's .env from
+    satisfying another runtime's explicit interpolation.
+    """
+    from bobi import paths
+    env = parse_env_file(paths.env_path(project_path))
+    for key, value in os.environ.items():
+        if _DOTENV_LOADED.get(key) == value:
+            continue
+        env[key] = value
+    return env
+
+
+def find_env_var_refs(project_path: Path) -> list[EnvVarRef]:
+    """Scan package/agent.yaml for ${VAR} references.
+
+    De-duped by name, order preserved; a required reference wins over an
+    optional one to the same name.
+    """
+    from bobi import paths
+    refs: dict[str, EnvVarRef] = {}
+    for ref in _scan_env_refs(paths.agent_yaml_path(project_path)):
+        prior = refs.get(ref.name)
+        if prior is None or (ref.required and not prior.required):
+            refs[ref.name] = ref
+    return list(refs.values())
 
 
 def find_required_env_vars(project_path: Path) -> list[str]:
-    """Scan package/agent.yaml for ${VAR} references and return var names."""
-    from bobi import paths
-    agent_yaml = paths.agent_yaml_path(project_path)
+    """The bare ${VAR} names agent.yaml requires (${VAR:-default} excluded)."""
+    return [r.name for r in find_env_var_refs(project_path) if r.required]
+
+
+def _scan_env_refs(agent_yaml: Path) -> list[EnvVarRef]:
+    """Every ${VAR} reference in an arbitrary (not-yet-installed) package
+    file, in order, un-deduped. The one file-level scan the filters below and
+    find_env_var_refs build on."""
     if not agent_yaml.exists():
         return []
-    content = agent_yaml.read_text()
-    return _ENV_VAR_RE.findall(content)
+    return [parse_env_ref(t) for t in _ENV_VAR_RE.findall(agent_yaml.read_text())]
 
 
-def _interpolate_env(value):
-    """Recursively resolve ${ENV_VAR} references in strings, dicts, and lists."""
+def _dedup(names: list[str]) -> list[str]:
+    return list(dict.fromkeys(names))
+
+
+def scan_required_vars(agent_yaml: Path) -> list[str]:
+    """The bare ${VAR} secret names a package's agent.yaml requires.
+
+    Like find_required_env_vars but for a package file that isn't installed
+    yet. A bare ${VAR} is required; ${VAR:-default} carries its own fallback
+    (a ':' in the captured name) and is optional, so it's excluded. De-duped,
+    order preserved.
+    """
+    return _dedup([r.name for r in _scan_env_refs(agent_yaml) if r.required])
+
+
+def scan_declared_vars(agent_yaml: Path) -> list[str]:
+    """All ${VAR} secret names a package references — required AND optional.
+
+    Unlike `scan_required_vars`, this keeps ${VAR:-default} refs (stripping the
+    `:-default` suffix). An optional ref is still DECLARED: it may legitimately be
+    set, and must never be pruned. This is the team's complete secret surface, so
+    it doubles as the prune authority and the env-file filter. De-duped, order
+    preserved.
+    """
+    return _dedup([r.name for r in _scan_env_refs(agent_yaml)])
+
+
+def _interpolate_env(value, env: dict[str, str] | None = None):
+    """Recursively resolve ${VAR} / ${VAR:-default} references in strings,
+    dicts, and lists. An unset (or empty) VAR resolves to its ``:-`` fallback
+    when it has one, else ""."""
+    lookup = os.environ if env is None else env
     if isinstance(value, str):
-        return _ENV_VAR_RE.sub(
-            lambda m: os.environ.get(m.group(1), ""), value
-        )
+        def _resolve(m: "re.Match[str]") -> str:
+            ref = parse_env_ref(m.group(1))
+            return lookup.get(ref.name) or ref.default
+        return _ENV_VAR_RE.sub(_resolve, value)
     if isinstance(value, dict):
-        return {k: _interpolate_env(v) for k, v in value.items()}
+        return {k: _interpolate_env(v, env) for k, v in value.items()}
     if isinstance(value, list):
-        return [_interpolate_env(v) for v in value]
+        return [_interpolate_env(v, env) for v in value]
     return value
 
 
@@ -79,6 +176,14 @@ def _load_yaml(path: Path) -> dict:
     if not path.exists():
         return {}
     return yaml.safe_load(path.read_text()) or {}
+
+
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
 def _project_config_path(project_path: Path) -> Path:
@@ -219,17 +324,69 @@ class Config:
     monitors: list[dict] = field(default_factory=list)
     auto_dispatch: list[dict] = field(default_factory=list)
     requires: list[RequiresEntry] = field(default_factory=list)
+    # Host capabilities a dependency needs but the container can't grant itself
+    # (a kernel sysctl, a device) — #428 Stage 3. Raw `host:` entries
+    # (`{sysctl: key=value}`); parsed into HostCap by bobi.host_caps. Emitted into
+    # the composed agent.yaml from a dependency's `host:` field so deploy/doctor can
+    # surface + verify it. Never materialized into the image (runtime wiring).
+    host: list = field(default_factory=list)
     build: "BuildSpec | None" = None  # C24 team image build spec; None = generic base
     spend_cap: int = 0  # max agent invocations per rolling hour; 0 = use default
     max_concurrent_agents: int = 0  # max simultaneous subagents; 0 = use default (2)
+    launch_admission: dict = field(default_factory=lambda: {
+        "enabled": False,
+        "max_starting_agents": 1,
+        "load_per_cpu_soft_limit": 1.5,
+        "load_per_cpu_hard_limit": 2.0,
+        "min_memory_available_mb": 512,
+        "init_failure_window_seconds": 600,
+        "init_failure_backoff_threshold": 2,
+    })
     # Which agent "brain" drives this team's agents (#485). `{kind: claude|codex|
-    # …, model: <optional override>}`. Empty = the framework default (claude).
+    # gateway, model: <optional override>}`; `kind: gateway` additionally takes
+    # `base_url` (required) and `small_model` (#655). Empty = the framework
+    # default (claude).
     brain: dict = field(default_factory=dict)
+    # Per-role settings (#617). `roles: {<role>: {model: <override>}}`. A role's
+    # model is a provider-native string for the team's brain (Claude aliases
+    # like `haiku`, full Claude IDs, Codex IDs) - never translated.
+    roles: dict = field(default_factory=dict)
+
+    @property
+    def entry_role(self) -> str:
+        """The team's entry-point role, defaulting to "manager" when unset.
+
+        The one place the default lives: named start, monitor agent spawns,
+        and address resolution all resolve the role through this property.
+        """
+        return self.entry_point or "manager"
 
     @property
     def brain_kind(self) -> str:
         """The configured brain kind, or "" for the framework default."""
         return str((self.brain or {}).get("kind", "") or "")
+
+    @property
+    def brain_model(self) -> str:
+        """The configured brain model override, or "" for the provider default."""
+        return str((self.brain or {}).get("model", "") or "")
+
+    @property
+    def brain_base_url(self) -> str:
+        """The gateway endpoint for `kind: gateway` (#655), or ""."""
+        return str((self.brain or {}).get("base_url", "") or "")
+
+    @property
+    def brain_small_model(self) -> str:
+        """The gateway's small/fast model override (#655), or ""."""
+        return str((self.brain or {}).get("small_model", "") or "")
+
+    def role_model(self, role: str) -> str:
+        """The model configured for *role*, or "" when unconfigured."""
+        entry = (self.roles or {}).get(role)
+        if isinstance(entry, dict):
+            return str(entry.get("model", "") or "")
+        return ""
 
     def credential(self, service: str, key: str) -> str:
         """Look up a credential value for a named service."""
@@ -240,25 +397,27 @@ class Config:
 
     @classmethod
     def load(cls, project_path: Path) -> "Config":
-        """Load config from package/agent.yaml, resolving .env first."""
-        load_dotenv(project_path)
+        """Load config from package/agent.yaml with per-project env resolution."""
         agent_yaml = _project_config_path(project_path)
         if not agent_yaml.exists():
             return cls()
-        return cls._parse(agent_yaml)
+        return cls._parse(agent_yaml, env=project_env(project_path))
 
     @classmethod
-    def _parse(cls, path: Path) -> "Config":
+    def _parse(cls, path: Path, env: dict[str, str] | None = None) -> "Config":
         raw_uninterpolated = _load_yaml(path)
         # Preserve monitor commands and requires check/fix commands
         # verbatim — they may contain ${VAR} or ~ intended for shell
         # expansion, not config interpolation.
         monitors_raw = raw_uninterpolated.get("monitors", [])
         requires_raw = raw_uninterpolated.get("requires", [])
+        # host: entries carry a sysctl `key=value` verbatim — no config
+        # interpolation (mirrors requires/build).
+        host_raw = raw_uninterpolated.get("host", [])
         # build steps are shell commands run at image-build time; preserve them
         # verbatim (they may carry ~ or literal $VAR for the build shell).
         build_raw = raw_uninterpolated.get("build", None)
-        raw = _interpolate_env(raw_uninterpolated)
+        raw = _interpolate_env(raw_uninterpolated, env)
         raw["monitors"] = monitors_raw
 
         services = []
@@ -313,11 +472,40 @@ class Config:
             monitors=raw.get("monitors", []),
             auto_dispatch=raw.get("auto_dispatch", []),
             requires=requires,
+            host=host_raw if isinstance(host_raw, list) else [],
             build=build,
             spend_cap=int(raw.get("spend_cap", 0)),
             max_concurrent_agents=int(raw.get("max_concurrent_agents", 0)),
+            launch_admission=cls._parse_launch_admission(raw.get("launch_admission", {})),
             brain=raw.get("brain", {}) if isinstance(raw.get("brain"), dict) else {},
+            roles=raw.get("roles", {}) if isinstance(raw.get("roles"), dict) else {},
         )
+
+    @staticmethod
+    def _parse_launch_admission(raw: object) -> dict:
+        defaults = {
+            "enabled": False,
+            "max_starting_agents": 1,
+            "load_per_cpu_soft_limit": 1.5,
+            "load_per_cpu_hard_limit": 2.0,
+            "min_memory_available_mb": 512,
+            "init_failure_window_seconds": 600,
+            "init_failure_backoff_threshold": 2,
+        }
+        if not isinstance(raw, dict):
+            return defaults
+        cfg = {**defaults, **raw}
+        soft = max(0.1, float(cfg.get("load_per_cpu_soft_limit", 1.5)))
+        hard = max(soft, float(cfg.get("load_per_cpu_hard_limit", 2.0)))
+        return {
+            "enabled": _as_bool(cfg.get("enabled", False)),
+            "max_starting_agents": max(1, int(cfg.get("max_starting_agents", 1))),
+            "load_per_cpu_soft_limit": soft,
+            "load_per_cpu_hard_limit": hard,
+            "min_memory_available_mb": max(0, int(cfg.get("min_memory_available_mb", 512))),
+            "init_failure_window_seconds": max(1, int(cfg.get("init_failure_window_seconds", 600))),
+            "init_failure_backoff_threshold": max(1, int(cfg.get("init_failure_backoff_threshold", 2))),
+        }
 
     @staticmethod
     def _parse_build(build_raw, agent_yaml_path: Path) -> "BuildSpec | None":
@@ -470,4 +658,3 @@ def save_bubble_state(project_path: Path, bubble_id: str, bubble_key: str) -> No
 def clear_bubble_state(project_path: Path) -> None:
     """Drop the bubble credential — a subsequent start mints a fresh bubble."""
     bubble_state_path(project_path).unlink(missing_ok=True)
-

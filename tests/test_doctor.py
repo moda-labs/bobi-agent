@@ -57,6 +57,115 @@ class TestCheckProjectConfig:
         assert "missing" in r.detail
 
 
+# --- Team policy ---
+
+class TestCheckPolicy:
+    def test_missing_policy_is_ok_for_fresh_runtime(self, tmp_path):
+        with (
+            patch("bobi.doctor.bound_root", return_value=tmp_path),
+            patch("bobi.history.messages_since", return_value=[]),
+        ):
+            from bobi.doctor import _check_policy
+            r = _check_policy()
+        assert r.ok
+        assert "no long_term_memory.md yet" in r.detail
+
+    def test_missing_policy_with_large_backlog_fails(self, tmp_path):
+        rows = [{"id": i} for i in range(101)]
+        with (
+            patch("bobi.doctor.bound_root", return_value=tmp_path),
+            patch("bobi.history.messages_since", return_value=rows),
+        ):
+            from bobi.doctor import _check_policy
+            r = _check_policy()
+        assert not r.ok
+        assert "pending" in r.detail
+        assert "sleep cycle appears stalled" in r.hint
+
+
+# --- Ingress reachability ---
+
+class TestCheckIngressReachability:
+
+    def test_warns_for_external_events_on_loopback(self, tmp_path):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "agent: test\n"
+            "services:\n"
+            "  - name: slack\n"
+            "    events: true\n"
+        )
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_ingress_reachability
+            r = _check_ingress_reachability()
+        assert not r.ok
+        assert not r.required
+        assert "slack" in r.detail
+        assert "public HTTPS ingress" in r.detail
+        assert "event_server_url" in r.hint
+
+    def test_passes_for_remote_event_server(self, tmp_path):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "agent: test\n"
+            "event_server_url: https://events.example.com\n"
+            "services:\n"
+            "  - name: slack\n"
+            "    events: true\n"
+        )
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_ingress_reachability
+            r = _check_ingress_reachability()
+        assert r.ok
+
+    def test_malformed_config_does_not_crash_doctor_check(self, tmp_path):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text("agent: [broken\n")
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_ingress_reachability
+            r = _check_ingress_reachability()
+        assert r.ok
+        assert "skipped" in r.detail
+
+
+# --- Host capabilities (#428 Stage 3) ---
+
+
+class TestCheckHostCaps:
+    def _install(self, tmp_path):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "agent: t\nhost:\n  - sysctl: net.example.knob=0\n")
+
+    def test_no_host_block_no_checks(self, tmp_path):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text("agent: t\n")
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_host_caps
+            assert _check_host_caps() == []
+
+    def test_satisfied_cap_passes(self, tmp_path):
+        self._install(tmp_path)
+        knob = tmp_path / "knob"; knob.write_text("0\n")
+        from bobi.host_caps import HostCap
+        with patch("bobi.doctor.bound_root", return_value=tmp_path), \
+             patch.object(HostCap, "proc_path", property(lambda self: knob)):
+            from bobi.doctor import _check_host_caps
+            results = _check_host_caps()
+        assert len(results) == 1 and results[0].ok
+
+    def test_violated_cap_fails_with_fix(self, tmp_path):
+        self._install(tmp_path)
+        knob = tmp_path / "knob"; knob.write_text("1\n")
+        from bobi.host_caps import HostCap
+        with patch("bobi.doctor.bound_root", return_value=tmp_path), \
+             patch.object(HostCap, "proc_path", property(lambda self: knob)):
+            from bobi.doctor import _check_host_caps
+            results = _check_host_caps()
+        assert len(results) == 1 and not results[0].ok
+        assert "sudo sysctl -w net.example.knob=0" in results[0].hint
+
+
 # --- Runtime layout ---
 
 class TestCheckRuntimeLayout:

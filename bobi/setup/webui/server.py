@@ -20,24 +20,33 @@ no CLI. `serve()` is the socket→uvicorn foreground launcher.
 from __future__ import annotations
 
 import json
-import socket
+import os
 from pathlib import Path
 from typing import AsyncIterator
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
+
+import yaml
 
 # Imported at module level (not inside build_app) so that, under
 # `from __future__ import annotations`, FastAPI can resolve the string
 # annotations on the route handlers against this module's globals.
 from fastapi import FastAPI, Request
-from fastapi.responses import (FileResponse, JSONResponse, Response,
-                               StreamingResponse)
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from bobi import paths
 from bobi.setup.state import STAGE_ORDER, SetupState, Stage
-from bobi.webui_common import resolve_static_asset
+from bobi.webui_common.launcher import serve_local
+from bobi.webui_common.security import (
+    WEBUI_TOKEN_HEADER,
+    install_security,
+)
+from bobi.webui_common.static import mount_static, serve_index
 
 STATIC_DIR = Path(__file__).parent / "static"
-NONCE_HEADER = "x-bobi-nonce"
-_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+NONCE_HEADER = WEBUI_TOKEN_HEADER
 
 
 # --- serialization -------------------------------------------------------
@@ -53,10 +62,19 @@ def serialize_state(state: SetupState) -> dict:
         "team_name": state.team_name,
         "source_dir": state.source_dir,
         "chat": state.chat,
+        "ingress": {
+            "mode": state.ingress.mode,
+            "url": state.ingress.url,
+            "verified": state.ingress.verified,
+            "verified_at": state.ingress.verified_at,
+            "error": state.ingress.error,
+        },
         "phase": state.phase,
         "spec": {
             "goal": spec.goal,
             "roles": spec.roles,
+            "workflows": spec.workflows,
+            "workflows_confirmed": spec.workflows_confirmed,
             "autonomous": spec.autonomous,
             "autonomous_confirmed": spec.autonomous_confirmed,
             "services": spec.services,
@@ -80,13 +98,67 @@ def _sse(event: str, data) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+def _validate_public_event_server_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return "use a public https:// event server URL"
+    return None
+
+
+def _probe_event_server(url: str) -> tuple[bool, str]:
+    health_url = url.rstrip("/") + "/health"
+    req = UrlRequest(health_url, headers={"accept": "application/json"})
+    try:
+        with urlopen(req, timeout=8) as resp:
+            if not (200 <= resp.status < 300):
+                return False, f"/health returned HTTP {resp.status}"
+            try:
+                payload = json.loads(resp.read(4096).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return False, "/health did not return Bobi JSON"
+            if (isinstance(payload, dict)
+                    and payload.get("status") == "ok"
+                    and payload.get("auth") == "hmac"):
+                return True, ""
+            return False, "/health did not look like a Bobi event server"
+    except HTTPError as e:
+        return False, f"/health returned HTTP {e.code}"
+    except URLError as e:
+        return False, f"could not reach /health: {e.reason}"
+    except TimeoutError:
+        return False, "timed out reaching /health"
+    except OSError as e:
+        return False, f"could not reach /health: {e}"
+
+
+def _persist_ingress_env(project: Path, state: SetupState) -> None:
+    from bobi.setup import actions
+    env = actions.read_env(project)
+    if state.ingress.mode == "local":
+        env.pop("BOBI_EVENT_SERVER", None)
+        os.environ.pop("BOBI_EVENT_SERVER", None)
+    elif state.ingress.url:
+        env["BOBI_EVENT_SERVER"] = state.ingress.url
+        os.environ["BOBI_EVENT_SERVER"] = state.ingress.url
+    actions.write_env(project, env)
+
+
 # --- app -----------------------------------------------------------------
 
 def build_app(state: SetupState, project: Path, *, nonce: str,
               model: str | None = None, stream_fn=None,
-              home_root: Path | None = None):
+              home_root: Path | None = None, base_path: str = "",
+              on_finish=None):
     """Construct the FastAPI app. `stream_fn` overrides the LLM source
-    (tests inject a fake). `home_root` overrides the Bobi home for tests."""
+    (tests inject a fake). `home_root` overrides the Bobi home for tests.
+    `base_path` is the mount prefix when hosted as a sub-app of the unified
+    web app (e.g. "/setup") — the SPA prefixes its /api and /static URLs
+    with it. Empty (the standalone `bobi setup` server) changes nothing.
+    `on_finish` is the unified app's launch hook: called after Finish marks
+    the state complete; its dict return is merged into the finish response
+    (e.g. {"launched": True, "redirect": ...}); an exception surfaces as
+    `launch_error` without unwinding the finish. None (standalone) keeps
+    today's behavior: finish just marks done and shows the start command."""
     app = FastAPI()
     app.state.stream_fn = stream_fn
     app.state.model = model
@@ -109,41 +181,48 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         p = p.resolve()
         return p, (p == home or home in p.parents)
 
-    # --- security middleware: Host guard + nonce on /api ---------------
-    @app.middleware("http")
-    async def _guard(request: Request, call_next):
-        host = (request.headers.get("host") or "").rsplit(":", 1)[0]
-        if host and host not in _ALLOWED_HOSTS:
-            return JSONResponse({"error": "host not allowed"}, status_code=403)
-        if request.url.path.startswith("/api"):
-            if request.headers.get(NONCE_HEADER) != nonce:
-                return JSONResponse({"error": "bad or missing nonce"},
-                                    status_code=403)
-        return await call_next(request)
+    def _load_machine_config() -> dict:
+        cfg_path = paths.ensure_global_config()
+        try:
+            return yaml.safe_load(cfg_path.read_text()) or {}
+        except Exception:
+            return {}
 
-    # --- page ----------------------------------------------------------
-    @app.get("/")
-    def index() -> Response:
-        html = (STATIC_DIR / "index.html").read_text()
-        # The page bootstraps the nonce from a meta tag the JS reads back.
-        html = html.replace("{{NONCE}}", nonce)
-        return Response(html, media_type="text/html",
-                        headers={"Cache-Control": "no-store, max-age=0"})
+    def _write_machine_config(raw: dict) -> None:
+        cfg_path = paths.ensure_global_config()
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(yaml.dump(raw, default_flow_style=False))
 
-    # static assets (css/js) — no nonce needed, same-origin only
-    @app.get("/static/{name}")
-    def static_asset(name: str) -> Response:
-        target = resolve_static_asset(STATIC_DIR, name)
-        if target is None:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        types = {".css": "text/css", ".js": "text/javascript",
-                 ".svg": "image/svg+xml"}
-        # The wizard is a short-lived local server whose assets change between
-        # runs (and during development); never let the browser serve a stale
-        # bundle from cache — always revalidate against disk.
-        return FileResponse(
-            target, media_type=types.get(target.suffix, "text/plain"),
-            headers={"Cache-Control": "no-store, max-age=0"})
+    def source_roots() -> list[Path]:
+        """Configured team-source scan roots, always including the library."""
+        roots: list[Path] = []
+
+        def add(path: Path) -> None:
+            try:
+                resolved = path.resolve()
+            except OSError:
+                return
+            if resolved not in roots:
+                roots.append(resolved)
+
+        add(library)
+        configured = _load_machine_config().get("sources", [])
+        if isinstance(configured, list):
+            for item in configured:
+                target, ok = _within_home(str(item), library)
+                if ok:
+                    add(target)
+        return roots
+
+    install_security(
+        app,
+        secret=nonce,
+        header_name=WEBUI_TOKEN_HEADER,
+        error_message="bad or missing nonce",
+    )
+    serve_index(app, STATIC_DIR / "index.html",
+                {"{{NONCE}}": nonce, "{{BASE}}": base_path})
+    mount_static(app, STATIC_DIR)
 
     # --- state (deterministic) -----------------------------------------
     @app.get("/api/state")
@@ -166,30 +245,62 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     def ping() -> dict:
         return {"ok": True}
 
+    def visible_teams() -> list[dict]:
+        # Every editable team source in the library, plus this session's team.
+        # A team can be authored anywhere the user points /api/start (the chosen
+        # location is persisted in state.source_dir). Surface this session's team
+        # even when it lives outside the default library, deduped by path — else a
+        # team the user explicitly placed elsewhere is invisible on the home screen.
+        from bobi.setup import open_mode
+        from bobi.setup.actions import team_source_dir
+        teams = []
+        seen = set()
+        for root in source_roots():
+            for t in open_mode.list_teams_in(root):
+                if t["path"] not in seen:
+                    seen.add(t["path"])
+                    teams.append(t)
+        if state.source_dir:
+            src = team_source_dir(project, state)
+            teams += [t for t in open_mode.list_teams_in(src)
+                      if t["path"] not in seen]
+        return teams
+
     # --- intro: create / modify-existing / from-registry + a location --
     @app.get("/api/intro")
     def intro() -> dict:
-        from bobi.setup import open_mode
         # Create defaults the team source into the library; Modify defaults to
         # scanning the same library, but the user can point the scan elsewhere
         # (another source tree, a thumb drive, wherever) via /api/teams. Install
         # always targets the selected Bobi Agent's run/package directory; a
         # source outside the default library copies in like a registry team.
-        from bobi.setup.actions import team_source_dir
-        teams = open_mode.list_teams_in(library)
-        # A team can be authored anywhere the user points /api/start (the chosen
-        # location is persisted in state.source_dir). Surface this session's team
-        # even when it lives outside the default library, deduped by path — else a
-        # team the user explicitly placed elsewhere is invisible on the home screen.
-        if state.source_dir:
-            src = team_source_dir(project, state)
-            seen = {t["path"] for t in teams}
-            teams += [t for t in open_mode.list_teams_in(src)
-                      if t["path"] not in seen]
         default_source = paths.agent_source_dir(state.team_name or "new-agent")
-        return {"teams": teams,
+        return {"teams": visible_teams(),
                 "default_location": str(default_source),
-                "scan_dir": str(library)}
+                "scan_dir": str(library),
+                "source_roots": [str(p) for p in source_roots()]}
+
+    @app.get("/api/source-roots")
+    def get_source_roots() -> dict:
+        return {"source_roots": [str(p) for p in source_roots()]}
+
+    @app.post("/api/source-roots")
+    def add_source_root(payload: dict) -> JSONResponse:
+        target, ok = _within_home(str(payload.get("dir") or ""), library)
+        if not ok:
+            return JSONResponse(
+                {"error": "pick a folder inside your home directory"},
+                status_code=400)
+        raw = _load_machine_config()
+        configured = raw.get("sources", [])
+        if not isinstance(configured, list):
+            configured = []
+        existing = {str(p) for p in source_roots()}
+        if str(target) not in existing:
+            configured.append(str(target))
+        raw["sources"] = configured
+        _write_machine_config(raw)
+        return JSONResponse({"source_roots": [str(p) for p in source_roots()]})
 
     @app.get("/api/teams")
     def teams(request: Request) -> JSONResponse:
@@ -258,7 +369,10 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # When the working source folder is named after the team (modify and
         # registry default to <location>/<team-name>), rename the folder on disk
         # to match so it reflects the new name. Create's "bobi/" folder isn't
-        # team-named, so it's left as the user chose it.
+        # team-named, so it's left as the user chose it. The hosted web app's
+        # from-scratch flow starts in a placeholder slot
+        # agents/<old>/src; treat that canonical source as team-named too so a
+        # rename moves the editable source out of the placeholder slot.
         if old and state.source_dir and Path(state.source_dir).name == old:
             src = team_source_dir(project, state)
             dest = src.parent / new
@@ -275,13 +389,38 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 # the source tree moved — any prior validation is stale
                 state.validated = False
                 state.validated_hash = ""
+        elif on_finish is not None and state.source_dir:
+            src = team_source_dir(project, state)
+            try:
+                rel_src = src.resolve().relative_to(library.resolve())
+                slot = rel_src.parts[0] if rel_src.parts[1:] == ("src",) else ""
+            except (IndexError, ValueError):
+                slot = ""
+            old_default = library / (old or slot) / "src"
+            new_slot = library / new
+            new_default = new_slot / "src"
+            if src.resolve() == old_default.resolve():
+                if src.resolve() != new_default.resolve() and new_slot.exists():
+                    return JSONResponse(
+                        {"error": f"a team named '{new}' already exists"},
+                        status_code=409)
+                if src.is_dir() and src.resolve() != new_default.resolve():
+                    new_default.parent.mkdir(parents=True, exist_ok=True)
+                    src.rename(new_default)
+                    try:
+                        src.parent.rmdir()
+                    except OSError:
+                        pass
+                state.source_dir = str(new_default)
+                # the source tree moved — any prior validation is stale
+                state.validated = False
+                state.validated_hash = ""
         state.team_name = new
         state.save(project)
         return JSONResponse(serialize_state(state))
 
     @app.post("/api/start")
     def start(payload: dict) -> JSONResponse:
-        from bobi import paths
         from bobi.setup import open_mode
         from bobi.setup.authoring import slug
         mode = payload.get("mode", "create")
@@ -290,20 +429,34 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 {"error": "mode must be create, open, or registry"},
                 status_code=400)
         location = (payload.get("location") or "").strip()
-        if not location:
+        team = (payload.get("team") or "").strip()
+        if mode == "registry" and not team:
+            return JSONResponse({"error": "pick a team to download"},
+                                status_code=400)
+        if location:
+            loc = Path(location).expanduser()
+            abs_loc = (loc if loc.is_absolute() else home / loc).resolve()
+        elif mode == "registry":
+            # A template defaults into its own library slot - the same
+            # agents/<name>/src shape the home scan reads, so the finished
+            # team shows on the hub without the UI doing path math. A name
+            # that slugs to nothing (all punctuation / non-ASCII) has no
+            # slot to default into.
+            if not slug(team):
+                return JSONResponse(
+                    {"error": "choose a location for the team"},
+                    status_code=400)
+            abs_loc = (library / slug(team) / "src").resolve()
+        else:
             return JSONResponse({"error": "choose a location for the team"},
                                 status_code=400)
-        loc = Path(location).expanduser()
-        abs_loc = (loc if loc.is_absolute() else home / loc).resolve()
         run_root = project.resolve()
         if abs_loc == run_root or run_root in abs_loc.parents:
             return JSONResponse({"error": "pick a source location outside run/"},
                                 status_code=400)
-        state.source_dir = str(abs_loc)
-        state.finished = False   # starting/opening a team begins a fresh session
-        # Both modify-local and from-registry land in the same non-lossy
-        # edit-in-place authoring path; only create authors from scratch.
-        state.mode = "create" if mode == "create" else "open"
+        # Validate and materialize the source first; session state is mutated
+        # only after everything succeeded, so a rejected or failed start can't
+        # leave the session pointing at a team it never opened.
         if mode == "open":
             # The UI sends the team's source path (from a scan of whatever
             # folder the user chose), not just a name — teams can live anywhere
@@ -329,16 +482,19 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 open_mode.copy_into(src, abs_loc)
             except ValueError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
-            open_mode.reverse_fill(state, abs_loc)
         elif mode == "registry":
-            team = (payload.get("team") or "").strip()
-            if not team:
-                return JSONResponse({"error": "pick a team to download"},
-                                    status_code=400)
             # Don't merge a template over a team that already lives at the target
-            # (fetch_into → copy_into uses copytree dirs_exist_ok). Open it from
-            # the hub or remove it first to start fresh.
-            if abs_loc.exists():
+            # (fetch_into → copy_into uses copytree dirs_exist_ok). An existing
+            # but EMPTY directory is fine — the canonical slot src/ may already
+            # have been created by the slot scaffolding. Also don't nest one
+            # inside a direct-root team (agent.yaml right at the parent) - the
+            # scanner would list both as editable teams.
+            def _occupied(d: Path) -> bool:
+                try:
+                    return d.is_dir() and any(d.iterdir())
+                except OSError:
+                    return False
+            if abs_loc.is_file() or _occupied(abs_loc) or open_mode.is_team(abs_loc.parent):
                 return JSONResponse(
                     {"error": f"a team already exists at {abs_loc} — open it from "
                      "the hub, or remove it first to start from this template."},
@@ -346,17 +502,29 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             try:
                 open_mode.fetch_into(project, team, abs_loc)
             except Exception as e:
+                # Anything now in the target is this request's partial copy -
+                # remove it, else the leftover blocks the slot with a baffling
+                # 409 forever.
+                import shutil
+                shutil.rmtree(abs_loc, ignore_errors=True)
                 return JSONResponse({"error": f"couldn't download '{team}': {e}"},
                                     status_code=502)
-            open_mode.reverse_fill(state, abs_loc)
         else:
             name = (payload.get("name") or "").strip()
-            state.team_name = slug(name) if name else ""
             if open_mode.is_team(abs_loc):
                 return JSONResponse(
                     {"error": f"a team already exists at {abs_loc} — open it "
                      "from the hub, or choose another source directory."},
                     status_code=409)
+        state.source_dir = str(abs_loc)
+        state.finished = False   # starting/opening a team begins a fresh session
+        # Both modify-local and from-registry land in the same non-lossy
+        # edit-in-place authoring path; only create authors from scratch.
+        state.mode = "create" if mode == "create" else "open"
+        if mode == "create":
+            state.team_name = slug(name) if name else ""
+        else:
+            open_mode.reverse_fill(state, abs_loc)
         state.stage = Stage.DESIGN
         state.save(project)
         return JSONResponse(serialize_state(state))
@@ -604,6 +772,46 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         return {"cards": cards, "catalog": catalog,
                 "venn_configured": bool(actions.venn_key(project))}
 
+    # --- ingress: how public webhooks reach the event server ------------
+    @app.post("/api/ingress/verify")
+    def ingress_verify(payload: dict) -> JSONResponse:
+        from datetime import datetime, timezone
+        from bobi.config import DEFAULT_EVENT_SERVER
+        mode = (payload.get("mode") or state.ingress.mode or "local").strip()
+        url = (payload.get("url") or state.ingress.url or "").strip().rstrip("/")
+        if mode == "bobi_cloud":
+            url = DEFAULT_EVENT_SERVER
+        if mode == "local":
+            state.ingress.mode = "local"
+            state.ingress.url = ""
+            state.ingress.verified = True
+            state.ingress.verified_at = datetime.now(timezone.utc).isoformat()
+            state.ingress.error = ""
+            _persist_ingress_env(project, state)
+            state.save(project)
+            return JSONResponse({"ok": True, "state": serialize_state(state)})
+        if mode not in ("quick_tunnel", "bobi_cloud", "custom_worker"):
+            return JSONResponse({"ok": False, "error": "unknown ingress mode"},
+                                status_code=400)
+        if not url:
+            return JSONResponse({"ok": False, "error": "event server URL required"},
+                                status_code=400)
+        err = _validate_public_event_server_url(url)
+        if err:
+            return JSONResponse({"ok": False, "error": err}, status_code=400)
+        ok, error = _probe_event_server(url)
+        if ok:
+            state.ingress.mode = mode
+            state.ingress.url = url
+            state.ingress.verified = True
+            state.ingress.verified_at = datetime.now(timezone.utc).isoformat()
+            state.ingress.error = ""
+            _persist_ingress_env(project, state)
+            state.save(project)
+        return JSONResponse({"ok": ok, "error": error,
+                             "state": serialize_state(state)},
+                            status_code=200 if ok else 502)
+
     # --- automate (suggester + commit) ---------------------------------
     @app.post("/api/automate/suggest")
     async def automate_suggest() -> dict:
@@ -674,11 +882,31 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 item[k] = fields[k].strip()
         if fields.get("leash") in ("notify", "ask", "act"):
             item["leash"] = fields["leash"]
+        if fields.get("trigger") in ("schedule", "event"):
+            item["trigger"] = fields["trigger"]
         items[idx] = item
         state.spec.autonomous_confirmed = True
         state.validated = False
         state.save(project)
         return JSONResponse(serialize_state(state))
+
+    @app.get("/api/workflow/yaml")
+    def workflow_yaml(request: Request) -> JSONResponse:
+        # Read-only preview of the YAML a spec workflow will be codified as
+        # at build — shown in the Workflows card's dark-slab popup. Editing
+        # happens through the conversation, not here.
+        from bobi.setup import authoring
+        try:
+            idx = int(request.query_params.get("index", ""))
+        except ValueError:
+            return JSONResponse({"error": "bad index"}, status_code=400)
+        wfs = state.spec.workflows
+        if not (0 <= idx < len(wfs)) or not isinstance(wfs[idx], dict):
+            return JSONResponse({"error": "no such workflow"}, status_code=404)
+        wf = wfs[idx]
+        path = f"workflows/{authoring.workflow_slug(wf)}.yaml"
+        return JSONResponse({"path": path,
+                             "yaml": authoring.build_workflow_yaml(state, wf)})
 
     @app.post("/api/service/remove")
     def service_remove(payload: dict) -> JSONResponse:
@@ -958,6 +1186,93 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         state.save(project)
         return JSONResponse(serialize_state(state))
 
+    # --- slack finalization (the post-install next-steps screen) --------
+    def _env_value(var: str) -> str:
+        # Same precedence as runtime resolution (config.load_dotenv and
+        # venn_key): an exported environment variable wins over .env.
+        import os
+        from bobi.setup import actions
+        return os.environ.get(var) or actions.read_env(project).get(var, "")
+
+    @app.post("/api/slack/channel")
+    def slack_channel(payload: dict) -> JSONResponse:
+        """Save the team's dedicated Slack channel as SLACK_CHANNELS in
+        run/.env (the `channels:` scoping knob in agent.yaml resolves it).
+        Accepts a channel ID (C…/G…) directly, or a #name resolved live via
+        the saved bot token."""
+        from bobi.setup import actions
+        raw = (payload.get("channel") or "").strip()
+        if not raw:
+            return JSONResponse({"error": "enter a channel ID (C…) or #name"},
+                                status_code=400)
+        token = _env_value("SLACK_BOT_TOKEN")
+        if token:
+            # One code path: resolve_channel_id owns the ID-vs-name decision
+            # (a literal C…/G…/D… ID passes through without a network call).
+            from bobi.slack import resolve_channel_id
+            try:
+                value = resolve_channel_id(token, raw)
+            except Exception as e:
+                return JSONResponse(
+                    {"error": actions.redact_secrets(str(e))[0]},
+                    status_code=502)
+        else:
+            # No token yet: only a literal channel ID can be trusted verbatim
+            # (same shape rule resolve_channel_id uses); a name needs the
+            # token to look up — a bare word saved as-is would silently scope
+            # the adapter to a channel that doesn't exist.
+            import re as _re
+            if raw.startswith("#") or not _re.fullmatch(r"[CGD][A-Z0-9]{6,}",
+                                                        raw):
+                return JSONResponse(
+                    {"error": "save the Slack bot token first so the name "
+                     "can be looked up — or paste the channel ID (C…)"},
+                    status_code=400)
+            value = raw
+        try:
+            actions.save_credential(state, project, "SLACK_CHANNELS", "slack",
+                                    "", prompt_fn=lambda *_: value)
+        except actions.ActionError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "channel": value,
+                             "state": serialize_state(state)})
+
+    @app.post("/api/slack/test")
+    def slack_test() -> JSONResponse:
+        """Post a test message to the saved channel — proves token + channel
+        + membership end-to-end, from the finalize-Slack step."""
+        from bobi.setup import actions
+        token = _env_value("SLACK_BOT_TOKEN")
+        if not token:
+            return JSONResponse({"error": "no Slack bot token saved yet"},
+                                status_code=400)
+        channel = _env_value("SLACK_CHANNELS").split(",")[0].strip()
+        if not channel:
+            return JSONResponse({"error": "save a channel first"},
+                                status_code=400)
+        from bobi.slack import post_slack_message
+        team = state.team_name or "your bobi team"
+        try:
+            post_slack_message(
+                token, channel,
+                f"Test message from bobi setup — {team} can post here. "
+                "You're wired up.")
+        except Exception as e:
+            return JSONResponse({"error": actions.redact_secrets(str(e))[0]},
+                                status_code=502)
+        return JSONResponse({"ok": True, "channel": channel})
+
+    @app.post("/api/shutdown")
+    def shutdown() -> dict:
+        """End the setup session: the page shows a static goodbye and the
+        server process exits once this response is sent. The uvicorn server
+        is attached by serve_local; absent (tests), this is a no-op."""
+        state.save(project)
+        server = getattr(app.state, "uvicorn_server", None)
+        if server is not None:
+            server.should_exit = True
+        return {"ok": True}
+
     @app.get("/api/credential/value")
     def credential_value(request: Request) -> JSONResponse:
         # Copy-to-clipboard support: returns a saved credential value to the
@@ -988,6 +1303,13 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     @app.post("/api/build")
     async def build() -> StreamingResponse:
         async def gen() -> AsyncIterator[str]:
+            # The one hard floor, enforced here too (not just /api/advance)
+            # so a direct build call can't author a placeholder team.
+            if not state.spec.goal.strip():
+                yield _sse("error", {"message": "tell bobi what the team "
+                           "should do — the goal is still empty"})
+                yield _sse("state", serialize_state(state))
+                return
             from bobi.setup import authoring
             try:
                 async for event in authoring.author_pack(
@@ -1097,15 +1419,24 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # user can open and edit any team. The process ends when they stop it.
         state.finished = True
         state.save(project)
-        return serialize_state(state)
+        result = serialize_state(state)
+        if on_finish is not None:
+            # Hosted mode: launch the installed team and send the browser
+            # back to the unified app. A launch failure never unwinds the
+            # finish — the team is installed either way.
+            try:
+                result.update(on_finish() or {})
+            except Exception as e:  # noqa: BLE001 — surfaced to the UI
+                result["launch_error"] = str(e)
+        return result
 
     @app.get("/api/home")
     def home_teams() -> dict:
-        # The homepage's team list — every editable team source in the library.
+        # The homepage's team list - same visibility rules as the intro, so a
+        # team never shows on one screen and not the other.
         # NB: don't name this `home` — that shadows the `home` Path in this
         # scope and breaks every endpoint that closes over it (e.g. browse).
-        from bobi.setup import open_mode
-        return {"teams": open_mode.list_teams_in(library),
+        return {"teams": visible_teams(),
                 "library": str(library)}
 
     return app
@@ -1117,12 +1448,6 @@ def serve(project: Path, *, model: str | None = None,
           resume: bool = False, open_browser: bool = True) -> int:
     """Run the setup web UI in the foreground until setup finishes or the
     user interrupts. Binds 127.0.0.1:0, hands the socket to uvicorn."""
-    import secrets
-    import threading
-    import webbrowser
-
-    import uvicorn
-
     state = None
     if resume:
         state = SetupState.load(project)
@@ -1133,34 +1458,17 @@ def serve(project: Path, *, model: str | None = None,
         SetupState.clear(project)
         state = SetupState()
 
-    nonce = secrets.token_urlsafe(24)
-
-    # Bind our own loopback socket first so we know the port before serving.
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    url = f"http://127.0.0.1:{port}/?n={nonce}"
-
     # The server stays alive after Finish (the page transitions to the team
     # hub, a re-entrant editor), so there's no finish-triggered shutdown — it
     # runs until the user interrupts it.
-    app = build_app(state, project, nonce=nonce, model=model)
-    config = uvicorn.Config(app, log_level="warning")
-    server = uvicorn.Server(config)
-
-    if open_browser:
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
-    print(f"\n  bobi setup is running at {url}\n  (Ctrl-C to stop)\n")
-
-    try:
-        server.run(sockets=[sock])
-    except KeyboardInterrupt:
-        pass
-    finally:
-        sock.close()
+    rc = serve_local(
+        lambda nonce: build_app(state, project, nonce=nonce, model=model),
+        open_browser=open_browser,
+        label="bobi setup",
+        announce=lambda url:
+            f"\n  bobi setup is running at {url}\n  (Ctrl-C to stop)\n",
+    )
 
     if state.finished:
         SetupState.clear(project)
-        return 0
-    return 0
+    return rc

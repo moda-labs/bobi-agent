@@ -5,7 +5,14 @@
    never in the chat. Build/Done reuse the generating + done views. */
 (() => {
   const NONCE = document.querySelector('meta[name="bobi-nonce"]').content;
-  const H = { "x-bobi-nonce": NONCE };
+  // Mount prefix when hosted inside the unified web app ("" standalone).
+  // Every /api and /static request goes through the helpers below, which
+  // prefix it - keep it that way.
+  const BASE = (document.querySelector('meta[name="bobi-base"]') || {}).content || "";
+  // Hosted inside the unified app: the dashboard is home. The SPA never
+  // shows its own hub, and every home-exit leaves to the shell instead.
+  const HOSTED = !!BASE;
+  const H = { "x-bobi-webui-token": NONCE };
   const $ = (sel, el = document) => el.querySelector(sel);
   // Escapes for both element text AND double/single-quoted attribute contexts
   // (role/service names are user- and LLM-authored and flow into value="…" /
@@ -32,6 +39,12 @@
     { key: "slack", name: "Slack", soon: false },
     { key: "telegram", name: "Telegram", soon: true },
   ];
+  const INGRESS_LABELS = {
+    local: "Local only",
+    quick_tunnel: "Quick tunnel",
+    bobi_cloud: "Bobi cloud",
+    custom_worker: "Custom Worker",
+  };
 
   let S = null;            // latest serialized state
   let _connData = null;    // last /api/connect payload (drives connect cards)
@@ -39,6 +52,9 @@
   let _prevSig = null;     // per-card HTML signatures — diff to re-render only what changed
   let _prevPhase;          // last interview phase — drives the phase-banner ease-in
   let _prevGathered = null; // last N/5 — drives the meter tick-up
+  let _connRefreshSig = ""; // service list already queued for connection-card refresh
+  let _connRefreshPending = false;
+  let _connRefreshNextSig = "";
 
   // --- connection state --------------------------------------------------
   // The page is useless without its local setup server. If that server dies
@@ -73,7 +89,7 @@
   // --- api helpers -------------------------------------------------------
   async function getJSON(path) {
     let r;
-    try { r = await fetch(path, { headers: H }); }
+    try { r = await fetch(BASE + path, { headers: H }); }
     catch (e) { markDisconnected(); throw e; }   // network failure = server gone
     markConnected();
     return r.json();
@@ -81,7 +97,7 @@
   async function postJSON(path, body) {
     let r;
     try {
-      r = await fetch(path, {
+      r = await fetch(BASE + path, {
         method: "POST", headers: { ...H, "content-type": "application/json" },
         body: JSON.stringify(body || {}),
       });
@@ -101,7 +117,7 @@
   async function sse(path, body, handlers) {
     let res;
     try {
-      res = await fetch(path, {
+      res = await fetch(BASE + path, {
         method: "POST", headers: { ...H, "content-type": "application/json" },
         body: JSON.stringify(body || {}),
       });
@@ -110,20 +126,31 @@
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
+    const dispatch = (raw) => {
+      const ev = parseSSE(raw);
+      if (handlers[ev.event]) handlers[ev.event](ev.data);
+    };
+    const pump = () => {
+      let i;
+      while ((i = buf.indexOf("\n\n")) !== -1) {
+        dispatch(buf.slice(0, i));
+        buf = buf.slice(i + 2);
+      }
+    };
     for (;;) {
       let chunk;
       try { chunk = await reader.read(); }
       catch (e) { markDisconnected(); throw e; }  // stream cut = server gone
       const { value, done } = chunk;
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let i;
-      while ((i = buf.indexOf("\n\n")) !== -1) {
-        const ev = parseSSE(buf.slice(0, i));
-        buf = buf.slice(i + 2);
-        if (handlers[ev.event]) handlers[ev.event](ev.data);
+      if (done) {
+        buf += dec.decode();
+        pump();
+        break;
       }
+      buf += dec.decode(value, { stream: true });
+      pump();
     }
+    if (buf.trim()) dispatch(buf);
   }
 
   // --- navigation --------------------------------------------------------
@@ -134,6 +161,22 @@
   async function refresh() { S = await getJSON("/api/state"); render(); }
   async function boot() {
     S = await getJSON("/api/state");
+    if (HOSTED) {
+      // The unified app already welcomed the user and owns the home screen.
+      welcomed = true;
+      hostedChrome();
+      if (S.finished) { location.href = "/#/"; return; }
+      // Edit-an-existing-team deep link: /setup/?open=<source path> jumps
+      // straight into the open-mode conversation (cards pre-filled).
+      const openPath = new URLSearchParams(location.search).get("open");
+      if (openPath && S.stage === "start") {
+        const r = await postJSON("/api/start",
+          { mode: "open", location: openPath, team_path: openPath });
+        if (r.ok) { S = r.data; } else { toast(r.data.error || "couldn't open the team"); }
+      }
+      render();
+      return;
+    }
     // A finished session returns to the hub; so do returning users who already
     // have teams and aren't mid-setup. New users get the welcome on-ramp.
     if (S.finished) {
@@ -143,6 +186,11 @@
       catch { /* no hub — fall through to the welcome on-ramp */ }
     }
     render();
+  }
+  // Hosted titlebar: the address chip becomes the way back to the dashboard.
+  function hostedChrome() {
+    const addr = document.querySelector(".titlebar .addr");
+    if (addr) addr.innerHTML = '<a class="addr-back" href="/#/">&larr; dashboard</a>';
   }
   async function go(stage) {
     const r = await postJSON("/api/advance", { to: stage });
@@ -163,6 +211,7 @@
   // entry), so its Back routes by where it was entered from: back to the team
   // hub, or to the welcome on-ramp on first run.
   function introBack() {
+    if (HOSTED) { location.href = "/#/"; return; }
     if (introFrom === "hub") { atHome = true; render(); }
     else { welcomed = false; render(); }
   }
@@ -170,6 +219,7 @@
   // welcome screen both call this. The hub overlays any stage and is re-entrant,
   // so leaving mid-flow is safe; the server keeps each team's state.
   function goHome() {
+    if (HOSTED) { location.href = "/#/"; return; }
     if (atHome) { renderHome(); return; }
     atHome = true; welcomed = true;   // don't fall back to the welcome on-ramp
     building = false; buildGen++;      // supersede any in-flight build
@@ -272,7 +322,7 @@
           ? `Log in so your agents can run. In your terminal:`
           : `Install the Claude Code CLI, then log in. In your terminal:`}</p>
         <div class="cmd"><span class="pr">$</span> <span class="cmd-text">${esc(hs.login_command)}</span>
-          <button class="cmd-copy" id="harness-copy" title="Copy">Copy</button></div>
+          <button class="cmd-copy" data-copycmd title="Copy">Copy</button></div>
       </div>`;
     return `
       <div class="harness-rows">
@@ -300,11 +350,7 @@
     }
     card.classList.toggle("harness-warn", !hs.authenticated);
     card.innerHTML = harnessCardHTML(hs);
-    const copy = $("#harness-copy");
-    if (copy) copy.addEventListener("click", async () => {
-      try { await navigator.clipboard.writeText(hs.login_command); toast("Copied."); }
-      catch { toast("Copy failed — select the command manually."); }
-    });
+    // Copy goes through the delegated [data-copycmd] handler — one code path.
     $("#harness-recheck").addEventListener("click", loadHarness);
   }
 
@@ -312,12 +358,15 @@
   // Two ways in: start from a registry "template" (download + reverse-fill,
   // non-lossy edit) or design a new team from scratch (auto-named in chat).
   // Modify-an-existing-team will return later in a different shape.
-  let introRegistry = null, introBase = "bobi", introLoc = "";
+  let introRegistry = null, introBase = "bobi", introLoc = "", introLocChanged = false;
+  let introSourceRoots = [];
   async function renderIntro() {
     setPanes("1fr");
     const data = await getJSON("/api/intro");
     introBase = data.default_location || introBase;
     introLoc = introBase;
+    introSourceRoots = data.source_roots || [];
+    introLocChanged = false;
     drawIntro();
     loadTemplates();
   }
@@ -344,6 +393,10 @@
           <span class="locbox-path" id="loc-path" title="${esc(introLoc)}">${esc(introLoc)}</span>
           <button type="button" class="btn ghost xs" id="loc-change">Change…</button>
         </div>
+        <div class="source-roots">
+          <div class="source-roots-head"><span>Team source folders</span><button type="button" class="linkbtn" id="source-add">Add folder</button></div>
+          <div class="source-root-list">${sourceRootsHTML()}</div>
+        </div>
       </section>
 
       <section class="isec">
@@ -353,6 +406,12 @@
       </section>
     </main>`;
     wireIntro();
+  }
+  function sourceRootsHTML() {
+    if (!introSourceRoots.length) return `<span class="source-root muted">No source folders configured.</span>`;
+    return introSourceRoots.map(p =>
+      `<span class="source-root" title="${esc(p)}">${esc(p)}</span>`
+    ).join("");
   }
   // Templates come from the configured registries (lazy / network-backed), so
   // the intro paints immediately and fills the list in when they arrive.
@@ -397,7 +456,17 @@
   function wireIntro() {
     const lc = $("#loc-change");
     if (lc) lc.addEventListener("click", () => openFolderPicker(p => {
-      introLoc = p; const lp = $("#loc-path"); if (lp) { lp.textContent = p; lp.title = p; }
+      introLoc = p; introLocChanged = true;
+      const lp = $("#loc-path"); if (lp) { lp.textContent = p; lp.title = p; }
+    }));
+    const add = $("#source-add");
+    if (add) add.addEventListener("click", () => openFolderPicker(async p => {
+      const r = await postJSON("/api/source-roots", { dir: p });
+      if (!r.ok) { toast(r.data.error || "couldn't add folder"); return; }
+      introSourceRoots = r.data.source_roots || [];
+      const list = $(".source-root-list");
+      if (list) list.innerHTML = sourceRootsHTML();
+      toast("Source folder added");
     }));
   }
   // Shared start path: disables the clicked control, posts, advances on success.
@@ -533,11 +602,14 @@
     // The Connections slot counts only when every implied service is truly
     // connected (not merely "named") — the brain's readiness can't see live auth.
     const connOk = servicesSettled(sp);
-    const cards = [goalCard(sp), rolesCard(sp), automationsCard(sp),
-                   connectionsCard(sp), chatCard()];
-    const keys = ["goal", "roles", "autonomous", "services", "chat"];
+    // Workflows is an OPTIONAL card — it renders and celebrates like the
+    // others but never counts toward the N/5 gathered meter.
+    const cards = [goalCard(sp), rolesCard(sp), workflowsCard(sp),
+                   automationsCard(sp), connectionsCard(sp), chatCard()];
+    const keys = ["goal", "roles", "workflows", "autonomous", "services", "chat"];
     const doneNow = {
       goal: sp.readiness.goal === "enough", roles: sp.readiness.roles === "enough",
+      workflows: !!(sp.workflows || []).length || !!sp.workflows_confirmed,
       autonomous: sp.readiness.autonomous === "enough", services: connOk, chat: !!S.chat,
     };
     // Reconcile per card: only re-create the cards whose markup actually changed,
@@ -585,10 +657,43 @@
     }
     _prevGathered = gathered;
     const ready = gathered === 5;
+    // Finish is a soft gate: always clickable, but an incomplete spec gets a
+    // "you sure?" confirmation instead of a grayed-out button. The only hard
+    // floor left is server-side (the goal must be non-empty to build).
     const foot = $("#uni-foot");
-    if (foot) foot.innerHTML = ready
-      ? `<button class="btn primary" data-go="build">Finish →</button>`
-      : `<span class="uni-note">bobi is gathering goal, roles, automations, connections, and chat</span>`;
+    if (foot) {
+      const html = (ready ? ""
+        : `<span class="uni-note">bobi is gathering goal, roles, automations, connections, and chat</span>`)
+        + `<button class="btn primary" id="uni-finish">Finish →</button>`;
+      // Rebuild only on change — SSE-driven re-renders must not recreate the
+      // button mid-press (killing focus and eating the click).
+      if (foot.innerHTML !== html) {
+        foot.innerHTML = html;
+        $("#uni-finish").addEventListener("click", () =>
+          _lastReady ? go("build") : confirmFinish(_lastGathered));
+      }
+      _lastReady = ready; _lastGathered = gathered;
+    }
+  }
+  let _lastReady = false, _lastGathered = 0;
+  // The not-everything-gathered confirmation before an early Finish.
+  function confirmFinish(gathered) {
+    const ov = document.createElement("div");
+    ov.className = "secret-ov"; ov.id = "finish-ov";
+    ov.innerHTML = `<div class="secret-panel">
+      <div class="sp-head"><b>Finish early?</b><button class="btn ghost sm" id="fin-close">Close</button></div>
+      <div class="sp-body">
+        <p class="pd">You haven't completed all the agent setup — ${gathered} of 5 gathered so far. bobi fills reasonable gaps at build, and you can reopen the team to keep editing anytime. Are you sure you want to move on?</p>
+        <div class="sp-actions">
+          <button class="btn ghost sm" id="fin-stay">Keep setting up</button>
+          <button class="btn primary sm" id="fin-go">Move on →</button>
+        </div>
+      </div></div>`;
+    document.body.appendChild(ov);
+    ov.addEventListener("click", e => {
+      if (e.target.id === "fin-close" || e.target.id === "fin-stay" || e.target === ov) { ov.remove(); return; }
+      if (e.target.id === "fin-go") { ov.remove(); go("build"); }
+    });
   }
   // The current interview phase, shown so the user always knows where bobi is
   // and that it's moving methodically. S.phase is "goal" | "role:<name>" |
@@ -605,7 +710,8 @@
       label = "interviewing · " + name;
       if (roles.length) sub = `role ${(idx < 0 ? roles.length : idx + 1)} of ${roles.length}`;
     } else {
-      label = ({ goal: "setting the goal", automations: "automations",
+      label = ({ goal: "setting the goal", workflows: "designing workflows",
+                 automations: "automations",
                  connections: "connections", wrap: "wrapping up" }[p]) || p;
     }
     el.innerHTML = `<span class="ph-dot"></span><span class="ph-lab">${esc(label)}</span>${sub ? `<span class="ph-sub">${esc(sub)}</span>` : ""}`;
@@ -657,12 +763,34 @@
       <div class="ud">${body}</div>
       <div class="uadd"><button class="lnk add" data-addrole>+ add a role</button></div></div>`;
   }
+  // Workflows — optional, proposed by bobi once the roles settle. Click a
+  // flow to read its generated YAML (the dark-slab popup); refinements go
+  // through the conversation, so there's no structured editor here.
+  function workflowsCard(sp) {
+    const items = sp.workflows || [];
+    const settled = !!items.length || !!sp.workflows_confirmed;
+    const body = items.length
+      ? items.map((w, i) => {
+          const hitl = (w.steps || []).some(s => s && s.hitl);
+          const n = (w.steps || []).length;
+          return `<div class="urole click" data-wfopen="${i}">
+            <div class="urow"><b>${esc(w.name || "workflow")}</b>${hitl ? `<span class="wf-hitl" title="pauses for human approval">human gate</span>` : ""}</div>
+            <span>${esc(w.trigger || w.description || "")}${n ? ` · ${n} step${n === 1 ? "" : "s"}` : ""}</span></div>`;
+        }).join("")
+      : (sp.workflows_confirmed
+          ? `<span class="ph">no set flows — bobi handles work ad hoc</span>`
+          : `<span class="ph">bobi proposes repeatable flows once the roles are set</span>`);
+    return `<div class="ucard ${settled ? "filled" : "empty"}">
+      <div class="ut">Workflows <span class="ut-opt">optional</span></div>
+      <div class="ud">${body}</div>
+      <div class="uadd"><button class="lnk add" data-addwf>+ add a workflow</button></div></div>`;
+  }
   function automationsCard(sp) {
     const items = sp.autonomous || [];
     const body = items.length
       ? items.map((a, i) => `<div class="urole click" data-autoopen="${i}">
           <div class="urow"><b>${esc(a.description || "behavior")}</b></div>
-          <span>${esc(a.leash || "")}${a.cadence ? " · " + esc(a.cadence) : ""}${a.role ? " · " + esc(a.role) : ""}</span></div>`).join("")
+          <span>${esc(a.leash || "")}${a.trigger === "event" ? " · on event" : ""}${a.cadence ? " · " + esc(a.cadence) : ""}${a.role ? " · " + esc(a.role) : ""}</span></div>`).join("")
       : (sp.autonomous_confirmed
           ? `<span class="ph">nothing proactive — bobi acts only when asked</span>`
           : `<span class="ph">anything bobi should do on its own?</span>`);
@@ -695,11 +823,27 @@
     // Venn is ONE account-level connection many services share — pinned as the
     // top row (shown whenever we have connection data) so it can be set up /
     // managed first; the per-service rows follow.
+    const ingress = ingressRow();
     const venn = cards ? vennAccountRow(vennConfigured) : "";
     return `<div class="ucard ${(sp.services || []).length ? "filled" : "empty"}">
       <div class="ut">Connections ${slotDot(ok)}</div>
-      <div class="ud">${venn}${body}</div>
+      <div class="ud">${ingress}${venn}${body}</div>
       <div class="uadd"><button class="lnk add" data-addconn>+ add a connection</button></div></div>`;
+  }
+  function ingressRow() {
+    const ing = S.ingress || { mode: "local", url: "", verified: false };
+    const label = INGRESS_LABELS[ing.mode] || "Ingress";
+    const detail = ing.mode === "local"
+      ? "loopback only"
+      : (ing.url || "needs URL");
+    const badge = ing.verified
+      ? `<span class="cbadge connected">${CHECK} verified</span>`
+      : ing.error
+      ? `<span class="cbadge warn">check failed</span>`
+      : `<span class="cbadge">not checked</span>`;
+    return `<div class="uconn ingress-row">
+      <span><b>Webhook ingress</b><span class="ctag">${esc(label)} · ${esc(detail)}</span></span>
+      <span class="cright">${badge}<button class="lnk" data-ingressopen>Configure</button></span></div>`;
   }
   // Account-level Venn: one connection the user manages globally; any number of
   // Venn-backed services (Gmail, Slack, Salesforce…) are reached through it. One
@@ -808,10 +952,144 @@
     _connData = await getJSON("/api/connect");
     renderUniCards();
   }
+  function connectionRefreshSig() {
+    const spec = (S && S.spec) || {};
+    const services = spec.services || [];
+    const mcpServers = spec.mcp_servers || {};
+    if (!services.length && !Object.keys(mcpServers).length) return "";
+    return JSON.stringify({
+      services: services.map(s => (s && s.name) || s),
+      mcp_servers: mcpServers,
+    });
+  }
+  function runUniConnectionsRefresh(sig) {
+    _connRefreshSig = sig;
+    _connRefreshPending = true;
+    refreshUniConnections()
+      .catch(() => {
+        if (_connRefreshSig === sig) _connRefreshSig = "";
+      })
+      .finally(() => {
+        _connRefreshPending = false;
+        const next = _connRefreshNextSig;
+        _connRefreshNextSig = "";
+        if (next && next !== _connRefreshSig) runUniConnectionsRefresh(next);
+        else if (!next && !connectionRefreshSig()) {
+          _connRefreshSig = "";
+          _connData = null;
+          renderUniCards();
+        }
+      });
+  }
+  function requestUniConnectionsRefresh() {
+    const sig = connectionRefreshSig();
+    if (!sig) {
+      _connRefreshSig = "";
+      _connRefreshNextSig = "";
+      _connData = null;
+      renderUniCards();
+      return;
+    }
+    if (_connRefreshPending) {
+      if (sig !== _connRefreshSig) _connRefreshNextSig = sig;
+      else _connRefreshNextSig = "";
+      return;
+    }
+    if (sig === _connRefreshSig) return;
+    runUniConnectionsRefresh(sig);
+  }
   async function setChat(key) {
     const r = await postJSON("/api/chat", { channel: key });
     if (!r.ok) { toast(r.data.error || "couldn't set"); return; }
     S = r.data; renderUniCards();
+  }
+
+  function openIngressModal() {
+    const cur = S.ingress || { mode: "local", url: "" };
+    const ov = document.createElement("div");
+    ov.className = "secret-ov";
+    ov.id = "ingress-ov";
+    const team = S.team_name || "<name>";
+    ov.innerHTML = `<div class="secret-panel ingress-panel">
+      <div class="sp-head"><b>Webhook ingress</b><button class="x" id="ingress-close">×</button></div>
+      <div class="sp-body">
+        <p class="fhelp">Pick how GitHub, Slack, and Linear can reach the event server. Local-only is fine for command-line teams; webhook services need an internet-facing HTTPS URL.</p>
+        <div class="ingress-options">
+          ${ingressOption("local", "Local only", "No public webhooks. Bobi auto-starts loopback when the team runs.")}
+          ${ingressOption("quick_tunnel", "Quick tunnel", "Fast local test with cloudflared or ngrok in front of localhost:8080.")}
+          ${ingressOption("bobi_cloud", "Bobi cloud", "Durable shared Worker for hosted webhook delivery.")}
+          ${ingressOption("custom_worker", "Custom Worker", "Durable event server you operate, usually a Cloudflare Worker.")}
+        </div>
+        <div id="ingress-fields"></div>
+        <div class="sp-actions"><button class="btn primary sm" id="ingress-save">Verify & save</button></div>
+        <div class="mcp-status" id="ingress-status"></div>
+      </div></div>`;
+    document.body.appendChild(ov);
+    let mode = cur.mode || "local";
+    ov.addEventListener("click", e => {
+      if (e.target.id === "ingress-close" || e.target === ov) { ov.remove(); return; }
+      const opt = e.target.closest("[data-ingressmode]");
+      if (opt) { mode = opt.dataset.ingressmode; draw(); return; }
+    });
+    $("#ingress-save").addEventListener("click", () => verifyIngress(mode, ov));
+    function draw() {
+      ov.querySelectorAll("[data-ingressmode]").forEach(b => b.classList.toggle("on", b.dataset.ingressmode === mode));
+      const url = cur.mode === mode ? (cur.url || "") : "";
+      let html = "";
+      if (mode === "local") {
+        html = `<div class="ingress-note">
+          <b>Local-only event server</b>
+          <span>Run <code>bobi agent ${esc(team)} start</code>. Bobi will start the loopback server automatically; external webhook providers cannot reach it.</span>
+        </div>`;
+      } else if (mode === "quick_tunnel") {
+        html = `<div class="ingress-note">
+          <b>Quick tunnel</b>
+          <span>Start the local event server, run a tunnel, then paste its HTTPS URL. The empty env override forces loopback startup even if a remote URL was previously saved.</span>
+          <div class="cmd mini"><span class="pr">$</span><span class="cmd-text">BOBI_EVENT_SERVER= bobi agent ${esc(team)} event-server start
+cloudflared tunnel --url http://127.0.0.1:8080</span></div>
+        </div>
+        <label class="fld"><span class="flab">Tunnel URL</span>
+          <input id="ingress-url" placeholder="https://example.trycloudflare.com" autocomplete="off" value="${esc(url)}"></label>`;
+      } else if (mode === "bobi_cloud") {
+        html = `<div class="ingress-note">
+          <b>Bobi cloud Worker</b>
+          <span>Setup will verify the shared Worker and save it as <code>BOBI_EVENT_SERVER</code> for this agent.</span>
+        </div>`;
+      } else {
+        html = `<div class="ingress-note">
+          <b>Custom Worker</b>
+          <span>Use your own deployed event server. Verification checks <code>/health</code> before saving.</span>
+        </div>
+        <label class="fld"><span class="flab">Event server URL</span>
+          <input id="ingress-url" placeholder="https://events.example.workers.dev" autocomplete="off" value="${esc(url)}"></label>`;
+      }
+      $("#ingress-fields").innerHTML = html;
+      $("#ingress-save").textContent = mode === "local" ? "Use local only" : "Verify & save";
+      const inp = $("#ingress-url");
+      if (inp) inp.addEventListener("keydown", e => {
+        if (e.key === "Enter") { e.preventDefault(); verifyIngress(mode, ov); }
+      });
+    }
+    draw();
+  }
+  function ingressOption(mode, label, sub) {
+    return `<button class="ingress-opt" type="button" data-ingressmode="${mode}">
+      <b>${esc(label)}</b><span>${esc(sub)}</span></button>`;
+  }
+  async function verifyIngress(mode, ov) {
+    const st = $("#ingress-status");
+    const url = ($("#ingress-url") && $("#ingress-url").value || "").trim();
+    st.innerHTML = `<div class="fhelp"><span class="spin"></span> Checking ingress…</div>`;
+    const r = await postJSON("/api/ingress/verify", { mode, url });
+    if (!r.ok || !r.data.ok) {
+      st.innerHTML = `<div class="mcp-err">${esc((r.data && (r.data.error || r.data.message)) || "couldn't verify ingress")}</div>`;
+      if (r.data && r.data.state) { S = r.data.state; renderUniCards(); }
+      return;
+    }
+    S = r.data.state;
+    renderUniCards();
+    ov.remove();
+    toast("ingress verified");
   }
 
   // --- conversation ------------------------------------------------------
@@ -840,6 +1118,17 @@
     if (extra) html += extra;
     body.innerHTML = html;
     body.scrollTop = body.scrollHeight;
+  }
+  function reconcileUserBubbles() {
+    const chbody = $("#chbody");
+    const youEls = chbody ? chbody.querySelectorAll(".msg.you") : [];
+    let yi = 0;
+    for (const m of (S && S.messages) || []) {
+      if (m.role === "user") {
+        if (youEls[yi] && youEls[yi].textContent !== m.content) youEls[yi].textContent = m.content;
+        yi++;
+      }
+    }
   }
   // A typewriter that reveals buffered text character-by-character regardless
   // of how chunky the network deltas are. Honors reduced-motion.
@@ -885,7 +1174,12 @@
       redacted: () => toast("Scrubbed a secret from that message — add credentials in the connection setup, not the chat."),
       delta: (d) => tw.push(d.text),
       error: (d) => toast(d.message || "something broke"),
-      state: (st) => { S = st; },
+      state: (st) => {
+        S = st;
+        reconcileUserBubbles();
+        renderUniCards();
+        requestUniConnectionsRefresh();
+      },
     });
     await tw.finish();
     streaming = false;
@@ -900,21 +1194,13 @@
       if (finalText) { sb.textContent = finalText; sb.removeAttribute("id"); }
       else sb.remove();
       // Reconcile user bubbles with authoritative server state (handles redaction).
-      const chbody = $("#chbody");
-      const youEls = chbody ? chbody.querySelectorAll(".msg.you") : [];
-      let yi = 0;
-      for (const m of S.messages) {
-        if (m.role === "user") {
-          if (youEls[yi] && youEls[yi].textContent !== m.content) youEls[yi].textContent = m.content;
-          yi++;
-        }
-      }
+      reconcileUserBubbles();
     } else {
       renderMessages();
     }
     updateCue();
     renderUniCards();
-    if ((S.spec.services || []).length) refreshUniConnections();
+    requestUniConnectionsRefresh();
     if (pendingSend) { const m = pendingSend; pendingSend = null; sendMessage(m); }
   }
 
@@ -923,7 +1209,7 @@
   let editSecrets = new Set();   // secret vars temporarily re-opened for editing
   // Copy a saved credential to the clipboard without ever showing it on screen.
   async function copySecret(varName) {
-    const r = await fetch("/api/credential/value?var=" + encodeURIComponent(varName), { headers: H });
+    const r = await fetch(BASE + "/api/credential/value?var=" + encodeURIComponent(varName), { headers: H });
     if (!r.ok) { toast("nothing to copy"); return; }
     const { value } = await r.json();
     try { await navigator.clipboard.writeText(value); toast(`${varName} copied`); }
@@ -1087,7 +1373,7 @@
         <p class="pd">Paste your Venn API key. bobi pulls in the services
         you've connected in Venn — pick which ones this team should use.</p>
         <ol class="steps">
-          <li>Sign in at app.venn.ai and create an API key (Settings → API).</li>
+          <li>Sign in at <a class="doclink" href="https://app.venn.ai" target="_blank" rel="noopener">app.venn.ai</a> and create an API key (Settings → API).</li>
           <li>Connect the services you want in Venn (one-click OAuth).</li>
           <li>Paste the key below.</li>
         </ol>
@@ -1315,8 +1601,20 @@
       toast(r.ok ? "Opened the team folder." : (r.data.error || "couldn't open the folder"));
     });
     $("#fd-finish").addEventListener("click", async () => {
-      const b = $("#fd-finish"); b.disabled = true; b.textContent = "Finishing…";
-      try { await postJSON("/api/finish", {}); } catch { /* ignore */ }
+      const b = $("#fd-finish"); b.disabled = true;
+      // Finish marks the state complete; launching stays a deliberate action
+      // in both modes (the hosted on_finish redirects, it does not launch).
+      b.textContent = "Finishing…";
+      let r = null;
+      try { r = await postJSON("/api/finish", {}); } catch { /* ignore */ }
+      const d = (r && r.data) || {};
+      if (d.redirect) {
+        // Launched — back to the unified app (dashboard / agent view).
+        _finished = true;
+        location.href = d.redirect;
+        return;
+      }
+      if (d.launch_error) toast("Launch failed: " + d.launch_error);
       renderFinished();
     });
 
@@ -1352,50 +1650,191 @@
     });
   }
 
-  // Final screen after Finish. The server now stays alive (the homepage is a
-  // re-entrant hub), so its buttons can talk to it: copy/run the start command,
-  // link to cloud docs, and head to the homepage.
+  // Final screen after Finish: "All set" on one line, then a next-steps
+  // carousel — one full card per step (test locally / deploy / finalize
+  // Slack), cycled forward and back. The server stays alive through this
+  // screen (the Slack step saves a channel and sends a real test message);
+  // "Close & end setup" is what actually stops it, via /api/shutdown.
+  let nsIndex = 0;
+  let nsSlackDraft = "";   // unsaved channel input, kept across carousel nav
+  function cmdRow(label, cmd) {
+    return `<div class="cmd-item">${label ? `<span class="cmd-k">${esc(label)}</span>` : ""}
+      <div class="cmd"><span class="pr">$</span> <span class="cmd-text">${esc(cmd)}</span>
+        <button class="cmd-copy" data-copycmd title="Copy">Copy</button></div></div>`;
+  }
+  // A paste-into-your-agent prompt (Claude Code / Codex), styled like a command.
+  function promptRow(text) {
+    return `<div class="cmd prompt"><span class="cmd-text">${esc(text)}</span>
+      <button class="cmd-copy" data-copycmd title="Copy">Copy</button></div>`;
+  }
+  // Keep in lockstep with bobi/templates/slack-app.manifest.yaml (scopes.bot)
+  // — the manifest is the source of truth that create-slack-bot prefills.
+  const SLACK_SCOPES = ["app_mentions:read", "channels:history",
+    "channels:read", "chat:write", "files:read", "files:write",
+    "groups:history", "groups:read", "im:history", "im:read", "im:write",
+    "mpim:history", "users:read"];
+  function nsSteps() {
+    const name = agentCommandName();
+    const teamSlug = slugify(S.team_name) || "your-team";
+    const steps = [{
+      key: "test", label: "Test locally",
+      title: "Take it for a spin in your terminal",
+      html: `
+        <p class="ns-lede">Your team runs on this machine with one command. Open a fresh terminal and work through these:</p>
+        <div class="cmdlist">
+          ${cmdRow("turn it on", `bobi agent ${name} start`)}
+          ${cmdRow("check its health", `bobi agent ${name} status`)}
+          ${cmdRow("ask it a question", `bobi agent ${name} ask "what can you do?"`)}
+          ${cmdRow("give it a task", `bobi agent ${name} message "introduce yourself and list your roles"`)}
+          ${cmdRow("watch what it's doing", `bobi agent ${name} events`)}
+          ${cmdRow("stop / restart anytime", `bobi agent ${name} restart`)}
+        </div>`,
+    }, {
+      key: "deploy", label: "Deploy",
+      title: "Deploy it somewhere that stays awake",
+      html: `
+        <p class="ns-lede">Two good homes. Either way, ask Claude Code or Codex to do the wiring — copy a prompt below and paste it into your coding agent.</p>
+        <div class="deploy">
+          <div class="deploy-opt">
+            <div class="deploy-head"><span class="deploy-tag">Local</span><span class="deploy-sub">this machine, a Mac mini, or a server you own</span></div>
+            <p class="deploy-lede">Reuses the Claude Code login you already have.</p>
+            ${promptRow(`Help me run my bobi agent team "${name}" as an always-on service on this machine: configure its event server so it can receive webhooks, and make "bobi agent ${name} start" survive reboots. The framework docs are at https://github.com/moda-labs/bobi-agent (see docs/EVENT_SERVER.md).`)}
+          </div>
+          <div class="deploy-opt">
+            <div class="deploy-head"><span class="deploy-tag">Cloud</span><span class="deploy-sub">always-on, on Fly.io</span></div>
+            <p class="deploy-lede">A dedicated container + volume + secrets; the instance needs its own <span class="mono">ANTHROPIC_API_KEY</span>.</p>
+            ${promptRow(`Read ${DOCS_CLOUD_URL} and deploy my bobi agent team "${teamSlug}" to Fly.io using scripts/provision-instance.sh. Walk me through the env file and secrets it needs.`)}
+            <p class="deploy-note"><a class="exlink" href="${DOCS_CLOUD_URL}" target="_blank" rel="noopener">Full runbook →</a></p>
+          </div>
+        </div>`,
+    }];
+    if (S.chat === "slack") {
+      const savedCh = (S.credentials_saved || []).includes("SLACK_CHANNELS");
+      // A verified non-local ingress (the ingress wizard) already IS the
+      // event server Slack calls — show the concrete Request URL instead of
+      // the contradictory "deploy first" placeholder copy.
+      const ing = S.ingress || {};
+      const ingUrl = (ing.verified && ing.mode !== "local" && ing.url)
+        ? ing.url.replace(/\/+$/, "") + "/webhooks/slack" : "";
+      const urlSteps = ingUrl
+        ? `<li>Your event server is already verified. At <a class="exlink" href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a> → your app → <b>Event Subscriptions</b>, set the Request URL to <span class="mono">${esc(ingUrl)}</span>.</li>`
+        : `<li>Deploy first (previous step) — your event server's public URL is what Slack calls.</li>
+            <li>At <a class="exlink" href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a> → your app → <b>Event Subscriptions</b>, set the Request URL to <span class="mono">&lt;your event server&gt;/webhooks/slack</span>.</li>`;
+      steps.push({
+        key: "slack", label: "Finalize Slack",
+        title: "Finish wiring Slack",
+        html: `
+          <p class="ns-lede">${ingUrl ? "" : "After you deploy, "}Slack needs to know where to send events — then your team is reachable in your workspace.</p>
+          <ol class="ns-list">
+            ${urlSteps}
+            <li>Install the app to your workspace with the scopes below (the <span class="mono">bobi create-slack-bot</span> manifest prefills them).</li>
+            <li>Invite the bot to a dedicated channel (<span class="mono">/invite @your-bot</span>), then save that channel here.</li>
+          </ol>
+          <div class="scopes">${SLACK_SCOPES.map(s => `<b>${esc(s)}</b>`).join("")}</div>
+          <div class="slackrow">
+            <input id="ns-slackch" aria-label="Slack channel" placeholder="#channel or channel ID (C…)" autocomplete="off" value="${esc(nsSlackDraft)}">
+            <button class="btn ghost xs" id="ns-slacksave">Save</button>
+            <button class="btn primary xs" id="ns-slacktest">Send a test message</button>
+          </div>
+          <div class="ns-slackstatus${savedCh ? " ok" : ""}" id="ns-slackstatus">${savedCh ? "✓ channel saved" : ""}</div>`,
+      });
+    }
+    return steps;
+  }
   function renderFinished() {
     setPanes("1fr");
-    const agentName = agentCommandName();
-    const startCmd = `bobi agent ${agentName} start`;
+    nsIndex = 0;
+    const where = S.source_dir || "$BOBI_HOME/agents/" + agentCommandName() + "/src";
     $("#main").innerHTML = `<main class="done-wrap">
-      <div class="seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L19 7"/></svg></div>
-      <div class="eyebrow">All set</div>
-      <h1>${esc(S.team_name || "your team")} is ready</h1>
-      <p class="lede">Installed into <code>run/package/</code>.</p>
-
-      <p class="done-h">Run it — pick where</p>
-      <p class="lede">Your team needs an agent harness wherever it runs. Locally it reuses the Claude Code login you already have; in the cloud the instance gets its own.</p>
-
-      <div class="deploy">
-        <div class="deploy-opt">
-          <div class="deploy-head"><span class="deploy-tag">Local</span><span class="deploy-sub">on this machine</span></div>
-          <p class="deploy-lede">Open a fresh terminal and turn your team on.</p>
-          <div class="cmd"><span class="pr">$</span> <span class="cmd-text">${esc(startCmd)}</span>
-            <button class="cmd-copy" id="copy-start" title="Copy">Copy</button></div>
-        </div>
-        <div class="deploy-opt">
-          <div class="deploy-head"><span class="deploy-tag">Cloud</span><span class="deploy-sub">always-on, on Fly</span></div>
-          <p class="deploy-lede">Provision a dedicated instance (container + volume + secrets).</p>
-          <div class="cmd"><span class="pr">$</span> <span class="cmd-text">scripts/provision-instance.sh --app you-bobi --team ${esc(slugify(S.team_name) || "your-team")} --env-file ./instance.env</span>
-            <button class="cmd-copy" id="copy-deploy" title="Copy">Copy</button></div>
-          <p class="deploy-note">The instance needs its own <span class="mono">ANTHROPIC_API_KEY</span> (or a subscription login) in <span class="mono">instance.env</span>. <a class="exlink" href="${DOCS_CLOUD_URL}" target="_blank" rel="noopener">Full runbook →</a></p>
+      <div class="done-head">
+        <div class="seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L19 7"/></svg></div>
+        <div class="done-head-copy"><div class="eyebrow">All set</div>
+          <h1>${esc(S.team_name || "your team")} is ready</h1></div>
+      </div>
+      <p class="lede">Your agent team is created on this machine — source at <code>${esc(where)}</code>, installed into its <code>run/package/</code>. Two things left: try it, then deploy it.</p>
+      <div class="ns-bar">
+        <div class="ns-dots" id="ns-dots"></div>
+        <div class="ns-nav">
+          <button class="btn ghost xs" id="ns-prev">← Previous</button>
+          <button class="btn primary xs" id="ns-next">Next →</button>
         </div>
       </div>
-
-      <div class="actions" style="margin-top:26px"><button class="btn primary" id="done-home">Done →</button></div>
+      <section class="ns-step" id="ns-step"></section>
+      <div class="ns-exit">
+        <button class="btn ghost" id="ns-home">${HOSTED ? "Go to dashboard" : "Go to homepage"}</button>
+        ${HOSTED ? "" : `<button class="btn ghost" id="ns-close">Close &amp; end setup</button>`}
+      </div>
     </main>`;
-    $("#copy-start").addEventListener("click", async () => {
-      try { await navigator.clipboard.writeText(startCmd); toast("Copied."); }
-      catch { toast("Copy failed — select the command manually."); }
+    drawNsStep();
+    $("#ns-prev").addEventListener("click", () => { if (nsIndex > 0) { nsIndex--; drawNsStep(); } });
+    $("#ns-next").addEventListener("click", () => {
+      if (nsIndex < nsSteps().length - 1) { nsIndex++; drawNsStep(); }
+      else { goHome(); }
     });
-    $("#copy-deploy").addEventListener("click", async () => {
-      const cmd = $(".cmd-text", $("#copy-deploy").closest(".cmd")).textContent;
-      try { await navigator.clipboard.writeText(cmd); toast("Copied."); }
-      catch { toast("Copy failed — select the command manually."); }
+    $("#ns-home").addEventListener("click", goHome);
+    const nsClose = $("#ns-close");
+    if (nsClose) nsClose.addEventListener("click", endSession);
+  }
+  function drawNsStep() {
+    const steps = nsSteps();
+    const s = steps[nsIndex];
+    $("#ns-dots").innerHTML = steps.map((st, i) =>
+      `<button class="ns-dot ${i === nsIndex ? "on" : ""}" data-nsgo="${i}">
+        <span class="ns-dot-n">${i + 1}</span>${esc(st.label)}</button>`).join("");
+    $("#ns-step").innerHTML = `
+      <div class="ns-eyebrow">Step ${nsIndex + 1} of ${steps.length}</div>
+      <h2>${esc(s.title)}</h2>${s.html}`;
+    $("#ns-prev").disabled = nsIndex === 0;
+    $("#ns-next").textContent = nsIndex === steps.length - 1 ? "Done →" : "Next →";
+    if (s.key === "slack") wireSlackStep();
+  }
+  function wireSlackStep() {
+    // kind: "ok" (confirmed success, green) | "err" (red) | "busy" (muted) —
+    // in-flight copy must not pre-announce success in green.
+    const status = (msg, kind) => { const el = $("#ns-slackstatus");
+      if (el) { el.textContent = msg;
+        el.classList.toggle("err", kind === "err");
+        el.classList.toggle("ok", kind === "ok"); } };
+    $("#ns-slackch").addEventListener("input",
+      e => { nsSlackDraft = e.target.value; });
+    // Disable the pressed button while its request is in flight — a double
+    // click must not post two test messages or race two saves.
+    const oneShot = (btn, fn) => btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try { await fn(); } finally { btn.disabled = false; }
     });
-    $("#done-home").addEventListener("click", () => { atHome = true; renderHome(); });
+    oneShot($("#ns-slacksave"), async () => {
+      const ch = ($("#ns-slackch").value || "").trim();
+      if (!ch) { status("enter a #channel or channel ID first", "err"); return; }
+      status("saving…", "busy");
+      const r = await postJSON("/api/slack/channel", { channel: ch });
+      if (!r.ok) { status(r.data.error || "couldn't save", "err"); return; }
+      if (r.data.state) S = r.data.state;
+      status(`✓ channel saved (${r.data.channel})`, "ok");
+    });
+    oneShot($("#ns-slacktest"), async () => {
+      status("sending…", "busy");
+      const r = await postJSON("/api/slack/test", {});
+      status(r.ok ? "✓ test message sent — check the channel"
+                  : (r.data.error || "test failed"), r.ok ? "ok" : "err");
+    });
+  }
+  // Close & end setup: stop the local server and leave a static goodbye —
+  // nothing left on screen depends on it. Standalone only: hosted in the
+  // unified app the dashboard owns the server's lifecycle (the Close button
+  // isn't rendered there).
+  async function endSession() {
+    _finished = true;   // suppress the disconnect overlay; this exit is chosen
+    try { await postJSON("/api/shutdown", {}); } catch { /* it's exiting */ }
+    setPanes("1fr");
+    $("#main").innerHTML = `<main class="done-wrap ns-bye">
+      <div class="done-head">
+        <div class="seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L19 7"/></svg></div>
+        <div class="done-head-copy"><div class="eyebrow">Setup ended</div>
+          <h1>${esc(S.team_name || "Your team")} is installed</h1></div>
+      </div>
+      <p class="lede">The setup server has stopped — you can close this tab. Start the team anytime with <code>bobi agent ${esc(agentCommandName())} start</code>, or run <code>bobi setup</code> again to keep editing.</p>
+    </main>`;
   }
 
   // --- homepage (the re-entrant team hub) --------------------------------
@@ -1474,6 +1913,7 @@
       roles.map(r => `<option value="${esc(r.name)}" ${a.role === r.name ? "selected" : ""}>${esc(r.name)}</option>`)).join("");
     const leashOpts = [["notify", "notify · just tells you"], ["ask", "ask first · waits for approval"], ["act", "act · does it, reports"]]
       .map(([v, l]) => `<option value="${v}" ${a.leash === v ? "selected" : ""}>${esc(l)}</option>`).join("");
+    const trig = a.trigger === "event" ? "event" : "schedule";
     const ov = document.createElement("div");
     ov.className = "secret-ov"; ov.id = "auto-ov";
     ov.innerHTML = `<div class="secret-panel">
@@ -1483,8 +1923,13 @@
           <textarea id="a-desc" rows="2">${esc(a.description || "")}</textarea></label>
         <label class="fld"><span class="flab">role <span class="fhelp inline">which agent runs it</span></span>
           <select id="a-role">${roleOpts}</select></label>
-        <label class="fld"><span class="flab">when <span class="fhelp inline">a schedule (1d, 15m) or an event</span></span>
-          <input id="a-when" value="${esc(a.cadence || "")}" placeholder="e.g. 1d, 9am daily, when a PR opens" autocomplete="off"></label>
+        <div class="fld"><span class="flab">fires <span class="fhelp inline">on a schedule, or reacting to an event</span></span>
+          <div class="seg" id="a-trigger">
+            <button type="button" class="seg-btn ${trig === "schedule" ? "on" : ""}" data-trig="schedule">on a schedule</button>
+            <button type="button" class="seg-btn ${trig === "event" ? "on" : ""}" data-trig="event">on an event</button>
+          </div></div>
+        <label class="fld"><span class="flab">when <span class="fhelp inline" id="a-when-help"></span></span>
+          <input id="a-when" value="${esc(a.cadence || "")}" autocomplete="off"></label>
         <label class="fld"><span class="flab">leash</span>
           <select id="a-leash">${leashOpts}</select></label>
         <label class="fld"><span class="flab">command <span class="fhelp inline">what the agent is told to do</span></span>
@@ -1492,25 +1937,65 @@
         <div class="sp-actions"><button class="btn primary sm" id="a-save">Save automation</button></div>
       </div></div>`;
     document.body.appendChild(ov);
+    // The trigger segment reshapes the "when" field's hint + placeholder:
+    // schedule = an interval; event = what it reacts to (a webhook-fed event).
+    const syncTrig = () => {
+      const on = ov.querySelector("#a-trigger .seg-btn.on");
+      const isEvent = on && on.dataset.trig === "event";
+      $("#a-when-help").textContent = isEvent
+        ? "the event it reacts to" : "an interval or time";
+      $("#a-when").placeholder = isEvent
+        ? "e.g. when an email arrives, when a PR opens"
+        : "e.g. 1d, 15m, 9am daily";
+    };
+    ov.querySelectorAll("#a-trigger .seg-btn").forEach(b =>
+      b.addEventListener("click", () => {
+        ov.querySelectorAll("#a-trigger .seg-btn").forEach(x =>
+          x.classList.toggle("on", x === b));
+        syncTrig();
+      }));
+    syncTrig();
     ov.addEventListener("click", e => { if (e.target.id === "auto-close" || e.target === ov) ov.remove(); });
     $("#a-save").addEventListener("click", async () => {
+      const on = ov.querySelector("#a-trigger .seg-btn.on");
       const fields = {
         description: $("#a-desc").value, role: $("#a-role").value,
         cadence: $("#a-when").value, leash: $("#a-leash").value,
         command: $("#a-cmd").value,
+        trigger: on ? on.dataset.trig : "schedule",
       };
       const res = await postJSON("/api/automation/update", { index: i, fields });
       if (!res.ok) { toast(res.data.error || "couldn't save"); return; }
       S = res.data; ov.remove(); renderUniCards(); toast("automation saved");
     });
   }
-  // Add a role / automation / connection by describing it — the description is
+  // A workflow's generated YAML, read-only in the dark slab — the machine
+  // writes in the dark. Refinements go through the conversation.
+  async function openWorkflowModal(i) {
+    const w = (S.spec.workflows || [])[i]; if (!w) return;
+    const ov = document.createElement("div");
+    ov.className = "secret-ov"; ov.id = "wf-ov";
+    ov.innerHTML = `<div class="secret-panel wf-panel">
+      <div class="sp-head"><b id="wf-path">${esc("workflows/" + (slugify(w.name) || "workflow") + ".yaml")}</b><button class="btn ghost sm" id="wf-close">Close</button></div>
+      <div class="wf-slab"><div class="code" id="wf-code">loading…</div></div>
+      <div class="wf-foot">Written at build, exactly like this. To change it, just tell bobi in the chat.</div></div>`;
+    document.body.appendChild(ov);
+    ov.addEventListener("click", e => { if (e.target.id === "wf-close" || e.target === ov) ov.remove(); });
+    const d = await getJSON("/api/workflow/yaml?index=" + i);
+    const code = $("#wf-code");
+    if (!code) return;   // closed while fetching
+    if (d.error) { code.textContent = d.error; return; }
+    code.textContent = d.yaml || "";
+    if (d.path) $("#wf-path").textContent = d.path;
+  }
+  // Add a role / automation / workflow by describing it — the description is
   // routed into the conversation so the brain ingests it. Connections also offer
   // the custom "build an integration on the fly" placeholder.
   function openDescribeModal(kind) {
     const meta = {
       role: { title: "Add a role", ph: "Describe the role — what it does, what a good job looks like, what it needs to access.", lead: "Tell bobi about the role and it'll add it to the team." },
-      auto: { title: "Add an automation", ph: "Describe something the team should do on its own — e.g. 'post a daily digest at 9am'.", lead: "Describe the proactive behavior; bobi wires it up." },
+      auto: { title: "Add an automation", ph: "Describe something the team should do on its own — e.g. 'post a daily digest at 9am' or 'when an email arrives, triage it'.", lead: "Describe the proactive behavior; bobi wires it up." },
+      wf: { title: "Add a workflow", ph: "Describe the flow step by step — e.g. 'when an issue lands: triage it, write a fix, wait for my approval, open a PR'.", lead: "Describe the repeatable flow and where you want to approve; bobi codifies it as a workflow." },
     }[kind];
     const ov = document.createElement("div");
     ov.className = "secret-ov"; ov.id = "describe-ov";
@@ -1753,6 +2238,17 @@
   }
 
   document.addEventListener("click", (e) => {
+    // Copy the command/prompt text sitting next to any [data-copycmd] button.
+    const cc = e.target.closest("[data-copycmd]");
+    if (cc) {
+      const t = cc.closest(".cmd") && $(".cmd-text", cc.closest(".cmd"));
+      if (t) navigator.clipboard.writeText(t.textContent)
+        .then(() => toast("Copied."))
+        .catch(() => toast("Copy failed — select the text manually."));
+      return;
+    }
+    const nsgo = e.target.closest("[data-nsgo]");
+    if (nsgo) { nsIndex = +nsgo.dataset.nsgo; drawNsStep(); return; }
     if (e.target.closest("[data-home]")) { goHome(); return; }
     if (e.target.closest("[data-back]")) { goBack(); return; }
     const go_ = e.target.closest("[data-go]");
@@ -1782,8 +2278,17 @@
     if (tmpl) {
       if (!tmpl.disabled) {
         const name = tmpl.dataset.template;
-        startTeam({ mode: "registry", team: name,
-          location: introLoc.replace(/\/+$/, "") + "/" + name }, tmpl, "Downloading…");
+        // At the default location the server picks the template's own library
+        // slot (agents/<name>/src). Appending the name to .../new-agent/src
+        // here would bury the team one level deeper than the home scan reads.
+        // A user-chosen folder is a container: the template lands in a child
+        // named after it.
+        const body = { mode: "registry", team: name };
+        // slugify the child folder: the name comes from the registry (possibly
+        // third-party) and must not steer the path (e.g. "../..").
+        if (introLocChanged)
+          body.location = introLoc.replace(/\/+$/, "") + "/" + (slugify(name) || "team");
+        startTeam(body, tmpl, "Downloading…");
       }
       return;
     }
@@ -1793,8 +2298,11 @@
     if (ro) { openRoleModal(+ro.dataset.roleopen); return; }
     const ao = e.target.closest("[data-autoopen]");
     if (ao) { openAutoModal(+ao.dataset.autoopen); return; }
+    const wo = e.target.closest("[data-wfopen]");
+    if (wo) { openWorkflowModal(+wo.dataset.wfopen); return; }
     if (e.target.closest("[data-addrole]")) { openDescribeModal("role"); return; }
     if (e.target.closest("[data-addauto]")) { openDescribeModal("auto"); return; }
+    if (e.target.closest("[data-addwf]")) { openDescribeModal("wf"); return; }
     if (e.target.closest("[data-addconn]")) { openMcpModal(); return; }
     const addmcp = e.target.closest("[data-addmcp]");
     if (addmcp) { openMcpModal(addmcp.dataset.addmcp); return; }
@@ -1824,6 +2332,7 @@
     }
     const sco = e.target.closest("[data-secretcopy]");
     if (sco) { copySecret(sco.dataset.secretcopy); return; }
+    if (e.target.closest("[data-ingressopen]")) { openIngressModal(); return; }
     const vs = e.target.closest("[data-vennsetup]");
     if (vs) { openVennSetup(); return; }
     if (e.target.closest("[data-vennconnect]")) { vennConnect(); return; }
@@ -1852,7 +2361,7 @@
   async function heartbeat() {
     if (_finished) return;
     try {
-      const r = await fetch("/api/ping", { headers: H });
+      const r = await fetch(BASE + "/api/ping", { headers: H });
       if (r.ok) markConnected(); else markDisconnected();
     } catch { markDisconnected(); }
   }

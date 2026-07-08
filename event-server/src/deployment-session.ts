@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { constantTimeEqual, type NormalizedEvent, namespaceSubKey } from "./core";
+import { constantTimeEqual, type NormalizedEvent, namespaceSubKey, sha256Hex } from "./core";
 import {
 	INTERNAL_HEADER,
 	INTERNAL_WS_QUERY_PARAM,
@@ -14,6 +14,8 @@ interface Env {
 type StoredEvent = NormalizedEvent & { seq: number };
 
 const EVENT_BUFFER_TTL = 48 * 60 * 60;
+const EVENT_DEDUP_TTL_MS = EVENT_BUFFER_TTL * 1000;
+const EVENT_DEDUP_SWEEP_INTERVAL = 100;
 
 // Eviction backstop (#279): if all WebSockets disconnect and none
 // reconnect within this window, the alarm fires and cleans up KV
@@ -75,9 +77,14 @@ export class DeploymentSession extends DurableObject<Env> {
 
 	private async handleIncomingEvent(request: Request): Promise<Response> {
 		const event = (await request.json()) as NormalizedEvent;
+		const seenKey = event.id ? `seen_event:${await sha256Hex(event.id)}` : "";
+		if (seenKey && await this.ctx.storage.get(seenKey)) {
+			return new Response("OK");
+		}
 
 		const seq = this.nextSeq++;
 		const storedEvent: StoredEvent = { ...event, seq };
+		const now = Date.now();
 
 		await Promise.all([
 			this.ctx.storage.put("next_seq", this.nextSeq),
@@ -85,6 +92,12 @@ export class DeploymentSession extends DurableObject<Env> {
 				expirationTtl: EVENT_BUFFER_TTL,
 			}),
 		]);
+		if (seenKey) {
+			await this.ctx.storage.put(seenKey, { expires_at: now + EVENT_DEDUP_TTL_MS });
+		}
+		if (seq % EVENT_DEDUP_SWEEP_INTERVAL === 0) {
+			await this.sweepSeenEvents(now);
+		}
 
 		const message = JSON.stringify({ type: "event", data: storedEvent });
 		for (const ws of this.ctx.getWebSockets()) {
@@ -96,6 +109,15 @@ export class DeploymentSession extends DurableObject<Env> {
 		}
 
 		return new Response("OK");
+	}
+
+	private async sweepSeenEvents(now: number): Promise<void> {
+		const seen = await this.ctx.storage.list<{ expires_at?: number }>({ prefix: "seen_event:" });
+		const expired: string[] = [];
+		for (const [key, value] of seen) {
+			if ((value.expires_at || 0) <= now) expired.push(key);
+		}
+		if (expired.length) await this.ctx.storage.delete(expired);
 	}
 
 	private async handleWebSocketUpgrade(request: Request): Promise<Response> {

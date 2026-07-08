@@ -5,29 +5,34 @@ import {
 	type BubbleRecord,
 	type SlackWorkspaceRecord,
 	type ResourceGrant,
+	type IngestTokenRecord,
+	type WebhookDeliveryRecord,
 	type NormalizedEvent,
 	type HandlerResult,
 	authenticateDeployment,
 	subscriptionKeysForEvent,
 	admittedDeploymentIds,
 	handleAuthorizeResource,
-	verifyGitHubSignature,
-	verifySlackSignature,
 	readBubbleAuthHeaders,
 	hasBubbleSignature,
 	hasPartialBubbleSignature,
 	authenticateBubble,
-	handleGitHubWebhook,
-	handleLinearWebhook,
-	handleSlackWebhook,
+	handleWebhookRequest,
+	handleWebhookHandshake,
+	matchWebhookSource,
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
 	handleDeregisterDeployment,
 	handleTopicEvent,
-	handleSlackSend,
+	handleIngestTokenCreate,
+	handleIngestTokenList,
+	handleIngestTokenRevoke,
+	handleChannelsSend,
+	handleChannelsTyping,
+	handleChannelsHistory,
 	handleSlackWorkspaceRegister,
+	handleWhatsAppNumberRegister,
 	handleTestSeedResourceGrants,
-	slackSigningSecretFor,
 	getAuthRejectionCounters,
 } from "./core";
 import {
@@ -43,8 +48,18 @@ interface Env {
 	EVENTS: KVNamespace;
 	DEPLOYMENT_SESSION: DurableObjectNamespace;
 	INTERNAL_DO_SECRET: string;
+	BOBI_RELEASE_VERSION?: string;
+	BOBI_RELEASE_SHA?: string;
+	CF_VERSION_METADATA?: {
+		id?: string;
+		tag?: string;
+		timestamp?: string;
+	};
 	WEBHOOK_SECRET?: string;
 	SLACK_SIGNING_SECRET?: string;
+	LINEAR_WEBHOOK_SECRET?: string;
+	WHATSAPP_APP_SECRET?: string;
+	WHATSAPP_VERIFY_TOKEN?: string;
 	TEST_GRANTS_SECRET?: string;
 }
 
@@ -87,6 +102,53 @@ function createKVStorage(env: Env): StorageAdapter {
 		async hasResourceGrant(service: string, resource: string, bubbleId: string): Promise<boolean> {
 			const data = await env.EVENTS.get(`resource_grant:${service}:${resource}:${bubbleId}`);
 			return data !== null;
+		},
+
+		// Ingest tokens (#640). Two keys per token, both holding the (immutable)
+		// record: hash-keyed for the hot-path lookup, and a per-bubble composite
+		// key for list/revoke. Deliberately NO shared index blob: KV is
+		// last-write-wins, and a read-modify-write index loses entries under
+		// concurrent mints — a token that authenticates but can never be listed
+		// or revoked. Independent puts/deletes cannot race that way.
+		async putIngestToken(record: IngestTokenRecord): Promise<void> {
+			const json = JSON.stringify(record);
+			await Promise.all([
+				env.EVENTS.put(`ingest_token:${record.token_hash}`, json),
+				env.EVENTS.put(`ingest_token_by_id:${record.bubble_id}:${record.id}`, json),
+			]);
+		},
+
+		async getIngestTokenByHash(hash: string): Promise<IngestTokenRecord | null> {
+			const data = await env.EVENTS.get(`ingest_token:${hash}`);
+			return data ? JSON.parse(data) : null;
+		},
+
+		async listIngestTokens(bubbleId: string): Promise<IngestTokenRecord[]> {
+			// One list page (1000 keys) is far beyond any real per-bubble token
+			// count; values fetched in parallel.
+			const listed = await env.EVENTS.list({ prefix: `ingest_token_by_id:${bubbleId}:` });
+			const values = await Promise.all(listed.keys.map((k) => env.EVENTS.get(k.name)));
+			return values.filter((v): v is string => v !== null).map((v) => JSON.parse(v));
+		},
+
+		async deleteIngestToken(record: IngestTokenRecord): Promise<void> {
+			await Promise.all([
+				env.EVENTS.delete(`ingest_token:${record.token_hash}`),
+				env.EVENTS.delete(`ingest_token_by_id:${record.bubble_id}:${record.id}`),
+			]);
+		},
+
+		async getWebhookDelivery(source: string, deliveryKey: string): Promise<WebhookDeliveryRecord | null> {
+			const data = await env.EVENTS.get(`webhook_delivery:${source}:${deliveryKey}`);
+			return data ? JSON.parse(data) : null;
+		},
+
+		async putWebhookDelivery(record: WebhookDeliveryRecord): Promise<void> {
+			await env.EVENTS.put(
+				`webhook_delivery:${record.source}:${record.delivery_key}`,
+				JSON.stringify(record),
+				{ expirationTtl: 7 * 24 * 60 * 60 },
+			);
 		},
 
 		async putDeployment(deployment: DeploymentRecord): Promise<void> {
@@ -202,6 +264,15 @@ function createKVStorage(env: Env): StorageAdapter {
 			await env.EVENTS.put(`slack_workspace:${workspaceId}`, JSON.stringify(record));
 		},
 
+		async getChannelState(key: string): Promise<Record<string, unknown> | null> {
+			const data = await env.EVENTS.get(`channel_state:${key}`);
+			return data ? JSON.parse(data) : null;
+		},
+
+		async putChannelState(key: string, value: Record<string, unknown>): Promise<void> {
+			await env.EVENTS.put(`channel_state:${key}`, JSON.stringify(value));
+		},
+
 		async initDeploymentSession(deploymentId: string, subscriptions: string[]): Promise<void> {
 			const doId = env.DEPLOYMENT_SESSION.idFromName(deploymentId);
 			const stub = env.DEPLOYMENT_SESSION.get(doId);
@@ -246,12 +317,41 @@ async function readJson(request: Request): Promise<Record<string, unknown> | nul
 	}
 }
 
+// Shared prologue of every mandatory bubble-signed route: read the exact wire
+// bytes (the signature covers them — never a re-serialization), parse JSON,
+// and authenticate. Returns a ready error Response on failure. A GET carries
+// an empty body, which verifies and parses as {}.
+async function bubbleAuthedJson(
+	request: Request,
+	url: URL,
+	storage: StorageAdapter,
+): Promise<{ bubble: BubbleRecord; data: Record<string, unknown> } | Response> {
+	const raw = await request.text();
+	let data: Record<string, unknown> = {};
+	if (raw) {
+		try {
+			data = JSON.parse(raw) as Record<string, unknown>;
+		} catch {
+			return Response.json({ error: "invalid JSON" }, { status: 400 });
+		}
+	}
+	const ctx = readBubbleAuthHeaders(
+		(n) => request.headers.get(n),
+		request.method,
+		url.pathname + url.search,
+		raw,
+	);
+	const bubble = await authenticateBubble(storage, ctx);
+	if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
+	return { bubble, data };
+}
+
 // ---------------------------------------------------------------------------
 // Routing table
 // ---------------------------------------------------------------------------
 
 export default {
-	async fetch(request: Request, env: Env): Promise<Response> {
+	async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 		const path = url.pathname;
 		const method = request.method;
@@ -261,76 +361,65 @@ export default {
 			return Response.json({
 				status: "ok",
 				auth: "hmac",
+				release: {
+					version: env.BOBI_RELEASE_VERSION || "dev",
+					sha: env.BOBI_RELEASE_SHA || "dev",
+				},
+				worker: {
+					version_id: env.CF_VERSION_METADATA?.id || null,
+					version_tag: env.CF_VERSION_METADATA?.tag || null,
+					version_timestamp: env.CF_VERSION_METADATA?.timestamp || null,
+				},
 				rejections: getAuthRejectionCounters(),
 			});
 		}
 
-		if (method === "POST" && path === "/webhooks/github") {
-			const body = await request.text();
+		// Inbound webhooks — one pipeline for every source (#639): the shared
+		// core matches the route, verifies the exact wire bytes (the verify
+		// slot is structural — no source registers without one), normalizes,
+		// and delivers. matchWebhookSource returns null for an unregistered
+		// path, which 404s below WITHOUT consuming the request body.
+		const webhookSecrets = {
+			github: env.WEBHOOK_SECRET,
+			slack: env.SLACK_SIGNING_SECRET,
+			linear: env.LINEAR_WEBHOOK_SECRET,
+			whatsapp: env.WHATSAPP_APP_SECRET,
+			whatsappVerifyToken: env.WHATSAPP_VERIFY_TOKEN,
+		};
 
-			if (env.WEBHOOK_SECRET) {
-				const sigHeader = request.headers.get("x-hub-signature-256") || "";
-				const valid = await verifyGitHubSignature(env.WEBHOOK_SECRET, new TextEncoder().encode(body), sigHeader);
-				if (!valid) {
-					return Response.json({ error: "invalid signature" }, { status: 401 });
+		// Provider GET handshakes (#656): Meta verifies a webhook URL with a
+		// GET whose challenge must echo back as RAW text (JSON-quoting breaks
+		// its byte comparison), so this responds outside respond()/JSON.
+		if (method === "GET") {
+			const handshakeRoute = matchWebhookSource(path);
+			if (handshakeRoute) {
+				const h = handleWebhookHandshake(
+					handshakeRoute.source, (n) => url.searchParams.get(n) || "", webhookSecrets);
+				if (h) {
+					return new Response(h.text, {
+						status: h.status,
+						headers: { "Content-Type": "text/plain" },
+					});
 				}
 			}
-
-			let payload: Record<string, unknown>;
-			try {
-				payload = JSON.parse(body);
-			} catch {
-				return Response.json({ error: "invalid JSON" }, { status: 400 });
-			}
-			const eventHeader = request.headers.get("x-github-event") || "unknown";
-			const deliveryId = request.headers.get("x-github-delivery") || crypto.randomUUID();
-			return respond(await handleGitHubWebhook(storage, eventHeader, deliveryId, payload));
 		}
 
-		if (method === "POST" && path === "/webhooks/linear") {
-			const payload = await readJson(request);
-			if (!payload) return Response.json({ error: "invalid JSON" }, { status: 400 });
-			return respond(await handleLinearWebhook(storage, payload));
-		}
-
-		if (method === "POST" && (path === "/webhooks/slack" || path === "/webhooks/slack/")) {
-			const body = await request.text();
-
-			let payload: Record<string, unknown>;
-			try {
-				payload = JSON.parse(body);
-			} catch {
-				return Response.json({ error: "invalid JSON" }, { status: 400 });
-			}
-
-			// url_verification must be handled before BOTH the retry short-circuit
-			// and the signature check: it carries no signing headers, and Slack
-			// retries a failed handshake with x-slack-retry-num set — so swallowing
-			// retries here would leave the request URL permanently unverified.
-			if (payload.type === "url_verification") {
-				return Response.json({ challenge: payload.challenge });
-			}
-
-			// Dedup retried EVENT deliveries so the agent doesn't double-process.
-			if (request.headers.get("x-slack-retry-num")) {
-				return Response.json({ ok: true });
-			}
-
-			// Verify against the AUTHORING app's signing secret (resolved by
-			// api_app_id), falling back to the global secret for legacy single-app
-			// deployments. A second app in the workspace signs with its OWN secret;
-			// validating only the global one 401'd it (and dropped its login DM).
-			const signingSecret = await slackSigningSecretFor(storage, payload, env.SLACK_SIGNING_SECRET || "");
-			if (signingSecret) {
-				const timestamp = request.headers.get("x-slack-request-timestamp") || "";
-				const signature = request.headers.get("x-slack-signature") || "";
-				const valid = await verifySlackSignature(signingSecret, timestamp, body, signature);
-				if (!valid) {
-					return Response.json({ error: "invalid signature" }, { status: 401 });
-				}
-			}
-
-			return respond(await handleSlackWebhook(storage, payload));
+		const webhookRoute = method === "POST" ? matchWebhookSource(path) : null;
+		if (webhookRoute) {
+			const rawBody = await request.text();
+			const waitUntil = typeof ctx?.waitUntil === "function" ? ctx.waitUntil.bind(ctx) : undefined;
+			const result = await handleWebhookRequest(
+				storage,
+				webhookRoute.source,
+				{
+					rawBody,
+					header: (n) => request.headers.get(n) || "",
+					subpath: webhookRoute.subpath,
+				},
+				webhookSecrets,
+				waitUntil ? { waitUntil } : {},
+			);
+			if (result) return respond(result);
 		}
 
 		if (method === "POST" && path === "/deployments") {
@@ -428,47 +517,59 @@ export default {
 			return respond(await handleTopicEvent(storage, topicMatch[1], data, ctx));
 		}
 
-		if (method === "POST" && path === "/slack/send") {
-			// Raw text so the bubble signature verifies over the exact wire bytes.
-			const raw = await request.text();
-			let data: Record<string, unknown>;
-			try {
-				data = JSON.parse(raw);
-			} catch {
-				return Response.json({ error: "invalid JSON" }, { status: 400 });
-			}
-			const ctx = readBubbleAuthHeaders(
-				(n) => request.headers.get(n),
-				method,
-				url.pathname + url.search,
-				raw,
-			);
-			const bubble = await authenticateBubble(storage, ctx);
-			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
-			return respond(await handleSlackSend(storage, data, bubble.id));
+		if (method === "POST" && path === "/channels/send") {
+			// Channel-agnostic send (#618) - mandatory bubble auth.
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleChannelsSend(storage, auth.data, auth.bubble.id));
+		}
+
+		if (method === "POST" && path === "/channels/typing") {
+			// Set/clear a channel's thinking indicator (#629).
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleChannelsTyping(storage, auth.data, auth.bubble.id));
+		}
+
+		if (method === "GET" && path === "/channels/history") {
+			// Read a conversation's messages (#629). The signature covers the
+			// full path INCLUDING the query string, with an empty body.
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			const conversation = url.searchParams.get("conversation") || "";
+			const limit = parseInt(url.searchParams.get("limit") || "100", 10);
+			return respond(await handleChannelsHistory(storage, conversation, limit, auth.bubble.id));
 		}
 
 		if (method === "POST" && path === "/resources/authorize") {
-			// Raw text so the bubble signature verifies over the exact wire bytes.
-			// Auth is MANDATORY (no legacy unsigned caller) — mirror /slack/send.
+			// Auth is MANDATORY (no legacy unsigned caller).
 			// The credential in the body is verified once and never persisted; the
 			// route is deliberately excluded from any body logging.
-			const raw = await request.text();
-			let data: Record<string, unknown>;
-			try {
-				data = JSON.parse(raw);
-			} catch {
-				return Response.json({ error: "invalid JSON" }, { status: 400 });
-			}
-			const ctx = readBubbleAuthHeaders(
-				(n) => request.headers.get(n),
-				method,
-				url.pathname + url.search,
-				raw,
-			);
-			const bubble = await authenticateBubble(storage, ctx);
-			if (!bubble) return Response.json({ error: "forbidden" }, { status: 403 });
-			return respond(await handleAuthorizeResource(storage, data, bubble.id));
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleAuthorizeResource(storage, auth.data, auth.bubble.id));
+		}
+
+		// Scoped ingest tokens (#640) — mint/list/revoke, mandatory bubble auth
+		// (mirrors /resources/authorize). The mint response is the only place
+		// the plaintext token ever appears.
+		if (method === "POST" && path === "/ingest-tokens") {
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleIngestTokenCreate(storage, auth.data, auth.bubble.id));
+		}
+
+		if (method === "GET" && path === "/ingest-tokens") {
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleIngestTokenList(storage, auth.bubble.id));
+		}
+
+		const ingestTokenMatch = method === "DELETE" && path.match(/^\/ingest-tokens\/([^/]+)$/);
+		if (ingestTokenMatch) {
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleIngestTokenRevoke(storage, ingestTokenMatch[1], auth.bubble.id));
 		}
 
 		if (method === "POST" && path === "/__test/resource-grants" && env.TEST_GRANTS_SECRET) {
@@ -511,7 +612,7 @@ export default {
 			// Auth is OPTIONAL here: an unsigned registration still writes the
 			// global record (inbound self-reply loop prevention, kept for legacy
 			// clients). A signed one ALSO writes the bubble-scoped record that
-			// outbound /slack/send reads. A present-but-invalid signature is a
+			// outbound channel sends read. A present-but-invalid signature is a
 			// malformed/forged request — reject rather than silently downgrade.
 			let bubbleId: string | undefined;
 			if (hasBubbleSignature(ctx)) {
@@ -522,6 +623,15 @@ export default {
 				return Response.json({ error: "forbidden" }, { status: 403 });
 			}
 			return respond(await handleSlackWorkspaceRegister(storage, data, bubbleId));
+		}
+
+		if (method === "POST" && path === "/whatsapp/numbers") {
+			// Signed-only (#656): unlike Slack there is no unsigned global-record
+			// use case, so an unauthenticated registration is rejected outright
+			// (bubbleAuthedJson fails closed on unsigned requests).
+			const auth = await bubbleAuthedJson(request, url, storage);
+			if (auth instanceof Response) return auth;
+			return respond(await handleWhatsAppNumberRegister(storage, auth.data, auth.bubble.id));
 		}
 
 		return new Response("Not Found", { status: 404 });

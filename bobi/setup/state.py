@@ -71,7 +71,13 @@ class Spec:
     # "systems" (list of systems it accesses), "triggers" (what makes it run),
     # "status": "in_progress"|"complete"}.
     roles: list = field(default_factory=list)
-    # [{"description","leash","cadence","role" (which agent runs it),"command"}]
+    # Deterministic multi-step flows the brain proposes once the roles are
+    # settled (an OPTIONAL slot — never gates the Finish meter):
+    # [{"name","description","trigger","steps":
+    #     [{"name","role","prompt","hitl" (human approval gate after)}]}]
+    workflows: list = field(default_factory=list)
+    # [{"description","leash","cadence","role" (which agent runs it),"command",
+    #   "trigger" ("schedule" | "event" — how it fires)}]
     autonomous: list = field(default_factory=list)
     services: list = field(default_factory=list)    # [{"name","status"}]
     # User-defined custom MCP connections added through the "add a connector"
@@ -88,6 +94,9 @@ class Spec:
     # Autonomous is "enough" only once explicitly confirmed — even when the
     # answer is "nothing proactive" (an empty list is a real decision here).
     autonomous_confirmed: bool = False
+    # Same for workflows: "this team has no set flows" is a real answer, and
+    # the card should read settled once the user has weighed in.
+    workflows_confirmed: bool = False
 
     # Brain-emitted self-scores per slot (slot -> Readiness value). Absent
     # until the digestion prompt scores it; readiness_for() falls back to a
@@ -110,6 +119,28 @@ class Spec:
 
 
 @dataclass
+class Ingress:
+    """How public webhooks reach this setup's event server.
+
+    ``mode`` is one of:
+      - local: loopback-only, no public webhook ingress
+      - quick_tunnel: temporary public tunnel to the local event server
+      - bobi_cloud: shared Bobi Worker
+      - custom_worker: user-managed public Worker/event server
+
+    The selected URL is persisted for setup resume and, for public modes, saved
+    to run/.env as BOBI_EVENT_SERVER so generated integration helpers point at
+    the verified ingress path.
+    """
+
+    mode: str = "local"
+    url: str = ""
+    verified: bool = False
+    verified_at: str = ""
+    error: str = ""
+
+
+@dataclass
 class SetupState:
     stage: Stage = Stage.START
     mode: str = "create"             # "create" | "open"
@@ -119,6 +150,7 @@ class SetupState:
     source_dir: str = ""
     chat: str = ""                   # how you talk to the team: "cli"|"slack"|"telegram"
     spec: Spec = field(default_factory=Spec)
+    ingress: Ingress = field(default_factory=Ingress)
 
     # The brain's current interview focus, so the panel can show where we are:
     # "goal" | "role:<slug>" | "automations" | "connections" | "wrap" (or "").
@@ -213,6 +245,11 @@ class SetupState:
             spec_fields = set(Spec.__dataclass_fields__)
             data["spec"] = Spec(**{k: v for k, v in raw_spec.items()
                                    if k in spec_fields})
+        raw_ingress = data.get("ingress")
+        if isinstance(raw_ingress, dict):
+            ingress_fields = set(Ingress.__dataclass_fields__)
+            data["ingress"] = Ingress(**{k: v for k, v in raw_ingress.items()
+                                         if k in ingress_fields})
         known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in known})
 

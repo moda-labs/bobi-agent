@@ -9,10 +9,11 @@ runs - plus a Python client (`bobi/events/`) that every agent session uses.
 ## Mental model
 
 ```
-       external webhooks
-      (GitHub, Slack, Linear)
-                │
-                ▼
+       external webhooks                  generic ingress
+ (GitHub, Slack, Linear, WhatsApp) (alerting, CI, SaaS webhooks,
+                │                   via scoped ingest tokens)
+                │                               │
+                ▼                               ▼
          ┌──────────────┐    routed by topic, delivered over
          │ event server │    each agent's outbound WebSocket
          │ Worker/local │ ───────────────────────────────────▶  agent sessions
@@ -98,6 +99,7 @@ Every delivered event is a v2 `NormalizedEvent` (`core.ts`), wrapped on the wire
   "topics": ["github:moda-labs/bobi"], // the routing keys (see catalog below)
   "delivery": "bulk",            // "chat" (slack) | "bulk" (github/linear/monitor)
   "text": "...",                 // human summary the agent reads
+  "conversation": "slack:T1:channel:C9:thread:12.34", // chat events: reply address (#618)
   "fields": { "number": 42, "action": "opened" }, // flat routing/context map
   "payload": { /* raw webhook body or publisher payload, passed through */ },
   "bubble_id": "bub_...",        // set for authenticated /events publishes; UNSET for webhooks
@@ -109,23 +111,86 @@ The server extracts routing fields and passes `payload` through untouched - agen
 are models and interpret raw payloads directly. Routing context (repo, channel,
 `thread_ts`, ...) is delivered in `fields`, not at the top level.
 
+**Conversation references** (`conversation.ts`, mirrored by `bobi/conversation.py`).
+Chat adapters set a channel-agnostic reply address on every chat event:
+`<source>:<scope>:<chat_type>:<chat_id>[:thread:<thread_id>]`, where `scope` is the
+platform's tenancy unit (Slack team id). The agent echoes it back verbatim -
+`bobi reply <conversation>` or `POST /channels/send`
+`{conversation, text, mode: post|update|final, edit_ref?, files?}` - and the gateway
+parses it to address the platform send. Text is raw markdown; formatting is the
+gateway's job (Slack: native `markdown_text`), and `mode: final` resolves a response
+context (edit `edit_ref` when given, else post, then clear the typing indicator).
+`POST /channels/typing` sets/clears the thinking indicator and `GET /channels/history`
+reads a conversation's messages; both share the send path's auth and tenancy
+boundary. Channel capabilities (edit, typing, files, length budget) are declared per
+adapter in `event-server/src/channels.ts` (`ChannelDescriptor`); degradation is the
+gateway's job, not the caller's. Only adapters build refs and only the gateway parses
+them; the agent never assembles platform routing fields.
+
 ## Ingestion: getting events in
 
-**Webhooks** (`event-server/src/adapters/`). Each adapter turns a raw provider
-payload into a `NormalizedEvent`, deriving the routing key **from the signed body,
-never from client input**:
+**Webhooks** (the unified pipeline, #639). Every inbound webhook runs through one
+pipeline in the shared core, identical on the Worker and the local server:
+
+```
+route (/webhooks/<source>) -> verifier -> normalizer -> deliver()
+```
+
+A source registers a **required** verify slot plus a normalizer in
+`WEBHOOK_SOURCES` (`event-server/src/core.ts`); the verify field is non-optional
+by type, so a route cannot exist without verification by construction. Transports
+never stitch verification per-route. Verifiers run over the exact wire bytes; an
+unconfigured provider secret admits that provider unverified (zero-config local
+development; counted on `/health` as `webhook_unverified` so a public server
+running unverified is visible), and a configured one rejects bad or missing
+signatures with 401 (counted as `webhook_bad_signature`).
+`/health` also reports the release stamp baked into the deployed Worker:
+`release.version`, `release.sha`, and Cloudflare Worker version metadata when
+available. The release workflow uses this to fail fast if the fleet
+`event_server` URL is still pointed at a different Worker after deploy.
+Normalizers (`event-server/src/adapters/`) derive the routing key **from the
+signed body, never from client input**:
 
 - **GitHub** (`POST /webhooks/github`): `type = github.<event>`, key
   `github:<owner>/<repo>` from `repository.full_name`. Signature
-  (`X-Hub-Signature-256`, HMAC-SHA256) is verified when `WEBHOOK_SECRET` is set.
-- **Slack** (`POST /webhooks/slack`): handles the `url_verification` challenge and
-  retry dedup; verifies the `v0=` signature within a ±300s window, with the signing
-  secret resolved per authoring app (`api_app_id`). Maps to
-  `slack.mention` / `slack.dm` / `slack.thread_reply` and filters our own bots'
-  messages.
+  (`X-Hub-Signature-256`, HMAC-SHA256) is verified when `WEBHOOK_SECRET`
+  (local: `BOBI_ES_WEBHOOK_SECRET`) is set.
+- **Slack** (`POST /webhooks/slack`): the pipeline's pre-verify stage handles the
+  `url_verification` challenge and retry dedup (both must run before the signature
+  check); then verifies the `v0=` signature within a ±300s window, with the signing
+  secret resolved per authoring app (`api_app_id`), falling back to
+  `SLACK_SIGNING_SECRET` (local: `BOBI_ES_SLACK_SIGNING_SECRET`). Normalization
+  runs through the Chat SDK bridge (`adapters/chat-sdk-slack.ts`, #628), the
+  only Slack inbound normalizer (#647). Maps to `slack.mention` / `slack.dm` /
+  `slack.thread_reply` and filters our own bots' messages.
 - **Linear** (`POST /webhooks/linear`): `type = linear.<type>.<action>`, key
-  `linear:<TEAM_KEY>`. No HTTP-layer signature check - inbound Linear relies on a
-  secret webhook URL plus the delivery-time grant filter.
+  `linear:<TEAM_KEY>`. Signature (`Linear-Signature`, HMAC-SHA256 of the raw body)
+  is verified when `LINEAR_WEBHOOK_SECRET` (local: `BOBI_ES_LINEAR_WEBHOOK_SECRET`)
+  is set, with replay rejection via the signed `webhookTimestamp` (±300s;
+  fail-closed - a signed payload without a numeric `webhookTimestamp` is
+  rejected, since it would otherwise be replayable forever).
+- **WhatsApp** (`POST /webhooks/whatsapp`, #656): `type = whatsapp.message`, key
+  `whatsapp:<phone_number_id>`. Meta signs like GitHub (`X-Hub-Signature-256`),
+  verified when `WHATSAPP_APP_SECRET` (local: `BOBI_ES_WHATSAPP_APP_SECRET`) is
+  set. Meta additionally verifies the URL with a **GET subscribe handshake**
+  (`hub.challenge` echoed as raw text when `hub.verify_token` matches
+  `WHATSAPP_VERIFY_TOKEN` / `BOBI_ES_WHATSAPP_VERIFY_TOKEN`; rejected when the
+  token is unset, so a third party can never bind the URL). Inbound messages
+  also record the conversation's 24h customer-service window, which
+  `/channels/send` enforces (`outside_message_window` typed error). Delivery
+  receipts (`statuses`) are skipped.
+- **Generic ingest** (`POST /webhooks/ingest/<topic>`, #640): the escape hatch for
+  external systems that cannot compute per-request signatures (alerting, CI, SaaS
+  webhooks - most can only set static headers). The verify slot checks a **scoped
+  ingest token** sent as `Authorization: Bearer <token>` (see Security); the
+  default normalizer delivers the raw JSON body as the event's `payload` with its
+  top-level primitives mirrored into `fields`, on exactly the token's bound topic,
+  bubble-scoped to the minting bubble. Body fields never influence routing (unlike
+  `createTopicEvent`, routing fields such as `repo` are inert here). Requests are
+  capped at 256 KiB, rejected with 413 before the body is ever parsed, and
+  rate-limited per token at 60/min (429; in-memory - authoritative locally,
+  per-isolate on the Worker). This is the only webhook route whose path has a
+  slash-bearing remainder; provider routes stay exact-match.
 
 **Generic topic endpoint** (`POST /events/{topic}`). Monitors, lifecycle emits,
 inter-agent inbox/reply, and any agent-emitted event publish here. It is
@@ -146,12 +211,13 @@ prefixed by the subscriber's bubble id for tenant isolation (see Security).
 | `linear:<TEAM_KEY>` | Linear webhook | `linear:MOD` |
 | `slack:<team>` | Slack webhook (no app id) | `slack:T0ABC` |
 | `slack:<team>:app:<app_id>[:<channel>]` | Slack webhook (app-qualified) | `slack:T0ABC:app:A123:C0XYZ` |
+| `whatsapp:<phone_number_id>` | WhatsApp webhook | `whatsapp:747556541` |
 | `inbox/<session>` | inter-agent fire-and-forget | `inbox/director` |
 | `reply/<uuid>` | transient ask-reply channel | `reply/9f3a...` |
 | `<type>` and `<source>/<type>` | monitors / agent publishes | `support.email`, `monitor/support.email` |
 | `agent/session.completed` (+ bare `session.completed`) | sub-agent lifecycle | |
 
-`github:`, `linear:`, and `slack:` are **global** topics (cross-bubble, gated by
+`github:`, `linear:`, `slack:`, and `whatsapp:` are **global** topics (cross-bubble, gated by
 resource grants). Everything else is **bubble-scoped**. Monitors and lifecycle
 events are published to both the bare `<type>` and the `<source>/<type>` form, and
 clients subscribe to both, for cross-version compatibility.
@@ -160,7 +226,7 @@ clients subscribe to both, for cross-version compatibility.
 
 Resolved in `bobi/events/subscriptions.py` + `adapters.py`:
 
-1. **Explicit** - `agent.yaml` top-level `subscribe:` (used verbatim if present).
+1. **Explicit** - `agent.yaml` top-level `subscribe:` after environment interpolation.
 2. **Auto-detected** from `services:` entries with `events: true`:
    - **github** from the project's `git remote` (`owner/repo`); for a director over
      many repos with no root remote, from each immediate child repo.
@@ -273,11 +339,58 @@ concurrent first-registrations converge on a single bubble.
 | Join / register | `POST /deployments` (signed) | bubble signature |
 | Publish | `POST /events/{topic}` | bubble signature |
 | Authorize resource | `POST /resources/authorize` | bubble signature |
-| Slack send | `POST /slack/send` | bubble signature (bubble-scoped to its own workspace) |
+| Ingest token mint / list / revoke | `POST` / `GET /ingest-tokens`, `DELETE /ingest-tokens/{id}` | bubble signature |
+| Generic ingest | `POST /webhooks/ingest/{topic}` | bearer ingest token (topic-bound) |
+| Channel send | `POST /channels/send` | bubble signature (bubble-scoped to its own workspace) |
+| Channel typing | `POST /channels/typing` | bubble signature |
+| Channel history | `GET /channels/history` | bubble signature (covers path + query, empty body) |
 | WS subscribe / update subs / deregister | `/deployments/{id}/...` | bearer `api_key` (issued at register) |
 
 The bubble key authenticates *membership*; the per-deployment `api_key`
 authenticates a *specific deployment's transport*.
+
+### Scoped ingest tokens
+
+Generic publishes require a bubble signature, but external systems (alerting,
+CI, SaaS webhooks) can rarely compute one - most can only set a static header.
+A **scoped ingest token** (#640) is the credential for that case: the instance
+mints it bound to one `(bubble, topic)` pair
+(`bobi agent <name> events ingest-token create alert/firing`), and the external
+system sends it as `Authorization: Bearer <token>` on
+`POST /webhooks/ingest/<topic>`.
+
+Properties:
+
+- **Hash-only storage.** The server stores the SHA-256 of the token; the
+  plaintext transits exactly once, in the mint response. `list` shows metadata
+  only.
+- **Scoped blast radius.** A leaked token allows publishing spurious events on
+  its one bound topic in its one bubble - a 403 on every other topic - and
+  never exposes bubble membership or the bubble key, which stays inside the
+  instance.
+- **Revocable.** `DELETE /ingest-tokens/<id>` (CLI: `ingest-token revoke`)
+  takes effect immediately on the local server; on the Worker it is subject
+  to KV propagation (typically seconds, up to ~60s across points of
+  presence). Management routes are bubble-signed, and ids resolve only
+  within the caller's own bubble.
+- **Env-seeded locally.** The local server can seed tokens at boot from
+  `BOBI_ES_INGEST_TOKENS`, a comma-separated list of `topic=token` bindings,
+  for example `alert/firing=ingt_...`; commas are delimiters, so env-provided
+  tokens must be comma-free. The server validates each topic, stores only the
+  token hash, and lazily attaches the seeded records to the first local bubble
+  after the first deployment registers. `list` flags these records as
+  `env_managed`; `revoke` rejects them with guidance to rotate by changing
+  `BOBI_ES_INGEST_TOKENS` in the deployment secret store and restarting. A
+  changed secret takes effect after that restart, not as a hot reload. This is
+  local-server only; Worker tokens are already durable in KV.
+- **Bounded.** 256 KiB body cap enforced before the body is parsed, 60
+  requests/min per token. Auth rejections are opaque 403s (missing, unknown,
+  revoked, and wrong-topic are indistinguishable) and count into
+  `webhook_bad_signature` on `/health`; 413/429 policy rejections do not
+  pollute that counter.
+- **Topic shape.** `source/type` form from `[A-Za-z0-9_.-]` segments; the
+  `github`/`linear`/`slack` sources and `:`-style global keys are rejected at
+  mint, so an ingest token can never reach a provider or global topic.
 
 ### Proof-of-access: resource grants
 
@@ -291,8 +404,11 @@ the grant, never the credential:
   not just the org).
 - **Slack**: the bubble-signed `/slack/workspaces` registration (proving the bot
   token + signing secret via `auth.test`) doubles as the grant.
+- **WhatsApp**: the bubble-signed `/whatsapp/numbers` registration (proving the
+  Cloud API token can read the phone-number node on the Graph API) doubles as
+  the grant, and stores the bubble-scoped send credential.
 
-Unknown services are default-deny (only `github:` / `linear:` / `slack:` are global).
+Unknown services are default-deny (only `github:` / `linear:` / `slack:` / `whatsapp:` are global).
 The grant is enforced at **three points**, all sharing one parser so they cannot
 diverge:
 
@@ -302,7 +418,7 @@ diverge:
    admitted to a subscriber only if its bubble currently holds the grant, so a stale
    index entry for a revoked bubble is dropped.
 
-The client authorizes its github/linear topics (and registers Slack workspaces)
+The client authorizes its github/linear topics (and registers Slack workspaces / WhatsApp numbers)
 before it registers subscriptions, dropping any topic whose credential is missing or
 rejected so it never trips the server's hard reject.
 
@@ -322,12 +438,13 @@ to every granted bubble, and a `linear:<TEAM>` key can collide across two Linear
 webhooks to a specific account is the multi-tenant hardening tracked in **#239**.
 
 Running a shared or public event server is a deliberate step with prerequisites:
-serve over TLS, set `WEBHOOK_SECRET` and the Slack signing secret, and keep the
-Linear webhook URL secret.
+serve over TLS and set all three provider webhook secrets (`WEBHOOK_SECRET`,
+`SLACK_SIGNING_SECRET`, `LINEAR_WEBHOOK_SECRET`) so every inbound route verifies.
 
 ## Key files
 
-- `event-server/src/core.ts` - shared handlers, routing, HMAC auth, grant filter.
+- `event-server/src/core.ts` - shared handlers, the unified webhook pipeline,
+  routing, HMAC auth, grant filter.
 - `event-server/src/index.ts` - Cloudflare Worker entry (KV storage, DO fan-out).
 - `event-server/src/local.ts` - local Node entry (in-memory store, direct sockets).
 - `event-server/src/deployment-session.ts` - the per-deployment Durable Object.

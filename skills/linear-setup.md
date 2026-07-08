@@ -1,6 +1,7 @@
 # Linear Setup
 
-Get a Linear API key for bobi to scan issues and post comments.
+Get a Linear API key for bobi to scan issues and post comments, plus an
+optional webhook signing secret so bobi can verify inbound Linear events.
 
 **Time:** ~2 minutes.
 
@@ -41,7 +42,29 @@ The project key is the prefix on your issue IDs. If your issues look like `ENG-4
 
 You can also find it in Linear: **Settings** → **Teams** → your team → the **Identifier** field.
 
-## 4. Label issues for automation
+## 4. Optional: verify Linear webhooks
+
+If this agent receives Linear events through the event server, create a webhook
+in **Settings** → **API** → **Webhooks**, point it at
+`<event-server-url>/webhooks/linear`, and copy the webhook's signing secret.
+Store it as `LINEAR_WEBHOOK_SECRET` alongside `LINEAR_API_KEY`.
+
+For non-interactive installs:
+
+```bash
+LINEAR_API_KEY=lin_api_... LINEAR_WEBHOOK_SECRET=... \
+  bobi agents install <source> --name <name> --non-interactive
+```
+
+For a Cloudflare Worker event server, store the same signing secret on the
+Worker:
+
+```bash
+cd event-server
+wrangler secret put LINEAR_WEBHOOK_SECRET
+```
+
+## 5. Label issues for automation
 
 Create a label in Linear called `agent` (or whatever you set in `trigger_labels`). When you want dispatch to pick up an issue, add that label.
 
@@ -68,4 +91,5 @@ Then reference the appropriate workspace when configuring your projects.
 | No issues found | Check `trigger_labels` matches a real label in Linear |
 | Wrong project | Verify the project key matches your issue ID prefix |
 | `401 Unauthorized` | API key expired or revoked — regenerate at linear.app/settings/api |
+| Inbound webhook returns `401` | `LINEAR_WEBHOOK_SECRET` does not match the webhook signing secret |
 | Issues not picked up | They must be in `Triage` or `Unstarted` state, not `In Progress` or `Done` |

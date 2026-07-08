@@ -92,6 +92,12 @@ def format_event_for_manager(event: dict) -> str:
     if text:
         lines.append(f"  {text}")
 
+    # Channel-agnostic reply address (#618) - the agent echoes this back
+    # verbatim via `bobi reply <conversation>`.
+    conversation = event.get("conversation", "")
+    if conversation:
+        lines.append(f"  conversation: {conversation}")
+
     # v2 fields — flat scalar map from the adapter
     fields = event.get("fields")
     if isinstance(fields, dict) and fields:
@@ -204,6 +210,15 @@ class EventServerClient:
         self._short_drop_streak = 0
         self._ever_connected = False
         self._last_ws_error: object = None
+        # Highest seq already enqueued in THIS process. With ACK-after-
+        # processing (#688) the saved cursor can trail the delivery point by
+        # the whole inbox backlog, so reconnecting with the cursor alone
+        # would make every routine CF cycle replay events that are still
+        # queued in memory - duplicate turns and duplicate chat replies.
+        # In-process events don't need replay (the queue survives a
+        # reconnect); only a process restart does, and there this floor
+        # starts back at 0 so the cursor drives a full replay.
+        self._max_enqueued_seq = 0
 
     # A connection that stayed up at least this long before ending is treated
     # as a routine CF cycle, not instability.
@@ -352,7 +367,7 @@ class EventServerClient:
             self._reconnect_delay = min(self._reconnect_delay * 2, 60)
 
     def _connect(self) -> None:
-        last_seen = _load_cursor(self.cursor_path)
+        last_seen = max(_load_cursor(self.cursor_path), self._max_enqueued_seq)
         ws_url = (
             f"{self.server_url.replace('https://', 'wss://').replace('http://', 'ws://')}"
             f"/deployments/{self.deployment_id}/subscribe?last_seen={last_seen}"
@@ -410,6 +425,9 @@ class EventServerClient:
                 data = msg.get("data", {})
 
                 _log_event(data, session_id=self.deployment_id)
+                seq = data.get("seq") or 0
+                if seq > self._max_enqueued_seq:
+                    self._max_enqueued_seq = seq
                 self._queue.put(data)
                 log.info(f"Event queued: {data.get('source', '?')}/{data.get('type', '?')}")
 

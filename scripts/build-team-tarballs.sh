@@ -21,7 +21,7 @@
 # Examples:
 #   scripts/build-team-tarballs.sh                          # all of agents/*
 #   scripts/build-team-tarballs.sh agents/eng-team          # just one
-#   scripts/build-team-tarballs.sh --out /tmp/pkg tests/fixtures/smoke-team
+#   scripts/build-team-tarballs.sh --out /tmp/pkg tests/fixtures/claude-smoke
 
 set -euo pipefail
 

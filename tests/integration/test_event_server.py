@@ -10,11 +10,14 @@ delivered via the WebSocket subscription API.  All state is isolated to
 the bobi_env temp install.
 """
 
+import hashlib
+import hmac
 import json
 import os
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -23,6 +26,7 @@ from pathlib import Path
 
 import pytest
 import websocket
+import yaml
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 TEST_GRANTS_SECRET = "bobi-integration-test-grants"
@@ -995,6 +999,71 @@ class TestBubbleIsolation:
         texts = [e["payload"].get("text") for e in evB if e.get("source") == "inbox"]
         assert "hi w2" in texts
 
+    def test_cli_events_publish_delivers_custom_topic(self, event_server, bobi_env):
+        """`bobi agent <name> events publish source/type` uses the same signed
+        publish path as library callers and reaches a source/type subscriber."""
+        from bobi.config import bubble_state_path, save_bubble_state
+
+        base_url, *_ = event_server
+        dep = _register(base_url, "custom-topic-cli", ["alert/firing"])
+        bubble_path = bubble_state_path(bobi_env.project_path)
+        original_bubble = bubble_path.read_text() if bubble_path.exists() else None
+
+        cfg_path = bobi_env.package_dir / "agent.yaml"
+        original_cfg = cfg_path.read_text()
+        cfg = yaml.safe_load(original_cfg) or {}
+        cfg["event_server"] = {"url": base_url}
+        cfg.pop("event_server_url", None)
+
+        events, ready, thread = _live_subscriber(
+            base_url,
+            dep["deployment_id"],
+            dep["api_key"],
+        )
+        assert ready.wait(5)
+
+        try:
+            save_bubble_state(
+                bobi_env.project_path,
+                dep["bubble_id"],
+                dep["bubble_key"],
+            )
+            cfg_path.write_text(yaml.dump(cfg, sort_keys=False))
+            result = subprocess.run(
+                [
+                    sys.executable, "-m", "bobi.cli",
+                    "agent", bobi_env.agent_name,
+                    "events", "publish", "alert/firing",
+                ],
+                input='{"title":"x"}',
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=str(bobi_env.project_path),
+                env={
+                    **os.environ,
+                    "BOBI_HOME": str(bobi_env.home_dir),
+                    "BOBI_ROOT": str(bobi_env.project_path),
+                },
+            )
+        finally:
+            cfg_path.write_text(original_cfg)
+            if original_bubble is None:
+                bubble_path.unlink(missing_ok=True)
+            else:
+                bubble_path.write_text(original_bubble)
+                bubble_path.chmod(0o600)
+
+        assert result.returncode == 0, result.stderr + result.stdout
+        thread.join(timeout=5)
+        matching = [
+            e for e in events
+            if e.get("source") == "alert"
+            and e.get("type") == "firing"
+            and e.get("payload", {}).get("title") == "x"
+        ]
+        assert matching, f"custom topic publish was not delivered: {events}"
+
     def test_unsigned_publish_rejected(self, event_server):
         base_url, *_ = event_server
         with pytest.raises(urllib.error.HTTPError) as ei:
@@ -1017,6 +1086,49 @@ class TestBubbleIsolation:
         with pytest.raises(urllib.error.HTTPError) as ei:
             _register(base_url, "intruder", ["inbox/x"], a["bubble_id"], "bkey_wrong")
         assert ei.value.code == 403
+
+    def test_signed_generic_publish_rejects_global_topics_without_delivery(
+            self, event_server):
+        """Global webhook topics must stay webhook-only through the real HTTP
+        route, including URL path parsing and signature verification."""
+        base_url, *_ = event_server
+
+        for name, subscriptions, topic, body in [
+            (
+                "global-source-guard",
+                ["repo"],
+                "repo",
+                {"source": "github:org", "payload": {"text": "fake"}},
+            ),
+            (
+                "global-path-guard",
+                ["ci/github:org"],
+                "github:org",
+                {"source": "ci", "payload": {"text": "fake"}},
+            ),
+        ]:
+            dep = _register(base_url, name, subscriptions)
+            events, ready, thread = _live_subscriber(
+                base_url,
+                dep["deployment_id"],
+                dep["api_key"],
+            )
+            assert ready.wait(5)
+
+            with pytest.raises(urllib.error.HTTPError) as ei:
+                _post_event_signed(
+                    base_url,
+                    topic,
+                    body,
+                    dep["bubble_id"],
+                    dep["bubble_key"],
+                )
+            assert ei.value.code == 400
+            thread.join(timeout=5)
+            assert events == [], (
+                "global-topic generic publish was rejected but still delivered: "
+                f"{events}"
+            )
 
     def test_webhook_fans_out_across_bubbles(self, event_server):
         """Inbound webhooks remain GLOBAL, but #488 now admits only bubbles with
@@ -1085,6 +1197,7 @@ class TestSchedulerEndToEnd:
 
     def test_native_check_finding_delivered_to_subscriber(
             self, event_server, bobi_env):
+        from bobi.config import bubble_state_path
         from bobi.events import publish as publish_mod
         from bobi.events.server import ensure_bubble
         from bobi.events.subscriptions import monitor_subscription_keys
@@ -1099,6 +1212,15 @@ class TestSchedulerEndToEnd:
         original = agent_yaml.read_text()
         agent_yaml.write_text(original + f"\nevent_server_url: {base_url}\n")
         publish_mod._es_url_cache.clear()
+        # The session-scoped project may carry a bubble minted against the
+        # session event server. ensure_bubble returns any on-disk bubble
+        # as-is, and THIS test's server has never seen it, so the signed
+        # JOIN would 403 (production recovers via force_remint_of; the test
+        # helper does not). Isolate bubble state both ways too.
+        bubble_path = bubble_state_path(bobi_env.project_path)
+        original_bubble = (bubble_path.read_bytes()
+                          if bubble_path.exists() else None)
+        bubble_path.unlink(missing_ok=True)
         try:
             m = Monitor(name="pr-conflict-check",
                         event="monitor/pr.conflict_detected",
@@ -1145,6 +1267,10 @@ class TestSchedulerEndToEnd:
             assert sched.state["pr-conflict-check"]["active"] == ["repo#7"]
         finally:
             agent_yaml.write_text(original)
+            if original_bubble is None:
+                bubble_path.unlink(missing_ok=True)
+            else:
+                bubble_path.write_bytes(original_bubble)
             publish_mod._es_url_cache.clear()
 
 
@@ -1157,13 +1283,19 @@ class TestBindAddress:
     @staticmethod
     def _start_server(bobi_env, port: int, extra_env: dict | None = None):
         """Start an event server with explicit env control, return (proc, log_path)."""
-        from bobi.events.server import _find_event_server_dir, _needs_build, _run_npm
+        from bobi.events.server import (
+            _build_local,
+            _find_event_server_dir,
+            _needs_build,
+            _needs_install,
+            _run_npm,
+        )
 
         es_dir = _find_event_server_dir()
-        if not (es_dir / "node_modules").exists():
-            _run_npm(["npm", "install", "--no-audit", "--no-fund"], es_dir)
+        if _needs_install(es_dir):
+            _run_npm(["npm", "install", "--omit=dev", "--no-audit", "--no-fund"], es_dir)
         if _needs_build(es_dir):
-            _run_npm(["npm", "run", "build:local"], es_dir)
+            _build_local(es_dir)
 
         log_path = bobi_env.state_dir / f"event-server-bind-{port}.log"
 
@@ -1247,3 +1379,297 @@ class TestBindAddress:
             assert "loopback-only" in log_text
         finally:
             self._stop(proc, lf)
+
+
+@pytest.mark.local_only
+class TestWebhookSignatureVerification:
+    """#639: every /webhooks/<source> route verifies through the unified
+    pipeline's structural verify slot. This drives the REAL local server
+    process with per-provider secrets set and proves bad/missing signatures
+    are rejected while valid ones deliver - including linear, whose route
+    previously had no signature check at all."""
+
+    GITHUB_SECRET = "gh-int-secret"
+    SLACK_SECRET = "sl-int-secret"
+    LINEAR_SECRET = "ln-int-secret"
+
+    @pytest.fixture()
+    def secured_server(self, bobi_env):
+        port = _free_port()
+        proc, _log_path, lf = TestBindAddress._start_server(bobi_env, port, {
+            "BOBI_ES_WEBHOOK_SECRET": self.GITHUB_SECRET,
+            "BOBI_ES_SLACK_SIGNING_SECRET": self.SLACK_SECRET,
+            "BOBI_ES_LINEAR_WEBHOOK_SECRET": self.LINEAR_SECRET,
+        })
+        try:
+            assert TestBindAddress._wait_healthy(f"http://127.0.0.1:{port}")
+            yield f"http://127.0.0.1:{port}"
+        finally:
+            TestBindAddress._stop(proc, lf)
+
+    @staticmethod
+    def _post(url: str, body: bytes, headers: dict) -> int:
+        req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json", **headers})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status
+        except urllib.error.HTTPError as err:
+            return err.code
+
+    def test_github_signature_enforced(self, secured_server):
+        body = json.dumps({"action": "opened",
+                           "repository": {"full_name": "org/repo"}}).encode()
+        url = f"{secured_server}/webhooks/github"
+        headers = {"x-github-event": "issues", "x-github-delivery": "d1"}
+
+        assert self._post(url, body, headers) == 401
+        assert self._post(
+            url, body, {**headers, "x-hub-signature-256": "sha256=bad"}) == 401
+
+        sig = "sha256=" + hmac.new(
+            self.GITHUB_SECRET.encode(), body, hashlib.sha256).hexdigest()
+        assert self._post(
+            url, body, {**headers, "x-hub-signature-256": sig}) == 200
+
+    def test_linear_signature_enforced(self, secured_server):
+        body = json.dumps({"action": "update", "type": "Issue",
+                           "data": {"title": "t", "team": {"key": "ENG"}},
+                           "webhookTimestamp": int(time.time() * 1000)}).encode()
+        url = f"{secured_server}/webhooks/linear"
+
+        assert self._post(url, body, {}) == 401
+        assert self._post(url, body, {"linear-signature": "deadbeef"}) == 401
+
+        sig = hmac.new(self.LINEAR_SECRET.encode(), body, hashlib.sha256).hexdigest()
+        assert self._post(url, body, {"linear-signature": sig}) == 200
+
+    def test_linear_replay_rejected(self, secured_server):
+        stale = json.dumps({"action": "update", "type": "Issue",
+                            "data": {"title": "t", "team": {"key": "ENG"}},
+                            "webhookTimestamp": int(time.time() * 1000) - 3_600_000}).encode()
+        sig = hmac.new(self.LINEAR_SECRET.encode(), stale, hashlib.sha256).hexdigest()
+        assert self._post(
+            f"{secured_server}/webhooks/linear", stale, {"linear-signature": sig}) == 401
+
+    def test_slack_signature_enforced(self, secured_server):
+        body = json.dumps({"type": "event_callback",
+                           "event": {"type": "message", "user": "U1", "channel": "D1",
+                                     "channel_type": "im", "text": "hi",
+                                     "ts": "1700000000.000001"}}).encode()
+        url = f"{secured_server}/webhooks/slack"
+
+        assert self._post(url, body, {}) == 401
+
+        ts = str(int(time.time()))
+        sig = "v0=" + hmac.new(
+            self.SLACK_SECRET.encode(), f"v0:{ts}:".encode() + body,
+            hashlib.sha256).hexdigest()
+        assert self._post(url, body, {"x-slack-request-timestamp": ts,
+                                      "x-slack-signature": sig}) == 200
+
+    def test_slack_url_verification_passes_unsigned(self, secured_server):
+        """The handshake carries no signing headers; the pipeline's preVerify
+        stage must short-circuit it before the signature check."""
+        body = json.dumps({"type": "url_verification", "challenge": "c1"}).encode()
+        assert self._post(f"{secured_server}/webhooks/slack", body, {}) == 200
+
+
+class TestIngestTokens:
+    """#640: scoped ingest tokens end to end on BOTH backends. Mints a token
+    bound to (bubble, alert/firing) over the signed management API, then
+    drives the acceptance matrix: a plain curl-style POST with the bearer
+    token delivers to a bubble subscriber; missing/wrong/revoked tokens and
+    cross-topic use are opaque 403s; list never exposes token material."""
+
+    @staticmethod
+    def _signed(base_url: str, method: str, path: str, body: str,
+                bubble_id: str, bubble_key: str) -> tuple[int, dict]:
+        from bobi.events.signing import sign_headers
+
+        headers = {"Content-Type": "application/json"} if body else {}
+        headers.update(sign_headers(bubble_id, bubble_key, method, path, body))
+        req = urllib.request.Request(
+            base_url + path, data=body.encode() if body else None,
+            headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as err:
+            try:
+                return err.code, json.loads(err.read())
+            except ValueError:
+                return err.code, {}
+
+    @staticmethod
+    def _ingest(base_url: str, topic: str, payload: dict,
+                token: str | None = None) -> int:
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(
+            f"{base_url}/webhooks/ingest/{topic}",
+            data=json.dumps(payload).encode(), headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                json.loads(resp.read())
+                return resp.status
+        except urllib.error.HTTPError as err:
+            return err.code
+
+    def test_unsigned_token_mint_rejected(self, event_server):
+        base_url, *_ = event_server
+        req = urllib.request.Request(
+            f"{base_url}/ingest-tokens",
+            data=json.dumps({"topic": "alert/firing"}).encode(),
+            headers={"Content-Type": "application/json"})
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(req, timeout=5)
+        assert exc.value.code == 403
+
+    def test_ingest_token_lifecycle(self, event_server):
+        base_url, *_ = event_server
+        from bobi.events.signing import serialize_body
+
+        boot = _register(base_url, "ingest-bootstrap", ["_bootstrap"])
+        bub, key = boot["bubble_id"], boot["bubble_key"]
+        dep = _register(base_url, "ingest-subscriber", ["alert/firing"], bub, key)
+
+        # Mint - the token appears here and only here.
+        status, minted = self._signed(
+            base_url, "POST", "/ingest-tokens",
+            serialize_body({"name": "oncall", "topic": "alert/firing"}), bub, key)
+        assert status == 201
+        token = minted["token"]
+        assert token.startswith("ingt_")
+
+        # The exact acceptance flow: a static-header POST of plain JSON
+        # reaches a subscriber of the bound topic in the bound bubble.
+        events = _send_and_drain(
+            base_url, dep["deployment_id"], dep["api_key"],
+            lambda: self._ingest(base_url, "alert/firing",
+                                 {"title": "disk full", "severity": "critical"}, token))
+        matching = [e for e in events
+                    if e.get("source") == "ingest" and e.get("type") == "alert/firing"]
+        assert len(matching) == 1
+        assert matching[0]["fields"]["title"] == "disk full"
+        assert matching[0]["payload"] == {"title": "disk full", "severity": "critical"}
+
+        # Missing, wrong, and cross-topic tokens: opaque 403.
+        assert self._ingest(base_url, "alert/firing", {"t": 1}) == 403
+        assert self._ingest(base_url, "alert/firing", {"t": 1}, "ingt_wrong") == 403
+        assert self._ingest(base_url, "alert/resolved", {"t": 1}, token) == 403
+
+        # List shows metadata, never token material.
+        status, listed = self._signed(base_url, "GET", "/ingest-tokens", "", bub, key)
+        assert status == 200
+        assert [t["id"] for t in listed["tokens"]] == [minted["id"]]
+        assert all("token" not in t and "token_hash" not in t for t in listed["tokens"])
+
+        # Revoke takes effect immediately.
+        status, _ = self._signed(
+            base_url, "DELETE", f"/ingest-tokens/{minted['id']}", "", bub, key)
+        assert status == 200
+        assert self._ingest(base_url, "alert/firing", {"t": 1}, token) == 403
+
+    def test_token_is_bubble_scoped(self, event_server):
+        """A second bubble cannot see or revoke the first bubble's tokens, and
+        the ingested event stays inside the minting bubble."""
+        base_url, *_ = event_server
+        from bobi.events.signing import serialize_body
+
+        owner = _register(base_url, "ingest-owner", ["_bootstrap"])
+        other = _register(base_url, "ingest-other", ["_bootstrap"])
+        # A subscriber to the SAME topic in the OTHER bubble must not receive.
+        other_dep = _register(base_url, "ingest-other-sub", ["alert/firing"],
+                              other["bubble_id"], other["bubble_key"])
+
+        status, minted = self._signed(
+            base_url, "POST", "/ingest-tokens",
+            serialize_body({"topic": "alert/firing"}),
+            owner["bubble_id"], owner["bubble_key"])
+        assert status == 201
+
+        events = _send_and_drain(
+            base_url, other_dep["deployment_id"], other_dep["api_key"],
+            lambda: self._ingest(base_url, "alert/firing", {"title": "x"},
+                                 minted["token"]),
+            timeout=3)
+        assert [e for e in events if e.get("source") == "ingest"] == []
+
+        status, listed = self._signed(
+            base_url, "GET", "/ingest-tokens", "",
+            other["bubble_id"], other["bubble_key"])
+        assert status == 200 and listed["tokens"] == []
+        status, _ = self._signed(
+            base_url, "DELETE", f"/ingest-tokens/{minted['id']}", "",
+            other["bubble_id"], other["bubble_key"])
+        assert status == 404
+
+    @pytest.mark.local_only
+    def test_env_seeded_token_survives_local_restart(self, bobi_env):
+        """#661: local in-memory token state self-heals from env on restart."""
+        first_token = "ingt_static_restart_secret"
+        rotated_token = "ingt_rotated_restart_secret"
+        procs = []
+
+        def start(port: int, token: str):
+            proc, _log_path, lf = TestBindAddress._start_server(
+                bobi_env,
+                port,
+                {"BOBI_ES_INGEST_TOKENS": f"alert/firing={token}"},
+            )
+            procs.append((proc, lf))
+            base = f"http://127.0.0.1:{port}"
+            assert TestBindAddress._wait_healthy(base, timeout=30)
+            return base
+
+        def assert_delivers(base_url: str, suffix: str, token: str):
+            boot = _register(base_url, f"env-ingest-bootstrap-{suffix}", ["_bootstrap"])
+            bub, key = boot["bubble_id"], boot["bubble_key"]
+            dep = _register(base_url, f"env-ingest-subscriber-{suffix}",
+                            ["alert/firing"], bub, key)
+
+            status, listed = self._signed(base_url, "GET", "/ingest-tokens", "", bub, key)
+            assert status == 200
+            assert listed["tokens"][0]["env_managed"] is True
+            assert listed["tokens"][0]["name"] == "BOBI_ES_INGEST_TOKENS"
+
+            status, body = self._signed(
+                base_url, "DELETE", f"/ingest-tokens/{listed['tokens'][0]['id']}",
+                "", bub, key)
+            assert status == 400
+            assert "BOBI_ES_INGEST_TOKENS" in body["error"]
+
+            events = _send_and_drain(
+                base_url, dep["deployment_id"], dep["api_key"],
+                lambda: self._ingest(base_url, "alert/firing", {"title": suffix}, token),
+            )
+            matching = [e for e in events
+                        if e.get("source") == "ingest" and e.get("type") == "alert/firing"]
+            assert len(matching) == 1
+            assert matching[0]["fields"]["title"] == suffix
+
+            # Cross-topic behavior remains the same opaque 403 as minted tokens.
+            assert self._ingest(base_url, "alert/resolved", {"title": suffix}, token) == 403
+
+        try:
+            first = start(_free_port(), first_token)
+            assert_delivers(first, "before-restart", first_token)
+
+            proc, lf = procs.pop()
+            TestBindAddress._stop(proc, lf)
+
+            second = start(_free_port(), first_token)
+            assert_delivers(second, "after-restart", first_token)
+
+            proc, lf = procs.pop()
+            TestBindAddress._stop(proc, lf)
+
+            rotated = start(_free_port(), rotated_token)
+            assert self._ingest(rotated, "alert/firing", {"title": "old"}, first_token) == 403
+            assert_delivers(rotated, "after-rotation", rotated_token)
+        finally:
+            while procs:
+                proc, lf = procs.pop()
+                TestBindAddress._stop(proc, lf)

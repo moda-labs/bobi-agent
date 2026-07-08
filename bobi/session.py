@@ -26,6 +26,7 @@ from bobi.inbox import Inbox, Message
 from bobi.sdk import (
     save_session_id,
     load_session_id,
+    load_resumable_session_id,
     log_activity,
     get_registry,
     SessionEntry,
@@ -42,9 +43,10 @@ DEFAULT_ROTATION_TOKEN_CAP = 275_000
 # indefinitely with no timeout — the actual 2026-06-23/24 director wedge. We
 # wrap the reconnect in a hard timeout, retry a bounded number of times, then
 # recover into an addressable connected client rather than a silent park. A
-# connect + single ack turn is lighter than the old flush turn, so a smaller
-# timeout suffices; these are tuning numbers, not load-bearing.
-ROTATION_RECONNECT_TIMEOUT = 120.0
+# connect + single ack turn is lighter than the old flush turn, but this must
+# stay above the Claude initialize deadline so the SDK can surface retryable
+# initialize timeouts instead of being preempted by the outer rotation wrapper.
+ROTATION_RECONNECT_TIMEOUT = 240.0
 ROTATION_MAX_RECONNECT_ATTEMPTS = 3
 ROTATION_RECONNECT_BACKOFF = 2.0
 
@@ -72,6 +74,42 @@ def _context_fill_tokens(usage: dict | None) -> int:
         + (usage.get("cache_read_input_tokens") or 0)
         + (usage.get("cache_creation_input_tokens") or 0)
     )
+
+
+def _rotation_error_message(err: BaseException | None) -> str:
+    """Return a non-empty, diagnosable rotation failure string.
+
+    ``asyncio.TimeoutError`` commonly has no message, so ``str(err)`` is empty.
+    Rotation failure records are operational breadcrumbs; they must name the
+    failure class even when the exception object carries no text.
+    """
+    if err is None:
+        return "unknown rotation reconnect failure"
+
+    err_type = type(err).__name__
+    try:
+        text = str(err).strip()
+    except Exception:
+        text = ""
+    if text:
+        message = f"{err_type}: {text}"
+    elif isinstance(err, asyncio.TimeoutError):
+        message = (
+            f"{err_type}: rotation reconnect timed out after "
+            f"{ROTATION_RECONNECT_TIMEOUT:.0f}s"
+        )
+    else:
+        message = f"{err_type}: no error message provided"
+
+    cause = err.__cause__ or err.__context__
+    if cause is not None and cause is not err:
+        try:
+            cause_text = str(cause).strip()
+        except Exception:
+            cause_text = ""
+        cause_text = cause_text or "no error message provided"
+        message = f"{message}; caused by {type(cause).__name__}: {cause_text}"
+    return message
 
 # Background event-subscription retry cadence (#409). When the initial
 # registration handshake with the event server times out, the session boots
@@ -139,6 +177,22 @@ def _emit_session_unreachable_alert(
         log.warning("Failed to emit session unreachable alert", exc_info=True)
 
 
+def _ack_message(msg: Message) -> None:
+    """Confirm a fully-processed message so its event-server cursor advances.
+
+    Only called on paths where the message was actually processed (#688) -
+    a dropped or failed message must not ack, so a restart replays it.
+    Ack failure is non-fatal: the cursor stays behind and the event is
+    re-delivered after a restart (at-least-once).
+    """
+    if msg.on_done is None:
+        return
+    try:
+        msg.on_done()
+    except Exception:
+        log.warning("Message ack failed for %s", msg.id, exc_info=True)
+
+
 class Session:
     """A Claude Code session with an inbox for receiving messages."""
 
@@ -196,7 +250,6 @@ class Session:
         self._rotate_pending = False
         self._rotate_reason = "context_cap"
         self._rotation_count = 0
-        self._unreachable_alert_active = False
 
     def detect_state(self) -> str:
         return self._state
@@ -250,6 +303,16 @@ class Session:
             resume=resume,
             options=self._extra_options,
         )
+
+    def _session_model(self) -> str:
+        """The effective configured model for this session (#617).
+
+        The explicit option if set, else the process default the adapter
+        would fill in - the string recorded alongside the saved session id
+        so a resume under a different model starts fresh instead.
+        """
+        from bobi.brain import resolve_model_option
+        return resolve_model_option(self._extra_options.get("model"))
 
     async def _safe_disconnect(self, client) -> None:
         """Disconnect a client, swallowing errors — used to discard a hung or
@@ -314,11 +377,12 @@ class Session:
             await self._safe_disconnect(self._client)
             self._client = None
 
-        # Rebuild system prompt — reloads the team policy (#456).
+        # Rebuild system prompt - reloads long-term memory (#456).
         self._system_prompt = self._rebuild_system_prompt()
 
         # Bounded, recoverable reconnect.
         last_err: BaseException | None = None
+        attempt_errors: list[dict] = []
         reconnected = False
         for attempt in range(1, ROTATION_MAX_RECONNECT_ATTEMPTS + 1):
             try:
@@ -327,6 +391,10 @@ class Session:
                 break
             except asyncio.TimeoutError as e:
                 last_err = e
+                attempt_errors.append({
+                    "attempt": attempt,
+                    "error": _rotation_error_message(e),
+                })
                 log.error(
                     "Rotation reconnect for '%s' timed out after %.0fs "
                     "(attempt %d/%d)",
@@ -335,9 +403,14 @@ class Session:
                 )
             except Exception as e:
                 last_err = e
+                attempt_errors.append({
+                    "attempt": attempt,
+                    "error": _rotation_error_message(e),
+                })
                 log.error(
                     "Rotation reconnect for '%s' failed (attempt %d/%d): %s",
-                    self.name, attempt, ROTATION_MAX_RECONNECT_ATTEMPTS, e,
+                    self.name, attempt, ROTATION_MAX_RECONNECT_ATTEMPTS,
+                    _rotation_error_message(e),
                 )
             if attempt < ROTATION_MAX_RECONNECT_ATTEMPTS:
                 await asyncio.sleep(ROTATION_RECONNECT_BACKOFF * attempt)
@@ -345,7 +418,7 @@ class Session:
         if not reconnected:
             # Exhausted — recover into an addressable state (or surface
             # terminally if even that fails). Raises on terminal failure.
-            await self._recover_rotation_failure(last_err)
+            await self._recover_rotation_failure(last_err, attempt_errors)
 
         self._rotate_pending = False
         reason = self._rotate_reason
@@ -383,7 +456,11 @@ class Session:
         registry.update(self.name, status="idle", rotation_count=self._rotation_count)
         log.info("Session '%s' rotated successfully (count=%d)", self.name, self._rotation_count)
 
-    async def _recover_rotation_failure(self, err: BaseException | None) -> None:
+    async def _recover_rotation_failure(
+        self,
+        err: BaseException | None,
+        attempt_errors: list[dict] | None = None,
+    ) -> None:
         """Recover after the bounded reconnect exhausted its attempts (#456 #3).
 
         Fails loudly (log.error + a session.rotation_failed activity/event) and
@@ -394,15 +471,24 @@ class Session:
         this final fresh connect fails does the session surface terminally —
         loudly, never a silent hang.
         """
+        error_message = _rotation_error_message(err)
+        attempt_errors = attempt_errors or [
+            {"attempt": ROTATION_MAX_RECONNECT_ATTEMPTS, "error": error_message}
+        ]
+
         log.error(
             "Rotation reconnect exhausted for '%s' after %d attempts: %s — "
             "attempting fresh-connect recovery",
-            self.name, ROTATION_MAX_RECONNECT_ATTEMPTS, err,
+            self.name, ROTATION_MAX_RECONNECT_ATTEMPTS, error_message,
         )
         try:
             log_activity(
                 "rotation_failed",
-                {"attempts": ROTATION_MAX_RECONNECT_ATTEMPTS, "error": str(err)},
+                {
+                    "attempts": ROTATION_MAX_RECONNECT_ATTEMPTS,
+                    "error": error_message,
+                    "attempt_errors": attempt_errors,
+                },
                 session=self.name,
             )
             from bobi.events.client import _log_event
@@ -413,7 +499,8 @@ class Session:
                     "payload": {
                         "session": self.name,
                         "attempts": ROTATION_MAX_RECONNECT_ATTEMPTS,
-                        "error": str(err),
+                        "error": error_message,
+                        "attempt_errors": attempt_errors,
                     },
                 },
                 session_id=self.name,
@@ -431,9 +518,38 @@ class Session:
             )
         except BaseException as e2:
             await self._safe_disconnect(client)
+            final_error_message = _rotation_error_message(e2)
+            try:
+                log_activity(
+                    "rotation_failed",
+                    {
+                        "attempts": ROTATION_MAX_RECONNECT_ATTEMPTS,
+                        "error": error_message,
+                        "attempt_errors": attempt_errors,
+                        "final_recovery_error": final_error_message,
+                    },
+                    session=self.name,
+                )
+                from bobi.events.client import _log_event
+                _log_event(
+                    {
+                        "type": "session.rotation_failed",
+                        "source": "bobi",
+                        "payload": {
+                            "session": self.name,
+                            "attempts": ROTATION_MAX_RECONNECT_ATTEMPTS,
+                            "error": error_message,
+                            "attempt_errors": attempt_errors,
+                            "final_recovery_error": final_error_message,
+                        },
+                    },
+                    session_id=self.name,
+                )
+            except Exception:
+                pass
             log.error(
                 "Final rotation recovery failed for '%s': %s — surfacing terminally",
-                self.name, e2,
+                self.name, final_error_message,
             )
             self._client = None
             self._set_state("error")
@@ -450,16 +566,16 @@ class Session:
     def _rebuild_system_prompt(self) -> dict:
         """Rebuild the system prompt, reloading long-term memory (#456).
 
-        A rotated session re-reads long_term_memory.md here — the passive pickup path for
-        a sleep_cycle update (no inbox push needed for a routine distillation).
+        A rotated session re-reads long_term_memory.md here - the passive
+        pickup path for a sleep-cycle update.
         """
         try:
             from bobi.subagent import _load_long_term_memory_prompt
             memory_prompt = _load_long_term_memory_prompt()
             if isinstance(self._system_prompt, dict):
                 base_append = self._system_prompt.get("append", "")
-                # Strip a previously-injected memory section so it isn't doubled
-                # across rotations.
+                # Strip a previously-injected memory section so it isn't
+                # doubled across rotations.
                 for heading in ("## Long-Term Memory", "## Team Policy"):
                     if heading in base_append:
                         base_append = base_append.split(heading)[0].rstrip()
@@ -510,7 +626,8 @@ class Session:
                             except Exception:
                                 pass
                 elif isinstance(msg, TurnResult):
-                    save_session_id(self.name, msg.session_id)
+                    save_session_id(self.name, msg.session_id,
+                                    model=self._session_model())
                     self._last_is_error = msg.is_error
                     cost = msg.total_cost_usd or 0.0
                     self._total_cost_usd += cost
@@ -585,13 +702,25 @@ class Session:
             self._set_state("error")
             registry.update(self.name, status="error")
 
-        # Turn complete — clear any "is thinking…" Slack indicators the drain
-        # loop started for this turn. The slack-reply CLI can't do this (it
-        # runs in a subprocess without the manager's loop registry), so the
-        # indicator would otherwise refresh itself forever.
+        # Turn complete — clear any "is thinking…" indicators the drain loop
+        # started for this turn. The gateway clears the indicator when a
+        # reply resolves the response context (`bobi reply` sends mode
+        # final), but the manager's refresh loop would re-set it on the next
+        # tick; this in-process sweep is what actually stops the loops.
         self._stop_status_indicators()
 
         return self._last_response
+
+    async def _ack_processed(self, msg: Message) -> None:
+        """Run the message ack off the event loop.
+
+        The ack ends in real I/O (cursor-file write + WS send in
+        ``ack_through``); a blocked socket must never freeze this session's
+        event loop, so it runs on the executor like ``inbox.recv``.
+        """
+        if msg.on_done is None:
+            return
+        await asyncio.get_running_loop().run_in_executor(None, _ack_message, msg)
 
     async def _process_message(self, msg: Message) -> None:
         """Wait for ready state, inject a message, and optionally respond."""
@@ -600,8 +729,7 @@ class Session:
         while self._state not in ("waiting_input", "stopped", "error"):
             elapsed = time.monotonic() - wait_started
             if (
-                not self._unreachable_alert_active
-                and not alerted_unreachable
+                not alerted_unreachable
                 and elapsed >= SESSION_UNREACHABLE_ALERT_AFTER
             ):
                 _emit_session_unreachable_alert(
@@ -613,7 +741,6 @@ class Session:
                     elapsed=elapsed,
                 )
                 alerted_unreachable = True
-                self._unreachable_alert_active = True
             if self._input_ready:
                 if self._input_ready.is_set():
                     # A set event with a still-not-ready state is stale. Do not
@@ -633,9 +760,13 @@ class Session:
                 # Fallback: no event yet (shouldn't happen after _run)
                 await asyncio.sleep(SESSION_READY_WAIT_POLL)
 
-        self._unreachable_alert_active = False
-
         if self._state in ("stopped", "error"):
+            # Not ACKed (on_done not called), so the event server replays the
+            # message after a restart instead of losing it (#688).
+            log.warning(
+                "Dropping inbox message for '%s' (state=%s, sender=%s): %.120s",
+                self.name, self._state, msg.sender, msg.text,
+            )
             # Dropping the message means no turn runs, so clear any Slack
             # "thinking…" indicator here — _drain_turn (which normally clears
             # it) is never reached.
@@ -659,6 +790,7 @@ class Session:
             self._rotate_reason = "manual"
             if msg.wait:
                 self.inbox.respond(msg, "compaction requested; rotating at next idle")
+            await self._ack_processed(msg)
             return
 
         try:
@@ -696,7 +828,9 @@ class Session:
 
             if msg.wait:
                 self.inbox.respond(msg, response)
+            await self._ack_processed(msg)
         except Exception as e:
+            # No ack: the message was not processed, so a restart replays it.
             log.error(f"Inbox processing failed for '{self.name}': {e}")
             if msg.wait:
                 self.inbox.respond(msg, f"error: {e}")
@@ -715,7 +849,7 @@ class Session:
                 # Act at idle — rotate when pending and the queue is empty. The
                 # decision-log flush is gone (#456); rotation is now just the
                 # bounded, recoverable client cycle in _rotate().
-                if self._rotate_pending and self.inbox._queue.empty():
+                if self._rotate_pending and self.inbox.empty():
                     try:
                         await self._rotate()
                     except Exception as e:
@@ -730,7 +864,7 @@ class Session:
             await self._process_message(msg)
 
     async def _run(self, startup_prompt: str | None = None) -> None:
-        saved_id = load_session_id(self.name)
+        saved_id = load_resumable_session_id(self.name, self._session_model())
         resume_id = saved_id or None
 
         self._client = self._make_brain_session(resume=resume_id)

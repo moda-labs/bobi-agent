@@ -1,6 +1,7 @@
 """Unit tests for bobi.manager_health — the manager health endpoint."""
 
 import json
+import socket
 import urllib.request
 
 import pytest
@@ -32,6 +33,49 @@ class TestHealthServer:
         port_file = state_dir / "manager-health.port"
         assert port_file.exists()
         assert int(port_file.read_text().strip()) == port
+
+    def test_start_uses_configured_bind_and_port(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        configured_port = sock.getsockname()[1]
+        sock.close()
+
+        monkeypatch.setenv("BOBI_HEALTH_BIND", "0.0.0.0")
+        monkeypatch.setenv("BOBI_HEALTH_PORT", str(configured_port))
+        port = manager_health.start(state_dir, "test-project")
+
+        assert manager_health._server.server_address[0] == "0.0.0.0"
+        assert port == configured_port
+        assert int((state_dir / "manager-health.port").read_text()) == port
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health",
+                                    timeout=2) as resp:
+            data = json.loads(resp.read())
+        assert data["status"] == "ok"
+
+    def test_fixed_port_can_restart_after_stop(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        configured_port = sock.getsockname()[1]
+        sock.close()
+
+        monkeypatch.setenv("BOBI_HEALTH_PORT", str(configured_port))
+        assert manager_health.start(state_dir, "test-project") == configured_port
+        manager_health.stop()
+        assert manager_health.start(state_dir, "test-project") == configured_port
+
+    @pytest.mark.parametrize("value", ["not-a-port", "-1", "65536"])
+    def test_invalid_configured_port_fails_loudly(self, tmp_path, monkeypatch,
+                                                  value):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        monkeypatch.setenv("BOBI_HEALTH_PORT", value)
+
+        with pytest.raises(ValueError, match="BOBI_HEALTH_PORT"):
+            manager_health.start(state_dir, "test-project")
 
     def test_health_endpoint_returns_ok(self, tmp_path):
         state_dir = tmp_path / "state"
@@ -118,6 +162,45 @@ class TestHealthServer:
         """health() returns None when nothing is listening."""
         data = manager_health.health("http://127.0.0.1:1", timeout=0.5)
         assert data is None
+
+    def test_ready_returns_503_until_manager_running_or_idle(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        manager = {"session": "moda-mgr-p", "status": "starting",
+                   "last_activity": None, "idle_seconds": 0.0}
+
+        port = manager_health.start(
+            state_dir, "test-project", session_status_fn=lambda: [],
+            manager_status_fn=lambda: manager)
+
+        url = f"http://127.0.0.1:{port}/ready"
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(url, timeout=2)
+        assert exc_info.value.code == 503
+
+        manager["status"] = "running"
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            running = json.loads(resp.read())
+        assert resp.status == 200
+        assert running["status"] == "ready"
+
+        manager["status"] = "idle"
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            idle = json.loads(resp.read())
+        assert resp.status == 200
+        assert idle["manager"]["status"] == "idle"
+
+    def test_ready_returns_503_without_manager_signal(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        port = manager_health.start(state_dir, "test-project",
+                                    session_status_fn=lambda: [])
+
+        url = f"http://127.0.0.1:{port}/ready"
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(url, timeout=2)
+        assert exc_info.value.code == 503
 
 
 class TestManagerBlock:

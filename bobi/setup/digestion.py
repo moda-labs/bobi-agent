@@ -66,8 +66,22 @@ user when you move from one to the next so they always know where you are:
        request).
    A small team is fine — often one role. Don't fabricate roles the user
    hasn't implied.
-3. **Automations** — proactive things the team does on its own, unprompted.
-4. **Connections** — the outside services the whole team reads from / writes to.
+3. **Workflows** — once every role is settled, PROPOSE the deterministic,
+   repeatable flows you can see in this team's work (e.g. "an issue lands →
+   triage → implement → human approves → open a PR"). Don't wait to be asked —
+   this is where you show you thought ahead. For each flow: a short name, what
+   triggers it, and the ordered steps — which role does each step, what that
+   step is told to do, and mark the steps after which a HUMAN must approve
+   before work continues ("hitl": true). Keep flows short (2–5 steps). Plenty
+   of teams have no repeatable flows — offer, but take "no workflows" as a
+   valid, settled answer (set workflows_confirmed). The user can read each
+   flow's YAML from the Workflows card on the right.
+4. **Automations** — proactive things the team does on its own, unprompted.
+   For each, pin down HOW it fires: on a schedule ("trigger": "schedule",
+   cadence like "1d" or "9am daily") or reacting to an event ("trigger":
+   "event", cadence describing it — e.g. "when an email arrives", "when a PR
+   opens").
+5. **Connections** — the outside services the whole team reads from / writes to.
    Once you and the user agree on which services the team needs, **direct them to
    the Connections card in the right-hand panel to actually connect them** —
    that's where OAuth and API keys are entered (NEVER in this chat; if a user
@@ -76,7 +90,7 @@ user when you move from one to the next so they always know where you are:
    there, then come back and we'll sort out how you chat with the team." Then
    **wait** — do not move on to chat until every connection shows connected (or
    the user confirms none are needed).
-5. **Chat** — how they'll talk to the team day to day. Bring this up only once
+6. **Chat** — how they'll talk to the team day to day. Bring this up only once
    connections are settled, framing it as the last step.
 
 Give the user a sense of progress as you go (which phase, how many roles left).
@@ -88,10 +102,19 @@ Ask ONE good question at a time. Never dump a giant questionnaire.
 - **roles**: the roles, each with the four dimensions above. Mark a role
   "complete" only once all four dimensions are genuinely settled; otherwise
   "in_progress".
+- **workflows** (OPTIONAL — never required to finish): deterministic,
+  repeatable multi-step flows, codified as YAML workflow files at build. Each
+  has a name, a trigger (what kicks it off), and ordered steps — each step
+  names the role that runs it, what it's told to do, and whether a human must
+  approve before the flow continues ("hitl"). An empty list is a valid,
+  deliberate answer — but only once the user has weighed in (set
+  workflows_confirmed).
 - **autonomous**: things the team should do on its own, unprompted (proactive
   checks / scheduled or triggered behavior). Each carries a leash: "notify"
   (tell the user), "ask" (propose, wait for approval), or "act" (do it,
-  report); the role that runs it; and what the agent is told to do (command).
+  report); the role that runs it; what the agent is told to do (command); and
+  a trigger — "schedule" (cadence is an interval like "1d"/"9am daily") or
+  "event" (cadence describes what it reacts to, e.g. "when an email arrives").
   An empty list is a valid, deliberate answer — but only once the user has
   weighed in (set autonomous_confirmed).
 - **services**: the outside services the team reads from or writes to (e.g.
@@ -115,14 +138,21 @@ After your conversational reply, output a line containing exactly
     "roles": [{{"name": "...", "responsibility": "...",
                 "good_looks_like": "...", "systems": ["..."],
                 "triggers": "...", "status": "in_progress|complete"}}],
+    "workflows": [{{"name": "short-kebab-name", "description": "...",
+                    "trigger": "what kicks it off",
+                    "steps": [{{"name": "...", "role": "which role",
+                                "prompt": "what the step is told to do",
+                                "hitl": false}}]}}],
     "autonomous": [{{"description": "...", "leash": "notify|ask|act",
-                     "cadence": "e.g. 1d, 15m, or an event",
+                     "trigger": "schedule|event",
+                     "cadence": "e.g. 1d, 9am daily — or the event it reacts to",
                      "role": "which role runs it", "command": "what it's told to do"}}],
     "services": [{{"name": "..."}}],
     "chat": "cli|slack|telegram (only if they indicated how they'll talk to it)"
   }},
   "autonomous_confirmed": true,
-  "phase": "goal | role:<role-name> | automations | connections | wrap",
+  "workflows_confirmed": true,
+  "phase": "goal | role:<role-name> | workflows | automations | connections | wrap",
   "summary": "refreshed 2–4 sentence running summary of the whole design",
   "readiness": {{"goal": "empty|thin|enough", "roles": "...",
                  "autonomous": "...", "services": "..."}}
@@ -146,6 +176,7 @@ class DigestionResult:
     summary: str = ""
     readiness: dict = field(default_factory=dict)
     autonomous_confirmed: bool | None = None
+    workflows_confirmed: bool | None = None
     phase: str = ""
 
 
@@ -158,6 +189,8 @@ def assemble_context(state: SetupState, last_n: int = 12) -> str:
     snapshot = {
         "goal": spec.goal,
         "roles": spec.roles,
+        "workflows": spec.workflows,
+        "workflows_confirmed": spec.workflows_confirmed,
         "autonomous": spec.autonomous,
         "autonomous_confirmed": spec.autonomous_confirmed,
         "services": spec.services,
@@ -208,8 +241,33 @@ def parse_digestion(full_text: str) -> DigestionResult:
         summary=payload.get("summary") or "",
         readiness=payload.get("readiness") or {},
         autonomous_confirmed=payload.get("autonomous_confirmed"),
+        workflows_confirmed=payload.get("workflows_confirmed"),
         phase=str(phase) if isinstance(phase, str) else "",
     )
+
+
+def _normalized_workflow(w: dict) -> dict:
+    """Shape-guard a brain-emitted workflow at the trust boundary: the panel
+    and authoring expect string fields and a LIST of dict steps — a malformed
+    payload must degrade, never crash the render."""
+    out = dict(w)
+    for k in ("name", "description", "trigger"):
+        if k in out and not isinstance(out[k], str):
+            out[k] = "" if out[k] is None else str(out[k])
+    norm_steps = []
+    steps = out.get("steps")
+    for s in (steps if isinstance(steps, list) else []):
+        if not isinstance(s, dict):
+            continue
+        s = dict(s)
+        # hitl must be a REAL bool: the model can emit "false" (truthy), which
+        # would author an unintended approval gate and stall the workflow.
+        h = s.get("hitl")
+        s["hitl"] = h if isinstance(h, bool) else (
+            str(h).strip().lower() in ("true", "yes", "1"))
+        norm_steps.append(s)
+    out["steps"] = norm_steps
+    return out
 
 
 def apply_deltas(state: SetupState, result: DigestionResult) -> None:
@@ -229,14 +287,30 @@ def apply_deltas(state: SetupState, result: DigestionResult) -> None:
         spec.goal = d["goal"].strip()
     if isinstance(d.get("roles"), list):
         spec.roles = d["roles"]
+    if isinstance(d.get("workflows"), list):
+        spec.workflows = [_normalized_workflow(w) for w in d["workflows"]
+                          if isinstance(w, dict)]
     if isinstance(d.get("services"), list):
-        spec.services = d["services"]
+        # The digestion emits fresh {"name": ...} entries; carry over the
+        # pack-declared credential vars reverse_fill attached, or the
+        # Connect cards would silently fall back to catalog var names
+        # mid-conversation.
+        declared = {s.get("name"): s["credential_vars"]
+                    for s in spec.services
+                    if isinstance(s, dict) and s.get("credential_vars")}
+        spec.services = [
+            {**s, "credential_vars": declared[s["name"]]}
+            if isinstance(s, dict) and s.get("name") in declared else s
+            for s in d["services"]
+        ]
     if isinstance(d.get("autonomous"), list):
         spec.autonomous = d["autonomous"]
     if d.get("chat") in ("cli", "slack", "telegram"):
         state.chat = d["chat"]
     if result.autonomous_confirmed is not None:
         spec.autonomous_confirmed = bool(result.autonomous_confirmed)
+    if result.workflows_confirmed is not None:
+        spec.workflows_confirmed = bool(result.workflows_confirmed)
     for slot, value in (result.readiness or {}).items():
         if slot in SPEC_SLOTS and value in _READINESS_VALUES:
             spec.readiness[slot] = value

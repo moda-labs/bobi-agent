@@ -20,6 +20,7 @@ This is a NEW test module (not tests/test_packaging.py) on purpose — see D-4 /
 spec §7 #438 collision avoidance.
 """
 import filecmp
+import os
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,13 @@ PUBLISH_SH = REPO / "scripts" / "publish-team-tarballs.sh"
 TEAM_VERSION_PY = REPO / "scripts" / "team-version.py"
 CHECK_VERSIONS_PY = REPO / "scripts" / "check-team-versions.py"
 WF_TEAMS = REPO / ".github" / "workflows" / "team-packages.yml"
+
+# The shell scripts call bare `python3` (check-publishable.py needs pyyaml).
+# Prepend the test interpreter's bindir so that `python3` resolves to the same
+# interpreter running the tests whether or not a venv is activated — CI runs
+# under an activated venv, but a direct `.venv/bin/python -m pytest` does not.
+_SUBPROC_ENV = {**os.environ, "PATH": os.pathsep.join(
+    [str(Path(sys.executable).parent), os.environ.get("PATH", "")])}
 
 
 # --- fixtures ---------------------------------------------------------------
@@ -53,7 +61,7 @@ def _make_team(root: Path, name: str, version: str | None) -> Path:
 def _build(team_dir: Path, out: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["bash", str(BUILD_SH), "--out", str(out), str(team_dir)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=_SUBPROC_ENV,
     )
 
 
@@ -107,7 +115,7 @@ def test_build_survives_one_bad_team(tmp_path):
     out = tmp_path / "dist"
     proc = subprocess.run(
         ["bash", str(BUILD_SH), "--out", str(out), str(good), str(bad)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=_SUBPROC_ENV,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     # Healthy team got both tarballs; bad team got rolling only (no crash).
@@ -295,7 +303,6 @@ def _seed_dist(tmp_path) -> Path:
 
 
 def test_publish_rolling_clobbers_versioned_does_not(tmp_path, monkeypatch):
-    import os
     dist = _seed_dist(tmp_path)
     bindir = tmp_path / "bin"
     _fake_gh(bindir)
@@ -313,7 +320,6 @@ def test_publish_rolling_clobbers_versioned_does_not(tmp_path, monkeypatch):
 
 
 def test_publish_skips_already_published_versioned_asset(tmp_path):
-    import os
     dist = _seed_dist(tmp_path)
     bindir = tmp_path / "bin"
     _fake_gh(bindir)
@@ -330,7 +336,6 @@ def test_publish_skips_already_published_versioned_asset(tmp_path):
 def test_publish_real_upload_error_is_fatal(tmp_path):
     """A non-422 failure on a versioned asset must abort (not be swallowed as
     an immutable skip)."""
-    import os
     dist = tmp_path / "dist"
     dist.mkdir()
     (dist / "eng-team-1.1.0.tar.gz").write_bytes(b"x")

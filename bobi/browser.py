@@ -24,10 +24,17 @@ import subprocess
 from pathlib import Path
 
 from bobi.doctor import CheckResult
+from bobi.host_caps import HostCap
 
 # The AppArmor knob that gates unprivileged user namespaces. 1 = restricted
 # (Chromium's sandbox can't initialize), 0 = unrestricted (Chromium works).
+# Expressed as a HostCap so gstack's sandbox requirement is one instance of the
+# generalized `host:` model (#428 Stage 3): a team declaring
+# `host: [{sysctl: kernel.apparmor_restrict_unprivileged_userns=0}]` gets the
+# generic host-cap doctor/deploy surface, and this browser-specific check shares
+# the same fix command. Never materialized in-container — it's a host capability.
 USERNS_SYSCTL = "kernel.apparmor_restrict_unprivileged_userns"
+USERNS_CAP = HostCap.sysctl(USERNS_SYSCTL, "0", owner="gstack")
 USERNS_SYSCTL_PATH = Path("/proc/sys/kernel") / "apparmor_restrict_unprivileged_userns"
 
 # Where the fix is persisted so it survives reboots.
@@ -49,7 +56,7 @@ SANDBOX_ERROR_MARKERS = (
     "Operation not permitted (1)",
 )
 
-FIX_COMMAND = f"sudo sysctl -w {USERNS_SYSCTL}=0"
+FIX_COMMAND = USERNS_CAP.fix_command()
 FIX_HINT = (
     f"Run `{FIX_COMMAND}` (and persist it to {SYSCTL_CONF_PATH}), "
     f"or re-run `bobi agent <name> doctor --browser --fix` to apply it interactively."

@@ -36,12 +36,16 @@ bobi agent eng ask "what's the status?"
 ## Machine Commands
 
 ```bash
+bobi app start                        # unified web app (dashboard + onboarding
+bobi app stop|restart|status          #   + chat), runs in the background
 bobi setup <name>                     # design/build/install a Bobi Agent
 bobi agents install <source> --name <name>
+bobi agents install <source> --name <name> --with-deps  # + install declared deps locally
 bobi agents list
 bobi agents browse
 bobi agents update <name>
 bobi agents add-registry <repo>
+bobi build <team> --tag <ref> [--push]  # render a team into a ready-to-run image
 ```
 
 `<source>` can be a local source directory, local `.tar.gz`, public
@@ -61,11 +65,28 @@ bobi agent <name> ask "question"
 bobi agent <name> message "text"
 bobi agent <name> compact
 bobi agent <name> events
+bobi agent <name> events publish alert/firing --json '{"title":"x"}'
+
+# Scoped ingest tokens: let an external system (alerting, CI, SaaS webhooks)
+# POST plain JSON to one topic via /webhooks/ingest/<topic>. The token is
+# shown once at creation; the server stores only a hash.
+bobi agent <name> events ingest-token create alert/firing --name oncall
+bobi agent <name> events ingest-token list
+bobi agent <name> events ingest-token revoke <id>
 
 bobi agent <name> transcript show manager
 bobi agent <name> transcript search "query"
 bobi agent <name> costs
+
+# Reply into a chat conversation (channel-agnostic; ref comes from the event)
+bobi reply <conversation> "markdown text"
+bobi reply <conversation> --edit <ts> "text"     # resolve a placeholder
+bobi reply <conversation> --file <path> "comment"
+bobi read-conversation <conversation> [-n 50] [--json-output]
 ```
+
+Use `bobi reply` and `bobi read-conversation` for Slack and any other
+chat channel delivered through the channel gateway.
 
 ## Sub-Agents
 
@@ -115,6 +136,7 @@ bobi agent support ask "summarize the current queue"
 # Inspect operation
 bobi agent support status
 bobi agent support events
+echo '{"title":"x"}' | bobi agent support events publish alert/firing
 bobi agent support transcript show manager
 ```
 

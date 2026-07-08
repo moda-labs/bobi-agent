@@ -135,7 +135,12 @@ try:
     data = json.loads((Path(os.environ["CODEX_CRED_DIR"]) / "auth.json").read_text())
 except Exception:
     sys.exit(1)
-sys.exit(0 if isinstance(data, dict) and "OPENAI_API_KEY" in data else 1)
+# API-key auth ONLY: a real OPENAI_API_KEY value AND no OAuth tokens. A codex
+# `login --device-auth` file carries an OPENAI_API_KEY field (null) ALONGSIDE
+# `tokens`, so a bare `"OPENAI_API_KEY" in data` misreads valid OAuth as an
+# API-key file and wipes it every boot (re-posting a device-login each time).
+sys.exit(0 if isinstance(data, dict) and data.get("OPENAI_API_KEY")
+         and not data.get("tokens") else 1)
 PY
 }
 
@@ -151,7 +156,9 @@ fi
 # Only durable state lives on the volume: BOBI_HOME, the selected run root, and
 # Claude's config dir (CLAUDE_CONFIG_DIR). HOME is on the image and needs no
 # volume prep.
-mkdir -p "${BOBI_HOME}" "${RUN_ROOT}" "${RUN_ROOT}/workspace" "${CLAUDE_CONFIG_DIR}"
+mkdir -p "${BOBI_HOME}" "${RUN_ROOT}" "${RUN_ROOT}/workspace" "${CLAUDE_CONFIG_DIR}" \
+  "${HF_HOME:-${BOBI_HOME}/cache/huggingface}" \
+  "${FASTEMBED_CACHE_PATH:-${BOBI_HOME}/cache/fastembed}"
 
 # Fly/EC2/k8s mount fresh volumes owned by root. Take ownership once so the
 # non-root user can write; a stamp keeps subsequent boots from re-walking a
@@ -161,7 +168,10 @@ if [ ! -e "${DATA_DIR}/.bobi-owned" ]; then
   chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}"
   : > "${DATA_DIR}/.bobi-owned"
 else
-  chown "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${BOBI_HOME}" "${RUN_ROOT}" "${CLAUDE_CONFIG_DIR}"
+  chown "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${BOBI_HOME}" "${RUN_ROOT}" \
+    "${CLAUDE_CONFIG_DIR}" \
+    "${HF_HOME:-${BOBI_HOME}/cache/huggingface}" \
+    "${FASTEMBED_CACHE_PATH:-${BOBI_HOME}/cache/fastembed}"
 fi
 
 # --- 1b. Make ~/.claude coincide with the durable volume config dir (C24) -----
@@ -353,12 +363,23 @@ if [ "${BOBI_AUTH:-api_key}" = "subscription" ] \
   as_app bobi agent "${AGENT_NAME}" login-bootstrap
 fi
 
+# --- 4c. Dependency snapshot is frozen; warm boot runs no bootstrap (#428) ---
+# The unified dependency model materializes + verifies a team's deps when the
+# team IMAGE is built (in CI, OQ1) and freezes the result. Production never runs
+# the bootstrap agent: a warm boot replays that snapshot. Surface the baked
+# dependency-set identity so `fly logs` shows which snapshot is live — `bobi
+# deploy` compares this same stamp (over `fly ssh`) to decide when a CHANGED
+# dependency set needs a rebuild + re-bootstrap.
+if [ -f /opt/bobi/dep-list.hash ]; then
+  log "Dependency snapshot $(cat /opt/bobi/dep-list.hash) — warm boot, no bootstrap (deps baked in CI, #428)."
+fi
+
 # --- 5. Hand off to the manager as the non-root user ------------------------
 # Agent UI on by default IN THE CONTAINER (the manager starts it on the private
-# 6PN; reach it with `bobi agent <name> ui <deployment>` / `fly proxy`). It's image
-# behavior, not a per-instance flag, so existing instances pick it up on their
-# next image swap. Disable with BOBI_UI=0 in the Fly env. The dark instance
-# has no public route, so this exposes nothing — see DESIGN.md "Agent UI".
+# 6PN for control-plane administration). It's image behavior, not a per-instance
+# flag, so existing instances pick it up on their next image swap. Disable with
+# BOBI_UI=0 in the Fly env. The dark instance has no public route, so this
+# exposes nothing — see DESIGN.md "Agent UI".
 export BOBI_UI="${BOBI_UI:-1}"
 log "Starting manager under self-heal watchdog (user=${APP_USER}, agent=${AGENT_NAME}, run=${RUN_ROOT}, home=${HOME}, bobi_home=${BOBI_HOME}, claude_config=${CLAUDE_CONFIG_DIR})"
 # #464: launch the manager under `bobi supervise` instead of directly.

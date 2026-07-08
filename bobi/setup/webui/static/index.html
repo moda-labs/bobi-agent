@@ -4,10 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="bobi-nonce" content="{{NONCE}}" />
+  <meta name="bobi-base" content="{{BASE}}" />
   <title>bobi setup</title>
-  <link rel="icon" type="image/svg+xml" href="/static/bobi-mark.svg" />
-  <link rel="stylesheet" href="/static/tokens.css" />
-  <link rel="stylesheet" href="/static/app.css" />
+  <link rel="icon" type="image/svg+xml" href="{{BASE}}/static/bobi-mark.svg" />
+  <link rel="stylesheet" href="{{BASE}}/static/tokens.css" />
+  <link rel="stylesheet" href="{{BASE}}/static/app.css" />
 </head>
 <body>
   <div class="app">
@@ -27,6 +28,6 @@
       <div id="main" style="display:contents"></div>
     </div>
   </div>
-  <script src="/static/app.js"></script>
+  <script src="{{BASE}}/static/app.js"></script>
 </body>
 </html>

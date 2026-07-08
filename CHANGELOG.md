@@ -1,5 +1,191 @@
 # Changelog
 
+## 0.40.0 - 2026-07-08
+
+Minor release: WhatsApp joins the channel gateway, event delivery becomes
+restart-durable with chat priority, the local web UI surfaces converge on
+`bobi app`, and webhook/setup paths get release hardening.
+
+### Added
+- **WhatsApp channel adapter (#656).** Add reactive-only WhatsApp support via
+  the Meta Cloud API, including setup docs and gateway integration tests
+  (#665).
+- **Durable inbox delivery and chat priority (#688).** Event drain ACKs now wait
+  for session processing, human chat messages jump bulk webhook backlog, and
+  dropped messages log enough detail to diagnose delivery loss (#691).
+- **Local ingest tokens from env (#661).** Local development can seed scoped
+  ingest tokens from environment configuration (#685).
+
+### Changed
+- **Unified local web surfaces (#614).** Bare `bobi`, `bobi setup`, and local
+  `bobi agent <name> ui` now route through the unified `bobi app` surface; the
+  old standalone agent UI and stale design/dashboard assets are gone (#694).
+- **Shared signed JSON envelopes (#664).** Signed event-server responses now use
+  one shared envelope path across clients (#679).
+- **Slack gateway cleanup (#652).** Removed legacy Slack send shims after the
+  Chat SDK migration (#684).
+
+### Fixed
+- **Setup connection refresh during chat (#683).** Streaming setup chat updates
+  now refresh connection cards, coalesce duplicate refreshes, and reconcile
+  redacted user bubbles (#693).
+- **Curator monitor task delivery (#682).** Curator monitor tasks now deliver via
+  files instead of fragile inline payloads (#689).
+- **Config dotenv interpolation isolation (#596).** Dotenv interpolation is
+  isolated so one config load cannot leak substitutions into another (#687).
+- **Event grant and release drift warnings (#669, #670).** Unbacked event grants
+  now warn, and release automation verifies the fleet event-server identity
+  after deploy (#681, #686).
+- **Linear webhook reliability (#650, #671, #672).** Linear setup docs now cover
+  webhook secret provisioning, comment webhooks route by issue team, and Linear
+  webhooks ACK before fan-out (#675, #678, #683).
+- **Inbound ingress and onboarding polish (#590, #635).** Bobi now warns when
+  inbound ingress is unreachable and clarifies setup/onboarding paths (#676,
+  #677).
+- **Slack placeholder behavior.** Automatic Slack placeholders are removed for
+  cases where typing/status UX should own progress indication (#674).
+
+## 0.39.0 - 2026-07-05
+
+Minor release: the channel gateway lands (Slack rebuilt on the Chat SDK, inbound
+and outbound), the unified `bobi app` web app, per-role and gateway-brain model
+flexibility, scoped webhook ingest, and release-owned GHCR base images.
+
+### Added
+- **Channel gateway (#190).** Phase 1: durable conversation refs, a signed
+  `/channels/send` API, and `bobi reply` (#620). Phase 2: Slack inbound and
+  outbound moved onto the Chat SDK with placeholder/typing UX and capability
+  degradation (#636). Over-budget sends now chunk at natural boundaries
+  (#660), and a gated live-Slack soak suite guards the path (#644).
+- **Unified web app (#525).** `bobi app` serves a dashboard, hosted
+  onboarding, and chat from one place (#587).
+- **Per-role model selection (#617).** `roles.<role>.model` picks the model
+  per role, with a cross-model resume guard (#619).
+- **Brain-level session continuation (#642).** Sessions continue across model
+  switches instead of restarting cold (#646).
+- **`kind: gateway` brain (#655).** Run a team on a local SLM through an
+  Anthropic-compatible gateway (#659).
+- **Scoped ingest tokens (#640, #641).** Mint per-topic tokens for
+  `/webhooks/ingest/<topic>` plus an `ingest-token` CLI (#657); the client
+  rides the shared signed transport (#663).
+- **Signed event publish CLI (#606).** Publish arbitrary events from the CLI
+  with bubble signing (#626).
+- **`bobi build` (#610).** Render an agent team into a ready-to-run container
+  image (#624).
+- **GHCR base image on release (#609).** Releases publish
+  `ghcr.io/moda-labs/bobi:<version>` (#631, #632).
+- **Setup wizard growth.** Ingress wizard (#593); workflows card, event
+  automations, and a next-steps finish flow (#627).
+- **Two-tier semantic gate (#630)** for relevance-gated poll monitors (#633).
+- **Manager health probe configuration (#604)** (#623).
+- **`auto_dispatch` task templates** (#621).
+- **Quickstart guide and concepts overview** docs (#594).
+
+### Changed
+- **One verified inbound-webhook pipeline (#639).** All inbound webhooks share
+  a single verification path (#645).
+- **One signed-request transport (#653).** Every Python event-server client
+  signs and sends through `signed_request` (#658).
+- **Slack parity normalizer deleted (#647)** after the Chat SDK soak completed
+  clean (#648).
+
+### Fixed
+- **Queued session messages survive reconnect (#588)** (#589).
+- **Passive Slack thread placeholders suppressed (#567)** (#616).
+- **Workflow loop re-entry bounded (MOD-250)** (#597).
+- **Question-only PR comments get answered** (#613).
+- **MCP preflight timeout configurable** (#622).
+- **Explicit subscriptions interpolate config refs (#607)** (#625).
+- **Template-built teams appear on the setup home screen** (#595).
+
+## 0.38.0 — 2026-07-02
+
+Patch/minor release: fixes a production Codex OAuth device-login flood, plus
+a per-step brain model override and other runtime fixes.
+
+### Added
+- **Per-step brain model override (MOD-240).** A team can set a `brain.model`
+  default alongside `brain.kind`, and individual workflow steps can override
+  `model:` to start a fresh brain session when the effective model changes.
+  Claude aliases (`haiku`, `sonnet`, `opus`), full Claude model IDs, and Codex
+  model IDs (e.g. `gpt-5-codex`) all pass through unchanged. (#550)
+
+### Fixed
+- **Codex OAuth device-login flood.** A subscription (Codex OAuth) instance
+  re-posted a device-login code to its Slack login channel on every reboot.
+  Both the entrypoint and the codex catalog `success` check misread a valid
+  OAuth `auth.json` (which carries a null `OPENAI_API_KEY` field alongside its
+  `tokens`) as a stale API-key file, wiping it and forcing a fresh login each
+  boot. Now treated as API-key auth only when there is a real `OPENAI_API_KEY`
+  value and no OAuth `tokens`. (#586)
+- **Fastembed cache path baked into the image.** The Dockerfile set `HF_HOME`
+  but never created the directory before the fastembed model download, so the
+  subsequent `chmod` failed. The bake and runtime now share one explicit
+  `/opt/bobi/models/fastembed` cache path, created ahead of time. (#579)
+- **Surfaced agent failure causes (MOD-246).** Opaque "connection lost" session
+  failures now distinguish network-drop, subprocess-timeout, and tool-crash
+  causes; Codex subprocess stderr is preserved, and workflow draining surfaces
+  clean brain error results instead of turning them into later handoff
+  failures. (#570)
+- **Fresh installs default to the local event server (#584).** Config
+  interpolation's `${VAR:-default}` looked up the literal string `VAR:-default`
+  in the environment instead of applying the default, so optional refs never
+  fell back. This nudged fresh eng-team installs onto the Moda Cloudflare event
+  server instead of the bundled local one. (#585)
+
+## 0.37.0 — 2026-07-01
+
+Minor release: gstack joins the tool-library catalog.
+
+### Added
+- **gstack in the tool-library catalog (#428).** The headless-browser QA /
+  dogfooding toolchain (the `browse`, `qa`, `ship`, and `review` skills) is now a
+  reusable catalog entry — a team pulls it in with `tool_library: [gstack]`, with
+  the pins living once in the catalog instead of a hand-written per-team `build:`.
+  The entry is self-contained: it declares its own `nodejs`/`npm` (the base image
+  is Node-free) so its `bun` / Playwright / `./setup` install works standalone. (#583)
+
+## 0.36.0 — 2026-07-01
+
+Minor release: the unified tool-library dependency model (#428, epic #515),
+Codex as a first-class base-image brain, plus runtime and web-UI hardening.
+
+### Added
+- **Unified agent-bootstrapped dependency model (#428).** A team declares CLI
+  tools, skill libraries, and MCP servers as one concept — a dependency with a
+  required `success` contract and optional `guide` / `install` / `host` / `mcp`.
+  Guide-only deps are materialized by a bootstrap agent at image build, verified
+  against `success` per brain, and snapshotted; a declared-set hash drives
+  re-bootstrap. (#571, #577, #578)
+- **Codex baked into the base image** as a first-class brain alongside Claude;
+  `brain: codex` teams no longer bake Codex per-team. (#573)
+- **MCP per-brain rendering.** A dependency's `mcp:` spec renders into Claude
+  session options and Codex `~/.codex/config.toml`, verified by the `initialize`
+  handshake. Direct `mcp_servers:` declarations keep working and win over a
+  dependency's `mcp:` for the same server. (#580)
+- **`bobi agents install --with-deps`.** Materialize a team's declared
+  dependencies on the local machine: the on-machine brain installs them, adapting
+  to the host, idempotently skipping already-satisfied ones, confirm-gated, and
+  never running `sudo` silently. (#581)
+- **Codex release-gate canary at parity.** `ci-codex-smoke` smokes the Codex
+  brain from the release wheel as a hard gate alongside the Claude canary. (#574)
+- **Resource-aware launch admission** to bound concurrent agent starts. (#565)
+
+### Changed
+- Extracted a runtime service core and a web-UI transport harness, and shared
+  web-UI design tokens. (#560, #563, #559)
+- Documentation pass: README rewrite, docs consolidation, Apache 2.0 license,
+  and ticketing policy. (#546, #551, #555)
+
+### Fixed
+- **Deploy resolves a team's brain from the deployment yaml for `team-url`
+  canaries**, so an api_key-mode Codex canary provisions with `OPENAI_API_KEY`
+  instead of defaulting to Claude and demanding `ANTHROPIC_API_KEY`. (#582)
+- Retry Claude `initialize` timeouts, exempt the agent lifecycle from the circuit
+  breaker, and report session-rotation retry errors. (#564, #562, #569)
+- Dropped the broken `openai` CLI catalog entry. (#575)
+- Made the unit suite hermetic against env and subprocess-PATH leaks. (#576)
+
 ## 0.35.4 — 2026-06-27
 
 Patch release for fleet deploys after the Bobi repo rename.

@@ -1,6 +1,7 @@
-"""Unit tests for the workflow orchestrator — schema parsing, handoff
+"""Unit tests for the workflow orchestrator - schema parsing, handoff
 validation, route evaluation, step sequencing, and event emission."""
 
+import asyncio
 import json
 import textwrap
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 
 from bobi import paths
 from bobi.workflow.schema import (
+    DEFAULT_ROUTE_LOOP_MAX_ITERATIONS,
     Workflow, StepDef, HandoffContract, load_workflow,
 )
 from bobi.workflow.orchestrator import (
@@ -22,10 +24,17 @@ from bobi.workflow.orchestrator import (
 from bobi.workflow.state import WorkflowRun
 
 
+@pytest.fixture(autouse=True)
+def default_brain_env(monkeypatch):
+    monkeypatch.delenv("BOBI_BRAIN", raising=False)
+    monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
+
+
 def _bind_runtime_root(root: Path, monkeypatch) -> Path:
     paths.package_dir(root).mkdir(parents=True, exist_ok=True)
     paths.agent_yaml_path(root).write_text("agent: test\nentry_point: manager\n")
     monkeypatch.setattr(paths, "_root", None)
+    monkeypatch.setenv("BOBI_BRAIN", "claude")
     paths.bind_root(root)
     return root
 
@@ -57,6 +66,18 @@ class TestSchemaLoad:
         assert wf.steps[0].handoff.required == ["greeting"]
         assert wf.steps[0].timeout == 60
 
+    def test_load_step_model(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: test-wf
+            steps:
+              - name: discover
+                model: haiku
+                prompt: "Find prospects"
+        """))
+        wf = load_workflow(f)
+        assert wf.steps[0].model == "haiku"
+
     def test_load_route_step(self, tmp_path):
         f = tmp_path / "test.yaml"
         f.write_text(textwrap.dedent("""\
@@ -72,6 +93,137 @@ class TestSchemaLoad:
         assert step.condition == "needs_spec == true"
         assert step.goto == "spec"
         assert step.else_goto == "implement"
+
+    def test_load_route_iteration_cap(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: bounded-route
+            steps:
+              - name: review
+                prompt: "Review"
+              - name: gate
+                if: "clean == true"
+                goto: done
+                else: review
+                max_iterations: 2
+                on_exhausted: escalate
+              - name: done
+                prompt: "Done"
+              - name: escalate
+                prompt: "Escalate"
+        """))
+        wf = load_workflow(f)
+        step = wf.step_by_name("gate")
+        assert step.max_iterations == 2
+        assert step.on_exhausted == "escalate"
+
+    def test_applies_default_cap_to_back_edge(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: default-capped-route
+            steps:
+              - name: review
+                prompt: "Review"
+              - name: gate
+                if: "clean == true"
+                goto: done
+                else: review
+              - name: done
+                prompt: "Done"
+        """))
+        wf = load_workflow(f)
+        assert (
+            wf.step_by_name("gate").max_iterations
+            == DEFAULT_ROUTE_LOOP_MAX_ITERATIONS
+        )
+
+    def test_applies_default_cap_to_self_loop(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: default-capped-self-loop
+            steps:
+              - name: gate
+                if: "ready == true"
+                goto: done
+                else: gate
+              - name: done
+                prompt: "Done"
+        """))
+        wf = load_workflow(f)
+        assert (
+            wf.step_by_name("gate").max_iterations
+            == DEFAULT_ROUTE_LOOP_MAX_ITERATIONS
+        )
+
+    def test_max_visits_alias_loads_as_iteration_cap(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: alias-route
+            steps:
+              - name: review
+                prompt: "Review"
+              - name: gate
+                if: "clean == true"
+                goto: done
+                else: review
+                max_visits: 3
+              - name: done
+                prompt: "Done"
+        """))
+        wf = load_workflow(f)
+        assert wf.step_by_name("gate").max_iterations == 3
+
+    def test_rejects_float_iteration_cap(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: float-cap
+            steps:
+              - name: gate
+                if: "ready == true"
+                goto: done
+                else: gate
+                max_iterations: 2.9
+              - name: done
+                prompt: "Done"
+        """))
+        with pytest.raises(ValueError, match="positive integer"):
+            load_workflow(f)
+
+    def test_rejects_backward_on_exhausted_target(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: backward-exhausted
+            steps:
+              - name: retry
+                prompt: "Retry"
+              - name: gate
+                if: "ready == true"
+                goto: done
+                else: retry
+                max_iterations: 2
+                on_exhausted: retry
+              - name: done
+                prompt: "Done"
+        """))
+        with pytest.raises(ValueError, match="on_exhausted"):
+            load_workflow(f)
+
+    def test_rejects_missing_on_exhausted_target(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: missing-exhausted
+            steps:
+              - name: gate
+                if: "ready == true"
+                goto: done
+                else: gate
+                max_iterations: 2
+                on_exhausted: missing
+              - name: done
+                prompt: "Done"
+        """))
+        with pytest.raises(ValueError, match="on_exhausted"):
+            load_workflow(f)
 
     def test_load_await_step(self, tmp_path):
         f = tmp_path / "test.yaml"
@@ -179,7 +331,7 @@ class TestBuildStepPrompt:
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
         """Prompt building reads handoffs via the session registry, which
-        needs a bound root — bind explicitly, don't rely on leakage from
+        needs a bound root - bind explicitly, don't rely on leakage from
         earlier tests."""
         _bind_runtime_root(tmp_path, monkeypatch)
 
@@ -274,6 +426,15 @@ class FakeClient:
         self.connected = False
 
 
+class FakeBrainClient(FakeClient):
+    """Fake normalized BrainSession for tests that patch get_brain directly."""
+
+    async def receive_response(self):
+        from bobi.brain import AssistantText, TurnResult
+        yield AssistantText(text="Done.")
+        yield TurnResult(session_id="test-session-id")
+
+
 class TestRunWorkflow:
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
@@ -338,6 +499,46 @@ class TestRunWorkflow:
         result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", run_key="1")
         assert result is True
 
+    def test_route_iteration_cap_routes_to_on_exhausted(self, tmp_path, monkeypatch):
+        _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        review_handoffs = []
+
+        def _fake_handoff(session_name, step_name):
+            if step_name == "review":
+                review_handoffs.append(session_name)
+                return {"clean": False}
+            return {}
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="review", prompt="review",
+                    handoff=HandoffContract(required=["clean"])),
+            StepDef(name="gate", condition="clean == true", goto="done",
+                    else_goto="review", max_iterations=2,
+                    on_exhausted="escalate"),
+            StepDef(name="done", prompt="done"),
+            StepDef(name="escalate", prompt="escalate"),
+        ])
+
+        with patch("bobi.workflow.orchestrator._read_handoff",
+                   side_effect=_fake_handoff):
+            result = self._mock_asyncio_run(
+                wf, task="t", repo="r", cwd="/tmp", run_key="1",
+            )
+
+        assert result is True
+        assert len(review_handoffs) == 2
+
+    def test_route_iteration_cap_without_on_exhausted_fails(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="gate", condition="ready == true", goto="done",
+                    else_goto="gate", max_iterations=1),
+            StepDef(name="done", prompt="done"),
+        ])
+
+        result = self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", run_key="1")
+
+        assert result is False
+
     def test_session_name_is_deterministic(self):
         name1 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "42")
         name2 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "42")
@@ -348,9 +549,320 @@ class TestRunWorkflow:
         name2 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "43")
         assert name1 != name2
 
+    def test_step_model_passed_to_brain_session(self, monkeypatch):
+        calls = []
+        clients = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                client = FakeBrainClient()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="haiku"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is True
+        assert calls[0]["options"]["model"] == "haiku"
+
+    def _run_with_scorer_role(self, tmp_path, monkeypatch, steps, **kwargs):
+        """One workflow run against a root whose config maps scorer→haiku;
+        returns the models captured from every make_session call (#617)."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.agent_yaml_path(root).write_text(
+            "agent: test\nentry_point: manager\n"
+            "roles:\n  scorer:\n    model: haiku\n"
+        )
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kw):
+                calls.append(kw)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=steps)
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1", **kwargs,
+        )
+        assert result is True
+        return [c["options"].get("model") for c in calls]
+
+    @pytest.mark.parametrize("steps,kwargs,expected", [
+        # role model applies when the step has none
+        ([StepDef(name="score", prompt="score", agent="scorer")],
+         {}, ["haiku"]),
+        # explicit step model beats the role model
+        ([StepDef(name="score", prompt="score", agent="scorer", model="sonnet")],
+         {}, ["sonnet"]),
+        # launch --model beats step and role config for the whole run
+        ([StepDef(name="discover", prompt="discover", model="sonnet"),
+          StepDef(name="score", prompt="score", agent="scorer")],
+         {"model": "opus"}, ["opus"]),
+    ], ids=["role-fallback", "step-beats-role", "launch-beats-all"])
+    def test_model_precedence(self, tmp_path, monkeypatch, steps, kwargs, expected):
+        models = self._run_with_scorer_role(tmp_path, monkeypatch, steps, **kwargs)
+        assert models == expected
+
+    def test_env_model_default_passed_to_brain_session(self, monkeypatch):
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        monkeypatch.setenv("BOBI_BRAIN_MODEL", "sonnet")
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is True
+        assert calls[0]["options"]["model"] == "sonnet"
+
+    def test_model_change_starts_fresh_session(self, monkeypatch):
+        calls = []
+        clients = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                client = FakeBrainClient()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="haiku"),
+            StepDef(name="score", prompt="score", model="sonnet"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is True
+        assert [c["options"].get("model") for c in calls] == ["haiku", "sonnet"]
+        assert len(clients) == 2
+        assert "Continue workflow `t`" in clients[1].queries[0]
+        assert "run_key: '1'" in clients[1].queries[0]
+
+    def test_model_change_preserves_explicit_role(self, monkeypatch):
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        forced_role = paths.roles_dir() / "forced" / "ROLE.md"
+        forced_role.parent.mkdir(parents=True, exist_ok=True)
+        forced_role.write_text("PROMPT forced")
+        scorer_role = paths.roles_dir() / "scorer" / "ROLE.md"
+        scorer_role.parent.mkdir(parents=True, exist_ok=True)
+        scorer_role.write_text("PROMPT scorer")
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="haiku"),
+            StepDef(name="score", prompt="score", model="sonnet", agent="scorer"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1", role="forced",
+        )
+
+        assert result is True
+        assert [c["options"].get("model") for c in calls] == ["haiku", "sonnet"]
+        prompts = [c["system_prompt"]["append"] for c in calls]
+        assert all("PROMPT forced" in prompt for prompt in prompts), prompts
+        assert all("PROMPT scorer" not in prompt for prompt in prompts)
+
+    def test_model_change_resumes_natively_on_capable_brain(self, monkeypatch):
+        """A brain with cross_model_resume continues the SAME session on the
+        new model instead of fresh + YAML reinject (#642)."""
+        from bobi.brain import BrainCapabilities
+
+        calls = []
+        clients = []
+
+        class FakeBrain:
+            capabilities = BrainCapabilities(cross_model_resume=True)
+
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                client = FakeBrainClient()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="haiku"),
+            StepDef(name="score", prompt="score", model="sonnet"),
+        ])
+
+        cwd = "/tmp"
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="live-session"), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
+
+        assert result is True
+        assert [c["options"].get("model") for c in calls] == ["haiku", "sonnet"]
+        # The switch session resumes the live session id natively.
+        assert calls[1]["resume"] == "live-session"
+        assert len(clients) == 2
+        # No reinject turn: the new session's first message is the step prompt.
+        assert all("Continue workflow" not in q for q in clients[1].queries)
+        assert "score" in clients[1].queries[0]
+
+    def test_model_change_records_new_model_on_save(self, monkeypatch):
+        """Post-turn saves carry the model the session currently runs under,
+        so the store record follows a mid-run switch (#642 stale-record fix)."""
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="haiku"),
+            StepDef(name="score", prompt="score", model="sonnet"),
+        ])
+
+        cwd = "/tmp"
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id") as save_mock, \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
+
+        assert result is True
+        saved_models = [c.kwargs.get("model") for c in save_mock.call_args_list
+                        if c.args[1]]
+        assert saved_models[0] == "haiku"
+        assert saved_models[-1] == "sonnet"
+
+    def test_agent_change_at_model_switch_starts_fresh(self, monkeypatch):
+        """A step with a different agent never resumes the previous agent's
+        transcript, even on a capable brain (#642 isolation rule)."""
+        from bobi.brain import BrainCapabilities
+
+        calls = []
+        clients = []
+
+        class FakeBrain:
+            capabilities = BrainCapabilities(cross_model_resume=True)
+
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                client = FakeBrainClient()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        for role_name in ("builder", "scorer"):
+            role_md = paths.roles_dir() / role_name / "ROLE.md"
+            role_md.parent.mkdir(parents=True, exist_ok=True)
+            role_md.write_text(f"PROMPT {role_name}")
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="haiku",
+                    agent="builder"),
+            StepDef(name="score", prompt="score", model="sonnet",
+                    agent="scorer"),
+        ])
+
+        cwd = "/tmp"
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="live-session"), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
+
+        assert result is True
+        # Fresh session for the new agent, with the YAML reinject turn.
+        assert calls[1]["resume"] is None
+        assert any("Continue workflow" in q for q in clients[1].queries)
+
+    def test_native_switch_falls_back_to_fresh_on_stale_resume(
+            self, monkeypatch):
+        """A connect failure on the native-resume path retries the fresh +
+        reinject fallback instead of failing the whole run (#642)."""
+        from bobi.brain import BrainCapabilities
+
+        calls = []
+        clients = []
+
+        class StaleResumeClient(FakeBrainClient):
+            async def connect(self, prompt=None):
+                raise RuntimeError("No conversation found")
+
+        class FakeBrain:
+            capabilities = BrainCapabilities(cross_model_resume=True)
+
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                cls = (StaleResumeClient if kwargs.get("resume") == "stale-id"
+                       and kwargs["options"].get("model") == "sonnet"
+                       else FakeBrainClient)
+                client = cls()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="haiku"),
+            StepDef(name="score", prompt="score", model="sonnet"),
+        ])
+
+        cwd = "/tmp"
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="stale-id"), \
+             patch("bobi.workflow.orchestrator.save_session_id") as save_mock, \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
+
+        assert result is True
+        # resume attempt on haiku (initial), native switch attempt, then the
+        # fresh fallback session.
+        assert calls[-1]["resume"] is None
+        assert calls[-1]["options"]["model"] == "sonnet"
+        assert any("Continue workflow" in q for q in clients[-1].queries)
+        # The stale id was cleared from the store.
+        assert call("wf-t-r-1", "") in save_mock.call_args_list
+
 
 class FailingClient:
-    """ClaudeSDKClient mock whose turn yields no ResultMessage — _drain_response
+    """ClaudeSDKClient mock whose turn yields no ResultMessage - _drain_response
     returns None, driving the orchestrator's failure path."""
 
     def __init__(self):
@@ -370,8 +882,40 @@ class FailingClient:
         self.connected = False
 
 
+class CrashingClient(FailingClient):
+    async def receive_response(self):
+        if False:
+            yield None
+        raise RuntimeError("codex subprocess exited 1: tool exploded")
+
+
+class TimeoutClient(FailingClient):
+    async def receive_response(self):
+        if False:
+            yield None
+        raise asyncio.TimeoutError()
+
+
+class ErrorResultClient(FakeClient):
+    async def receive_response(self):
+        yield FakeResultMessage(is_error=True, result="real brain failure")
+
+
+class ErrorOnStepClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.drains = 0
+
+    async def receive_response(self):
+        self.drains += 1
+        if self.drains == 1:
+            yield FakeResultMessage()
+        else:
+            yield FakeResultMessage(is_error=True, result="step brain failure")
+
+
 class TestHonestTerminalEmit:
-    """MDS-65 RC#2/RC#4 — the orchestrator must emit the HONEST terminal session
+    """MDS-65 RC#2/RC#4 - the orchestrator must emit the HONEST terminal session
     event (session.failed on failure, never session.completed after a failure)
     and carry requested_by so the launcher can route it to the requester."""
 
@@ -415,6 +959,49 @@ class TestHonestTerminalEmit:
         # RC#4: the failure event carries requested_by for routing.
         failed = next(d for t, d in emits if t == "agent/session.failed")
         assert failed["requested_by"] == {"slack_user": "U1", "thread_ts": "123.45"}
+        assert failed["error"] == (
+            "network drop: response stream ended before turn result"
+        )
+
+    def test_stream_crash_surfaces_tool_crash_cause(self):
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture(
+            wf, CrashingClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is False
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert failed["error"] == (
+            "tool crash: codex subprocess exited 1: tool exploded"
+        )
+
+    def test_stream_timeout_surfaces_subprocess_timeout(self):
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture(
+            wf, TimeoutClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is False
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert failed["error"] == "subprocess timeout while draining response"
+
+    def test_initial_error_result_surfaces_brain_failure(self):
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture(
+            wf, ErrorResultClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is False
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert failed["error"] == "real brain failure"
+
+    def test_step_error_result_surfaces_brain_failure(self):
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        result, emits = self._run_capture(
+            wf, ErrorOnStepClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is False
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert failed["error"] == "step brain failure"
+        step_failed = next(d for t, d in emits if t == "agent/step.failed")
+        assert step_failed["error"] == "step brain failure"
 
     def test_success_emits_session_completed_with_requested_by(self):
         wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
@@ -431,7 +1018,7 @@ class TestHonestTerminalEmit:
 
     def test_suspend_does_not_emit_terminal_session_event(self, tmp_path, monkeypatch):
         """An await/suspend is dormant, not terminal: it must emit
-        workflow.suspended but NEITHER session.completed NOR session.failed —
+        workflow.suspended but NEITHER session.completed NOR session.failed -
         else the (now-subscribed) manager is told the agent finished while it
         waits for the external event."""
         root = _bind_runtime_root(tmp_path / "_r", monkeypatch)
@@ -534,6 +1121,220 @@ class TestAwaitStep:
         assert success is True
         reloaded = WorkflowRun.load(run.run_id)
         assert reloaded.status == "completed"
+
+    def test_resume_model_change_starts_fresh_session(self, tmp_path, monkeypatch):
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+
+        run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {
+            "input": {"task": "t", "repo": "r", "run_key": "1"},
+            "_runtime": {"model": "haiku"},
+        }
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.run_key = "1"
+        run.save()
+
+        calls = []
+        clients = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                client = FakeBrainClient()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it", model="sonnet"),
+        ])
+
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="old-session"), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            success = resume_workflow(run, wf)
+
+        assert success is True
+        assert calls[0]["resume"] is None
+        assert calls[0]["options"]["model"] == "sonnet"
+        assert "Continue workflow `t`" in clients[0].queries[0]
+        assert "_runtime" not in clients[0].queries[0]
+
+    def test_resume_model_change_continues_natively_on_capable_brain(
+            self, tmp_path, monkeypatch):
+        """A suspended run whose resolved model changed continues its saved
+        session natively when the brain supports cross-model resume (#642)."""
+        from bobi.brain import BrainCapabilities
+
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+
+        run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {
+            "input": {"task": "t", "repo": "r", "run_key": "1"},
+            "_runtime": {"model": "haiku"},
+        }
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.run_key = "1"
+        run.save()
+
+        calls = []
+        clients = []
+
+        class FakeBrain:
+            capabilities = BrainCapabilities(cross_model_resume=True)
+
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                client = FakeBrainClient()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it", model="sonnet"),
+        ])
+
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="old-session"), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            success = resume_workflow(run, wf)
+
+        assert success is True
+        # Native continuation: the saved session resumes ON the new model.
+        assert calls[0]["resume"] == "old-session"
+        assert calls[0]["options"]["model"] == "sonnet"
+        # No YAML reinject turn.
+        assert all("Continue workflow" not in q for q in clients[0].queries)
+
+    def test_resume_preserves_launch_model(self, tmp_path, monkeypatch):
+        """A launch --model override survives suspension: the resume re-applies
+        it instead of re-resolving to the config default, tripping the
+        mismatch guard, and dropping the saved session (#617 review)."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+
+        run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {
+            "input": {"task": "t", "repo": "r", "run_key": "1"},
+            "_runtime": {"model": "opus", "launch_model": "opus"},
+        }
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.run_key = "1"
+        run.save()
+
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="old-session"), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            success = resume_workflow(run, wf)
+
+        assert success is True
+        # The mismatch guard must NOT fire: same model, saved session kept.
+        assert calls[0]["resume"] == "old-session"
+        assert calls[0]["options"]["model"] == "opus"
+
+    def test_resume_role_model_change_starts_fresh_session(self, tmp_path, monkeypatch):
+        """A pre-#617 suspend (no recorded model) resumed after a role model
+        was configured must start fresh, not resume the default-model session
+        under the role's model (#617 review)."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
+        paths.agent_yaml_path(root).write_text(
+            "agent: test\nentry_point: manager\n"
+            "roles:\n  implementer:\n    model: haiku\n"
+        )
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+
+        run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {
+            "input": {"task": "t", "repo": "r", "run_key": "1"},
+        }
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.run_key = "1"
+        run.save()
+
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it", agent="implementer"),
+        ])
+
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="old-session"), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            success = resume_workflow(run, wf)
+
+        assert success is True
+        assert calls[0]["resume"] is None
+        assert calls[0]["options"]["model"] == "haiku"
 
     def test_find_waiting_returns_none_when_no_match(self, tmp_path, monkeypatch):
         root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)

@@ -126,6 +126,14 @@ def build_service_records(state: SetupState, catalog=None) -> list[dict]:
             if conn.credential_var:
                 key = _CRED_KEY.get(conn.key, "token")
                 rec["credentials"] = {key: f"${{{conn.credential_var}}}"}
+            # Scope the Slack adapter to the team's dedicated channel when the
+            # user saves one on the finalize screen (SLACK_CHANNELS in .env).
+            # The `:-` optional form matters: a bare ${VAR} is a REQUIRED
+            # secret to deploy.py and the non-interactive installer, and the
+            # documented flow saves the channel AFTER deploying. Unset then
+            # resolves to "" → no scoping.
+            if conn.key == "slack" and state.chat == "slack":
+                rec["channels"] = "${SLACK_CHANNELS:-}"
         elif conn.kind == "custom" and conn.credential_var:
             rec["credentials"] = {"api_key": f"${{{conn.credential_var}}}"}
         svcs.append(rec)
@@ -199,6 +207,11 @@ def build_agent_cfg(state: SetupState, catalog=None) -> dict:
         "agent": derive_team_name(state),
         "version": "0.1.0",
         "entry_point": compute_entry_point(state),
+        # The setup ingress wizard writes verified public ingress to
+        # BOBI_EVENT_SERVER. Keep the generated config wired to that optional
+        # env var so public webhook setup takes effect without breaking the
+        # default local-only flow when it is unset.
+        "event_server": "${BOBI_EVENT_SERVER:-}",
     }
     svcs = build_service_records(state, catalog)
     if svcs:
@@ -215,6 +228,12 @@ def build_agent_cfg(state: SetupState, catalog=None) -> dict:
         cfg["venn_api_key"] = "${VENN_API_KEY}"
     if state.chat and state.chat != "cli":
         cfg["chat"] = state.chat
+    # Monitor checks are frequent observe-and-report runs - default them to a
+    # cheap model instead of inheriting the manager's (#617, #549 Part A).
+    # `haiku` is a Claude alias: valid here because build_agent_cfg never
+    # emits a brain: key (fresh packs run the default Claude brain), and
+    # merge_agent_yaml skips this default for packs on another brain.
+    cfg["roles"] = {"monitor": {"model": "haiku"}}
     return cfg
 
 
@@ -239,6 +258,19 @@ def merge_agent_yaml(existing_text: str, state: SetupState, catalog=None) -> str
     cfg["agent"] = managed["agent"]
     cfg.setdefault("version", managed.get("version", "0.1.0"))
     cfg["entry_point"] = managed["entry_point"]
+    cfg.setdefault("event_server", managed["event_server"])
+    # Union roles per-key (like mcp_servers below): keep every hand-written
+    # role entry, add only the ones setup manages. Skip the injection entirely
+    # for packs on a non-Claude brain - the managed default is a Claude alias
+    # and would be an invalid model id for e.g. codex.
+    existing_brain = cfg.get("brain") if isinstance(cfg.get("brain"), dict) else {}
+    if str(existing_brain.get("kind", "") or "") in ("", "claude"):
+        existing_roles = cfg.get("roles") if isinstance(cfg.get("roles"), dict) else {}
+        merged_roles = dict(existing_roles)
+        for k, v in (managed.get("roles") or {}).items():
+            merged_roles.setdefault(k, v)
+        if merged_roles:
+            cfg["roles"] = merged_roles
     if managed.get("venn_api_key"):
         cfg.setdefault("venn_api_key", managed["venn_api_key"])
     # Union services by name: keep every existing entry untouched, append only
@@ -276,11 +308,22 @@ def build_adhoc_yaml() -> str:
     }, sort_keys=False)
 
 
+def is_event_automation(b) -> bool:
+    """Whether an autonomous behavior reacts to an event (webhook-fed) rather
+    than running on a schedule. Explicit only — legacy items without a
+    trigger keep today's schedule/monitor behavior."""
+    return isinstance(b, dict) and b.get("trigger") == "event"
+
+
 def build_monitors_yaml(state: SetupState) -> str:
-    """Description-only monitors from the autonomous behaviors — robust at
-    install time (no venn CLI dependency); the agent interprets them."""
+    """Description-only monitors from the SCHEDULED autonomous behaviors —
+    robust at install time (no venn CLI dependency); the agent interprets
+    them. Event-shaped behaviors are codified as event-triggered workflows
+    instead (see build_automation_workflow_yaml) — never as a silent poll."""
     mons: list[dict] = []
     for i, b in enumerate(state.spec.autonomous):
+        if is_event_automation(b):
+            continue
         d = b if isinstance(b, dict) else {}
         desc = (d.get("description") if isinstance(b, dict) else str(b)) or ""
         if not desc.strip():
@@ -313,6 +356,15 @@ def merge_monitors_yaml(existing_text: str, state: SetupState) -> str:
     except yaml.YAMLError:
         cur = {}
     existing = cur.get("monitors") if isinstance(cur.get("monitors"), list) else []
+    # A behavior that migrated from schedule to event must not keep its old
+    # poll monitor alive alongside the new event workflow — drop the monitor
+    # authored for the same description (hand-written names never match the
+    # description slug this setup generates).
+    event_names = {slug(str(b.get("description") or ""))[:40]
+                   for b in state.spec.autonomous if is_event_automation(b)}
+    event_names.discard("")
+    existing = [m for m in existing
+                if not (isinstance(m, dict) and m.get("name") in event_names)]
     have = {m.get("name") for m in existing if isinstance(m, dict)}
     fresh = yaml.safe_load(build_monitors_yaml(state)).get("monitors", [])
     merged = list(existing) + [m for m in fresh if m.get("name") not in have]
@@ -321,7 +373,118 @@ def merge_monitors_yaml(existing_text: str, state: SetupState) -> str:
 
 def has_monitors(state: SetupState) -> bool:
     return any((b.get("description") if isinstance(b, dict) else str(b))
-               for b in state.spec.autonomous)
+               for b in state.spec.autonomous if not is_event_automation(b))
+
+
+# --- workflow authoring (deterministic YAML from the spec) -----------------
+
+# How long an `await: approval` gate waits for the human (24h) — one constant
+# for both spec-workflow gates and event-automation "ask" gates.
+APPROVAL_TIMEOUT = 86400
+
+
+def workflow_slug(wf: dict) -> str:
+    """The canonical file slug for a spec workflow — the single source for
+    the build, the manifest, and the UI's read-only YAML preview."""
+    return slug(str(wf.get("name") or "")) or "workflow"
+
+
+def _workflow_steps(state: SetupState, raw_steps: list) -> list[dict]:
+    """Schema-valid step records from a spec workflow's steps. A step names
+    the role that runs it (agent), carries its prompt, and a `hitl` step is
+    followed by an `await: approval` gate — the engine's human-approval
+    pattern. Unknown roles are dropped from `agent` (the entry point picks
+    it up) rather than authored as a broken reference."""
+    role_slugs = {slug(r["name"]) for r in normalized_roles(state)}
+    out: list[dict] = []
+    seen: set[str] = set()
+    for i, s in enumerate(raw_steps or []):
+        if not isinstance(s, dict):
+            continue
+        prompt = str(s.get("prompt") or s.get("description") or "").strip()
+        if not prompt:
+            continue
+        name = slug(str(s.get("name") or "") or f"step-{i + 1}") or f"step-{i + 1}"
+        while name in seen:
+            name += "-2"
+        seen.add(name)
+        rec: dict = {"name": name}
+        agent = slug(str(s.get("role") or ""))
+        if agent and agent in role_slugs:
+            rec["agent"] = agent
+        rec["prompt"] = prompt
+        out.append(rec)
+        if s.get("hitl"):
+            out.append({"name": f"{name}-approval", "await": "approval",
+                        "timeout": APPROVAL_TIMEOUT})
+    return out
+
+
+def build_workflow_yaml(state: SetupState, wf: dict, *,
+                        name: str | None = None) -> str:
+    """One workflows/<slug>.yaml from a spec workflow. Structure is computed
+    here (never LLM-decided at build): trigger text feeds the manager's
+    dispatch menu; hitl steps become `await: approval` gates. `name`
+    overrides the slug when the manifest had to de-collide the filename."""
+    name = name or workflow_slug(wf)
+    desc = str(wf.get("description") or "").strip()
+    trigger = str(wf.get("trigger") or "").strip() or desc or name
+    steps = _workflow_steps(state, wf.get("steps"))
+    if not steps:
+        steps = [{"name": "run", "prompt": desc or trigger}]
+    return yaml.dump({"name": name, "trigger": trigger,
+                      "description": desc, "steps": steps}, sort_keys=False)
+
+
+def spec_workflows(state: SetupState) -> list[dict]:
+    """The spec's usable workflow records (named dicts only)."""
+    return [w for w in state.spec.workflows
+            if isinstance(w, dict) and slug(str(w.get("name") or ""))]
+
+
+def build_automation_workflow_yaml(state: SetupState, b: dict, *,
+                                   name: str | None = None) -> str:
+    """An event-shaped automation as an event-triggered workflow: the trigger
+    text (the event it reacts to) feeds the manager's dispatch menu, and the
+    leash shapes the steps — "ask" gets a real `await: approval` gate."""
+    desc = str(b.get("description") or "").strip()
+    trigger = str(b.get("cadence") or "").strip() or desc
+    prompt = str(b.get("command") or "").strip() or desc
+    leash = b.get("leash")
+    role_slugs = {slug(r["name"]) for r in normalized_roles(state)}
+    agent = slug(str(b.get("role") or ""))
+    first: dict = {"name": "react"}
+    if agent and agent in role_slugs:
+        first["agent"] = agent
+    steps: list[dict]
+    if leash == "notify":
+        first["prompt"] = (f"{prompt} Only observe and report to the user — "
+                           "do not take action yourself.")
+        steps = [first]
+    elif leash == "ask":
+        first["prompt"] = (f"{prompt} Propose what you would do and why — "
+                           "do NOT act yet; a human approves first.")
+        second = dict(first, name="act",
+                      prompt="Approved — carry out what you proposed and "
+                             "report the outcome.")
+        steps = [first, {"name": "react-approval", "await": "approval",
+                         "timeout": APPROVAL_TIMEOUT}, second]
+    else:
+        first["prompt"] = f"{prompt} Do it, then report what you did."
+        steps = [first]
+    return yaml.dump({
+        "name": name or automation_workflow_name(b),
+        "trigger": trigger,
+        "description": desc,
+        "steps": steps,
+    }, sort_keys=False)
+
+
+def automation_workflow_name(b: dict) -> str:
+    """The workflow name/filename slug for an event automation — prefixed so
+    it never collides with a user-named workflow."""
+    return ("auto-" + (slug(str(b.get("description") or ""))[:40]
+                       or "behavior")).strip("-")
 
 
 # --- LLM authoring prompts -----------------------------------------------
@@ -396,8 +559,10 @@ def _spec_brief(state: SetupState) -> str:
                      for s in spec.services) or "none"
     auto = "; ".join((b.get("description") if isinstance(b, dict) else str(b))
                      for b in spec.autonomous) or "none"
+    wfs = "; ".join(f"{w.get('name')} (on: {w.get('trigger') or '-'})"
+                    for w in spec_workflows(state)) or "none"
     return (f"Team goal: {spec.goal}\nRoles: {roles}\n"
-            f"Services: {svcs}\nProactive behaviors: {auto}")
+            f"Workflows: {wfs}\nServices: {svcs}\nProactive behaviors: {auto}")
 
 
 def agent_md_prompt(state: SetupState) -> str:
@@ -528,6 +693,35 @@ def compute_manifest(state: SetupState, catalog=None) -> list[FileSpec]:
             system=AUTHORING_SYSTEM_PROMPT, user=role_md_prompt(state, role),
             with_base=True))
     files.append(FileSpec("workflows/adhoc.yaml", content=build_adhoc_yaml()))
+    # Deterministic workflows: the flows the interview codified, plus one
+    # event-triggered workflow per event-shaped automation. A colliding name
+    # (a flow named "adhoc", two flows slugging identically, two automations
+    # sharing a description prefix) gets a numeric suffix — every flow the
+    # card shows ships; nothing is silently dropped.
+    wf_names = {"adhoc"}
+
+    def _free_name(name: str) -> str:
+        base, n = name, 2
+        while name in wf_names:
+            name = f"{base}-{n}"
+            n += 1
+        wf_names.add(name)
+        return name
+
+    for wf in spec_workflows(state):
+        name = _free_name(workflow_slug(wf))
+        files.append(FileSpec(
+            f"workflows/{name}.yaml",
+            content=build_workflow_yaml(state, wf, name=name)))
+    for b in state.spec.autonomous:
+        if not is_event_automation(b):
+            continue
+        if not str(b.get("description") or "").strip():
+            continue
+        name = _free_name(automation_workflow_name(b))
+        files.append(FileSpec(
+            f"workflows/{name}.yaml",
+            content=build_automation_workflow_yaml(state, b, name=name)))
     if has_monitors(state):
         files.append(FileSpec("monitors/defaults.yaml",
                               content=build_monitors_yaml(state)))
@@ -562,6 +756,13 @@ def _deterministic_body(spec: "FileSpec", target: Path, state: SetupState,
         return merge_agent_yaml(existing, state, catalog)
     if spec.path.startswith("monitors/"):
         return merge_monitors_yaml(existing, state)
+    # Spec-modeled workflows are setup-managed: the UI's YAML preview promises
+    # exactly this content, so modify mode overwrites rather than keeping a
+    # stale file. Hand-written flows use other slugs, never enter the
+    # manifest, and stay untouched; the adhoc stub keeps any hand edits.
+    if (spec.path.startswith("workflows/")
+            and spec.path != "workflows/adhoc.yaml"):
+        return spec.content
     # adhoc.yaml and anything else already present: leave it exactly as written.
     return existing
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from queue import SimpleQueue
 from typing import TYPE_CHECKING, Callable
@@ -18,18 +19,16 @@ DRAIN_INTERVAL = 2
 # session can stop its drain thread cleanly on shutdown (the loop otherwise
 # blocks forever on queue.get()).
 _DRAIN_STOP = object()
+_MONITOR_ERROR_DELIVERED: dict[tuple[str, str, str, str], int] = {}
+_MONITOR_ERROR_REPEAT_PUSH_EVERY = 3
 
 
-def _get_project_config():
-    """Load the project Config, or return None if unavailable."""
+def _get_project_root():
+    """Resolve the project root, or None if unavailable."""
     try:
         from bobi.sdk import get_project_root
-        from bobi.config import Config
 
-        root = get_project_root()
-        if not root:
-            return None
-        return Config.load(root)
+        return get_project_root() or None
     except Exception:
         return None
 
@@ -60,64 +59,161 @@ def _is_policy_update(event: dict) -> bool:
     )
 
 
-def _thread_key(event: dict) -> tuple[str, str, str]:
-    """Return (source, channel, thread_ts) for placeholder dedup."""
-    fields = event.get("fields", {})
-    channel = fields.get("channel", "")
-    thread_ts = fields.get("thread_ts", "") or fields.get("ts", "")
-    return (event.get("source", ""), channel, thread_ts)
+def _is_monitor_error(event: dict) -> bool:
+    """Whether an event is a monitor failure signal that should push actively."""
+    etype = str(event.get("type", ""))
+    return etype == "monitor.error" or etype.endswith("/monitor.error")
+
+
+def _is_passive_slack_thread_reply(event: dict) -> bool:
+    """Whether a Slack event should be delivered without placeholder UX."""
+    return (
+        event.get("source") == "slack"
+        and event.get("type") == "slack.thread_reply"
+    )
+
+
+def _without_placeholder_fields(event: dict) -> dict:
+    """Return an event copy with Slack placeholder metadata removed."""
+    fields = dict(event.get("fields", {}))
+    fields.pop("placeholder_ts", None)
+    return dict(event, fields=fields)
 
 
 def _prepare_chat_events(events: list[dict]) -> list[dict]:
     """Run input channel handlers on chat events, returning augmented copies.
 
-    Each handler may post placeholders, set typing status, or inject
-    fields (e.g. ``placeholder_ts``) into the event before delivery.
-
-    When multiple events in a batch target the same thread, only the
-    first triggers a placeholder — subsequent events reuse the same
-    ``placeholder_ts`` to avoid duplicate "Evaluating…" messages (#232).
-
-    Credential resolution is generic: the handler declares its
-    ``credential_key`` and the drain loop resolves it via
-    ``cfg.credential(source, key)`` from the project's service config.
+    Each handler may set typing status or make other source-specific
+    adjustments before delivery. Handlers talk to the channel gateway (#190),
+    so no credential is resolved here - the event server holds the channel
+    tokens.
     """
     from bobi.events.channels import get_channel_handler
 
-    cfg = _get_project_config()
-
-    # Track placeholder_ts per thread so we post at most one per batch.
-    seen_threads: dict[tuple[str, str, str], str] = {}
+    project_root = _get_project_root()
 
     result: list[dict] = []
     for event in events:
+        if _is_passive_slack_thread_reply(event):
+            result.append(_without_placeholder_fields(event))
+            continue
+
         source = event.get("source", "")
         handler = get_channel_handler(source)
         if handler is None:
             result.append(event)
             continue
 
-        token = cfg.credential(source, handler.credential_key) if cfg else ""
-        if not token:
-            result.append(event)
-            continue
-
-        key = _thread_key(event)
-        existing_ts = seen_threads.get(key)
-
-        if existing_ts is not None:
-            # Reuse the placeholder from the first event in this thread.
-            fields = dict(event.get("fields", {}))
-            fields["placeholder_ts"] = existing_ts
-            result.append(dict(event, fields=fields))
-        else:
-            prepared = handler.prepare(event, token)
-            placeholder_ts = prepared.get("fields", {}).get("placeholder_ts", "")
-            if placeholder_ts:
-                seen_threads[key] = placeholder_ts
-            result.append(prepared)
+        result.append(handler.prepare(event, project_root))
 
     return result
+
+
+# A pending map this large means the cursor floor has been pinned for a long
+# time (a message dropped un-acked, or a no-inbox drop) - warn so a wedged
+# watermark is visible in logs instead of surfacing as a giant replay later.
+_WATERMARK_PENDING_WARN = 512
+
+
+class _AckWatermark:
+    """ACK-after-processing cursor tracker (#688).
+
+    The server treats an ACK of seq N as "everything through N is processed",
+    and chat priority makes messages complete out of push order - so acking
+    the seq of whatever finished last could silently discard older events
+    still queued in the inbox. The watermark acks the highest seq whose batch
+    and every batch below it have fully completed.
+
+    Each batch is a refcount: open_batch() takes one reference (released by
+    close()), attach() takes one per pushed message (released by its done
+    callback). A batch is complete at zero. A batch that never completes (a
+    message dropped while the session is stopped/error) deliberately pins the
+    floor so a restart replays it.
+    """
+
+    def __init__(self, ack: Callable[[int], None]) -> None:
+        self._ack = ack
+        self._lock = threading.Lock()
+        self._pending: dict[int, int] = {}  # seq -> outstanding references
+        self._acked = 0    # newest ackable seq decided so far
+        self._sent = 0     # last seq actually handed to self._ack
+        self._sending = False
+
+    def open_batch(self, seq: int) -> "_BatchAck":
+        self._add(seq)
+        return _BatchAck(self, seq)
+
+    def _add(self, seq: int) -> None:
+        with self._lock:
+            self._pending[seq] = self._pending.get(seq, 0) + 1
+            if len(self._pending) == _WATERMARK_PENDING_WARN:
+                log.warning(
+                    "Ack watermark has %d outstanding batches - cursor "
+                    "pinned near seq %d (a message was likely dropped "
+                    "un-acked; a restart will replay from there)",
+                    len(self._pending), min(self._pending))
+
+    def _done(self, seq: int) -> None:
+        with self._lock:
+            if seq in self._pending:
+                self._pending[seq] -= 1
+            # Ascending scan (NOT insertion order: a reconnect replay can
+            # register a lower seq after a higher one): pop fully-completed
+            # batches until the first still-outstanding seq holds the floor.
+            for s in sorted(self._pending):
+                if self._pending[s] <= 0:
+                    del self._pending[s]
+                    self._acked = max(self._acked, s)
+                else:
+                    break
+        self._flush()
+
+    def _flush(self) -> None:
+        """Send the newest ackable seq via self._ack, outside the state lock.
+
+        The callback does real I/O (cursor-file write + WS send), and a
+        blocked socket must never stall whoever holds the state lock - the
+        drain thread and the session loop both take it on hot paths. One
+        sender at a time; a newer target decided mid-send is picked up by
+        the loop, so sends stay strictly increasing.
+        """
+        while True:
+            with self._lock:
+                if self._sending or self._sent == self._acked:
+                    return
+                self._sending = True
+                target = self._acked
+            try:
+                self._ack(target)
+            finally:
+                with self._lock:
+                    self._sent = target
+                    self._sending = False
+
+
+class _BatchAck:
+    """Completion handle for one delivered batch's seq."""
+
+    def __init__(self, tracker: _AckWatermark, seq: int) -> None:
+        self._tracker = tracker
+        self._seq = seq
+
+    def attach(self) -> Callable[[], None]:
+        """Register one pushed message; returns its once-only done callback."""
+        self._tracker._add(self._seq)
+        called = [False]
+
+        def _done() -> None:
+            if called[0]:
+                return
+            called[0] = True
+            self._tracker._done(self._seq)
+
+        return _done
+
+    def close(self) -> None:
+        """Release the batch's own reference; an empty batch completes now."""
+        self._tracker._done(self._seq)
 
 
 def drain_loop(session_name: str, queue: SimpleQueue | None = None,
@@ -135,10 +231,11 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
             When set, each event is checked against auto-dispatch rules
             before delivery. Matched events are still delivered but
             annotated so the LLM knows a workflow was already launched.
-        cursor_ack: Optional callback invoked with the highest seq number
-            in each batch AFTER delivery to the inbox. Used to advance the
-            cursor and ACK to the event server only once the event is
-            durably delivered (#278).
+        cursor_ack: Optional callback invoked with the highest safe seq
+            number once every message pushed for that seq (and every seq
+            below it) has been PROCESSED by the session - not merely pushed
+            into its in-memory inbox. A restart therefore replays anything
+            still queued instead of destroying it (#278, #688).
     """
     if queue is None:
         from bobi.events.client import event_queue
@@ -147,6 +244,8 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
         from bobi.events.client import format_event_for_manager
         formatter = format_event_for_manager
     from bobi.inbox import get_local_inbox, Message, _msg_id
+
+    tracker = _AckWatermark(cursor_ack) if cursor_ack else None
 
     log.info("Drain loop active — delivering events to session inbox")
 
@@ -165,13 +264,21 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 break
             batch.append(nxt)
 
+        max_seq = max((e.get("seq", 0) for e in batch), default=0)
+        batch_ack = (tracker.open_batch(max_seq)
+                     if tracker and max_seq > 0 else None)
+
         # The drain runs in the same process as its session, so it pushes
         # straight into the session's in-process inbox queue — never back
         # through the transport (which would re-deliver to this same drain).
         inbox = get_local_inbox(session_name)
         if inbox is None:
-            log.warning("No local inbox for %s — dropping %d event(s)",
-                        session_name, len(batch))
+            # batch_ack is deliberately never closed: the seq stays
+            # outstanding, holding the ack floor so the server replays these
+            # events after a restart instead of losing them.
+            log.warning("No local inbox for %s - dropping %d event(s) "
+                        "(seq<=%d, not ACKed; replayed after restart)",
+                        session_name, len(batch), max_seq)
             if stop_after:
                 return
             continue
@@ -192,6 +299,7 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                     text=text,
                     wait=bool(payload.get("wait", False)),
                     reply_to=payload.get("reply_to", ""),
+                    on_done=batch_ack.attach() if batch_ack else None,
                 ))
             elif _is_policy_update(e):
                 # Passive-by-default delivery (#456). The sleep_cycle publishes
@@ -214,18 +322,41 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                     text=(f"long_term_memory.md updated — {summary}\n"
                           "Re-read run/state/long_term_memory.md and reconcile any "
                           "in-flight plan against it."),
+                    on_done=batch_ack.attach() if batch_ack else None,
+                ))
+            elif _is_monitor_error(e):
+                payload = e.get("payload") or e.get("fields") or {}
+                monitor = str(payload.get("monitor", "") or "unknown-monitor")
+                flavor = str(payload.get("flavor", "") or "unknown")
+                reason = str(payload.get("reason", "") or "unknown")
+                detail = str(payload.get("detail", "") or "").strip()
+                key = (session_name, monitor, flavor, reason)
+                count = _MONITOR_ERROR_DELIVERED.get(key, 0) + 1
+                _MONITOR_ERROR_DELIVERED[key] = count
+                should_push = (
+                    count == 1
+                    or count % _MONITOR_ERROR_REPEAT_PUSH_EVERY == 0
+                )
+                if not should_push:
+                    log.debug("Suppressing duplicate monitor.error inbox push "
+                              "for %s/%s/%s", monitor, flavor, reason)
+                    continue
+                text = f"Monitor {monitor} failed ({flavor}: {reason})."
+                if count > 1:
+                    text += f" Repeated {count} times."
+                if detail:
+                    text += f"\n{detail}"
+                inbox.push(Message(
+                    id=_msg_id(),
+                    sender="monitor-error",
+                    text=text,
                 ))
             else:
                 external.append(e)
 
-        if not external:
-            if stop_after:
-                return
-            continue
-
-        # Single pass: auto-dispatch + group by delivery class.
-        # Bulk events are delivered first so the agent sees context
-        # before interactive messages that may need an immediate reply.
+        # Single pass: auto-dispatch + group by delivery class. Chat events
+        # are pushed as priority messages (#688): a human is waiting on
+        # them, so they must not sit behind queued bulk webhook batches.
         bulk_events: list[tuple[bool, dict]] = []
         chat_events: list[tuple[bool, dict]] = []
         for e in external:
@@ -239,10 +370,13 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 except Exception:
                     log.exception("Reactor failed processing event %s — "
                                   "delivering it un-dispatched", e.get("type"))
+            if reactor_result == "deduped":
+                log.info("Dropping duplicate event delivery %s", e.get("type"))
+                continue
             target = chat_events if e.get("delivery") == "chat" else bulk_events
             target.append((reactor_result, e))
 
-        # Run input channel handlers on chat events (placeholder, typing, etc.).
+        # Run input channel handlers on chat events (typing, cleanup, etc.).
         if chat_events:
             raw = [ev for _, ev in chat_events]
             prepared = _prepare_chat_events(raw)
@@ -251,7 +385,7 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 for (dispatched, _), prepared_ev in zip(chat_events, prepared)
             ]
 
-        for group in [bulk_events, chat_events]:
+        for is_chat, group in [(False, bulk_events), (True, chat_events)]:
             if not group:
                 continue
 
@@ -265,16 +399,20 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 lines.append(formatted)
             text = "\n\n".join(lines)
 
-            log.info(f"Delivering {len(group)} event(s) to {session_name}")
-            inbox.push(Message(id=_msg_id(), sender="event-bus", text=text))
+            log.info("Delivering %d event(s) to %s (batch seq<=%d)",
+                     len(group), session_name, max_seq)
+            inbox.push(
+                Message(id=_msg_id(), sender="event-bus", text=text,
+                        on_done=batch_ack.attach() if batch_ack else None),
+                priority=is_chat,
+            )
 
-        # Advance cursor and ACK only AFTER all events in this batch have
-        # been delivered to the inbox — a crash before here means the
-        # server replays the events on reconnect (#278 bug 2).
-        if cursor_ack:
-            max_seq = max((e.get("seq", 0) for e in batch), default=0)
-            if max_seq > 0:
-                cursor_ack(max_seq)
+        # The cursor is NOT acked here: each pushed message carries a
+        # completion callback, and the watermark acks the batch seq only
+        # once the session has processed everything at or below it (#688).
+        # A crash before then means the server replays on reconnect.
+        if batch_ack:
+            batch_ack.close()
 
         if stop_after:
             return

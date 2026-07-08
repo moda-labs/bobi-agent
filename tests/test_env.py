@@ -96,15 +96,17 @@ class TestChildAgentEnv:
         config_dir = paths.package_dir(root)
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text(
-            "agent: eng-team\nbrain:\n  kind: codex\n"
+            "agent: eng-team\nbrain:\n  kind: codex\n  model: gpt-5-codex\n"
         )
         monkeypatch.setenv("BOBI_ROOT", "/stale/root")
         monkeypatch.setenv("BOBI_BRAIN", "claude")
+        monkeypatch.setenv("BOBI_BRAIN_MODEL", "opus")
 
         env = child_agent_env(root)
 
         assert env["BOBI_ROOT"] == str(root)
         assert env["BOBI_BRAIN"] == "codex"
+        assert env["BOBI_BRAIN_MODEL"] == "gpt-5-codex"
 
     def test_clears_stale_parent_brain_for_default_brain_team(
         self, tmp_path, monkeypatch,
@@ -116,27 +118,32 @@ class TestChildAgentEnv:
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text("agent: eng-team\n")
         monkeypatch.setenv("BOBI_BRAIN", "codex")
+        monkeypatch.setenv("BOBI_BRAIN_MODEL", "gpt-5-codex")
 
         env = child_agent_env(root)
 
         assert "BOBI_BRAIN" not in env
+        assert "BOBI_BRAIN_MODEL" not in env
 
-    def test_interpolates_brain_kind_from_dotenv(self, tmp_path, monkeypatch):
+    def test_interpolates_brain_config_from_dotenv(self, tmp_path, monkeypatch):
         from bobi.env import child_agent_env
 
         root = tmp_path / "install"
         config_dir = paths.package_dir(root)
         config_dir.mkdir(parents=True)
         (config_dir / "agent.yaml").write_text(
-            "agent: eng-team\nbrain:\n  kind: ${TEAM_BRAIN}\n"
+            "agent: eng-team\nbrain:\n  kind: ${TEAM_BRAIN}\n  model: ${TEAM_MODEL}\n"
         )
-        paths.env_path(root).write_text("TEAM_BRAIN=codex\n")
+        paths.env_path(root).write_text("TEAM_BRAIN=codex\nTEAM_MODEL=haiku\n")
         monkeypatch.delenv("TEAM_BRAIN", raising=False)
+        monkeypatch.delenv("TEAM_MODEL", raising=False)
 
         env = child_agent_env(root)
 
         assert env["TEAM_BRAIN"] == "codex"
+        assert env["TEAM_MODEL"] == "haiku"
         assert env["BOBI_BRAIN"] == "codex"
+        assert env["BOBI_BRAIN_MODEL"] == "haiku"
 
     def test_carries_parent_tool_and_credential_environment(self, tmp_path, monkeypatch):
         from bobi.env import child_agent_env
@@ -174,6 +181,102 @@ class TestChildAgentEnv:
         assert env["VENN_API_KEY"] == "from-file"
         assert os.environ.get("VENN_API_KEY") is None
 
+    def test_child_env_replaces_dotenv_value_loaded_by_another_runtime(
+        self, tmp_path, monkeypatch,
+    ):
+        from bobi.config import Config
+        from bobi.env import child_agent_env
+
+        monkeypatch.delenv("SHARED_CHILD_TOKEN", raising=False)
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        for root, token in [(first, "first-token"), (second, "second-token")]:
+            paths.package_dir(root).mkdir(parents=True)
+            paths.agent_yaml_path(root).write_text(
+                "services:\n"
+                "  - name: slack\n"
+                "    credentials:\n"
+                "      bot_token: ${SHARED_CHILD_TOKEN}\n"
+            )
+            paths.env_path(root).write_text(f"SHARED_CHILD_TOKEN={token}\n")
+
+        assert Config.load(first).credential("slack", "bot_token") == "first-token"
+
+        env = child_agent_env(second)
+
+        assert env["SHARED_CHILD_TOKEN"] == "second-token"
+
+    def test_pins_gateway_config_with_dotenv_interpolation(
+        self, tmp_path, monkeypatch,
+    ):
+        """A `kind: gateway` team pins base_url/small_model for its sessions
+        (#655), with `${VAR}` resolved from the runtime .env."""
+        from bobi.env import child_agent_env
+
+        root = tmp_path / "install"
+        config_dir = paths.package_dir(root)
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text(
+            "agent: local-team\n"
+            "brain:\n"
+            "  kind: gateway\n"
+            "  base_url: ${LLM_GATEWAY_URL}\n"
+            "  model: qwen3:14b\n"
+            "  small_model: qwen3:4b\n"
+        )
+        paths.env_path(root).write_text("LLM_GATEWAY_URL=http://localhost:4000\n")
+        monkeypatch.delenv("LLM_GATEWAY_URL", raising=False)
+
+        env = child_agent_env(root)
+
+        assert env["BOBI_BRAIN"] == "gateway"
+        assert env["BOBI_BRAIN_MODEL"] == "qwen3:14b"
+        assert env["BOBI_GATEWAY_BASE_URL"] == "http://localhost:4000"
+        assert env["BOBI_GATEWAY_SMALL_MODEL"] == "qwen3:4b"
+
+    def test_brain_interpolation_matches_config_semantics(
+        self, tmp_path, monkeypatch,
+    ):
+        """`${VAR:-default}` must resolve the same here as in Config.load -
+        a divergence passes validate yet pins an empty gateway base URL into
+        every child (#655 review finding)."""
+        from bobi.env import child_agent_env
+
+        root = tmp_path / "install"
+        config_dir = paths.package_dir(root)
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text(
+            "agent: local-team\n"
+            "brain:\n"
+            "  kind: gateway\n"
+            "  base_url: ${UNSET_GATEWAY_URL:-http://localhost:11434}\n"
+            "  model: qwen3:14b\n"
+        )
+        monkeypatch.delenv("UNSET_GATEWAY_URL", raising=False)
+
+        env = child_agent_env(root)
+
+        assert env["BOBI_GATEWAY_BASE_URL"] == "http://localhost:11434"
+
+    def test_clears_stale_parent_gateway_pins_for_other_team(
+        self, tmp_path, monkeypatch,
+    ):
+        """A stale gateway endpoint from another installation must never leak
+        into a claude/default team's sessions."""
+        from bobi.env import child_agent_env
+
+        root = tmp_path / "install"
+        config_dir = paths.package_dir(root)
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text("agent: eng-team\n")
+        monkeypatch.setenv("BOBI_GATEWAY_BASE_URL", "http://stale:4000")
+        monkeypatch.setenv("BOBI_GATEWAY_SMALL_MODEL", "stale-model")
+
+        env = child_agent_env(root)
+
+        assert "BOBI_GATEWAY_BASE_URL" not in env
+        assert "BOBI_GATEWAY_SMALL_MODEL" not in env
+
     def test_uses_same_path_normalization_as_spawn_env(self, tmp_path, monkeypatch):
         from bobi.env import agent_spawn_env, child_agent_env
 
@@ -195,5 +298,5 @@ class TestProbeAndSpawnUseSameHelper:
         import bobi.validate as validate_mod
         import bobi.subagent as subagent_mod
 
-        assert validate_mod.agent_spawn_env is env_mod.agent_spawn_env
+        assert validate_mod.child_agent_env is env_mod.child_agent_env
         assert subagent_mod.agent_spawn_env is env_mod.agent_spawn_env

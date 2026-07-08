@@ -48,13 +48,22 @@ Monitor flavors:
     verdict, and converts it into conditions. The check agent only observes
     and reports — dedup and publishing happen here, on the same path as
     every other flavor. The manager never sees the check process itself.
-  - Sleep cycle (`sleep_cycle: true`) — the one flavor whose agent WRITES an artifact
-    (long_term_memory.md) instead of returning a verdict (#456). The scheduler does the
-    deterministic half (window the transcript delta on messages.id since a
-    success-advanced cursor, apply the per-run input cap), launches the sleep_cycle
-    agent with the rendered delta, and on a successful run advances the cursor
-    and publishes `system/memory.updated` directly — bypassing _reconcile dedup
+  - Sleep cycle (`sleep_cycle: true`) — the one flavor whose agent WRITES an
+    artifact (long_term_memory.md) instead of returning a verdict (#456). The
+    scheduler does the deterministic half (window the transcript delta on
+    messages.id since a success-advanced cursor, apply the per-run input cap),
+    launches the sleep-cycle agent with the rendered delta, and on a successful
+    run advances the cursor and publishes `system/memory.updated` directly —
+    bypassing _reconcile dedup
     because a completion signal is not a deduped finding.
+
+A command/check monitor may additionally set `relevance:` (#630) - the
+two-tier semantic gate. The mechanical detector still decides what exists at
+$0; the scheduler dedups first and sends ONLY the new conditions to a
+short-lived cheap-model gate agent that judges them against the criterion.
+Relevant items publish normally; irrelevant items are recorded active without
+publishing, so each item is judged exactly once. A tick with nothing new
+never touches a model.
 """
 
 from __future__ import annotations
@@ -66,6 +75,8 @@ import logging
 import subprocess
 import sys
 import threading
+import tempfile
+import time as time_mod
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -142,6 +153,16 @@ def _monitor_state_path() -> Path:
 
 TICK_INTERVAL = 30  # seconds between scheduler ticks
 
+# Most new items a single relevance-gate call judges (#630). Overflow items
+# are simply not recorded, so the next tick re-detects them as new and gates
+# the next batch - bounded prompt size. Assumes the detector re-reports
+# pending items (poll windows must cover a burst across intervals).
+GATE_MAX_ITEMS = 20
+
+# Linux MAX_ARG_STRLEN is 131072 bytes; keep monitor agent argv elements well
+# below that so failures are caught before Popen raises E2BIG.
+MAX_MONITOR_ARG_BYTES = 100_000
+
 # How late a weekday-gated (`days:`) at-monitor may fire and still count as a
 # live run rather than a missed-while-down catch-up. A live fire lands within
 # one tick of the scheduled instant; anything later means the manager was down
@@ -160,34 +181,38 @@ def _default_publish(event: str, data: dict) -> bool:
     return post_event(event, data)
 
 
-def _resolve_monitor_role(monitor) -> str:
-    """Resolve the role for a monitor-launched subagent.
-
-    Monitor-local ``role`` wins. If omitted, use the installed agent's
-    ``entry_point`` so framework defaults can run without duplicating a role in
-    every monitor record.
-    """
-    role = getattr(monitor, "role", "") or ""
-    if role:
-        return role
+def _append_manager_log(message: str) -> None:
     try:
-        from bobi.config import Config
-        from bobi.paths import bound_root as get_project_root
-        root = get_project_root()
-        if root:
-            cfg = Config.load(root)
-            return cfg.entry_point or ""
+        from bobi import paths
+        log_path = paths.state_dir() / "manager.log"
+        with open(log_path, "a") as lf:
+            lf.write(message.rstrip() + "\n")
     except Exception:
         pass
-    return ""
 
 
-def _parse_verdict(output: str) -> dict | None:
-    """Extract the trailing verdict JSON a check process printed, or None.
+def _publish_monitor_error(monitor_name: str, kind: str, reason: str,
+                           detail: str = "", publish=None) -> None:
+    payload = {
+        "monitor": monitor_name,
+        "flavor": kind,
+        "reason": reason,
+        "detail": detail,
+    }
+    publisher = publish or _default_publish
+    try:
+        publisher("system/monitor.error", payload)
+    except Exception:
+        log.exception("Failed to publish monitor.error for %s", monitor_name)
 
-    `bobi agent <name> subagents launch --wait` prints the check's verdict as a single
-    JSON line ({"success": ..., "finding": ...}). None means the process
-    produced no parseable verdict — an indeterminate run, never "all clear".
+
+def _parse_stdout_json(output: str, key: str) -> dict | None:
+    """Extract the trailing JSON line containing ``key`` that a monitor
+    subprocess printed, or None.
+
+    The shared stdout parser for every out-of-band monitor agent. None means
+    the process produced no parseable verdict - an indeterminate run, never
+    "all clear".
     """
     for line in reversed((output or "").strip().splitlines()):
         line = line.strip()
@@ -197,12 +222,136 @@ def _parse_verdict(output: str) -> dict | None:
             parsed = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(parsed, dict) and "finding" in parsed:
+        if isinstance(parsed, dict) and key in parsed:
             return parsed
     return None
 
 
-def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
+def _parse_verdict(output: str) -> dict | None:
+    """The check flavor's verdict line: {"success": ..., "finding": ...}."""
+    return _parse_stdout_json(output, "finding")
+
+
+def _parse_gate_output(output: str) -> dict | None:
+    """The gate flavor's verdict line: {"success": ..., "relevant": [...]}."""
+    return _parse_stdout_json(output, "relevant")
+
+
+def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
+                         on_result, cleanup=None, publish=None) -> None:
+    """Launch an out-of-band monitor agent subprocess and report its result.
+
+    The shared subprocess machinery for the check, gate, and curator flavors:
+    Popen (never blocking the scheduler thread) plus a waiter thread that
+    tees stdout to manager.log and hands ``parse(stdout)`` - or None on
+    spawn/timeout failure, indeterminate - to ``on_result``. ``cleanup`` (if
+    given) runs exactly once when the subprocess is finished with its inputs.
+    """
+    from bobi import paths
+    root = paths.bobi_root()
+    log_path = paths.state_dir() / "manager.log"
+
+    oversized = [(idx, len(str(arg).encode())) for idx, arg in enumerate(cmd)
+                 if len(str(arg).encode()) > MAX_MONITOR_ARG_BYTES]
+    if oversized:
+        idx, size = oversized[0]
+        detail = (f"argv element {idx} is {size} bytes, over "
+                  f"{MAX_MONITOR_ARG_BYTES} byte safety bound")
+        message = (f"Failed to spawn {kind} for monitor {monitor_name}: "
+                   f"{detail}")
+        log.error(message)
+        _append_manager_log(message)
+        if cleanup:
+            cleanup()
+        _publish_monitor_error(
+            monitor_name, kind, "spawn-failed", detail, publish=publish)
+        on_result(None)
+        return
+
+    try:
+        with open(log_path, "a") as lf:
+            # cwd pins the child CLI's root resolution to this process's
+            # bound root - never whatever directory the manager happened
+            # to be started from.
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=lf,
+                                    text=True, start_new_session=True,
+                                    cwd=str(root))
+    except OSError as e:
+        detail = str(e)
+        message = f"Failed to spawn {kind} for monitor {monitor_name}: {detail}"
+        log.error(message)
+        _append_manager_log(message)
+        if cleanup:
+            cleanup()
+        _publish_monitor_error(
+            monitor_name, kind, "spawn-failed", detail, publish=publish)
+        on_result(None)
+        return
+
+    def _wait() -> None:
+        from bobi.subagent import CHECK_TIMEOUT
+        # The blocking runners retry internally (attempts=2, each bounded by
+        # CHECK_TIMEOUT), so allow both attempts plus startup slack.
+        budget = 2 * CHECK_TIMEOUT + 120
+        try:
+            out, _ = proc.communicate(timeout=budget)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            detail = f"exceeded {budget}s - killed"
+            message = f"{kind.capitalize()} for monitor {monitor_name} {detail}"
+            log.error(message)
+            _append_manager_log(message)
+            _publish_monitor_error(
+                monitor_name, kind, "timeout", detail, publish=publish)
+            on_result(None)
+            return
+        finally:
+            if cleanup:
+                cleanup()
+        if out:  # keep the agent's output observable in manager.log
+            try:
+                with open(log_path, "a") as lf:
+                    lf.write(out)
+            except OSError:
+                pass
+        result = parse(out)
+        if result is None:
+            detail = "subprocess output did not contain a parseable result"
+            log.warning("Monitor %s: %s %s", monitor_name, kind, detail)
+            _append_manager_log(
+                f"Monitor {monitor_name}: {kind} {detail}")
+            _publish_monitor_error(
+                monitor_name, kind, "indeterminate-result", detail,
+                publish=publish)
+        on_result(result)
+
+    threading.Thread(target=_wait, daemon=True,
+                     name=f"{kind}-wait-{monitor_name}").start()
+
+
+def _monitor_agent_role(monitor) -> str:
+    """Resolve the role for an out-of-band monitor agent launch (#212, #695).
+
+    `subagents launch` requires --role. Monitors rarely set one, so fall back
+    to the team's entry-point role via Config.entry_role - the same resolution
+    named start uses, "manager" included, so a monitor never fails on a config
+    that `bobi start` accepts.
+    """
+    role = getattr(monitor, "role", "") or ""
+    if role:
+        return role
+    try:
+        from bobi.config import Config
+        from bobi.paths import bound_root
+        return Config.load(bound_root()).entry_role
+    except Exception:
+        log.exception("Failed to resolve entry role for monitor %s",
+                      getattr(monitor, "name", "?"))
+        return "manager"
+
+
+def _default_spawn_check(monitor, cwd: str | None, on_verdict,
+                         publish=None) -> None:
     """Launch a non-interactive check subprocess and report its verdict.
 
     Runs `bobi agent <name> subagents launch --wait` out-of-band so the scheduler thread
@@ -211,124 +360,219 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict) -> None:
     process exits. The check agent only observes — converting the verdict to
     conditions, dedup, and publishing all happen in the scheduler.
     """
-    role = _resolve_monitor_role(monitor)
+    role = _monitor_agent_role(monitor)
+
     from bobi import paths
     root = paths.bobi_root()
     cmd = [
         sys.executable, "-m", "bobi.cli",
         "agent", paths.agent_name_for_root(root), "subagents", "launch",
         "-w", "adhoc",
-        *(["--role", role] if role else []),
+        "--role", role,
         "--non-interactive",
         "--wait",
         "--task", monitor.description or monitor.name,
     ]
+    _spawn_monitor_agent(
+        cmd, monitor.name, "check", _parse_verdict, on_verdict,
+        publish=publish)
 
-    log_path = paths.state_dir() / "manager.log"
 
+# A gate request file older than this is an orphan: the waiter thread that
+# would have deleted it died with a previous manager. Twice the waiter budget
+# leaves generous slack for a live in-flight gate.
+_GATE_REQUEST_MAX_AGE = 3600 * 2
+_CURATOR_TASK_MAX_AGE = 3600 * 2
+
+
+def _write_gate_request(monitor, items: list) -> str | None:
+    """Write the gate request file (criterion + new items) and return its path.
+
+    Item payloads are cut to the gate prompt's per-item budget at write time -
+    the prompt would truncate them anyway, so a batch of large emails must not
+    turn into megabytes written and re-parsed per gate call. The full payload
+    still publishes: the scheduler keeps the original conditions in memory for
+    the verdict callback. Also sweeps orphaned request files left by a manager
+    that died mid-gate, so raw payloads never accumulate at rest.
+    """
+    import tempfile
+    import time as time_mod
+
+    from bobi import paths
+    from bobi.subagent import GATE_ITEM_CHARS
+
+    gates_dir = paths.state_dir() / "gates"
     try:
-        with open(log_path, "a") as lf:
-            # cwd pins the child CLI's root resolution to this process's
-            # bound root — never whatever directory the manager happened
-            # to be started from.
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=lf,
-                                    text=True, start_new_session=True,
-                                    cwd=str(root))
-    except OSError as e:
-        log.error(f"Failed to spawn check for monitor {monitor.name}: {e}")
-        return
-
-    def _wait() -> None:
-        from bobi.subagent import CHECK_TIMEOUT
-        # run_check_blocking retries internally (attempts=2, each bounded by
-        # CHECK_TIMEOUT), so allow both attempts plus startup slack.
-        budget = 2 * CHECK_TIMEOUT + 120
-        try:
-            out, _ = proc.communicate(timeout=budget)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            log.error(f"Check for monitor {monitor.name} exceeded {budget}s — killed")
-            on_verdict(None)
-            return
-        if out:  # keep the check's output observable in manager.log
+        gates_dir.mkdir(parents=True, exist_ok=True)
+        cutoff = time_mod.time() - _GATE_REQUEST_MAX_AGE
+        for stale in gates_dir.glob("*.json"):
             try:
-                with open(log_path, "a") as lf:
-                    lf.write(out)
+                if stale.stat().st_mtime < cutoff:
+                    stale.unlink()
             except OSError:
                 pass
-        on_verdict(_parse_verdict(out))
 
-    threading.Thread(target=_wait, daemon=True,
-                     name=f"check-wait-{monitor.name}").start()
+        rendered = []
+        for c in items:
+            try:
+                serialized = json.dumps(c.data, sort_keys=True, default=str)
+            except (TypeError, ValueError):
+                serialized = str(c.data)
+            data = (c.data if len(serialized) <= GATE_ITEM_CHARS
+                    else {"truncated_payload": serialized[:GATE_ITEM_CHARS]})
+            rendered.append({"key": c.key, "data": data})
+
+        fd, request_path = tempfile.mkstemp(
+            dir=gates_dir, prefix=f"{monitor.name.replace('/', '_')}-",
+            suffix=".json")
+        try:
+            with open(fd, "w") as f:
+                json.dump({
+                    "criterion": monitor.relevance,
+                    "name": f"gate-{monitor.name}",
+                    "items": rendered,
+                }, f, default=str)
+        except (OSError, TypeError, ValueError):
+            Path(request_path).unlink(missing_ok=True)
+            raise
+    except (OSError, TypeError, ValueError) as e:
+        log.error(f"Failed to write gate request for monitor {monitor.name}: {e}")
+        return None
+    return request_path
 
 
-def _default_spawn_sleep_cycle(monitor, cwd: str | None, task: str, on_result) -> None:
-    """Launch the out-of-band sleep cycle agent with a pre-rendered task (#456).
+def _write_curator_task(monitor, task: str) -> str | None:
+    """Write a rendered sleep-cycle task to disk and return its absolute path.
 
-    Mirrors _default_spawn_check, but the agent WRITES long_term_memory.md (its Write tool
-    is available because adhoc launches run permission_mode=bypassPermissions)
-    and prints a JSON summary instead of a verdict. The waiter thread hands the
-    parsed summary (or None) to ``on_result`` when the process exits. The
-    scheduler — not the agent — owns the cursor advance and the publish.
+    Sleep-cycle prompts include transcript windows up to hundreds of KB, which
+    can exceed Linux's per-argv-string limit if passed inline. Store the full
+    task under state/sleep-cycle and pass the agent a short request path.
     """
-    role = _resolve_monitor_role(monitor)
     from bobi import paths
+
+    tasks_dir = paths.state_dir() / "sleep-cycle"
+    try:
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        cutoff = time_mod.time() - _CURATOR_TASK_MAX_AGE
+        for stale in tasks_dir.glob("task-*.md"):
+            try:
+                if stale.stat().st_mtime < cutoff:
+                    stale.unlink()
+            except OSError:
+                pass
+
+        fd, task_path = tempfile.mkstemp(
+            dir=tasks_dir, prefix="task-", suffix=".md")
+        try:
+            with open(fd, "w") as f:
+                f.write(task)
+        except OSError:
+            Path(task_path).unlink(missing_ok=True)
+            raise
+    except OSError as e:
+        log.error("Failed to write sleep-cycle task for monitor %s: %s",
+                  monitor.name, e)
+        return None
+    return task_path
+
+
+def _default_spawn_gate(monitor, cwd: str | None, items: list, on_verdict,
+                        publish=None) -> None:
+    """Launch a non-interactive relevance-gate subprocess over new items (#630).
+
+    Mirrors _default_spawn_check: out-of-band so the scheduler thread is never
+    blocked, cost attributed to role=monitor. The batch of new items rides in
+    a request file under run/state/gates/ because real payloads (emails) do
+    not fit argv. The waiter thread hands the trailing verdict JSON (or None)
+    to ``on_verdict`` when the process exits; judging which keys publish stays
+    in the scheduler.
+    """
+    from bobi import paths
+
+    request_path = _write_gate_request(monitor, items)
+    if request_path is None:
+        on_verdict(None)
+        return
+
     root = paths.bobi_root()
     cmd = [
         sys.executable, "-m", "bobi.cli",
-        "agent", paths.agent_name_for_root(root), "subagents", "launch",
-        "-w", "adhoc",
-        *(["--role", role] if role else []),
-        "--non-interactive",
-        "--wait",
-        "--agent-wait",
-        "--task", task,
+        "agent", paths.agent_name_for_root(root), "monitors", "gate",
+        "--request", str(request_path),
     ]
+    _spawn_monitor_agent(
+        cmd, monitor.name, "gate", _parse_gate_output, on_verdict,
+        cleanup=lambda: Path(request_path).unlink(missing_ok=True),
+        publish=publish,
+    )
 
-    log_path = paths.state_dir() / "manager.log"
 
-    try:
-        with open(log_path, "a") as lf:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=lf,
-                                    text=True, start_new_session=True,
-                                    cwd=str(root))
-    except OSError as e:
-        log.error(f"Failed to spawn sleep_cycle for monitor {monitor.name}: {e}")
+def _default_spawn_sleep_cycle(monitor, cwd: str | None, task: str, on_result,
+                               publish=None) -> None:
+    """Launch the out-of-band sleep-cycle agent with a pre-rendered task (#456).
+
+    Mirrors _default_spawn_gate: the full rendered task rides in a request
+    file under run/state/sleep-cycle/ (it can exceed argv limits) and the child
+    runs the dedicated `monitors curator` command - NOT `subagents launch`,
+    whose --wait path wraps the task in check-verdict semantics that swallow
+    the summary (#695). The agent WRITES long_term_memory.md and prints a
+    JSON summary; the waiter thread hands the parsed summary (or None) to
+    ``on_result`` when the process exits. The scheduler - not the agent -
+    owns the cursor advance and the publish.
+    """
+    from bobi import paths
+
+    task_path = _write_curator_task(monitor, task)
+    if task_path is None:
+        _publish_monitor_error(
+            monitor.name, "sleep-cycle", "spawn-failed",
+            "failed to write sleep-cycle task file", publish=publish)
         on_result(None)
         return
 
-    def _wait() -> None:
-        from bobi.subagent import CHECK_TIMEOUT
-        budget = 2 * CHECK_TIMEOUT + 120
-        try:
-            out, _ = proc.communicate(timeout=budget)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            log.error(f"Sleep cycle for monitor {monitor.name} exceeded {budget}s — killed")
-            on_result(None)
-            return
-        if out:
-            try:
-                with open(log_path, "a") as lf:
-                    lf.write(out)
-            except OSError:
-                pass
-        from bobi.monitors import sleep_cycle as sleep_cycle_mod
-        on_result(sleep_cycle_mod.parse_result(out))
+    root = paths.bobi_root()
+    cmd = [
+        sys.executable, "-m", "bobi.cli",
+        "agent", paths.agent_name_for_root(root), "monitors", "curator",
+        "--request", str(task_path),
+    ]
 
-    threading.Thread(target=_wait, daemon=True,
-                     name=f"sleep_cycle-wait-{monitor.name}").start()
+    def _parse_sleep_cycle(out: str):
+        from bobi.monitors import sleep_cycle as sleep_cycle_mod
+        return sleep_cycle_mod.parse_result(out)
+
+    _spawn_monitor_agent(
+        cmd, monitor.name, "sleep-cycle", _parse_sleep_cycle, on_result,
+        cleanup=lambda: Path(task_path).unlink(missing_ok=True),
+        publish=publish,
+    )
+
+
+def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result,
+                           publish=None) -> None:
+    """Deprecated compatibility wrapper for one release."""
+    _default_spawn_sleep_cycle(monitor, cwd, task, on_result, publish=publish)
 
 
 class MonitorScheduler:
     def __init__(self, publish=None, state_path: Path | None = None,
                  now=None, registry_loader=None, spawn_check=None,
                  project_path: Path | None = None, spawn_sleep_cycle=None,
-                 spawn_curator=None):
+                 spawn_curator=None,
+                 spawn_gate=None):
         self.publish = publish or _default_publish
-        self.spawn_check = spawn_check or _default_spawn_check
-        self.spawn_sleep_cycle = (
-            spawn_sleep_cycle or spawn_curator or _default_spawn_sleep_cycle
+        self.spawn_check = spawn_check or (
+            lambda monitor, cwd, on_verdict: _default_spawn_check(
+                monitor, cwd, on_verdict, publish=self.publish)
+        )
+        self.spawn_sleep_cycle = spawn_sleep_cycle or spawn_curator or (
+            lambda monitor, cwd, task, on_result: _default_spawn_sleep_cycle(
+                monitor, cwd, task, on_result, publish=self.publish)
+        )
+        self.spawn_curator = self.spawn_sleep_cycle
+        self.spawn_gate = spawn_gate or (
+            lambda monitor, cwd, items, on_verdict: _default_spawn_gate(
+                monitor, cwd, items, on_verdict, publish=self.publish)
         )
         self.state_path = Path(state_path) if state_path else _monitor_state_path()
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -341,6 +585,14 @@ class MonitorScheduler:
         # Waiter threads for out-of-band checks reconcile concurrently with
         # the scheduler thread — all state mutation goes through this lock.
         self._state_lock = threading.RLock()
+        # Monitors with a relevance gate verdict still pending. In-memory on
+        # purpose: a manager restart mid-gate recorded nothing, so re-gating
+        # the same items is safe and loses nothing.
+        self._gates_in_flight: set[str] = set()
+        # Consecutive indeterminate gate verdicts per monitor, to surface a
+        # systematically broken gate (each retry pays for a model call that
+        # never lands a verdict). Reset on any successful verdict.
+        self._gate_failures: dict[str, int] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -484,7 +736,7 @@ class MonitorScheduler:
         elif monitor.check:
             conditions = self._check_conditions(monitor, registry)
         elif monitor.sleep_cycle:
-            # The sleep_cycle writes an artifact, not a verdict — it does not flow
+            # The sleep cycle writes an artifact, not a verdict — it does not flow
             # through _reconcile. The cursor advance + publish happen on result.
             sleep_cycle_spawned = self._spawn_sleep_cycle(
                 monitor, registry.projects_for(monitor))
@@ -494,7 +746,13 @@ class MonitorScheduler:
             conditions = None  # detection in flight — reconciled on verdict
 
         if conditions is not None:
-            self._reconcile(monitor, conditions)
+            if monitor.gated:
+                # Two-tier semantic gate (#630): the mechanical detector
+                # decided what exists, a cheap-model gate judges what is new.
+                self._reconcile_gated(monitor, conditions,
+                                      registry.projects_for(monitor))
+            else:
+                self._reconcile(monitor, conditions)
 
         with self._state_lock:
             entry = self.state.setdefault(monitor.state_key, {})
@@ -536,6 +794,147 @@ class MonitorScheduler:
             log.warning(f"Monitor {monitor.name} failed to publish {event} "
                         f"({condition.key}) — will retry next interval")
         return ok
+
+    # --- relevance gate (two-tier semantic gate, #630) -------------------
+
+    def _reconcile_gated(self, monitor, conditions: list,
+                         projects: list[Path]) -> None:
+        """Dedup first, then judge ONLY the new conditions with a cheap-model
+        relevance gate before anything publishes.
+
+        The cost shape is the point: a tick where the mechanical detector
+        finds nothing new ends here with zero LLM calls (the common case).
+        Only genuinely new keys ride to an out-of-band gate agent; the
+        verdict callback publishes the relevant ones and records the
+        irrelevant ones active WITHOUT publishing, so each item is judged
+        exactly once. A judged-relevant item whose publish failed sits in
+        ``pending_publish`` and is retried here mechanically at $0 - never
+        re-sent to the model, whose second opinion on a borderline item
+        could flip and silently drop the finding. Clearing semantics match
+        _reconcile: disappeared keys drop out and re-fire if they recur.
+        """
+        with self._state_lock:
+            entry = self.state.setdefault(monitor.state_key, {})
+            previous = set(entry.get("active", []))
+            current = {c.key: c for c in conditions}
+            entry["active"] = [k for k in current if k in previous]
+            self._save_state()
+            pending = dict(entry.get("pending_publish") or {})
+            new = [current[k] for k in current
+                   if k not in previous and k not in pending]
+            spawn = False
+            if new:
+                if monitor.state_key in self._gates_in_flight:
+                    # A verdict is still pending. The unrecorded keys stay
+                    # new and re-enter here on the tick after it lands.
+                    log.info(f"Monitor {monitor.name}: gate already in "
+                             f"flight - deferring {len(new)} new item(s)")
+                else:
+                    if len(new) > GATE_MAX_ITEMS:
+                        log.info(f"Monitor {monitor.name}: {len(new)} new "
+                                 f"items - gating the first {GATE_MAX_ITEMS},"
+                                 " the rest stay new for the next interval")
+                        new = new[:GATE_MAX_ITEMS]
+                    self._gates_in_flight.add(monitor.state_key)
+                    spawn = True
+
+        if pending:
+            # Already judged relevant, publish failed last time: retry the
+            # publish only, outside the lock.
+            self._publish_judged(monitor, [Condition(key=k, data=d)
+                                           for k, d in pending.items()])
+
+        if not spawn:
+            return
+        cwd = str(projects[0]) if projects else None
+        log.info(f"Monitor {monitor.name}: gating {len(new)} new item(s) "
+                 "against its relevance criterion")
+        try:
+            self.spawn_gate(monitor, cwd, new,
+                            lambda verdict: self._on_gate_verdict(monitor, new, verdict))
+        except Exception as e:
+            # A spawn that raised will never deliver a verdict - lift the
+            # in-flight guard so the next tick can retry.
+            with self._state_lock:
+                self._gates_in_flight.discard(monitor.state_key)
+            log.error(f"Failed to spawn gate for monitor {monitor.name}: {e}")
+
+    def _publish_judged(self, monitor, conditions: list) -> None:
+        """Publish judged-relevant conditions and record the outcome.
+
+        Publishes run OUTSIDE the state lock - they are HTTP posts (up to
+        GATE_MAX_ITEMS of them) and must never stall the scheduler tick or
+        the check-waiter threads queued on the lock. A successful publish
+        records the key active and clears any pending_publish entry; a
+        failed one parks the payload in pending_publish for a mechanical
+        retry next tick.
+        """
+        fired = {c.key for c in conditions if self._fire(monitor, c)}
+        with self._state_lock:
+            entry = self.state.setdefault(monitor.state_key, {})
+            active = list(entry.get("active", []))
+            pending = dict(entry.get("pending_publish") or {})
+            for c in conditions:
+                if c.key in fired:
+                    pending.pop(c.key, None)
+                    if c.key not in active:
+                        active.append(c.key)
+                else:
+                    pending[c.key] = c.data
+            entry["active"] = active
+            if pending:
+                entry["pending_publish"] = pending
+            else:
+                entry.pop("pending_publish", None)
+            self._save_state()
+
+    def _on_gate_verdict(self, monitor, judged: list,
+                         verdict: dict | None) -> None:
+        """Reconcile a relevance-gate verdict (waiter-thread callback).
+
+        Irrelevant items are recorded active without publishing - judged
+        once, never re-judged. Relevant items publish via _publish_judged;
+        a failed publish parks the payload for a mechanical retry, never a
+        re-judge. An indeterminate gate records nothing, so every judged
+        key stays new and the next tick retries the judgment. The in-flight
+        guard is held until the publishes are recorded, so a concurrent
+        tick can neither re-gate nor double-publish the judged keys.
+        """
+        key = monitor.state_key
+        if not isinstance(verdict, dict) or not verdict.get("success", False):
+            with self._state_lock:
+                self._gates_in_flight.discard(key)
+            failures = self._gate_failures.get(key, 0) + 1
+            self._gate_failures[key] = failures
+            log.warning(f"Monitor {monitor.name}: gate indeterminate - "
+                        "leaving new items unjudged, retrying next interval")
+            if failures >= 3:
+                log.error(f"Monitor {monitor.name}: {failures} consecutive "
+                          "indeterminate gates - every interval pays for a "
+                          "verdict that never lands and nothing publishes; "
+                          "check the monitor role's model and the gate "
+                          "output in manager.log")
+            return
+        self._gate_failures.pop(key, None)
+
+        raw = verdict.get("relevant", [])
+        relevant = {str(k) for k in raw} if isinstance(raw, list) else set()
+        to_publish = [c for c in judged if c.key in relevant]
+
+        with self._state_lock:
+            entry = self.state.setdefault(key, {})
+            active = list(entry.get("active", []))
+            for condition in judged:
+                if condition.key not in relevant and condition.key not in active:
+                    active.append(condition.key)
+            entry["active"] = active
+            self._save_state()
+
+        if to_publish:
+            self._publish_judged(monitor, to_publish)
+
+        with self._state_lock:
+            self._gates_in_flight.discard(key)
 
     # --- detectors ------------------------------------------------------
 
@@ -647,7 +1046,7 @@ class MonitorScheduler:
         return [Condition(key=key, data={"summary": summary, "text": summary,
                                          **details})]
 
-    # --- sleep_cycle flavor (#456) -----------------------------------------
+    # --- sleep-cycle flavor (#456) -------------------------------------
 
     def _project_root(self, projects: list[Path]):
         """The bound project root for path resolution — the first applicable
@@ -657,9 +1056,9 @@ class MonitorScheduler:
         return self._project_path
 
     def _load_sleep_cycle_prompt(self, root) -> str:
-        """The sleep cycle agent's working instructions. Team override first
+        """The sleep-cycle agent's working instructions. Team override first
         (<run>/package/prompts/sleep_cycle.md), then the legacy
-        <run>/package/prompts/curator.md override, framework default otherwise —
+        <run>/package/prompts/curator.md override, framework default otherwise -
         "what counts as durable" is domain-flavored (Q1), so a team can replace
         it without touching the framework."""
         from bobi import paths
@@ -676,17 +1075,21 @@ class MonitorScheduler:
         try:
             return SLEEP_CYCLE_PATH.read_text()
         except OSError:
-            log.error("Sleep cycle prompt missing at %s", SLEEP_CYCLE_PATH)
+            log.error("Sleep-cycle prompt missing at %s", SLEEP_CYCLE_PATH)
             return ""
+
+    def _load_curator_prompt(self, root) -> str:
+        """Deprecated compatibility wrapper for one release."""
+        return self._load_sleep_cycle_prompt(root)
 
     def _spawn_sleep_cycle(self, monitor, projects: list[Path]) -> bool:
         """Window the transcript delta, apply the input cap, and launch the
-        sleep cycle agent with the rendered delta (#456).
+        sleep-cycle agent with the rendered delta (#456).
 
-        The scheduler owns the deterministic half — read the success-advanced
+        The scheduler owns the deterministic half - read the success-advanced
         cursor, index new transcript lines, select messages oldest-first by id
         under MAX_SLEEP_CYCLE_INPUT_CHARS (deferring the overflow, truncating an
-        oversized oldest message) — so the cursor / cap / no-silent-skip
+        oversized oldest message) - so the cursor / cap / no-silent-skip
         invariants live in plain code, never behind the model. The agent does
         the judgment and rewrites long_term_memory.md; _on_sleep_cycle_result advances the
         cursor and publishes on success.
@@ -702,22 +1105,22 @@ class MonitorScheduler:
         cursor = sleep_cycle_mod.read_cursor(cursor_path)
 
         try:
-            history.index()  # incremental — only new JSONL lines
+            history.index()  # incremental - only new JSONL lines
         except Exception as e:
-            log.warning("Sleep cycle transcript index failed for %s: %s", monitor.name, e)
+            log.warning("Sleep-cycle transcript index failed for %s: %s", monitor.name, e)
 
         rows = history.messages_since(cursor)
 
         # One-time seed (#456): on the very first run (no long_term_memory.md yet) distill
         # the existing per-session decision-log journals into the first long_term_memory.md
         # so accumulated knowledge isn't discarded at rollout. Guarded on
-        # long_term_memory.md absence → idempotent: once written, the seed never re-fires.
+        # long_term_memory.md absence -> idempotent: once written, the seed never re-fires.
         seed = ""
         if not paths.long_term_memory_path(root).is_file():
             seed = collect_legacy_journals(state_dir, sleep_cycle_mod.MAX_SEED_INPUT_CHARS)
 
         if not rows and not seed:
-            log.info("Monitor %s due — no new transcript messages since cursor %d "
+            log.info("Monitor %s due - no new transcript messages since cursor %d "
                      "and nothing to seed", monitor.name, cursor)
             return False
 
@@ -739,7 +1142,7 @@ class MonitorScheduler:
                      "journals", monitor.name, len(seed))
 
         cwd = str(projects[0]) if projects else None
-        log.info("Monitor %s due — spawning sleep_cycle over %d new message(s) "
+        log.info("Monitor %s due - spawning sleep cycle over %d new message(s) "
                  "(highest id %d, deferred=%s)",
                  monitor.name, len(ingested), highest_id, flags.get("input_truncated"))
         self.spawn_sleep_cycle(
@@ -749,34 +1152,46 @@ class MonitorScheduler:
         )
         return True
 
+    def _spawn_curator(self, monitor, projects: list[Path]) -> bool:
+        """Deprecated compatibility wrapper for one release."""
+        return self._spawn_sleep_cycle(monitor, projects)
+
     def _on_sleep_cycle_result(self, monitor, result: dict | None,
-                           highest_id: int | None, cursor_path: Path) -> None:
-        """Waiter-thread callback for a finished sleep cycle run.
+                               highest_id: int | None, cursor_path: Path) -> None:
+        """Waiter-thread callback for a finished sleep-cycle run.
 
         Advances the cursor ONLY on success (a failed/indeterminate run leaves
-        it unmoved so the same window is re-read next interval — no transcript
+        it unmoved so the same window is re-read next interval - no transcript
         skipped). Publishes `system/memory.updated` only when the run actually
         changed long_term_memory.md.
         """
         from bobi.monitors import sleep_cycle as sleep_cycle_mod
 
-        if not isinstance(result, dict) or not result.get("success"):
-            log.warning("Monitor %s: sleep cycle run failed/indeterminate — cursor "
+        if not isinstance(result, dict):
+            log.warning("Monitor %s: sleep-cycle run failed/indeterminate - cursor "
                         "NOT advanced, retrying next interval", monitor.name)
             return
+        if not result.get("success"):
+            summary = str(result.get("summary", "") or "sleep cycle returned failure")
+            log.warning("Monitor %s: sleep-cycle run failed - cursor NOT advanced, "
+                        "retrying next interval: %s", monitor.name, summary)
+            _publish_monitor_error(
+                monitor.name, "sleep-cycle", "indeterminate-result", summary,
+                publish=self.publish)
+            return
 
-        # A seed-only first run ingests no transcript rows (highest_id is None) —
+        # A seed-only first run ingests no transcript rows (highest_id is None) -
         # there is nothing to advance; the cursor stays at 0 and the next run
         # reads the real transcript delta normally.
         if highest_id is not None:
             try:
                 sleep_cycle_mod.write_cursor(cursor_path, highest_id)
             except OSError as e:
-                log.error("Monitor %s: failed to advance sleep_cycle cursor: %s",
+                log.error("Monitor %s: failed to advance sleep-cycle cursor: %s",
                           monitor.name, e)
 
         if result.get("lossy_drops"):
-            log.warning("Monitor %s: sleep_cycle made %s LOSSY drop(s) of still-valid "
+            log.warning("Monitor %s: sleep cycle made %s LOSSY drop(s) of still-valid "
                         "items for space — raise MAX_MEMORY_CHARS / build the "
                         "decisions-spill: %s", monitor.name,
                         result.get("lossy_drops"), result.get("summary", ""))
@@ -784,13 +1199,18 @@ class MonitorScheduler:
         if result.get("updated"):
             self._publish_memory_updated(monitor, result)
         else:
-            log.info("Monitor %s: sleep_cycle found nothing durable — no publish",
+            log.info("Monitor %s: sleep cycle found nothing durable - no publish",
                      monitor.name)
+
+    def _on_curator_result(self, monitor, result: dict | None,
+                           highest_id: int | None, cursor_path: Path) -> None:
+        """Deprecated compatibility wrapper for one release."""
+        self._on_sleep_cycle_result(monitor, result, highest_id, cursor_path)
 
     def _publish_memory_updated(self, monitor, result: dict) -> None:
         """Publish the completion event directly (bypassing _reconcile dedup).
 
-        A completion signal is not a deduped finding — two runs with the same
+        A completion signal is not a deduped finding - two runs with the same
         summary must both deliver. The drain-side filter (events/drain.py)
         enforces passive-vs-active: a non-urgent memory.updated publishes for
         observability but is suppressed before the inbox push; urgent ones push.
@@ -816,6 +1236,10 @@ class MonitorScheduler:
                      monitor.name, event, payload["urgent"])
         else:
             log.warning("Monitor %s failed to publish %s", monitor.name, event)
+
+    def _publish_policy_updated(self, monitor, result: dict) -> None:
+        """Deprecated compatibility wrapper for one release."""
+        self._publish_memory_updated(monitor, result)
 
     # --- state persistence ---------------------------------------------
 

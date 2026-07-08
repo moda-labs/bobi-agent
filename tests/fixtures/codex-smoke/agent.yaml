@@ -1,0 +1,19 @@
+# Minimal Codex-brained team for the live container smoke (#428) and the
+# always-on release canary - the Codex twin of tests/fixtures/claude-smoke. Since
+# the Codex CLI ships in the base image, this bakes NOTHING and needs no flavored
+# image: it boots on the generic base image like claude-smoke, just with brain:
+# codex. test_container_image.py
+# mounts it, boots with BOBI_AUTH=api_key + OPENAI_API_KEY, and asserts a Codex
+# manager answers one ask.
+#
+# Deliberately dependency-free: github is a native service (auth via gh, no
+# credentials block), so preflight passes with ZERO secrets.
+version: "1.0.0"
+agent: codex-smoke
+entry_point: manager
+event_server: ${BOBI_EVENT_SERVER}
+brain:
+  kind: codex
+services:
+  - name: github
+    events: true

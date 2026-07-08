@@ -145,6 +145,11 @@ def resolve_root(start: Path | None = None) -> Path:
     )
 
 
+def webapp_dir() -> Path:
+    """Machine-level state for the unified web app daemon (pid/port/token/log)."""
+    return home_dir() / "webapp"
+
+
 def ensure_global_config() -> Path:
     path = global_config_path()
     if not path.exists():
@@ -152,6 +157,7 @@ def ensure_global_config() -> Path:
         path.write_text(
             "# Bobi machine config. BOBI_HOME controls this file's location.\n"
             "registries: []\n"
+            "sources: []\n"
         )
     return path
 

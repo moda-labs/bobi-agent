@@ -427,9 +427,28 @@ def get_registry() -> SessionRegistry:
     return _registry
 
 
-def save_session_id(name: str, session_id: str) -> None:
+def save_session_id(name: str, session_id: str, model: str | None = None) -> None:
+    """Persist a session's resume id, plus the model and brain it runs under.
+
+    ``model=None`` leaves any recorded model untouched (for callers that do
+    not know it); clearing the id (``session_id=""``) clears the model and
+    brain records too, so a fresh session never inherits a stale note. The
+    brain record (#642) is the session's provenance: a resume token is only
+    meaningful to the brain that minted it.
+    """
+    from bobi.brain import get_brain
+
     sd = _sessions_dir()
     (sd / f"{name}.id").write_text(session_id)
+    model_path = sd / f"{name}.model"
+    brain_path = sd / f"{name}.brain"
+    if not session_id:
+        model_path.unlink(missing_ok=True)
+        brain_path.unlink(missing_ok=True)
+    else:
+        if model is not None:
+            model_path.write_text(model)
+        brain_path.write_text(get_brain().name)
     registry = get_registry()
     registry.update(name, session_id=session_id)
 
@@ -439,6 +458,66 @@ def load_session_id(name: str) -> str:
     if path.exists():
         return path.read_text().strip()
     return ""
+
+
+def load_resumable_session_id(name: str, model: str) -> str:
+    """The saved session id, if the active brain can continue it under *model*.
+
+    Same-model sessions always resume. A session recorded under a different
+    model continues natively only when the brain supports cross-model resume
+    (#642); otherwise it starts fresh - the same rule the workflow
+    orchestrator applies. An empty recorded model means "ran under the
+    provider default" and still counts as a model; only sessions with no
+    record at all (saved before #617) resume unconditionally, and they get a
+    model record on their next save.
+    """
+    from bobi.brain import continuation_token, get_brain
+
+    saved_id = load_session_id(name)
+    if not saved_id:
+        return ""
+    brain = get_brain()
+    brain_path = _sessions_dir() / f"{name}.brain"
+    recorded_brain = (
+        brain_path.read_text().strip() if brain_path.exists() else ""
+    )
+    if recorded_brain and recorded_brain != brain.name:
+        # A resume token is only meaningful to the brain that minted it.
+        log.info(
+            "Session %s was recorded under brain %r but %r is active; "
+            "starting fresh.", name, recorded_brain, brain.name,
+        )
+        return ""
+    model_path = _sessions_dir() / f"{name}.model"
+    if not model_path.exists():
+        return saved_id
+    recorded = model_path.read_text().strip()
+    if not recorded_brain and recorded != (model or ""):
+        # No brain provenance (record predates #642) plus a model change:
+        # the old guard would have started fresh here, and we cannot prove
+        # the token belongs to the active brain. Stay conservative.
+        log.info(
+            "Session %s has no recorded brain and model changed (%r -> %r); "
+            "starting fresh.", name, recorded or "<default>",
+            model or "<default>",
+        )
+        return ""
+    token = continuation_token(
+        brain, session_id=saved_id,
+        from_model=recorded, to_model=model or "",
+    )
+    if not token:
+        log.info(
+            "Session %s was recorded under model %r but %r is now resolved; "
+            "starting fresh.", name, recorded or "<default>",
+            model or "<default>",
+        )
+    elif recorded != (model or ""):
+        log.info(
+            "Session %s continues natively from model %r to %r.",
+            name, recorded or "<default>", model or "<default>",
+        )
+    return token
 
 
 def log_activity(event: str, data: dict | None = None, session: str = "") -> None:

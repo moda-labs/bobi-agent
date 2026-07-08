@@ -3,6 +3,7 @@ deterministic + streaming endpoints. Driven by Starlette's TestClient with
 an injected fake LLM source: no network, no CLI."""
 
 import json
+import os
 import re
 
 import pytest
@@ -161,6 +162,121 @@ class TestSerializeState:
         s = SetupState(stage=Stage.CHAT)
         s.spec.goal = "Do the thing."
         assert server.serialize_state(s)["advance_blocker"] is None
+
+    def test_exposes_ingress_choice(self, project):
+        s = SetupState()
+        s.ingress.mode = "quick_tunnel"
+        s.ingress.url = "https://agent.trycloudflare.com"
+        s.ingress.verified = True
+        data = server.serialize_state(s)
+        assert data["ingress"] == {
+            "mode": "quick_tunnel",
+            "url": "https://agent.trycloudflare.com",
+            "verified": True,
+            "verified_at": "",
+            "error": "",
+        }
+
+
+class TestIngressEndpoint:
+    class _HealthResponse:
+        status = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self, _limit):
+            return self._body
+
+    def test_ingress_verify_is_the_only_mutation_endpoint(self, project):
+        c = _client(SetupState(), project)
+        r = c.post("/api/ingress", json={"mode": "local"})
+        assert r.status_code == 404
+
+    def test_probe_requires_bobi_health_payload(self, monkeypatch):
+        monkeypatch.setattr(
+            server,
+            "urlopen",
+            lambda *a, **k: self._HealthResponse(b'{"status":"ok","auth":"hmac"}'),
+        )
+        assert server._probe_event_server("https://events.example.com") == (True, "")
+
+        monkeypatch.setattr(
+            server,
+            "urlopen",
+            lambda *a, **k: self._HealthResponse(b'{"status":"ok"}'),
+        )
+        ok, err = server._probe_event_server("https://events.example.com")
+        assert ok is False
+        assert "Bobi event server" in err
+
+    def test_local_ingress_verified_and_removes_event_server_env(self, project):
+        (project / ".env").write_text("BOBI_EVENT_SERVER=https://old.example\n")
+        os.environ["BOBI_EVENT_SERVER"] = "https://old.example"
+        s = SetupState()
+        c = _client(s, project)
+        r = c.post("/api/ingress/verify", json={"mode": "local"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert s.ingress.mode == "local"
+        assert s.ingress.verified is True
+        assert "BOBI_EVENT_SERVER" not in (project / ".env").read_text()
+        assert "BOBI_EVENT_SERVER" not in os.environ
+
+    def test_quick_tunnel_verifies_health_and_saves_event_server(self, project,
+                                                                 monkeypatch):
+        monkeypatch.setattr(server, "_probe_event_server", lambda url: (True, ""))
+        os.environ["BOBI_EVENT_SERVER"] = "https://stale.example"
+        s = SetupState()
+        c = _client(s, project)
+        r = c.post("/api/ingress/verify", json={
+            "mode": "quick_tunnel",
+            "url": "https://agent.trycloudflare.com/",
+        })
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert s.ingress.mode == "quick_tunnel"
+        assert s.ingress.url == "https://agent.trycloudflare.com"
+        assert s.ingress.verified is True
+        assert "BOBI_EVENT_SERVER=https://agent.trycloudflare.com" in (
+            project / ".env").read_text()
+        assert os.environ["BOBI_EVENT_SERVER"] == "https://agent.trycloudflare.com"
+
+    def test_ingress_requires_public_https_url(self, project):
+        c = _client(SetupState(), project)
+        r = c.post("/api/ingress/verify", json={
+            "mode": "custom_worker",
+            "url": "http://events.example.com",
+        })
+        assert r.status_code == 400
+        assert "https" in r.json()["error"]
+
+    def test_failed_probe_keeps_previous_verified_ingress(self, project,
+                                                          monkeypatch):
+        monkeypatch.setattr(server, "_probe_event_server",
+                            lambda url: (False, "boom"))
+        (project / ".env").write_text("BOBI_EVENT_SERVER=https://old.example\n")
+        os.environ["BOBI_EVENT_SERVER"] = "https://old.example"
+        s = SetupState()
+        s.ingress.mode = "bobi_cloud"
+        s.ingress.url = "https://old.example"
+        s.ingress.verified = True
+        c = _client(s, project)
+        r = c.post("/api/ingress/verify", json={
+            "mode": "custom_worker",
+            "url": "https://events.example.com",
+        })
+        assert r.status_code == 502
+        assert r.json()["error"] == "boom"
+        assert s.ingress.verified is True
+        assert s.ingress.url == "https://old.example"
+        assert "BOBI_EVENT_SERVER=https://old.example" in (
+            project / ".env").read_text()
+        assert os.environ["BOBI_EVENT_SERVER"] == "https://old.example"
 
 
 # --- conversation turn ---------------------------------------------------
@@ -1076,6 +1192,31 @@ class TestFinish:
         assert r.json()["finished"] is True
         assert s.finished is True
 
+    def test_finish_merges_on_finish_result(self, project):
+        # Hosted mode (the unified app): on_finish launches the team and its
+        # return rides the finish response so the SPA can redirect.
+        s = SetupState(stage=Stage.DONE)
+        c = _client(s, project,
+                    on_finish=lambda: {"launched": True, "redirect": "/#/x"})
+        body = c.post("/api/finish").json()
+        assert body["finished"] is True
+        assert body["launched"] is True
+        assert body["redirect"] == "/#/x"
+
+    def test_finish_survives_on_finish_failure(self, project):
+        # A launch failure surfaces as launch_error; the finish itself holds
+        # (the team is installed either way).
+        def boom():
+            raise RuntimeError("preflight: missing SLACK_BOT_TOKEN")
+
+        s = SetupState(stage=Stage.DONE)
+        c = _client(s, project, on_finish=boom)
+        body = c.post("/api/finish").json()
+        assert body["finished"] is True
+        assert s.finished is True
+        assert "SLACK_BOT_TOKEN" in body["launch_error"]
+        assert "redirect" not in body
+
 
 class TestHome:
     def test_lists_library_teams_with_descriptions(self, project, home):
@@ -1092,6 +1233,19 @@ class TestHome:
     def test_empty_library_lists_nothing(self, project, home):
         c = _client(SetupState(), project, home_root=home)
         assert c.get("/api/home").json()["teams"] == []
+
+    def test_home_includes_session_team_outside_library(self, project, home):
+        # /api/intro merges the session's source_dir so a team authored at a
+        # user-chosen location stays visible. The hub list must do the same,
+        # else the team the user just built vanishes the moment the page
+        # transitions from finish to the hub.
+        src = home / "projects" / "moda"
+        _seed_team(src, "sales-prep", parent=".")     # team at <src>/sales-prep
+        state = SetupState(mode="create", team_name="sales-prep",
+                           source_dir=str(src))
+        c = _client(state, project, home_root=home)
+        teams = c.get("/api/home").json()["teams"]
+        assert any(t["name"] == "sales-prep" for t in teams)
 
 
 # --- intro: create / open + location -------------------------------------
@@ -1150,6 +1304,25 @@ class TestIntro:
         library = str((home / "agents").resolve())
         assert data["default_location"] == str((home / "agents" / "new-agent" / "src").resolve())
         assert data["scan_dir"] == library
+        assert data["source_roots"] == [library]
+
+    def test_intro_scans_configured_source_roots(self, project, home):
+        import yaml
+
+        from bobi import paths
+
+        extra = home / "sources"
+        _seed_team(extra, "field-ops", parent="teams")
+        cfg = paths.ensure_global_config()
+        raw = yaml.safe_load(cfg.read_text()) or {}
+        raw["sources"] = [str(extra / "teams")]
+        cfg.write_text(yaml.dump(raw))
+
+        c = _client(SetupState(), project, home_root=home)
+        data = c.get("/api/intro").json()
+
+        assert str((extra / "teams").resolve()) in data["source_roots"]
+        assert "field-ops" in {t["name"] for t in data["teams"]}
 
     def test_intro_finds_team_at_library_root(self, project, home):
         # A scanned folder itself may be a team — show the agent.yaml name, not
@@ -1211,6 +1384,26 @@ class TestIntro:
         d = c.get("/api/teams", params={"dir": "work/agents"}).json()
         assert d["dir"] == str((home / "work" / "agents").resolve())
         assert "triage-bot" in {t["name"] for t in d["teams"]}
+
+    def test_source_roots_adds_persistent_scan_root(self, project, home):
+        import yaml
+
+        from bobi import paths
+
+        c = _client(SetupState(), project, home_root=home)
+        root = home / "work" / "agents"
+
+        r = c.post("/api/source-roots", json={"dir": str(root)})
+
+        assert r.status_code == 200
+        assert str(root.resolve()) in r.json()["source_roots"]
+        raw = yaml.safe_load(paths.global_config_path().read_text()) or {}
+        assert str(root.resolve()) in raw["sources"]
+
+    def test_source_roots_rejects_path_outside_home(self, project, home):
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/source-roots", json={"dir": "/etc"})
+        assert r.status_code == 400
 
     def test_start_open_rejects_fork_inside_source(self, project, home):
         src = home / "agents" / "pa" / "src"
@@ -1321,6 +1514,120 @@ class TestIntro:
         assert d["spec"]["goal"]
         assert (home / "bobi" / "eng-team" / "agent.yaml").is_file()
 
+    def test_start_registry_defaults_into_library_slot(self, project, home,
+                                                       monkeypatch):
+        # The eng-team-template bug: the UI used to append the template name
+        # to the default location (agents/new-agent/src/eng-team), one level
+        # deeper than the home scan reads, so the finished team never showed
+        # on the hub. With no location given, a template must land in its own
+        # library slot (agents/<name>/src) and be visible on /api/home.
+        from bobi.setup import open_mode
+
+        def fake_fetch_into(proj, name, dest):
+            _seed_team(proj, name)  # writes agents/<name>/
+            open_mode.copy_into(proj / "agents" / name, dest)
+
+        monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "registry", "team": "eng-team"})
+        assert r.status_code == 200
+        slot = home / "agents" / "eng-team" / "src"
+        assert (slot / "agent.yaml").is_file()
+        teams = c.get("/api/home").json()["teams"]
+        assert any(t["path"] == str(slot.resolve()) for t in teams)
+
+    def test_start_registry_default_slot_refuses_to_clobber(self, project, home):
+        # Downloading a template with no location (the UI default) targets
+        # agents/<name>/src; if a team already lives there, the same clobber
+        # guard as an explicit location must apply.
+        existing = _seed_library_team(home, "eng-team")
+        keep = "# eng-team\n\nMY CUSTOMIZED TEAM - keep me.\n"
+        (existing / "agent.md").write_text(keep)
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "registry", "team": "eng-team"})
+        assert r.status_code == 409
+        assert (existing / "agent.md").read_text() == keep
+
+    def test_start_registry_409_leaves_session_state_untouched(self, project,
+                                                               home):
+        # A rejected start must not corrupt the session: before the guards
+        # ran, state was mutated first, so clicking the same template twice
+        # left the session pointing at a team it never opened.
+        _seed_library_team(home, "eng-team")
+        state = SetupState()
+        c = _client(state, project, home_root=home)
+        r = c.post("/api/start", json={"mode": "registry", "team": "eng-team"})
+        assert r.status_code == 409
+        assert state.source_dir == ""
+        assert state.mode == "create"
+        assert state.stage == Stage.START
+
+    def test_start_registry_fetch_failure_frees_the_slot(self, project, home,
+                                                         monkeypatch):
+        # A failed download must not leave a partial copy at the target - the
+        # leftover would 409 every retry and permanently block the slot.
+        from bobi.setup import open_mode
+
+        def failing_fetch_into(proj, name, dest):
+            dest.mkdir(parents=True)
+            (dest / "agent.yaml").write_text("agent: eng-team\n")  # partial
+            raise RuntimeError("network died")
+
+        monkeypatch.setattr(open_mode, "fetch_into", failing_fetch_into)
+        state = SetupState()
+        c = _client(state, project, home_root=home)
+        r = c.post("/api/start", json={"mode": "registry", "team": "eng-team"})
+        assert r.status_code == 502
+        assert not (home / "agents" / "eng-team" / "src").exists()
+        assert state.source_dir == ""
+        # ...and the retry succeeds once the fetch works.
+        def ok_fetch_into(proj, name, dest):
+            _seed_team(proj, name)
+            open_mode.copy_into(proj / "agents" / name, dest)
+        monkeypatch.setattr(open_mode, "fetch_into", ok_fetch_into)
+        assert c.post("/api/start", json={"mode": "registry",
+                                          "team": "eng-team"}).status_code == 200
+
+    def test_start_registry_refuses_to_nest_inside_direct_root_team(
+            self, project, home):
+        # A direct-root team (agent.yaml at agents/<name>/, no src slot) must
+        # block a template defaulting into agents/<name>/src - the scanner
+        # lists both shapes, so nesting would show two teams for one slot.
+        _seed_team(home, "eng-team", parent="agents")  # agents/eng-team/agent.yaml
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "registry", "team": "eng-team"})
+        assert r.status_code == 409
+
+    def test_start_registry_default_slot_slugs_the_name(self, project, home,
+                                                        monkeypatch):
+        # The default slot derives from slug(team), so a display-style name
+        # ("Eng Team") still lands at agents/eng-team/src.
+        from bobi.setup import open_mode
+
+        def fake_fetch_into(proj, name, dest):
+            _seed_team(proj, "eng-team")
+            open_mode.copy_into(proj / "agents" / "eng-team", dest)
+
+        monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "registry", "team": "Eng Team"})
+        assert r.status_code == 200
+        assert (home / "agents" / "eng-team" / "src" / "agent.yaml").is_file()
+
+    def test_start_registry_unsluggable_name_needs_location_400(self, project):
+        # A team name that slugs to nothing has no library slot to default
+        # into - the server must ask for a location, not land at agents/src.
+        c = _client(SetupState(), project)
+        r = c.post("/api/start", json={"mode": "registry", "team": "###"})
+        assert r.status_code == 400
+
+    def test_start_create_without_location_400(self, project):
+        # Only registry mode can derive a default location (from the template
+        # name) - create still requires an explicit one.
+        c = _client(SetupState(), project)
+        r = c.post("/api/start", json={"mode": "create"})
+        assert r.status_code == 400
+
     def test_start_registry_refuses_to_clobber_an_existing_team(self, project, home):
         # Selecting a (bundled/registry) template into a location already holding
         # a team must not overwrite it — same data-loss class as the open-mode
@@ -1333,6 +1640,25 @@ class TestIntro:
             "mode": "registry", "team": "market-research", "location": str(existing)})
         assert r.status_code == 409
         assert (existing / "agent.md").read_text() == keep
+
+    def test_start_registry_accepts_existing_empty_dir(self, project, home,
+                                                       monkeypatch):
+        # The canonical slot src/ may already exist (empty) from the slot
+        # scaffolding — an empty dir is not "an existing team".
+        from bobi.setup import open_mode
+
+        def fake_fetch_into(proj, name, dest):
+            _seed_team(proj, name)
+            open_mode.copy_into(proj / "agents" / name, dest)
+
+        monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
+        empty = home / "agents" / "new-agent" / "src"
+        empty.mkdir(parents=True)
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "registry", "team": "eng-team",
+                                       "location": str(empty)})
+        assert r.status_code == 200
+        assert (empty / "agent.yaml").is_file()
 
     def test_start_registry_without_team_400(self, project):
         c = _client(SetupState(), project)
@@ -1419,6 +1745,33 @@ class TestIntro:
         assert d["team_name"] == "triage-bot"
         assert d["source_dir"] == "bobi"
 
+    def test_rename_moves_default_placeholder_source_slot(self, project):
+        old_src = paths.agent_source_dir("new-agent")
+        old_src.mkdir(parents=True)
+        (old_src / "agent.yaml").write_text("agent: new-agent\n")
+        st = SetupState(stage=Stage.DESIGN, team_name="",
+                        source_dir=str(old_src))
+        c = _client(st, project, on_finish=lambda: {})
+        d = c.post("/api/rename", json={"name": "My Triage Team"}).json()
+        new_src = paths.agent_source_dir("my-triage-team")
+        assert d["team_name"] == "my-triage-team"
+        assert d["source_dir"] == str(new_src)
+        assert (new_src / "agent.yaml").is_file()
+        assert not old_src.exists()
+
+    def test_rename_keeps_standalone_placeholder_source_slot(self, project):
+        old_src = paths.agent_source_dir("new-agent")
+        old_src.mkdir(parents=True)
+        (old_src / "agent.yaml").write_text("agent: new-agent\n")
+        st = SetupState(stage=Stage.DESIGN, team_name="",
+                        source_dir=str(old_src))
+        c = _client(st, project)
+        d = c.post("/api/rename", json={"name": "My Triage Team"}).json()
+        assert d["team_name"] == "my-triage-team"
+        assert d["source_dir"] == str(old_src)
+        assert (old_src / "agent.yaml").is_file()
+        assert not paths.agent_source_dir("my-triage-team").exists()
+
     def test_rename_conflict_when_target_folder_exists(self, project):
         (paths.home_dir() / "bobi" / "old").mkdir(parents=True)
         (paths.home_dir() / "bobi" / "taken").mkdir(parents=True)
@@ -1427,3 +1780,226 @@ class TestIntro:
         r = c.post("/api/rename", json={"name": "taken"})
         assert r.status_code == 409
         assert (paths.home_dir() / "bobi" / "old").exists()  # original untouched
+
+
+class TestWorkflowYaml:
+    def test_yaml_preview(self, project):
+        s = SetupState(stage=Stage.DESIGN)
+        s.spec.roles = [{"name": "lead", "responsibility": "runs it"}]
+        s.spec.workflows = [{"name": "triage", "trigger": "an issue lands",
+                             "steps": [{"name": "look", "role": "lead",
+                                        "prompt": "Look at it.",
+                                        "hitl": True}]}]
+        c = _client(s, project)
+        r = c.get("/api/workflow/yaml", params={"index": 0})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["path"] == "workflows/triage.yaml"
+        wf = yaml.safe_load(data["yaml"])
+        assert [st["name"] for st in wf["steps"]] == ["look", "look-approval"]
+
+    def test_bad_or_missing_index(self, project):
+        c = _client(SetupState(), project)
+        assert c.get("/api/workflow/yaml",
+                     params={"index": "x"}).status_code == 400
+        assert c.get("/api/workflow/yaml",
+                     params={"index": 3}).status_code == 404
+
+    def test_state_serializes_workflows(self, project):
+        s = SetupState()
+        s.spec.workflows = [{"name": "w"}]
+        s.spec.workflows_confirmed = True
+        c = _client(s, project)
+        spec = c.get("/api/state").json()["spec"]
+        assert spec["workflows"] == [{"name": "w"}]
+        assert spec["workflows_confirmed"] is True
+
+
+class TestAutomationTrigger:
+    def test_update_accepts_trigger(self, project):
+        s = SetupState(stage=Stage.DESIGN)
+        s.spec.autonomous = [{"description": "d", "leash": "notify"}]
+        c = _client(s, project)
+        r = c.post("/api/automation/update",
+                   json={"index": 0, "fields": {"trigger": "event",
+                                                "cadence": "when a PR opens"}})
+        assert r.status_code == 200
+        assert s.spec.autonomous[0]["trigger"] == "event"
+        assert s.spec.autonomous[0]["cadence"] == "when a PR opens"
+
+    def test_bogus_trigger_is_ignored(self, project):
+        s = SetupState(stage=Stage.DESIGN)
+        s.spec.autonomous = [{"description": "d"}]
+        c = _client(s, project)
+        r = c.post("/api/automation/update",
+                   json={"index": 0, "fields": {"trigger": "banana"}})
+        assert r.status_code == 200
+        assert "trigger" not in s.spec.autonomous[0]
+
+
+class TestSlackFinalize:
+    @pytest.fixture(autouse=True)
+    def _no_host_slack_env(self):
+        # A real SLACK_BOT_TOKEN exported on the dev machine must not leak in
+        # (it would turn the name-rejection test into a live Slack call).
+        # _isolate_environ restores the host environment afterwards.
+        import os
+        os.environ.pop("SLACK_BOT_TOKEN", None)
+        os.environ.pop("SLACK_CHANNELS", None)
+
+    def test_channel_id_saves_without_token(self, project):
+        from bobi.setup import actions
+        s = SetupState()
+        c = _client(s, project)
+        r = c.post("/api/slack/channel", json={"channel": "C0ABC123"})
+        assert r.status_code == 200
+        assert r.json()["channel"] == "C0ABC123"
+        assert actions.read_env(project)["SLACK_CHANNELS"] == "C0ABC123"
+        assert "SLACK_CHANNELS" in s.credentials_saved
+
+    def test_channel_name_without_token_is_rejected(self, project):
+        c = _client(SetupState(), project)
+        r = c.post("/api/slack/channel", json={"channel": "#general"})
+        assert r.status_code == 400
+        assert "token" in r.json()["error"]
+
+    def test_empty_channel_rejected(self, project):
+        c = _client(SetupState(), project)
+        assert c.post("/api/slack/channel",
+                      json={"channel": " "}).status_code == 400
+
+    def test_test_requires_token_then_channel(self, project):
+        import os
+        c = _client(SetupState(), project)
+        assert c.post("/api/slack/test").status_code == 400
+        os.environ["SLACK_BOT_TOKEN"] = "xoxb-test"
+        r = c.post("/api/slack/test")
+        assert r.status_code == 400
+        assert "channel" in r.json()["error"]
+
+    def test_test_posts_to_first_channel(self, project, monkeypatch):
+        import os
+        os.environ["SLACK_BOT_TOKEN"] = "xoxb-test"
+        os.environ["SLACK_CHANNELS"] = "C111, C222"
+        calls = []
+        import bobi.slack
+
+        def fake_post(token, channel, text, *a, **kw):
+            calls.append((token, channel, text))
+            return {"ok": True}
+        monkeypatch.setattr(bobi.slack, "post_slack_message", fake_post)
+        c = _client(SetupState(team_name="crew"), project)
+        r = c.post("/api/slack/test")
+        assert r.status_code == 200
+        assert calls[0][1] == "C111"
+        assert "crew" in calls[0][2]
+
+
+class TestShutdown:
+    def test_shutdown_flips_should_exit(self, project):
+        app = server.build_app(SetupState(), project, nonce=NONCE)
+
+        class Srv:
+            should_exit = False
+        app.state.uvicorn_server = Srv()
+        c = _testclient(app)
+        c.headers.update({server.NONCE_HEADER: NONCE})
+        assert c.post("/api/shutdown").json()["ok"] is True
+        assert app.state.uvicorn_server.should_exit is True
+
+    def test_shutdown_without_server_is_noop(self, project):
+        c = _client(SetupState(), project)
+        assert c.post("/api/shutdown").status_code == 200
+
+
+class TestSlackFinalizeHardening:
+    @pytest.fixture(autouse=True)
+    def _no_host_slack_env(self):
+        import os
+        os.environ.pop("SLACK_BOT_TOKEN", None)
+        os.environ.pop("SLACK_CHANNELS", None)
+
+    def test_resolution_failure_is_redacted(self, project, monkeypatch):
+        import os
+
+        import bobi.slack
+        secret = "xoxb-" + "supersecrettoken" + "value123"
+        os.environ["SLACK_BOT_TOKEN"] = secret
+
+        def boom(token, name, **kw):
+            raise RuntimeError(f"slack said no for {token}")
+        monkeypatch.setattr(bobi.slack, "resolve_channel_id", boom)
+        c = _client(SetupState(), project)
+        r = c.post("/api/slack/channel", json={"channel": "#general"})
+        assert r.status_code == 502
+        assert secret not in r.json()["error"]
+
+    def test_name_resolves_and_saves_id(self, project, monkeypatch):
+        import os
+
+        import bobi.slack
+        from bobi.setup import actions
+        os.environ["SLACK_BOT_TOKEN"] = "xoxb-test"
+        monkeypatch.setattr(bobi.slack, "resolve_channel_id",
+                            lambda token, name, **kw: "C0RESOLVED")
+        s = SetupState()
+        c = _client(s, project)
+        r = c.post("/api/slack/channel", json={"channel": "#general"})
+        assert r.status_code == 200
+        assert r.json()["channel"] == "C0RESOLVED"
+        assert actions.read_env(project)["SLACK_CHANNELS"] == "C0RESOLVED"
+
+    def test_plain_word_without_token_is_not_saved_verbatim(self, project):
+        # "Customers" starts with C and is alnum, but it's a NAME — saving it
+        # as an ID would scope the adapter to a channel that doesn't exist.
+        c = _client(SetupState(), project)
+        r = c.post("/api/slack/channel", json={"channel": "Customers"})
+        assert r.status_code == 400
+
+    def test_message_failure_is_redacted(self, project, monkeypatch):
+        import os
+
+        import bobi.slack
+        secret = "xoxb-" + "supersecrettoken" + "value123"
+        os.environ["SLACK_BOT_TOKEN"] = secret
+        os.environ["SLACK_CHANNELS"] = "C111"
+
+        def boom(token, channel, text, *a, **kw):
+            raise RuntimeError(f"boom {token}")
+        monkeypatch.setattr(bobi.slack, "post_slack_message", boom)
+        c = _client(SetupState(), project)
+        r = c.post("/api/slack/test")
+        assert r.status_code == 502
+        assert secret not in r.json()["error"]
+
+    def test_exported_env_wins_over_stale_dotenv(self, project, monkeypatch):
+        import os
+
+        import bobi.slack
+        from bobi.setup import actions
+        env = actions.read_env(project)
+        env["SLACK_BOT_TOKEN"] = "xoxb-" + "staletoken" + "000000"
+        actions.write_env(project, env)
+        fresh = "xoxb-" + "freshtoken" + "000000"
+        os.environ["SLACK_BOT_TOKEN"] = fresh
+        calls = []
+
+        def fake(token, name, **kw):
+            calls.append(token)
+            return "C0RESOLVED"
+        monkeypatch.setattr(bobi.slack, "resolve_channel_id", fake)
+        c = _client(SetupState(), project)
+        assert c.post("/api/slack/channel",
+                      json={"channel": "#g"}).status_code == 200
+        assert calls == [fresh]
+
+
+class TestBuildGoalFloor:
+    def test_build_refuses_empty_goal(self, project):
+        # The one hard floor holds even on a direct /api/build call — no
+        # placeholder team from an empty spec.
+        s = SetupState(stage=Stage.BUILD)
+        c = _client(s, project)
+        r = c.post("/api/build")
+        assert "goal is still empty" in r.text
+        assert "file_start" not in r.text

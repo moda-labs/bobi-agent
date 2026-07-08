@@ -91,6 +91,12 @@ linear:
 Only include services the team actually needs. `bobi agents install`
 prompts for any `${VAR}` references and writes them to `run/.env`.
 
+To give the team host tools, skills, or MCP servers, declare them under
+`tool_library:` (a named catalog entry like `- venn`, or an inline dependency
+with a required `success:`). See `docs/TOOL_LIBRARY.md` for the two ways to
+declare a dependency (pinned `install:` vs guide-only) and how catalog entries
+let you pull a tool in by name.
+
 ### agent.md
 
 ```markdown
@@ -195,6 +201,7 @@ description: >
 steps:
   - name: step-name
     agent: role-name
+    model: sonnet      # optional: override the team default for this prompt step
     prompt: |
       Instructions for this step.
     handoff:
@@ -216,6 +223,72 @@ Step types:
 - **Prompt step**: `agent` + `prompt` — agent executes and writes handoff
 - **Route step**: `if` + `goto` + `else` — deterministic branch
 - **Await step**: `await` — suspends until external event arrives
+
+Runtime model selection lives in `agent.yaml` by default:
+
+```yaml
+brain:
+  kind: codex          # omit the block entirely for Claude Code
+  model: gpt-5-codex   # optional provider-specific model or alias
+```
+
+To run a team on local or self-hosted models, point the Claude CLI at an
+Anthropic-compatible gateway (LiteLLM, Ollama's Anthropic-compat API):
+
+```yaml
+brain:
+  kind: gateway
+  base_url: ${LLM_GATEWAY_URL}   # required; the /v1/messages-compatible endpoint
+  model: qwen3:14b               # gateway-native model id
+  small_model: qwen3:4b          # optional; background/fast tasks (defaults to model)
+```
+
+Gateway auth is `ANTHROPIC_AUTH_TOKEN` in the runtime `.env`, and it is
+optional - Ollama serves unauthenticated; LiteLLM typically wants its master
+key. An ambient real `ANTHROPIC_API_KEY` is never sent to a gateway. Model
+names are the backend's own: the Claude aliases below only mean something if
+the gateway serves models by those names. Cross-model session continuation is
+disabled for gateways (a model switch starts fresh and re-injects context),
+and costs reported through a gateway are nominal, attributed to provider
+`gateway` in `bobi agent <name> costs`.
+
+Individual roles can declare their own model, applied whenever an agent
+launches with that role (subagents, workflow steps, monitor checks):
+
+```yaml
+roles:
+  monitor: {model: haiku}    # cheap observe-and-report checks
+  planner: {model: opus}
+```
+
+Role models pick a model within the team's brain, never a different brain.
+Precedence: `--model` launch flag > step `model:` > `roles.<role>.model` >
+`brain.model` > provider default.
+
+Workflow prompt steps can override that team default for just one step:
+
+```yaml
+steps:
+  - name: discover
+    agent: prospect-targeter
+    model: haiku
+    prompt: "Find companies matching the wedge..."
+```
+
+For Claude-backed teams, `model` can be an alias such as `haiku`, `sonnet`, or
+`opus`, or a full Claude model ID. Bobi passes provider-native model strings to
+the selected backend; it does not translate model names across providers, and
+it does not verify them: a wrong or unavailable model fails at runtime when
+the session starts its first turn, not at validate. Availability can depend
+on the deployment's account and auth mode (Codex ChatGPT-plan auth, for
+example, rejects models an API key would accept), so prefer the provider's
+well-known names and the aliases above over exotic IDs.
+
+When consecutive prompt steps use different models, the session continues
+natively across the switch where the brain supports it (Claude and Codex
+both do), carrying the full transcript into the new model's context. A step
+that moves a long conversation onto a pricier model pays for that history in
+input tokens; a step that also changes `agent:` always starts fresh instead.
 
 Always include `adhoc.yaml`:
 ```yaml
@@ -243,6 +316,27 @@ monitors:
 
 Monitors without `check:` are executed by a short-lived agent that
 evaluates the description and posts an event only if something is found.
+That costs an LLM call every interval, so reserve it for checks that
+cannot be pulled mechanically.
+
+For "items about X" needs, prefer a mechanical poll (`check: tool_poll`
+or `venn_poll`, or a `command:`) plus a `relevance:` criterion - the
+two-tier semantic gate. The poll runs at $0 per interval; only genuinely
+new items are judged by a short cheap-model gate, and only relevant ones
+publish the event:
+
+```yaml
+monitors:
+  - name: billing-emails
+    check: venn_poll
+    interval: 5m
+    service: work-gmail
+    tool: list_messages
+    query: '{"maxResults": 10, "q": "is:unread"}'
+    id_field: id
+    relevance: "emails about billing problems, refunds, or payment failures"
+    event: monitor/email.billing
+```
 
 ### Context files (context/*.md)
 
@@ -271,7 +365,7 @@ fill in before starting the team.
 ## Built-in CLI tools
 
 Every agent has access to the full `bobi` CLI — messaging
-(`agent <name> message`, `agent <name> ask`, `slack-reply`), sub-agent
+(`agent <name> message`, `agent <name> ask`, `reply`), sub-agent
 management (`agent <name> subagents launch`, `list`, `cancel`), and
 observability (`agent <name> status`, `events`, `transcript`). Reference
 these in role prompts so agents know how to

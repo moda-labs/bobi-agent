@@ -1,0 +1,15 @@
+# Minimal Claude-brained team for the live container smoke (containerized-8 /
+# #338) and the always-on release canary. The Claude twin of
+# tests/fixtures/codex-smoke - same shape, brain: claude (the default).
+# Deliberately dependency-free so preflight passes with ZERO secrets:
+#   - github is a native service (auth rides on `gh`; no credentials block)
+#   - no MCP servers (no codex/gstack probes)
+#   - no Venn services, no monitors
+# Just enough to start a manager that answers one named ask.
+version: "1.0.0"
+agent: claude-smoke
+entry_point: manager
+event_server: ${BOBI_EVENT_SERVER}
+services:
+  - name: github
+    events: true

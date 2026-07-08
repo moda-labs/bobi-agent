@@ -38,10 +38,12 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_runtime_layout())
     results.append(_check_install_integrity())
     results.extend(_check_package_requires())
+    results.extend(_check_host_caps())
     results.extend(_check_services())
     results.append(_check_workflows())
     results.append(_check_bubble_auth())
     results.append(_check_event_server())
+    results.append(_check_ingress_reachability())
     results.append(_check_recent_events())
     results.append(_check_long_term_memory())
 
@@ -154,6 +156,29 @@ def _check_package_requires() -> list[CheckResult]:
                 detail=entry.why or detail,
                 hint=hint))
     return results
+
+
+def _check_host_caps() -> list[CheckResult]:
+    """Verify host capabilities a dependency declared via `host:` (#428 Stage 3).
+
+    A host capability (a kernel sysctl, a device) is provisioned on the host, not
+    baked into the image — the in-container agent cannot grant it. Doctor reports
+    whether each is satisfied on THIS host; where the knob is absent (older kernel,
+    non-Linux) the capability simply doesn't apply and the check passes.
+    """
+    from bobi.config import Config
+    from bobi.host_caps import parse_host_caps
+
+    root = bound_root()
+    if not root:
+        return []
+    try:
+        cfg = Config.load(root)
+    except Exception:
+        return []
+    if not cfg.host:
+        return []
+    return [cap.check() for cap in parse_host_caps(cfg.host)]
 
 
 def _check_local_config() -> CheckResult:
@@ -324,6 +349,30 @@ def _check_event_server() -> CheckResult:
                        hint="`bobi agent <name> event-server start` or `bobi agent <name> start` will auto-launch")
 
 
+def _check_ingress_reachability() -> CheckResult:
+    """Warn when external webhook sources point at local-only ingress."""
+    root = bound_root()
+    if not root:
+        return CheckResult("Ingress reachability", ok=True,
+                           detail="no runtime selected")
+    try:
+        from bobi.ingress import check_ingress_reachability
+
+        warning = check_ingress_reachability(root)
+    except FileNotFoundError:
+        return CheckResult("Ingress reachability", ok=True,
+                           detail="no agent config")
+    except Exception as exc:
+        return CheckResult("Ingress reachability", ok=True,
+                           detail=f"skipped: {exc}")
+    if not warning:
+        return CheckResult("Ingress reachability", ok=True,
+                           detail="inbound event URL is reachable")
+    return CheckResult("Ingress reachability", ok=False,
+                       detail=warning.detail, hint=warning.hint,
+                       required=False)
+
+
 def _check_recent_events() -> CheckResult:
     root = bound_root()
     if not root:
@@ -339,12 +388,12 @@ def _check_recent_events() -> CheckResult:
 
 
 def _check_long_term_memory() -> CheckResult:
-    """Check the team long_term_memory.md (#456): present, under cap, and not foreign-written.
+    """Check long_term_memory.md (#456): present, under cap, and not foreign-written.
 
-    The sleep_cycle is the single writer. A soft single-writer guard (Q5): the
-    sleep_cycle rewrites long_term_memory.md and advances long_term_memory_cursor together, so a
-    long_term_memory.md whose mtime is newer than the cursor file's mtime is a write not
-    attributable to the last sleep cycle run (a foreign writer). Flagged, not fatal.
+    The sleep cycle is the single writer. A soft single-writer guard (Q5): the
+    sleep cycle rewrites long_term_memory.md and advances long_term_memory_cursor
+    together, so a memory file whose mtime is newer than the cursor file's mtime
+    is a write not attributable to the last sleep-cycle run.
     """
     from bobi.memory import MAX_MEMORY_CHARS
     root = bound_root()
@@ -362,24 +411,49 @@ def _check_long_term_memory() -> CheckResult:
         except (OSError, json.JSONDecodeError):
             state = {}
         sleep_cycle_state = state.get("sleep-cycle") if isinstance(state, dict) else None
-        if isinstance(sleep_cycle_state, dict) and sleep_cycle_state.get("last_spawn") and not cursor.is_file():
+        if (
+            isinstance(sleep_cycle_state, dict)
+            and sleep_cycle_state.get("last_spawn")
+            and not cursor.is_file()
+        ):
             return CheckResult(
                 "Long-term memory", ok=False,
-                detail="sleep-cycle has spawned but long_term_memory.md and long_term_memory_cursor are absent",
+                detail=("sleep-cycle has spawned but long_term_memory.md and "
+                        "long_term_memory_cursor are absent"),
                 hint="Check manager.log for sleep-cycle launch or result parsing errors")
+        backlog = 0
+        try:
+            from bobi import history
+            backlog = len(history.messages_since(0, limit=101))
+        except Exception:
+            backlog = 0
+        if backlog > 100:
+            cursor = paths.long_term_memory_cursor_path(root)
+            cursor_detail = (
+                "no long_term_memory_cursor"
+                if not cursor.is_file()
+                else "stale long_term_memory_cursor"
+            )
+            return CheckResult(
+                "Long-term memory", ok=False,
+                detail=(f"no long_term_memory.md yet, but at least {backlog} transcript "
+                        f"messages are pending and {cursor_detail}"),
+                hint=("The sleep cycle appears stalled; check monitor.error "
+                      "events and manager.log"))
         return CheckResult("Long-term memory", ok=True,
-                           detail="no long_term_memory.md yet (sleep_cycle seeds it on first run)")
+                           detail="no long_term_memory.md yet (sleep cycle seeds it on first run)")
 
     try:
         size = len(memory.read_text())
     except OSError as e:
-        return CheckResult("Long-term memory", ok=False, detail=f"unreadable long_term_memory.md: {e}")
+        return CheckResult("Long-term memory", ok=False,
+                           detail=f"unreadable long_term_memory.md: {e}")
 
     if size > MAX_MEMORY_CHARS:
         return CheckResult(
             "Long-term memory", ok=False,
             detail=f"long_term_memory.md is {size} chars (over {MAX_MEMORY_CHARS} cap)",
-            hint="The sleep_cycle should keep long_term_memory.md under cap — check sleep cycle runs")
+            hint="The sleep cycle should keep long_term_memory.md under cap - check sleep cycle runs")
 
     cursor = paths.long_term_memory_cursor_path(root)
     if cursor.is_file():
@@ -387,9 +461,9 @@ def _check_long_term_memory() -> CheckResult:
             if memory.stat().st_mtime > cursor.stat().st_mtime + 1.0:
                 return CheckResult(
                     "Long-term memory", ok=False,
-                    detail="long_term_memory.md modified after the last sleep_cycle cursor advance "
-                           "— a non-sleep_cycle write may have occurred",
-                    hint="Only the sleep-cycle should write long_term_memory.md (single-writer)")
+                    detail=("long_term_memory.md modified after the last sleep-cycle "
+                            "cursor advance - a non-sleep-cycle write may have occurred"),
+                    hint="Only the sleep cycle should write long_term_memory.md (single-writer)")
         except OSError:
             pass
 
@@ -399,5 +473,5 @@ def _check_long_term_memory() -> CheckResult:
 
 
 def _check_policy() -> CheckResult:
-    """Deprecated alias for one release."""
+    """Deprecated compatibility wrapper for one release."""
     return _check_long_term_memory()

@@ -63,7 +63,7 @@ class TestDrainAutoDispatch:
         delivered = []
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 delivered.append(msg.text)
 
         def fake_formatter(event):
@@ -121,6 +121,40 @@ class TestDrainAutoDispatch:
 
         assert len(delivered) == 1
         assert "AUTO-DISPATCHED" not in delivered[0]
+        mock_launch.assert_not_called()
+
+    @patch("bobi.subagent.launch_agent")
+    def test_deduped_event_is_not_delivered(self, mock_launch):
+        """dedup_only lets first delivery through and drops redeliveries."""
+        reactor = EventReactor(
+            rules=[
+                AutoDispatchRule(
+                    event="github.issue_comment",
+                    workflow="pr-comment-event-dedup",
+                    match={"is_pull_request": True},
+                    dedup_only=True,
+                    allow_self_authored=True,
+                ),
+            ],
+            cwd="/tmp/proj",
+        )
+        first = {
+            "type": "github.issue_comment",
+            "id": "delivery-1",
+            "text": "[org/repo] comment PR #1",
+            "delivery": "bulk",
+            "topics": ["github:org/repo"],
+            "fields": {"is_pull_request": True, "number": 1, "comment_id": 123},
+        }
+        redelivery = {
+            **first,
+            "id": "delivery-2",
+            "text": "[org/repo] duplicate comment PR #1",
+        }
+
+        delivered = self._run_drain_one_batch([first, redelivery], reactor=reactor)
+
+        assert delivered == ["[org/repo] comment PR #1"]
         mock_launch.assert_not_called()
 
     @patch("bobi.subagent.launch_agent")

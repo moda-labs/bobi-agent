@@ -61,6 +61,39 @@ class TestInboxQueue:
         assert received == [f"msg-{i}" for i in range(5)]
         inbox.close()
 
+    def test_empty_reflects_queue_state(self):
+        inbox = Inbox("test-empty-check")
+        assert inbox.empty()
+        inbox.push(Message(id="1", sender="s", text="x"))
+        assert not inbox.empty()
+        inbox.recv(timeout=1)
+        assert inbox.empty()
+        inbox.close()
+
+
+class TestChatPriority:
+    """Chat messages jump queued bulk work; FIFO holds within each class (#688)."""
+
+    def test_priority_message_jumps_queue(self):
+        inbox = Inbox("test-prio")
+        inbox.push(Message(id="b1", sender="event-bus", text="bulk-1"))
+        inbox.push(Message(id="b2", sender="event-bus", text="bulk-2"))
+        inbox.push(Message(id="c1", sender="event-bus", text="chat-1"),
+                   priority=True)
+        received = [inbox.recv(timeout=1).text for _ in range(3)]
+        assert received == ["chat-1", "bulk-1", "bulk-2"]
+        inbox.close()
+
+    def test_fifo_within_each_class(self):
+        inbox = Inbox("test-prio-fifo")
+        inbox.push(Message(id="c1", sender="s", text="chat-1"), priority=True)
+        inbox.push(Message(id="b1", sender="s", text="bulk-1"))
+        inbox.push(Message(id="c2", sender="s", text="chat-2"), priority=True)
+        inbox.push(Message(id="b2", sender="s", text="bulk-2"))
+        received = [inbox.recv(timeout=1).text for _ in range(4)]
+        assert received == ["chat-1", "chat-2", "bulk-1", "bulk-2"]
+        inbox.close()
+
 
 class TestLocalInboxRegistry:
     """start()/close() make a session addressable in-process for its drain."""

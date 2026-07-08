@@ -26,13 +26,18 @@ def bound_root(tmp_path, monkeypatch):
     root leaked from earlier test files."""
     (tmp_path / ".bobi").mkdir()
     monkeypatch.setattr("bobi.paths._root", tmp_path)
+    monkeypatch.setenv("BOBI_BRAIN", "claude")
 
 
 from bobi.subagent import (
+    GATE_ITEM_CHARS,
+    GATE_MAX_TURNS,
     AgentResult,
     CheckResult,
+    GateResult,
     InputHandler,
     _build_check_prompt,
+    _build_gate_prompt,
     _build_prompt,
     _emit_lifecycle_event,
     _emit_session_finished,
@@ -40,10 +45,12 @@ from bobi.subagent import (
     _make_defer_hook,
     _parse_check_output,
     _parse_check_verdict,
+    _parse_gate_verdict,
     _run_agent_supervised,
     _session_name,
     _summarize_output,
     run_check_blocking,
+    run_gate_blocking,
     run_phase_blocking,
     spawn_adhoc,
 )
@@ -224,7 +231,7 @@ class TestRunAgentSupervisedNormal:
         mock_module.ResultMessage = FakeResultMessage
         mock_module.TextBlock = FakeTextBlock
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -265,7 +272,7 @@ class TestRunAgentSupervisedNormal:
         mock_module.ResultMessage = FakeResultMessage
         mock_module.TextBlock = FakeTextBlock
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -296,7 +303,7 @@ class TestRunAgentSupervisedNormal:
         mock_module.ResultMessage = FakeResultMessage
         mock_module.TextBlock = FakeTextBlock
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -312,7 +319,10 @@ class TestRunAgentSupervisedNormal:
             )
 
         assert result.success is False
-        assert "connection lost" in result.error
+        assert result.error == (
+            "network drop: response stream ended before turn result "
+            "(no ResultMessage)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +365,7 @@ class TestRunAgentSupervisedDeferral:
         mock_module.TextBlock = FakeTextBlock
         mock_module.HookMatcher = MagicMock()
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -421,7 +431,7 @@ class TestRunAgentSupervisedDeferral:
         mock_module.TextBlock = FakeTextBlock
         mock_module.HookMatcher = MagicMock()
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -466,7 +476,7 @@ class TestRunAgentSupervisedDeferral:
         mock_module.ResultMessage = FakeResultMessage
         mock_module.TextBlock = FakeTextBlock
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -509,7 +519,7 @@ class TestRunAgentSupervisedResume:
         mock_module.ResultMessage = FakeResultMessage
         mock_module.TextBlock = FakeTextBlock
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value="old-sess-id"), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value="old-sess-id"), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -551,7 +561,7 @@ class TestRunAgentSupervisedExceptions:
 
         mock_module.ClaudeSDKClient = MagicMock(return_value=bad_client)
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -568,7 +578,41 @@ class TestRunAgentSupervisedExceptions:
 
         assert result.success is False
         assert "CLI crashed" in result.error
+        assert result.error == "tool crash: CLI crashed"
         bad_client.disconnect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_reported_as_subprocess_timeout(self):
+        """A supervised run timeout should not be reported as a network drop."""
+        mock_module = MagicMock()
+        mock_module.AssistantMessage = FakeAssistantMessage
+        mock_module.ClaudeAgentOptions = MagicMock()
+        mock_module.ResultMessage = FakeResultMessage
+        mock_module.TextBlock = FakeTextBlock
+
+        bad_client = MagicMock()
+        bad_client.connect = AsyncMock(side_effect=asyncio.TimeoutError())
+        bad_client.disconnect = AsyncMock()
+
+        mock_module.ClaudeSDKClient = MagicMock(return_value=bad_client)
+
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
+
+            result = await _run_agent_supervised(
+                prompt="Do it",
+                cwd="/tmp/test",
+                run_key="TEST-TIMEOUT",
+                phase="implement",
+                timeout=60,
+            )
+
+        assert result.success is False
+        assert result.error == "subprocess timeout after 60s"
 
     @pytest.mark.asyncio
     async def test_disconnect_exception_swallowed(self):
@@ -591,7 +635,7 @@ class TestRunAgentSupervisedExceptions:
         mock_module.ResultMessage = FakeResultMessage
         mock_module.TextBlock = FakeTextBlock
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
@@ -633,7 +677,7 @@ class TestRunAgentSupervisedTracking:
         mock_module.ResultMessage = FakeResultMessage
         mock_module.TextBlock = FakeTextBlock
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id") as mock_save, \
              patch(f"{SDK_PATCH}.log_activity") as mock_log, \
              patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry), \
@@ -658,7 +702,7 @@ class TestRunAgentSupervisedTracking:
         )
 
         # Session ID saved
-        mock_save.assert_called_with("agent-test-t1-spec", "sess-track")
+        mock_save.assert_called_with("agent-test-t1-spec", "sess-track", model="")
 
         # Activity logged (now carries the terminal status)
         mock_log.assert_any_call(
@@ -683,7 +727,7 @@ class TestRunAgentSupervisedTracking:
 
         mock_registry = MagicMock()
 
-        with patch(f"{SDK_PATCH}.load_session_id", return_value=""), \
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry), \
@@ -696,7 +740,7 @@ class TestRunAgentSupervisedTracking:
             )
 
         mock_registry.mark_terminal.assert_any_call(
-            "agent-err-1-implement", "crashed", error="boom",
+            "agent-err-1-implement", "crashed", error="tool crash: boom",
             session_id=None, phase="implement",
         )
 
@@ -1279,3 +1323,405 @@ class TestRunCheckBlocking:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# Tests: per-role model selection threads into every launch path (#617)
+# ---------------------------------------------------------------------------
+
+def _write_roles_yaml(root: Path) -> None:
+    from bobi import paths
+    paths.package_dir(root).mkdir(parents=True, exist_ok=True)
+    paths.agent_yaml_path(root).write_text(
+        "agent: t\nroles:\n  monitor:\n    model: haiku\n"
+    )
+
+
+class _CapturingBrainSession:
+    """Minimal BrainSession yielding one successful TurnResult."""
+
+    async def connect(self, prompt=None):
+        pass
+
+    async def query(self, text):
+        pass
+
+    async def receive_response(self):
+        from bobi.brain import TurnResult
+        yield TurnResult(session_id="sess-1", num_turns=1)
+
+    async def disconnect(self):
+        pass
+
+
+class TestLaunchModelResolution:
+    @pytest.fixture(autouse=True)
+    def no_ambient_model(self, monkeypatch):
+        monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
+
+    def _capture_session_cls(self, captured: dict):
+        def _cls(*args, **kwargs):
+            captured.update(kwargs)
+            return FakeSession(success=True)
+        return _cls
+
+    def test_spawn_adhoc_passes_role_model(self, tmp_path):
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+        with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event"):
+            spawn_adhoc(cwd="/tmp", task="t", name="x", role="monitor")
+        assert captured["extra_options"]["model"] == "haiku"
+
+    def test_spawn_adhoc_explicit_model_wins(self, tmp_path):
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+        with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event"):
+            spawn_adhoc(cwd="/tmp", task="t", name="x", role="monitor",
+                        model="opus")
+        assert captured["extra_options"]["model"] == "opus"
+
+    def test_spawn_adhoc_unconfigured_role_stays_unchanged(self, tmp_path):
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+        with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event"):
+            spawn_adhoc(cwd="/tmp", task="t", name="x", role="engineer")
+        assert "model" not in captured["extra_options"]
+
+    def test_run_phase_blocking_passes_role_model(self, tmp_path):
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+        with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event"):
+            run_phase_blocking(run_key="1", phase="implement", cwd="/tmp",
+                               role="monitor")
+        assert captured["extra_options"]["model"] == "haiku"
+
+    @pytest.mark.asyncio
+    async def test_supervised_check_uses_monitor_role_model(self, tmp_path):
+        """The monitor check path resolves roles.monitor.model - the #549
+        Part A unblock."""
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                captured.update(kwargs)
+                return _CapturingBrainSession()
+
+        with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
+             patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = await _run_agent_supervised(
+                prompt="check", cwd="/tmp", run_key="k", phase="check",
+                timeout=5, role="monitor",
+            )
+
+        assert result.success is True
+        assert captured["options"]["model"] == "haiku"
+
+
+class TestModelAwareSessionResume:
+    """Cross-model resume follows the brain's capability: native continuation
+    when supported (#642), a fresh session otherwise (#617 findings 2-3)."""
+
+    @staticmethod
+    def _incapable_brain(kind=None):
+        from bobi.brain import BrainCapabilities
+
+        class Incapable:
+            name = "claude"
+            capabilities = BrainCapabilities()
+
+        return Incapable()
+
+    def test_cross_model_continues_on_capable_brain(self):
+        """The default brain (Claude) supports cross-model resume, so a model
+        change to a concrete target keeps the session; a switch back to the
+        provider default has no target to pass and goes fresh."""
+        from bobi.sdk import load_resumable_session_id, save_session_id
+        save_session_id("s1", "sess-abc", model="haiku")
+        assert load_resumable_session_id("s1", "haiku") == "sess-abc"
+        assert load_resumable_session_id("s1", "opus") == "sess-abc"
+        assert load_resumable_session_id("s1", "") == ""
+
+    def test_guard_blocks_resume_without_capability(self):
+        from bobi.sdk import load_resumable_session_id, save_session_id
+        save_session_id("s1", "sess-abc", model="haiku")
+        with patch("bobi.brain.get_brain", self._incapable_brain):
+            assert load_resumable_session_id("s1", "haiku") == "sess-abc"
+            assert load_resumable_session_id("s1", "opus") == ""
+            assert load_resumable_session_id("s1", "") == ""
+
+    def test_empty_recorded_model_still_guards(self):
+        """'' means 'provider default' and is a real model for the guard."""
+        from bobi.sdk import load_resumable_session_id, save_session_id
+        save_session_id("s2", "sess-abc", model="")
+        with patch("bobi.brain.get_brain", self._incapable_brain):
+            assert load_resumable_session_id("s2", "") == "sess-abc"
+            assert load_resumable_session_id("s2", "haiku") == ""
+
+    def test_cross_brain_record_starts_fresh(self):
+        """A resume token is only meaningful to the brain that minted it:
+        a session saved under another brain kind never resumes (#642)."""
+        from bobi.brain import BrainCapabilities
+        from bobi.sdk import load_resumable_session_id, save_session_id
+        save_session_id("s6", "codex-thread-id", model="gpt-5")
+
+        class OtherBrain:
+            name = "claude"
+            capabilities = BrainCapabilities(cross_model_resume=True)
+
+        # Recorded under the default (claude) brain; simulate a brain switch
+        # by rewriting the provenance record.
+        from bobi.sdk import _sessions_dir
+        (_sessions_dir() / "s6.brain").write_text("codex")
+        with patch("bobi.brain.get_brain", lambda kind=None: OtherBrain()):
+            assert load_resumable_session_id("s6", "gpt-5") == ""
+            assert load_resumable_session_id("s6", "sonnet") == ""
+
+    def test_pre642_record_without_brain_blocks_cross_model(self):
+        """A record with no brain provenance (saved before #642) keeps the
+        old conservative guard: same model resumes, cross-model goes fresh
+        even on a capable brain."""
+        from bobi.sdk import _sessions_dir, load_resumable_session_id, \
+            save_session_id
+        save_session_id("s7", "sess-abc", model="haiku")
+        (_sessions_dir() / "s7.brain").unlink()
+        assert load_resumable_session_id("s7", "haiku") == "sess-abc"
+        assert load_resumable_session_id("s7", "opus") == ""
+
+    @pytest.mark.asyncio
+    async def test_supervised_retries_fresh_on_stale_resume(self):
+        """A saved id that fails to connect is cleared and retried fresh
+        instead of crashing the run (#642) - a stale token must not fail
+        every subsequent monitor interval."""
+        calls = []
+
+        class StaleResumeSession(_CapturingBrainSession):
+            async def connect(self, prompt=None):
+                raise RuntimeError("No conversation found")
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                cls = (StaleResumeSession if kwargs.get("resume")
+                       else _CapturingBrainSession)
+                return cls()
+
+        with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
+             patch(f"{SDK_PATCH}.load_resumable_session_id",
+                   return_value="stale-id"), \
+             patch(f"{SDK_PATCH}.save_session_id") as save_mock, \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = await _run_agent_supervised(
+                prompt="check", cwd="/tmp", run_key="k", phase="check",
+                timeout=5,
+            )
+
+        assert result.success is True
+        assert calls[0]["resume"] == "stale-id"
+        assert calls[1]["resume"] is None
+        cleared = [c for c in save_mock.call_args_list
+                   if len(c.args) > 1 and c.args[1] == ""]
+        assert cleared, "stale id was not cleared from the store"
+
+    def test_missing_record_resumes_unconditionally(self):
+        from bobi.sdk import load_resumable_session_id, save_session_id
+        save_session_id("s3", "sess-abc")  # model=None: pre-#617 shape
+        assert load_resumable_session_id("s3", "haiku") == "sess-abc"
+
+    def test_clearing_id_clears_model_record(self):
+        from bobi.sdk import load_resumable_session_id, save_session_id
+        save_session_id("s4", "sess-abc", model="haiku")
+        save_session_id("s4", "")
+        save_session_id("s4", "sess-new")  # fresh save, no model known yet
+        assert load_resumable_session_id("s4", "opus") == "sess-new"
+
+    @pytest.mark.asyncio
+    async def test_supervised_resume_respects_model_guard(self, tmp_path):
+        """_run_agent_supervised resolves the role model BEFORE loading the
+        saved id and consults the guard with it."""
+        _write_roles_yaml(tmp_path)
+        from bobi.sdk import save_session_id
+        name = _session_name("k", role="monitor", phase="check")
+        save_session_id(name, "sess-old", model="")  # ran under the default
+
+        captured: dict = {}
+
+        class FakeBrain:
+            name = "claude"
+
+            def make_session(self, **kwargs):
+                captured.update(kwargs)
+                return _CapturingBrainSession()
+
+        with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = await _run_agent_supervised(
+                prompt="check", cwd="/tmp", run_key="k", phase="check",
+                timeout=5, role="monitor",
+            )
+
+        assert result.success is True
+        # roles.monitor.model=haiku differs from the recorded default: fresh.
+        assert captured["resume"] is None
+        assert captured["options"]["model"] == "haiku"
+
+
+# ---------------------------------------------------------------------------
+# Tests: relevance gate (two-tier semantic gate, #630)
+# ---------------------------------------------------------------------------
+
+_GATE_ITEMS = [
+    {"key": "m1", "data": {"subject": "Refund request", "from": "a@x.test"}},
+    {"key": "m2", "data": {"subject": "Lunch?", "from": "b@x.test"}},
+]
+
+
+class TestBuildGatePrompt:
+    def test_includes_criterion_keys_and_payloads(self):
+        prompt = _build_gate_prompt("emails about billing", _GATE_ITEMS)
+        assert "emails about billing" in prompt
+        assert "m1" in prompt and "m2" in prompt
+        assert "Refund request" in prompt
+        assert '{"relevant": ["<key>", ...]}' in prompt
+        # Judge-only: must tell the agent not to act.
+        assert "do not" in prompt.lower()
+
+    def test_truncates_oversized_payloads(self):
+        big = [{"key": "k", "data": {"body": "x" * (GATE_ITEM_CHARS * 2)}}]
+        prompt = _build_gate_prompt("about y", big)
+        assert "...[truncated]" in prompt
+        assert len(prompt) < GATE_ITEM_CHARS * 2
+
+    def test_unserializable_payload_falls_back_to_str(self):
+        prompt = _build_gate_prompt("about y", [{"key": "k", "data": {"o": object()}}])
+        assert "k" in prompt
+
+
+class TestParseGateVerdict:
+    """A missing verdict must be distinguishable from an explicit no-match:
+    None is indeterminate (retry), [] is a successful 'nothing matched'."""
+
+    def test_relevant_keys_returned(self):
+        out = 'thinking...\n{"relevant": ["m1"]}'
+        assert _parse_gate_verdict(out, {"m1", "m2"}) == ["m1"]
+
+    def test_hallucinated_keys_filtered(self):
+        out = '{"relevant": ["m1", "made-up"]}'
+        assert _parse_gate_verdict(out, {"m1", "m2"}) == ["m1"]
+
+    def test_explicit_empty_is_success(self):
+        assert _parse_gate_verdict('{"relevant": []}', {"m1"}) == []
+
+    def test_no_json_returns_none(self):
+        assert _parse_gate_verdict("just prose", {"m1"}) is None
+
+    def test_empty_returns_none(self):
+        assert _parse_gate_verdict("", {"m1"}) is None
+
+    def test_non_list_relevant_returns_none(self):
+        assert _parse_gate_verdict('{"relevant": "m1"}', {"m1"}) is None
+
+    def test_picks_last_verdict(self):
+        out = '{"relevant": []}\nreconsidering\n{"relevant": ["m2"]}'
+        assert _parse_gate_verdict(out, {"m1", "m2"}) == ["m2"]
+
+    def test_non_string_keys_coerced(self):
+        assert _parse_gate_verdict('{"relevant": [42]}', {"42"}) == ["42"]
+
+
+class TestRunGateBlocking:
+    def test_relevant_parsed_from_agent_output(self):
+        agent_result = AgentResult(
+            session_id="s", run_key="gate-x", phase="gate", success=True,
+            duration_ms=800, total_cost_usd=0.001,
+            final_text='{"relevant": ["m1"]}',
+        )
+
+        async def _mock(*a, **kw):
+            return agent_result
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_gate_blocking("about billing", _GATE_ITEMS, cwd="/tmp")
+
+        assert isinstance(result, GateResult)
+        assert result.success is True
+        assert result.relevant == ["m1"]
+        assert result.duration_ms == 800
+
+    def test_runs_as_monitor_role_with_gate_turn_cap(self):
+        captured: dict = {}
+
+        async def _mock(prompt, cwd, run_key, phase, timeout, **kw):
+            captured.update(kw, phase=phase)
+            return AgentResult(session_id="s", run_key=run_key, phase=phase,
+                               success=True, final_text='{"relevant": []}')
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_gate_blocking("about y", _GATE_ITEMS, cwd="/tmp")
+
+        assert result.success is True
+        assert result.relevant == []
+        assert captured["role"] == "monitor"
+        assert captured["max_turns"] == GATE_MAX_TURNS
+        assert captured["phase"] == "gate"
+        # A gate is a stateless judgment: it must never resume the previous
+        # batch's transcript (cost growth + stale-item verdict pollution).
+        assert captured["fresh"] is True
+
+    def test_missing_verdict_retries_then_succeeds(self):
+        calls = []
+
+        async def _mock(prompt, cwd, run_key, *a, **kw):
+            calls.append(run_key)
+            text = "no verdict here" if len(calls) == 1 else '{"relevant": ["m2"]}'
+            return AgentResult(session_id="s", run_key=run_key, phase="gate",
+                               success=True, final_text=text)
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_gate_blocking("about y", _GATE_ITEMS, cwd="/tmp",
+                                       attempts=2)
+
+        assert result.success is True
+        assert result.relevant == ["m2"]
+        assert len(calls) == 2
+        # Fresh run_key on retry - never resume the botched transcript.
+        assert calls[0] != calls[1]
+
+    def test_exhausted_attempts_is_indeterminate(self):
+        async def _mock(prompt, cwd, run_key, *a, **kw):
+            return AgentResult(session_id="s", run_key=run_key, phase="gate",
+                               success=True, final_text="still no verdict")
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_gate_blocking("about y", _GATE_ITEMS, cwd="/tmp",
+                                       attempts=2)
+
+        assert result.success is False
+        assert result.relevant == []
+        assert "verdict" in result.error
+
+    def test_agent_error_is_indeterminate(self):
+        async def _mock(prompt, cwd, run_key, *a, **kw):
+            return AgentResult(session_id="s", run_key=run_key, phase="gate",
+                               success=False, error="boom")
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_gate_blocking("about y", _GATE_ITEMS, cwd="/tmp",
+                                       attempts=2)
+
+        assert result.success is False
+        assert result.error == "boom"

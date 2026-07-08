@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_PROMPT = REPO_ROOT / "bobi" / "prompts" / "base.md"
 DIRECTOR_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "director" / "ROLE.md"
 ENGINEER_PROMPT = REPO_ROOT / "agents" / "eng-team" / "roles" / "engineer" / "ROLE.md"
+GITHUB_CONTEXT = REPO_ROOT / "agents" / "eng-team" / "context" / "github.md"
 
 
 class TestBasePolicyContract:
@@ -181,6 +182,37 @@ class TestDirectorDispatchContract:
         assert "do not edit repo files directly" in self.lower, (
             "Director must preserve the async-only repo-work boundary"
         )
+
+    def test_question_only_pr_comments_are_answered_directly(self):
+        assert "question-only pr or issue comment" in self.lower, (
+            "Director must route question-only comments to direct answers"
+        )
+        assert "answer directly" in self.lower, (
+            "Director must answer question-only comments directly"
+        )
+
+    def test_pr_feedback_requires_visible_actionable_text(self):
+        assert "actionable requested-change text" in self.lower, (
+            "Director must only launch pr-feedback for actionable change text"
+        )
+        assert "visible text" in self.lower, (
+            "Director must base pr-feedback routing on visible comment text"
+        )
+
+
+class TestGitHubContextRoutingPolicy:
+    """GitHub context keeps comment routing in markdown policy."""
+
+    def setup_method(self):
+        self.text = GITHUB_CONTEXT.read_text()
+        self.lower = self.text.lower()
+
+    def test_question_only_comments_are_direct_answers(self):
+        assert "question-only pr or issue comments must be answered directly" in self.lower
+
+    def test_pr_feedback_requires_actionable_requested_change_text(self):
+        assert "pr-feedback" in self.lower
+        assert "actionable requested-change text" in self.lower
 
 
 class TestDirectorListFromLiveSource:

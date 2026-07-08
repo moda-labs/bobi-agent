@@ -1,78 +1,44 @@
-"""Tests for Slack placeholder + typing status features (#189).
+"""Tests for the chat typing flow.
 
 Covers:
-- update_slack_message (chat.update)
-- set_thread_status (assistant.threads.setStatus)
-- post_placeholder (post + setStatus in one call)
-- StatusRefreshLoop (periodic status refresh)
-- SlackInputChannel (framework-level channel handler)
-- CLI --edit flag on slack-reply
+- SlackInputChannel (gateway-backed typing response context)
+- TypingRefreshLoop (periodic /channels/typing refresh)
+- stop_all_refresh_loops (turn-end sweep)
 - Drain loop integration via channel handlers
+
+The handlers are policy shims over the channel gateway: they address events
+by their ``conversation`` reference and never touch a Slack token.
 """
 
-import json
 import time
+from pathlib import Path
 from unittest.mock import patch, MagicMock, call
 
-import httpx
 import pytest
 
-from bobi import http as pooled
-from bobi import paths
-from bobi.slack import (
-    post_slack_message,
-    update_slack_message,
-    set_thread_status,
-    post_placeholder,
-    StatusRefreshLoop,
+from bobi.events.channels import (
+    SlackInputChannel,
+    TypingRefreshLoop,
+    get_channel_handler,
+    stop_all_refresh_loops,
+    _active_loops,
 )
+from bobi.events.gateway import GatewayError
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _make_mock_client(response_data, *, requests_log=None, side_effect=None):
-    """Create an httpx.Client with a MockTransport returning *response_data*.
-
-    If *requests_log* is provided (a list), each incoming request is
-    appended so callers can inspect URL, headers and body.
-
-    If *side_effect* is provided it should be a callable(request) that is
-    invoked instead of returning the canned response (useful for raising).
-    """
-    def handler(request: httpx.Request) -> httpx.Response:
-        if requests_log is not None:
-            requests_log.append(request)
-        if side_effect is not None:
-            return side_effect(request)
-        return httpx.Response(200, json=response_data)
-
-    transport = httpx.MockTransport(handler)
-    return httpx.Client(transport=transport)
+PROJECT = Path("/tmp/fake-project")
+CONV = "slack:T123:channel:C123:thread:171.42"
 
 
-def _setup_project(tmp_path, monkeypatch, slack_bot_token="xoxb-test"):
-    """Set up project config with a Slack bot token."""
-    config_dir = paths.package_dir(tmp_path)
-    config_dir.mkdir(parents=True)
-    if slack_bot_token:
-        yaml = (
-            "entry_point: manager\n"
-            "services:\n"
-            "  - name: slack\n"
-            "    credentials:\n"
-            f"      bot_token: '{slack_bot_token}'\n"
-        )
-    else:
-        yaml = "entry_point: manager\n"
-    paths.agent_yaml_path(tmp_path).write_text(yaml)
-    monkeypatch.setenv("BOBI_ROOT", str(tmp_path))
+@pytest.fixture(autouse=True)
+def _clean_loops():
+    yield
+    stop_all_refresh_loops()
 
 
 def _make_slack_event(channel="C123", thread_ts="171.42",
-                      ts="171.50", text="hello bot"):
-    return {
+                      ts="171.50", text="hello bot", conversation=CONV):
+    event = {
         "source": "slack",
         "type": "slack.mention",
         "delivery": "chat",
@@ -85,503 +51,204 @@ def _make_slack_event(channel="C123", thread_ts="171.42",
             "thread_ts": thread_ts,
         },
     }
+    if conversation:
+        event["conversation"] = conversation
+    return event
 
 
 # ---------------------------------------------------------------------------
-# update_slack_message
+# TypingRefreshLoop
 # ---------------------------------------------------------------------------
 
-class TestUpdateSlackMessage:
-    def test_basic_update(self):
-        reqs = []
-        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
-
-        with patch.object(pooled, '_client', mock_client):
-            result = update_slack_message(
-                "xoxb-test", "C123", "1720165787.123456", "Real response"
-            )
-        assert result["ok"] is True
-
-        req = reqs[0]
-        assert str(req.url) == "https://slack.com/api/chat.update"
-        body = json.loads(req.content)
-        assert body["channel"] == "C123"
-        assert body["ts"] == "1720165787.123456"
-        assert body["text"] == "Real response"
-
-    def test_formats_markdown(self):
-        reqs = []
-        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
-
-        with patch.object(pooled, '_client', mock_client):
-            update_slack_message(
-                "xoxb-test", "C123", "171.42", "**bold** and [link](https://example.com)"
-            )
-
-        body = json.loads(reqs[0].content)
-        assert "*bold*" in body["text"]
-        assert "<https://example.com|link>" in body["text"]
-
-    def test_api_error_raises(self):
-        mock_client = _make_mock_client({"ok": False, "error": "message_not_found"})
-
-        with patch.object(pooled, '_client', mock_client):
-            with pytest.raises(RuntimeError, match="message_not_found"):
-                update_slack_message("xoxb-test", "C123", "171.42", "text")
-
-
-# ---------------------------------------------------------------------------
-# set_thread_status
-# ---------------------------------------------------------------------------
-
-class TestSetThreadStatus:
-    def test_set_status(self):
-        reqs = []
-        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
-
-        with patch.object(pooled, '_client', mock_client):
-            set_thread_status(
-                "xoxb-test", "C123", "1720165787.123456", "is thinking..."
-            )
-
-        req = reqs[0]
-        assert str(req.url) == "https://slack.com/api/assistant.threads.setStatus"
-        body = json.loads(req.content)
-        assert body["channel_id"] == "C123"
-        assert body["thread_ts"] == "1720165787.123456"
-        assert body["status"] == "is thinking..."
-
-    def test_clear_status(self):
-        reqs = []
-        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
-
-        with patch.object(pooled, '_client', mock_client):
-            set_thread_status("xoxb-test", "C123", "171.42", "")
-
-        body = json.loads(reqs[0].content)
-        assert body["status"] == ""
-
-    def test_failure_does_not_raise(self):
-        """setStatus failures are non-fatal (logged, not raised)."""
-        mock_client = _make_mock_client({"ok": False, "error": "not_allowed"})
-
-        with patch.object(pooled, '_client', mock_client):
-            # Should not raise — failures are debug-logged and swallowed
-            set_thread_status("xoxb-test", "C123", "171.42", "is thinking...")
-
-    def test_no_thread_ts_is_noop(self):
-        """Without thread_ts, setStatus silently does nothing."""
-        reqs = []
-        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
-
-        with patch.object(pooled, '_client', mock_client):
-            set_thread_status("xoxb-test", "C123", "", "is thinking...")
-
-        assert len(reqs) == 0
-
-
-# ---------------------------------------------------------------------------
-# post_placeholder
-# ---------------------------------------------------------------------------
-
-class TestPostPlaceholder:
-    @patch("bobi.slack.set_thread_status")
-    @patch("bobi.slack.post_slack_message")
-    def test_posts_and_sets_status(self, mock_post, mock_status):
-        mock_post.return_value = {"ok": True, "ts": "171.99"}
-
-        ts = post_placeholder(
-            "xoxb-test", "C123", thread_ts="171.42"
-        )
-
-        assert ts == "171.99"
-        mock_post.assert_called_once_with(
-            "xoxb-test", "C123", "Evaluating\u2026",
-            thread_ts="171.42",
-        )
-        mock_status.assert_called_once_with(
-            "xoxb-test", "C123", "171.42", "is thinking\u2026",
-        )
-
-    @patch("bobi.slack.set_thread_status")
-    @patch("bobi.slack.post_slack_message")
-    def test_custom_placeholder_text(self, mock_post, mock_status):
-        mock_post.return_value = {"ok": True, "ts": "171.99"}
-
-        post_placeholder(
-            "xoxb-test", "C123", thread_ts="171.42",
-            placeholder_text="Processing...",
-        )
-
-        assert mock_post.call_args[0][2] == "Processing..."
-
-    @patch("bobi.slack.set_thread_status")
-    @patch("bobi.slack.post_slack_message")
-    def test_no_thread_ts_posts_without_status(self, mock_post, mock_status):
-        """Without thread context, posts placeholder but skips status."""
-        mock_post.return_value = {"ok": True, "ts": "171.99"}
-
-        ts = post_placeholder("xoxb-test", "C123", thread_ts="")
-
-        assert ts == "171.99"
-        mock_post.assert_called_once()
-        mock_status.assert_not_called()
-
-    @patch("bobi.slack.set_thread_status")
-    @patch("bobi.slack.post_slack_message")
-    def test_post_failure_returns_empty(self, mock_post, mock_status):
-        """If posting fails, return empty string and don't set status."""
-        mock_post.side_effect = RuntimeError("network")
-
-        ts = post_placeholder("xoxb-test", "C123", thread_ts="171.42")
-
-        assert ts == ""
-        mock_status.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# StatusRefreshLoop
-# ---------------------------------------------------------------------------
-
-class TestStatusRefreshLoop:
-    @patch("bobi.slack.set_thread_status")
-    def test_starts_and_stops(self, mock_status):
-        loop = StatusRefreshLoop(
-            "xoxb-test", "C123", "171.42", interval=0.05
-        )
+class TestTypingRefreshLoop:
+    @patch("bobi.events.gateway.channels_typing")
+    def test_starts_and_stops(self, mock_typing):
+        loop = TypingRefreshLoop(PROJECT, CONV, interval=0.05)
         loop.start()
         assert loop.is_alive()
-
         loop.stop()
-        loop.join(timeout=1)
+        loop.join(timeout=2)
         assert not loop.is_alive()
 
-    @patch("bobi.slack.set_thread_status")
-    def test_refreshes_status_periodically(self, mock_status):
-        loop = StatusRefreshLoop(
-            "xoxb-test", "C123", "171.42", interval=0.05
-        )
+    @patch("bobi.events.gateway.channels_typing")
+    def test_refreshes_typing_periodically(self, mock_typing):
+        loop = TypingRefreshLoop(PROJECT, CONV, interval=0.05)
         loop.start()
-        time.sleep(0.2)
+        time.sleep(0.18)
         loop.stop()
-        loop.join(timeout=1)
+        loop.join(timeout=2)
+        assert mock_typing.call_count >= 2
+        mock_typing.assert_has_calls([call(PROJECT, CONV, True)])
 
-        # Should have been called at least twice in 0.2s with 0.05s interval
-        assert mock_status.call_count >= 2
-        for c in mock_status.call_args_list:
-            assert c == call("xoxb-test", "C123", "171.42", "is thinking\u2026")
-
-    @patch("bobi.slack.set_thread_status")
-    def test_stop_clears_status(self, mock_status):
-        loop = StatusRefreshLoop(
-            "xoxb-test", "C123", "171.42", interval=0.05
-        )
+    @patch("bobi.events.gateway.channels_typing")
+    def test_stop_clears_typing(self, mock_typing):
+        loop = TypingRefreshLoop(PROJECT, CONV, interval=5)
         loop.start()
-        time.sleep(0.05)
         loop.stop(clear=True)
-        loop.join(timeout=1)
+        loop.join(timeout=2)
+        mock_typing.assert_called_with(PROJECT, CONV, False)
 
-        # Last call should clear the status
-        last_call = mock_status.call_args_list[-1]
-        assert last_call == call("xoxb-test", "C123", "171.42", "")
-
-    @patch("bobi.slack.set_thread_status")
-    def test_self_terminates_at_max_seconds(self, mock_status):
-        # Safety cap: even if nothing ever calls stop(), the loop must clear
-        # the status and exit on its own — no forever "is thinking…".
-        loop = StatusRefreshLoop(
-            "xoxb-test", "C123", "171.42", interval=0.02, max_seconds=0.05,
-        )
+    @patch("bobi.events.gateway.channels_typing")
+    def test_self_terminates_at_max_seconds(self, mock_typing):
+        loop = TypingRefreshLoop(PROJECT, CONV, interval=0.02, max_seconds=0.01)
         loop.start()
         loop.join(timeout=2)
         assert not loop.is_alive()
-        assert mock_status.call_args_list[-1] == call("xoxb-test", "C123", "171.42", "")
+        # The safety cap clears the indicator on the way out.
+        mock_typing.assert_called_with(PROJECT, CONV, False)
 
 
 # ---------------------------------------------------------------------------
-# SlackInputChannel (framework-level channel handler)
+# SlackInputChannel
 # ---------------------------------------------------------------------------
 
 class TestSlackInputChannel:
-    @patch("bobi.slack.StatusRefreshLoop")
-    @patch("bobi.slack.post_placeholder")
-    def test_prepare_posts_placeholder_and_injects_ts(self, mock_placeholder,
-                                                       mock_loop_cls):
-        """Channel handler posts placeholder and injects placeholder_ts into fields."""
-        from bobi.events.channels import SlackInputChannel
-
-        mock_placeholder.return_value = "171.99"
-        mock_loop = MagicMock()
-        mock_loop_cls.return_value = mock_loop
-
+    @patch("bobi.events.gateway.channels_typing", return_value=True)
+    @patch("bobi.events.gateway.channels_send")
+    def test_prepare_starts_typing_without_placeholder(self, mock_send, mock_typing):
         handler = SlackInputChannel()
         event = _make_slack_event()
-        result = handler.prepare(event, "xoxb-test")
 
-        mock_placeholder.assert_called_once_with(
-            "xoxb-test", "C123", thread_ts="171.42",
-        )
-        mock_loop_cls.assert_called_once_with("xoxb-test", "C123", "171.42")
-        mock_loop.start.assert_called_once()
+        prepared = handler.prepare(event, PROJECT)
 
-        # placeholder_ts injected into fields
-        assert result["fields"]["placeholder_ts"] == "171.99"
-        # Original fields preserved
-        assert result["fields"]["channel"] == "C123"
-        assert result["fields"]["user_id"] == "U123"
+        mock_send.assert_not_called()
+        assert "placeholder_ts" not in prepared["fields"]
+        # Typing indicator set + refresh loop registered under the ref.
+        mock_typing.assert_called_with(PROJECT, CONV, True)
+        assert CONV in _active_loops
 
-    @patch("bobi.slack.StatusRefreshLoop")
-    @patch("bobi.slack.post_placeholder")
-    def test_prepare_uses_ts_when_no_thread_ts(self, mock_placeholder,
-                                                mock_loop_cls):
-        """When thread_ts is empty, uses ts as the thread anchor."""
-        from bobi.events.channels import SlackInputChannel
-
-        mock_placeholder.return_value = "171.99"
-        mock_loop_cls.return_value = MagicMock()
-
+    @patch("bobi.events.gateway.channels_typing", return_value=True)
+    @patch("bobi.events.gateway.channels_send")
+    def test_prepare_reuses_existing_refresh_loop(self, mock_send, mock_typing):
         handler = SlackInputChannel()
-        event = _make_slack_event(thread_ts="", ts="171.50")
-        handler.prepare(event, "xoxb-test")
 
-        mock_placeholder.assert_called_once_with(
-            "xoxb-test", "C123", thread_ts="171.50",
-        )
+        handler.prepare(_make_slack_event(), PROJECT)
+        first_loop = _active_loops[CONV]
+        handler.prepare(_make_slack_event(ts="171.51"), PROJECT)
+        mock_send.assert_not_called()
+        assert _active_loops[CONV] is first_loop
 
-    @patch("bobi.slack.post_placeholder")
-    def test_prepare_no_refresh_without_thread(self, mock_placeholder):
-        """No refresh loop started when there's no thread context."""
-        from bobi.events.channels import SlackInputChannel
-
-        mock_placeholder.return_value = "171.99"
-
+    @patch("bobi.events.gateway.channels_typing", return_value=True)
+    @patch("bobi.events.gateway.channels_send")
+    def test_prepare_replaces_dead_refresh_loop(self, mock_send, mock_typing):
+        """A loop that self-terminated at its safety cap must not block a
+        fresh one for a later event in the same conversation."""
         handler = SlackInputChannel()
-        event = _make_slack_event(thread_ts="", ts="171.50")
-        result = handler.prepare(event, "xoxb-test")
 
-        assert result["fields"]["placeholder_ts"] == "171.99"
+        dead = TypingRefreshLoop(PROJECT, CONV, interval=0.01, max_seconds=0.01)
+        dead.start()
+        dead.join(timeout=2)
+        assert not dead.is_alive()
+        _active_loops[CONV] = dead
 
-    @patch("bobi.slack.post_placeholder")
-    def test_prepare_failure_returns_original_event(self, mock_placeholder):
-        """If placeholder posting fails, returns the original event unchanged."""
-        from bobi.events.channels import SlackInputChannel
+        handler.prepare(_make_slack_event(), PROJECT)
+        mock_send.assert_not_called()
+        assert _active_loops[CONV] is not dead
+        assert _active_loops[CONV].is_alive()
 
-        mock_placeholder.side_effect = RuntimeError("network")
-
+    @patch("bobi.events.gateway.channels_typing")
+    def test_prepare_failure_returns_event_without_placeholder(self, mock_typing):
+        mock_typing.side_effect = GatewayError("event server unreachable")
         handler = SlackInputChannel()
         event = _make_slack_event()
-        result = handler.prepare(event, "xoxb-test")
+        event["fields"]["placeholder_ts"] = "stale"
 
-        assert "placeholder_ts" not in result["fields"]
+        prepared = handler.prepare(event, PROJECT)
 
-    @patch("bobi.slack.post_placeholder")
-    def test_prepare_empty_placeholder_returns_original(self, mock_placeholder):
-        """If placeholder returns empty ts, original event is returned."""
-        from bobi.events.channels import SlackInputChannel
+        assert prepared is not event
+        assert "placeholder_ts" not in prepared["fields"]
+        assert event["fields"]["placeholder_ts"] == "stale"
 
-        mock_placeholder.return_value = ""
-
+    @patch("bobi.events.gateway.channels_send")
+    def test_prepare_strips_stale_placeholder_from_mention(self, mock_send):
         handler = SlackInputChannel()
         event = _make_slack_event()
-        result = handler.prepare(event, "xoxb-test")
+        event["fields"]["placeholder_ts"] = "stale"
 
-        assert "placeholder_ts" not in result["fields"]
+        prepared = handler.prepare(event, PROJECT)
+        mock_send.assert_not_called()
+        assert "placeholder_ts" not in prepared["fields"]
+        assert event["fields"]["placeholder_ts"] == "stale"
 
-    def test_prepare_no_channel_returns_original(self):
-        """Events without a channel field are returned unchanged."""
-        from bobi.events.channels import SlackInputChannel
-
+    def test_prepare_no_conversation_returns_original(self):
         handler = SlackInputChannel()
-        event = {"source": "slack", "type": "slack.mention",
-                 "delivery": "chat", "fields": {}}
-        result = handler.prepare(event, "xoxb-test")
+        event = _make_slack_event(conversation="")
 
-        assert result is event
+        prepared = handler.prepare(event, PROJECT)
+        assert prepared is event
 
-    @patch("bobi.slack.post_placeholder")
-    def test_prepare_does_not_mutate_original(self, mock_placeholder):
-        """Channel handler returns a new event dict, doesn't mutate the original."""
-        from bobi.events.channels import SlackInputChannel
-
-        mock_placeholder.return_value = "171.99"
-
+    @patch("bobi.events.gateway.channels_send")
+    def test_prepare_skips_passive_thread_reply(self, mock_send):
         handler = SlackInputChannel()
         event = _make_slack_event()
-        original_fields = dict(event["fields"])
+        event["type"] = "slack.thread_reply"
 
-        handler.prepare(event, "xoxb-test")
+        prepared = handler.prepare(event, PROJECT)
 
-        # Original event's fields should be untouched
-        assert "placeholder_ts" not in event["fields"]
-        assert event["fields"] == original_fields
+        mock_send.assert_not_called()
+        assert "placeholder_ts" not in prepared["fields"]
+
+    @patch("bobi.events.gateway.channels_send")
+    def test_prepare_strips_stale_placeholder_from_thread_reply(self, mock_send):
+        handler = SlackInputChannel()
+        event = _make_slack_event()
+        event["type"] = "slack.thread_reply"
+        event["fields"]["placeholder_ts"] = "stale"
+
+        prepared = handler.prepare(event, PROJECT)
+
+        assert prepared is not event
+        assert "placeholder_ts" not in prepared["fields"]
+        assert event["fields"]["placeholder_ts"] == "stale"
+
+    @patch("bobi.events.gateway.channels_typing", return_value=True)
+    @patch("bobi.events.gateway.channels_send")
+    def test_prepare_does_not_mutate_original(self, mock_send, mock_typing):
+        handler = SlackInputChannel()
+        event = _make_slack_event()
+        event["fields"]["placeholder_ts"] = "stale"
+
+        prepared = handler.prepare(event, PROJECT)
+
+        assert prepared is not event
+        assert event["fields"]["placeholder_ts"] == "stale"
+        assert "placeholder_ts" not in prepared["fields"]
 
 
 # ---------------------------------------------------------------------------
-# Channel handler registry
+# Registry + turn-end sweep
 # ---------------------------------------------------------------------------
 
 class TestChannelRegistry:
     def test_slack_handler_registered(self):
-        from bobi.events.channels import get_channel_handler
         handler = get_channel_handler("slack")
-        assert handler is not None
-
-    def test_slack_handler_credential_key(self):
-        from bobi.events.channels import get_channel_handler
-        handler = get_channel_handler("slack")
-        assert handler.credential_key == "bot_token"
+        assert isinstance(handler, SlackInputChannel)
 
     def test_unknown_source_returns_none(self):
-        from bobi.events.channels import get_channel_handler
         assert get_channel_handler("github") is None
-        assert get_channel_handler("unknown") is None
 
 
-class TestStopRefreshLoop:
-    def test_stops_and_removes_active_loop(self):
-        from bobi.events.channels import _active_loops, stop_refresh_loop
-
-        mock_loop = MagicMock()
-        _active_loops[("C123", "171.42")] = mock_loop
-
-        stop_refresh_loop("C123", "171.42")
-
-        mock_loop.stop.assert_called_once_with(clear=True)
-        assert ("C123", "171.42") not in _active_loops
-
-    def test_noop_when_no_loop_exists(self):
-        from bobi.events.channels import stop_refresh_loop
-
-        # Should not raise
-        stop_refresh_loop("C999", "999.99")
-
-    def test_stop_all_stops_every_loop(self):
-        # This is what actually clears the indicator on turn completion (the
-        # per-reply stop_refresh_loop runs in the CLI subprocess and can't
-        # reach the manager's loops).
-        from bobi.events.channels import _active_loops, stop_all_refresh_loops
-
-        l1, l2 = MagicMock(), MagicMock()
-        _active_loops[("C1", "1.1")] = l1
-        _active_loops[("C2", "2.2")] = l2
+class TestStopAllRefreshLoops:
+    @patch("bobi.events.gateway.channels_typing", return_value=True)
+    def test_stop_all_stops_every_loop(self, mock_typing):
+        loops = []
+        for conv in ("slack:T1:dm:D1:thread:1.1", "slack:T1:dm:D2:thread:2.2"):
+            loop = TypingRefreshLoop(PROJECT, conv, interval=5)
+            loop.start()
+            _active_loops[conv] = loop
+            loops.append(loop)
 
         stop_all_refresh_loops()
 
-        l1.stop.assert_called_once_with(clear=True)
-        l2.stop.assert_called_once_with(clear=True)
-        assert _active_loops == {}
-
-
-# ---------------------------------------------------------------------------
-# CLI --edit flag
-# ---------------------------------------------------------------------------
-
-class TestSlackReplyEdit:
-    def test_edit_calls_chat_update(self, tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch)
-        reqs = []
-        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
-
-        from click.testing import CliRunner
-        from bobi.cli import main
-
-        runner = CliRunner()
-        with patch.object(pooled, '_client', mock_client):
-            result = runner.invoke(main, [
-                "slack-reply", "-w", "T123", "-c", "C456",
-                "-t", "171.42",
-                "--edit", "171.99",
-                "Real response here",
-            ])
-        assert result.exit_code == 0, result.output
-
-        # First call should be chat.update (second is setStatus to clear)
-        update_req = reqs[0]
-        assert "chat.update" in str(update_req.url)
-        body = json.loads(update_req.content)
-        assert body["ts"] == "171.99"
-        assert body["channel"] == "C456"
-        assert body["text"] == "Real response here"
-
-    @patch("bobi.slack.set_thread_status")
-    @patch("bobi.slack.update_slack_message")
-    def test_edit_clears_thread_status(self, mock_update, mock_status,
-                                        tmp_path, monkeypatch):
-        _setup_project(tmp_path, monkeypatch)
-        mock_update.return_value = {"ok": True}
-
-        from click.testing import CliRunner
-        from bobi.cli import main
-
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "slack-reply", "-w", "T123", "-c", "C456",
-            "-t", "171.42",
-            "--edit", "171.99",
-            "Response",
-        ])
-        assert result.exit_code == 0, result.output
-
-        mock_update.assert_called_once()
-        # Should clear thread status
-        mock_status.assert_called_once_with(
-            "xoxb-test", "C456", "171.42", "",
-        )
-
-    def test_edit_without_thread_skips_status(self, tmp_path, monkeypatch):
-        """--edit without -t still updates the message but skips status clear."""
-        _setup_project(tmp_path, monkeypatch)
-        reqs = []
-        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
-
-        from click.testing import CliRunner
-        from bobi.cli import main
-
-        runner = CliRunner()
-        with patch.object(pooled, '_client', mock_client):
-            result = runner.invoke(main, [
-                "slack-reply", "-w", "T123", "-c", "C456",
-                "--edit", "171.99",
-                "Response",
-            ])
-        assert result.exit_code == 0, result.output
-
-        assert any("chat.update" in str(r.url) for r in reqs)
-
-    def test_normal_reply_unchanged(self, tmp_path, monkeypatch):
-        """Without --edit, slack-reply still posts a new message."""
-        _setup_project(tmp_path, monkeypatch)
-        reqs = []
-        mock_client = _make_mock_client({"ok": True}, requests_log=reqs)
-
-        from click.testing import CliRunner
-        from bobi.cli import main
-
-        runner = CliRunner()
-        with patch.object(pooled, '_client', mock_client):
-            result = runner.invoke(main, [
-                "slack-reply", "-w", "T123", "-c", "C456",
-                "-t", "171.42",
-                "Normal reply",
-            ])
-        assert result.exit_code == 0, result.output
-
-        assert any("chat.postMessage" in str(r.url) for r in reqs)
+        for loop in loops:
+            loop.join(timeout=2)
+            assert not loop.is_alive()
+        assert not _active_loops
 
 
 # ---------------------------------------------------------------------------
 # Drain loop integration (channel handler wiring)
 # ---------------------------------------------------------------------------
-
-class _FakeConfig:
-    """Minimal Config stand-in for drain loop tests."""
-
-    def __init__(self, credentials=None):
-        self._creds = credentials or {}
-
-    def credential(self, service, key):
-        return self._creds.get((service, key), "")
-
 
 class TestDrainChannelIntegration:
     @patch("bobi.events.channels.SlackInputChannel.prepare")
@@ -592,8 +259,7 @@ class TestDrainChannelIntegration:
         from bobi.events.drain import drain_loop
 
         event = _make_slack_event()
-        augmented = dict(event, fields=dict(event["fields"], placeholder_ts="171.99"))
-        mock_prepare.return_value = augmented
+        mock_prepare.return_value = event
 
         q = SimpleQueue()
         q.put(event)
@@ -603,7 +269,7 @@ class TestDrainChannelIntegration:
         from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 delivered.append(msg.text)
                 raise SystemExit
 
@@ -613,8 +279,7 @@ class TestDrainChannelIntegration:
                 lines.append(f"  {k}: {v}")
             return "\n".join(lines)
 
-        cfg = _FakeConfig({("slack", "bot_token"): "xoxb-test"})
-        monkeypatch.setattr("bobi.events.drain._get_project_config", lambda: cfg)
+        monkeypatch.setattr("bobi.events.drain._get_project_root", lambda: PROJECT)
 
         register_local_inbox("test-session", _CaptureInbox())
         try:
@@ -623,10 +288,8 @@ class TestDrainChannelIntegration:
         finally:
             unregister_local_inbox("test-session")
 
-        mock_prepare.assert_called_once_with(event, "xoxb-test")
-        # placeholder_ts should appear in the delivered text via formatter
-        assert "placeholder_ts" in delivered[0]
-        assert "171.99" in delivered[0]
+        mock_prepare.assert_called_once_with(event, PROJECT)
+        assert "placeholder_ts" not in delivered[0]
 
     def test_drain_skips_handler_for_non_slack(self, monkeypatch):
         """Non-Slack events are delivered without channel handler processing."""
@@ -647,7 +310,7 @@ class TestDrainChannelIntegration:
         from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 delivered.append(msg.text)
                 raise SystemExit
 
@@ -665,54 +328,17 @@ class TestDrainChannelIntegration:
         assert "github.push" in delivered[0]
 
     @patch("bobi.events.channels.SlackInputChannel.prepare")
-    def test_drain_skips_handler_without_token(self, mock_prepare,
-                                                monkeypatch):
-        """No channel handler called when service token is unavailable."""
+    def test_drain_prepares_each_active_slack_event(self, mock_prepare,
+                                                    monkeypatch):
+        """When multiple Slack events for the same thread are batched,
+        each active event gets typing-only preparation."""
         from queue import SimpleQueue
         from bobi.events.drain import drain_loop
-
-        q = SimpleQueue()
-        q.put(_make_slack_event())
-
-        delivered = []
-
-        from bobi.inbox import register_local_inbox, unregister_local_inbox
-
-        class _CaptureInbox:
-            def push(self, msg):
-                delivered.append(msg.text)
-                raise SystemExit
-
-        def fake_formatter(event):
-            return f"Event: {event['source']}/{event['type']}"
-
-        cfg = _FakeConfig()  # No credentials configured
-        monkeypatch.setattr("bobi.events.drain._get_project_config", lambda: cfg)
-
-        register_local_inbox("test-session", _CaptureInbox())
-        try:
-            with pytest.raises(SystemExit):
-                drain_loop("test-session", queue=q, formatter=fake_formatter)
-        finally:
-            unregister_local_inbox("test-session")
-
-        mock_prepare.assert_not_called()
-        assert len(delivered) == 1
-
-    @patch("bobi.events.channels.SlackInputChannel.prepare")
-    def test_drain_deduplicates_placeholders_per_thread(self, mock_prepare,
-                                                         monkeypatch):
-        """When multiple Slack events for the same thread are batched,
-        only one placeholder is posted and all events share its ts."""
-        from queue import SimpleQueue
-        from bobi.events.drain import drain_loop, DRAIN_INTERVAL
 
         e1 = _make_slack_event(ts="171.50", text="first message")
         e2 = _make_slack_event(ts="171.51", text="second message")
 
-        # prepare() is called only for the first event; returns augmented copy
-        augmented = dict(e1, fields=dict(e1["fields"], placeholder_ts="171.99"))
-        mock_prepare.return_value = augmented
+        mock_prepare.side_effect = [e1, e2]
 
         q = SimpleQueue()
         q.put(e1)
@@ -723,7 +349,7 @@ class TestDrainChannelIntegration:
         from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 delivered.append(msg.text)
                 raise SystemExit
 
@@ -733,8 +359,7 @@ class TestDrainChannelIntegration:
                 lines.append(f"  {k}: {v}")
             return "\n".join(lines)
 
-        cfg = _FakeConfig({("slack", "bot_token"): "xoxb-test"})
-        monkeypatch.setattr("bobi.events.drain._get_project_config", lambda: cfg)
+        monkeypatch.setattr("bobi.events.drain._get_project_root", lambda: PROJECT)
         monkeypatch.setattr("bobi.events.drain.DRAIN_INTERVAL", 0)
 
         register_local_inbox("test-session", _CaptureInbox())
@@ -744,26 +369,114 @@ class TestDrainChannelIntegration:
         finally:
             unregister_local_inbox("test-session")
 
-        # prepare() should only be called once (for the first event)
-        mock_prepare.assert_called_once_with(e1, "xoxb-test")
-        # Both events should appear in the delivered text with placeholder_ts
+        assert mock_prepare.call_count == 2
+        mock_prepare.assert_any_call(e1, PROJECT)
+        mock_prepare.assert_any_call(e2, PROJECT)
+        # Both events should appear in the delivered text without placeholder_ts.
         assert len(delivered) == 1  # all chat events delivered in one batch
-        assert delivered[0].count("placeholder_ts") == 2
-        assert delivered[0].count("171.99") == 2
+        assert "placeholder_ts" not in delivered[0]
+
+    @patch("bobi.events.gateway.channels_typing", return_value=True)
+    @patch("bobi.events.gateway.channels_send")
+    def test_prepare_chat_events_keeps_thread_reply_passive(self,
+                                                             mock_send,
+                                                             mock_typing,
+                                                             monkeypatch):
+        """Mixed batches keep placeholder metadata off passive thread replies."""
+        from bobi.events.drain import _prepare_chat_events
+
+        active = _make_slack_event(ts="171.50", text="active mention")
+        passive = _make_slack_event(ts="171.51", text="passive chatter")
+        passive["type"] = "slack.thread_reply"
+
+        monkeypatch.setattr("bobi.events.drain._get_project_root", lambda: PROJECT)
+
+        prepared = _prepare_chat_events([active, passive])
+
+        assert prepared[0]["type"] == "slack.mention"
+        assert "placeholder_ts" not in prepared[0]["fields"]
+        assert prepared[1] is not passive
+        assert prepared[1]["type"] == "slack.thread_reply"
+        assert "placeholder_ts" not in prepared[1]["fields"]
+        mock_send.assert_not_called()
+
+    def test_prepare_chat_events_strips_stale_thread_reply_placeholder(self,
+                                                                       monkeypatch):
+        """Passive replies do not deliver stale placeholder metadata."""
+        from bobi.events.drain import _prepare_chat_events
+
+        passive = _make_slack_event(ts="171.51", text="passive chatter")
+        passive["type"] = "slack.thread_reply"
+        passive["fields"]["placeholder_ts"] = "stale"
+
+        monkeypatch.setattr("bobi.events.drain._get_project_root", lambda: PROJECT)
+
+        prepared = _prepare_chat_events([passive])
+
+        assert prepared[0] is not passive
+        assert prepared[0]["type"] == "slack.thread_reply"
+        assert "placeholder_ts" not in prepared[0]["fields"]
+        assert passive["fields"]["placeholder_ts"] == "stale"
 
     @patch("bobi.events.channels.SlackInputChannel.prepare")
-    def test_drain_separate_placeholders_for_different_threads(self, mock_prepare,
+    def test_drain_does_not_reuse_placeholder_for_thread_reply(self,
+                                                                mock_prepare,
                                                                 monkeypatch):
-        """Events in different threads each get their own placeholder."""
+        """Passive thread replies must not inherit another event's placeholder."""
+        from queue import SimpleQueue
+        from bobi.events.drain import drain_loop
+
+        e1 = _make_slack_event(ts="171.50", text="active mention")
+        e2 = _make_slack_event(ts="171.51", text="passive chatter")
+        e2["type"] = "slack.thread_reply"
+
+        mock_prepare.return_value = e1
+
+        q = SimpleQueue()
+        q.put(e1)
+        q.put(e2)
+
+        delivered = []
+
+        from bobi.inbox import register_local_inbox, unregister_local_inbox
+
+        class _CaptureInbox:
+            def push(self, msg, priority=False):
+                delivered.append(msg.text)
+                raise SystemExit
+
+        def fake_formatter(ev):
+            lines = [f"Event: {ev['source']}/{ev['type']}"]
+            for k, v in ev.get("fields", {}).items():
+                lines.append(f"  {k}: {v}")
+            return "\n".join(lines)
+
+        monkeypatch.setattr("bobi.events.drain._get_project_root", lambda: PROJECT)
+        monkeypatch.setattr("bobi.events.drain.DRAIN_INTERVAL", 0)
+
+        register_local_inbox("test-session", _CaptureInbox())
+        try:
+            with pytest.raises(SystemExit):
+                drain_loop("test-session", queue=q, formatter=fake_formatter)
+        finally:
+            unregister_local_inbox("test-session")
+
+        mock_prepare.assert_called_once_with(e1, PROJECT)
+        assert "placeholder_ts" not in delivered[0]
+        assert "slack.thread_reply" in delivered[0]
+
+    @patch("bobi.events.channels.SlackInputChannel.prepare")
+    def test_drain_prepares_different_threads(self, mock_prepare, monkeypatch):
+        """Events in different threads are prepared independently."""
         from queue import SimpleQueue
         from bobi.events.drain import drain_loop
 
         e1 = _make_slack_event(thread_ts="171.42", ts="171.50")
-        e2 = _make_slack_event(thread_ts="172.00", ts="172.01")
+        e2 = _make_slack_event(
+            thread_ts="172.00", ts="172.01",
+            conversation="slack:T123:channel:C123:thread:172.00")
 
-        aug1 = dict(e1, fields=dict(e1["fields"], placeholder_ts="p1"))
-        aug2 = dict(e2, fields=dict(e2["fields"], placeholder_ts="p2"))
-        mock_prepare.side_effect = [aug1, aug2]
+        mock_prepare.side_effect = [e1, e2]
 
         q = SimpleQueue()
         q.put(e1)
@@ -774,7 +487,7 @@ class TestDrainChannelIntegration:
         from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 delivered.append(msg.text)
                 raise SystemExit
 
@@ -784,8 +497,7 @@ class TestDrainChannelIntegration:
                 lines.append(f"  {k}: {v}")
             return "\n".join(lines)
 
-        cfg = _FakeConfig({("slack", "bot_token"): "xoxb-test"})
-        monkeypatch.setattr("bobi.events.drain._get_project_config", lambda: cfg)
+        monkeypatch.setattr("bobi.events.drain._get_project_root", lambda: PROJECT)
         monkeypatch.setattr("bobi.events.drain.DRAIN_INTERVAL", 0)
 
         register_local_inbox("test-session", _CaptureInbox())
@@ -795,32 +507,35 @@ class TestDrainChannelIntegration:
         finally:
             unregister_local_inbox("test-session")
 
-        # prepare() should be called once per distinct thread
         assert mock_prepare.call_count == 2
 
     @patch("bobi.events.channels.SlackInputChannel.prepare")
-    def test_drain_skips_handler_without_config(self, mock_prepare,
+    def test_drain_handles_missing_project_root(self, mock_prepare,
                                                  monkeypatch):
-        """No channel handler called when project config is unavailable."""
+        """A missing project root still delivers; the handler decides what
+        to do with project_path=None."""
         from queue import SimpleQueue
         from bobi.events.drain import drain_loop
 
+        event = _make_slack_event()
+        mock_prepare.return_value = event
+
         q = SimpleQueue()
-        q.put(_make_slack_event())
+        q.put(event)
 
         delivered = []
 
         from bobi.inbox import register_local_inbox, unregister_local_inbox
 
         class _CaptureInbox:
-            def push(self, msg):
+            def push(self, msg, priority=False):
                 delivered.append(msg.text)
                 raise SystemExit
 
         def fake_formatter(event):
             return f"Event: {event['source']}/{event['type']}"
 
-        monkeypatch.setattr("bobi.events.drain._get_project_config", lambda: None)
+        monkeypatch.setattr("bobi.events.drain._get_project_root", lambda: None)
 
         register_local_inbox("test-session", _CaptureInbox())
         try:
@@ -829,5 +544,5 @@ class TestDrainChannelIntegration:
         finally:
             unregister_local_inbox("test-session")
 
-        mock_prepare.assert_not_called()
+        mock_prepare.assert_called_once_with(event, None)
         assert len(delivered) == 1

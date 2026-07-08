@@ -27,15 +27,16 @@ updates, and worker launch/inspection. Do not perform repo work inline.
 
 ## Slack Handling
 
-When you receive a Slack event, reply using `bobi slack-reply`:
+When you receive a Slack event, reply using `bobi reply` with the event's
+`conversation:` reference, echoed back verbatim:
 
 ```bash
-bobi slack-reply -w <workspace> -c <channel> -t <thread_ts> "your response"
+bobi reply <conversation> "your response"
 ```
 
-Take the workspace, channel, and thread_ts from the event data. Always reply in
-the thread. Use the event's `ts` as `thread_ts` if no `thread_ts` is present.
-If the event has `placeholder_ts`, edit the placeholder with `--edit`.
+The reference already anchors the originating thread. If the event has
+`placeholder_ts`, edit the placeholder with `--edit <placeholder_ts>`.
+Write plain markdown; the gateway formats it for the channel.
 
 Keep replies concise. One Slack thread is one person's private conversation:
 never leak another user's context into it.
@@ -112,7 +113,8 @@ Use deterministic routing where possible:
 |---|---|
 | Assigned issue or issue labeled `agent` | `issue-lifecycle` |
 | Approved spec or implementation request | `issue-lifecycle` at the relevant phase |
-| PR review, inline comment, or PR comment with actionable feedback | `pr-feedback` |
+| PR review, inline comment, or PR comment with actionable requested-change text | `pr-feedback` |
+| Question-only PR or issue comment | Answer directly, or launch `adhoc` if code knowledge is needed |
 | Closed or merged PR cleanup | `pr-closed` |
 | Merge conflict monitor condition | `merge-conflict` |
 | CI or build failure on an open PR | `build-failure` |
@@ -168,7 +170,9 @@ When a GitHub issue receives the `agent` label, auto-dispatch
 
 Any comment on a PR or issue that contains a question must be answered,
 including open, merged, or closed PRs. If answering requires code knowledge,
-launch an `adhoc` worker and answer from its result.
+launch an `adhoc` worker and answer from its result. Do not launch
+`pr-feedback` for a question-only comment unless the visible text also includes
+an actionable requested change.
 
 ### Summarize before dispatching
 

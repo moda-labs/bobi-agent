@@ -303,3 +303,124 @@ class TestStatePersistence:
 
         assert "survive" in sched2.state
         assert "last_run" in sched2.state["survive"]
+
+
+class TestRelevanceGateFlow:
+    """End-to-end two-tier semantic gate (#630): a YAML-defined command
+    monitor with `relevance:` pulls items mechanically, sends only new items
+    to the gate, publishes only relevant verdicts, and never re-judges across
+    scheduler restarts."""
+
+    def _yaml_monitor(self, tmp_path, script):
+        """Load the gated monitor through the real registry from real YAML."""
+        config_dir = tmp_path / "package"
+        config_dir.mkdir(exist_ok=True)
+        (config_dir / "agent.yaml").write_text("entry_point: manager\n")
+        (config_dir / "monitors.yaml").write_text(yaml.dump({
+            "monitors": [{
+                "name": "billing-emails",
+                "command": str(script),
+                "interval": "5m",
+                "relevance": "emails about billing problems",
+                "event": "monitor/email.billing",
+            }]
+        }))
+        from bobi.monitors.registry import MonitorRegistry
+        reg = MonitorRegistry.load(project_path=tmp_path)
+        m = next(m for m in reg.effective_monitors()
+                 if m.name == "billing-emails")
+        assert m.relevance == "emails about billing problems"
+        return m
+
+    def _scheduler(self, tmp_path, monitors, gates, fired, now=None):
+        from bobi.monitors.scheduler import MonitorScheduler
+
+        class FakeRegistry:
+            def effective_monitors(self):
+                return monitors
+            def projects_for(self, _m):
+                return []
+
+        def publish(event, data):
+            fired.append({"event": event, "data": data})
+            return True
+
+        return MonitorScheduler(
+            publish=publish,
+            state_path=tmp_path / "monitor_state.json",
+            now=now or (lambda: datetime(2026, 6, 1, 12, 0, 0,
+                                         tzinfo=timezone.utc)),
+            registry_loader=lambda **kw: FakeRegistry(),
+            spawn_gate=lambda m, cwd, items, cb: gates.append((m, items, cb)),
+        )
+
+    def test_full_gate_flow_with_restart(self, tmp_path):
+        script = tmp_path / "poll.sh"
+        script.write_text(
+            '#!/bin/sh\n'
+            'echo \'[{"id": "m1", "subject": "refund overcharged"},'
+            ' {"id": "m2", "subject": "lunch on friday"}]\'\n')
+        script.chmod(0o755)
+
+        m = self._yaml_monitor(tmp_path, script)
+        gates, fired = [], []
+        t = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        sched = self._scheduler(tmp_path, [m], gates, fired, now=lambda: t)
+
+        # Tick 1: the command runs mechanically, nothing publishes yet,
+        # both new items ride to the gate.
+        sched.tick()
+        assert fired == []
+        assert len(gates) == 1
+        _, items, on_verdict = gates[0]
+        assert sorted(c.key for c in items) == ["m1", "m2"]
+
+        # Verdict: only m1 is about billing.
+        on_verdict({"success": True, "relevant": ["m1"]})
+        assert len(fired) == 1
+        assert fired[0]["event"] == "monitor/email.billing"
+        assert fired[0]["data"]["subject"] == "refund overcharged"
+        assert fired[0]["data"]["finding_key"] == "m1"
+
+        # Both judged keys persisted to disk.
+        state = json.loads((tmp_path / "monitor_state.json").read_text())
+        assert set(state[m.state_key]["active"]) == {"m1", "m2"}
+
+        # Tick 2 (same items, past the interval): zero gate calls, zero events.
+        t2 = t + timedelta(minutes=6)
+        sched._now = lambda: t2
+        sched.tick()
+        assert len(gates) == 1
+        assert len(fired) == 1
+
+        # Restart: a fresh scheduler reads the persisted state and still
+        # does not re-judge the same items.
+        sched2 = self._scheduler(tmp_path, [m], gates, fired,
+                                 now=lambda: t2 + timedelta(minutes=6))
+        sched2.tick()
+        assert len(gates) == 1
+        assert len(fired) == 1
+
+    def test_new_item_after_verdict_is_gated_alone(self, tmp_path):
+        script = tmp_path / "poll.sh"
+        script.write_text('#!/bin/sh\necho \'[{"id": "m1", "s": "x"}]\'\n')
+        script.chmod(0o755)
+
+        m = self._yaml_monitor(tmp_path, script)
+        gates, fired = [], []
+        t = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        sched = self._scheduler(tmp_path, [m], gates, fired, now=lambda: t)
+
+        sched.tick()
+        gates[0][2]({"success": True, "relevant": []})  # m1 irrelevant
+
+        # A new item appears next interval; only it is judged.
+        script.write_text(
+            '#!/bin/sh\n'
+            'echo \'[{"id": "m1", "s": "x"}, {"id": "m3", "s": "billing"}]\'\n')
+        sched._now = lambda: t + timedelta(minutes=6)
+        sched.tick()
+        assert len(gates) == 2
+        assert [c.key for c in gates[1][1]] == ["m3"]
+        gates[1][2]({"success": True, "relevant": ["m3"]})
+        assert [f["data"]["finding_key"] for f in fired] == ["m3"]

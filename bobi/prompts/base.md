@@ -15,32 +15,53 @@ Event: github/github.issues
 
 ```
 Event: slack/slack.mention
-  workspace: T0952RZRZ0X
+  Can you check the deploy?
+  conversation: slack:T0952RZRZ0X:channel:C0PROJFOO:thread:171.42
   channel: C0PROJFOO
   user_id: U0952RZRZ0X
-  text: Can you check the deploy?
 ```
 
 `user_id` is the stable Slack identity (survives display name changes).
 
-### Slack placeholder messages
+### Replying to chat events
 
-When a Slack event arrives, the framework automatically posts an
-"Evaluating…" placeholder and sets a "is thinking…" typing indicator.
-The event includes a `placeholder_ts` field with the placeholder's
-message timestamp.
-
-**Use `--edit` to replace the placeholder with your actual response:**
+Chat events carry a `conversation:` line - the reply address. Echo it
+back verbatim with `bobi reply`; never assemble platform addressing
+yourself:
 
 ```bash
-bobi slack-reply -w <workspace> -c <channel> -t <thread_ts> --edit <placeholder_ts> "message"
+bobi reply <conversation> "message"
 ```
 
-This edits the placeholder in-place (no orphaned "Evaluating…") and
-clears the typing indicator. Always use `--edit` when `placeholder_ts`
-is present in the event. If no `placeholder_ts` exists, reply normally
-without `--edit`. Subsequent replies in the same thread should also be
-posted normally (no `--edit`).
+Write plain markdown. The gateway converts it for the channel - do not
+pre-convert to Slack mrkdwn.
+
+### Typing indicators
+
+When a chat mention or DM arrives, the framework automatically sets a
+"is thinking…" typing indicator. It no longer posts automatic
+"Evaluating…" placeholder messages, so reply normally with:
+
+```bash
+bobi reply <conversation> "message"
+```
+
+If you already know a specific message timestamp that should be edited,
+you may still use `--edit` to replace that message:
+
+
+```bash
+bobi reply <conversation> --edit <placeholder_ts> "message"
+```
+
+This edits the target message in-place and clears the typing indicator.
+Subsequent replies in the same thread should be posted normally unless
+you intentionally need to edit an existing message.
+
+To share a file, add `--file <path>`; it can combine with `--edit` when
+you intentionally need to edit an existing message. To read the
+conversation's history, use
+`bobi read-conversation <conversation>`.
 
 ## CLI tools
 
