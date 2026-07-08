@@ -328,6 +328,38 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
                      name=f"{kind}-wait-{monitor_name}").start()
 
 
+def _monitor_agent_role(monitor) -> str:
+    """Resolve the role for an out-of-band monitor agent launch (#212, #695).
+
+    `subagents launch` requires --role. Monitors rarely set one, so fall back
+    to the team's entry-point role, matching how named start resolves it.
+    Returns "" only when neither is available; callers must fail loud rather
+    than spawn a subprocess the CLI is guaranteed to reject.
+    """
+    role = getattr(monitor, "role", "") or ""
+    if role:
+        return role
+    try:
+        from bobi.config import Config
+        from bobi.paths import bound_root
+        root = bound_root()
+        if root:
+            return Config.load(root).entry_point or ""
+    except Exception:
+        log.exception("Failed to resolve entry_point for monitor %s",
+                      getattr(monitor, "name", "?"))
+    return ""
+
+
+def _publish_no_role_error(monitor_name: str, kind: str, publish=None) -> None:
+    detail = ("no role resolved: the monitor sets no role and the team "
+              "config has no entry_point")
+    log.error("Failed to spawn %s for monitor %s: %s", kind, monitor_name,
+              detail)
+    _publish_monitor_error(
+        monitor_name, kind, "spawn-failed", detail, publish=publish)
+
+
 def _default_spawn_check(monitor, cwd: str | None, on_verdict,
                          publish=None) -> None:
     """Launch a non-interactive check subprocess and report its verdict.
@@ -338,17 +370,11 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict,
     process exits. The check agent only observes — converting the verdict to
     conditions, dedup, and publishing all happen in the scheduler.
     """
-    role = getattr(monitor, "role", "") or ""
+    role = _monitor_agent_role(monitor)
     if not role:
-        try:
-            from bobi.config import Config
-            from bobi.paths import bound_root as get_project_root
-            root = get_project_root()
-            if root:
-                cfg = Config.load(root)
-                role = cfg.entry_point
-        except Exception:
-            pass
+        _publish_no_role_error(monitor.name, "check", publish=publish)
+        on_verdict(None)
+        return
 
     from bobi import paths
     root = paths.bobi_root()
@@ -356,7 +382,7 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict,
         sys.executable, "-m", "bobi.cli",
         "agent", paths.agent_name_for_root(root), "subagents", "launch",
         "-w", "adhoc",
-        *(["--role", role] if role else []),
+        "--role", role,
         "--non-interactive",
         "--wait",
         "--task", monitor.description or monitor.name,
@@ -505,8 +531,13 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result,
     parsed summary (or None) to ``on_result`` when the process exits. The
     scheduler — not the agent — owns the cursor advance and the publish.
     """
-    role = getattr(monitor, "role", "") or ""
     from bobi import paths
+
+    role = _monitor_agent_role(monitor)
+    if not role:
+        _publish_no_role_error(monitor.name, "curator", publish=publish)
+        on_result(None)
+        return
 
     task_path = _write_curator_task(monitor, task)
     if task_path is None:
@@ -527,7 +558,7 @@ def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result,
         sys.executable, "-m", "bobi.cli",
         "agent", paths.agent_name_for_root(root), "subagents", "launch",
         "-w", "adhoc",
-        *(["--role", role] if role else []),
+        "--role", role,
         "--non-interactive",
         "--wait",
         "--task", pointer_task,

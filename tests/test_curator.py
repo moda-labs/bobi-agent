@@ -310,6 +310,9 @@ class TestCuratorTaskTransport:
     ):
         from bobi.monitors.scheduler import _default_spawn_curator
 
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "agent: test-pack\nentry_point: director\n")
         paths.bind_root(tmp_path)
         full_task = "x" * 205_000
         captured = {}
@@ -404,6 +407,103 @@ class TestCuratorTaskTransport:
 
         assert default_published == []
         assert injected_published[0][0] == "system/monitor.error"
+
+
+# ---------------------------------------------------------------------------
+# spawn role contract (#695) — the curator argv must satisfy the real CLI
+# ---------------------------------------------------------------------------
+
+class TestCuratorSpawnRole:
+    """Regression tests for #695: `subagents launch` requires --role, and the
+    shipped policy-curator monitor sets none, so the spawn must fall back to
+    the team's entry_point (parity with _default_spawn_check). The argv is
+    parsed against the real click command so a contract drift fails here, not
+    in production."""
+
+    def _project(self, tmp_path, agent_yaml: str):
+        project = tmp_path / "proj"
+        paths.state_dir(project)
+        paths.package_dir(project).mkdir(parents=True)
+        paths.agent_yaml_path(project).write_text(agent_yaml)
+        paths.bind_root(project)
+        return project
+
+    def _spawn(self, monkeypatch, monitor):
+        from bobi.monitors.scheduler import _default_spawn_curator
+
+        captured = []
+        results = []
+
+        class FakeProc:
+            def communicate(self, timeout=None):
+                return '{"success": true, "updated": false}\n', None
+
+        monkeypatch.setattr(
+            "subprocess.Popen",
+            lambda cmd, **kwargs: captured.append(cmd) or FakeProc(),
+        )
+        _default_spawn_curator(monitor, None, "task body", results.append)
+        for _ in range(100):
+            if results:
+                break
+            time.sleep(0.01)
+        return captured, results
+
+    def test_curator_argv_satisfies_launch_cli_contract(
+        self, tmp_path, monkeypatch, monitor
+    ):
+        """The spawned argv parses under the real `subagents launch` command
+        (required options included) and resolves --role to entry_point."""
+        from bobi.cli import subagents_launch
+
+        self._project(tmp_path, "agent: test-pack\nentry_point: director\n")
+        captured, results = self._spawn(monkeypatch, monitor)
+
+        assert results == [{"success": True, "updated": False}]
+        assert len(captured) == 1
+        launch_args = captured[0][captured[0].index("launch") + 1:]
+        ctx = subagents_launch.make_context("launch", list(launch_args))
+        assert ctx.params["role"] == "director"
+
+    def test_curator_monitor_role_wins_over_entry_point(
+        self, tmp_path, monkeypatch
+    ):
+        """An explicit role: on the monitor is used verbatim."""
+        self._project(tmp_path, "agent: test-pack\nentry_point: director\n")
+        m = Monitor(name="policy-curator", curator=True, role="librarian",
+                    event="system/policy.updated", interval="6h")
+        captured, _ = self._spawn(monkeypatch, m)
+
+        cmd = captured[0]
+        assert cmd[cmd.index("--role") + 1] == "librarian"
+
+    def test_curator_without_resolvable_role_fails_loud_not_doomed_spawn(
+        self, tmp_path, monkeypatch, monitor
+    ):
+        """No monitor role and no entry_point: publish monitor.error instead
+        of launching a subprocess the CLI is guaranteed to reject."""
+        from bobi.monitors.scheduler import _default_spawn_curator
+
+        self._project(tmp_path, "agent: test-pack\n")
+        published = []
+        results = []
+        monkeypatch.setattr(
+            "bobi.monitors.scheduler._default_publish",
+            lambda event, data: published.append((event, data)) or True,
+        )
+        monkeypatch.setattr(
+            "subprocess.Popen",
+            lambda *args, **kwargs: pytest.fail("Popen should not be called"),
+        )
+
+        _default_spawn_curator(monitor, None, "task body", results.append)
+
+        assert results == [None]
+        assert published[0][0] == "system/monitor.error"
+        assert published[0][1]["reason"] == "spawn-failed"
+        assert "role" in published[0][1]["detail"]
+        tasks_dir = paths.state_dir() / "curator"
+        assert not list(tasks_dir.glob("task-*.md"))
 
 
 # ---------------------------------------------------------------------------
