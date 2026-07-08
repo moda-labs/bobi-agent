@@ -276,6 +276,8 @@ def test_bootstrap_prompt_carries_success_guide_brains_and_pin_rule():
     assert "the guide text" in prompt
     assert "claude, codex" in prompt
     assert "PINNED" in prompt
+    assert "exact success command" in prompt
+    assert "non-login shell" in prompt
     assert '"ok": true' in prompt  # the JSON recipe contract is spelled out
 
 
