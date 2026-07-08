@@ -34,10 +34,12 @@ import {
 	handleChannelsHistory,
 	handleSlackWorkspaceRegister,
 	handleWhatsAppNumberRegister,
+	handleDiscordAppRegister,
 	handleTestSeedResourceGrants,
 	envIngestTokenRecords,
 	getAuthRejectionCounters,
 } from "@moda-labs/bobi-events-core";
+import { DiscordGatewayManager } from "./discord-gateway-local";
 import {
 	isExemptFromBreaker,
 	recordDelivery,
@@ -45,12 +47,13 @@ import {
 	conversationKey,
 	buildLoopDetectedEvent,
 } from "@moda-labs/bobi-events-core/circuit-breaker";
-import { setSlackApiUrl, setWhatsAppApiUrl } from "@moda-labs/bobi-events-core/channels";
+import { setSlackApiUrl, setWhatsAppApiUrl, setDiscordApiUrl } from "@moda-labs/bobi-events-core/channels";
 
-// Integration-test seams: point the Slack Web API / Meta Graph API at local
-// stubs. Unset in production, where the platform defaults apply.
+// Integration-test seams: point the Slack Web API / Meta Graph API / Discord
+// API at local stubs. Unset in production, where the platform defaults apply.
 setSlackApiUrl(process.env.BOBI_ES_SLACK_API_URL);
 setWhatsAppApiUrl(process.env.BOBI_ES_WHATSAPP_API_URL);
+setDiscordApiUrl(process.env.BOBI_ES_DISCORD_API_URL);
 
 const MAX_BUFFER = 10_000;
 
@@ -114,6 +117,15 @@ const webhookSecrets = {
 const testGrantsSecret = process.env.BOBI_ES_TEST_GRANTS_SECRET || "";
 const releaseVersion = process.env.BOBI_RELEASE_VERSION || "local";
 const releaseSha = process.env.BOBI_RELEASE_SHA || "local";
+
+// Discord Gateway connection manager (inbound rides a persistent outbound
+// WebSocket, not a webhook). Declared here, constructed after the storage
+// adapter below; connections start from env config in main() and from
+// POST /discord/apps registrations.
+const discordBotToken = process.env.BOBI_ES_DISCORD_BOT_TOKEN || "";
+const discordApplicationId = process.env.BOBI_ES_DISCORD_APPLICATION_ID || "";
+const discordMessageContent = process.env.BOBI_ES_DISCORD_MESSAGE_CONTENT === "1";
+const discordGatewayUrl = process.env.BOBI_ES_DISCORD_GATEWAY_URL || "";
 
 // ---------------------------------------------------------------------------
 // Map-based storage adapter
@@ -357,6 +369,11 @@ const storage: StorageAdapter = {
 	},
 };
 
+const discordGateway = new DiscordGatewayManager(storage, {
+	messageContent: discordMessageContent,
+	...(discordGatewayUrl ? { gatewayUrlOverride: discordGatewayUrl } : {}),
+});
+
 async function seedEnvIngestTokens() {
 	const configured = process.env.BOBI_ES_INGEST_TOKENS || "";
 	if (!configured.trim()) return;
@@ -451,6 +468,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	const method = req.method || "GET";
 
 	if (method === "GET" && path === "/health") {
+		const discordHealth = discordGateway.health();
 		return json(res, {
 			status: "ok",
 			mode: "local",
@@ -462,6 +480,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 			},
 			bubbles: bubbles.size,
 			rejections: getAuthRejectionCounters(),
+			...(discordHealth.length > 0 ? { discord_gateway: discordHealth } : {}),
 		});
 	}
 
@@ -582,6 +601,22 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		const auth = await bubbleAuthedJson(req, res, url);
 		if (!auth) return;
 		return respond(res, await handleWhatsAppNumberRegister(storage, auth.data, auth.bubble.id));
+	}
+
+	if (method === "POST" && path === "/discord/apps") {
+		// Signed-only, mirroring /whatsapp/numbers. A successful registration
+		// also starts (or refreshes) the app's Gateway connection so inbound
+		// messages flow without a restart.
+		const auth = await bubbleAuthedJson(req, res, url);
+		if (!auth) return;
+		const result = await handleDiscordAppRegister(storage, auth.data, auth.bubble.id);
+		if (result.status === 200) {
+			discordGateway.start(
+				auth.data.application_id as string,
+				auth.data.bot_token as string,
+			);
+		}
+		return respond(res, result);
 	}
 
 	if (method === "POST" && path === "/channels/send") {
@@ -808,6 +843,12 @@ evictionTimer.unref();
 
 async function main() {
 	await seedEnvIngestTokens();
+	// Single-tenant local dev: an env-configured bot connects at boot, before
+	// any signed registration. Registered apps start on POST /discord/apps.
+	if (discordBotToken && discordApplicationId) {
+		discordGateway.start(discordApplicationId, discordBotToken);
+		console.log(`discord gateway: starting connection for env-configured app ${discordApplicationId}`);
+	}
 	server.listen(port, bind, () => {
 		if (bind === "127.0.0.1" || bind === "::1") {
 			console.log(

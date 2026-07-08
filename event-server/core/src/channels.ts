@@ -60,6 +60,20 @@ export function whatsappApiUrl(): string {
 	return whatsappApiUrlOverride ?? DEFAULT_WHATSAPP_API_URL;
 }
 
+// Discord REST API base. Overridable so tests can stub the API with a local
+// server (local.ts wires BOBI_ES_DISCORD_API_URL); production always uses
+// the default.
+const DEFAULT_DISCORD_API_URL = "https://discord.com/api/v10/";
+let discordApiUrlOverride: string | undefined;
+
+export function setDiscordApiUrl(url: string | undefined): void {
+	discordApiUrlOverride = url ? (url.endsWith("/") ? url : `${url}/`) : undefined;
+}
+
+export function discordApiUrl(): string {
+	return discordApiUrlOverride ?? DEFAULT_DISCORD_API_URL;
+}
+
 export interface ChannelCapabilities {
 	edit: boolean;
 	typing: boolean;
@@ -556,6 +570,170 @@ const whatsappAdapter: ChannelAdapter = {
 	},
 };
 
+// --- Discord (REST outbound; inbound rides the Gateway, see gateway/discord.ts) ---
+
+// One Discord REST call with a bot token. Returns the parsed JSON body (or
+// {} for a bodyless 204, e.g. the typing trigger); throws on transport
+// errors. A Discord error body ({message, code}) is surfaced by callers.
+export async function discordApi(
+	token: string,
+	path: string,
+	init: { method?: string; json?: unknown; form?: FormData } = {},
+): Promise<Record<string, unknown>> {
+	const headers: Record<string, string> = { Authorization: `Bot ${token}` };
+	let body: BodyInit | undefined;
+	if (init.json !== undefined) {
+		headers["Content-Type"] = "application/json";
+		body = JSON.stringify(init.json);
+	} else if (init.form) {
+		body = init.form; // fetch sets the multipart boundary itself
+	}
+	const resp = await fetch(`${discordApiUrl()}${path}`, {
+		method: init.method ?? "POST",
+		headers,
+		...(body !== undefined ? { body } : {}),
+	});
+	const text = await resp.text();
+	if (!text) return {};
+	try {
+		return JSON.parse(text) as Record<string, unknown>;
+	} catch {
+		return { message: `non-JSON response (HTTP ${resp.status})` };
+	}
+}
+
+function discordError(data: Record<string, unknown>): string {
+	return (data.message as string) || "discord api error";
+}
+
+function discordConversationMessage(raw: Record<string, unknown>): ConversationMessage {
+	const author = (raw.author as Record<string, unknown>) || {};
+	const entry: ConversationMessage = {
+		user: (author.username as string) || (author.id as string) || "",
+		text: (raw.content as string) || "",
+		ts: (raw.id as string) || "",
+	};
+	const rawFiles = raw.attachments as Array<Record<string, unknown>> | undefined;
+	if (Array.isArray(rawFiles) && rawFiles.length > 0) {
+		entry.files = rawFiles.map((f) => ({
+			id: String(f.id ?? ""),
+			name: String(f.filename ?? ""),
+			mimetype: String(f.content_type ?? ""),
+			url_private: String(f.url ?? ""),
+		}));
+	}
+	return entry;
+}
+
+const discordAdapter: ChannelAdapter = {
+	descriptor: {
+		name: "discord",
+		topicShape: "discord:<application_id>",
+		// The first socket-transport channel: inbound arrives over the Gateway
+		// connection manager, not a webhook. Outbound stays plain REST.
+		transport: "socket",
+		capabilities: {
+			edit: true,
+			// Discord's typing trigger lasts ~10s; there is no explicit "off".
+			typing: true,
+			streaming: "edit-fallback",
+			// Discord threads are themselves channels - no thread trailer in v1.
+			threads: false,
+			files: true,
+			// Message content limit for bots, counted in characters (code points).
+			maxLength: 2000,
+			lengthUnit: "chars",
+		},
+		credentials: [
+			{ env: "DISCORD_BOT_TOKEN", secret: true, label: "Bot token" },
+			{ env: "DISCORD_APPLICATION_ID", secret: false, label: "Application ID" },
+		],
+		promptHint:
+			"Discord renders a markdown subset (bold, italics, code blocks, "
+			+ "lists) but no tables or headers before Discord's own sizes. Keep "
+			+ "replies short; messages cap at 2000 characters.",
+		setupSkill: "skills/discord-setup.md",
+	},
+
+	async send(token, conv, text) {
+		try {
+			const data = await discordApi(token, `channels/${conv.chatId}/messages`, {
+				json: { content: text },
+			});
+			const id = data.id as string;
+			if (!id) return { ok: false, error: discordError(data) };
+			return { ok: true, ts: id };
+		} catch (err) {
+			return { ok: false, error: String(err) };
+		}
+	},
+
+	async update(token, conv, messageId, text) {
+		try {
+			const data = await discordApi(
+				token,
+				`channels/${conv.chatId}/messages/${messageId}`,
+				{ method: "PATCH", json: { content: text } },
+			);
+			const id = data.id as string;
+			if (!id) return { ok: false, error: discordError(data) };
+			return { ok: true, ts: id };
+		} catch (err) {
+			return { ok: false, error: String(err) };
+		}
+	},
+
+	// Discord's indicator is a one-shot trigger that expires after ~10s (or on
+	// the next message); "off" has no API and is a silent no-op. Best-effort.
+	async typing(token, conv, on) {
+		if (!on) return;
+		try {
+			await discordApi(token, `channels/${conv.chatId}/typing`, {});
+		} catch {
+			// non-fatal
+		}
+	},
+
+	async fetchConversation(token, conv, limit = 100) {
+		const capped = Math.min(limit, 100); // Discord's per-request maximum
+		const data = await discordApi(
+			token,
+			`channels/${conv.chatId}/messages?limit=${capped}`,
+			{ method: "GET" },
+		);
+		if (!Array.isArray(data)) throw new Error(discordError(data));
+		// Discord returns newest-first; deliver oldest-first like Slack.
+		return (data as Array<Record<string, unknown>>)
+			.map(discordConversationMessage)
+			.reverse();
+	},
+
+	// One multipart message carrying every file (Discord allows 10 per
+	// message), with the comment as its content.
+	async uploadFiles(token, conv, files, comment) {
+		try {
+			const form = new FormData();
+			form.append("payload_json", JSON.stringify({
+				...(comment ? { content: comment } : {}),
+				attachments: files.map((f, i) => ({
+					id: i,
+					filename: f.name,
+					...(f.title ? { description: f.title } : {}),
+				})),
+			}));
+			for (const [i, f] of files.entries()) {
+				form.append(`files[${i}]`, new Blob([f.data]), f.name);
+			}
+			const data = await discordApi(token, `channels/${conv.chatId}/messages`, { form });
+			const id = data.id as string;
+			if (!id) return { ok: false, error: discordError(data) };
+			return { ok: true, ts: id };
+		} catch (err) {
+			return { ok: false, error: String(err) };
+		}
+	},
+};
+
 // Mirror the chunk path's partial-delivery contract: once any file reached
 // the user, the error must tell the caller not to blind-retry the batch.
 function partialUploadError(error: string, delivered: number, total: number): string {
@@ -593,6 +771,7 @@ function mimeForFilename(name: string): string {
 const CHANNEL_ADAPTERS: Record<string, ChannelAdapter> = {
 	slack: slackAdapter,
 	whatsapp: whatsappAdapter,
+	discord: discordAdapter,
 };
 
 export function getChannelAdapter(source: string): ChannelAdapter | undefined {
