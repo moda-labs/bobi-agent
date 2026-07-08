@@ -101,15 +101,15 @@ def check_image_rotation(session_name: str, project_path: Path) -> bool:
     current_hash = compute_manifest_hash(project_path)
     if not current_hash:
         return False
-    saved_id = load_session_id(session_name)
+    saved_id = load_session_id(session_name, root=project_path)
     if not saved_id:
         return False
-    registry = get_registry()
+    registry = SessionRegistry(project_path)
     entry = registry.get(session_name)
     if not entry or not entry.image_hash or entry.image_hash == current_hash:
         return False
     log.info("Installed image changed — rotating session for %s", session_name)
-    save_session_id(session_name, "")
+    save_session_id(session_name, "", root=project_path)
     return True
 
 
@@ -172,14 +172,27 @@ def find_runtime_root(start: Path | None = None) -> Path | None:
     return None
 
 
-def _sessions_dir() -> Path:
-    """Sessions directory under the bound installation root.
+def _sessions_dir(root: Path | None = None) -> Path:
+    """Sessions directory under *root*, else the bound installation root.
 
-    The root is bound explicitly in every process (manager at start,
-    children via the spawn args' `root`), so sessions always share one
-    registry without probing the filesystem.
+    In-team processes (manager at start, children via the spawn args'
+    `root`) bind their root once and pass None; multi-team hosts like the
+    webapp pass the target team's root explicitly per call.
     """
-    return paths.sessions_dir()
+    return paths.sessions_dir(root)
+
+
+def session_handoff_path(name: str, step: str, *,
+                         root: Path | None = None) -> Path:
+    """A session's handoff file for one workflow step."""
+    return _sessions_dir(root) / name / f"handoff-{step}.yaml"
+
+
+def session_log_path(name: str, *, root: Path | None = None) -> Path:
+    """A session's activity log, parent dir created."""
+    p = _sessions_dir(root) / name / "log.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def state_dir(project_path: Path | None = None) -> Path:
@@ -251,18 +264,21 @@ class SessionRegistry:
     Each session gets a directory at <run>/state/sessions/<name>/
     containing state.json, handoff-<step>.yaml files, and log.jsonl.
     Active sessions have a live pid; completed ones remain for history.
+
+    *root* selects the runtime root; None means the process's bound root
+    (in-team processes). Multi-team hosts construct one registry per target
+    root instead of mutating process state.
     """
 
-    def __init__(self):
-        _sessions_dir()
+    def __init__(self, root: Path | None = None):
+        self._root = root
+        _sessions_dir(root)
 
-    @staticmethod
-    def session_dir(name: str) -> Path:
-        return _sessions_dir() / name
+    def session_dir(self, name: str) -> Path:
+        return _sessions_dir(self._root) / name
 
-    @staticmethod
-    def _state_path(name: str) -> Path:
-        return _sessions_dir() / name / "state.json"
+    def _state_path(self, name: str) -> Path:
+        return _sessions_dir(self._root) / name / "state.json"
 
     def register(self, entry: SessionEntry) -> None:
         d = self.session_dir(entry.name)
@@ -360,7 +376,7 @@ class SessionRegistry:
 
     def list_active(self) -> list[SessionEntry]:
         result = []
-        sd = _sessions_dir()
+        sd = _sessions_dir(self._root)
         for d in sd.iterdir():
             if not d.is_dir():
                 continue
@@ -390,7 +406,7 @@ class SessionRegistry:
 
     def list_all(self) -> list[SessionEntry]:
         result = []
-        sd = _sessions_dir()
+        sd = _sessions_dir(self._root)
         for d in sd.iterdir():
             if not d.is_dir():
                 continue
@@ -406,15 +422,11 @@ class SessionRegistry:
     def get_by_role(self, role: str) -> list[SessionEntry]:
         return [e for e in self.list_all() if e.role == role]
 
-    @staticmethod
-    def handoff_path(name: str, step: str) -> Path:
-        return _sessions_dir() / name / f"handoff-{step}.yaml"
+    def handoff_path(self, name: str, step: str) -> Path:
+        return session_handoff_path(name, step, root=self._root)
 
-    @staticmethod
-    def log_path(name: str) -> Path:
-        p = _sessions_dir() / name / "log.jsonl"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        return p
+    def log_path(self, name: str) -> Path:
+        return session_log_path(name, root=self._root)
 
 
 _registry: SessionRegistry | None = None
@@ -427,18 +439,20 @@ def get_registry() -> SessionRegistry:
     return _registry
 
 
-def save_session_id(name: str, session_id: str, model: str | None = None) -> None:
+def save_session_id(name: str, session_id: str, model: str | None = None,
+                    *, root: Path | None = None) -> None:
     """Persist a session's resume id, plus the model and brain it runs under.
 
     ``model=None`` leaves any recorded model untouched (for callers that do
     not know it); clearing the id (``session_id=""``) clears the model and
     brain records too, so a fresh session never inherits a stale note. The
     brain record (#642) is the session's provenance: a resume token is only
-    meaningful to the brain that minted it.
+    meaningful to the brain that minted it. ``root=None`` means the process's
+    bound root; multi-team hosts pass the target root explicitly.
     """
     from bobi.brain import get_brain
 
-    sd = _sessions_dir()
+    sd = _sessions_dir(root)
     (sd / f"{name}.id").write_text(session_id)
     model_path = sd / f"{name}.model"
     brain_path = sd / f"{name}.brain"
@@ -449,12 +463,12 @@ def save_session_id(name: str, session_id: str, model: str | None = None) -> Non
         if model is not None:
             model_path.write_text(model)
         brain_path.write_text(get_brain().name)
-    registry = get_registry()
+    registry = SessionRegistry(root)
     registry.update(name, session_id=session_id)
 
 
-def load_session_id(name: str) -> str:
-    path = _sessions_dir() / f"{name}.id"
+def load_session_id(name: str, *, root: Path | None = None) -> str:
+    path = _sessions_dir(root) / f"{name}.id"
     if path.exists():
         return path.read_text().strip()
     return ""
@@ -524,6 +538,6 @@ def log_activity(event: str, data: dict | None = None, session: str = "") -> Non
     entry = {"event": event, "ts": time.time()}
     if data:
         entry.update(data)
-    log_path = SessionRegistry.log_path(session)
+    log_path = session_log_path(session)
     with open(log_path, "a") as f:
         f.write(json.dumps(entry) + "\n")

@@ -148,7 +148,7 @@ def clear_manager_session(project_path: Path) -> None:
     from bobi.config import clear_bubble_state
     from bobi.sdk import save_session_id
 
-    save_session_id(manager_session_name(project_path), "")
+    save_session_id(manager_session_name(project_path), "", root=project_path)
     clear_bubble_state(project_path)
     for sub in ("deployments", "cursors"):
         shutil.rmtree(paths.state_path(project_path) / sub, ignore_errors=True)
@@ -230,6 +230,13 @@ def build_startup_info(
 
 
 def _bind(project_path: Path) -> Path:
+    """Bind this process's identity to *project_path* (see paths.bind_root).
+
+    Only the run-in-this-process entry points (`run_team_foreground`,
+    `run_manager_from_config`) bind: they ARE the team process. Everything
+    else takes the root as an explicit argument so one process (the webapp)
+    can service any number of teams without mutating process state (#706).
+    """
     from bobi.sdk import set_project_root
 
     project_path = Path(project_path)
@@ -295,10 +302,10 @@ def _wait_for_manager_entry(
     manager_name: str,
     timeout: float,
 ) -> SessionEntry:
-    from bobi.sdk import get_registry
+    from bobi.sdk import SessionRegistry
 
     deadline = time.monotonic() + timeout
-    registry = get_registry()
+    registry = SessionRegistry(project_path)
     while time.monotonic() < deadline:
         for entry in registry.list_active():
             if entry.name == manager_name:
@@ -336,7 +343,7 @@ def spawn_team(
     subscribe: Iterable[str] = (),
 ) -> SpawnResult:
     """Spawn the manager detached and return without waiting for registration."""
-    project_path = _bind(project_path)
+    project_path = Path(project_path)
     cfg = _load_config_or_raise(project_path)
     # Select the team's brain before the in-process preflight below: the MCP
     # probe builds a real brain session in THIS process (#655), which may be
@@ -418,7 +425,7 @@ def start_team(
 ) -> LaunchResult:
     """Spawn the manager detached, wait for registration, and return its entry."""
     spawned = spawn_team(project_path, fresh=fresh, subscribe=subscribe)
-    project_path = _bind(project_path)
+    project_path = Path(project_path)
     cfg = _load_config_or_raise(project_path)
     role = cfg.entry_role
     manager_name = manager_session_name(project_path, role)
@@ -639,7 +646,7 @@ def stop_team(project_path: Path, *, force: bool = False) -> StopResult:
     """Stop the selected manager process."""
     import signal
 
-    project_path = _bind(project_path)
+    project_path = Path(project_path)
     pid_path = paths.manager_pid_path(project_path)
     result_kwargs: dict[str, object] = {}
 
@@ -679,7 +686,7 @@ def stop_team(project_path: Path, *, force: bool = False) -> StopResult:
 
     from bobi.kb.embedder import stop as stop_embedder
 
-    stop_embedder()
+    stop_embedder(project_path)
 
     from bobi.events.server import health
 
@@ -701,17 +708,17 @@ def restart_team(
 
 def team_status(project_path: Path) -> TeamStatus:
     """Return manager and active-agent status without formatting."""
-    project_path = _bind(project_path)
+    project_path = Path(project_path)
     pid_path = paths.manager_pid_path(project_path)
     pid = _read_pid(pid_path) if pid_path.exists() else 0
     manager_running = bool(pid and _pid_alive(pid))
 
-    from bobi.sdk import get_registry
+    from bobi.sdk import SessionRegistry
 
     return TeamStatus(
         manager_running=manager_running,
         manager_pid=pid if manager_running else 0,
-        active_agents=get_registry().list_active(),
+        active_agents=SessionRegistry(project_path).list_active(),
     )
 
 
@@ -721,16 +728,16 @@ def list_agents(project_path: Path) -> list[SessionEntry]:
 
 def resolve_address(project_path: Path, to: str | None = None) -> str | None:
     """Resolve a friendly session address to an actual session name."""
-    project_path = _bind(project_path)
+    project_path = Path(project_path)
 
     from bobi.config import Config
-    from bobi.sdk import get_registry
+    from bobi.sdk import SessionRegistry
 
     if to is not None and to != "manager":
         return to
 
     roles = list(dict.fromkeys([Config.load(project_path).entry_role, "manager"]))
-    registry = get_registry()
+    registry = SessionRegistry(project_path)
     for role in roles:
         managers = registry.get_by_role(role)
         active = [m for m in managers if m.status in ("idle", "running", "starting")]
@@ -751,7 +758,7 @@ def send_message(
     sender: str = "cli",
 ) -> MessageResult:
     """Send a message through the shared inbox transport."""
-    project_path = _bind(project_path)
+    project_path = Path(project_path)
     address = resolve_address(project_path, session)
     if not address:
         target = session or "manager"
@@ -759,7 +766,8 @@ def send_message(
 
     from bobi.inbox import deliver
 
-    ok, response = deliver(address, text, sender=sender, wait=wait, timeout=timeout)
+    ok, response = deliver(address, text, sender=sender, wait=wait,
+                           timeout=timeout, root=project_path)
     if not ok:
         raise MessageDeliveryError(response)
     return MessageResult(address=address, response=response)
@@ -778,7 +786,7 @@ def ask(
     Only addresses sessions that are actually live — a caller (e.g. a web UI)
     can never fan a message at an arbitrary name. The exchange is appended to
     the session's ``webui-chat.jsonl`` so a chat panel survives refresh."""
-    project_path = _bind(project_path)
+    project_path = Path(project_path)
     if agent not in {e.name for e in list_agents(project_path)}:
         raise MessageDeliveryError(f"unknown agent '{agent}'")
 

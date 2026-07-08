@@ -139,7 +139,7 @@ class TestWorkflowCrossModelContinuation:
 
         assert result is True
         handoff = yaml.safe_load(
-            SessionRegistry.handoff_path(session_name, "recall").read_text()
+            SessionRegistry().handoff_path(session_name, "recall").read_text()
         )
         assert "PANGOLIN" in str(handoff.get("word", "")).upper(), handoff
 

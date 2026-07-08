@@ -232,7 +232,7 @@ def clean_session(bobi_env):
         from bobi.sdk import get_registry, SessionRegistry
         registry = get_registry()
         registry.mark_done(name)
-        session_dir = SessionRegistry.session_dir(name)
+        session_dir = registry.session_dir(name)
         if session_dir.exists():
             shutil.rmtree(session_dir)
 
@@ -242,6 +242,6 @@ def clean_session(bobi_env):
         from bobi.sdk import get_registry, SessionRegistry
         registry = get_registry()
         registry.mark_done(name)
-        session_dir = SessionRegistry.session_dir(name)
+        session_dir = registry.session_dir(name)
         if session_dir.exists():
             shutil.rmtree(session_dir)

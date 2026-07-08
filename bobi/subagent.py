@@ -21,7 +21,8 @@ from typing import Any, Callable
 
 from bobi.sdk import (
     save_session_id, load_resumable_session_id, log_activity,
-    get_registry, SessionEntry, SessionRegistry,
+    session_handoff_path, session_log_path,
+    get_registry, SessionEntry,
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
 from bobi.transient import is_transient_api_error
@@ -92,7 +93,7 @@ def _build_prompt(phase: str, run_key: str, role: str = "", context: str = "") -
     if context:
         parts.append(context)
     session_name = _session_name(run_key, role=role, phase=phase)
-    handoff_path = SessionRegistry.handoff_path(session_name, phase)
+    handoff_path = session_handoff_path(session_name, phase)
     parts.append(
         f"After completing this phase, write your handoff file at "
         f"`{handoff_path}` with your results."
@@ -1030,7 +1031,7 @@ def launch_agent(
             timeout=timeout,
         ))
 
-    log_file = SessionRegistry.log_path(session_name)
+    log_file = session_log_path(session_name)
     # child_agent_env() is the single parent-to-child propagation contract:
     # identity, brain selection, tool PATH, and credential material all flow
     # through one helper instead of one-off launch-site patches.

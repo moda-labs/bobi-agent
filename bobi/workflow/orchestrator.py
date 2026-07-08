@@ -24,7 +24,7 @@ import yaml
 
 from bobi.sdk import (
     get_registry, save_session_id, load_session_id,
-    log_activity, SessionEntry, SessionRegistry,
+    log_activity, SessionEntry, session_handoff_path,
     TERMINAL_COMPLETED, TERMINAL_FAILED, ACTIVE_STATUSES,
 )
 from bobi.subagent import (
@@ -1092,7 +1092,7 @@ def _build_step_prompt(step: StepDef, ctx: VariableContext, session_name: str = 
     prompt = ctx.resolve(step.prompt)
 
     if step.handoff.required or step.handoff.optional:
-        handoff_path = SessionRegistry.handoff_path(session_name, step_name) if session_name else "<session>/handoff-<step>.yaml"
+        handoff_path = session_handoff_path(session_name, step_name) if session_name else "<session>/handoff-<step>.yaml"
         prompt += f"\n\nWhen complete, write your handoff file at `{handoff_path}` as YAML:"
         prompt += "\n```yaml"
         for field in step.handoff.required:
@@ -1106,7 +1106,7 @@ def _build_step_prompt(step: StepDef, ctx: VariableContext, session_name: str = 
 
 def _read_handoff(session_name: str, step_name: str) -> dict:
     """Read the handoff YAML for a step."""
-    path = SessionRegistry.handoff_path(session_name, step_name)
+    path = session_handoff_path(session_name, step_name)
     if not path.exists():
         return {}
     try:
