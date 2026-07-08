@@ -8,12 +8,13 @@ Python (the #454 lesson: never let a mocked model bypass the gate).
 """
 
 import queue
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from bobi import history
+from bobi import history, paths
 from bobi.monitors import curator as curator_mod
 from bobi.monitors.schema import Monitor
 from bobi.monitors.scheduler import MonitorScheduler
@@ -287,6 +288,123 @@ class TestCuratorDispatch:
             h.sched._spawn_curator(monitor, [tmp_path])
         assert h.captured == {}  # nothing dispatched
 
+    def test_failed_curator_result_publishes_monitor_error(self, tmp_path, monitor):
+        h = _CuratorHarness(tmp_path, [_row(10, "a")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        h.captured["on_result"]({"success": False, "summary": "bad output"})
+        assert h.published == [(
+            "system/monitor.error",
+            {
+                "monitor": "policy-curator",
+                "flavor": "curator",
+                "reason": "indeterminate-result",
+                "detail": "bad output",
+            },
+        )]
+
+
+class TestCuratorTaskTransport:
+    def test_default_spawn_curator_passes_short_file_pointer_and_cleans_up(
+        self, tmp_path, monkeypatch, monitor
+    ):
+        from bobi.monitors.scheduler import _default_spawn_curator
+
+        paths.bind_root(tmp_path)
+        full_task = "x" * 205_000
+        captured = {}
+        results = []
+
+        class FakeProc:
+            def communicate(self, timeout=None):
+                return '{"success": true, "updated": false}\n', None
+
+        def fake_popen(cmd, **kwargs):
+            pointer = cmd[cmd.index("--task") + 1]
+            captured["cmd"] = cmd
+            captured["pointer"] = pointer
+            task_path = Path(pointer.splitlines()[2])
+            captured["task_path"] = task_path
+            assert len(pointer) < 1000
+            assert task_path.read_text() == full_task
+            return FakeProc()
+
+        monkeypatch.setattr("subprocess.Popen", fake_popen)
+        _default_spawn_curator(monitor, None, full_task, results.append)
+
+        for _ in range(100):
+            if results:
+                break
+            time.sleep(0.01)
+
+        assert results == [{"success": True, "updated": False}]
+        assert "--task" in captured["cmd"]
+        assert not captured["task_path"].exists()
+
+    def test_monitor_spawn_rejects_oversized_argv_and_publishes_error(
+        self, tmp_path, monkeypatch, monitor
+    ):
+        from bobi.monitors.scheduler import _spawn_monitor_agent
+
+        paths.bind_root(tmp_path)
+        published = []
+        cleaned = []
+        results = []
+
+        monkeypatch.setattr(
+            "bobi.monitors.scheduler._default_publish",
+            lambda event, data: published.append((event, data)) or True,
+        )
+        monkeypatch.setattr(
+            "subprocess.Popen",
+            lambda *args, **kwargs: pytest.fail("Popen should not be called"),
+        )
+
+        _spawn_monitor_agent(
+            ["bobi", "--task", "x" * 100_001],
+            monitor.name,
+            "curator",
+            lambda out: {"success": True},
+            results.append,
+            cleanup=lambda: cleaned.append(True),
+        )
+
+        assert results == [None]
+        assert cleaned == [True]
+        assert published[0][0] == "system/monitor.error"
+        assert published[0][1]["reason"] == "spawn-failed"
+        assert "argv element" in published[0][1]["detail"]
+
+    def test_monitor_spawn_uses_injected_publisher_for_errors(
+        self, tmp_path, monkeypatch, monitor
+    ):
+        from bobi.monitors.scheduler import _spawn_monitor_agent
+
+        paths.bind_root(tmp_path)
+        default_published = []
+        injected_published = []
+
+        monkeypatch.setattr(
+            "bobi.monitors.scheduler._default_publish",
+            lambda event, data: default_published.append((event, data)) or True,
+        )
+        monkeypatch.setattr(
+            "subprocess.Popen",
+            lambda *args, **kwargs: pytest.fail("Popen should not be called"),
+        )
+
+        _spawn_monitor_agent(
+            ["bobi", "--task", "x" * 100_001],
+            monitor.name,
+            "curator",
+            lambda out: {"success": True},
+            lambda result: None,
+            publish=lambda event, data: injected_published.append((event, data)) or True,
+        )
+
+        assert default_published == []
+        assert injected_published[0][0] == "system/monitor.error"
+
 
 # ---------------------------------------------------------------------------
 # one-time seed (in-scope item 7) — distill legacy journals into first policy.md
@@ -399,3 +517,44 @@ class TestPolicyUpdatedDelivery:
             "payload": {"summary": "x", "urgent": False},
         }])
         assert delivered == []
+
+
+class TestMonitorErrorDelivery:
+    def test_monitor_error_is_pushed_actively(self):
+        from bobi.events.drain import _MONITOR_ERROR_DELIVERED
+
+        _MONITOR_ERROR_DELIVERED.clear()
+        delivered = _run_drain_one_batch([{
+            "type": "system/monitor.error",
+            "payload": {
+                "monitor": "policy-curator",
+                "flavor": "curator",
+                "reason": "spawn-failed",
+                "detail": "argv element too large",
+            },
+        }])
+        assert len(delivered) == 1
+        assert delivered[0].sender == "monitor-error"
+        assert "policy-curator" in delivered[0].text
+        assert "argv element too large" in delivered[0].text
+
+    def test_duplicate_monitor_error_is_suppressed(self):
+        from bobi.events.drain import _MONITOR_ERROR_DELIVERED
+
+        _MONITOR_ERROR_DELIVERED.clear()
+        event = {
+            "type": "system/monitor.error",
+            "payload": {
+                "monitor": "policy-curator",
+                "flavor": "curator",
+                "reason": "spawn-failed",
+                "detail": "argv element too large",
+            },
+        }
+        delivered = _run_drain_one_batch([event])
+        assert len(delivered) == 1
+        delivered = _run_drain_one_batch([event])
+        assert delivered == []
+        delivered = _run_drain_one_batch([event])
+        assert len(delivered) == 1
+        assert "Repeated 3 times" in delivered[0].text
