@@ -242,7 +242,7 @@ jobs:
           )
 
           for spec in "${canaries[@]}"; do
-            IFS=: read -r name app policy <<<"$spec"
+            IFS=: read -r _deployment app policy <<<"$spec"
             if ! "$FLY" status -a "$app" >/dev/null 2>&1; then
               if [ "$policy" = required ]; then
                 echo "::error::$app does not exist — the release canary gate cannot run"
