@@ -33,17 +33,16 @@ class BobiEnv:
     env: dict[str, str]
 
 
-@pytest.fixture(scope="session")
-def bobi_env(tmp_path_factory):
-    """Create a fully isolated Bobi home in a temp directory.
+def _provision_bobi_env(base: Path, *, agent_name: str, brain: str | None):
+    """Build + install an isolated Bobi home and return its :class:`BobiEnv`.
 
-    Session-scoped: created once, shared across all integration tests.
-    Includes a real git repo at the selected run root (for worktree support),
-    config files, workflows, and empty credentials.
+    The ONE scaffold both the default (Claude) integration fixture and the
+    stub-brain fixture share, parameterized only on the brain: ``brain=None``
+    leaves the framework default (Claude), ``brain="stub"`` installs the public
+    deterministic stub brain and marks the env so ``make_session`` accepts it.
+    Caller owns BOBI_HOME/BOBI_ROOT save/restore around the yielded value.
     """
-    base = tmp_path_factory.mktemp("bobi")
     home_dir = base / "home"
-    agent_name = "test-repo"
     project_path = home_dir / "agents" / agent_name / "run"
     package_dir = project_path / "package"
     state_dir = project_path / "state"
@@ -58,15 +57,13 @@ def bobi_env(tmp_path_factory):
               state_dir / "workflow" / "runs", state_dir / "logs"]:
         d.mkdir(parents=True, exist_ok=True)
 
-    old_home = os.environ.get("BOBI_HOME")
-    old_root = os.environ.get("BOBI_ROOT")
     os.environ["BOBI_HOME"] = str(home_dir)
     os.environ.pop("BOBI_ROOT", None)
 
     # Build a local agent team, then install it via the machine-scoped CLI.
     pack_dir = base / "software_team"
     pack_dir.mkdir()
-    (pack_dir / "agent.yaml").write_text(yaml.dump({
+    agent_yaml = {
         "version": "1.0.0",
         "agent": "software_team",
         "entry_point": "manager",
@@ -74,7 +71,10 @@ def bobi_env(tmp_path_factory):
         "services": [
             {"name": "github", "events": True},
         ],
-    }))
+    }
+    if brain:
+        agent_yaml["brain"] = {"kind": brain}
+    (pack_dir / "agent.yaml").write_text(yaml.dump(agent_yaml))
     for role_name, content in [
         ("manager", "# Manager\n\nYou are a test manager agent.\n"),
         ("engineer", "# Engineer\n\nYou are a test engineer agent. Complete tasks quickly.\n"),
@@ -116,6 +116,11 @@ def bobi_env(tmp_path_factory):
         "BOBI_EVENT_SERVER": event_server_url,
         "BOBI_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET,
     }
+    if brain == "stub":
+        # Acknowledge the test-only brain (the make_session gate). BOBI_BRAIN is
+        # set too so in-process resolution picks the stub without agent.yaml.
+        env["BOBI_STUB_BRAIN"] = "1"
+        env["BOBI_BRAIN"] = "stub"
 
     result = subprocess.run(
         [
@@ -143,18 +148,80 @@ def bobi_env(tmp_path_factory):
         cwd=str(project_path), capture_output=True, check=True,
     )
 
+    return BobiEnv(
+        home_dir=home_dir,
+        agent_name=agent_name,
+        project_path=project_path,
+        package_dir=package_dir,
+        state_dir=state_dir,
+        sessions_dir=sessions_dir,
+        workflows_dir=workflows_dir,
+        event_server_url=event_server_url,
+        env=env,
+    )
+
+
+@pytest.fixture(scope="session")
+def claude_bobi_env(tmp_path_factory):
+    """Create a fully isolated Bobi home on the default (Claude) brain.
+
+    Session-scoped: created once, shared across all integration tests.
+    Includes a real git repo at the selected run root (for worktree support),
+    config files, workflows, and empty credentials.
+    """
+    old_home = os.environ.get("BOBI_HOME")
+    old_root = os.environ.get("BOBI_ROOT")
+    env = _provision_bobi_env(tmp_path_factory.mktemp("bobi"),
+                              agent_name="test-repo", brain=None)
     try:
-        yield BobiEnv(
-            home_dir=home_dir,
-            agent_name=agent_name,
-            project_path=project_path,
-            package_dir=package_dir,
-            state_dir=state_dir,
-            sessions_dir=sessions_dir,
-            workflows_dir=workflows_dir,
-            event_server_url=event_server_url,
-            env=env,
-        )
+        yield env
+    finally:
+        if old_home is None:
+            os.environ.pop("BOBI_HOME", None)
+        else:
+            os.environ["BOBI_HOME"] = old_home
+        if old_root is None:
+            os.environ.pop("BOBI_ROOT", None)
+        else:
+            os.environ["BOBI_ROOT"] = old_root
+
+
+@pytest.fixture(scope="session")
+def bobi_env(claude_bobi_env):
+    """Default isolated env (Claude brain) - the name the bulk of the suite uses.
+
+    A thin alias so existing tests keep the ``bobi_env`` name while the session
+    scaffold lives under ``claude_bobi_env`` (the sibling of ``stub_bobi_env``).
+    Session-scoped like the original so module/session-scoped consumers (e.g.
+    ``test_event_server``'s ``event_server`` fixture) can still depend on it.
+    """
+    return claude_bobi_env
+
+
+@pytest.fixture(scope="module")
+def stub_bobi_env(tmp_path_factory):
+    """A sibling of :func:`bobi_env` running the public stub brain.
+
+    The same isolated scaffold, but the installed team selects ``brain: stub``
+    so a REAL manager boots to idle with no ``claude`` CLI or credentials -
+    letting the runtime-plumbing integration tests (start/stop/status/restart,
+    event flow) run deterministically in the fast lane instead of behind
+    ``requires_claude``. It is the same stub brain the private deploy-package
+    sidecar e2e uses, so both surfaces share one test double.
+
+    Module-scoped (not session): the stub suites each start and churn real
+    managers / a local event server, so a per-file home keeps one suite's
+    leftover runtime state from polluting the next (the Claude fixture can stay
+    session-scoped because those tests are gated and rarely run together).
+    """
+    old_home = os.environ.get("BOBI_HOME")
+    old_root = os.environ.get("BOBI_ROOT")
+    # Same agent_name as bobi_env (isolated in its own home) so tests that
+    # hardcode "test-repo" session names work against either fixture.
+    env = _provision_bobi_env(tmp_path_factory.mktemp("bobi-stub"),
+                              agent_name="test-repo", brain="stub")
+    try:
+        yield env
     finally:
         if old_home is None:
             os.environ.pop("BOBI_HOME", None)
@@ -168,20 +235,39 @@ def bobi_env(tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def _bind_bobi_env_for_test(request):
-    """Bind the shared integration Bobi Agent only for tests that use it."""
-    if "bobi_env" not in request.fixturenames:
+    """Bind the shared integration Bobi Agent only for tests that use it.
+
+    Binds whichever isolated home the test requested - the default Claude
+    ``bobi_env`` or the ``stub_bobi_env`` - so in-process code (``paths``,
+    ``set_project_root``) resolves the same run root the subprocesses use.
+    """
+    fixture = next((f for f in ("bobi_env", "stub_bobi_env")
+                    if f in request.fixturenames), None)
+    if fixture is None:
         yield
         return
 
     from bobi import paths
     from bobi.sdk import set_project_root
 
-    bobi_env = request.getfixturevalue("bobi_env")
-    paths.bind_root(bobi_env.project_path)
-    set_project_root(bobi_env.project_path)
+    env = request.getfixturevalue(fixture)
+    paths.bind_root(env.project_path)
+    set_project_root(env.project_path)
+    # For the stub env, pin the brain in os.environ too so BOTH in-process
+    # resolution and any manager the test spawns (which inherits os.environ)
+    # select the gated stub brain. Saved/restored around the test.
+    brain_pins = {k: env.env[k] for k in ("BOBI_BRAIN", "BOBI_STUB_BRAIN")
+                  if k in env.env}
+    saved = {k: os.environ.get(k) for k in brain_pins}
+    os.environ.update(brain_pins)
     try:
         yield
     finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         set_project_root(None)
         paths.bind_root(None)
 
@@ -192,9 +278,8 @@ requires_claude = pytest.mark.skipif(
 )
 
 
-@pytest.fixture
-def cli_run(bobi_env):
-    """Run bobi CLI commands against the isolated install."""
+def _make_cli_run(env_obj: BobiEnv):
+    """Return a ``bobi`` CLI runner bound to *env_obj* (Claude or stub)."""
     def _run(*args, timeout=10):
         explicit_top_level = {
             "agent", "agents", "deploy", "destroy", "supervise", "version",
@@ -207,19 +292,60 @@ def cli_run(bobi_env):
         }
         argv = list(args)
         if argv and argv[0] not in explicit_top_level:
-            argv = ["agent", bobi_env.agent_name, *argv]
+            argv = ["agent", env_obj.agent_name, *argv]
+        # Rebuild from live os.environ each call (so a test's monkeypatch is
+        # honored), then layer the env's fixed overrides - including the
+        # stub-brain pins that make the subprocess select the stub.
         env = {
             **os.environ,
-            "BOBI_HOME": str(bobi_env.home_dir),
-            "BOBI_EVENT_SERVER": bobi_env.event_server_url,
+            "BOBI_HOME": str(env_obj.home_dir),
+            "BOBI_EVENT_SERVER": env_obj.event_server_url,
             "BOBI_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET,
         }
+        for key in ("BOBI_BRAIN", "BOBI_STUB_BRAIN"):
+            if key in env_obj.env:
+                env[key] = env_obj.env[key]
         return subprocess.run(
             [sys.executable, "-m", "bobi.cli", *argv],
             capture_output=True, text=True, timeout=timeout,
-            cwd=str(bobi_env.project_path), env=env,
+            cwd=str(env_obj.project_path), env=env,
         )
     return _run
+
+
+@pytest.fixture
+def cli_run(bobi_env):
+    """Run bobi CLI commands against the isolated (Claude) install."""
+    return _make_cli_run(bobi_env)
+
+
+@pytest.fixture
+def stub_cli_run(stub_bobi_env):
+    """Run bobi CLI commands against the stub-brain install (no claude CLI)."""
+    return _make_cli_run(stub_bobi_env)
+
+
+# The "without and with real claude" tiers as one axis: a runtime-plumbing test
+# runs on the stub (fast lane, always) AND on real Claude (gated, so it still
+# proves the real manager/subagent path when the CLI is present). Mirrors the
+# private sidecar e2e's brain parametrization.
+BRAIN_PARAMS = [
+    pytest.param("stub", id="stub"),
+    pytest.param("claude", id="claude", marks=requires_claude),
+]
+
+
+@pytest.fixture(params=BRAIN_PARAMS)
+def dual_brain_env(request):
+    """An isolated env parametrized over both brains (stub + claude)."""
+    name = "stub_bobi_env" if request.param == "stub" else "claude_bobi_env"
+    return request.getfixturevalue(name)
+
+
+@pytest.fixture
+def dual_brain_cli_run(dual_brain_env):
+    """CLI runner bound to whichever brain ``dual_brain_env`` selected."""
+    return _make_cli_run(dual_brain_env)
 
 
 @pytest.fixture

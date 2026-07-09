@@ -35,13 +35,18 @@ from bobi.brain.gateway import (
     GATEWAY_SMALL_MODEL_ENV,
     GatewayBrain,
 )
+from bobi.brain.stub import STUB_BRAIN_ENV, StubBrain
 
 # Registry of available brains by kind. Gemini/Grok adapters register here as
-# they land (#485 phase 4).
+# they land (#485 phase 4). ``stub`` is a test-only brain: registered so the
+# public integration suites and the private deploy e2e resolve the identical
+# brain, but ``StubBrain.make_session`` refuses to run unless BOBI_STUB_BRAIN is
+# set, so an accidental production selection fails loud.
 _BRAINS: dict[str, BrainFactory] = {
     "claude": ClaudeBrain(),
     "codex": CodexBrain(),
     "gateway": GatewayBrain(),
+    "stub": StubBrain(),
 }
 
 DEFAULT_BRAIN = "claude"
@@ -265,6 +270,8 @@ __all__ = [
     "ClaudeBrain",
     "CodexBrain",
     "GatewayBrain",
+    "StubBrain",
+    "STUB_BRAIN_ENV",
     "DeferredTool",
     "StreamDelta",
     "TurnResult",

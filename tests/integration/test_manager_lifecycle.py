@@ -1,22 +1,34 @@
 """Integration tests for manager start/stop lifecycle.
 
-Exercises the full named start → status → stop cycle via the CLI
-against the isolated install. Requires the `claude` CLI.
+Exercises the full named start → status → stop cycle via the CLI against the
+isolated install. Runs on BOTH brains (``dual_brain_env``): the public stub
+(fast lane, always) and real Claude (gated on the ``claude`` CLI). These are
+runtime-plumbing assertions (pid/log/status/restart, drain-loop readiness), so
+the stub proves them deterministically in CI while the Claude leg still exercises
+a real manager locally. The same stub brain drives the private sidecar e2e.
 """
 
-import json
 import os
 import signal
 import time
 
 import pytest
 
-from .conftest import requires_claude
 
-pytestmark = pytest.mark.claude
+# Bind this file's ``bobi_env`` / ``cli_run`` to the dual-brain (stub + claude)
+# variants, so every lifecycle test below runs once per brain without touching
+# its body. The autouse binder in conftest still sees "bobi_env" in the fixture
+# graph, resolves it to the selected env, and pins the stub brain on that leg.
+@pytest.fixture
+def bobi_env(dual_brain_env):
+    return dual_brain_env
 
 
-@requires_claude
+@pytest.fixture
+def cli_run(dual_brain_cli_run):
+    return dual_brain_cli_run
+
+
 @pytest.mark.timeout(120)
 class TestManagerStartStop:
     def test_launch_team_service_starts_manager(self, bobi_env):
@@ -177,7 +189,6 @@ class TestManagerStartStop:
         _wait_for_exit_file(pid_file)
 
 
-@requires_claude
 @pytest.mark.timeout(180)
 class TestManagerMessaging:
     """Tests that require a fully booted manager with drain loop active."""
@@ -221,7 +232,6 @@ class TestManagerMessaging:
         assert len(result.stdout.strip()) > 0
 
 
-@requires_claude
 @pytest.mark.timeout(30)
 class TestManagerNotRunning:
     """Tests for message/ask when the manager is stopped."""

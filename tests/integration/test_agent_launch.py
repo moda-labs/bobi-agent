@@ -1,9 +1,12 @@
 """Integration tests for agent launching — adhoc and multi-step workflows.
 
-Uses a short 2-step test workflow instead of the full issue-lifecycle
-so tests complete quickly. All session state goes into the isolated install.
-
-Requires the `claude` CLI to be installed. Skipped in CI.
+Uses a short 2-step test workflow instead of the full issue-lifecycle so tests
+complete quickly. All session state goes into the isolated install. Runs on BOTH
+brains (``dual_brain_env``): the public stub (fast lane, always) and real Claude
+(gated). These assert launch + completion plumbing (the subagent/workflow
+completes and writes its session state/logs), so the stub proves them in CI while
+the Claude leg exercises a real subagent locally - the same stub the private
+sidecar e2e uses.
 """
 
 import json
@@ -12,12 +15,21 @@ import time
 import pytest
 
 from bobi.sdk import _sessions_dir
-from .conftest import requires_claude
-
-pytestmark = pytest.mark.claude
 
 
-@requires_claude
+# Bind this file's ``bobi_env`` / ``cli_run`` to the dual-brain (stub + claude)
+# variants (see test_manager_lifecycle for the pattern) so subagents launch once
+# per brain while the test bodies stay untouched.
+@pytest.fixture
+def bobi_env(dual_brain_env):
+    return dual_brain_env
+
+
+@pytest.fixture
+def cli_run(dual_brain_cli_run):
+    return dual_brain_cli_run
+
+
 @pytest.mark.timeout(120)
 class TestAdhocAgentLaunch:
 
@@ -97,7 +109,6 @@ class TestAdhocAgentLaunch:
         assert len(log_content) > 0
 
 
-@requires_claude
 @pytest.mark.timeout(180)
 class TestMultiStepWorkflowLaunch:
 
