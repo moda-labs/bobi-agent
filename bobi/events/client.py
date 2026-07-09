@@ -260,7 +260,7 @@ class EventServerClient:
 
     def _heartbeat(self, ws: "websocket.WebSocketApp",
                    hb_stop: threading.Event) -> None:
-        """Per-connection watchdog: ping the server, force-reconnect if deaf.
+        """Per-connection keepalive: ping the server, force-reconnect if deaf.
 
         Runs for the life of one connection. ``hb_stop`` is set when that
         connection closes, so the loop never outlives its socket.
@@ -378,12 +378,12 @@ class EventServerClient:
             f"{self.server_url.replace('https://', 'wss://').replace('http://', 'ws://')}"
             f"/deployments/{self.deployment_id}/subscribe?last_seen={last_seen}"
         )
-        # One watchdog per connection; closing the socket sets this so the
+        # One keepalive per connection; closing the socket sets this so the
         # heartbeat thread never outlives its socket.
         hb_stop = threading.Event()
 
         def on_open(ws):
-            # Baseline the pong clock so the watchdog has a reference before the
+            # Baseline the pong clock so the keepalive has a reference before the
             # first beat completes, then run the heartbeat for this connection.
             self._last_pong_at = time.monotonic()
             threading.Thread(target=self._heartbeat, args=(ws, hb_stop),
@@ -401,7 +401,7 @@ class EventServerClient:
                 self._last_connected_at = time.monotonic()
                 self._reconnect_delay = 1
                 # Treat the connect frame as a fresh liveness proof so the
-                # watchdog doesn't immediately fire on a just-opened socket.
+                # keepalive doesn't immediately fire on a just-opened socket.
                 self._last_pong_at = time.monotonic()
                 # First connect of the process is worth surfacing; routine
                 # reconnects after CF cycling are not, so they go to debug.
@@ -449,7 +449,7 @@ class EventServerClient:
             log.debug(f"Event client WebSocket error: {error}")
 
         def on_close(ws, close_status, close_msg):
-            hb_stop.set()  # stop this connection's heartbeat watchdog
+            hb_stop.set()  # stop this connection's heartbeat loop
             log.debug(f"Event client disconnected: {close_status} {close_msg}")
 
         self._ws = websocket.WebSocketApp(
@@ -465,11 +465,11 @@ class EventServerClient:
             self._ws.run_forever(ping_interval=30, ping_timeout=10,
                                  sslopt={"context": ssl_context})
         finally:
-            # Belt-and-suspenders: ensure the watchdog stops even if on_close
+            # Belt-and-suspenders: ensure the keepalive stops even if on_close
             # never fired (e.g. run_forever raised before opening). _connected
             # is left as-is for routine reconnects (sub-second, lossless) so
-            # subscribe-before-publish waiters aren't stalled; the deaf watchdog
-            # clears it explicitly when the path is genuinely dead.
+            # subscribe-before-publish waiters aren't stalled; the deaf-socket
+            # keepalive clears it explicitly when the path is genuinely dead.
             hb_stop.set()
 
     def _safe_resubscribe(self, cb: callable) -> None:

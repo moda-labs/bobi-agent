@@ -3,7 +3,7 @@
 Agent replies no longer go through here: since #190 Phase 2 they flow
 through the event server's channel gateway (``bobi/events/gateway.py``),
 which owns formatting and delivery. What remains is the direct-token
-path used by system notifications (watchdog, monitors, workflow
+path used by system notifications (supervisor sidecar, monitors, workflow
 orchestrator, auth bootstrap) and channel-reference resolution for setup.
 
 All errors are raised unless documented otherwise — callers decide
