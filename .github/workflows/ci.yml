@@ -27,8 +27,8 @@ jobs:
 
       - name: Install dependencies
         # Public product only - the bobi_deploy plugin's suite (and the
-        # two-wheel install smoke) run in deploy-package.yml, which moves to
-        # the private repo at cut time (repo-split phase 1).
+        # two-wheel install smoke) run in the private deploy repo's CI
+        # (repo split).
         run: pip install -e ".[dev,kb]"
 
       - name: Run unit tests
@@ -48,7 +48,7 @@ jobs:
           ./actionlint -color
 
   event-server:
-    name: Event server (Worker/miniflare)
+    name: Event server (events-core + local)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -70,7 +70,7 @@ jobs:
         working-directory: event-server
         run: npx tsc --noEmit
 
-      - name: Run Worker tests
+      - name: Run event-server tests
         working-directory: event-server
         run: npx vitest run
 
@@ -192,9 +192,9 @@ jobs:
           --timeout=60 -v
 
   # NOTE: the wrangler-dev integration job (Worker adapter under a real
-  # `wrangler dev`) lives in worker-integration.yml - the Worker runtime moves
-  # to the private repo at cut time (repo-split phase 1), so its CI moves as a
-  # whole file.
+  # `wrangler dev`) lives in the private deploy repo (repo split), which runs
+  # this repo's tests/integration/test_event_server.py against its worker via
+  # BOBI_TEST_ES_DIR as the protocol-compatibility gate.
 
   # NOTE: the real-Claude integration suite (test_agent_launch / manager_lifecycle
   # / manager_sdk / e2e_event_flow / messaging / setup_flow) ran on a self-hosted

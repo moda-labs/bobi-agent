@@ -74,7 +74,7 @@ changes often, adapts to the host, or is easier to describe than to script).
 |---|---|---|
 | Who writes the recipe | You | The bootstrap agent, once, in CI |
 | Reproducible | Byte-for-byte | The **snapshot** is the pinned artifact; two bootstraps can resolve different upstream versions |
-| Cost | None | A one-time agent run per declared dependency set (see `docs/CONTAINERIZED_DEPLOYMENT.md` §2.6.1) |
+| Cost | None | A one-time agent run per declared dependency set (see the private deploy repo's `CONTAINERIZED_DEPLOYMENT.md` §2.6.1) |
 | `bobi deploy` source-build | Works | Refused - deploy never runs the agent; build + push the image in CI and deploy it by `image:` / `team-url:` |
 | When to use | Pinned / security-sensitive / a brain CLI | Loose, human-readable, or fast-moving deps |
 
@@ -443,5 +443,5 @@ tarball.
 - `bobi/build_render.py` - the one renderer that bakes `install`/recipes into the
   Docker hook layer.
 - `bobi/host_caps.py` - the generic `host:` capability model (doctor + deploy).
-- `docs/CONTAINERIZED_DEPLOYMENT.md` §2.6 / §2.6.1 - how the image is built and
-  when the bootstrap agent runs.
+- The private deploy repo's `CONTAINERIZED_DEPLOYMENT.md` §2.6 / §2.6.1 - how
+  the image is built and when the bootstrap agent runs.

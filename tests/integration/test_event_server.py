@@ -1,9 +1,14 @@
-"""Integration tests for the event server.
+"""Integration tests for the event server - the protocol suite.
 
 Parametrized over TWO backends:
-1. **local** — the Node.js local.ts server started via ``ensure_running``
-2. **wrangler** — the Cloudflare Worker via ``wrangler dev`` (local mode,
-   no CF credentials needed)
+1. **local** — the Node.js local.ts server started via ``ensure_running``;
+   the backend this public repo runs in CI.
+2. **wrangler** — a Cloudflare Worker via ``wrangler dev`` (local mode, no
+   CF credentials needed). The worker adapter lives in the private deploy
+   repo (repo split); point ``BOBI_TEST_ES_DIR`` at a checkout of its
+   ``event-server/`` to run this same suite against it - that run is the
+   protocol-compatibility gate between the two repos. Without a worker dir
+   (no wrangler.jsonc at the target) the backend is skipped.
 
 Starts the event server, sends webhook payloads, and verifies events are
 delivered via the WebSocket subscription API.  All state is isolated to
@@ -89,15 +94,27 @@ def _post_event_signed(base_url: str, topic: str, body_dict: dict,
         return json.loads(resp.read())
 
 
+def _wrangler_es_dir() -> Path:
+    """Worker-adapter directory for the wrangler backend.
+
+    Defaults to the in-repo event-server/. The private deploy repo owns the
+    Cloudflare Worker adapter (repo split) and points BOBI_TEST_ES_DIR at its
+    own event-server/ to run this same suite as the protocol-compatibility
+    gate between the pinned public bobi and its worker.
+    """
+    override = os.environ.get("BOBI_TEST_ES_DIR")
+    return Path(override) if override else PACKAGE_ROOT / "event-server"
+
+
 def _has_wrangler() -> bool:
     """Check whether wrangler is installed and runnable for this platform."""
-    wrangler = PACKAGE_ROOT / "event-server" / "node_modules" / ".bin" / "wrangler"
+    wrangler = _wrangler_es_dir() / "node_modules" / ".bin" / "wrangler"
     if not wrangler.exists():
         return False
     try:
         subprocess.run(
             [str(wrangler), "--version"],
-            cwd=str(PACKAGE_ROOT / "event-server"),
+            cwd=str(_wrangler_es_dir()),
             check=True,
             capture_output=True,
             text=True,
@@ -131,9 +148,14 @@ def _event_server_backends():
     backends = []
     if _node_major() >= 20:
         backends.append("local")
-    # wrangler backend is opt-in via the BOBI_TEST_WRANGLER env var or
-    # when wrangler is already installed in event-server/node_modules.
-    if os.environ.get("BOBI_TEST_WRANGLER") == "1" or _has_wrangler():
+    # wrangler backend is opt-in via the BOBI_TEST_WRANGLER env var or when
+    # wrangler is already installed in the target dir - but only where a
+    # worker actually lives (wrangler.jsonc). The public repo has none post
+    # repo-split, so without BOBI_TEST_ES_DIR this skips instead of launching
+    # `wrangler dev` in a configless directory (stale pre-split node_modules
+    # would otherwise hard-fail every wrangler-parametrized test).
+    wants_wrangler = os.environ.get("BOBI_TEST_WRANGLER") == "1" or _has_wrangler()
+    if wants_wrangler and (_wrangler_es_dir() / "wrangler.jsonc").exists():
         backends.append("wrangler")
     return backends
 
@@ -192,7 +214,7 @@ def _start_wrangler_server():
     """Start wrangler dev on a free port, return (base_url, port, cleanup)."""
     import fcntl
 
-    es_dir = PACKAGE_ROOT / "event-server"
+    es_dir = _wrangler_es_dir()
 
     # Ensure node_modules exist
     if not (es_dir / "node_modules").exists():

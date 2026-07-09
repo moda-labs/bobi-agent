@@ -1,23 +1,12 @@
-import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
+import { defineConfig } from "vitest/config";
 
-export default defineWorkersConfig({
+// The specs exercise the runtime-agnostic events-core package and shared
+// webhook pipeline on web-standard APIs (fetch, crypto.subtle, TextEncoder),
+// all present in Node 20+. The Cloudflare Worker adapter and its
+// miniflare-based spec live in the private deploy repo (repo split), which
+// runs this same protocol surface under the workers pool there.
+export default defineConfig({
 	test: {
-		poolOptions: {
-			workers: {
-				// Disable isolated storage — the DELETE path exercises Durable
-				// Object storage, and the pool's transaction-based rollback
-				// triggers "Isolated storage failed" on DO teardown (#305).
-				// Tests are independent enough not to need per-test rollback.
-				isolatedStorage: false,
-				wrangler: { configPath: "./wrangler.jsonc" },
-				miniflare: {
-					bindings: {
-						INTERNAL_DO_SECRET: "test-internal-secret",
-						BOBI_RELEASE_VERSION: "test-version",
-						BOBI_RELEASE_SHA: "test-sha",
-					},
-				},
-			},
-		},
+		environment: "node",
 	},
 });

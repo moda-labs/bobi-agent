@@ -28,7 +28,7 @@
   // The cloud-deploy runbook shipped in-repo (the image, Fly provisioner, and
   // GitOps). Points at the GitHub blob so the finalization screen's link
   // works without a docs site.
-  const DOCS_CLOUD_URL = "https://github.com/moda-labs/bobi-agent/blob/main/docs/CONTAINERIZED_DEPLOYMENT.md";
+  const DOCS_CLOUD_URL = "https://github.com/moda-labs/bobi-agent/blob/main/README.md#cloud-deployment";
   const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4"><path d="M5 12l5 5L19 7"/></svg>';
   const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7"/></svg>';
   const HELP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.2a2.8 2.8 0 0 1 5.4 1c0 1.9-2.7 2.5-2.7 2.5"/><circle cx="12" cy="16.7" r="0.6" fill="currentColor" stroke="none"/></svg>';
@@ -1703,8 +1703,8 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
           <div class="deploy-opt">
             <div class="deploy-head"><span class="deploy-tag">Cloud</span><span class="deploy-sub">always-on, on Fly.io</span></div>
             <p class="deploy-lede">A dedicated container + volume + secrets; the instance needs its own <span class="mono">ANTHROPIC_API_KEY</span>.</p>
-            ${promptRow(`Read ${DOCS_CLOUD_URL} and deploy my bobi agent team "${teamSlug}" to Fly.io using scripts/provision-instance.sh. Walk me through the env file and secrets it needs.`)}
-            <p class="deploy-note"><a class="exlink" href="${DOCS_CLOUD_URL}" target="_blank" rel="noopener">Full runbook →</a></p>
+            ${promptRow(`I have the bobi-deploy package installed alongside bobi. Read the CONTAINERIZED_DEPLOYMENT.md runbook from my bobi-deploy distribution and deploy my bobi agent team "${teamSlug}" to Fly.io with "bobi deploy". Walk me through the env file and secrets it needs.`)}
+            <p class="deploy-note">Needs the private <span class="mono">bobi-deploy</span> package — <a class="exlink" href="${DOCS_CLOUD_URL}" target="_blank" rel="noopener">how to get access →</a></p>
           </div>
         </div>`,
     }];

@@ -160,7 +160,7 @@ def test_finish_builds_to_file_browser(page, bobi_url):
     expect(page.locator(".deploy-opt", has_text="Local")).to_contain_text(
         "always-on service")
     expect(page.locator(".deploy-opt", has_text="Cloud")).to_contain_text(
-        "provision-instance.sh")
+        "bobi-deploy")
     # The last step's Next becomes Done and goes to the team hub.
     expect(page.locator("#ns-next")).to_have_text("Done →")
     page.click("#ns-next")

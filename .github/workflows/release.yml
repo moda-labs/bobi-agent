@@ -1,37 +1,17 @@
 name: Release
 
-# The single gated release pipeline, on a published GitHub Release (C22 / #342;
-# docs/CONTAINERIZED_DEPLOYMENT.md §6). ONE functional gate - a canary
-# running the EXACT wheel we're about to ship — guards BOTH irreversible actions
-# (PyPI publish + Homebrew). Build once, prove once, then publish:
+# The public release pipeline, on a published GitHub Release. Build once,
+# prove once, then publish:
 #
 #   1. subscription-login-smoke  gate the release on a verified login path (#388).
 #   2. build-wheel               `python -m build` the wheel/sdist ONCE; upload it.
-#   3. fleet                     → release-fleet.yml: deploy the Worker the canary
-#                                talks to, then deploy the canary from an image
-#                                built FROM that wheel (BOBI_BUILD=wheel) and
-#                                SMOKE it - a functional `ask` proving the agent
-#                                answers CANARY-OK end-to-end. THIS is the gate.
-#   4. publish                   needs fleet → upload the SAME wheel to PyPI
-#                                and update/smoke Homebrew.
-#   5. image                     → release-image.yml: needs a canary that actually
-#                                RAN → build the base image per-arch (natively,
-#                                no QEMU) FROM the same wheel and publish
-#                                ghcr.io/moda-labs/bobi:<version> (#609); :latest
-#                                tracks the repo's latest non-prerelease release.
+#   3. publish                   upload the SAME wheel to PyPI.
+#   4. update-homebrew           bump/smoke the Homebrew formula.
 #
-# Repo-split phase 1: the Fly/Worker/image halves live in the two called
-# workflow files (release-fleet.yml, release-image.yml), which move WHOLE to
-# the private repo at cut time. This file keeps the public release (wheel +
-# PyPI + Homebrew); at cut time the `fleet`/`image` caller jobs are deleted and
-# `publish` re-gates on the public jobs only.
-#
-# Why the canary is built from the WHEEL, not source: it then proves the exact
-# artifact we publish actually boots and answers — catching wheel/sdist packaging
-# bugs (missing entry point / package_data) a source rebuild never would. Each app
-# keeps its volume/sessions/env/secrets: we round-trip the live config with `fly
-# config save` and only swap the canary image, so C9 idempotency makes the restart
-# safe. Production fleet rollout is owned by fleet repos such as moda-agents.
+# Repo split: the Fly fleet canary and the GHCR base image (the old `fleet`/
+# `image` caller jobs and their release-fleet.yml / release-image.yml files)
+# live in the private deploy repo, whose release train runs them against the
+# pinned public release. This file gates on the wheel + login smokes only.
 #
 # Why publish lives here (not a reusable workflow): PyPI trusted publishing rejects
 # a reusable workflow (`invalid-publisher`) — the OIDC publish step must run in the
@@ -39,10 +19,7 @@ name: Release
 # configured for THIS workflow (release.yml), environment `pypi`.
 #
 # Required configuration:
-#   deployments/defaults.yaml `fleet:`   fleet namespace for the ci-canary app.
-#   secrets.FLY_API_TOKEN                 Fly deploy token (org-scoped) for flyctl.
 #   PyPI trusted publisher for release.yml + environment `pypi` (OIDC; no token).
-#   secrets.CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID   event-server deploy.
 #   secrets.HOMEBREW_TAP_TOKEN            dispatch the formula bump.
 
 on:
@@ -150,9 +127,10 @@ jobs:
         run: pip install build && python -m build
 
       - name: Fail-fast sanity — the wheel at least imports + runs
-        # Cheap guard so we don't spin up a Fly canary build for a wheel that won't
-        # even load. The real functional proof is the canary smoke; this just avoids
-        # wasting the expensive build on an obviously-broken artifact.
+        # Post repo-split this plus the subscription-login smoke IS the whole
+        # public gate before PyPI - the fleet canary runs in the private
+        # deploy repo's release train, after publish. Do not weaken this step
+        # on the assumption a downstream canary still guards the artifact.
         run: |
           set -euo pipefail
           python -m venv /tmp/whl && /tmp/whl/bin/pip install --quiet dist/*.whl
@@ -176,33 +154,19 @@ jobs:
             >> "$GITHUB_OUTPUT"
 
   # --------------------------------------------------------------------------
-  # THE GATE (called workflow, private-bound): deploy the event server, then
-  # build the brain canaries FROM the just-built wheel and functionally smoke
-  # them. A broken wheel/image fails here and blocks PyPI/Homebrew publish.
-  # `smoked` is true only when the canary gate actually RAN (it is skipped
-  # when FLY_API_TOKEN is unset - fleet not wired).
-  fleet:
-    name: Fleet gate
-    needs: [subscription-login-smoke, build-wheel]
-    uses: ./.github/workflows/release-fleet.yml
-    with:
-      version: ${{ needs.build-wheel.outputs.version }}
-      claude-version: ${{ needs.build-wheel.outputs.claude-version }}
-      source-sha: ${{ needs.build-wheel.outputs.source-sha }}
-    secrets: inherit
-
-  # --------------------------------------------------------------------------
-  # Publish the SAME wheel the canary proved - gated on the fleet gate, NOT the
-  # fleet roll. Trusted publishing (OIDC): this step must live in the top-level
-  # workflow the PyPI publisher config names (release.yml), so it stays a
-  # native job here.
+  # Publish the SAME wheel the smokes proved. Trusted publishing (OIDC): this
+  # step must live in the top-level workflow the PyPI publisher config names
+  # (release.yml), so it stays a native job here.
+  # Repo split: the fleet canary gate and GHCR base image moved to the private
+  # deploy repo (its release train runs them against the pinned public
+  # release); the public release gates on the wheel + login smokes only.
   publish:
     name: Publish to PyPI
-    needs: fleet
+    needs: [subscription-login-smoke, build-wheel]
     runs-on: ubuntu-latest
     environment: pypi
     steps:
-      # Upload the SAME bytes the canary verified — do NOT rebuild.
+      # Upload the SAME bytes the smokes verified - do NOT rebuild.
       - name: Download the proven artifact
         uses: actions/download-artifact@v4
         with:
@@ -211,31 +175,6 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-
-  # --------------------------------------------------------------------------
-  # The GHCR base image (called workflow, private-bound). Gates, both required
-  # because GHCR auth is the always-present GITHUB_TOKEN (no external backstop
-  # like PyPI's trusted-publisher config):
-  #   * a canary that actually RAN (the fleet `smoked` output) - plain job
-  #     success also covers the fleet-not-wired skip;
-  #   * a release-tag-shaped ref - a bare dispatch from a branch would bake an
-  #     UNRELEASED wheel whose version collides with an already-published tag.
-  # Deliberately NOT in publish's `needs`: an image failure never blocks PyPI.
-  image:
-    name: Base image
-    needs: [build-wheel, fleet]
-    if: >-
-      needs.fleet.outputs.smoked == 'true' &&
-      (github.event_name == 'release' ||
-       startsWith(github.event.inputs.ref || github.ref_name, 'v'))
-    uses: ./.github/workflows/release-image.yml
-    permissions:
-      contents: read
-      packages: write
-    with:
-      version: ${{ needs.build-wheel.outputs.version }}
-      claude-version: ${{ needs.build-wheel.outputs.claude-version }}
-      source-sha: ${{ needs.build-wheel.outputs.source-sha }}
 
   # --------------------------------------------------------------------------
   # Bump the Homebrew formula to the freshly-published version.

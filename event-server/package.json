@@ -6,13 +6,9 @@
 		"core"
 	],
 	"scripts": {
-		"deploy": "wrangler deploy",
-		"dev": "wrangler dev",
-		"start": "wrangler dev",
 		"build:local": "esbuild src/local.ts --bundle --platform=node --target=node20 --outfile=dist/local.js --external:ws",
 		"start:local": "node dist/local.js",
-		"test": "vitest",
-		"cf-typegen": "wrangler types"
+		"test": "vitest"
 	},
 	"dependencies": {
 		"@moda-labs/bobi-events-core": "*",
@@ -20,11 +16,10 @@
 	},
 	"devDependencies": {
 		"@chat-adapter/slack": "^4.30.0",
-		"@cloudflare/vitest-pool-workers": "^0.12.4",
+		"@types/node": "^20.11.0",
 		"@types/ws": "^8.5.0",
 		"esbuild": "^0.25.0",
 		"typescript": "^5.7.2",
-		"vitest": "~3.2.0",
-		"wrangler": "^4.95.0"
+		"vitest": "~3.2.0"
 	}
 }
