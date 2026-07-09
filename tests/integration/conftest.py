@@ -186,12 +186,14 @@ def claude_bobi_env(tmp_path_factory):
             os.environ["BOBI_ROOT"] = old_root
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def bobi_env(claude_bobi_env):
     """Default isolated env (Claude brain) - the name the bulk of the suite uses.
 
     A thin alias so existing tests keep the ``bobi_env`` name while the session
     scaffold lives under ``claude_bobi_env`` (the sibling of ``stub_bobi_env``).
+    Session-scoped like the original so module/session-scoped consumers (e.g.
+    ``test_event_server``'s ``event_server`` fixture) can still depend on it.
     """
     return claude_bobi_env
 
