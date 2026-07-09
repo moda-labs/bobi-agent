@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.42.0 - 2026-07-09
+
+Minor release: retire the in-repo watchdog now that the supervisor sidecar owns
+container supervision, plus three reliability fixes for Codex prompts, session
+drain, and turn keepalive. Rolling this to the fleet clears the Codex E2BIG
+wedge that stalled long-prompt turns.
+
+### Removed
+- **In-repo watchdog (#720).** `bobi supervise` and the `bobi/watchdog.py` /
+  `bobi/manager_health.py` modules are gone. Container supervision moved to the
+  supervisor sidecar in the private deploy repo, a faithful port that keeps the
+  `WATCHDOG_*` env var names so operator config carries over. The local product
+  no longer ships `bobi supervise`; nothing else in the local runtime used it.
+
+### Fixed
+- **Codex prompts sent over stdin (#714).** A large prompt no longer blows the
+  argv size limit (E2BIG): the Codex brain pipes the prompt in over stdin
+  instead of passing it as a command-line argument, so long-context turns run
+  instead of failing to spawn.
+- **Session drain hardened against oversized/undecodable messages (#719).** A
+  single oversized frame or a transient decode error no longer aborts the
+  drain; the session skips the bad frame and keeps consuming, so a wedged turn
+  cannot silently drop later events.
+- **Keepalive during in-flight turns (#721).** `last_activity` is refreshed
+  while a turn is still running, so a long-running turn is not mistaken for an
+  idle session and torn down mid-flight.
+
 ## 0.41.1 - 2026-07-09
 
 Patch release: ship the programmable stub brain so the private `bobi-deploy`
