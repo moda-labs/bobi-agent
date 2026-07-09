@@ -4,23 +4,18 @@ This is the production bugfix release recipe for `bobi` plus the Moda
 agent-team fleet. Use it when a fix has merged to `main` and needs to reach the
 Fly-hosted agents.
 
-> **Repo-split phase 1 caveat:** the deploy commands now live in the separate
-> `bobi-deploy` package (`bobi_deploy/`, its own wheel). It is NOT on PyPI and
-> real releases never go there - anything published to PyPI is public forever,
-> which conflicts with this package going closed-source, and a stale public
-> copy next to a private index is a dependency-confusion setup. Distribution
-> is a private index or git+ssh pin only. A `uv tool install bobi` from the
-> next release therefore has no `bobi deploy`; that is the product line.
-> Before the first private-channel release: raise bobi_deploy/pyproject.toml's
-> `bobi>=` floor to the bobi release that ships the carve-out seams (0.40.0
-> satisfies the pin but predates bobi.build/bobi.config, and its CLI still
-> mounts a built-in `build` command that silently shadows the plugin's
-> entry point - built-ins win in bobi.cli's plugin group). And claim the
-> `bobi-deploy` name on PyPI with a defensive stub (or rename the package):
-> it is squattable today and `deploy-init`-scaffolded fleet workflows
-> pip-install it by name inside CI jobs holding FLY_API_TOKEN. CI and this
-> runbook's fleet steps are unaffected (they install both packages from the
-> checkout).
+> **Repo split:** this repo releases the PUBLIC product only (wheel, PyPI,
+> Homebrew). The deploy side - `bobi-deploy` package, container image, Fly
+> fleet canary, Cloudflare Worker deploy - lives in the private
+> `moda-labs/bobi-deploy` repo and releases through ITS train, pinned to the
+> public release. `bobi-deploy` is never published to PyPI (the name is held
+> by a defensive stub that fails loudly at install); distribution is the
+> private channel only. A `uv tool install bobi` has no `bobi deploy`; that
+> is the product line. Before the first private-channel bobi-deploy release:
+> raise its `bobi>=` floor to the first public release with the carve-out
+> seams (0.40.0 satisfies the pin but predates bobi.build/bobi.config, and
+> its CLI still mounts a built-in `build` command that silently shadows the
+> plugin's entry point - built-ins win in bobi.cli's plugin group).
 
 ## 1. Sync `bobi`
 
@@ -58,7 +53,7 @@ or Slack/Event Server path is involved:
 
 cd event-server
 PATH="$HOME/.nvm/versions/node/v24.4.1/bin:$PATH" \
-  npm test -- --run test/core.spec.ts test/index.spec.ts
+  npm test -- --run test/core.spec.ts
 cd ..
 ```
 
@@ -87,32 +82,22 @@ gh run list --repo moda-labs/bobi-agent --workflow release.yml --limit 3 \
 gh run watch <run-id> --repo moda-labs/bobi-agent --interval 20
 ```
 
-The release workflow deploys the Cloudflare event server, then checks the
-authoritative fleet event-server URL by fetching `<event_server>/health`. Set
-the repo variable `FLEET_EVENT_SERVER_URL` when production fleet config lives
-outside this repo; otherwise the workflow falls back to this repo's
-`deployments/defaults.yaml`. The health payload must report the wheel version
-and source git SHA just deployed. If this fails, stop: production is pointed at a
-different Worker or the new Worker has not propagated.
-
-Do not continue to the Moda fleet pin until the release workflow is green,
-including:
+The public release workflow must go green:
 
 - subscription-login smoke
-- release wheel build
-- canary build/smoke
+- release wheel build (with the import/`--version` sanity check)
 - PyPI publish
-- GHCR base image publish (`ghcr.io/moda-labs/bobi:<version>`; `:latest` moves
-  when this version is the repo's latest non-prerelease release)
-- event server deploy
-- event server identity check against the fleet `event_server` URL
-- fleet roll jobs
+- Homebrew formula bump + bottle-URL smoke
+
+Then run the PRIVATE release train in `moda-labs/bobi-deploy` (its runbook
+lives there): event-server Worker deploy + identity check, fleet canary
+build/smoke against the just-published wheel, GHCR base image publish
+(`ghcr.io/moda-labs/bobi:<version>`). Do not continue to the Moda fleet pin
+until BOTH trains are green - the public train alone carries no functional
+fleet proof.
 
 If PyPI was just published, allow a short propagation delay before installing
 the new version from another repo.
-
-One-time setup (first release only): the first push creates the GHCR package
-as private. Make it public in the package settings
 (github.com/orgs/moda-labs/packages) so consumers can pull without a token;
 visibility persists across releases.
 
@@ -125,7 +110,8 @@ docker logout ghcr.io
 docker run --rm --entrypoint bobi ghcr.io/moda-labs/bobi:<version> --version
 ```
 
-The full run contract is in `docs/CONTAINERIZED_DEPLOYMENT.md`.
+The full run contract is in the private deploy repo's
+`docs/CONTAINERIZED_DEPLOYMENT.md` (repo split).
 
 ## 3. Bump `moda-agents`
 
@@ -153,7 +139,7 @@ external entry points together before validating the release:
 - Linear webhook URL
 
 After any move, fetch the fleet URL directly and confirm `/health` reports the
-release version/SHA that the `bobi-agent` release workflow deployed.
+release version/SHA that the private deploy repo's release train deployed.
 
 Verify compose against the exact released package:
 

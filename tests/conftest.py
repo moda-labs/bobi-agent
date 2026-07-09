@@ -20,12 +20,7 @@ from pathlib import Path
 # CLI over the event server. Anchored on this file's own location so it always
 # matches the tests actually being run, in a worktree or the primary checkout.
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
-# bobi_deploy is src-layout, so the repo root alone only exposes it as a
-# namespace shadow that loses to any editable install; pin its src dir
-# explicitly so THIS checkout's copy wins too.
 _PIN_DIRS = [_REPO_ROOT]
-if (Path(_REPO_ROOT) / "bobi_deploy" / "src").is_dir():
-    _PIN_DIRS.append(str(Path(_REPO_ROOT) / "bobi_deploy" / "src"))
 for _d in reversed(_PIN_DIRS):
     if _d not in sys.path[: len(_PIN_DIRS)]:
         sys.path.insert(0, _d)

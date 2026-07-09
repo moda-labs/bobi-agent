@@ -30,7 +30,6 @@ import os
 import re
 from pathlib import Path
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOBI_PACKAGE = REPO_ROOT / "bobi"
@@ -40,17 +39,17 @@ EVENT_SERVER_CORE = EVENT_SERVER / "core"
 EVENT_SERVER_CORE_SRC = EVENT_SERVER_CORE / "src"
 EVENT_SERVER_TEST = EVENT_SERVER / "test"
 
-# The worker adapter: the only event-server sources allowed to know they run
-# on Cloudflare (internal-auth is the Worker<->Durable Object handshake, so it
-# moves private with the adapter). Module names relative to event-server/src/,
-# extension stripped (see _src_module). Anchored against wrangler.jsonc below
-# so a rename of the worker entry cannot silently make this guard vacuous.
+# The worker adapter moved to the private deploy repo at the phase-2 cut
+# (index.ts, deployment-session.ts, internal-auth.ts + wrangler.jsonc). The
+# module names stay guarded here so a copy of the adapter reappearing under
+# src/ is rejected as unclassified-private rather than silently public.
 WORKER_ADAPTER_MODULES = {"index", "deployment-session", "internal-auth"}
 
-# The only src/ modules that stay public at the phase-2 cut. Together with
-# WORKER_ADAPTER_MODULES this must PARTITION src/ - every module is one or the
-# other (test_src_modules_fully_classified), so new files cannot silently
-# default to public.
+# The only src/ modules allowed in the public repo. Together with
+# WORKER_ADAPTER_MODULES this bounds src/ - every module present must be in
+# one of the two sets and the worker set must stay ABSENT
+# (test_src_modules_fully_classified), so new files cannot silently default
+# to public.
 PUBLIC_LOCAL_MODULES = {"local"}
 
 
@@ -289,30 +288,16 @@ class TestEventServerCoreNeverImportsWorkerAdapter:
                 )
 
     def test_src_modules_fully_classified(self):
-        """Default-deny for new files under src/: every module must be
-        explicitly classified as worker adapter or public local runtime, so
-        a new worker helper cannot silently default to public and then
-        either leak into the public repo at cut time or be imported by
-        local.ts without the boundary noticing."""
+        """Default-deny for new files under src/: post-cut, src/ holds
+        exactly the public local runtime modules. A worker-adapter module
+        reappearing here, or any unclassified new module, fails loudly
+        instead of silently landing in the public repo."""
         modules = {_src_module(ts) for ts in _ts_sources(EVENT_SERVER_SRC)}
-        assert modules == WORKER_ADAPTER_MODULES | PUBLIC_LOCAL_MODULES, (
-            "new module under event-server/src/ - classify it in "
-            "WORKER_ADAPTER_MODULES (moves private at the cut) or "
-            "PUBLIC_LOCAL_MODULES (stays public) in this test"
+        assert modules == PUBLIC_LOCAL_MODULES, (
+            "unexpected module under event-server/src/ - the worker adapter "
+            "lives in the private deploy repo; a genuinely public module "
+            "must be added to PUBLIC_LOCAL_MODULES in this test"
         )
-
-    def test_worker_adapter_set_matches_wrangler_entry(self):
-        """Keep WORKER_ADAPTER_MODULES honest: the worker entry wrangler
-        actually deploys must be in the set, so renaming the adapter cannot
-        leave this guard green while enforcing nothing."""
-        wrangler = EVENT_SERVER / "wrangler.jsonc"
-        if not wrangler.exists():
-            pytest.skip("worker adapter moved to the private repo")
-        match = re.search(
-            r'"main"\s*:\s*"src/([^"]+)"', wrangler.read_text(encoding="utf-8")
-        )
-        assert match, "could not find the worker entry in wrangler.jsonc"
-        assert _TS_EXTENSION_RE.sub("", match.group(1)) in WORKER_ADAPTER_MODULES
 
 
 class TestEventsCorePackageBoundary:

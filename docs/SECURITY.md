@@ -13,7 +13,7 @@ So the model controls four things: who can put events on the bus, what external
 events you can receive, what code runs with your credentials, and where secrets
 live. This doc is the overview; the event-bus mechanics are detailed in
 [EVENT_SERVER.md](EVENT_SERVER.md), and the deployment/secrets specifics in
-[CONTAINERIZED_DEPLOYMENT.md](CONTAINERIZED_DEPLOYMENT.md).
+the private deploy repo's CONTAINERIZED_DEPLOYMENT.md (repo split).
 
 ## Trust boundary: local by default
 
@@ -34,7 +34,8 @@ be served over TLS.
   gitignored. Treat them like any credential; never copy them off the host.
 - **Deployed secrets** are stored as Fly secrets (the runtime store) and reconciled
   to the team's declared set on each deploy, so the store converges on exactly what
-  `agent.yaml` declares (see CONTAINERIZED_DEPLOYMENT.md). An undeclared key is
+  `agent.yaml` declares (see the private deploy repo's
+  CONTAINERIZED_DEPLOYMENT.md). An undeclared key is
   dropped, not provisioned.
 - **Auth modes.** `api_key` mode uses `ANTHROPIC_API_KEY`; `subscription` mode uses
   Claude OAuth credentials on the volume and **requires `ANTHROPIC_API_KEY` to be

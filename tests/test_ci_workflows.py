@@ -30,21 +30,3 @@ def test_integration_fast_model_download_is_bounded_without_hf_xet():
     assert "FASTEMBED_CACHE_PATH" not in pytest_step.get("env", {})
 
 
-def test_wrangler_event_server_install_retries_transient_npm_failures():
-    # Lives in worker-integration.yml (repo-split phase 1): the Worker adapter
-    # moves private at cut time, so its wrangler-dev CI is a whole-file unit.
-    workflow = load_workflow("worker-integration.yml")
-    job = workflow["jobs"]["integration-wrangler"]
-    step = next(
-        step
-        for step in job["steps"]
-        if step.get("name") == "Install event-server Node dependencies"
-    )
-
-    assert step["working-directory"] == "event-server"
-    run = step["run"]
-    assert "for attempt in 1 2 3" in run
-    assert "npm ci --no-audit --no-fund" in run
-    assert "rm -rf node_modules" in run
-    assert "npm cache clean --force" in run
-    assert "npm ci failed after 3 attempts" in run

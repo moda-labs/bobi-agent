@@ -210,9 +210,10 @@ You don't run the event server yourself - `bobi agent <name> start` launches a
 local one automatically. To receive webhooks from the public internet (Slack,
 GitHub, Linear), use the **Webhook ingress** row in `bobi setup`'s Connections
 card. It can keep the team local-only, verify a quick tunnel such as
-cloudflared/ngrok to `localhost:8080`, or save a durable HTTPS event server
-(`BOBI_EVENT_SERVER`) such as the shared Bobi cloud Worker or your own
-Cloudflare Worker. Setup-authored `agent.yaml` files reference that optional
+cloudflared/ngrok to `localhost:8080`, or save the URL of a durable HTTPS
+event server you host yourself (`BOBI_EVENT_SERVER`; see
+[docs/SELF_HOSTED_EVENT_SERVER.md](docs/SELF_HOSTED_EVENT_SERVER.md)).
+Setup-authored `agent.yaml` files reference that optional
 environment variable so verified public ingress is used when present, while an
 unset value leaves the automatic local event server path unchanged.
 
@@ -310,13 +311,14 @@ an always-on instance on a cloud VM - no Dockerfile to write, no server to
 configure.
 
 **Prerequisites.** The deploy commands ship in the separate `bobi-deploy`
-package (this repo's `bobi_deploy/`; from a checkout: `pip install ./bobi_deploy`) -
-installing it alongside `bobi` adds `build`/`deploy`/`deploy-init`/`destroy` to the CLI.
-Cloud deployment targets [Fly](https://fly.io) Machines, so you also
-need a Fly.io account and a Fly API token (`flyctl` authenticated via
-`fly auth login`). First time on Fly? `bobi deploy` preflights your setup and
-prints exactly what to do - install `flyctl`, sign up or log in, and clear the
-one-time new-org unlock.
+package - installing it alongside `bobi` adds
+`build`/`deploy`/`deploy-init`/`destroy` to the CLI. `bobi-deploy` is
+distributed privately as part of the managed/enterprise offering; reach out
+via an issue or zach@modalabs.ai if you want access. Cloud deployment targets
+[Fly](https://fly.io) Machines, so you also need a Fly.io account and a Fly
+API token (`flyctl` authenticated via `fly auth login`). First time on Fly?
+`bobi deploy` preflights your setup and prints exactly what to do - install
+`flyctl`, sign up or log in, and clear the one-time new-org unlock.
 
 ```bash
 bobi deploy eng-team
@@ -349,10 +351,8 @@ events as they arrive, kept alive by Fly's restart policy plus Bobi's supervisio
 watchdog. Because Fly Machines are Firecracker microVMs that suspend and resume in
 well under a second, near-term work will let an idle agent scale to zero and wake
 on the next event - making it very affordable to run a fleet of always-available
-agents without paying for idle VMs. It works from the installed CLI alone - no
-framework
-checkout. Full runbook (image, Fly, and GitOps):
-[docs/CONTAINERIZED_DEPLOYMENT.md](docs/CONTAINERIZED_DEPLOYMENT.md).
+agents without paying for idle VMs. It works from the installed CLIs alone - no
+framework checkout.
 
 ## Security
 
@@ -381,7 +381,7 @@ the prompt-injection surface, and trusted team code. Event-bus internals:
 | Receive webhooks on your own infrastructure | [docs/SELF_HOSTED_EVENT_SERVER.md](docs/SELF_HOSTED_EVENT_SERVER.md) — tunnel or standalone server |
 | Understand the security model | [docs/SECURITY.md](docs/SECURITY.md) — trust, credentials, prompt-injection |
 | Connect Slack / Linear | [skills/slack-setup.md](skills/slack-setup.md) · [skills/linear-setup.md](skills/linear-setup.md) |
-| Deploy to production | [docs/CONTAINERIZED_DEPLOYMENT.md](docs/CONTAINERIZED_DEPLOYMENT.md) |
+| Deploy to production | [Cloud Deployment](#cloud-deployment) (private `bobi-deploy` package) |
 
 ## Development
 

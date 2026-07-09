@@ -10,7 +10,6 @@ image is gone, and runtime operations now require a named scope.
 
 import re
 import shlex
-import tomllib
 from pathlib import Path
 
 import pytest
@@ -19,26 +18,35 @@ from bobi.cli import main as cli_main
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Commands delivered by the private bobi-deploy plugin via `bobi.commands`
+# entry points (repo split: the plugin lives in moda-labs/bobi-deploy). The
+# public docs deliberately keep describing them - README's Cloud Deployment
+# section is the enterprise pointer - so they are contract-checked against
+# this list instead of the CLI. Any OTHER unknown command in docs still
+# fails the check; test_plugin_command_list_matches_installed_entry_points
+# below enforces the sync wherever the plugin is actually installed (the
+# private repo's CI runs this suite with it).
+_PLUGIN_COMMANDS = frozenset({"build", "deploy", "deploy-init", "destroy"})
 
-def _plugin_commands() -> frozenset[str]:
-    """Commands the in-repo bobi-deploy plugin declares via `bobi.commands`.
 
-    The public unit suite runs WITHOUT the plugin installed (its CI lives in
-    deploy-package.yml; repo-split phase 1), so `_PluginGroup.get_command`
-    cannot resolve these from entry-point metadata. Read the declarations from
-    the plugin's own pyproject instead. When bobi_deploy/ leaves the tree at
-    cut time this returns empty, and any doc still referencing a private
-    command fails the contract check - exactly the drift we want flagged.
+def test_plugin_command_list_matches_installed_entry_points():
+    """Anti-drift tripwire for _PLUGIN_COMMANDS.
+
+    The public suite runs without the plugin (the group is empty -> skip).
+    The private deploy repo's CI installs bobi-deploy and runs this file, so
+    a renamed/retired plugin command fails THERE until both its pyproject and
+    this list (and the public docs) agree again.
     """
-    pyproject = REPO_ROOT / "bobi_deploy" / "pyproject.toml"
-    if not pyproject.exists():
-        return frozenset()
-    data = tomllib.loads(pyproject.read_text())
-    entry_points = data.get("project", {}).get("entry-points", {})
-    return frozenset(entry_points.get("bobi.commands", {}))
+    from importlib.metadata import entry_points
 
-
-_PLUGIN_COMMANDS = _plugin_commands()
+    installed = frozenset(ep.name for ep in entry_points(group="bobi.commands"))
+    if not installed:
+        pytest.skip("bobi-deploy plugin not installed (public CI)")
+    assert installed == _PLUGIN_COMMANDS, (
+        "bobi.commands entry points and _PLUGIN_COMMANDS disagree - update "
+        "this list and the public docs to match the plugin's pyproject: "
+        f"installed={sorted(installed)} listed={sorted(_PLUGIN_COMMANDS)}"
+    )
 
 # bobi invocations inside fenced code blocks or inline code spans.
 _FENCE = re.compile(r"```.*?```", re.DOTALL)

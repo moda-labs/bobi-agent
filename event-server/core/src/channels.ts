@@ -428,7 +428,10 @@ export async function whatsappApi(
 	init: { method?: string; json?: unknown; form?: FormData },
 ): Promise<Record<string, unknown>> {
 	const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-	let body: BodyInit | undefined;
+	// Structural (not BodyInit): only these two shapes are ever built, and
+	// the name resolves under every lib variant this file compiles against
+	// (dom for the published dist, @types/node for the in-repo build).
+	let body: string | FormData | undefined;
 	if (init.json !== undefined) {
 		headers["Content-Type"] = "application/json";
 		body = JSON.stringify(init.json);

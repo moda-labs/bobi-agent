@@ -277,15 +277,20 @@ If local covers your needs, skip ahead to
 
 `bobi deploy` packages your agent into a container image and runs it as an
 always-on Fly Machine - no Dockerfile, no server config. The deployed instance
-holds an outbound WebSocket to an internet-reachable event server (the shared
-Bobi cloud Worker by default - you don't need to set anything), so Slack and
-GitHub webhooks work out of the box.
+holds an outbound WebSocket to an internet-reachable event server, so Slack
+and GitHub webhooks work without a tunnel on your machine.
+
+The deploy commands ship in the separate `bobi-deploy` package, distributed
+privately as part of the managed/enterprise offering (see the README's
+[Cloud Deployment](../README.md#cloud-deployment) section for how to get
+access). Its distribution includes the full deployment runbook
+(CONTAINERIZED_DEPLOYMENT.md).
 
 The easiest way through this is to let Claude Code or Codex drive it. Open a
 session and paste:
 
 ```plaintext
-Read https://github.com/moda-labs/bobi-agent/blob/main/docs/CONTAINERIZED_DEPLOYMENT.md and help me deploy my bobi agent "my-agent" to Fly.io.
+Read the CONTAINERIZED_DEPLOYMENT.md runbook from my bobi-deploy distribution and help me deploy my bobi agent "my-agent" to Fly.io.
 ```
 
 Or do it by hand:
@@ -293,8 +298,8 @@ Or do it by hand:
 **1. Use a released Bobi version, plus the deploy plugin.** Deploy from a
 normal `uv tool install bobi` / Homebrew install (the instance image pins the
 version you're running). The `deploy`/`destroy` commands ship in the separate
-`bobi-deploy` package - install it alongside bobi (from a source checkout:
-`pip install ./bobi_deploy`) and they appear in the CLI.
+`bobi-deploy` package (distributed privately; see Option B above for access) -
+install it alongside bobi and they appear in the CLI.
 
 **2. Set up Fly.** If you've never used Fly:
 
@@ -347,8 +352,8 @@ bobi destroy my-agent
 ```
 
 For CI-driven fleets, GitOps, Codex-backed teams, and subscription-auth
-deployments, read the full runbook:
-[CONTAINERIZED_DEPLOYMENT.md](CONTAINERIZED_DEPLOYMENT.md).
+deployments, read the full CONTAINERIZED_DEPLOYMENT.md runbook that ships
+with the bobi-deploy distribution.
 
 ## Step 6: Finalize chat (Slack) configuration
 
@@ -406,10 +411,10 @@ Work through these in order:
    bobi agent my-agent start --fresh
    ```
 
-5. **Fly deploys:** `fly logs -a <app>` is the first stop. The
-   [deployment runbook's troubleshooting list](CONTAINERIZED_DEPLOYMENT.md#manual-ops)
-   covers the known failure modes. Re-running `bobi deploy <name>` is safe and
-   fixes most partial deploys.
+5. **Fly deploys:** `fly logs -a <app>` is the first stop. The deployment
+   runbook's troubleshooting list (CONTAINERIZED_DEPLOYMENT.md in the
+   bobi-deploy distribution) covers the known failure modes. Re-running
+   `bobi deploy <name>` is safe and fixes most partial deploys.
 
 6. **Enlist an AI pair.** Bobi's docs are written to be agent-readable. Open a
    Claude Code or Codex session next to your terminal and paste:

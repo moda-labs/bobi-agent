@@ -1,8 +1,9 @@
 """Container-safety contract for path/CLI assumptions (containerized-1, #332).
 
 A bobi instance runs in a Linux container with a volume-mounted ``$HOME``
-and the pinned ``claude`` CLI on ``PATH`` (see
-``docs/CONTAINERIZED_DEPLOYMENT.md`` The image). Two things must hold:
+and the pinned ``claude`` CLI on ``PATH`` (the image contract lives in the
+private deploy repo; its tests/test_container_contract.py carries the
+Dockerfile/entrypoint halves). Two things must hold:
 
 1. The ``claude`` CLI is resolved from ``PATH``; the only absolute fallback is
    a macOS dev-machine convenience, never used on Linux.
@@ -16,7 +17,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
 
 from bobi import sdk
 
@@ -83,27 +83,6 @@ class TestNoUnguardedMacosPaths:
         assert not offenders, "unguarded macOS-absolute paths:\n" + "\n".join(offenders)
 
 
-class TestContainerCliPath:
-    def test_bobi_cli_is_on_codex_sanitized_path(self):
-        """Codex tool shells keep /usr/local/bin but may drop /opt/venv/bin."""
-        dockerfile = (REPO_ROOT / "Dockerfile").read_text()
-        assert "> /usr/local/bin/bobi" in dockerfile
-        assert "/home/bobi/.local/bin/bobi" in dockerfile
-        assert 'exec /opt/venv/bin/bobi "$@"' in dockerfile
-
-
-class TestContainerFastembedCache:
-    def test_dockerfile_uses_volume_fastembed_cache_path(self):
-        """fastembed ignores HF_HOME, so first-use downloads must land in a
-        writable persistent cache path."""
-        dockerfile = (REPO_ROOT / "Dockerfile").read_text()
-        assert "FASTEMBED_CACHE_PATH=/data/.bobi/cache/fastembed" in dockerfile
-        assert "FROM python:3.11-slim AS model-baker" not in dockerfile
-        assert "COPY --from=model-baker" not in dockerfile
-
-    def test_entrypoint_prepares_fastembed_cache_path(self):
-        entrypoint = (REPO_ROOT / "docker" / "docker-entrypoint.sh").read_text()
-        assert '"${FASTEMBED_CACHE_PATH:-${BOBI_HOME}/cache/fastembed}"' in entrypoint
-        assert '"${HF_HOME:-${BOBI_HOME}/cache/huggingface}"' in entrypoint
-        assert "chown \"${APP_USER}:${APP_USER}\" \"${DATA_DIR}\" \"${BOBI_HOME}\" \"${RUN_ROOT}\"" in entrypoint
-        assert '"${FASTEMBED_CACHE_PATH:-${BOBI_HOME}/cache/fastembed}"' in entrypoint
+# The Dockerfile/entrypoint halves of this contract (bobi on the
+# codex-sanitized PATH, fastembed cache on the volume) live with the image in
+# the private deploy repo: tests/test_container_contract.py there.
