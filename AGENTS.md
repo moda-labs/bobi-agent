@@ -40,33 +40,21 @@ Bobi is an event-driven AI agent framework.
 
 ## Coding Standards
 
-### Code
+General coding, bug-fix, testing, writing, and commit standards live in
+`~/AGENTS.md`. Bobi-specific additions:
 
-- Prefer quality, simplicity, robustness, scalability, and long-term maintainability.
-- Keep a single code path for doing any one thing.
-- Review code for simplicity.
-- If something looks off, fix it along the way, even if it is unrelated to the current task.
-
-### Bug fixes
-
-- A CI failure or production bug means there is an integration test gap.
-- Reproduce the bug first, as closely aligned to real usage as possible.
-- Write a failing test that reproduces the problem, then write the fix.
-
-### Testing
-
-- When developing a new feature, unit tests are important, but end-to-end integration tests better prove the feature functions correctly.
-- Write integration tests that mimic the actual user experience as much as possible.
-- When working on tests, review the current set of tests and ensure coverage is complete but non-redundant.
-
-### Markdown and writing
-
-- Prefer concise wording over long descriptions.
-- Never use the em dash. Use a regular dash instead.
-
-### Commits
-
-- Never auto-add your agent name as co-author in commit messages.
+- **Real-Claude e2e as acceptance criteria (judgement call).** Bobi's runtime
+  runs through a real Claude brain. For a feature whose correctness depends on
+  that brain path (session orchestration, turn handling, tool use, resume,
+  event delivery through a live session), the acceptance bar includes an
+  end-to-end integration test that drives a REAL Claude session, not only the
+  deterministic `stub` brain. Follow the "one mechanism, two brains" pattern:
+  parametrize the e2e `[stub]+[claude]`, gate the claude leg on the CLI so it
+  runs when available and skips otherwise. This is a judgement call per feature,
+  usually the implementor's: a brain-agnostic change (process lifecycle, event
+  routing, read-model folds, the admin/control plane) is proven by the stub e2e
+  and does not need a claude leg - add one only when the real brain is where the
+  risk actually lives.
 
 ## Development Lifecycle
 
