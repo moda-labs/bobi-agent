@@ -20,11 +20,14 @@ from bobi.brain.codex import (
 )
 
 
+MAX_ARG_STRLEN = 128 * 1024
+
+
 def _runner_of(events, sink=None):
-    """A fake codex runner: records (argv, cwd) and replays `events`."""
-    async def _run(argv, cwd):
+    """A fake codex runner: records (argv, cwd, stdin) and replays `events`."""
+    async def _run(argv, cwd, stdin_text=None):
         if sink is not None:
-            sink.append((argv, cwd))
+            sink.append((argv, cwd, stdin_text))
         for ev in events:
             yield ev
     return _run
@@ -96,15 +99,55 @@ async def test_fresh_turn_prepends_instructions_then_resume_does_not():
     fresh_argv = sink[0][0]
     assert fresh_argv[:2] == ["codex", "exec"]
     assert "resume" not in fresh_argv
-    assert fresh_argv[-1] == "SYSTEM\n\nfirst"
+    assert fresh_argv[-1] == "-"
     assert sink[0][1] == "/w"
+    assert sink[0][2] == "SYSTEM\n\nfirst"
 
     # Next turn resumes the captured thread and does NOT re-send instructions.
     await s.query("second")
     await _drain(s)
     resume_argv = sink[1][0]
     assert resume_argv[:4] == ["codex", "exec", "resume", "th-9"]
-    assert resume_argv[-1] == "second"
+    assert resume_argv[-1] == "-"
+    assert sink[1][2] == "second"
+
+
+@pytest.mark.asyncio
+async def test_large_fresh_prompt_uses_stdin_not_argv():
+    sink = []
+    events = [{"type": "turn.completed", "usage": {}}]
+    prompt = "x" * (MAX_ARG_STRLEN + 1)
+    s = _CodexSession(cwd="/w", instructions="SYSTEM", runner=_runner_of(events, sink))
+
+    await s.connect(prompt)
+    await _drain(s)
+
+    argv, _cwd, stdin_text = sink[0]
+    assert argv[-1] == "-"
+    assert all(prompt not in arg for arg in argv)
+    assert stdin_text == "SYSTEM\n\n" + prompt
+    assert len(stdin_text) > MAX_ARG_STRLEN
+
+
+@pytest.mark.asyncio
+async def test_large_resume_prompt_uses_stdin_not_argv():
+    sink = []
+    events = [{"type": "turn.completed", "usage": {}}]
+    prompt = "x" * (MAX_ARG_STRLEN + 1)
+    s = _CodexSession(
+        cwd="/w", instructions="SYSTEM", resume="th-big",
+        runner=_runner_of(events, sink),
+    )
+
+    await s.query(prompt)
+    await _drain(s)
+
+    argv, _cwd, stdin_text = sink[0]
+    assert argv[:4] == ["codex", "exec", "resume", "th-big"]
+    assert argv[-1] == "-"
+    assert all(prompt not in arg for arg in argv)
+    assert stdin_text == prompt
+    assert len(stdin_text) > MAX_ARG_STRLEN
 
 
 @pytest.mark.asyncio
@@ -147,6 +190,28 @@ async def test_spawn_codex_accepts_large_ndjson_events(tmp_path):
 
     assert events[0]["type"] == "item.completed"
     assert events[0]["item"]["text"] == "x" * 70000
+    assert events[1]["type"] == "turn.completed"
+
+
+@pytest.mark.asyncio
+async def test_spawn_codex_writes_and_closes_large_stdin(tmp_path):
+    script = (
+        "import json, sys\n"
+        "prompt = sys.stdin.read()\n"
+        "print(json.dumps({'type': 'item.completed', 'item': "
+        "{'type': 'agent_message', 'text': str(len(prompt))}}), flush=True)\n"
+        "print(json.dumps({'type': 'turn.completed', 'usage': {}}), flush=True)\n"
+    )
+    prompt = "x" * (MAX_ARG_STRLEN + 1)
+
+    events = [
+        ev async for ev in _spawn_codex(
+            [sys.executable, "-c", script, "-"], str(tmp_path), prompt,
+        )
+    ]
+
+    assert events[0]["type"] == "item.completed"
+    assert events[0]["item"]["text"] == str(len(prompt))
     assert events[1]["type"] == "turn.completed"
 
 
