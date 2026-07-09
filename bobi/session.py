@@ -111,6 +111,39 @@ def _rotation_error_message(err: BaseException | None) -> str:
         message = f"{message}; caused by {type(cause).__name__}: {cause_text}"
     return message
 
+
+# Substrings that mark a drain exception as a per-message decode/framing error
+# (an oversized or malformed NDJSON line) rather than a dead transport. The SDK
+# converts a ``CLIJSONDecodeError`` — including the >max_buffer_size case — into
+# a plain ``Exception`` whose text it forwards through the message stream
+# (claude_agent_sdk `_read_messages`), so classifying on the message text is the
+# reliable cross-version signal.
+_DECODE_ERROR_MARKERS = (
+    "exceeded maximum buffer size",
+    "failed to decode json",
+    "jsondecodeerror",
+    "json decode",
+)
+
+
+def _is_decode_error(exc: BaseException) -> bool:
+    """True when a drain failure is a recoverable per-message decode error.
+
+    A single oversized/garbled NDJSON line is line-framed and recoverable — it
+    must not be treated like a dead transport and kill the session (#719). The
+    generous ``max_buffer_size`` (bobi.brain.claude, #719) makes the buffer case
+    rare; this is the belt-and-suspenders classifier for the residual case.
+    """
+    try:
+        from claude_agent_sdk import CLIJSONDecodeError
+
+        if isinstance(exc, CLIJSONDecodeError):
+            return True
+    except Exception:
+        pass
+    text = str(exc).lower()
+    return any(marker in text for marker in _DECODE_ERROR_MARKERS)
+
 # Background event-subscription retry cadence (#409). When the initial
 # registration handshake with the event server times out, the session boots
 # anyway and a daemon thread keeps retrying with capped exponential backoff —
@@ -698,9 +731,39 @@ class Session:
                             self._rotate_pending = True
                             self._rotate_reason = "context_cap"
         except Exception as e:
-            log.error(f"Drain failed for '{self.name}': {e}")
-            self._set_state("error")
-            registry.update(self.name, status="error")
+            # A drain failure used to be terminal on the FIRST exception: the
+            # session dropped to status="error" and stayed dead until a process
+            # restart. That is how a single oversized message (the 1 MB buffer
+            # death) left a director dead for tens of minutes in #718. Now we
+            # distinguish the two kinds of failure (#719):
+            if _is_decode_error(e):
+                # A per-message decode error — a single oversized/garbled NDJSON
+                # line — is line-framed and recoverable. It must NOT kill the
+                # session. The SDK reader for THIS connection is spent, so flag a
+                # rotation: the bounded, well-tested idle-time _rotate() rebuilds
+                # a fresh client, and we return to ready. (max_buffer_size in
+                # bobi.brain.claude, #719, makes this case rare; this is the
+                # safety net for the residual.) Clearing _last_is_error stops a
+                # prior turn's transient-error state from driving a spurious
+                # retry now that we return to waiting_input.
+                log.error(
+                    "Drain hit a recoverable per-message decode error for '%s' "
+                    "(rotating client, not killing the session): %s",
+                    self.name, e,
+                )
+                self._last_is_error = False
+                self._rotate_pending = True
+                self._rotate_reason = "drain_decode_error"
+                self._set_state("waiting_input")
+                registry.update(self.name, status="idle")
+            else:
+                # A genuinely dead transport (process gone, broken pipe) stays
+                # terminal, as before — a fresh process start recovers it, which
+                # the supervisor owns. Recovering it inline would block this
+                # session's loop on repeated connect timeouts.
+                log.error(f"Drain failed for '{self.name}': {e}")
+                self._set_state("error")
+                registry.update(self.name, status="error")
 
         # Turn complete — clear any "is thinking…" indicators the drain loop
         # started for this turn. The gateway clears the indicator when a
