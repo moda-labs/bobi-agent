@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.41.0 - 2026-07-08
+
+Minor release: the repo split lands. Deployment (containers, Fly fleet, the
+Cloudflare Worker event tier) moves to the private `moda-labs/bobi-deploy`
+repo, installed as a plugin; this repo now ships the open local product only.
+First release cut from the two-repo layout.
+
+### Added
+- **Self-hosted event server guide (#710).** `docs/SELF_HOSTED_EVENT_SERVER.md`
+  documents running your own webhook ingress: a tunnel in front of the local
+  server, or the standalone Node event server, with TLS, provider wiring, and
+  restart semantics.
+- **Publishable events-core package (#711).** `@moda-labs/bobi-events-core`
+  gains a pack pipeline (compiled ESM + type declarations) so external
+  consumers can pin it from npm instead of vendoring sources.
+
+### Changed
+- **Repo split (#713).** Deploy, fleet, and Cloudflare Worker code moved to the
+  private `moda-labs/bobi-deploy` repo. `bobi deploy`, `bobi deploy-init`,
+  `bobi destroy`, and `bobi build` are now delivered by the separately
+  installed `bobi-deploy` package via the CLI plugin seam (#699, #709); a
+  plain `bobi` install no longer carries them. CI workflows split along the
+  same boundary (#704), with an import-direction guard making the one-way
+  rule (private imports public, never the reverse) permanent (#701).
+- **events-core workspace boundary (#702).** The event protocol core
+  (normalized events, webhook pipeline, channel adapters, circuit breaker)
+  lives in `event-server/core/` as an npm workspace package behind a real
+  import boundary.
+- **TeamRuntime seam (#706).** The webapp runs against an explicit runtime
+  interface instead of the `BOBI_ROOT` root binder, decoupling the web UI
+  from process-global state (#708).
+- **Memory subsystem rename.** The curator subsystem is now the sleep cycle;
+  `policy.md` becomes `long_term_memory.md`.
+
+### Fixed
+- **Curator spawn contract (#695).** The sleep-cycle curator gets a dedicated
+  monitors command and an entry-role fallback, fixing the wedged-curator
+  stack (E2BIG, `--role` misrouting, check-runner hijack) (#697).
+- **Slack reply formatting defaults (#703).** Better default formatting for
+  Slack replies (#705).
+
 ## 0.40.0 - 2026-07-08
 
 Minor release: WhatsApp joins the channel gateway, event delivery becomes
