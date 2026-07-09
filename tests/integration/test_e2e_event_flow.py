@@ -1,10 +1,12 @@
 """End-to-end test: webhook → event server → manager → workflow.
 
-Starts the full bobi stack (manager + event server + drain loop),
-posts a simulated GitHub issue assignment webhook, and verifies the
-manager receives the event and responds with a workflow dispatch.
-
-Requires the `claude` CLI.
+Starts the full bobi stack (manager + event server + drain loop), posts a
+simulated GitHub issue assignment webhook, and verifies the manager receives
+the event and logs it. Runs on BOTH brains (``dual_brain_env``): the public stub
+(fast lane, always) and real Claude (gated). These are event-plumbing assertions
+(the webhook reaches the manager and is injected/logged), so the stub proves them
+in CI while the Claude leg exercises a real manager locally - the same stub the
+private sidecar e2e uses.
 """
 
 import json
@@ -15,12 +17,20 @@ import urllib.request
 
 import pytest
 
-from .conftest import requires_claude
 
-pytestmark = pytest.mark.claude
+# Bind this file's ``bobi_env`` / ``cli_run`` to the dual-brain (stub + claude)
+# variants (see test_manager_lifecycle for the pattern) so the stack runs once
+# per brain while the test bodies stay untouched.
+@pytest.fixture
+def bobi_env(dual_brain_env):
+    return dual_brain_env
 
 
-@requires_claude
+@pytest.fixture
+def cli_run(dual_brain_cli_run):
+    return dual_brain_cli_run
+
+
 @pytest.mark.timeout(180)
 class TestEndToEndEventFlow:
 
