@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.41.1 - 2026-07-09
+
+Patch release: ship the programmable stub brain so the private `bobi-deploy`
+control-plane sidecar e2e can pin a public release instead of an editable
+checkout. Test-only surface; no runtime behavior change for the local product.
+
+### Added
+- **Programmable stub brain (#716).** A test-only `BrainSession` (`bobi.brain.stub`)
+  that speaks the provider-agnostic brain contract with no vendor CLI or
+  network, so a real manager/subagent runtime can be driven to a deterministic
+  state without the `claude` CLI. Registered as `stub` but gated: `make_session`
+  refuses to run unless `BOBI_STUB_BRAIN` is set, so an accidental
+  `BOBI_BRAIN=stub` in production fails loud. Scriptable over the inbox
+  (`__stub__:hang|exit|reply|error|idle`) so tests trigger runtime state and
+  observe the result. It is the shared test double for both the public
+  integration suites and the private deploy-package sidecar e2e.
+
+### Changed
+- **Integration suites run both brains (#716).** The runtime-plumbing suites
+  (manager start/stop/status/restart, webhook event flow, subagent launch) now
+  run parametrized over the stub brain (fast lane, always) and real Claude
+  (gated on the CLI), on one provisioning code path. Previously claude-gated and
+  skipped in CI, so this adds real-runtime coverage that runs without Claude
+  while keeping the with-Claude tier.
+
+### Fixed
+- **kb tests skip cleanly without the `[kb]` extra (#716).** Running
+  `pytest tests/` on a `.[dev]`-only install no longer errors at collection
+  (numpy) or fails on the store/cli tests (sqlite-vec); the kb-runtime tests
+  skip gracefully. No-ops when `[kb]` is installed, so CI is unchanged.
+
 ## 0.41.0 - 2026-07-08
 
 Minor release: the repo split lands. Deployment (containers, Fly fleet, the
