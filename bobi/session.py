@@ -177,6 +177,17 @@ from bobi.transient import (  # noqa: F401  (re-exported for back-compat)
 SESSION_UNREACHABLE_ALERT_AFTER = 120.0
 SESSION_READY_WAIT_POLL = 1.0
 
+# Heartbeat cadence for the in-flight-turn keepalive (#721). While a turn is
+# blocked in receive_response() — e.g. parked on a Task subagent that outlives
+# the wedge threshold — _drain_turn makes no registry writes, so last_activity
+# freezes at turn start and any liveness check reading {status, last_activity,
+# idle_seconds} cannot tell "healthy, blocked on a live child" from "wedged."
+# The keepalive refreshes last_activity on this cadence, driven by the event
+# loop itself. It must sit well below the wedge stall threshold (default 600s,
+# and as high as 2400s in the field) so a healthy turn never crosses it; 30s
+# also matches the ~30s window over which the supervisor confirms a stall.
+KEEPALIVE_INTERVAL = 30.0
+
 
 def _emit_session_unreachable_alert(
     *,
@@ -624,6 +635,45 @@ class Session:
             log.debug("Failed to reload long-term memory for '%s'", self.name, exc_info=True)
         return self._system_prompt
 
+    async def _keepalive(self, registry) -> None:
+        """Refresh last_activity on a timer while a turn is in flight (#721).
+
+        _drain_turn stamps last_activity once at turn start (status="running")
+        and then blocks in receive_response() with no intermediate registry
+        writes. A Task subagent call parks the director inside that await with
+        no messages until the child returns, and deep-research children
+        routinely outlive the wedge stall threshold — so for the whole child
+        run last_activity stays frozen at turn start. From the outside that is
+        byte-identical to a wedge: status="running", idle_seconds climbing past
+        threshold. The wedge test (the #464 watchdog and its port in the deploy
+        supervisor sidecar) then kills a healthy parent mid-task, because the
+        health payload is only {status, last_activity, idle_seconds} with no
+        subagent field to distinguish the two.
+
+        This refreshes last_activity on a cadence *driven by the event loop
+        itself*, so it is a genuine liveness signal rather than a "a turn was
+        started" flag. A director merely blocked on a live child keeps its loop
+        pumping, so this coroutine wakes and the session reads alive. A director
+        genuinely wedged in-turn — the loop itself not progressing (a
+        synchronous hang, not an await) — cannot run this coroutine, so
+        last_activity stays frozen and the stall is still detected. The update
+        carries no status kwarg, so it only touches last_activity and never
+        resurrects a status that the drain loop has since moved to idle/error.
+        """
+        while True:
+            await asyncio.sleep(KEEPALIVE_INTERVAL)
+            try:
+                registry.update(self.name)
+            except Exception:
+                # A transient registry-write failure must not kill the heartbeat
+                # for the rest of the turn — that would silently re-expose the
+                # false wedge. Log and keep beating. (asyncio.CancelledError is a
+                # BaseException, so cancellation still tears the task down.)
+                log.debug(
+                    "keepalive: last_activity refresh failed for '%s'",
+                    self.name, exc_info=True,
+                )
+
     async def _drain_turn(self) -> str:
         self._last_response = ""
         if self._input_ready:
@@ -640,6 +690,11 @@ class Session:
         # and fires a perpetual false "rotation pending". One call's usage is
         # the actual window fill.
         last_assistant_usage: dict | None = None
+
+        # Heartbeat last_activity for the duration of the turn so a director
+        # blocked on a live child (e.g. a Task subagent) is not mistaken for a
+        # wedge (#721). Cancelled in the finally below the moment the turn ends.
+        keepalive = asyncio.create_task(self._keepalive(registry))
 
         try:
             async for msg in self._client.receive_response():
@@ -764,6 +819,19 @@ class Session:
                 log.error(f"Drain failed for '{self.name}': {e}")
                 self._set_state("error")
                 registry.update(self.name, status="error")
+        finally:
+            keepalive.cancel()
+            try:
+                await keepalive
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # Defense in depth: the heartbeat already swallows its own
+                # errors, but never let a keepalive failure escape here and mask
+                # a drain exception or skip the turn-complete cleanup below.
+                log.debug(
+                    "keepalive: teardown for '%s' raised", self.name, exc_info=True
+                )
 
         # Turn complete — clear any "is thinking…" indicators the drain loop
         # started for this turn. The gateway clears the indicator when a
