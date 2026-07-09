@@ -54,7 +54,7 @@ def _make_handler(manager_pid: int, project_name: str,
                 "project": project_name,
             }
             # The entry-point (director) session's progress signal — the
-            # input the #464 watchdog needs to tell a wedged director apart
+            # input the supervisor sidecar needs to tell a wedged director apart
             # from a healthy idle one. Additive; omitted when no manager
             # session is wired so existing consumers keep the old shape.
             manager = manager_block_fn() if manager_block_fn else None
@@ -89,11 +89,11 @@ def _make_handler(manager_pid: int, project_name: str,
 def _manager_block_from_registry(manager_session: str | None):
     """Build the entry-point session's progress block from the registry.
 
-    Server-side derivation of ``idle_seconds`` keeps the watchdog dumb (no
+    Server-side derivation of ``idle_seconds`` keeps the supervisor dumb (no
     clock-skew handling). Returns None when no manager session is wired so the
     payload stays backward-compatible. Fails open: a missing entry (the
     pre-spawn window) reports ``status="starting"`` with ``idle_seconds=0`` so
-    the watchdog never restarts a manager that has not finished booting.
+    the supervisor never restarts a manager that has not finished booting.
     """
     if not manager_session:
         return None
@@ -160,7 +160,7 @@ def start(state_dir: Path, project_name: str,
     ``manager_session`` names the entry-point (director) session; when given,
     the payload gains a top-level ``manager`` block with that session's
     ``status``, ``last_activity`` and server-derived ``idle_seconds`` — the
-    progress signal the #464 self-heal watchdog observes. ``manager_status_fn``
+    progress signal the self-heal supervisor sidecar observes. ``manager_status_fn``
     overrides the default registry lookup (used by tests).
     """
     global _server, _thread, _port_file

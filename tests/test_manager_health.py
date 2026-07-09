@@ -237,7 +237,7 @@ class TestManagerBlock:
 
     def test_missing_entry_guard_reports_starting(self):
         """Pre-spawn window: a missing registry entry fails open to
-        status=starting / idle_seconds=0 so the watchdog never restarts a
+        status=starting / idle_seconds=0 so the supervisor never restarts a
         booting manager."""
         block = manager_health._manager_block_from_registry("no-such-session")
         # No registry/root bound here -> the lookup returns None internally and

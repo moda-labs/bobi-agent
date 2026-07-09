@@ -464,44 +464,6 @@ def start(foreground, fresh, subscribe):
     _print_startup_info(project_path, result.startup.pid, result.startup.log_file)
 
 
-@main.command(context_settings={"ignore_unknown_options": True})
-@click.argument("start_args", nargs=-1, type=click.UNPROCESSED)
-def supervise(start_args):
-    """Run the manager under the self-heal watchdog (#464).
-
-    Spawns `bobi agent <name> start <args>` as a child, polls the manager health
-    endpoint, and restarts a wedged director with bounded retry, backoff, loud
-    logging and fail-open safety — the one recovery layer below the director
-    that `stall-recovery` (director→engineer) structurally cannot provide.
-
-    Used as the container entrypoint:
-
-        BOBI_ROOT=<run-root> bobi supervise -- --foreground
-
-    Everything after `--` is forwarded verbatim to the selected agent's start command (the
-    `--foreground` flag is required so the manager stays a supervisable child
-    and does not daemonize out from under the supervisor). Tunables are env
-    vars (WATCHDOG_*); on restart-budget exhaustion the supervisor exits
-    non-zero so Fly's machine restart policy escalates.
-    """
-    from bobi.watchdog import Supervisor, WatchdogConfig
-
-    project_path = _detect_project_root()
-    # click consumes the `--` separator, but strip a stray one defensively.
-    args = [a for a in start_args if a != "--"]
-
-    # Container/foreground mode: log to stdout/stderr only (mirror `start`).
-    root = logging.getLogger()
-    root.handlers = [h for h in root.handlers
-                     if not isinstance(h, logging.FileHandler)]
-
-    log = logging.getLogger(__name__)
-    log.info("watchdog: supervising selected agent start %s", " ".join(args))
-    supervisor = Supervisor(args, WatchdogConfig.from_env(),
-                            project_root=project_path)
-    raise SystemExit(supervisor.run())
-
-
 def _materialize_local_deps(pack_dir: Path, project_path: Path, *,
                             non_interactive: bool) -> None:
     """Drive the local brain to install the team's declared deps (#428 Stage 5).

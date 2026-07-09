@@ -14,7 +14,7 @@ still reports connected, the client declares the receive path deaf and forces a
 reconnect — self-healing without a manual restart.
 
 These tests fake only the transport (``websocket.WebSocketApp``) and drive the
-real client state machine — heartbeat watchdog, reconnect loop, and liveness
+real client state machine — heartbeat keepalive, reconnect loop, and liveness
 signal — end to end, with no external server dependency.
 """
 
@@ -105,7 +105,7 @@ def _fast_client(tmp_path, **kwargs):
         cursor_path=tmp_path / "cursor.json",
         **kwargs,
     )
-    # Shrink the heartbeat cadence so the watchdog fires in well under a second.
+    # Shrink the heartbeat cadence so the keepalive fires in well under a second.
     client._HEARTBEAT_INTERVAL_S = 0.1
     client._HEARTBEAT_TIMEOUT_S = 0.3
     return client
@@ -153,7 +153,7 @@ class TestDeafManagerSelfHeal:
         try:
             assert client.wait_connected(timeout=2.0), "never got connected frame"
 
-            # The watchdog must notice the missing pongs and reconnect.
+            # The keepalive must notice the missing pongs and reconnect.
             assert _wait_until(lambda: factory.count >= 2), (
                 "deaf connection was never force-reconnected — client stayed "
                 "silently deaf (the #425 bug)"
@@ -204,8 +204,8 @@ class TestHealthyConnectionStable:
             client.stop()
 
 
-class TestHeartbeatWatchdogUnit:
-    """Direct unit coverage of the watchdog decision, no sockets involved."""
+class TestHeartbeatKeepaliveUnit:
+    """Direct unit coverage of the keepalive decision, no sockets involved."""
 
     def _client(self, tmp_path):
         return EventServerClient(

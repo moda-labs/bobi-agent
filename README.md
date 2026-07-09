@@ -332,7 +332,7 @@ again and it updates the instance in place. Behind it:
   KB use into the durable volume cache.
 - **Durable state.** Credentials and session transcripts live on a mounted volume,
   so they survive image updates and the agent resumes where it left off.
-- **Self-managing.** A machine restart policy plus a supervision watchdog keep the
+- **Self-managing.** A machine restart policy plus a control-plane supervisor keep the
   agent alive without babysitting.
 - **GitOps for fleets.** `bobi deploy-init` scaffolds a GitHub Action that
   reconciles `deployments/*.yaml` against running instances on every release - git
@@ -347,8 +347,8 @@ Bobi runs agents on Fly Machines for their fast VM wake-up and scale-to-zero
 model, which pair naturally with the external event server. Today each agent runs
 as a single always-on Machine with no
 public ingress: it holds an outbound WebSocket to the event server and acts on
-events as they arrive, kept alive by Fly's restart policy plus Bobi's supervision
-watchdog. Because Fly Machines are Firecracker microVMs that suspend and resume in
+events as they arrive, kept alive by Fly's restart policy plus the deployment's
+control-plane supervisor. Because Fly Machines are Firecracker microVMs that suspend and resume in
 well under a second, near-term work will let an idle agent scale to zero and wake
 on the next event - making it very affordable to run a fleet of always-available
 agents without paying for idle VMs. It works from the installed CLIs alone - no
