@@ -201,6 +201,106 @@ def test_claude_brain_explicit_model_overrides_env(monkeypatch):
     assert captured["model"] == "sonnet"
 
 
+# --- max_buffer_size: never inherit the SDK's session-killing 1 MB default ---
+# (#719 / #718)
+
+
+def _capture_options():
+    captured = {}
+
+    def _options(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    return captured, _options
+
+
+def test_make_session_sets_generous_max_buffer_size(monkeypatch):
+    from bobi.brain.claude import DEFAULT_MAX_BUFFER_SIZE
+
+    monkeypatch.delenv("BOBI_CLAUDE_MAX_BUFFER_SIZE", raising=False)
+    captured, _options = _capture_options()
+    with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+        ClaudeSDKClient=MagicMock(),
+        ClaudeAgentOptions=_options,
+    )}):
+        ClaudeBrain().make_session(cwd="/tmp", system_prompt=None)
+
+    assert captured["max_buffer_size"] == DEFAULT_MAX_BUFFER_SIZE
+    # Anything above the SDK's fatal 1 MB default is the whole point.
+    assert captured["max_buffer_size"] > 1024 * 1024
+
+
+def test_make_session_max_buffer_size_env_override(monkeypatch):
+    monkeypatch.setenv("BOBI_CLAUDE_MAX_BUFFER_SIZE", str(8 * 1024 * 1024))
+    captured, _options = _capture_options()
+    with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+        ClaudeSDKClient=MagicMock(),
+        ClaudeAgentOptions=_options,
+    )}):
+        ClaudeBrain().make_session(cwd="/tmp", system_prompt=None)
+
+    assert captured["max_buffer_size"] == 8 * 1024 * 1024
+
+
+def test_make_session_explicit_max_buffer_size_wins(monkeypatch):
+    captured, _options = _capture_options()
+    with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+        ClaudeSDKClient=MagicMock(),
+        ClaudeAgentOptions=_options,
+    )}):
+        ClaudeBrain().make_session(
+            cwd="/tmp", system_prompt=None,
+            options={"max_buffer_size": 123},
+        )
+
+    assert captured["max_buffer_size"] == 123
+
+
+def test_max_buffer_size_is_floored_at_the_sdk_default(monkeypatch):
+    """A misconfigured tiny/zero override must not silently recreate the 1 MB
+    kill window — the knob only raises the ceiling."""
+    from bobi.brain.claude import _max_buffer_size, _SDK_DEFAULT_MAX_BUFFER_SIZE
+
+    monkeypatch.setenv("BOBI_CLAUDE_MAX_BUFFER_SIZE", "0")
+    assert _max_buffer_size() == _SDK_DEFAULT_MAX_BUFFER_SIZE
+
+    monkeypatch.setenv("BOBI_CLAUDE_MAX_BUFFER_SIZE", "1024")  # 1 KB
+    assert _max_buffer_size() == _SDK_DEFAULT_MAX_BUFFER_SIZE
+
+
+@pytest.mark.asyncio
+async def test_stream_once_sets_generous_max_buffer_size(monkeypatch):
+    from bobi.brain.claude import DEFAULT_MAX_BUFFER_SIZE
+
+    monkeypatch.delenv("BOBI_CLAUDE_MAX_BUFFER_SIZE", raising=False)
+    monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/usr/bin/claude")
+    captured = {}
+
+    def _options(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    async def _fake_query(prompt, options):
+        return
+        yield  # make this an async generator
+
+    with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+        AssistantMessage=AssistantMessage,
+        ClaudeAgentOptions=_options,
+        ResultMessage=ResultMessage,
+        StreamEvent=type("StreamEvent", (), {}),
+        TextBlock=TextBlock,
+        query=_fake_query,
+    )}):
+        async for _ in ClaudeBrain().stream_once(
+            system_prompt=None, user_prompt="hi",
+        ):
+            pass
+
+    assert captured["max_buffer_size"] == DEFAULT_MAX_BUFFER_SIZE
+
+
 # --- ResultMessage → TurnResult normalization ------------------------------
 
 

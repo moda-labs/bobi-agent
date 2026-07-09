@@ -35,6 +35,17 @@ log = logging.getLogger(__name__)
 DEFAULT_INITIALIZE_TIMEOUT_MS = 180_000
 DEFAULT_CONNECT_ATTEMPTS = 3
 DEFAULT_CONNECT_BACKOFF_SECONDS = 2.0
+# The SDK defaults ``max_buffer_size`` to 1 MB and raises ``CLIJSONDecodeError``
+# on the FIRST NDJSON message above it, which permanently kills the reader task
+# for that connection (#719 / #718). A single tool result over 1 MB — e.g. an
+# agent told to ``Read`` a multi-MB file, or a ~3 MB image that base64-inlines to
+# ~4 MB — is enough to take a session down. Set a generous explicit ceiling so
+# legitimate large messages pass; it is still a bound (not unlimited) so a
+# genuinely runaway line is caught rather than OOMing the process.
+DEFAULT_MAX_BUFFER_SIZE = 64 * 1024 * 1024  # 64 MB
+# The SDK's own default, used as an absolute floor for the operator override so
+# the knob can only raise the ceiling, never drop it back into the kill zone.
+_SDK_DEFAULT_MAX_BUFFER_SIZE = 1024 * 1024  # 1 MB
 
 
 def _delta_text(event: Any) -> str:
@@ -207,6 +218,21 @@ def _is_initialize_timeout(exc: Exception) -> bool:
     return "control request timeout" in text and "initialize" in text
 
 
+def _max_buffer_size() -> int:
+    """The NDJSON read-buffer ceiling for a Claude session (#719).
+
+    Operator-overridable via ``BOBI_CLAUDE_MAX_BUFFER_SIZE`` (bytes); defaults to
+    :data:`DEFAULT_MAX_BUFFER_SIZE`. Guards against the SDK's 1 MB default
+    silently killing any session that reads a single >1 MB message.
+
+    Floored at the SDK's own 1 MB default: this knob exists only to RAISE the
+    ceiling, so a misconfigured tiny/zero value (``_env_int`` clamps to >=1)
+    cannot silently recreate the very failure this guards against.
+    """
+    configured = _env_int("BOBI_CLAUDE_MAX_BUFFER_SIZE", DEFAULT_MAX_BUFFER_SIZE)
+    return max(configured, _SDK_DEFAULT_MAX_BUFFER_SIZE)
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None:
@@ -258,6 +284,9 @@ class ClaudeBrain:
         extra = with_default_model_option(options)
         # Defaults every call site shared; an explicit value in ``options`` wins.
         extra.setdefault("permission_mode", "bypassPermissions")
+        # Never inherit the SDK's 1 MB max_buffer_size default — a single >1 MB
+        # message (large Read, inlined image) would kill the session (#719).
+        extra.setdefault("max_buffer_size", _max_buffer_size())
         kwargs = dict(cwd=cwd, cli_path=get_cli_path(), resume=resume, **extra)
         # Only pass system_prompt when the caller set one — the MCP probe builds
         # a session with no prompt, and forcing system_prompt=None would override
@@ -304,6 +333,9 @@ class ClaudeBrain:
         model = resolve_model_option(model)
         extra.setdefault("permission_mode", "bypassPermissions")
         extra.setdefault("include_partial_messages", True)
+        # Match the persistent-session guard: a >1 MB message must not kill the
+        # one-shot stream either (#719).
+        extra.setdefault("max_buffer_size", _max_buffer_size())
         opts = ClaudeAgentOptions(
             cwd=cwd,
             model=model,
