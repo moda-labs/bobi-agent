@@ -76,16 +76,37 @@ def _costs(u: dict, model: str) -> list[BrainCost]:
                       output_tokens=u.get("output_tokens", 0) or 0)]
 
 
-async def _spawn_codex(argv: list[str], cwd: str) -> AsyncIterator[dict]:
+async def _write_stdin(writer: asyncio.StreamWriter, text: str) -> None:
+    try:
+        writer.write(text.encode("utf-8"))
+        await writer.drain()
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+async def _spawn_codex(
+    argv: list[str],
+    cwd: str,
+    stdin_text: str | None = None,
+) -> AsyncIterator[dict]:
     """Run ``codex exec`` and yield its NDJSON events as parsed dicts.
 
-    stdin is ``/dev/null`` — ``codex exec`` blocks reading a piped-but-open stdin
-    (Phase-0 gotcha). Non-JSON lines (banners) are skipped.
+    When ``stdin_text`` is provided, the caller must include ``-`` in argv and
+    this function writes then closes stdin. Otherwise stdin is ``/dev/null`` -
+    ``codex exec`` blocks reading a piped-but-open stdin (Phase-0 gotcha).
+    Non-JSON lines (banners) are skipped.
     """
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=cwd,
-        stdin=asyncio.subprocess.DEVNULL,
+        stdin=asyncio.subprocess.PIPE if stdin_text is not None
+        else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         limit=_CODEX_STREAM_LIMIT,
@@ -93,6 +114,10 @@ async def _spawn_codex(argv: list[str], cwd: str) -> AsyncIterator[dict]:
     assert proc.stdout is not None
     assert proc.stderr is not None
     stderr_task = asyncio.create_task(proc.stderr.read())
+    stdin_task = (
+        asyncio.create_task(_write_stdin(proc.stdin, stdin_text))
+        if stdin_text is not None and proc.stdin is not None else None
+    )
     exhausted = False
     try:
         while True:
@@ -123,6 +148,13 @@ async def _spawn_codex(argv: list[str], cwd: str) -> AsyncIterator[dict]:
                 except ProcessLookupError:
                     pass
         await proc.wait()
+        if stdin_task is not None:
+            try:
+                await asyncio.wait_for(
+                    stdin_task, timeout=_CODEX_TERMINATE_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                stdin_task.cancel()
         try:
             stderr = await asyncio.wait_for(
                 stderr_task, timeout=_CODEX_TERMINATE_TIMEOUT,
@@ -199,15 +231,15 @@ class _CodexSession:
     async def disconnect(self) -> None:
         return None
 
-    def _build_argv(self, prompt: str) -> list[str]:
+    def _build_argv(self) -> list[str]:
         flags = list(_EXEC_FLAGS)
         if self._model:
             flags += ["-m", self._model]
         if self._thread_id:
             # `resume` has a narrower flag set (no -C/--sandbox); cwd comes from
             # the subprocess cwd. The bypass/skip flags are accepted here too.
-            return ["codex", "exec", "resume", self._thread_id, *flags, prompt]
-        return ["codex", "exec", *flags, prompt]
+            return ["codex", "exec", "resume", self._thread_id, *flags, "-"]
+        return ["codex", "exec", *flags, "-"]
 
     async def receive_response(self) -> AsyncIterator[BrainMessage]:
         if self._pending is None:
@@ -223,8 +255,8 @@ class _CodexSession:
         if not self._thread_id and self._instructions:
             prompt = f"{self._instructions}\n\n{prompt}"
 
-        argv = self._build_argv(prompt)
-        async for ev in self._runner(argv, self._cwd):
+        argv = self._build_argv()
+        async for ev in self._runner(argv, self._cwd, prompt):
             etype = ev.get("type")
             if etype == "thread.started":
                 self._thread_id = ev.get("thread_id") or self._thread_id
