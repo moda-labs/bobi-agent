@@ -1,5 +1,6 @@
 """Unit tests for named KB CLI commands."""
 
+import importlib.util
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -9,6 +10,13 @@ from click.testing import CliRunner
 
 from bobi import paths
 from bobi.cli import main
+
+# Every KB CLI command drives the live store (sqlite-vec, from the optional [kb]
+# extra). Skip the module cleanly on a `.[dev]`-only install instead of failing.
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("sqlite_vec") is None,
+    reason="kb extra not installed (pip install '.[kb]')",
+)
 
 
 @pytest.fixture(autouse=True)

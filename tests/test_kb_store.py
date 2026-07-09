@@ -1,6 +1,7 @@
 """Unit tests for the KB store — schema, CRUD, FTS search, dedup, and management."""
 
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +18,15 @@ from bobi.kb.store import (
     _fts_query,
     _kb_dir,
     _rrf_merge,
+)
+
+# Building a real KBStore loads sqlite-vec (the optional [kb] extra). On a
+# `.[dev]`-only install, skip the tests that need the live store so the suite
+# runs cleanly - the pure-helper tests and the "missing dep gives a clear error"
+# test (which mocks the import) still run.
+requires_kb = pytest.mark.skipif(
+    importlib.util.find_spec("sqlite_vec") is None,
+    reason="kb extra not installed (pip install '.[kb]')",
 )
 
 
@@ -36,6 +46,8 @@ def kb_root(tmp_path, monkeypatch):
 @pytest.fixture
 def store(kb_root):
     """Create a fresh test KB."""
+    if importlib.util.find_spec("sqlite_vec") is None:
+        pytest.skip("kb extra not installed (pip install '.[kb]')")
     return KBStore.create("test", db_path=kb_root / "test.db")
 
 
@@ -390,6 +402,7 @@ class TestDelete:
 # KB management (class methods)
 # ---------------------------------------------------------------------------
 
+@requires_kb
 class TestKBManagement:
     def test_create(self, kb_root):
         store = KBStore.create("mydb", db_path=kb_root / "mydb.db")

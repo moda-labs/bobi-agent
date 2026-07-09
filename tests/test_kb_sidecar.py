@@ -12,7 +12,10 @@ from threading import Thread
 
 import pytest
 
-import numpy as np
+# numpy ships transitively with the optional [kb] extra (fastembed). Skip the
+# whole module cleanly on a `.[dev]`-only install rather than erroring at
+# collection, so `pytest tests/` works without the kb extra.
+np = pytest.importorskip("numpy", reason="kb extra not installed (pip install '.[kb]')")
 
 from bobi.kb.sidecar import _make_handler, MODEL_NAME, EMBEDDING_DIM
 
