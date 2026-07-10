@@ -363,7 +363,8 @@ class LocalRuntime(TeamRuntime):
         from bobi.costs import rollup_costs
 
         root = self._resolve(name)
-        return rollup_costs(paths.sessions_dir(root)).to_dict()
+        # sessions_path (not sessions_dir): a read endpoint must not mkdir.
+        return rollup_costs(paths.sessions_path(root)).to_dict()
 
     def fleet_spend(self) -> dict:
         """Roll up spend across every installed team. Offline: reads each
@@ -375,13 +376,17 @@ class LocalRuntime(TeamRuntime):
         teams: list[dict] = []
         for team in paths.list_agents():
             root = paths.agent_run_root(team)
-            summary = rollup_costs(paths.sessions_dir(root))
+            summary = rollup_costs(paths.sessions_path(root))
+            # Sum the rounded per-team totals so the dashboard header always
+            # equals the sum of the visible tiles (no sub-cent drift where the
+            # header shows spend no tile accounts for).
+            team_total = round(summary.total_cost_usd, 4)
             teams.append({
                 "name": team,
-                "total_cost_usd": round(summary.total_cost_usd, 4),
+                "total_cost_usd": team_total,
                 "sessions_counted": summary.sessions_counted,
             })
-            total += summary.total_cost_usd
+            total += team_total
             counted += summary.sessions_counted
         teams.sort(key=lambda t: t["total_cost_usd"], reverse=True)
         return {

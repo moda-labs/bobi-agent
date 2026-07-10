@@ -162,6 +162,23 @@ class TestSpend:
         assert team["total_cost_usd"] == 1.25
         assert team["sessions_counted"] == 1
 
+    def test_spend_read_does_not_create_sessions_dir(self, bobi_install):
+        import shutil
+        # A read endpoint must not mutate disk: remove the sessions dir the
+        # fixture pre-creates and confirm a spend GET leaves it absent.
+        shutil.rmtree(bobi_install.sessions_dir)
+        c = _client()
+        assert c.get(f"/api/agents/{bobi_install.agent_name}/spend").status_code == 200
+        assert c.get("/api/fleet/spend").status_code == 200
+        assert not bobi_install.sessions_dir.exists()
+
+    def test_null_cost_session_does_not_500(self, bobi_install):
+        _seed_session(bobi_install.sessions_dir, "broken", cost=None,
+                      model_usage={"anthropic:opus": {"cost_usd": None}})
+        r = _client().get(f"/api/agents/{bobi_install.agent_name}/spend")
+        assert r.status_code == 200
+        assert r.json()["total_cost_usd"] == 0.0
+
     def test_fleet_spend_empty_install(self, bobi_install):
         body = _client().get("/api/fleet/spend").json()
         assert body["total_cost_usd"] == 0.0

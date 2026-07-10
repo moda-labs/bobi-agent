@@ -291,7 +291,7 @@ html[data-retro="on"] body {
 }
 .side-head { color: var(--muted); padding: 14px 16px 8px; }
 
-/* spend panel — read-only spend fold at the top of the roster (#733) */
+/* spend panel - read-only spend fold at the top of the roster (#733) */
 .spend-panel {
   margin: 12px 12px 4px;
   padding: 10px 12px;

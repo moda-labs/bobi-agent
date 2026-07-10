@@ -115,6 +115,20 @@ class TestCostRollup:
         assert summary.total_cost_usd == 1.00
         assert summary.by_provider["anthropic"] == 1.00
 
+    def test_null_cost_coerces_to_zero(self, tmp_path):
+        # A hand-edited or partially-written state.json can carry an explicit
+        # null; the fold must not crash (it now backs a web endpoint).
+        sessions_dir = self._make_sessions(tmp_path, {
+            "broken": {"name": "broken", "role": "eng",
+                       "total_cost_usd": None,
+                       "model_usage": {"anthropic:opus": {"cost_usd": None}}},
+            "good": {"name": "good", "role": "eng", "total_cost_usd": 0.5,
+                     "model_usage": {"anthropic:opus": {"cost_usd": 0.5}}},
+        })
+        summary = rollup_costs(sessions_dir)
+        assert summary.total_cost_usd == 0.5
+        assert summary.by_model["anthropic:opus"] == 0.5
+
     def test_skips_zero_cost_sessions(self, tmp_path):
         sessions_dir = self._make_sessions(tmp_path, {
             "no-cost": {

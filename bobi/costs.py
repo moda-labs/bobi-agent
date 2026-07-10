@@ -108,8 +108,13 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
         except (json.JSONDecodeError, OSError):
             continue
 
-        cost = data.get("total_cost_usd", 0.0)
-        if not cost and not data.get("model_usage"):
+        # `or 0.0` (not a get default) so a present-but-null cost - a
+        # hand-edited or partially-written state.json - coerces to 0.0
+        # instead of crashing the arithmetic below (these fold now backs a
+        # web endpoint that must not 500 on one malformed session).
+        cost = data.get("total_cost_usd") or 0.0
+        model_usage = data.get("model_usage") or {}
+        if not cost and not model_usage:
             continue
 
         summary.sessions_counted += 1
@@ -120,9 +125,8 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
         summary.by_session[name] = summary.by_session.get(name, 0.0) + cost
         summary.by_role[role] = summary.by_role.get(role, 0.0) + cost
 
-        model_usage = data.get("model_usage", {})
         for key, usage in model_usage.items():
-            usage_cost = usage.get("cost_usd", 0.0)
+            usage_cost = (usage or {}).get("cost_usd") or 0.0
             # key format is "provider:model"
             parts = key.split(":", 1)
             provider = parts[0] if len(parts) > 1 else "unknown"

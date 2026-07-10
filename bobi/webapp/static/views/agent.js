@@ -3,7 +3,7 @@
    standalone agentui SPA, routed under #/agents/<name> with team-scoped
    endpoints. */
 
-import { openSetup } from "../shell.js";
+import { openSetup, fmtUsd } from "../shell.js";
 
 export function mountAgent(el, { api, name }) {
   const base = "/api/agents/" + encodeURIComponent(name);
@@ -153,12 +153,6 @@ export function mountAgent(el, { api, name }) {
   // markup. No CDN, no deps.
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;")
                       .replace(/>/g, "&gt;");
-
-  // "$1.23" for dollars, "$0.0042" for cents-and-under; blank when zero.
-  function fmtUsd(n) {
-    if (!n || n <= 0) return "";
-    return "$" + (n >= 1 ? n.toFixed(2) : n.toFixed(4));
-  }
 
   function mdInline(t) {
     // Inline code spans hide behind \x00N\x00 sentinels while the other

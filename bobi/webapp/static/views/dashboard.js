@@ -3,7 +3,7 @@
    design-only → the editor); lifecycle actions live on the agent's own
    dashboard, not here. */
 
-import { openSetup } from "../shell.js";
+import { openSetup, fmtUsd } from "../shell.js";
 
 export function mountDashboard(el, { api }) {
   el.innerHTML = "";
@@ -30,13 +30,6 @@ export function mountDashboard(el, { api }) {
 
   let lastAgents = [];
   let spendByTeam = new Map();   // name -> total_cost_usd (installed teams)
-
-  // "$1.23" for dollars, "$0.0042" for cents-and-under; blank when there is
-  // no recorded spend yet, so a fresh install stays uncluttered.
-  function fmtUsd(n) {
-    if (!n || n <= 0) return "";
-    return "$" + (n >= 1 ? n.toFixed(2) : n.toFixed(4));
-  }
 
   function card(a) {
     const c = document.createElement("button");
