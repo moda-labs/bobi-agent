@@ -3,6 +3,8 @@ and the per-agent lifecycle endpoints. Most classes monkeypatch service-core
 calls and read a real (temp) BOBI_HOME via the bobi_install fixture;
 TestMultiAgentRealService runs the real service layer on purpose (#706)."""
 
+import json
+
 import pytest
 import yaml
 from fastapi.testclient import TestClient
@@ -109,6 +111,63 @@ class TestStatus:
         r = _client().get(f"/api/agents/{bobi_install.agent_name}/status")
         assert r.status_code == 200
         assert r.json()["installed"] is True
+
+
+# --- spend (observability #733) --------------------------------------------
+
+def _seed_session(sessions_dir, name, *, cost, role="engineer",
+                  model_usage=None):
+    d = sessions_dir / name
+    d.mkdir(parents=True, exist_ok=True)
+    data = {"name": name, "role": role, "total_cost_usd": cost}
+    if model_usage is not None:
+        data["model_usage"] = model_usage
+    (d / "state.json").write_text(json.dumps(data))
+
+
+class TestSpend:
+    def test_team_spend_folds_sessions(self, bobi_install):
+        sd = bobi_install.sessions_dir
+        _seed_session(sd, "director", cost=0.60, role="director",
+                      model_usage={"anthropic:opus": {"cost_usd": 0.60}})
+        _seed_session(sd, "eng", cost=0.40, role="engineer",
+                      model_usage={"anthropic:sonnet": {"cost_usd": 0.40}})
+        r = _client().get(f"/api/agents/{bobi_install.agent_name}/spend")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["total_cost_usd"] == 1.0
+        assert body["sessions_counted"] == 2
+        assert body["by_role"] == {"director": 0.6, "engineer": 0.4}
+        # by_model ranked highest-first
+        assert list(body["by_model"]) == ["anthropic:opus", "anthropic:sonnet"]
+
+    def test_team_spend_empty(self, bobi_install):
+        r = _client().get(f"/api/agents/{bobi_install.agent_name}/spend")
+        assert r.status_code == 200
+        assert r.json()["total_cost_usd"] == 0.0
+        assert r.json()["sessions_counted"] == 0
+
+    def test_team_spend_unknown_agent_404(self, bobi_install):
+        assert _client().get("/api/agents/nope/spend").status_code == 404
+
+    def test_fleet_spend_totals(self, bobi_install):
+        _seed_session(bobi_install.sessions_dir, "director", cost=1.25)
+        r = _client().get("/api/fleet/spend")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["total_cost_usd"] == 1.25
+        assert body["sessions_counted"] == 1
+        team = next(t for t in body["teams"]
+                    if t["name"] == bobi_install.agent_name)
+        assert team["total_cost_usd"] == 1.25
+        assert team["sessions_counted"] == 1
+
+    def test_fleet_spend_empty_install(self, bobi_install):
+        body = _client().get("/api/fleet/spend").json()
+        assert body["total_cost_usd"] == 0.0
+        # the installed test agent is listed even with no spend
+        names = [t["name"] for t in body["teams"]]
+        assert bobi_install.agent_name in names
 
 
 # --- lifecycle actions -----------------------------------------------------

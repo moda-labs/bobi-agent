@@ -148,6 +148,16 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def dashboard() -> dict:
         return rt.dashboard()
 
+    # Observability: spend read from existing per-session cost (#733). No
+    # new emitters; the runtime folds each team's session state files.
+    @app.get("/api/fleet/spend")
+    def fleet_spend() -> dict:
+        return rt.fleet_spend()
+
+    @app.get("/api/agents/{name}/spend")
+    def agent_spend(name: str) -> JSONResponse:
+        return JSONResponse(rt.spend_summary(name))
+
     @app.get("/api/agents/{name}/status")
     def agent_status(name: str) -> JSONResponse:
         return JSONResponse(rt.team_status(name))

@@ -64,6 +64,26 @@ class CostSummary:
     by_role: dict[str, float] = field(default_factory=dict)
     sessions_counted: int = 0
 
+    def to_dict(self, *, ndigits: int = 4) -> dict:
+        """A JSON-ready view: costs rounded, dict order highest-spend first.
+
+        Shared by both webapp runtimes (the observability spend panel) so the
+        wire shape is defined once here rather than in each ``TeamRuntime``
+        implementation."""
+        def ranked(d: dict[str, float]) -> dict[str, float]:
+            return {k: round(v, ndigits)
+                    for k, v in sorted(d.items(), key=lambda kv: kv[1],
+                                       reverse=True)}
+
+        return {
+            "total_cost_usd": round(self.total_cost_usd, ndigits),
+            "sessions_counted": self.sessions_counted,
+            "by_provider": ranked(self.by_provider),
+            "by_model": ranked(self.by_model),
+            "by_session": ranked(self.by_session),
+            "by_role": ranked(self.by_role),
+        }
+
 
 def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
     """Aggregate costs across all session state files.

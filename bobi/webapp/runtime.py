@@ -111,6 +111,29 @@ class TeamRuntime(ABC):
         """The submit's outcome: pending/done/error. None when the id is
         unknown or belongs to a different team."""
 
+    # --- observability (read-only, #733) --------------------------------
+    # Surfaces signals we already capture; no new emitters. One interface,
+    # both runtimes, rendered once. The spend vertical folds the per-session
+    # cost already written to each session's state.json.
+
+    @abstractmethod
+    def spend_summary(self, name: str) -> dict:
+        """One team's spend: total plus breakdown by session, role, and model.
+
+        Shape (see ``bobi.costs.CostSummary.to_dict``)::
+
+            {"total_cost_usd", "sessions_counted",
+             "by_provider", "by_model", "by_session", "by_role"}
+        """
+
+    @abstractmethod
+    def fleet_spend(self) -> dict:
+        """Fleet-wide spend for the dashboard: a total plus per-team totals::
+
+            {"total_cost_usd", "sessions_counted",
+             "teams": [{"name", "total_cost_usd", "sessions_counted"}, ...]}
+        """
+
 
 # --- Local implementation ----------------------------------------------------
 
@@ -333,3 +356,36 @@ class LocalRuntime(TeamRuntime):
         if job is None or job.get("team") != name:
             return None
         return {k: v for k, v in job.items() if k != "team"}
+
+    # --- observability (read-only, #733) --------------------------------
+
+    def spend_summary(self, name: str) -> dict:
+        from bobi.costs import rollup_costs
+
+        root = self._resolve(name)
+        return rollup_costs(paths.sessions_dir(root)).to_dict()
+
+    def fleet_spend(self) -> dict:
+        """Roll up spend across every installed team. Offline: reads each
+        team's session state files directly, one rollup per team."""
+        from bobi.costs import rollup_costs
+
+        total = 0.0
+        counted = 0
+        teams: list[dict] = []
+        for team in paths.list_agents():
+            root = paths.agent_run_root(team)
+            summary = rollup_costs(paths.sessions_dir(root))
+            teams.append({
+                "name": team,
+                "total_cost_usd": round(summary.total_cost_usd, 4),
+                "sessions_counted": summary.sessions_counted,
+            })
+            total += summary.total_cost_usd
+            counted += summary.sessions_counted
+        teams.sort(key=lambda t: t["total_cost_usd"], reverse=True)
+        return {
+            "total_cost_usd": round(total, 4),
+            "sessions_counted": counted,
+            "teams": teams,
+        }

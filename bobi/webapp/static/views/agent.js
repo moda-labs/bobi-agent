@@ -24,6 +24,7 @@ export function mountAgent(el, { api, name }) {
   shell.className = "shell";
   shell.innerHTML = `
     <aside class="sidebar">
+      <div class="spend-panel" data-el="spendPanel" hidden></div>
       <div class="side-head mono"><a class="side-back" href="#/">&larr; agents</a> · subagents</div>
       <div class="cards" data-el="cards"></div>
       <p class="empty" data-el="empty" hidden>No active subagents. Press Start
@@ -153,6 +154,12 @@ export function mountAgent(el, { api, name }) {
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;")
                       .replace(/>/g, "&gt;");
 
+  // "$1.23" for dollars, "$0.0042" for cents-and-under; blank when zero.
+  function fmtUsd(n) {
+    if (!n || n <= 0) return "";
+    return "$" + (n >= 1 ? n.toFixed(2) : n.toFixed(4));
+  }
+
   function mdInline(t) {
     // Inline code spans hide behind \x00N\x00 sentinels while the other
     // transforms run, then restore. A NUL can never occur in the escaped
@@ -246,6 +253,14 @@ export function mountAgent(el, { api, name }) {
         const r = document.createElement("span");
         r.textContent = "· " + a.role;
         meta.appendChild(r);
+      }
+      const cost = fmtUsd(a.total_cost_usd);
+      if (cost) {
+        const cEl = document.createElement("span");
+        cEl.className = "card-cost";
+        cEl.textContent = cost;
+        cEl.title = "Recorded spend for this session";
+        meta.appendChild(cEl);
       }
       card.appendChild(meta);
 
@@ -410,6 +425,47 @@ export function mountAgent(el, { api, name }) {
     if (selected) loadMessages(selected);
   }
 
+  // --- spend panel (observability, #733) ------------------------------
+  // Team total plus the top-spend models, folded from existing per-session
+  // cost. A read-only surface: no controls, hidden until there is spend.
+  function renderSpend(data) {
+    const total = fmtUsd(data && data.total_cost_usd);
+    if (!total) { els.spendPanel.hidden = true; return; }
+    els.spendPanel.hidden = false;
+    const n = data.sessions_counted || 0;
+    const rows = Object.entries(data.by_model || {})
+      .filter(([, v]) => v > 0).slice(0, 4);
+    els.spendPanel.innerHTML = "";
+    const head = document.createElement("div");
+    head.className = "spend-head mono";
+    head.innerHTML = `<span>spend</span><span class="spend-total">${total}</span>`;
+    els.spendPanel.appendChild(head);
+    const sub = document.createElement("div");
+    sub.className = "spend-sub";
+    sub.textContent = `${n} session${n === 1 ? "" : "s"}`;
+    els.spendPanel.appendChild(sub);
+    for (const [key, val] of rows) {
+      const row = document.createElement("div");
+      row.className = "spend-row";
+      const label = document.createElement("span");
+      label.className = "spend-label";
+      // key is "provider:model" - show the model, keep provider in the title.
+      label.textContent = key.includes(":") ? key.split(":").slice(1).join(":") : key;
+      label.title = key;
+      const amt = document.createElement("span");
+      amt.className = "spend-amt";
+      amt.textContent = fmtUsd(val);
+      row.appendChild(label);
+      row.appendChild(amt);
+      els.spendPanel.appendChild(row);
+    }
+  }
+
+  async function pollSpend() {
+    const { ok, data } = await api(base + "/spend");
+    if (ok && data) renderSpend(data);
+  }
+
   els.composer.addEventListener("submit", (e) => {
     e.preventDefault();
     const text = els.input.value.trim();
@@ -434,8 +490,10 @@ export function mountAgent(el, { api, name }) {
   poll();
   pollMessages();
   pollStatus();
+  pollSpend();
   const t1 = setInterval(poll, 3000);
   const t2 = setInterval(pollMessages, 3000);
   const t3 = setInterval(pollStatus, 4000);
-  return () => { clearInterval(t1); clearInterval(t2); clearInterval(t3); };
+  const t4 = setInterval(pollSpend, 8000);
+  return () => { [t1, t2, t3, t4].forEach(clearInterval); };
 }

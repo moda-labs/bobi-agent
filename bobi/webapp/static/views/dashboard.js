@@ -16,6 +16,10 @@ export function mountDashboard(el, { api }) {
   const title = document.createElement("h1");
   title.textContent = "Your agents";
   head.appendChild(title);
+  const fleetSpend = document.createElement("span");
+  fleetSpend.className = "fleet-spend";
+  fleetSpend.hidden = true;
+  head.appendChild(fleetSpend);
   page.appendChild(head);
 
   const grid = document.createElement("div");
@@ -25,6 +29,14 @@ export function mountDashboard(el, { api }) {
   el.appendChild(page);
 
   let lastAgents = [];
+  let spendByTeam = new Map();   // name -> total_cost_usd (installed teams)
+
+  // "$1.23" for dollars, "$0.0042" for cents-and-under; blank when there is
+  // no recorded spend yet, so a fresh install stays uncluttered.
+  function fmtUsd(n) {
+    if (!n || n <= 0) return "";
+    return "$" + (n >= 1 ? n.toFixed(2) : n.toFixed(4));
+  }
 
   function card(a) {
     const c = document.createElement("button");
@@ -51,10 +63,21 @@ export function mountDashboard(el, { api }) {
       : "A design that hasn't been installed yet.");
     c.appendChild(d);
 
+    const foot = document.createElement("div");
+    foot.className = "agent-foot";
+    const spend = fmtUsd(spendByTeam.get(a.name));
+    if (a.installed && spend) {
+      const s = document.createElement("span");
+      s.className = "tile-spend";
+      s.textContent = spend;
+      s.title = "Total recorded spend for this team";
+      foot.appendChild(s);
+    }
     const go = document.createElement("span");
     go.className = "agent-go";
     go.textContent = a.installed ? "Open →" : "Edit design →";
-    c.appendChild(go);
+    foot.appendChild(go);
+    c.appendChild(foot);
 
     c.addEventListener("click", async () => {
       if (a.installed) {
@@ -97,10 +120,26 @@ export function mountDashboard(el, { api }) {
     grid.appendChild(createCard());
   }
 
+  function renderFleetSpend(data) {
+    const total = fmtUsd(data && data.total_cost_usd);
+    if (!total) { fleetSpend.hidden = true; return; }
+    const n = data.sessions_counted || 0;
+    fleetSpend.textContent = `${total} spent · ${n} session${n === 1 ? "" : "s"}`;
+    fleetSpend.hidden = false;
+  }
+
   async function poll() {
-    const { ok, data } = await api("/api/dashboard");
-    if (ok && data && Array.isArray(data.agents)) {
-      lastAgents = data.agents;
+    const [dash, spend] = await Promise.all([
+      api("/api/dashboard"),
+      api("/api/fleet/spend"),
+    ]);
+    if (spend.ok && spend.data) {
+      spendByTeam = new Map(
+        (spend.data.teams || []).map((t) => [t.name, t.total_cost_usd]));
+      renderFleetSpend(spend.data);
+    }
+    if (dash.ok && dash.data && Array.isArray(dash.data.agents)) {
+      lastAgents = dash.data.agents;
       render();
     }
   }
