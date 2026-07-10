@@ -581,7 +581,10 @@ export async function discordApi(
 	init: { method?: string; json?: unknown; form?: FormData } = {},
 ): Promise<Record<string, unknown>> {
 	const headers: Record<string, string> = { Authorization: `Bot ${token}` };
-	let body: BodyInit | undefined;
+	// Structural (not BodyInit): only these two shapes are ever built, and the
+	// event-server root typecheck runs without the "dom" lib, where BodyInit is
+	// undefined (same reason whatsappApi spells its body type out).
+	let body: string | FormData | undefined;
 	if (init.json !== undefined) {
 		headers["Content-Type"] = "application/json";
 		body = JSON.stringify(init.json);

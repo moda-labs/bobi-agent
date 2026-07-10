@@ -12,8 +12,8 @@
  * non-scope - it floods delivery and needs the privileged MESSAGE_CONTENT
  * intent anyway (DMs and bot-mentions are exempt from it).
  */
-import type { NormalizedEvent } from "../core";
-import { buildConversation } from "../conversation";
+import type { NormalizedEvent } from "../core.js";
+import { buildConversation } from "../conversation.js";
 
 /**
  * Shown when Discord withholds a guild message's content (the privileged

@@ -13,8 +13,8 @@
  * socket close); the output is a list of GatewayActions the driver executes
  * mechanically. The session never touches a socket.
  */
-import type { NormalizedEvent } from "../core";
-import { normalizeDiscordMessage } from "../adapters/discord";
+import type { NormalizedEvent } from "../core.js";
+import { normalizeDiscordMessage } from "../adapters/discord.js";
 
 // Gateway opcodes (https://discord.com/developers/docs/topics/opcodes-and-status-codes).
 export const GatewayOp = {
