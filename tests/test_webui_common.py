@@ -21,13 +21,14 @@ def _client(app, *, host="127.0.0.1"):
     return TestClient(app, base_url=f"http://{host}")
 
 
-def _secured_app():
+def _secured_app(*, allowed_hosts=None):
     app = FastAPI()
     install_security(
         app,
         secret=SECRET,
         header_name=WEBUI_TOKEN_HEADER,
         error_message="bad or missing token",
+        allowed_hosts=allowed_hosts,
     )
 
     @app.get("/api/ping")
@@ -44,6 +45,49 @@ def _secured_app():
 def test_security_rejects_foreign_host():
     c = _client(_secured_app(), host="evil.example.com")
     assert c.get("/", headers={WEBUI_TOKEN_HEADER: SECRET}).status_code == 403
+
+
+def test_security_allows_configured_extra_host_via_param():
+    # A hosted deployment names its public serving Host; that host is admitted
+    # while an unlisted foreign Host still 403s.
+    app = _secured_app(allowed_hosts={"127.0.0.1", "fleet.example.com"})
+    ok = _client(app, host="fleet.example.com")
+    assert ok.get("/", headers={WEBUI_TOKEN_HEADER: SECRET}).status_code == 200
+    assert ok.get("/api/ping", headers={WEBUI_TOKEN_HEADER: SECRET}).json() == {"ok": True}
+    evil = _client(app, host="evil.example.com")
+    assert evil.get("/", headers={WEBUI_TOKEN_HEADER: SECRET}).status_code == 403
+
+
+def test_security_host_match_is_case_insensitive(monkeypatch):
+    # Hostnames are case-insensitive; an operator-typed env value or a proxy
+    # forwarding mixed-case Host must still match.
+    monkeypatch.setenv("BOBI_WEBUI_ALLOWED_HOSTS", "Fleet.Example.COM")
+    c = _client(_secured_app(), host="fleet.example.com")
+    assert c.get("/", headers={WEBUI_TOKEN_HEADER: SECRET}).status_code == 200
+    # And the reverse: lowercase config, mixed-case request Host.
+    app = _secured_app(allowed_hosts={"127.0.0.1", "fleet.example.com"})
+    assert _client(app, host="Fleet.Example.com").get(
+        "/", headers={WEBUI_TOKEN_HEADER: SECRET}
+    ).status_code == 200
+
+
+def test_security_reads_allowed_hosts_env(monkeypatch):
+    # Wiring that build_app relies on: the env var threads through the default
+    # (build_app does not forward an allowed_hosts kwarg).
+    monkeypatch.setenv("BOBI_WEBUI_ALLOWED_HOSTS", "fleet.example.com, alt.example.com")
+    c = _client(_secured_app(), host="alt.example.com")
+    assert c.get("/", headers={WEBUI_TOKEN_HEADER: SECRET}).status_code == 200
+    assert _client(_secured_app(), host="nope.example.com").get(
+        "/", headers={WEBUI_TOKEN_HEADER: SECRET}
+    ).status_code == 403
+
+
+def test_security_default_hosts_unchanged_without_env(monkeypatch):
+    monkeypatch.delenv("BOBI_WEBUI_ALLOWED_HOSTS", raising=False)
+    assert _client(_secured_app(), host="evil.example.com").get(
+        "/", headers={WEBUI_TOKEN_HEADER: SECRET}
+    ).status_code == 403
+    assert _client(_secured_app()).get("/").status_code == 200
 
 
 def test_security_allows_page_without_secret_but_guards_api():
