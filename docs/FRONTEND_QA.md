@@ -50,3 +50,21 @@ the local QA screenshots to the PR with concise context. For PRs that require
 local UI QA, treat missing local prerequisites, browser launch failures, or
 failing e2e coverage as QA blockers and report the exact missing prerequisite.
 Treat a missing hosted preview as expected for these local-only UIs.
+
+## Attaching screenshots headless
+
+GitHub's native image upload needs a browser, which is unavailable in a headless
+agent container. Attach screenshots via the git-hosted raw-URL strategy instead
+(this repo is public, so raw URLs render inline):
+
+- Host the PNGs on a throwaway orphan branch named `qa-assets` (never merged, so
+  `main` stays image-free). Build it with git plumbing (`hash-object -w`,
+  `mktree`, `commit-tree`, `update-ref`) so no working tree or index is touched;
+  the branch is disposable and can be deleted after merge.
+- Name files by PR so one branch holds many PRs' shots (e.g. `734-dashboard.png`).
+- Embed in the PR body as
+  `![alt](https://raw.githubusercontent.com/moda-labs/bobi-agent/qa-assets/<file>.png)`,
+  and verify each URL returns `200 image/png` first.
+
+This is the repo-agnostic convention from the core `~/AGENTS.md` "Proof of Work"
+rule; see there for the private-repo caveat.
