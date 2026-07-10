@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.43.0 - 2026-07-10
+
+Minor release: fleet spend observability in the hosted webapp, headless
+record-to-GIF tooling baked into the gstack catalog, an env-configurable allowed
+Host for the hosted webapp, and a Codex-brain transcript fix for the fleet chat
+panel. The spend panels ship the `TeamRuntime.spend_summary` / `fleet_spend`
+read-model seam that the private hosted spend companion pins against.
+
+### Added
+- **Fleet + per-team spend observability (#734).** The webapp dashboard shows a
+  fleet-wide cumulative spend total plus per-team tiles, and the agent view
+  gains a spend panel with per-subagent cost. `TeamRuntime` gains
+  `spend_summary` and `fleet_spend`; `LocalRuntime` folds each session's
+  `state.json` via `costs.rollup_costs`, and `CostSummary.to_dict` defines the
+  wire shape once for both runtimes. Figures are lifetime-cumulative and labeled
+  as such (they reset only on a state wipe, so deployed teams need `state/` on a
+  persistent volume or spend zeroes on redeploy).
+- **ffmpeg baked into the gstack tool-library entry (#738).** The `gstack`
+  catalog entry now bakes `ffmpeg` alongside Playwright/Chromium behind a
+  success-gate check, so agent teams declaring `tool_library: [gstack]` get
+  headless record-to-GIF on their next rebuild.
+- **Env-configurable allowed Host for the hosted webapp (#732).** The shared
+  web-UI security middleware admitted loopback only, 403ing any non-loopback
+  Host. `install_security` now also admits bare hostnames named in
+  `BOBI_WEBUI_ALLOWED_HOSTS` (comma-separated, read once at install time), so
+  the hosted fleet-admin webapp can serve the same build behind its auth gate
+  and reverse proxy. Unset in the local product, so loopback-only behavior is
+  unchanged.
+
+### Fixed
+- **Codex-brain transcripts render in the fleet chat panel (#737).** The fleet
+  UI showed no chat history for codex-brain agents because the transcript reader
+  only understood Claude Code JSONL. `read_transcript_messages` is now
+  brain-aware: it reads a Codex "rollout" under `$CODEX_HOME/sessions` for
+  codex-brain agents (falling back to a rollout when the brain is unrecorded, as
+  the hosted supervisor leaves it), so a codex director's history renders
+  instead of a blank panel.
+
 ## 0.42.0 - 2026-07-09
 
 Minor release: retire the in-repo watchdog now that the supervisor sidecar owns
