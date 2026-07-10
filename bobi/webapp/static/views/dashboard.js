@@ -63,7 +63,7 @@ export function mountDashboard(el, { api }) {
       const s = document.createElement("span");
       s.className = "tile-spend";
       s.textContent = spend;
-      s.title = "Total recorded spend for this team";
+      s.title = "Cumulative recorded spend for this team";
       foot.appendChild(s);
     }
     const go = document.createElement("span");
@@ -118,6 +118,9 @@ export function mountDashboard(el, { api }) {
     if (!total) { fleetSpend.hidden = true; return; }
     const n = data.sessions_counted || 0;
     fleetSpend.textContent = `${total} spent · ${n} session${n === 1 ? "" : "s"}`;
+    // Lifetime-cumulative across every session on disk, not a time period.
+    fleetSpend.title =
+      "Cumulative recorded spend across all teams and sessions on disk (not a time period)";
     fleetSpend.hidden = false;
   }
 

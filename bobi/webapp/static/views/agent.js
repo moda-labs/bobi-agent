@@ -253,7 +253,7 @@ export function mountAgent(el, { api, name }) {
         const cEl = document.createElement("span");
         cEl.className = "card-cost";
         cEl.textContent = cost;
-        cEl.title = "Recorded spend for this session";
+        cEl.title = "Cumulative recorded spend for this session";
         meta.appendChild(cEl);
       }
       card.appendChild(meta);
@@ -426,6 +426,11 @@ export function mountAgent(el, { api, name }) {
     const total = fmtUsd(data && data.total_cost_usd);
     if (!total) { els.spendPanel.hidden = true; return; }
     els.spendPanel.hidden = false;
+    // The figure is lifetime-cumulative: it sums each session's recorded cost
+    // across all sessions still on disk, persists across restarts, and is not
+    // scoped to a time period. Label it so it is not read as "today".
+    els.spendPanel.title =
+      "Cumulative recorded spend across all sessions on disk (not a time period)";
     const n = data.sessions_counted || 0;
     const rows = Object.entries(data.by_model || {})
       .filter(([, v]) => v > 0).slice(0, 4);
@@ -436,7 +441,7 @@ export function mountAgent(el, { api, name }) {
     els.spendPanel.appendChild(head);
     const sub = document.createElement("div");
     sub.className = "spend-sub";
-    sub.textContent = `${n} session${n === 1 ? "" : "s"}`;
+    sub.textContent = `cumulative · ${n} session${n === 1 ? "" : "s"}`;
     els.spendPanel.appendChild(sub);
     for (const [key, val] of rows) {
       const row = document.createElement("div");
