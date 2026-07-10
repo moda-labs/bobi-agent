@@ -2,7 +2,7 @@
 set -euo pipefail
 
 VERSION="${1:?usage: smoke-homebrew-bottles.sh <version>}"
-MAX_ATTEMPTS="${BOBI_HOMEBREW_SMOKE_ATTEMPTS:-60}"
+MAX_ATTEMPTS="${BOBI_HOMEBREW_SMOKE_ATTEMPTS:-180}"
 SLEEP_SECONDS="${BOBI_HOMEBREW_SMOKE_SLEEP:-30}"
 EXPECTED_ROOT_URL="https://github.com/moda-labs/homebrew-bobi-agent/releases/download/bobi-${VERSION}"
 
