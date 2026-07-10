@@ -3485,6 +3485,79 @@ describe("discord app registration and outbound send", () => {
 		expect(messages.map((m) => m.ts)).toEqual(["m1", "m2"]);
 	});
 
+	// Multipart upload stub: verifies the token like stubDiscordApi, records
+	// each multipart message post's payload_json + file-part count, and fails
+	// the batch at `failOn` (1-based) with a Discord error body.
+	function stubDiscordUploads(failOn = 0) {
+		const posts: Array<{ payload: Record<string, unknown>; parts: number }> = [];
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const path = new URL(String(url)).pathname;
+			if ((init?.method ?? "POST") === "GET" && path.endsWith("/applications/@me")) {
+				return fetchOk(200, { id: DC_APP, name: "bobi" });
+			}
+			if (path.endsWith(`/channels/${DC_CHAN}/messages`) && init?.body instanceof FormData) {
+				const form = init.body;
+				posts.push({
+					payload: JSON.parse(String(form.get("payload_json"))),
+					parts: [...form.keys()].filter((k) => k.startsWith("files[")).length,
+				});
+				if (posts.length === failOn) return fetchOk(400, { message: "boom" });
+				return fetchOk(200, { id: `upload.${posts.length}` });
+			}
+			return fetchOk(404, { message: `unexpected ${path}` });
+		}));
+		return posts;
+	}
+
+	it("uploads files in multipart batches of 10, the first carrying the comment", async () => {
+		const store = createMockStorage();
+		const posts = stubDiscordUploads();
+		await register(store);
+
+		// 11 files: one over Discord's per-message attachment cap.
+		const res = await handleChannelsSend(store, {
+			conversation: DC_CONV, text: "the report",
+			files: Array.from({ length: 11 }, (_, i) => (
+				{ name: `f${i}.txt`, content_b64: btoa(`file ${i}`), ...(i === 0 ? { title: "First" } : {}) }
+			)),
+		}, "bubA");
+
+		expect(res.status).toBe(200);
+		expect(posts).toHaveLength(2);
+		expect(posts[0].parts).toBe(10);
+		expect(posts[0].payload.content).toBe("the report");
+		const first = posts[0].payload.attachments as Array<Record<string, unknown>>;
+		expect(first.map((a) => a.id)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+		expect(first[0].description).toBe("First");
+		// The second batch restarts attachment ids at 0 (they are message-local)
+		// and must not duplicate the comment.
+		expect(posts[1].parts).toBe(1);
+		expect(posts[1].payload.content).toBeUndefined();
+		expect((posts[1].payload.attachments as Array<Record<string, unknown>>)[0]).toMatchObject(
+			{ id: 0, filename: "f10.txt" });
+		// ts names the LAST message so a follow-up edit targets the newest post.
+		expect((res.body as Record<string, unknown>).ts).toBe("upload.2");
+	});
+
+	it("a failed later batch surfaces the partial-delivery contract", async () => {
+		const store = createMockStorage();
+		stubDiscordUploads(2); // first batch lands, second fails
+		await register(store);
+
+		const res = await handleChannelsSend(store, {
+			conversation: DC_CONV, text: "the report",
+			files: Array.from({ length: 11 }, (_, i) => (
+				{ name: `f${i}.txt`, content_b64: btoa(`file ${i}`) }
+			)),
+		}, "bubA");
+
+		expect(res.status).toBe(502);
+		const error = (res.body as Record<string, string>).error;
+		// Once batch 1 reached the user the caller must not blind-retry the set.
+		expect(error).toContain("10 file(s) are already visible");
+		expect(error).toContain("boom");
+	});
+
 	it("does not read another bubble's app registration", async () => {
 		const store = createMockStorage();
 		stubDiscordApi();

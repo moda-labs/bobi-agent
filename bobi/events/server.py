@@ -390,7 +390,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
             if sub.split(":", 1)[1] not in registered:
                 action = "dropping it from" if filter_unauthorized else "keeping it in"
                 log.warning(
-                    "%s registration did not back %r - %s this session's "
+                    "%s registration did not back %r — %s this session's "
                     "subscriptions (a resource grant is required, #488)",
                     service, sub, action,
                 )

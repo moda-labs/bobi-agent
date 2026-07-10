@@ -336,6 +336,14 @@ describe("normalizeDiscordMessage", () => {
 		expect(event.text).toContain("Message Content intent");
 	});
 
+	it("truncates inbound text at 4000 chars like the other adapters", () => {
+		const [event] = normalizeDiscordMessage({
+			id: "m1", channel_id: "c1", content: "x".repeat(5000),
+			author: { id: "u1", username: "ada" },
+		}, BOT_USER, APP_ID);
+		expect(event.text.length).toBe(4000);
+	});
+
 	it("prefers the display name over the username", () => {
 		const [event] = normalizeDiscordMessage({
 			id: "m1", channel_id: "c1", content: "hi",

@@ -46,6 +46,11 @@ BOT_TOKEN = "dc-gw-test-token"
 CHANNEL = "888777666555444333"
 CONV = f"discord:{APP_ID}:channel:{CHANNEL}"
 MESSAGE_CONTENT_INTENT = 1 << 15
+# A second app whose token the REST stub accepts on /applications/@me (so
+# registration succeeds) but rejects with a 401 on /gateway/bot - the
+# production bad-token signal that must park the connection as fatal.
+BAD_APP_ID = "222333444555666777"
+BAD_TOKEN = "dc-gw-revoked-token"
 
 
 def _free_port() -> int:
@@ -208,9 +213,17 @@ class _RestStub:
                     "method": "GET", "path": self.path,
                     "auth": self.headers.get("Authorization", ""),
                 })
+                bad = self.headers.get("Authorization", "") == f"Bot {BAD_TOKEN}"
                 if self.path == "/applications/@me":
+                    # The bad token still names ITS app (a revoked-after-
+                    # registration token behaves this way in the stub: the
+                    # registration passes, the Gateway bootstrap then 401s).
+                    if bad:
+                        return self._respond({"id": BAD_APP_ID, "name": "bobi-bad"})
                     return self._respond({"id": APP_ID, "name": "bobi-test"})
                 if self.path == "/gateway/bot":
+                    if bad:
+                        return self._respond({"message": "401: Unauthorized"}, 401)
                     return self._respond({
                         "url": f"ws://127.0.0.1:{gateway_ws_port}",
                         "shards": 1,
@@ -450,3 +463,39 @@ class TestOutbound:
         assert len(sends) == 1
         assert sends[0]["auth"] == f"Bot {BOT_TOKEN}"
         assert sends[0]["body"] == {"content": "hola *back*"}
+
+
+class TestFatalParking:
+    # Runs last: it leaves a parked (fatal) connection in the shared server,
+    # which is harmless to the good app but would be confusing mid-suite.
+    def test_bad_token_parks_the_connection_as_fatal_in_health(self, discord):
+        """A 401 from GET /gateway/bot is the production bad-token signal
+        (the socket's 4004 close never happens when the bootstrap REST call
+        already fails). The driver must park the connection as `fatal` -
+        surfaced in /health, no backoff retry loop - and leave the healthy
+        app's connection alone."""
+        _project, _gateway, _rest, es_url, bubble = discord
+
+        cfg = Config(services=[ServiceConfig(name="discord", credentials={
+            "bot_token": BAD_TOKEN, "application_id": BAD_APP_ID,
+        })])
+        # Registration itself succeeds: the stub's /applications/@me accepts
+        # the token (revoked-after-registration scenario).
+        registered = register_discord_apps(
+            es_url, cfg, bubble["bubble_id"], bubble["bubble_key"])
+        assert registered == [BAD_APP_ID]
+
+        entry = None
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            health = httpx.get(f"{es_url}/health", timeout=5).json()
+            entries = {e["application_id"]: e
+                       for e in health.get("discord_gateway", [])}
+            entry = entries.get(BAD_APP_ID)
+            if entry and entry["state"] == "fatal":
+                break
+            time.sleep(0.2)
+        assert entry and entry["state"] == "fatal", entry
+        assert "authentication failed" in entry["fatal_reason"]
+        # The healthy app's connection is untouched.
+        assert entries[APP_ID]["state"] == "connected"

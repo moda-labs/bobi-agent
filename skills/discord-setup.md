@@ -22,6 +22,10 @@ messages, edits supported).
    `discord:<application_id>`.
 3. Under **Bot**, click **Reset Token** and copy the bot token. This is
    `DISCORD_BOT_TOKEN`.
+4. Under **Bot**, turn **Public Bot off** (it defaults to on). With it on,
+   anyone who has your Application ID can invite the bot to *their* server,
+   and every member there can then @mention it and drive your agent - v1 has
+   no guild allowlist, so the invite is the only gate.
 
 The default (unprivileged) intents cover the v1 surface: DMs and messages
 mentioning the bot are exempt from the privileged Message Content intent.

@@ -653,8 +653,8 @@ const discordAdapter: ChannelAdapter = {
 		],
 		promptHint:
 			"Discord renders a markdown subset (bold, italics, code blocks, "
-			+ "lists) but no tables or headers before Discord's own sizes. Keep "
-			+ "replies short; messages cap at 2000 characters.",
+			+ "lists, # headers) but no tables. Keep replies short; messages "
+			+ "cap at 2000 characters.",
 		setupSkill: "skills/discord-setup.md",
 	},
 

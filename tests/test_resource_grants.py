@@ -211,6 +211,44 @@ def test_authorize_resources_keeps_registered_whatsapp_topic():
     assert kept == ["whatsapp:747556541", "inbox/self"]
 
 
+def test_authorize_resources_drops_discord_topic_the_registration_did_not_back():
+    """Same contract as WhatsApp through the generalized registered-by-service
+    filter (#2): a discord:<application_id> topic is grant-backed only by
+    register_discord_apps, so an unbacked one is dropped before register/PUT."""
+    transport = httpx.MockTransport(lambda req: (_ for _ in ()).throw(
+        AssertionError(f"unexpected authorize call: {req.url}")))
+    mock_http = httpx.Client(transport=transport)
+    with patch.object(pooled, "_client", mock_http):
+        kept = authorize_resources(
+            "https://es.invalid", _cfg(),
+            ["inbox/self", "discord:111222333444555666"],
+            "bub_test", "bkey_test",
+            discord_registered=[],
+        )
+    assert kept == ["inbox/self"]
+
+
+def test_authorize_resources_keeps_registered_discord_topic():
+    """An application id the registration DID back passes through; None means
+    no registration ran and the topic is kept."""
+    mock_http = httpx.Client(transport=httpx.MockTransport(lambda req: (_ for _ in ()).throw(
+        AssertionError(f"unexpected authorize call: {req.url}"))))
+    with patch.object(pooled, "_client", mock_http):
+        kept = authorize_resources(
+            "https://es.invalid", _cfg(),
+            ["discord:111222333444555666", "inbox/self"],
+            "bub_test", "bkey_test",
+            discord_registered=["111222333444555666"],
+        )
+        kept_unregistered = authorize_resources(
+            "https://es.invalid", _cfg(),
+            ["discord:111222333444555666"],
+            "bub_test", "bkey_test",
+        )
+    assert kept == ["discord:111222333444555666", "inbox/self"]
+    assert kept_unregistered == ["discord:111222333444555666"]
+
+
 def test_authorize_resources_keeps_whatsapp_when_no_registration_ran():
     """whatsapp_registered=None means no registration was attempted (e.g. an
     inbox-only session) - keep the topic, matching the pre-#656 behavior."""
