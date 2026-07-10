@@ -390,6 +390,42 @@ class TestSubagents:
             "/subagents/..%2Fetc/messages")
         assert r.status_code == 404
 
+    def test_messages_from_codex_rollout(self, bobi_install, monkeypatch,
+                                         tmp_path):
+        """A codex-brained session renders its rollout, not a blank panel —
+        the fleet-UI regression this fixes. The runtime dispatches on the
+        recorded ``.brain`` to the Codex reader instead of the Claude one."""
+        import json
+
+        from bobi import paths
+
+        sessions = paths.sessions_dir(bobi_install.repo_path)
+        (sessions / "bobi-worker-1.id").write_text("codex-thread-42")
+        (sessions / "bobi-worker-1.brain").write_text("codex")
+
+        codex_home = tmp_path / "codex"
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        rollout = (codex_home / "sessions" / "2026" / "07" / "09"
+                   / "rollout-2026-07-09T05-12-25-codex-thread-42.jsonl")
+        rollout.parent.mkdir(parents=True)
+        rollout.write_text("\n".join(json.dumps(r) for r in [
+            {"type": "response_item", "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "are you alive?"}]}},
+            {"type": "response_item", "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "Yes, standing by."}]}},
+        ]) + "\n")
+
+        r = _client().get(
+            f"/api/agents/{bobi_install.agent_name}"
+            "/subagents/bobi-worker-1/messages")
+        assert r.status_code == 200
+        assert r.json()["messages"] == [
+            {"role": "user", "text": "are you alive?"},
+            {"role": "agent", "text": "Yes, standing by."},
+        ]
+
 
 class TestChat:
     """Chat is submit-then-poll: POST returns a message id right away; the

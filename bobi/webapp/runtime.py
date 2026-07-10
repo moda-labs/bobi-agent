@@ -284,13 +284,17 @@ class LocalRuntime(TeamRuntime):
                 for e in ordered_subagents(entries, manager_name=mgr)]
 
     def messages(self, name: str, session: str) -> list[dict]:
-        from bobi.sdk import load_session_id
+        from bobi.sdk import load_session_brain, load_session_id
 
         root = self._resolve(name)
-        # The durable source of truth is the Claude transcript; the web-UI
-        # chat log is the fallback when no transcript resolves yet. Both are
-        # explicit-path reads.
-        messages = read_transcript_messages(load_session_id(session, root=root))
+        # The durable source of truth is the session transcript; the web-UI
+        # chat log is the fallback when no transcript resolves yet. The recorded
+        # brain picks the transcript format (Codex rollout vs Claude JSONL).
+        # Both are explicit-path reads.
+        messages = read_transcript_messages(
+            load_session_id(session, root=root),
+            brain=load_session_brain(session, root=root),
+        )
         if not messages:
             messages = read_chat(root, session)
         return messages

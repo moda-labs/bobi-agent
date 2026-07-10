@@ -474,6 +474,18 @@ def load_session_id(name: str, *, root: Path | None = None) -> str:
     return ""
 
 
+def load_session_brain(name: str, *, root: Path | None = None) -> str:
+    """The brain kind recorded for *name*'s session, or "" if none is recorded.
+
+    Written alongside the ``.id`` by :func:`save_session_id` (``<name>.brain``);
+    the transcript reader needs it to pick the right on-disk format (a Codex
+    rollout vs a Claude JSONL transcript)."""
+    path = _sessions_dir(root) / f"{name}.brain"
+    if path.exists():
+        return path.read_text().strip()
+    return ""
+
+
 def load_resumable_session_id(name: str, model: str) -> str:
     """The saved session id, if the active brain can continue it under *model*.
 
