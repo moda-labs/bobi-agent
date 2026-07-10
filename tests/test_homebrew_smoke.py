@@ -35,6 +35,12 @@ def test_release_smokes_homebrew_bottle_urls_after_dispatch():
     assert "scripts/smoke-homebrew-bottles.sh" in scripts
 
 
+def test_homebrew_smoke_default_timeout_covers_macos_bottle_queue():
+    script = HOMEBREW_SMOKE_SH.read_text()
+    assert 'MAX_ATTEMPTS="${BOBI_HOMEBREW_SMOKE_ATTEMPTS:-180}"' in script
+    assert 'SLEEP_SECONDS="${BOBI_HOMEBREW_SMOKE_SLEEP:-30}"' in script
+
+
 def _run_homebrew_smoke(formula: str, tmp_path: Path) -> subprocess.CompletedProcess:
     formula_path = tmp_path / "bobi.rb"
     formula_path.write_text(formula)
