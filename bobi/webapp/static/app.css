@@ -174,8 +174,15 @@ html[data-retro="on"] body {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-.agent-go {
+.agent-foot {
   margin-top: auto;
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.agent-go {
   font-family: var(--font-mono);
   font-size: 11px;
   text-transform: uppercase;
@@ -183,6 +190,21 @@ html[data-retro="on"] body {
   color: var(--faint);
 }
 .agent-tile:hover .agent-go { color: var(--accent); }
+.tile-spend {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+/* dashboard fleet-spend readout (page head, right of the title) */
+.fleet-spend {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 11px;
+  color: var(--muted);
+}
 .agent-tile.create {
   border-style: dashed;
   border-color: var(--border-strong);
@@ -268,6 +290,45 @@ html[data-retro="on"] body {
   flex-direction: column;
 }
 .side-head { color: var(--muted); padding: 14px 16px 8px; }
+
+/* spend panel - read-only spend fold at the top of the roster (#733) */
+.spend-panel {
+  margin: 12px 12px 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--raised);
+}
+.spend-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  color: var(--muted);
+}
+.spend-total { color: var(--text); font-size: 13px; letter-spacing: 0.02em; }
+.spend-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--faint);
+  margin: 2px 0 6px;
+}
+.spend-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+  padding: 1px 0;
+}
+.spend-label {
+  font-family: var(--font-mono);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.spend-amt { font-family: var(--font-mono); color: var(--text); flex: none; }
+.card-cost { margin-left: auto; font-family: var(--font-mono); color: var(--muted); }
 .side-back { color: var(--muted); text-decoration: none; }
 .side-back:hover { color: var(--accent); }
 .cards { display: flex; flex-direction: column; gap: 2px; padding: 0 8px 12px; }

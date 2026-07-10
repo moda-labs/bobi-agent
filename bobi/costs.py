@@ -64,6 +64,26 @@ class CostSummary:
     by_role: dict[str, float] = field(default_factory=dict)
     sessions_counted: int = 0
 
+    def to_dict(self, *, ndigits: int = 4) -> dict:
+        """A JSON-ready view: costs rounded, dict order highest-spend first.
+
+        Shared by both webapp runtimes (the observability spend panel) so the
+        wire shape is defined once here rather than in each ``TeamRuntime``
+        implementation."""
+        def ranked(d: dict[str, float]) -> dict[str, float]:
+            return {k: round(v, ndigits)
+                    for k, v in sorted(d.items(), key=lambda kv: kv[1],
+                                       reverse=True)}
+
+        return {
+            "total_cost_usd": round(self.total_cost_usd, ndigits),
+            "sessions_counted": self.sessions_counted,
+            "by_provider": ranked(self.by_provider),
+            "by_model": ranked(self.by_model),
+            "by_session": ranked(self.by_session),
+            "by_role": ranked(self.by_role),
+        }
+
 
 def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
     """Aggregate costs across all session state files.
@@ -88,8 +108,13 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
         except (json.JSONDecodeError, OSError):
             continue
 
-        cost = data.get("total_cost_usd", 0.0)
-        if not cost and not data.get("model_usage"):
+        # `or 0.0` (not a get default) so a present-but-null cost - a
+        # hand-edited or partially-written state.json - coerces to 0.0
+        # instead of crashing the arithmetic below (these fold now backs a
+        # web endpoint that must not 500 on one malformed session).
+        cost = data.get("total_cost_usd") or 0.0
+        model_usage = data.get("model_usage") or {}
+        if not cost and not model_usage:
             continue
 
         summary.sessions_counted += 1
@@ -100,9 +125,8 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
         summary.by_session[name] = summary.by_session.get(name, 0.0) + cost
         summary.by_role[role] = summary.by_role.get(role, 0.0) + cost
 
-        model_usage = data.get("model_usage", {})
         for key, usage in model_usage.items():
-            usage_cost = usage.get("cost_usd", 0.0)
+            usage_cost = (usage or {}).get("cost_usd") or 0.0
             # key format is "provider:model"
             parts = key.split(":", 1)
             provider = parts[0] if len(parts) > 1 else "unknown"

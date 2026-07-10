@@ -3,7 +3,7 @@
    standalone agentui SPA, routed under #/agents/<name> with team-scoped
    endpoints. */
 
-import { openSetup } from "../shell.js";
+import { openSetup, fmtUsd } from "../shell.js";
 
 export function mountAgent(el, { api, name }) {
   const base = "/api/agents/" + encodeURIComponent(name);
@@ -24,6 +24,7 @@ export function mountAgent(el, { api, name }) {
   shell.className = "shell";
   shell.innerHTML = `
     <aside class="sidebar">
+      <div class="spend-panel" data-el="spendPanel" hidden></div>
       <div class="side-head mono"><a class="side-back" href="#/">&larr; agents</a> · subagents</div>
       <div class="cards" data-el="cards"></div>
       <p class="empty" data-el="empty" hidden>No active subagents. Press Start
@@ -247,6 +248,14 @@ export function mountAgent(el, { api, name }) {
         r.textContent = "· " + a.role;
         meta.appendChild(r);
       }
+      const cost = fmtUsd(a.total_cost_usd);
+      if (cost) {
+        const cEl = document.createElement("span");
+        cEl.className = "card-cost";
+        cEl.textContent = cost;
+        cEl.title = "Cumulative recorded spend for this session";
+        meta.appendChild(cEl);
+      }
       card.appendChild(meta);
 
       card.addEventListener("click", () => selectAgent(a.name));
@@ -410,6 +419,52 @@ export function mountAgent(el, { api, name }) {
     if (selected) loadMessages(selected);
   }
 
+  // --- spend panel (observability, #733) ------------------------------
+  // Team total plus the top-spend models, folded from existing per-session
+  // cost. A read-only surface: no controls, hidden until there is spend.
+  function renderSpend(data) {
+    const total = fmtUsd(data && data.total_cost_usd);
+    if (!total) { els.spendPanel.hidden = true; return; }
+    els.spendPanel.hidden = false;
+    // The figure is lifetime-cumulative: it sums each session's recorded cost
+    // across all sessions still on disk, persists across restarts, and is not
+    // scoped to a time period. Label it so it is not read as "today".
+    els.spendPanel.title =
+      "Cumulative recorded spend across all sessions on disk (not a time period)";
+    const n = data.sessions_counted || 0;
+    const rows = Object.entries(data.by_model || {})
+      .filter(([, v]) => v > 0).slice(0, 4);
+    els.spendPanel.innerHTML = "";
+    const head = document.createElement("div");
+    head.className = "spend-head mono";
+    head.innerHTML = `<span>spend</span><span class="spend-total">${total}</span>`;
+    els.spendPanel.appendChild(head);
+    const sub = document.createElement("div");
+    sub.className = "spend-sub";
+    sub.textContent = `cumulative · ${n} session${n === 1 ? "" : "s"}`;
+    els.spendPanel.appendChild(sub);
+    for (const [key, val] of rows) {
+      const row = document.createElement("div");
+      row.className = "spend-row";
+      const label = document.createElement("span");
+      label.className = "spend-label";
+      // key is "provider:model" - show the model, keep provider in the title.
+      label.textContent = key.includes(":") ? key.split(":").slice(1).join(":") : key;
+      label.title = key;
+      const amt = document.createElement("span");
+      amt.className = "spend-amt";
+      amt.textContent = fmtUsd(val);
+      row.appendChild(label);
+      row.appendChild(amt);
+      els.spendPanel.appendChild(row);
+    }
+  }
+
+  async function pollSpend() {
+    const { ok, data } = await api(base + "/spend");
+    if (ok && data) renderSpend(data);
+  }
+
   els.composer.addEventListener("submit", (e) => {
     e.preventDefault();
     const text = els.input.value.trim();
@@ -434,8 +489,10 @@ export function mountAgent(el, { api, name }) {
   poll();
   pollMessages();
   pollStatus();
+  pollSpend();
   const t1 = setInterval(poll, 3000);
   const t2 = setInterval(pollMessages, 3000);
   const t3 = setInterval(pollStatus, 4000);
-  return () => { clearInterval(t1); clearInterval(t2); clearInterval(t3); };
+  const t4 = setInterval(pollSpend, 8000);
+  return () => { [t1, t2, t3, t4].forEach(clearInterval); };
 }

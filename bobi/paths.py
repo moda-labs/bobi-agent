@@ -265,8 +265,16 @@ def policy_cursor_path(root: Path | None = None) -> Path:
     return long_term_memory_cursor_path(root)
 
 
+def sessions_path(root: Path | None = None) -> Path:
+    """The sessions dir path without creating it.
+
+    Mirrors ``state_path`` vs ``state_dir``: read-only callers (e.g. the
+    spend/observability endpoints) use this so a plain GET never mkdirs."""
+    return state_path(root) / "sessions"
+
+
 def sessions_dir(root: Path | None = None) -> Path:
-    d = state_dir(root) / "sessions"
+    d = sessions_path(root)
     d.mkdir(parents=True, exist_ok=True)
     return d
 

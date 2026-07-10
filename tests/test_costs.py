@@ -115,6 +115,20 @@ class TestCostRollup:
         assert summary.total_cost_usd == 1.00
         assert summary.by_provider["anthropic"] == 1.00
 
+    def test_null_cost_coerces_to_zero(self, tmp_path):
+        # A hand-edited or partially-written state.json can carry an explicit
+        # null; the fold must not crash (it now backs a web endpoint).
+        sessions_dir = self._make_sessions(tmp_path, {
+            "broken": {"name": "broken", "role": "eng",
+                       "total_cost_usd": None,
+                       "model_usage": {"anthropic:opus": {"cost_usd": None}}},
+            "good": {"name": "good", "role": "eng", "total_cost_usd": 0.5,
+                     "model_usage": {"anthropic:opus": {"cost_usd": 0.5}}},
+        })
+        summary = rollup_costs(sessions_dir)
+        assert summary.total_cost_usd == 0.5
+        assert summary.by_model["anthropic:opus"] == 0.5
+
     def test_skips_zero_cost_sessions(self, tmp_path):
         sessions_dir = self._make_sessions(tmp_path, {
             "no-cost": {
@@ -154,3 +168,34 @@ class TestFormatCosts:
         summary = CostSummary()
         output = format_costs(summary)
         assert "Total cost: $0.0000" in output
+
+
+class TestToDict:
+    def test_shape_and_rounding(self):
+        summary = CostSummary(
+            total_cost_usd=1.234567,
+            by_provider={"anthropic": 1.234567},
+            by_model={"anthropic:claude-opus": 1.234567},
+            by_session={"manager": 1.234567},
+            by_role={"director": 1.234567},
+            sessions_counted=2,
+        )
+        d = summary.to_dict()
+        assert d["total_cost_usd"] == 1.2346          # rounded to 4 places
+        assert d["sessions_counted"] == 2
+        assert d["by_provider"] == {"anthropic": 1.2346}
+        assert d["by_model"] == {"anthropic:claude-opus": 1.2346}
+        assert d["by_session"] == {"manager": 1.2346}
+        assert d["by_role"] == {"director": 1.2346}
+
+    def test_breakdowns_ranked_highest_first(self):
+        summary = CostSummary(
+            by_model={"a": 0.10, "b": 0.90, "c": 0.30},
+        )
+        assert list(summary.to_dict()["by_model"]) == ["b", "c", "a"]
+
+    def test_empty_summary(self):
+        d = CostSummary().to_dict()
+        assert d["total_cost_usd"] == 0.0
+        assert d["sessions_counted"] == 0
+        assert d["by_model"] == {}

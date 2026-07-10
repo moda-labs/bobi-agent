@@ -54,6 +54,15 @@ export function setSubtitle(text) {
   document.getElementById("subtitle").textContent = text;
 }
 
+// Spend formatting, shared by the dashboard and agent views (#733):
+// "$1.23" for dollars, "$0.0042" for cents-and-under; "" when there is no
+// recorded spend, so a fresh install stays uncluttered. One home for the
+// zero/rounding contract the spend panels depend on.
+export function fmtUsd(n) {
+  if (!n || n <= 0) return "";
+  return "$" + (n >= 1 ? n.toFixed(2) : n.toFixed(4));
+}
+
 // --- router ---------------------------------------------------------
 
 let teardown = null; // current view's cleanup (clears pollers)
