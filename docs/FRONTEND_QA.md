@@ -46,25 +46,33 @@ For `bobi agent <name> ui`, use an agent that is already installed in the local
 `$BOBI_HOME`; the command opens `bobi app` at `#/agents/<name>`. Open the printed
 localhost URL, exercise the changed flow, and capture any screenshots from that
 local browser session. For every PR that touches these frontend surfaces, attach
-the local QA screenshots to the PR with concise context. For PRs that require
+local QA proof to the PR with concise context (prefer a GIF walkthrough, else
+screenshots; see "Attaching UI proof headless" below). For PRs that require
 local UI QA, treat missing local prerequisites, browser launch failures, or
 failing e2e coverage as QA blockers and report the exact missing prerequisite.
 Treat a missing hosted preview as expected for these local-only UIs.
 
-## Attaching screenshots headless
+## Attaching UI proof headless
+
+Prefer a short GIF walkthrough of the changed flow over still screenshots: it
+proves the feature works, not just a frozen state. Record it headless with
+Playwright (`record_video_dir`) driving the real app, then transcode the `.webm`
+to GIF with ffmpeg (two-pass palette for quality). Fall back to stills only when
+Chromium or ffmpeg is unavailable.
 
 GitHub's native image upload needs a browser, which is unavailable in a headless
-agent container. Attach screenshots via the git-hosted raw-URL strategy instead
+agent container. Attach the capture via the git-hosted raw-URL strategy instead
 (this repo is public, so raw URLs render inline):
 
-- Host the PNGs on a throwaway orphan branch named `qa-assets` (never merged, so
+- Host the file on a throwaway orphan branch named `qa-assets` (never merged, so
   `main` stays image-free). Build it with git plumbing (`hash-object -w`,
   `mktree`, `commit-tree`, `update-ref`) so no working tree or index is touched;
   the branch is disposable and can be deleted after merge.
-- Name files by PR so one branch holds many PRs' shots (e.g. `734-dashboard.png`).
+- Name files by PR so one branch holds many PRs' assets (e.g. `734-spend-flow.gif`).
 - Embed in the PR body as
-  `![alt](https://raw.githubusercontent.com/moda-labs/bobi-agent/qa-assets/<file>.png)`,
-  and verify each URL returns `200 image/png` first.
+  `![alt](https://raw.githubusercontent.com/moda-labs/bobi-agent/qa-assets/<file>)`,
+  and verify each URL returns `200` with an `image/*` content type first. A GIF
+  embeds inline this way; a raw `.webm`/`.mp4` does not, so convert to GIF.
 
 This is the repo-agnostic convention from the core `~/AGENTS.md` "Proof of Work"
 rule; see there for the private-repo caveat.
