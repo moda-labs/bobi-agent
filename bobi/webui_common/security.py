@@ -25,10 +25,14 @@ def _host_without_port(raw: str) -> str:
 
 
 def _configured_allowed_hosts() -> set[str]:
-    """Loopback defaults plus any bare hostnames in ``BOBI_WEBUI_ALLOWED_HOSTS``."""
-    hosts = set(ALLOWED_HOSTS)
+    """Loopback defaults plus any bare hostnames in ``BOBI_WEBUI_ALLOWED_HOSTS``.
+
+    Hostnames are case-insensitive, so entries are lowercased (the guard
+    lowercases the request Host to match); use bare hostnames without a port or
+    scheme (the request Host is port-stripped before comparison)."""
+    hosts = {h.lower() for h in ALLOWED_HOSTS}
     raw = os.environ.get(ALLOWED_HOSTS_ENV, "")
-    hosts.update(h.strip() for h in raw.split(",") if h.strip())
+    hosts.update(h.strip().lower() for h in raw.split(",") if h.strip())
     return hosts
 
 
@@ -46,12 +50,13 @@ def install_security(
     docstring on that env var); pass ``allowed_hosts`` to set them explicitly
     (direct/test callers). Read once at install time - the env is fixed for the
     process lifetime."""
-    allowed = allowed_hosts if allowed_hosts is not None else _configured_allowed_hosts()
+    source = allowed_hosts if allowed_hosts is not None else _configured_allowed_hosts()
+    allowed = {h.lower() for h in source}
 
     @app.middleware("http")
     async def _guard(request: Request, call_next):
         host = _host_without_port(request.headers.get("host") or "")
-        if host and host not in allowed:
+        if host and host.lower() not in allowed:
             return JSONResponse({"error": "host not allowed"}, status_code=403)
         # Strip the mount prefix so the check also fires when this app is
         # mounted as a sub-app (e.g. setup under /setup in the unified app):

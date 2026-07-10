@@ -58,6 +58,19 @@ def test_security_allows_configured_extra_host_via_param():
     assert evil.get("/", headers={WEBUI_TOKEN_HEADER: SECRET}).status_code == 403
 
 
+def test_security_host_match_is_case_insensitive(monkeypatch):
+    # Hostnames are case-insensitive; an operator-typed env value or a proxy
+    # forwarding mixed-case Host must still match.
+    monkeypatch.setenv("BOBI_WEBUI_ALLOWED_HOSTS", "Fleet.Example.COM")
+    c = _client(_secured_app(), host="fleet.example.com")
+    assert c.get("/", headers={WEBUI_TOKEN_HEADER: SECRET}).status_code == 200
+    # And the reverse: lowercase config, mixed-case request Host.
+    app = _secured_app(allowed_hosts={"127.0.0.1", "fleet.example.com"})
+    assert _client(app, host="Fleet.Example.com").get(
+        "/", headers={WEBUI_TOKEN_HEADER: SECRET}
+    ).status_code == 200
+
+
 def test_security_reads_allowed_hosts_env(monkeypatch):
     # Wiring that build_app relies on: the env var threads through the default
     # (build_app does not forward an allowed_hosts kwarg).
