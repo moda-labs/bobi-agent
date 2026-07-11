@@ -495,6 +495,8 @@
   // Server-side folder picker (a localhost page can't open a native OS dialog).
   async function openFolderPicker(onPick) {
     let cur = "";
+    let loading = false;
+    let loadSeq = 0;
     const ov = document.createElement("div");
     ov.className = "picker";
     ov.innerHTML = `<div class="pick-panel">
@@ -504,8 +506,18 @@
       <div class="pick-foot"><span class="pick-cur" id="pick-cur"></span>
         <button class="btn primary xs" id="pick-use">Use this folder</button></div></div>`;
     document.body.appendChild(ov);
+    const setLoading = (value) => {
+      loading = value;
+      const use = $("#pick-use");
+      if (use) use.disabled = value;
+      ov.classList.toggle("loading", value);
+    };
     const load = async (path) => {
+      const seq = ++loadSeq;
+      setLoading(true);
       const d = await getJSON("/api/browse?path=" + encodeURIComponent(path || ""));
+      if (seq !== loadSeq) return;
+      setLoading(false);
       if (d.error) return;
       cur = d.path;                       // absolute, home-rooted
       $("#pick-path").textContent = cur;
@@ -522,7 +534,10 @@
     await load("");
     ov.addEventListener("click", (e) => {
       if (e.target.id === "pick-close" || e.target === ov) { ov.remove(); return; }
-      if (e.target.id === "pick-use") { onPick(cur || introBase); ov.remove(); return; }
+      if (e.target.id === "pick-use") {
+        if (loading) return;
+        onPick(cur || introBase); ov.remove(); return;
+      }
       const n = e.target.closest("[data-pick]"); if (n) load(n.dataset.pick);
     });
   }
