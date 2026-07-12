@@ -74,14 +74,9 @@ be wrong or slower without this?* If not, leave it out.
      space — only if lossless compression still exceeds the cap. If you are
      forced to do this, you MUST name what you dropped in the summary and set
      `lossy_drops` accordingly. Never drop a still-valid item silently.
-   The scheduler validates the written `long_term_memory.md` by Python
-   character length after you finish. Over-cap output is rejected, the cursor is
-   not advanced, and the same work is retried on a future sleep-cycle run.
 
 If nothing durable changed, **do not rewrite** the file — leave it as is and
-report `updated: false`. Exception: when the current `long_term_memory.md` is
-already over the hard cap, rewrite it under the cap even if there are no new
-transcript messages.
+report `updated: false`.
 
 ## Final output: one JSON line
 
@@ -101,8 +96,6 @@ last line of your output (nothing after it):
   durable changes"). If you deferred, truncated, or dropped anything, **name it
   here**.
 - `bytes` — the size in bytes of the `long_term_memory.md` you wrote (0 if `updated: false`).
-  This field is informational; the scheduler enforces the character cap by
-  reading the artifact from disk.
 - `urgent` — `true` **only** for a change worth interrupting every working agent
   mid-task right now (e.g. you reversed a decision that invalidates work in
   flight). Routine distillation is **not** urgent. Default `false`.

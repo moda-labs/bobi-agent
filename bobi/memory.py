@@ -29,91 +29,6 @@ MAX_MEMORY_CHARS = 24_000
 # the decision log is the primary continuity spine when sessions rotate,
 # so it needs room for accumulated operational state.
 MAX_LEGACY_MEMORY_CHARS = 32_000
-_TRUNCATION_MARKER = "[memory truncated]"
-
-
-def load_long_term_memory_uncapped(state_dir: Path) -> str:
-    """Load long_term_memory.md without applying the prompt-injection cap.
-
-    Intended for the sleep-cycle scheduler, which must show the curator the full
-    artifact when it needs compaction. Working-agent prompt injection should use
-    ``load_long_term_memory`` instead.
-    """
-    from bobi import paths
-
-    root = state_dir.parent if state_dir.name == "state" else None
-    if root is not None:
-        paths.migrate_long_term_memory_state(root)
-    memory_file = state_dir / "long_term_memory.md"
-    try:
-        if not memory_file.is_file():
-            return ""
-        return memory_file.read_text()
-    except (OSError, UnicodeDecodeError):
-        log.debug("Failed to read long_term_memory.md at %s", memory_file, exc_info=True)
-        return ""
-
-
-def _split_long_term_memory_sections(content: str) -> tuple[str, str] | None:
-    sections: dict[str, list[str]] = {}
-    current: str | None = None
-    for line in content.splitlines(keepends=True):
-        heading = line.strip()
-        if heading == "## Facts":
-            current = "facts"
-            sections[current] = []
-            continue
-        if heading == "## Decisions":
-            current = "decisions"
-            sections[current] = []
-            continue
-        if current is not None:
-            sections[current].append(line)
-
-    if "facts" not in sections or "decisions" not in sections:
-        return None
-    return ("".join(sections["facts"]).strip(), "".join(sections["decisions"]).strip())
-
-
-def _allocate_section_budgets(facts: str, decisions: str, total: int) -> tuple[int, int]:
-    facts_budget = total // 2
-    decisions_budget = total - facts_budget
-
-    if len(facts) < facts_budget:
-        decisions_budget += facts_budget - len(facts)
-        facts_budget = len(facts)
-    if len(decisions) < decisions_budget:
-        facts_budget += decisions_budget - len(decisions)
-        decisions_budget = len(decisions)
-
-    return max(facts_budget, 0), max(decisions_budget, 0)
-
-
-def _truncate_section(text: str, budget: int) -> str:
-    if len(text) <= budget:
-        return text
-    marker = "\n\n" + _TRUNCATION_MARKER
-    keep = max(budget - len(marker), 0)
-    return text[:keep].rstrip() + marker
-
-
-def _truncate_long_term_memory_for_prompt(content: str) -> str:
-    sections = _split_long_term_memory_sections(content)
-    if sections is None:
-        return _truncate_section(content, MAX_MEMORY_CHARS)
-
-    facts, decisions = sections
-    facts_header = "## Facts\n\n"
-    decisions_header = "\n\n## Decisions\n\n"
-    fixed = len(facts_header) + len(decisions_header)
-    available = max(MAX_MEMORY_CHARS - fixed, 0)
-    facts_budget, decisions_budget = _allocate_section_budgets(facts, decisions, available)
-    return (
-        facts_header
-        + _truncate_section(facts, facts_budget)
-        + decisions_header
-        + _truncate_section(decisions, decisions_budget)
-    )
 
 
 def load_long_term_memory(state_dir: Path) -> str:
@@ -134,17 +49,13 @@ def load_long_term_memory(state_dir: Path) -> str:
         if not memory_file.is_file():
             return ""
         content = memory_file.read_text().strip()
-    except (OSError, UnicodeDecodeError):
+    except OSError:
         log.debug("Failed to read long_term_memory.md at %s", memory_file, exc_info=True)
         return ""
     if not content:
         return ""
     if len(content) > MAX_MEMORY_CHARS:
-        log.warning(
-            "long_term_memory.md at %s is %d chars (over %d cap); truncating for prompt",
-            memory_file, len(content), MAX_MEMORY_CHARS,
-        )
-        content = _truncate_long_term_memory_for_prompt(content)
+        content = content[:MAX_MEMORY_CHARS] + "\n\n[memory truncated]"
     return content
 
 

@@ -1095,18 +1095,13 @@ class MonitorScheduler:
         cursor and publishes on success.
         """
         from bobi import history, paths
-        from bobi.memory import (
-            MAX_MEMORY_CHARS,
-            collect_legacy_journals,
-            load_long_term_memory_uncapped,
-        )
+        from bobi.memory import collect_legacy_journals, load_long_term_memory
         from bobi.monitors import sleep_cycle as sleep_cycle_mod
 
         root = self._project_root(projects)
         paths.migrate_long_term_memory_state(root)
         state_dir = paths.state_path(root)
         cursor_path = paths.long_term_memory_cursor_path(root)
-        memory_path = paths.long_term_memory_path(root)
         cursor = sleep_cycle_mod.read_cursor(cursor_path)
 
         try:
@@ -1121,28 +1116,25 @@ class MonitorScheduler:
         # so accumulated knowledge isn't discarded at rollout. Guarded on
         # long_term_memory.md absence -> idempotent: once written, the seed never re-fires.
         seed = ""
-        if not memory_path.is_file():
+        if not paths.long_term_memory_path(root).is_file():
             seed = collect_legacy_journals(state_dir, sleep_cycle_mod.MAX_SEED_INPUT_CHARS)
 
-        current_memory = load_long_term_memory_uncapped(state_dir)
-        compaction_required = len(current_memory) > MAX_MEMORY_CHARS
-
-        if not rows and not seed and not compaction_required:
+        if not rows and not seed:
             log.info("Monitor %s due - no new transcript messages since cursor %d "
                      "and nothing to seed", monitor.name, cursor)
             return False
 
         ingested, highest_id, flags = sleep_cycle_mod.select_messages(
             rows, sleep_cycle_mod.MAX_SLEEP_CYCLE_INPUT_CHARS)
-        if compaction_required:
-            flags["output_over_cap"] = True
-            flags["output_chars"] = len(current_memory)
-            flags["output_cap"] = MAX_MEMORY_CHARS
-        if highest_id is None and not seed and not compaction_required:
+        if highest_id is None and not seed:
             log.info("Monitor %s: nothing ingestable this run", monitor.name)
             return False
 
         transcript = sleep_cycle_mod.render_transcript(ingested)
+        try:
+            current_memory = load_long_term_memory(state_dir)
+        except Exception:
+            current_memory = ""
         task = sleep_cycle_mod.build_sleep_cycle_task(
             self._load_sleep_cycle_prompt(root), transcript, current_memory, flags, seed=seed)
         if seed:
@@ -1151,13 +1143,12 @@ class MonitorScheduler:
 
         cwd = str(projects[0]) if projects else None
         log.info("Monitor %s due - spawning sleep cycle over %d new message(s) "
-                 "(highest id %s, deferred=%s)",
+                 "(highest id %d, deferred=%s)",
                  monitor.name, len(ingested), highest_id, flags.get("input_truncated"))
         self.spawn_sleep_cycle(
             monitor, cwd, task,
             lambda result: self._on_sleep_cycle_result(
-                monitor, result, highest_id, cursor_path, memory_path,
-                compaction_required),
+                monitor, result, highest_id, cursor_path),
         )
         return True
 
@@ -1166,9 +1157,7 @@ class MonitorScheduler:
         return self._spawn_sleep_cycle(monitor, projects)
 
     def _on_sleep_cycle_result(self, monitor, result: dict | None,
-                               highest_id: int | None, cursor_path: Path,
-                               memory_path: Path | None = None,
-                               compaction_required: bool = False) -> None:
+                               highest_id: int | None, cursor_path: Path) -> None:
         """Waiter-thread callback for a finished sleep-cycle run.
 
         Advances the cursor ONLY on success (a failed/indeterminate run leaves
@@ -1191,34 +1180,6 @@ class MonitorScheduler:
                 publish=self.publish)
             return
 
-        if result.get("updated") or compaction_required:
-            from bobi.memory import MAX_MEMORY_CHARS
-
-            if memory_path is None:
-                memory_path = cursor_path.parent / "long_term_memory.md"
-            try:
-                output_chars = len(memory_path.read_text()) if memory_path.is_file() else 0
-            except (OSError, UnicodeDecodeError) as e:
-                detail = f"unable to validate {memory_path}: {e}"
-                log.warning("Monitor %s: %s", monitor.name, detail)
-                _publish_monitor_error(
-                    monitor.name, "sleep-cycle", "output-validation-failed", detail,
-                    publish=self.publish)
-                return
-            if output_chars > MAX_MEMORY_CHARS:
-                updated = bool(result.get("updated"))
-                detail = (
-                    f"{memory_path} is {output_chars} chars after sleep-cycle run "
-                    f"(over {MAX_MEMORY_CHARS} cap); compaction_required="
-                    f"{str(bool(compaction_required)).lower()}, "
-                    f"updated={str(updated).lower()}"
-                )
-                log.warning("Monitor %s: %s", monitor.name, detail)
-                _publish_monitor_error(
-                    monitor.name, "sleep-cycle", "output-over-cap", detail,
-                    publish=self.publish)
-                return
-
         # A seed-only first run ingests no transcript rows (highest_id is None) -
         # there is nothing to advance; the cursor stays at 0 and the next run
         # reads the real transcript delta normally.
@@ -1228,13 +1189,6 @@ class MonitorScheduler:
             except OSError as e:
                 log.error("Monitor %s: failed to advance sleep-cycle cursor: %s",
                           monitor.name, e)
-        elif compaction_required and result.get("updated"):
-            try:
-                sleep_cycle_mod.write_cursor(
-                    cursor_path, sleep_cycle_mod.read_cursor(cursor_path))
-            except OSError as e:
-                log.error("Monitor %s: failed to touch sleep-cycle cursor after "
-                          "compaction: %s", monitor.name, e)
 
         if result.get("lossy_drops"):
             log.warning("Monitor %s: sleep cycle made %s LOSSY drop(s) of still-valid "
