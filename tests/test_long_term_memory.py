@@ -54,6 +54,51 @@ class TestLoadLongTermMemory:
         assert len(result) <= MAX_MEMORY_CHARS + 200
         assert "[memory truncated]" in result
 
+    def test_warns_when_truncating_oversized_policy(self, tmp_path, caplog):
+        from bobi.memory import load_long_term_memory, MAX_MEMORY_CHARS
+        state = tmp_path / "state"
+        _write_policy(state, "no sections\n" + ("x" * (MAX_MEMORY_CHARS + 5000)))
+        with caplog.at_level("WARNING", logger="bobi.memory"):
+            load_long_term_memory(state)
+        assert "long_term_memory.md" in caplog.text
+        assert "over" in caplog.text
+        assert str(MAX_MEMORY_CHARS) in caplog.text
+
+    def test_section_aware_truncation_preserves_decisions(self, tmp_path):
+        from bobi.memory import load_long_term_memory, MAX_MEMORY_CHARS
+        state = tmp_path / "state"
+        _write_policy(
+            state,
+            "## Facts\n\nFACT_KEEP\n" + ("f" * MAX_MEMORY_CHARS)
+            + "\n\n## Decisions\n\nDECISION_KEEP\n" + ("d" * MAX_MEMORY_CHARS),
+        )
+        result = load_long_term_memory(state)
+        assert len(result) <= MAX_MEMORY_CHARS + 200
+        assert "## Facts" in result
+        assert "## Decisions" in result
+        assert "FACT_KEEP" in result
+        assert "DECISION_KEEP" in result
+        assert result.count("[memory truncated]") >= 2
+
+    def test_uncapped_load_returns_full_migrated_policy(self, tmp_path):
+        from bobi.memory import load_long_term_memory_uncapped, MAX_MEMORY_CHARS
+        state = paths.state_path(tmp_path)
+        state.mkdir(parents=True)
+        legacy = state / "policy.md"
+        body = "## Facts\n\n" + ("x" * (MAX_MEMORY_CHARS + 5000))
+        legacy.write_text(body)
+        result = load_long_term_memory_uncapped(state)
+        assert result == body
+        assert not legacy.exists()
+        assert paths.long_term_memory_path(tmp_path).read_text() == body
+
+    def test_uncapped_load_tolerates_decode_failure(self, tmp_path):
+        from bobi.memory import load_long_term_memory_uncapped
+        state = paths.state_path(tmp_path)
+        state.mkdir(parents=True)
+        paths.long_term_memory_path(tmp_path).write_bytes(b"\xff\xfe\xfa")
+        assert load_long_term_memory_uncapped(state) == ""
+
 
 # ---------------------------------------------------------------------------
 # memory.format_long_term_memory_prompt

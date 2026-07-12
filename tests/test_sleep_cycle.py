@@ -290,6 +290,90 @@ class TestCuratorDispatch:
             h.sched._spawn_curator(monitor, [tmp_path])
         assert h.captured == {}  # nothing dispatched
 
+    def test_dispatches_compaction_when_existing_memory_over_cap(self, tmp_path, monitor):
+        from bobi.memory import MAX_MEMORY_CHARS
+        state = paths.state_path(tmp_path)
+        state.mkdir(parents=True)
+        full_memory = "## Facts\n\n" + ("x" * (MAX_MEMORY_CHARS + 100))
+        paths.long_term_memory_path(tmp_path).write_text(full_memory)
+        h = _CuratorHarness(tmp_path, [])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        assert "task" in h.captured
+        assert full_memory in h.captured["task"]
+        assert "[memory truncated]" not in h.captured["task"]
+
+    def test_compaction_only_success_does_not_advance_cursor(self, tmp_path, monitor):
+        from bobi.memory import MAX_MEMORY_CHARS
+        state = paths.state_path(tmp_path)
+        state.mkdir(parents=True)
+        curator_mod.write_cursor(paths.policy_cursor_path(tmp_path), 42)
+        oversized_memory = "## Facts\n\n" + ("x" * (MAX_MEMORY_CHARS + 100))
+        paths.long_term_memory_path(tmp_path).write_text(oversized_memory)
+        h = _CuratorHarness(tmp_path, [])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.long_term_memory_path(tmp_path).write_text("## Facts\n\ncompacted")
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "compacted", "bytes": 20})
+        cursor_path = paths.policy_cursor_path(tmp_path)
+        assert curator_mod.read_cursor(cursor_path) == 42
+        assert cursor_path.stat().st_mtime >= paths.long_term_memory_path(tmp_path).stat().st_mtime
+        assert [event for event, _ in h.published] == [
+            "system/policy.updated",
+            "system/memory.updated",
+        ]
+
+    def test_rejects_compaction_result_updated_false_when_still_over_cap(
+        self, tmp_path, monitor
+    ):
+        from bobi.memory import MAX_MEMORY_CHARS
+        state = paths.state_path(tmp_path)
+        state.mkdir(parents=True)
+        oversized_memory = "## Facts\n\n" + ("x" * (MAX_MEMORY_CHARS + 100))
+        paths.long_term_memory_path(tmp_path).write_text(oversized_memory)
+        h = _CuratorHarness(tmp_path, [])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        h.captured["on_result"]({"success": True, "updated": False,
+                                 "summary": "no durable changes", "bytes": 0})
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert [event for event, _ in h.published] == ["system/monitor.error"]
+        detail = h.published[0][1]["detail"]
+        assert str(len(oversized_memory)) in detail
+        assert str(MAX_MEMORY_CHARS) in detail
+        assert "updated=false" in detail
+
+    def test_rejects_updated_result_that_remains_over_cap(self, tmp_path, monitor):
+        from bobi.memory import MAX_MEMORY_CHARS
+        state = paths.state_path(tmp_path)
+        state.mkdir(parents=True)
+        paths.long_term_memory_path(tmp_path).write_text(
+            "## Facts\n\n" + ("x" * (MAX_MEMORY_CHARS + 1))
+        )
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable fact")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "still too large", "bytes": 1})
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert [event for event, _ in h.published] == ["system/monitor.error"]
+
+    def test_accepts_updated_result_at_exact_cap(self, tmp_path, monitor):
+        from bobi.memory import MAX_MEMORY_CHARS
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable fact")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text("x" * MAX_MEMORY_CHARS)
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "at cap", "bytes": MAX_MEMORY_CHARS})
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 10
+        assert [event for event, _ in h.published] == [
+            "system/policy.updated",
+            "system/memory.updated",
+        ]
+
     def test_failed_curator_result_publishes_monitor_error(self, tmp_path, monitor):
         h = _CuratorHarness(tmp_path, [_row(10, "a")])
         with _patch_history(h):
