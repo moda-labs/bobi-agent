@@ -33,6 +33,8 @@ import pytest
 import websocket
 import yaml
 
+from bobi.runtime_guard import with_mutable_runtime_package
+
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 TEST_GRANTS_SECRET = "bobi-integration-test-grants"
 
@@ -1050,7 +1052,8 @@ class TestBubbleIsolation:
                 dep["bubble_id"],
                 dep["bubble_key"],
             )
-            cfg_path.write_text(yaml.dump(cfg, sort_keys=False))
+            with with_mutable_runtime_package(bobi_env.project_path):
+                cfg_path.write_text(yaml.dump(cfg, sort_keys=False))
             result = subprocess.run(
                 [
                     sys.executable, "-m", "bobi.cli",
@@ -1069,7 +1072,8 @@ class TestBubbleIsolation:
                 },
             )
         finally:
-            cfg_path.write_text(original_cfg)
+            with with_mutable_runtime_package(bobi_env.project_path):
+                cfg_path.write_text(original_cfg)
             if original_bubble is None:
                 bubble_path.unlink(missing_ok=True)
             else:
@@ -1232,7 +1236,8 @@ class TestSchedulerEndToEnd:
         # after, and drop publish's runtime URL cache both ways.
         agent_yaml = bobi_env.package_dir / "agent.yaml"
         original = agent_yaml.read_text()
-        agent_yaml.write_text(original + f"\nevent_server_url: {base_url}\n")
+        with with_mutable_runtime_package(bobi_env.project_path):
+            agent_yaml.write_text(original + f"\nevent_server_url: {base_url}\n")
         publish_mod._es_url_cache.clear()
         # The session-scoped project may carry a bubble minted against the
         # session event server. ensure_bubble returns any on-disk bubble
@@ -1288,7 +1293,8 @@ class TestSchedulerEndToEnd:
             # Transactional dedup: published -> recorded active.
             assert sched.state["pr-conflict-check"]["active"] == ["repo#7"]
         finally:
-            agent_yaml.write_text(original)
+            with with_mutable_runtime_package(bobi_env.project_path):
+                agent_yaml.write_text(original)
             if original_bubble is None:
                 bubble_path.unlink(missing_ok=True)
             else:
