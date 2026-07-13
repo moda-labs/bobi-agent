@@ -1688,6 +1688,7 @@ def run_check_blocking(
     verdict, result, error = _run_verdict_agent_blocking(
         prompt, cwd, slug, phase, session, _parse_check_verdict,
         timeout=timeout, attempts=attempts, max_turns=CHECK_MAX_TURNS,
+        fresh=True,
         no_verdict_hint=" - likely a malformed tool call or truncated output",
     )
     if verdict is None:

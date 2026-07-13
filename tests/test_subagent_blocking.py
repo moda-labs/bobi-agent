@@ -30,6 +30,7 @@ def bound_root(tmp_path, monkeypatch):
 
 
 from bobi.subagent import (
+    CHECK_MAX_TURNS,
     GATE_ITEM_CHARS,
     GATE_MAX_TURNS,
     AgentResult,
@@ -539,6 +540,44 @@ class TestRunAgentSupervisedResume:
         assert client._connect_prompt is None
         # And the prompt is sent via query
         assert client.queries == ["Continue working"]
+
+    @pytest.mark.asyncio
+    async def test_fresh_skips_saved_session_resume(self):
+        """fresh=True starts from the prompt even when a saved id exists."""
+        captured: dict = {}
+
+        class RecordingSession(_CapturingBrainSession):
+            async def connect(self, prompt=None):
+                captured["connect_prompt"] = prompt
+
+            async def query(self, text):
+                captured.setdefault("queries", []).append(text)
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                captured["session_kwargs"] = kwargs
+                return RecordingSession()
+
+        with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
+             patch(f"{SDK_PATCH}.load_resumable_session_id",
+                   return_value="old-sess-id") as load_mock, \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = await _run_agent_supervised(
+                prompt="Check current state",
+                cwd="/tmp/test",
+                run_key="check-x",
+                phase="check",
+                timeout=60,
+                fresh=True,
+            )
+
+        assert result.success is True
+        load_mock.assert_not_called()
+        assert captured["session_kwargs"]["resume"] is None
+        assert captured["connect_prompt"] == "Check current state"
+        assert captured.get("queries", []) == []
 
 
 # ---------------------------------------------------------------------------
@@ -1317,6 +1356,29 @@ class TestRunCheckBlocking:
         assert entry.role == "monitor"
         assert entry.phase == "check"
         assert entry.name == "monitor-check-deploy-check"
+
+    def test_runs_fresh_to_avoid_stale_monitor_verdicts(self):
+        captured: list[dict] = []
+
+        async def _mock(prompt, cwd, run_key, phase, timeout, **kw):
+            captured.append({**kw, "phase": phase})
+            text = "no verdict" if len(captured) == 1 else '{"finding": false}'
+            return AgentResult(session_id="s", run_key=run_key, phase=phase,
+                               success=True, final_text=text)
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = run_check_blocking(description="Check prod", cwd="/tmp",
+                                        attempts=2)
+
+        assert result.success is True
+        assert len(captured) == 2
+        assert {call["role"] for call in captured} == {"monitor"}
+        assert {call["max_turns"] for call in captured} == {CHECK_MAX_TURNS}
+        assert {call["phase"] for call in captured} == {"check"}
+        # A check observes current runtime state; resuming a previous
+        # transcript can replay stale observations and stale verdicts.
+        assert [call["fresh"] for call in captured] == [True, True]
 
 
 # ---------------------------------------------------------------------------
