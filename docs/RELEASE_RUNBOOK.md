@@ -17,6 +17,14 @@ Fly-hosted agents.
 > its CLI still mounts a built-in `build` command that silently shadows the
 > plugin's entry point - built-ins win in bobi.cli's plugin group).
 
+> **Dev channel (#740 Track A):** every fully-green push to `main`
+> fast-forwards the `dev` branch (the `promote-dev` job in `ci.yml`).
+> `bobi-deploy`'s CI/staging track `dev` — NOT a released tag — so merging
+> public work is enough for private CI to build against it; no release is
+> needed per feature. A formal release (this runbook) is required only for
+> the production cut: the private release train pins the exact published
+> `bobi==<version>` from PyPI at dispatch time.
+
 ## 1. Sync `bobi`
 
 ```bash

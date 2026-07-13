@@ -204,6 +204,50 @@ jobs:
   # this repo's tests/integration/test_event_server.py against its worker via
   # BOBI_TEST_ES_DIR as the protocol-compatibility gate.
 
+  # --------------------------------------------------------------------------
+  # Dev channel (#740 Track A). When every gate above is green on a push to
+  # main, advance `refs/heads/dev` to that commit. `dev` is the pre-release /
+  # SHA channel the private deploy repo's CI + staging consume (its
+  # setup-public-bobi action defaults to this ref), so private work can build
+  # against merged-but-unreleased public code without waiting for a formal
+  # release. Only the production release train pins an exact released version.
+  promote-dev:
+    name: Advance the dev channel
+    # Every other job in this workflow gates the channel: a commit only
+    # becomes `dev` when the whole CI matrix proved it.
+    needs: [unit-tests, lint, event-server, integration-fast, e2e]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Serialize promotions; the ancestor check below handles runs that
+    # complete out of order.
+    concurrency:
+      group: promote-dev
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Full history: the ancestor check needs the merge-base.
+          fetch-depth: 0
+
+      - name: Fast-forward dev to this green main commit
+        # NO --force, by design: main is append-only, so a newer green main
+        # is always a descendant of `dev` and a plain push fast-forwards
+        # (or creates the branch on the first run). If an older run finishes
+        # last, the ancestor check turns it into a no-op instead of a red
+        # main. A genuinely diverged `dev` (someone force-pushed it off main)
+        # fails loudly here — that's a real problem to surface, not paper over.
+        run: |
+          set -euo pipefail
+          if git fetch origin dev 2>/dev/null \
+            && git merge-base --is-ancestor HEAD FETCH_HEAD; then
+            echo "dev is already at or ahead of ${GITHUB_SHA}; nothing to promote"
+            exit 0
+          fi
+          git push origin "HEAD:refs/heads/dev"
+          echo "dev -> ${GITHUB_SHA}"
+
   # NOTE: the real-Claude integration suite (test_agent_launch / manager_lifecycle
   # / manager_sdk / e2e_event_flow / messaging / setup_flow) ran on a self-hosted
   # EC2 runner. That box was retired when eng-team moved to Fly (C24, #368). These
