@@ -34,44 +34,46 @@ def install_pack(pack_dir: Path, project_path: Path,
     resolves the chain registry-only at locked versions (CI/deploy).
     """
     from bobi import compose as _compose
+    from bobi.runtime_guard import with_mutable_runtime_package
 
     dest = paths.package_dir(project_path)
     dest.mkdir(parents=True, exist_ok=True)
 
-    locked = read_compose_lock(dest) if pinned else None
-    chain = _compose.resolve_chain(pack_dir, project_path, pinned=pinned,
-                                   locked=locked)
+    with with_mutable_runtime_package(project_path):
+        locked = read_compose_lock(dest) if pinned else None
+        chain = _compose.resolve_chain(pack_dir, project_path, pinned=pinned,
+                                       locked=locked)
 
-    # Clear the previously frozen copy of each surface the composed chain
-    # contributes, so a re-install drops stale files (e.g. a tool the new chain
-    # no longer ships). A surface NO layer contributes is left untouched — the
-    # pre-compose install semantics — so package-added files (e.g. an extra
-    # `package/workflows/*.yaml`) survive a reinstall of the same team.
-    contributed = {sub for layer in chain
-                   for sub in ["roles", "tools", "workflows", "monitors", "context"]
-                   if (layer.dir / sub).is_dir()}
-    for sub in contributed:
-        d = dest / sub
-        if d.exists():
-            shutil.rmtree(d)
+        # Clear the previously frozen copy of each surface the composed chain
+        # contributes, so a re-install drops stale files (e.g. a tool the new chain
+        # no longer ships). A surface NO layer contributes is left untouched — the
+        # pre-compose install semantics — so package-added files (e.g. an extra
+        # `package/workflows/*.yaml`) survive a reinstall of the same team.
+        contributed = {sub for layer in chain
+                       for sub in ["roles", "tools", "workflows", "monitors", "context"]
+                       if (layer.dir / sub).is_dir()}
+        for sub in contributed:
+            d = dest / sub
+            if d.exists():
+                shutil.rmtree(d)
 
-    prov = _compose.compose(chain, dest)
+        prov = _compose.compose(chain, dest)
 
-    # Seed workspace leaf → base (seed-if-absent), so an overlay's own template
-    # wins and the base only fills files the overlay doesn't supply. (Mirrors the
-    # deploy flatten's leaf-wins merge_workspace; user edits already on disk are
-    # never overwritten regardless of order.)
-    for layer in reversed(chain):
-        seed_workspace(layer.dir, project_path)
+        # Seed workspace leaf → base (seed-if-absent), so an overlay's own template
+        # wins and the base only fills files the overlay doesn't supply. (Mirrors the
+        # deploy flatten's leaf-wins merge_workspace; user edits already on disk are
+        # never overwritten regardless of order.)
+        for layer in reversed(chain):
+            seed_workspace(layer.dir, project_path)
 
-    # The leaf's directory name is the installed agent name (the team a user
-    # named on the CLI), regardless of how deep its `from:` chain runs.
-    cfg = _read_yaml(dest / "agent.yaml")
-    cfg.setdefault("agent", pack_dir.name)
-    _write_yaml(dest / "agent.yaml", cfg)
+        # The leaf's directory name is the installed agent name (the team a user
+        # named on the CLI), regardless of how deep its `from:` chain runs.
+        cfg = _read_yaml(dest / "agent.yaml")
+        cfg.setdefault("agent", pack_dir.name)
+        _write_yaml(dest / "agent.yaml", cfg)
 
-    write_compose_lock(dest, chain, prov)
-    write_install_manifest(dest, pack_dir, local_source)
+        write_compose_lock(dest, chain, prov)
+        write_install_manifest(dest, pack_dir, local_source)
 
 
 def _read_yaml(path: Path) -> dict:
@@ -175,5 +177,8 @@ def write_install_gitignore(project_path: Path, local_source: bool) -> None:
     if local_source:
         entries += ["roles/", "tools/", "workflows/", "monitors/", "context/",
                     "agent.md", "agent.yaml"]
-    gitignore = paths.package_dir(project_path) / ".gitignore"
-    gitignore.write_text("\n".join(entries) + "\n")
+    from bobi.runtime_guard import with_mutable_runtime_package
+
+    with with_mutable_runtime_package(project_path):
+        gitignore = paths.package_dir(project_path) / ".gitignore"
+        gitignore.write_text("\n".join(entries) + "\n")

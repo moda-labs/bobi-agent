@@ -36,7 +36,9 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_claude_auth())
     results.append(_check_local_config())
     results.append(_check_runtime_layout())
+    results.append(_check_runtime_write_policy())
     results.append(_check_install_integrity())
+    results.append(_check_bobi_install_integrity())
     results.extend(_check_package_requires())
     results.extend(_check_host_caps())
     results.extend(_check_services())
@@ -128,6 +130,46 @@ def _check_install_integrity() -> CheckResult:
                  "source and re-run `bobi agents install ... --name <agent>`")
     return CheckResult("Installed team", ok=True,
                        detail=f"{manifest.get('agent', '?')} (frozen, clean)")
+
+
+def _check_runtime_write_policy() -> CheckResult:
+    root = bound_root()
+    if not root:
+        return CheckResult("Runtime write policy", ok=True,
+                           detail="no runtime selected")
+    from bobi.runtime_guard import check_runtime_write_policy
+
+    result = check_runtime_write_policy(root)
+    if result.ok:
+        return CheckResult("Runtime write policy", ok=True, detail=result.detail)
+    return CheckResult(
+        "Runtime write policy",
+        ok=False,
+        detail=result.detail,
+        hint=(
+            "Runtime package images should be read-only. Re-run "
+            "`bobi agents install ... --name <agent>`; same-UID chmod can "
+            "bypass this guardrail, so use read-only mounts or split ownership "
+            "for a hard boundary."
+        ),
+    )
+
+
+def _check_bobi_install_integrity() -> CheckResult:
+    from bobi.runtime_guard import check_bobi_distribution_integrity
+
+    result = check_bobi_distribution_integrity()
+    if result.ok:
+        return CheckResult("Bobi install", ok=True, detail=result.detail)
+    return CheckResult(
+        "Bobi install",
+        ok=False,
+        detail=result.detail,
+        hint=(
+            "Reinstall or upgrade Bobi, and move any desired framework changes "
+            "into a source PR instead of editing the installed package."
+        ),
+    )
 
 
 def _check_package_requires() -> list[CheckResult]:

@@ -19,6 +19,17 @@ from bobi.config import parse_env_file
 from bobi.doctor import _check_install_integrity
 
 
+def _force_write(path, text):
+    path.chmod(path.stat().st_mode | 0o200)
+    path.write_text(text)
+
+
+def _force_unlink(path):
+    path.chmod(path.stat().st_mode | 0o200)
+    path.parent.chmod(path.parent.stat().st_mode | 0o200)
+    path.unlink()
+
+
 @pytest.fixture(autouse=True)
 def _clear_bound_root():
     paths.bind_root(None)
@@ -68,8 +79,8 @@ def test_reinstall_discards_hand_edits(pack, project):
     cfg = yaml.safe_load(installed.read_text())
     cfg["entry_point"] = "director"
     cfg["subscribe"] = ["github:o/r"]
-    installed.write_text(yaml.dump(cfg))
-    (paths.roles_dir(project) / "manager" / "ROLE.md").write_text("edited\n")
+    _force_write(installed, yaml.dump(cfg))
+    _force_write(paths.roles_dir(project) / "manager" / "ROLE.md", "edited\n")
 
     _install_pack(pack, project)
 
@@ -124,7 +135,7 @@ class TestContextInstall:
     def test_reinstall_restores_context_edits(self, pack, project):
         _install_pack(pack, project)
         installed = paths.context_dir(project) / "style-guide.md"
-        installed.write_text("edited\n")
+        _force_write(installed, "edited\n")
         _install_pack(pack, project)
         assert installed.read_text().startswith("# House style guide")
 
@@ -221,8 +232,8 @@ class TestDoctorIntegrity:
 
     def test_drift_is_flagged(self, pack, project, monkeypatch):
         _install_pack(pack, project)
-        (paths.agent_yaml_path(project)).write_text("agent: edited\n")
-        (paths.workflows_dir(project) / "adhoc.yaml").unlink()
+        _force_write(paths.agent_yaml_path(project), "agent: edited\n")
+        _force_unlink(paths.workflows_dir(project) / "adhoc.yaml")
         self._set_root(project, monkeypatch)
         result = _check_install_integrity()
         assert not result.ok
@@ -231,7 +242,7 @@ class TestDoctorIntegrity:
 
     def test_downloaded_pack_is_editable(self, pack, project, monkeypatch):
         _install_pack(pack, project, local_source=False)
-        (paths.agent_yaml_path(project)).write_text("agent: edited\n")
+        _force_write(paths.agent_yaml_path(project), "agent: edited\n")
         self._set_root(project, monkeypatch)
         result = _check_install_integrity()
         assert result.ok
@@ -241,6 +252,51 @@ class TestDoctorIntegrity:
         paths.package_dir(project).mkdir(parents=True)
         self._set_root(project, monkeypatch)
         assert _check_install_integrity().ok
+
+
+class TestRuntimeWritePolicy:
+    def _mode(self, path):
+        return path.lstat().st_mode
+
+    def test_install_leaves_package_readonly_but_readable_and_executable(self, pack, project):
+        script_dir = pack / "tools"
+        script_dir.mkdir()
+        script = script_dir / "hello.sh"
+        script.write_text("#!/bin/sh\necho hello\n")
+        script.chmod(0o755)
+
+        _install_pack(pack, project)
+
+        installed = paths.package_dir(project)
+        installed_script = installed / "tools" / "hello.sh"
+        assert self._mode(installed) & 0o222 == 0
+        assert self._mode(paths.agent_yaml_path(project)) & 0o222 == 0
+        assert self._mode(installed_script) & 0o111
+        assert installed_script.read_text().startswith("#!/bin/sh")
+
+    def test_reinstall_temporarily_restores_mutability_then_reapplies_policy(
+        self, pack, project,
+    ):
+        _install_pack(pack, project)
+        (pack / "roles" / "manager" / "ROLE.md").write_text("# Manager v2\n")
+
+        _install_pack(pack, project)
+
+        role = paths.roles_dir(project) / "manager" / "ROLE.md"
+        assert role.read_text() == "# Manager v2\n"
+        assert role.lstat().st_mode & 0o222 == 0
+
+    def test_workspace_and_state_remain_writable(self, pack, project):
+        _install_pack(pack, project)
+        paths.state_dir(project)
+
+        workspace_file = paths.workspace_dir(project) / "user.md"
+        state_file = paths.state_path(project) / "handoff.yaml"
+        workspace_file.write_text("ok\n")
+        state_file.write_text("ok\n")
+
+        assert workspace_file.read_text() == "ok\n"
+        assert state_file.read_text() == "ok\n"
 
 
 class TestNonInteractiveInstall:
