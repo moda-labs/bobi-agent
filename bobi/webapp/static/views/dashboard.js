@@ -3,7 +3,7 @@
    design-only → the editor); lifecycle actions live on the agent's own
    dashboard, not here. */
 
-import { openSetup, fmtUsd } from "../shell.js";
+import { openSetup, fmtUsd, healthChip } from "../shell.js";
 
 export function mountDashboard(el, { api }) {
   el.innerHTML = "";
@@ -42,9 +42,11 @@ export function mountDashboard(el, { api }) {
     name.className = "agent-name";
     name.textContent = a.name;
     const status = document.createElement("span");
-    const st = !a.installed ? "design" : a.running ? "running" : "stopped";
-    status.className = "status " + st;
-    status.textContent = st === "design" ? "draft" : st;
+    // Distinct health badge (#733): reachability/wedged outrank
+    // running/stopped on cards that carry them (hosted fleet).
+    const chip = healthChip(a);
+    status.className = "status " + chip.cls;
+    status.textContent = chip.label;
     top.appendChild(name);
     top.appendChild(status);
     c.appendChild(top);

@@ -252,6 +252,9 @@ html[data-retro="on"] body {
 .status.stopped::before  { background: var(--faint); }
 .status.starting::before, .status.stopping::before { background: var(--accent); }
 .status.design::before   { background: var(--border-strong); }
+/* health badge states (#733): degraded reachability + wedged manager */
+.status.stale::before    { background: var(--warn); }
+.status.unreachable::before, .status.wedged::before { background: var(--err); }
 
 .action-error {
   background: rgba(181, 70, 43, 0.08);
@@ -291,28 +294,31 @@ html[data-retro="on"] body {
 }
 .side-head { color: var(--muted); padding: 14px 16px 8px; }
 
-/* spend panel - read-only spend fold at the top of the roster (#733) */
-.spend-panel {
-  margin: 12px 12px 4px;
+/* sidebar panels - the read-only observability folds at the top of the
+   roster (#733): health (manager liveness + lifecycle trail) and spend.
+   One shared shell so the stacked panels always match. */
+.spend-panel, .health-panel {
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--raised);
 }
-.spend-head {
+.health-panel { margin: 12px 12px 0; }
+.spend-panel  { margin: 12px 12px 4px; }
+.spend-head, .health-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   color: var(--muted);
 }
-.spend-total { color: var(--text); font-size: 13px; letter-spacing: 0.02em; }
-.spend-sub {
+.spend-sub, .health-sub {
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--faint);
-  margin: 2px 0 6px;
 }
-.spend-row {
+.spend-sub  { margin: 2px 0 6px; }
+.health-sub { margin: 2px 0 0; }
+.spend-row, .health-row {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -320,6 +326,27 @@ html[data-retro="on"] body {
   font-size: 11.5px;
   padding: 1px 0;
 }
+.health-row:first-of-type { margin-top: 6px; }
+.health-event {
+  font-family: var(--font-mono);
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.health-event::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--faint); flex: none;
+}
+.health-event.ok::before   { background: var(--ok); }
+.health-event.warn::before { background: var(--warn); }
+.health-event.bad::before  { background: var(--err); }
+.health-when { font-family: var(--font-mono); color: var(--faint); flex: none; }
+
+.spend-total { color: var(--text); font-size: 13px; letter-spacing: 0.02em; }
 .spend-label {
   font-family: var(--font-mono);
   color: var(--muted);

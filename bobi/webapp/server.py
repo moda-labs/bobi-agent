@@ -158,6 +158,12 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def agent_spend(name: str) -> JSONResponse:
         return JSONResponse(rt.spend_summary(name))
 
+    # System health (#733 vertical 2): manager liveness + session statuses;
+    # a hosted runtime adds reachability and the sidecar's lifecycle trail.
+    @app.get("/api/agents/{name}/health")
+    def agent_health(name: str) -> JSONResponse:
+        return JSONResponse(rt.health_summary(name))
+
     @app.get("/api/agents/{name}/status")
     def agent_status(name: str) -> JSONResponse:
         return JSONResponse(rt.team_status(name))

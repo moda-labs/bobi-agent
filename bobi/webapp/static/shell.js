@@ -63,6 +63,35 @@ export function fmtUsd(n) {
   return "$" + (n >= 1 ? n.toFixed(2) : n.toFixed(4));
 }
 
+// Health chip derivation, shared by the dashboard cards and the agent
+// header (#733 system health): hosted cards carry `reachability` (heartbeat
+// age: live/stale/unreachable) and the sidecar's `manager_status`; local
+// cards only running/stopped. The worst signal wins, so a silent or wedged
+// team never renders as a calm "running".
+export function healthChip(a) {
+  if (!a) return { label: "…", cls: "" };
+  // Truthy, matching every other `a.installed` branch in the card renderer.
+  if (!a.installed) return { label: "draft", cls: "design" };
+  if (a.reachability === "unreachable") {
+    return { label: "unreachable", cls: "unreachable" };
+  }
+  if (a.reachability === "stale") return { label: "stale", cls: "stale" };
+  if (a.manager_status === "wedged") return { label: "wedged", cls: "wedged" };
+  return a.running ? { label: "running", cls: "running" }
+                   : { label: "stopped", cls: "stopped" };
+}
+
+// Relative time for health/lifecycle rows: epoch ms → "12s ago" / "3m ago".
+// "" for a missing timestamp so callers can hide the element.
+export function fmtAgo(ms) {
+  if (!ms || !Number.isFinite(ms)) return "";
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  if (s < 172800) return Math.round(s / 3600) + "h ago";
+  return Math.round(s / 86400) + "d ago";
+}
+
 // --- router ---------------------------------------------------------
 
 let teardown = null; // current view's cleanup (clears pollers)

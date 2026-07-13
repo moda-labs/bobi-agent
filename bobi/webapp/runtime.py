@@ -134,6 +134,27 @@ class TeamRuntime(ABC):
              "teams": [{"name", "total_cost_usd", "sessions_counted"}, ...]}
         """
 
+    @abstractmethod
+    def health_summary(self, name: str) -> dict:
+        """One team's system health: manager liveness, session statuses, and
+        (where a supervisor records one) the recent lifecycle trail.
+
+        Shape::
+
+            {"reachability": "live" | "stale" | "unreachable",
+             "last_heartbeat_at": str | None,
+             "manager": {"status", "pid", "running", "healthy",
+                         "restart_count", "last_restart_reason",
+                         "last_restart_at", "idle_seconds"},
+             "sessions": [{"name", "role", "status"}, ...],
+             "lifecycle": [{"event", "received_at", "at", ...}, ...]}
+
+        ``lifecycle`` is newest first. Fields a runtime cannot know are
+        null/empty rather than omitted (a local team has no heartbeats and no
+        supervisor trail), so render code branches on value, never on key
+        presence.
+        """
+
 
 # --- Local implementation ----------------------------------------------------
 
@@ -397,4 +418,46 @@ class LocalRuntime(TeamRuntime):
             "total_cost_usd": round(total, 4),
             "sessions_counted": counted,
             "teams": teams,
+        }
+
+    def health_summary(self, name: str) -> dict:
+        """Manager liveness + session statuses from this machine's files -
+        the same sources the dashboard card and the roster read (manager
+        pidfile, session registry). A local team shares this host, so
+        ``reachability`` is "live" by construction; there is no supervisor
+        here, so the restart fields are null and the lifecycle trail is
+        empty - the hosted runtime fills those from its sidecar."""
+        from bobi import service
+
+        root = self._resolve(name)
+        status = service.team_status(root)
+        mgr_name = service.manager_session_name(root)
+        entries = ordered_subagents(status.active_agents,
+                                    manager_name=mgr_name)
+        running = status.manager_running
+        mgr_entry = next((e for e in entries if e.name == mgr_name), None)
+        if not running:
+            mgr_status = "stopped"
+        elif mgr_entry is not None and mgr_entry.status:
+            mgr_status = mgr_entry.status
+        else:
+            # Manager pid alive but no registered manager session yet: the
+            # boot window. Same fail-open verdict the hosted sidecar reports.
+            mgr_status = "starting"
+        return {
+            "reachability": "live",
+            "last_heartbeat_at": None,
+            "manager": {
+                "status": mgr_status,
+                "pid": status.manager_pid,
+                "running": running,
+                "healthy": running,
+                "restart_count": None,
+                "last_restart_reason": None,
+                "last_restart_at": None,
+                "idle_seconds": None,
+            },
+            "sessions": [{"name": e.name, "role": e.role, "status": e.status}
+                         for e in entries],
+            "lifecycle": [],
         }
