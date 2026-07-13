@@ -752,8 +752,6 @@ class TestDefaultSpawnCheckEntryPoint:
         assert "--role" in cmd, f"--role missing from command: {cmd}"
         role_idx = cmd.index("--role")
         assert cmd[role_idx + 1] == "support_manager"
-        assert "--as-check" in cmd
-        assert "--wait" not in cmd
         # The check agent no longer publishes — the scheduler does, after
         # converting the verdict to conditions on the shared reconcile path.
         assert "--post-event" not in cmd

@@ -66,10 +66,6 @@ class TurnResult:
 
     session_id: str = ""
     is_error: bool = False
-    error_kind: str = ""
-    error_message: str = ""
-    max_turns: int | None = None
-    turn_count: int | None = None
     api_error_status: int | None = None
     total_cost_usd: float = 0.0
     duration_ms: int = 0

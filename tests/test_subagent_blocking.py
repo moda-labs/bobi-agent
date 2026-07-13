@@ -97,7 +97,6 @@ class FakeResultMessage:
     result: str | None = None
     deferred_tool_use: FakeDeferredToolUse | None = None
     stop_reason: str | None = None
-    errors: list[str] | None = None
     usage: dict | None = None
 
 
@@ -291,87 +290,6 @@ class TestRunAgentSupervisedNormal:
         assert result.success is False
         assert result.error == "file not found"
         assert result.session_id == "sess-2"
-
-    @pytest.mark.asyncio
-    async def test_max_turns_error_is_actionable(self):
-        messages = [
-            FakeResultMessage(
-                session_id="sess-max", is_error=True, result=None,
-                stop_reason="max_turns_reached", num_turns=9,
-                errors=[
-                    '{"type":"attachment","attachment":{"type":"max_turns_reached",'
-                    '"maxTurns":8,"turnCount":9}}',
-                ],
-            ),
-        ]
-        client = FakeClient(rounds=[messages])
-
-        mock_module = MagicMock()
-        mock_module.AssistantMessage = FakeAssistantMessage
-        mock_module.ClaudeAgentOptions = MagicMock()
-        mock_module.ClaudeSDKClient = MagicMock(return_value=client)
-        mock_module.ResultMessage = FakeResultMessage
-        mock_module.TextBlock = FakeTextBlock
-
-        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
-             patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
-             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
-             patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
-
-            result = await _run_agent_supervised(
-                prompt="Do the thing",
-                cwd="/tmp/test",
-                run_key="TEST-MAX",
-                phase="check",
-                timeout=60,
-                max_turns=8,
-            )
-
-        assert result.success is False
-        assert result.error == "max_turns_reached (max=8, turns=9)"
-        assert result.error != "unknown error"
-
-    @pytest.mark.asyncio
-    async def test_max_turns_stop_reason_marks_failure_even_without_error_flag(self):
-        messages = [
-            FakeResultMessage(
-                session_id="sess-max", is_error=False, result=None,
-                stop_reason="max_turns_reached", num_turns=9,
-                errors=[
-                    '{"type":"attachment","attachment":{"type":"max_turns_reached",'
-                    '"maxTurns":8,"turnCount":9}}',
-                ],
-            ),
-        ]
-        client = FakeClient(rounds=[messages])
-
-        mock_module = MagicMock()
-        mock_module.AssistantMessage = FakeAssistantMessage
-        mock_module.ClaudeAgentOptions = MagicMock()
-        mock_module.ClaudeSDKClient = MagicMock(return_value=client)
-        mock_module.ResultMessage = FakeResultMessage
-        mock_module.TextBlock = FakeTextBlock
-
-        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
-             patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
-             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
-             patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
-
-            result = await _run_agent_supervised(
-                prompt="Do the thing",
-                cwd="/tmp/test",
-                run_key="TEST-MAX",
-                phase="check",
-                timeout=60,
-                max_turns=8,
-            )
-
-        assert result.success is False
-        assert result.error == "max_turns_reached (max=8, turns=9)"
 
     @pytest.mark.asyncio
     async def test_connection_lost(self):

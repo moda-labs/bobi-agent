@@ -459,24 +459,15 @@ async def _run_agent_supervised(
                 await client.query(answer)
                 continue
 
-            result.success = not (result_msg.is_error or result_msg.error_kind)
-            if not result.success:
-                if result_msg.error_message and result_msg.result_text:
-                    result.error = (
-                        f"{result_msg.error_message}: {result_msg.result_text}"
-                    )
-                else:
-                    result.error = (
-                        result_msg.error_message
-                        or result_msg.result_text
-                        or "unknown error"
-                    )
+            result.success = not result_msg.is_error
+            if result_msg.is_error:
+                result.error = result_msg.result_text or "unknown error"
                 # Single-sourced transient classification (§4.3): a 529/rate-limit
                 # /5xx is tagged transient so the launcher can re-dispatch. We do
                 # NOT retry here — survival/retry is owned by #444.
                 result.transient = is_transient_api_error(
                     result_msg.api_error_status,
-                    result.error,
+                    result_msg.result_text or "",
                 )
             # RC#2: honest terminal status — never record `done` on an error
             # result. A transient 529 surfaces as an error ResultMessage (not an

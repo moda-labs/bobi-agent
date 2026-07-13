@@ -86,13 +86,12 @@ every tick, so monitors added at runtime take effect without a restart.
   default).
 - **Sleep cycle** (`sleep_cycle: true`) - the one flavor whose agent *writes* an
   artifact (`long_term_memory.md`) instead of returning a verdict. Sleep-cycle
-  input can be large, so the scheduler writes the rendered task to
-  `run/state/sleep-cycle/` and spawns the dedicated
-  `monitors curator --request <file>` command (like the gate's `monitors gate`),
-  never the `subagents launch --as-check` harness - that path wraps the task in
-  check-verdict semantics that can swallow the summary (#695). The sleep-cycle
-  agent runs with role `curator`, not the cheap-model `monitor` role -
-  distillation judgment matters more than poll cost; pin its
+  input can be large, so the scheduler writes the rendered task to `run/state/sleep-cycle/` and
+  spawns the dedicated `monitors curator --request <file>` command (like the
+  gate's `monitors gate`), never `subagents launch` - its `--wait` path wraps
+  the task in check-verdict semantics that can swallow the summary
+  (#695). The sleep-cycle agent runs with role `curator`, not the cheap-model
+  `monitor` role - distillation judgment matters more than poll cost; pin its
   model with `roles: {curator: {model: ...}}`.
 
 Out-of-band monitor agents must not inline large context into the spawn command.
