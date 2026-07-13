@@ -1,11 +1,13 @@
-# Issue #751: Guard Bobi's Own Install From Agent Writes
+# Issue #751: Guard Bobi's Runtime Installs From Agent Writes
 
 ## Problem
 
-Bobi launches Claude-backed agents with `permission_mode="bypassPermissions"` in
-`bobi/brain/claude.py`, so Claude Code does not prompt before tool calls that
-write files. That is intentional for unattended agents, but it currently also
-lets an agent edit Bobi's own runtime framework install.
+Bobi runs autonomous agents with broad local write authority. Claude sessions use
+`permission_mode="bypassPermissions"` in `bobi/brain/claude.py`, and Codex
+sessions pass `--dangerously-bypass-approvals-and-sandbox` in
+`bobi/brain/codex.py`. That is intentional for unattended task work, but it
+currently means an agent can also edit Bobi-owned runtime code and installed
+package images.
 
 The concrete failure from #751 was an agent investigating #750 and modifying
 `site-packages/bobi/subagent.py` in its own installed Bobi package. The edit was
@@ -16,169 +18,188 @@ technically the right code change, which makes the failure mode worse:
 - It created a phantom fix where the operator could believe the framework had
   been repaired while the source repo remained unchanged.
 
-Bobi already detects drift in installed team images under `run/package/`, but
-that does not cover the framework wheel, Python venvs, or `site-packages`.
+Bobi already detects drift in installed team images under `run/package/`, but it
+does not make those images non-writable and does not cover the Bobi framework
+wheel, its `.dist-info` metadata, Python virtualenvs, or other package-managed
+runtime directories.
 
 ## Goals
 
-- Deny known Claude write tools before they mutate Bobi framework installs,
-  Python virtualenvs, and selected package-manager managed dependency
-  directories.
-- Preserve unattended operation for normal task work inside the assigned repo,
-  workspace, and runtime state.
-- Make blocked writes visible to the agent with instructions to report the
-  attempted framework patch to the operator.
-- Add a doctor integrity check that fails loudly when the installed Bobi wheel
-  has drifted from its package `RECORD` hashes.
-- Keep the protection framework-owned and enabled by default for Claude agents.
+- Make Bobi-owned runtime package images and framework installs read-only by
+  default, while preserving agent read and execute access.
+- Apply the same protection before any brain runs, including Claude, Codex,
+  gateway-backed Claude, and future brain adapters.
+- Keep normal task work writable: assigned repos, `run/workspace/`, `run/state/`,
+  logs, handoffs, and other runtime state remain available for agents to edit.
+- Make accidental writes fail at the filesystem boundary where possible instead
+  of by parsing individual model/tool commands.
+- Add doctor checks that fail loudly when protected runtime package files are
+  writable or when the installed Bobi wheel has drifted from package `RECORD`
+  hashes.
 
 ## Non-Goals
 
-- Replacing `bypassPermissions` for all agents.
-- Building a complete OS sandbox or claiming this hook is a filesystem write
-  barrier. It is framework-owned defense in depth; filesystem permissions or
-  read-only mounts remain the stronger boundary where the runtime can provide
-  them.
-- Blocking legitimate source-repo edits to Bobi when the user has checked out
-  `moda-labs/bobi-agent` as the assigned task repository.
-- Enforcing the guard for non-Claude brains that do not support Claude hooks.
-- Detecting arbitrary dependency drift outside Bobi's own distribution files in
-  the doctor check.
+- Blocking legitimate source-repo edits to Bobi when the assigned task checkout
+  is `moda-labs/bobi-agent`.
+- Making `run/workspace/` or `run/state/` immutable; those are intentionally
+  user/agent writable.
+- Building a complete host sandbox in this ticket. Same-UID POSIX permissions
+  are a practical guardrail, not a hard security boundary against a process that
+  can call `chmod` on files it owns. Stronger isolation backends are designed
+  into the framework boundary below.
+- Detecting arbitrary dependency drift outside Bobi's own distribution files and
+  Bobi-managed installed package images.
 
 ## Root Cause
 
-Claude permission prompts are bypassed globally, but Bobi does not currently add
-a framework-level write policy. The only default `PreToolUse` hook is
-`_make_defer_hook()` in `bobi/subagent.py`, and it is only installed for
-`AskUserQuestion` deferral on the blocking subagent path. Session-backed agents
-and one-shot Claude calls receive no default guard hook.
+Bobi has a provider-agnostic `BrainFactory` / `BrainSession` boundary, but it
+does not have a provider-agnostic runtime filesystem policy. Each brain adapter
+is allowed to run with broad local authority, and there is no framework step that
+prepares protected roots before handing control to the brain.
 
-The framework also has install integrity detection for team packs via
-`bobi/install.py` and `bobi/doctor.py`, but not for the Bobi Python distribution
-installed in `site-packages`.
+The existing install integrity check records hashes for the installed team image
+in `run/package/`, but it only reports drift later. It does not set permissions
+after install, does not verify permissions in doctor, and does not cover Bobi's
+own installed Python distribution.
 
 ## Proposed Solution
 
-### 1. Centralize Claude Hook Composition
+### 1. Add A Runtime Write-Policy Module
 
-Add a small hook helper module, tentatively `bobi/brain/claude_hooks.py`, that
-exports:
+Add a framework module, tentatively `bobi/runtime_guard.py`, that owns the
+provider-independent filesystem policy. It should expose a small API:
 
-- `make_default_pre_tool_use_hooks(cwd: Path | None, existing: dict | None)`
-- `is_protected_agent_write(tool_name: str, tool_input: dict, cwd: Path | None)`
-- `protected_roots(cwd: Path | None) -> list[Path]`
+- `protected_runtime_roots(runtime_root: Path | None) -> list[ProtectedRoot]`
+- `apply_runtime_write_policy(runtime_root: Path | None) -> GuardReport`
+- `check_runtime_write_policy(runtime_root: Path | None) -> CheckResult`
+- `with_mutable_runtime_package(runtime_root: Path) -> ContextManager[None]`
 
-`ClaudeBrain.make_session()` and `ClaudeBrain.stream_once()` should merge these
-default hooks with caller-provided hooks before constructing
-`ClaudeAgentOptions`. Existing call sites should not need to remember to opt in.
+`ProtectedRoot` should include:
 
-If a caller already provides `PreToolUse` matchers, preserve them and ensure the
-default guard cannot be bypassed by an earlier hook. Prefer prepending the guard
-matcher unless the SDK guarantees that any `deny` decision wins after all
-matching hooks run. Add a test that covers a caller-provided hook for the same
-tool returning `allow`.
+- `path: Path`
+- `kind: Literal["team-package", "bobi-package", "bobi-dist-info", "venv", "dependency"]`
+- `mode: Literal["readonly"]`
+- `reason: str`
 
-The guard should run for known Claude built-in write-capable tools only:
+The first implementation should protect:
 
-- `Write`
-- `Edit`
-- `MultiEdit`
-- `NotebookEdit`
-- `Bash`
+- The installed team package image at `$BOBI_HOME/agents/<name>/run/package/`.
+- Bobi's imported package directory, resolved from `Path(bobi.__file__).parent`,
+  when it is not the active assigned source checkout.
+- Bobi's installed `.dist-info` directory, discovered from
+  `importlib.metadata.distribution("bobi")`.
+- The nearest concrete `site-packages` or `dist-packages` package metadata roots
+  that contain the installed Bobi distribution, scoped to Bobi files only where
+  possible.
+- Common package-manager directories only when they are Bobi-created runtime
+  dependency state with a positive ownership marker. Do not protect dependency
+  directories merely because they exist under the assigned task checkout; agents
+  may legitimately install, update, and test task-repo dependencies.
 
-The existing `AskUserQuestion` defer hook remains separate and composes through
-the same hook dictionary.
+Do not protect arbitrary ancestors such as `/usr`, `/usr/local`, `/`, or the
+user's full home directory. A target is protected only when Bobi can identify a
+concrete runtime/package-managed root.
 
-MCP tools, custom tools, future Claude write tools, and shell code that does not
-surface a protected path in the command text are explicitly out of scope for the
-preventive hook. They are covered only by the doctor drift check and by any
-runtime filesystem isolation available outside Bobi.
+### 2. Enforce With Filesystem Permissions First
 
-### 2. Protected Path Policy
+After installing or composing an agent package, Bobi should make
+`run/package/` read-only:
 
-The guard should deny writes that target package-managed or framework-managed
-paths:
+- Directories keep execute/search bits and lose write bits.
+- Files keep their existing read/execute bits and lose write bits.
+- Symlinks are not followed when changing permissions; their resolved targets
+  are checked during doctor so a package cannot smuggle writes outside the image.
+- The install manifest, compose lock, and generated `.gitignore` are also
+  Bobi-owned package metadata and should be read-only after install.
 
-- Bobi's imported package directory, resolved from `Path(bobi.__file__).parent`.
-  Skip this root when Bobi is installed editable from the current assigned
-  source checkout, so a `moda-labs/bobi-agent` task can still edit source files
-  through the normal PR flow.
-- The installed Bobi distribution root when derivable from
-  `importlib.metadata.distribution("bobi").locate_file("")`.
-- The nearest concrete `site-packages` or `dist-packages` directory containing
-  Bobi's installed package. Do not add arbitrary ancestors such as `/usr`,
-  `/usr/local`, or `/`.
-- The active Python virtualenv root when `sys.prefix != sys.base_prefix`.
-- Common dependency directories under the current working tree:
-  `.venv/`, `venv/`, `node_modules/`, `.tox/`, `.nox/`, and `__pycache__/`.
-  This list is intentionally narrow and starts with dependency directories where
-  generated or package-managed content should not be hand-patched by agents.
+Agents must still be able to:
 
-The policy should normalize and resolve candidate paths before comparison. A
-target is protected when it is equal to or inside one of the protected roots.
-Missing target paths should still be resolved against the closest existing
-parent so new-file writes into protected directories are blocked.
+- Read prompts, roles, workflows, monitors, context, and tool definitions from
+  `run/package/`.
+- Execute scripts shipped by the package when the executable bit is present.
 
-This is not race-free. A symlink swap or directory replacement between hook
-approval and tool execution can bypass a hook-level policy. The implementation
-should still resolve symlinked candidates and test symlink paths into protected
-roots, while documenting that OS-level read-only mounts are needed for a hard
-filesystem boundary.
+Agents must not be able to directly edit files inside `run/package/`. Reinstall
+is the mutation path: `install_pack()` enters `with_mutable_runtime_package()`,
+regenerates the image, writes manifests, then reapplies read-only permissions.
 
-### 3. Tool Input Extraction
+For Bobi's own framework install, apply the same read-only mode to Bobi's package
+directory and `.dist-info` metadata when Bobi can safely identify that it is
+running from a wheel/tool install. Skip this step for editable/source installs so
+development checkouts and legitimate `moda-labs/bobi-agent` tasks remain
+writable through the normal PR flow.
 
-For file-native tools, extract the path fields directly:
+### 3. Add Pluggable Enforcement Backends
 
-- `Write.file_path`
-- `Edit.file_path`
-- `MultiEdit.file_path`
-- `NotebookEdit.notebook_path`
+Filesystem permissions should be the default local backend because they are
+simple, brain-agnostic, and preserve read/execute access. The module should make
+the backend explicit so stronger deployments can use a stronger mechanism
+without changing brain adapters:
 
-For `Bash`, use a conservative detector rather than a broad command ban. The
-first implementation should block when the command string contains an explicit
-protected path or a write redirection / mutation command whose destination
-normalizes into a protected root. It should cover the known incident class and
-common variants:
+- `chmod` backend: remove write bits from protected roots. This is the portable
+  default and catches accidental direct writes from Claude, Codex, shell tools,
+  MCP tools, and future adapters. It is not a security boundary when the agent
+  process owns the files, because the same UID can deliberately restore write
+  bits with `chmod`.
+- `readonly-mount` backend: for containerized deployments, mount protected roots
+  read-only into the agent process namespace.
+- `owner-split` backend: for managed hosts that can run agents as a worker user,
+  keep protected roots owned by the controller/install user and run brain
+  subprocesses without permission to `chmod` or rewrite them.
 
-- `cat > /path`, `echo ... > /path`, `tee /path`
-- `python -c ... /path`, `python script.py /path` when the protected path is
-  explicit in the command
-- `sed -i`, `perl -pi`, `mv`, `cp`, `rm`, `touch`, `mkdir`, `chmod`, `chown`
-  with explicit protected-path operands
-- `cd /protected && ... > file` when the command establishes a protected working
-  directory before a write-like operation
+The first implementation only needs to ship the `chmod` backend plus the
+abstraction and doctor visibility. It must document that same-UID processes can
+potentially undo chmod, so operators that need a hard boundary should configure
+the stronger backend once available.
 
-The guard should not try to parse every shell construct. If a command explicitly
-mentions a protected path and uses a write-like operation, deny it. Commands that
-only read protected files for diagnostics can remain allowed unless the command
-also matches a mutating form. Known non-goals for the first implementation
-include environment-variable expansion, glob-only targets, here-doc scripts with
-hidden destinations, and external scripts whose contents are not visible in the
-tool input.
+Every backend must preserve read access, directory search access, and existing
+execute bits for the agent execution identity. A stronger backend is invalid if
+it prevents agents from reading package prompts/workflows/context or executing
+package-provided scripts that were executable before protection was applied.
 
-### 4. Denial Response
+### 4. Apply The Policy At Framework Boundaries
 
-When denying, return a synchronous `PreToolUse` hook output:
+Apply and verify the runtime write policy in framework-owned paths, not inside a
+specific brain adapter:
 
-```python
-{
-    "hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "permissionDecision": "deny",
-        "permissionDecisionReason": (
-            "Bobi blocks agents from editing its installed framework, venv, "
-            "or package-managed dependency directories. Report the attempted "
-            "change and implement it in the source repo via PR instead."
-        ),
-    }
-}
-```
+- `bobi.install.install_pack()` should make the package mutable for the duration
+  of install and read-only at the end, using `finally` semantics so a failed
+  install does not leave a previously protected image writable.
+- Add a shared helper, tentatively `bobi.runtime_guard.prepare_brain_runtime()`,
+  and call it from every framework-owned brain invocation path before
+  constructing or invoking a `BrainSession`.
+- The first implementation should wire that helper into the concrete current
+  call sites: `Session._make_brain_session()` in `bobi/session.py`,
+  `_run_agent_supervised()` / `_build_client()` in `bobi/subagent.py`,
+  workflow agent creation in `bobi/workflow/orchestrator.py`, setup one-shots in
+  `bobi/setup/llm.py`, and MCP probe sessions in `bobi/validate.py`.
+- `bobi agent <name> doctor` should call `check_runtime_write_policy()` and
+  report protected roots that are still writable.
 
-The reason should include the matched path class, but not expose secrets or full
-environment dumps. Absolute local paths are acceptable because the agent already
-attempted to write them and Bobi transcripts are local operational records.
+This handles Claude, Codex, gateway-backed Claude, and future model adapters
+because they all run after the same Bobi runtime preparation. No Claude
+`PreToolUse` hook or Codex-specific command filter is required for the primary
+guard.
 
-### 5. Doctor Integrity Check For Bobi Distribution
+### 5. Preserve Writable Development Checkouts
+
+The guard must distinguish runtime installs from assigned source repos:
+
+- If Bobi is imported from a source checkout that is equal to or inside the
+  current assigned task repo, do not mark that checkout read-only.
+- If the assigned task repo is `moda-labs/bobi-agent`, edits under that checkout
+  are allowed; that is the correct path for framework changes.
+- Detect editable/source installs using distribution metadata where available
+  (`direct_url.json` editable markers, missing wheel `RECORD`, and path
+  comparison), not only by inspecting `bobi.__file__`.
+- If the active runtime uses an installed wheel or tool-managed virtualenv,
+  protect the installed package copy even if the agent's assigned repo happens
+  to contain a different Bobi checkout.
+
+This keeps the desired workflow intact: agents can read installed runtime files
+for diagnostics, but framework changes must be made in the source repo and sent
+through PR review.
+
+### 6. Doctor Integrity Check For Bobi Distribution
 
 Add `_check_bobi_install_integrity()` to `bobi/doctor.py` and include it in
 `run_doctor()`.
@@ -188,43 +209,53 @@ The check should use `importlib.metadata.distribution("bobi")` and the wheel's
 
 - For each file with a `sha256=` hash in `dist.files`, compare the current bytes
   to the recorded hash.
+- Resolve `PackagePath` entries through the metadata API and reject/report any
+  resolved path that escapes the expected distribution package or `.dist-info`
+  roots.
 - Skip files without hashes, missing metadata, editable source installs, and
   local source checkouts where no wheel `RECORD` exists.
 - Skip non-`sha256` hashes and report unreadable hashed files as failures.
 - Fail when hashed files are missing or differ.
 - The hint should instruct the operator to reinstall or upgrade Bobi and move
-  any desired changes into a source PR.
+  any desired framework changes into a source PR.
 
 Implement the metadata lookup behind a small helper so tests can inject a
 fixture distribution without depending on the test runner's own installation
 layout.
 
-This is detection only. It complements the hook guard and catches:
+This is detection only. It complements the filesystem guard and catches:
 
 - Drift that happened before the guard existed.
-- Out-of-band edits made outside Claude tool hooks.
-- Tooling paths that bypass the hook layer.
+- Out-of-band edits made outside Bobi-controlled launch paths.
+- Same-UID or privileged edits that intentionally bypass read-only permissions.
 
 ## Testing Plan
 
 Unit tests:
 
-- Hook composition preserves existing `AskUserQuestion` defer behavior.
-- `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` are denied for protected
-  Bobi, site-packages, venv, and dependency-directory paths.
-- The same tools are allowed for normal repo/workspace paths.
-- Missing destination files inside protected roots are denied.
-- Bash commands with explicit protected-path mutation are denied.
-- Read-only Bash commands against protected paths are allowed.
-- Existing caller-provided hooks still run and default hooks are appended.
-- A caller-provided hook for the same tool cannot bypass the guard by returning
-  `allow` before the guard runs.
-- `stream_once()` receives the same default protection as persistent sessions.
-- Editable Bobi source checkouts used as the assigned task repo remain writable.
-- Non-editable Bobi wheel installs under `site-packages` are protected.
-- Symlinked workspace paths that resolve into protected roots are denied.
-- Relative paths from a protected `cwd` are denied.
-- Bash mutation after `cd <protected-root>` is denied.
+- `install_pack()` writes the package image and leaves files/directories
+  non-writable while preserving read and execute bits.
+- Reinstall temporarily restores mutability, regenerates the package image, and
+  reapplies read-only permissions.
+- `run/package/` scripts with executable bits remain executable after the guard.
+- `run/workspace/` and `run/state/` remain writable.
+- `protected_runtime_roots()` includes the team package image for a bound runtime.
+- Bobi wheel installs include the imported package and `.dist-info` roots.
+- Editable/source Bobi checkouts used as the assigned task repo are skipped.
+- Symlinks inside protected package images are not chmod-followed and are
+  reported by doctor as package-integrity failures when they resolve outside the
+  protected image, even if the resolved target is not currently writable.
+- `check_runtime_write_policy()` fails with a clear detail for writable protected
+  files or directories.
+- The guard preparation path is invoked before Claude session creation.
+- The guard preparation path is invoked before Codex subprocess execution.
+- A fake future brain enters through the public session/launch path and observes
+  that `prepare_brain_runtime()` ran without adding provider-specific write
+  filters.
+- Same-owner `chmod` bypass is documented by test: direct writes fail after the
+  `chmod` backend, but a same-UID process can deliberately restore write bits.
+  The test should assert this limitation is reported in docs/doctor expectations,
+  not treat `chmod` as a hard sandbox.
 - Doctor passes for editable/source installs without `RECORD`.
 - Doctor fails with a clear detail when a hashed Bobi wheel file differs from
   its `RECORD` digest.
@@ -233,31 +264,41 @@ Unit tests:
 
 Integration or smoke tests:
 
-- A focused real-Claude smoke, gated on the CLI, attempts to write a temporary
-  file under a synthetic protected root and asserts the write is blocked.
-- The real-Claude smoke verifies that the `permissionDecision: "deny"` hook
-  output shape actually blocks a tool call with the installed SDK.
-- `bobi agent <name> doctor` reports Bobi install drift when the check is fed a
-  fixture distribution with a mismatched file.
+- Install a fixture team, verify `run/package/` is readable and executable but a
+  direct file write fails without first making it mutable through Bobi install.
+- Run a Claude-backed smoke, gated on the CLI, that reads and executes a script
+  from `run/package/` and fails to edit the same package image.
+- Run a Codex-backed smoke when the CLI is available with the same read/execute
+  and write-denial expectations.
+- `bobi agent <name> doctor` reports a writable protected package file and
+  reports Bobi install drift when fed a fixture distribution with a mismatched
+  file.
 
 ## Rollout
 
-1. Ship the hook guard enabled by default for Claude-backed agents.
-2. Ship doctor drift detection in the same release.
-3. Document the boundary in `docs/SECURITY.md`: agents may edit task source and
-   workspace files, but framework installs, venvs, and package-managed
-   dependency directories are protected.
-4. Keep the existing `bypassPermissions` default for now; revisit a narrower
-   permission mode after the guard has production coverage.
+1. Ship the runtime write-policy module with the `chmod` backend enabled by
+   default.
+2. Update install and launch paths to apply the policy for all brains.
+3. Ship doctor checks for writable protected roots and Bobi wheel drift.
+4. Document the boundary in `docs/SECURITY.md`: agents may read and execute
+   runtime package files, and may edit assigned repos/workspaces/state, but
+   Bobi-owned installed framework and package images are protected.
+5. Add deployment notes for stronger `readonly-mount` and `owner-split`
+   backends as follow-up work for managed hosts that need a hard security
+   boundary.
 
 ## Risks And Mitigations
 
-- **False positives in source checkouts:** only protect Bobi's imported package
-  path and package-managed directories, not every path named `bobi/`.
-- **Shell parsing gaps:** start conservative and deny obvious write forms with
-  explicit protected paths; do not frame this as a complete shell sandbox, and
-  rely on doctor plus external filesystem isolation as defense in depth.
-- **Hook compatibility:** merge hooks rather than replacing caller hooks, and
-  keep tests around existing deferred question behavior.
-- **Non-Claude brains:** document that this enforcement depends on Claude hook
-  support; keep doctor detection brain-agnostic.
+- **Same-UID chmod bypass:** document the limitation clearly, detect drift in
+  doctor, and keep the backend abstraction ready for read-only mounts or
+  owner-split execution where a hard boundary is required.
+- **False positives in source checkouts:** skip editable Bobi source checkouts
+  that are the assigned task repo, and avoid protecting arbitrary ancestors.
+- **Broken package scripts:** preserve execute bits and add tests that execute a
+  package-provided script after permissions are applied.
+- **Install failures after read-only mode:** centralize mutable install windows
+  in `with_mutable_runtime_package()` so reinstall, compose, and manifest writes
+  do not hand-roll permission changes.
+- **Brain-specific gaps:** keep enforcement at install/launch boundaries so
+  Claude, Codex, MCP tools, shell commands, and future brains all encounter the
+  same protected filesystem state.
