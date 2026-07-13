@@ -14,6 +14,12 @@ replies to the bot's own messages. It does not read the full channel
 firehose. Replies go out through the Discord REST API (2000-character
 messages, edits supported).
 
+**Not an auth bootstrap channel:** Bobi's subscription-login bootstrap
+(`bobi login-bootstrap`, including Codex device auth) is still Slack-only
+because that flow needs a private `BOBI_LOGIN_CHANNEL` and, for paste-back
+logins, a Slack event-bus reply path. Discord v1 is a runtime chat transport
+for agent work, not a channel for CLI/Codex OAuth onboarding.
+
 ## 1. Create the application and bot
 
 1. Open https://discord.com/developers/applications → **New Application**.
@@ -72,6 +78,12 @@ successful registration also starts the Gateway connection; the server
 additionally connects at boot when `DISCORD_BOT_TOKEN` /
 `DISCORD_APPLICATION_ID` are present in its environment (the launcher
 forwards them automatically).
+
+Discord subscriptions are app-wide in v1: the subscription key is exactly
+`discord:<application_id>`. There is no `channels:` scoping knob like Slack.
+Which guild channels can reach the agent is controlled by Discord permissions
+and by the v1 normalizer filter: DMs, bot @mentions, and replies to the bot
+are delivered; unrelated channel messages are ignored.
 
 ## 4. Test it
 

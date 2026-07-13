@@ -254,6 +254,11 @@ Resolved in `bobi/events/subscriptions.py` + `adapters.py`:
    - **slack** from the bot token (`auth.test` -> team + app id), scoped to any
      configured `channels:`.
    - **linear** from the API key (teams query -> one `linear:<KEY>` per team).
+   - **whatsapp** from the configured phone-number id after Graph API validation.
+   - **discord** from the configured application id after Discord API validation;
+     Discord has one app-wide `discord:<application_id>` subscription in v1,
+     while channel reachability is limited by Discord permissions and the
+     Gateway normalizer's DM / @mention / reply filter.
 3. **Fallback** - the project directory name.
 
 On top of that, `bobi agent <name> start` adds any `--subscribe` extras, every

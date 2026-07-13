@@ -63,6 +63,17 @@ class TestDetectDiscord:
                 {"message": "401: Unauthorized", "code": 0})):
             assert detect("discord", None, _cfg()) == []
 
+    def test_discord_subscription_is_app_wide_not_channel_scoped(self):
+        cfg = Config(services=[ServiceConfig(
+            name="discord",
+            credentials={"bot_token": "dc-tok", "application_id": APP_ID},
+            channels=["123456789012345678"],
+        )])
+
+        with patch.object(pooled, "get",
+                          side_effect=lambda *a, **k: _ApiResp({"id": APP_ID})):
+            assert detect("discord", None, cfg) == [f"discord:{APP_ID}"]
+
 
 class TestRegisterDiscordApps:
     def test_signed_registration_posts_and_returns_app_id(self):
