@@ -30,3 +30,36 @@ def test_integration_fast_model_download_is_bounded_without_hf_xet():
     assert "FASTEMBED_CACHE_PATH" not in pytest_step.get("env", {})
 
 
+def test_promote_dev_advances_only_on_fully_green_main_push():
+    """#740 Track A: `dev` is the pre-release channel the private deploy repo
+    consumes, so it must only ever point at a main commit the WHOLE CI matrix
+    proved — and must move by fast-forward, never force."""
+    workflow = _ci_workflow()
+    jobs = workflow["jobs"]
+    job = jobs["promote-dev"]
+
+    # Gated on every other job in this workflow: adding a CI job without
+    # gating the channel on it would silently weaken what "green" means.
+    assert set(job["needs"]) == set(jobs) - {"promote-dev"}
+
+    # Push-to-main only — never PRs, nightly cron, or manual dispatch.
+    condition = job["if"]
+    assert "github.event_name == 'push'" in condition
+    assert "github.ref == 'refs/heads/main'" in condition
+
+    # Job-scoped write permission (the rest of CI stays read-only) and
+    # serialized promotions.
+    assert job["permissions"] == {"contents": "write"}
+    assert job["concurrency"]["group"] == "promote-dev"
+    assert job["concurrency"]["cancel-in-progress"] is False
+
+    push = next(s for s in job["steps"] if "refs/heads/dev" in s.get("run", ""))
+    # Fast-forward only: no force flag, and out-of-order completions no-op
+    # via the ancestor check instead of rewinding the channel.
+    assert "--force" not in push["run"]
+    assert "merge-base --is-ancestor" in push["run"]
+    # The ancestor check needs history; a shallow checkout would break it.
+    checkout = next(s for s in job["steps"] if "checkout" in s.get("uses", ""))
+    assert checkout["with"]["fetch-depth"] == 0
+
+
