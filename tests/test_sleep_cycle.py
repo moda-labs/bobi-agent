@@ -262,9 +262,13 @@ class TestCuratorDispatch:
         assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
 
     def test_publishes_policy_updated_on_success_updated(self, tmp_path, monitor):
+        from bobi import paths
+
         h = _CuratorHarness(tmp_path, [_row(10, "a")])
         with _patch_history(h):
             h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text("## Facts\n\nadded a fact")
         h.captured["on_result"]({"success": True, "updated": True,
                                  "summary": "added a fact", "bytes": 123,
                                  "urgent": False})
@@ -289,6 +293,154 @@ class TestCuratorDispatch:
         with _patch_history(h):
             h.sched._spawn_curator(monitor, [tmp_path])
         assert h.captured == {}  # nothing dispatched
+
+    def test_dispatches_compaction_only_when_memory_over_cap(self, tmp_path, monitor):
+        from bobi.memory import MAX_MEMORY_CHARS
+        from bobi import paths
+
+        state = paths.state_path(tmp_path)
+        state.mkdir(parents=True)
+        oversized = "## Facts\n\n" + ("x" * (MAX_MEMORY_CHARS + 5000))
+        paths.long_term_memory_path(tmp_path).write_text(oversized)
+        h = _CuratorHarness(tmp_path, [])
+
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+
+        assert "task" in h.captured
+        assert "exceeds the 24000-character cap" in h.captured["task"]
+        assert oversized in h.captured["task"]
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "compacted", "bytes": 100,
+                                 "urgent": False})
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+
+    def test_dispatches_compaction_when_raw_whitespace_pushes_memory_over_cap(
+        self, tmp_path, monitor
+    ):
+        from bobi.memory import MAX_MEMORY_CHARS
+        from bobi import paths
+
+        paths.state_path(tmp_path).mkdir(parents=True)
+        paths.long_term_memory_path(tmp_path).write_text(
+            ("x" * MAX_MEMORY_CHARS) + "\n\n   "
+        )
+        h = _CuratorHarness(tmp_path, [])
+
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+
+        assert "task" in h.captured
+        assert "compaction-required run" in h.captured["task"]
+
+    def test_rejects_over_cap_compaction_even_when_reported_not_updated(
+        self, tmp_path, monitor
+    ):
+        from bobi.memory import MAX_MEMORY_CHARS
+        from bobi import paths
+
+        paths.state_path(tmp_path).mkdir(parents=True)
+        paths.long_term_memory_path(tmp_path).write_text(
+            "## Facts\n\n" + ("x" * (MAX_MEMORY_CHARS + 1))
+        )
+        h = _CuratorHarness(tmp_path, [])
+
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        h.captured["on_result"]({"success": True, "updated": False,
+                                 "summary": "no durable changes"})
+
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        actual_chars = MAX_MEMORY_CHARS + len("## Facts\n\n") + 1
+        assert h.published == [(
+            "system/monitor.error",
+            {
+                "monitor": "policy-curator",
+                "flavor": "sleep-cycle",
+                "reason": "memory-cap-exceeded",
+                "detail": (
+                    "long_term_memory.md output exceeded cap: "
+                    f"{actual_chars} chars "
+                    f"(cap {MAX_MEMORY_CHARS}) at "
+                    f"{paths.long_term_memory_path(tmp_path)}; "
+                    "compaction_required=True; updated=False"
+                ),
+            },
+        )]
+
+    def test_rejects_updated_file_that_remains_over_cap(self, tmp_path, monitor):
+        from bobi.memory import MAX_MEMORY_CHARS
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text(
+            "## Facts\n\n" + ("x" * (MAX_MEMORY_CHARS + 1))
+        )
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "added signal", "bytes": 42,
+                                 "urgent": False})
+
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert [event for event, _ in h.published] == ["system/monitor.error"]
+        assert "memory-cap-exceeded" == h.published[0][1]["reason"]
+        assert "updated=True" in h.published[0][1]["detail"]
+
+    def test_rejects_over_cap_file_even_when_not_compaction_or_updated(
+        self, tmp_path, monitor
+    ):
+        from bobi.memory import MAX_MEMORY_CHARS
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text(
+            "## Facts\n\n" + ("x" * (MAX_MEMORY_CHARS + 1))
+        )
+        h.captured["on_result"]({"success": True, "updated": False,
+                                 "summary": "no durable changes"})
+
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert [event for event, _ in h.published] == ["system/monitor.error"]
+        assert "memory-cap-exceeded" == h.published[0][1]["reason"]
+        assert "updated=False" in h.published[0][1]["detail"]
+
+    def test_rejects_updated_true_when_memory_file_missing(self, tmp_path, monitor):
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "claimed write", "bytes": 0,
+                                 "urgent": False})
+
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert [event for event, _ in h.published] == ["system/monitor.error"]
+        assert "memory-artifact-unreadable" == h.published[0][1]["reason"]
+
+    def test_accepts_updated_file_exactly_at_cap(self, tmp_path, monitor):
+        from bobi.memory import MAX_MEMORY_CHARS
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text("x" * MAX_MEMORY_CHARS)
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "added signal", "bytes": 999999,
+                                 "urgent": False})
+
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 10
+        assert [event for event, _ in h.published] == [
+            "system/policy.updated",
+            "system/memory.updated",
+        ]
 
     def test_failed_curator_result_publishes_monitor_error(self, tmp_path, monitor):
         h = _CuratorHarness(tmp_path, [_row(10, "a")])

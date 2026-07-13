@@ -31,13 +31,12 @@ MAX_MEMORY_CHARS = 24_000
 MAX_LEGACY_MEMORY_CHARS = 32_000
 
 
-def load_long_term_memory(state_dir: Path) -> str:
-    """Load the team long_term_memory.md as one capped block, or "" when absent (#456).
+def load_raw_long_term_memory(state_dir: Path) -> str:
+    """Load long_term_memory.md without applying the prompt-injection cap.
 
-    Reads ``state_dir/long_term_memory.md`` (the two-section ``## Facts`` / ``## Decisions``
-    file the sleep cycle maintains), truncates at ``MAX_MEMORY_CHARS`` as a backstop,
-    and returns "" if the file is missing or empty so callers can skip injection.
-    Read-only — working agents never write this file.
+    Scheduler-only callers use this so an over-cap artifact remains visible to
+    the sleep cycle and can be compacted. It preserves the legacy policy.md
+    migration behavior of load_long_term_memory().
     """
     from bobi import paths
 
@@ -48,14 +47,91 @@ def load_long_term_memory(state_dir: Path) -> str:
     try:
         if not memory_file.is_file():
             return ""
-        content = memory_file.read_text().strip()
+        return memory_file.read_text()
     except OSError:
         log.debug("Failed to read long_term_memory.md at %s", memory_file, exc_info=True)
         return ""
+
+
+def _truncate_to_budget(text: str, budget: int) -> str:
+    if budget <= 0:
+        return ""
+    if len(text) <= budget:
+        return text
+    marker = "\n\n[memory truncated]"
+    if budget <= len(marker):
+        return marker[-budget:]
+    return text[:budget - len(marker)] + marker
+
+
+def _split_memory_sections(content: str) -> tuple[str, str] | None:
+    facts_heading = "## Facts"
+    decisions_heading = "## Decisions"
+    facts_at: int | None = None
+    decisions_at: int | None = None
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped == facts_heading and facts_at is None:
+            facts_at = offset
+        elif stripped == decisions_heading and facts_at is not None:
+            decisions_at = offset
+            break
+        offset += len(line)
+    if facts_at is None or decisions_at is None or decisions_at < facts_at:
+        return None
+    facts = content[facts_at:decisions_at].strip()
+    decisions = content[decisions_at:].strip()
+    if not facts or not decisions:
+        return None
+    return facts, decisions
+
+
+def _section_aware_truncate(content: str, cap: int) -> str:
+    sections = _split_memory_sections(content)
+    if sections is None:
+        return _truncate_to_budget(content, cap)
+
+    facts, decisions = sections
+    separator = "\n\n"
+    available = cap - len(separator)
+    if available <= 0:
+        return _truncate_to_budget(content, cap)
+
+    facts_budget = min(len(facts), available // 2)
+    decisions_budget = min(len(decisions), available - facts_budget)
+    remaining = available - facts_budget - decisions_budget
+    if remaining and len(facts) > facts_budget:
+        add = min(remaining, len(facts) - facts_budget)
+        facts_budget += add
+        remaining -= add
+    if remaining and len(decisions) > decisions_budget:
+        add = min(remaining, len(decisions) - decisions_budget)
+        decisions_budget += add
+
+    result = (
+        f"{_truncate_to_budget(facts, facts_budget)}"
+        f"{separator}"
+        f"{_truncate_to_budget(decisions, decisions_budget)}"
+    )
+    return result[:cap]
+
+
+def load_long_term_memory(state_dir: Path) -> str:
+    """Load the team long_term_memory.md as one capped block, or "" when absent (#456).
+
+    Reads ``state_dir/long_term_memory.md`` (the two-section ``## Facts`` / ``## Decisions``
+    file the sleep cycle maintains), truncates at ``MAX_MEMORY_CHARS`` as a backstop,
+    and returns "" if the file is missing or empty so callers can skip injection.
+    Read-only — working agents never write this file.
+    """
+    content = load_raw_long_term_memory(state_dir).strip()
     if not content:
         return ""
     if len(content) > MAX_MEMORY_CHARS:
-        content = content[:MAX_MEMORY_CHARS] + "\n\n[memory truncated]"
+        log.warning("long_term_memory.md exceeds cap: %d chars (cap %d); "
+                    "truncating prompt injection", len(content), MAX_MEMORY_CHARS)
+        content = _section_aware_truncate(content, MAX_MEMORY_CHARS)
     return content
 
 

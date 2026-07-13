@@ -188,6 +188,13 @@ def build_sleep_cycle_task(prompt_template: str, transcript: str,
         notes.append(f"- {flags['oversized_truncated']} oversized message(s) were "
                      f"head+tail truncated to fit (ids {flags.get('oversized_ids')}); "
                      f"set oversized_truncated and name them.")
+    if flags.get("memory_over_cap"):
+        observed = flags.get("memory_chars")
+        cap = flags.get("memory_cap")
+        notes.append(f"- Current long_term_memory.md exceeds the {cap}-character cap "
+                     f"({observed} chars). This is a compaction-required run: "
+                     f"rewrite long_term_memory.md under the cap even if there are "
+                     f"no new transcript messages.")
     notes_block = ("\n\nIngest notes (from the deterministic input cap):\n"
                    + "\n".join(notes)) if notes else ""
 
