@@ -644,18 +644,23 @@ def test_reinstall_drops_stale_surface_files(tmp_path, monkeypatch):
 
 def test_reinstall_keeps_uncontributed_project_dirs(tmp_path, monkeypatch):
     """A surface NO layer contributes is left untouched on reinstall — so a
-    runtime-added `run/package/workflows/*.yaml` survives."""
+    framework-added `run/package/workflows/*.yaml` survives."""
     from bobi.cli import _install_pack
+    from bobi.runtime_guard import with_mutable_runtime_package
+
     proj = tmp_path
     (proj / "agents").mkdir()
     team = _team(proj, "t", 'version: "1.0.0"\nentry_point: director\n',
                  tools={"a.md": "A"})  # no workflows/
     monkeypatch.chdir(proj)
     _install_pack(team, proj, local_source=True)
-    # A project adds its own workflow after install.
+    # A framework path adds a workflow after install. Direct writes to
+    # run/package/ are forbidden by the runtime guard; reinstall remains the
+    # mutation path and preserves uncontributed package surfaces.
     proj_wf = paths.package_dir(proj) / "workflows"
-    proj_wf.mkdir(parents=True, exist_ok=True)
-    (proj_wf / "adhoc.yaml").write_text("name: adhoc\nsteps: []\n")
+    with with_mutable_runtime_package(proj):
+        proj_wf.mkdir(parents=True, exist_ok=True)
+        (proj_wf / "adhoc.yaml").write_text("name: adhoc\nsteps: []\n")
     _install_pack(team, proj, local_source=True)  # reinstall
     assert (proj_wf / "adhoc.yaml").exists()  # survived
 

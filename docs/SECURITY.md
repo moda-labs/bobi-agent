@@ -90,6 +90,15 @@ therefore runs untrusted-author code against your credentials.
 - The installed `run/package/` image is a frozen build artifact: regenerated
   verbatim on every install, never hand-edited. `bobi agent <name> doctor` flags
   drift against the install manifest.
+- Bobi makes Bobi-owned runtime package roots read-only before handing control to
+  an agent brain. Agents keep read/search access and keep existing execute bits
+  for packaged scripts, while assigned repos, `run/workspace/`, `run/state/`,
+  logs, and handoffs stay writable. The default local backend is POSIX `chmod`:
+  it catches accidental writes from Claude, Codex, gateway-backed Claude, MCP
+  tools, and future brains through the shared launch boundary, but it is not a
+  hard sandbox when the agent process owns the files because the same UID can
+  deliberately restore write bits. Managed deployments that need a stronger
+  boundary should use read-only mounts or split ownership.
 
 ## Deployed instances
 

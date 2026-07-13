@@ -62,9 +62,11 @@ async def _sdk_stream(*, system_prompt: str, user_prompt: str,
     ``TurnResult`` carrying any error.
     """
     from bobi.brain import AssistantText, StreamDelta, TurnResult, get_brain
+    from bobi.runtime_guard import prepare_brain_runtime
 
     saw_partial = False
     try:
+        prepare_brain_runtime()
         async for msg in get_brain().stream_once(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
