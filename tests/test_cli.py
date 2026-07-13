@@ -9,7 +9,7 @@ from click.testing import CliRunner
 from bobi.__version__ import __version__
 from bobi import paths
 from bobi.cli import main
-from bobi.subagent import CheckResult, GateResult
+from bobi.subagent import AgentResult, CheckResult, GateResult
 from tests.conftest import TEST_AGENT_NAME
 
 
@@ -65,7 +65,7 @@ def test_agent_help_lists_runtime_commands(bobi_install):
 
 def test_agent_group_pins_team_brain_for_cli_process(bobi_install, monkeypatch):
     """`bobi agent <name> ...` must select the team's brain for sessions the
-    CLI process itself runs - a gateway team's `--wait` completion check
+    CLI process itself runs - a gateway team's `--as-check` monitor check
     otherwise hits real Anthropic with the gateway's token (#655)."""
     import os
     import yaml
@@ -210,15 +210,94 @@ class TestSubagents:
         assert result.exit_code != 0
         assert "Unknown role" in result.output
 
-    def test_wait_mode_runs_check(self, bobi_install):
-        check = CheckResult(success=True, finding=False)
-        with patch("bobi.subagent.run_check_blocking", return_value=check):
+    def test_wait_mode_runs_agent(self, bobi_install):
+        agent = AgentResult(
+            session_id="sess-1", run_key="run-1", phase="adhoc",
+            success=True, final_text="done",
+        )
+        with patch("bobi.subagent.spawn_adhoc", return_value=agent) as spawn, \
+             patch("bobi.subagent.run_check_blocking") as check:
             result = CliRunner().invoke(main, [
                 "agent", TEST_AGENT_NAME, "subagents", "launch",
                 "-w", "adhoc", "--role", "engineer",
-                "--wait", "--task", "Check prod URL",
+                "--wait", "--task", "Fix prod URL",
             ])
         assert result.exit_code == 0, result.output
+        assert "done" in result.output
+        check.assert_not_called()
+        spawn.assert_called_once()
+        assert spawn.call_args.kwargs["task"] == "Fix prod URL"
+        assert spawn.call_args.kwargs["role"] == "engineer"
+
+    def test_agent_wait_alias_runs_agent(self, bobi_install):
+        agent = AgentResult(
+            session_id="sess-1", run_key="run-1", phase="adhoc", success=True,
+        )
+        with patch("bobi.subagent.spawn_adhoc", return_value=agent) as spawn:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer",
+                "--agent-wait", "--task", "Fix prod URL",
+            ])
+        assert result.exit_code == 0, result.output
+        spawn.assert_called_once()
+
+    def test_as_check_runs_check(self, bobi_install):
+        check = CheckResult(success=True, finding=False)
+        with patch("bobi.subagent.run_check_blocking", return_value=check) as run_check, \
+             patch("bobi.subagent.spawn_adhoc") as spawn:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer",
+                "--as-check", "--task", "Check prod URL",
+            ])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output.strip()) == {
+            "success": True,
+            "finding": False,
+            "summary": "",
+            "details": {},
+        }
+        run_check.assert_called_once()
+        spawn.assert_not_called()
+
+    def test_subagents_launch_help_separates_wait_and_check(self, bobi_install):
+        result = CliRunner().invoke(main, [
+            "agent", TEST_AGENT_NAME, "subagents", "launch", "--help",
+        ])
+        assert result.exit_code == 0, result.output
+        assert "--wait" in result.output
+        assert "Block until the launched agent completes" in result.output
+        assert "--as-check" in result.output
+        assert "monitoring check" in result.output
+        assert "--agent-wait" not in result.output
+
+    def test_as_check_rejects_wait_flags(self, bobi_install):
+        result = CliRunner().invoke(main, [
+            "agent", TEST_AGENT_NAME, "subagents", "launch",
+            "-w", "adhoc", "--role", "engineer",
+            "--as-check", "--wait", "--task", "Check prod URL",
+        ])
+        assert result.exit_code != 0
+        assert "--as-check cannot be combined with --wait" in result.output
+
+    def test_post_event_requires_as_check(self, bobi_install):
+        result = CliRunner().invoke(main, [
+            "agent", TEST_AGENT_NAME, "subagents", "launch",
+            "-w", "adhoc", "--role", "engineer",
+            "--post-event", "monitor/test", "--task", "Check prod URL",
+        ])
+        assert result.exit_code != 0
+        assert "--post-event requires --as-check" in result.output
+
+    def test_wait_non_adhoc_fails_loudly(self, bobi_install):
+        result = CliRunner().invoke(main, [
+            "agent", TEST_AGENT_NAME, "subagents", "launch",
+            "-w", "issue-lifecycle", "--role", "engineer",
+            "--wait", "--task", "Fix #1",
+        ])
+        assert result.exit_code != 0
+        assert "--wait only supports adhoc workflow runs" in result.output
 
     def test_passes_requested_by(self, bobi_install):
         req = '{"requester":"Alice","source":{"kind":"test"},"ids":[1,2]}'

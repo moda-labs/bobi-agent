@@ -15,6 +15,7 @@ monkeypatch ``claude_agent_sdk.ClaudeSDKClient`` continue to take effect.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from typing import Any, AsyncIterator
@@ -184,9 +185,17 @@ def _result_to_turn(msg: Any) -> TurnResult:
             name=getattr(dtu, "name", ""), input=getattr(dtu, "input", None)
         )
 
+    error_kind, error_message, max_turns, turn_count = _terminal_error(msg)
+
+    is_error = bool(getattr(msg, "is_error", False) or error_kind)
+
     return TurnResult(
         session_id=getattr(msg, "session_id", "") or "",
-        is_error=bool(getattr(msg, "is_error", False)),
+        is_error=is_error,
+        error_kind=error_kind,
+        error_message=error_message,
+        max_turns=max_turns,
+        turn_count=turn_count,
         api_error_status=getattr(msg, "api_error_status", None),
         total_cost_usd=getattr(msg, "total_cost_usd", 0.0) or 0.0,
         duration_ms=getattr(msg, "duration_ms", 0) or 0,
@@ -195,6 +204,68 @@ def _result_to_turn(msg: Any) -> TurnResult:
         deferred_tool=deferred,
         costs=costs,
     )
+
+
+def _terminal_error(msg: Any) -> tuple[str, str, int | None, int | None]:
+    """Return provider-neutral terminal error details for known SDK failures."""
+    stop_reason = str(getattr(msg, "stop_reason", "") or "")
+    max_turns, turn_count = _max_turns_from_errors(getattr(msg, "errors", None))
+
+    if stop_reason == "max_turns_reached" or max_turns is not None:
+        kind = "max_turns_reached"
+        message = _render_max_turns_error(max_turns, turn_count)
+        return kind, message, max_turns, turn_count
+
+    return "", "", None, None
+
+
+def _max_turns_from_errors(errors: Any) -> tuple[int | None, int | None]:
+    if not errors:
+        return None, None
+    items = errors if isinstance(errors, (list, tuple)) else [errors]
+    for item in items:
+        parsed = item
+        if isinstance(item, str):
+            try:
+                parsed = json.loads(item)
+            except (TypeError, ValueError):
+                continue
+        if not isinstance(parsed, dict):
+            continue
+        attachment = parsed.get("attachment")
+        if (
+            parsed.get("type") == "attachment"
+            and isinstance(attachment, dict)
+            and attachment.get("type") == "max_turns_reached"
+        ):
+            return (
+                _int_or_none(
+                    attachment.get("maxTurns", attachment.get("max_turns"))
+                ),
+                _int_or_none(
+                    attachment.get("turnCount", attachment.get("turn_count"))
+                ),
+            )
+    return None, None
+
+
+def _render_max_turns_error(max_turns: int | None,
+                            turn_count: int | None) -> str:
+    details = []
+    if max_turns is not None:
+        details.append(f"max={max_turns}")
+    if turn_count is not None:
+        details.append(f"turns={turn_count}")
+    if details:
+        return f"max_turns_reached ({', '.join(details)})"
+    return "max_turns_reached"
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _configure_initialize_timeout() -> None:
