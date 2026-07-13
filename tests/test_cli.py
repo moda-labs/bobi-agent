@@ -229,19 +229,6 @@ class TestSubagents:
         assert spawn.call_args.kwargs["task"] == "Fix prod URL"
         assert spawn.call_args.kwargs["role"] == "engineer"
 
-    def test_agent_wait_alias_runs_agent(self, bobi_install):
-        agent = AgentResult(
-            session_id="sess-1", run_key="run-1", phase="adhoc", success=True,
-        )
-        with patch("bobi.subagent.spawn_adhoc", return_value=agent) as spawn:
-            result = CliRunner().invoke(main, [
-                "agent", TEST_AGENT_NAME, "subagents", "launch",
-                "-w", "adhoc", "--role", "engineer",
-                "--agent-wait", "--task", "Fix prod URL",
-            ])
-        assert result.exit_code == 0, result.output
-        spawn.assert_called_once()
-
     def test_as_check_runs_check(self, bobi_install):
         check = CheckResult(success=True, finding=False)
         with patch("bobi.subagent.run_check_blocking", return_value=check) as run_check, \
@@ -270,7 +257,19 @@ class TestSubagents:
         assert "Block until the launched agent completes" in result.output
         assert "--as-check" in result.output
         assert "monitoring check" in result.output
-        assert "--agent-wait" not in result.output
+
+    def test_agent_wait_alias_is_not_supported(self, bobi_install):
+        with patch("bobi.subagent.spawn_adhoc") as spawn, \
+             patch("bobi.subagent.run_check_blocking") as check:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer",
+                "--agent-wait", "--task", "Fix prod URL",
+            ])
+        assert result.exit_code != 0
+        assert "No such option '--agent-wait'" in result.output
+        spawn.assert_not_called()
+        check.assert_not_called()
 
     def test_as_check_rejects_wait_flags(self, bobi_install):
         result = CliRunner().invoke(main, [

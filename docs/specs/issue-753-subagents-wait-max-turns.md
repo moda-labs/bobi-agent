@@ -21,8 +21,8 @@ from an API failure or malformed output.
 
 ## Root Cause
 
-- `bobi/cli.py` declares `--wait` with the blocking-agent help text, but
-  `_dispatch_agent()` calls `_run_check()` whenever `wait and not agent_wait`.
+- Before this change, `bobi/cli.py` declared `--wait` with the blocking-agent
+  help text, but `_dispatch_agent()` called `_run_check()` for public `--wait`.
 - `_run_check()` uses `run_check_blocking()`, which intentionally applies
   `CHECK_MAX_TURNS` and check-verdict parsing. That is appropriate for monitor
   checks, not for user-visible subagent delegation.
@@ -39,8 +39,9 @@ Change the CLI contract so names match behavior:
 
 - `--wait` blocks on the requested agent.
 - A new explicit `--as-check` flag runs the short-lived monitoring-check harness.
-- `--agent-wait` remains temporarily as a hidden/deprecated compatibility alias
-  for `--wait`.
+- The hidden `--agent-wait` escape hatch is removed in the same cutover. The only
+  known callers are Bobi-Agent processes, and stale callers will fail with normal
+  CLI usage output instead of preserving a second spelling.
 - `--post-event` is only valid with `--as-check`, because completion events are a
   monitor-check concern rather than a general synchronous-agent concern. A
   repo-wide search shows the only current `subagents launch --post-event`
@@ -71,9 +72,8 @@ In scope:
 - Regression tests for:
   - `--wait` calls the real agent-wait path, not `run_check_blocking()`.
   - `--as-check` calls `run_check_blocking()` and still prints check verdict JSON.
-  - invalid combinations such as `--as-check --wait`,
-    `--as-check --agent-wait`, and `--post-event` without `--as-check` are usage
-    errors.
+  - invalid combinations such as `--as-check --wait` and `--post-event` without
+    `--as-check` are usage errors.
   - `--as-check` preserves the old check-mode stdout JSON, retry behavior,
     `--post-event` behavior, and exit codes.
   - max-turn failures propagate as actionable errors in check, curator, and
@@ -95,22 +95,19 @@ Out of scope:
    - Add `--as-check`, `is_flag=True`, with help text like "Run the task as a
      short-lived monitoring check".
    - Change `--wait` help to "Block until the launched agent completes".
-   - Keep hidden `--agent-wait` accepted for backward compatibility. Treat
-     `agent_wait=True` as equivalent to `wait=True`.
+   - Remove hidden `--agent-wait` rather than carrying a compatibility alias.
 
 2. Split dispatch clearly:
    - If `as_check` is true, call `_run_check()` and return.
    - If `post_event` is provided without `as_check`, exit with a usage error.
-   - If `as_check` is combined with `wait` or `agent_wait`, exit with a usage
-     error. Check mode is already synchronous; accepting both would make flag
-     precedence ambiguous.
-   - If `wait` or `agent_wait` is true, call `_run_agent_wait()`.
+   - If `as_check` is combined with `wait`, exit with a usage error. Check mode
+     is already synchronous; accepting both would make flag precedence ambiguous.
+   - If `wait` is true, call `_run_agent_wait()`.
    - Otherwise launch asynchronously with `launch_agent()`.
 
 3. Define the dispatch/output matrix:
    - `adhoc + --wait`: run `_run_agent_wait()`, print final agent text on stdout,
      return 0 on success and 1 on agent failure.
-   - `adhoc + --agent-wait`: same as `--wait`; hidden compatibility alias.
    - `adhoc + --as-check`: run `_run_check()`, preserve the old check-mode stdout
      verdict JSON, retry behavior, `--post-event` behavior, and exit codes.
    - `non-adhoc + --wait`: return a usage error until a blocking workflow runner
@@ -126,9 +123,9 @@ Out of scope:
      monitor checks.
    - Update comments in `docs/MONITORS.md` that describe the old `--wait`
      behavior as a known hazard.
-   - Run a repo-wide search for `--wait`, `--agent-wait`, `run_check_blocking`,
-     and `post_event` to catch tests, prompts, docs, workflows, and generated
-     command strings that still assume check-mode `--wait`.
+   - Run a repo-wide search for `--wait`, `run_check_blocking`, and `post_event`
+     to catch tests, prompts, docs, workflows, and generated command strings that
+     still assume check-mode `--wait`.
 
 5. Normalize max-turn failure details:
    - Add a narrow provider-neutral terminal error model to `TurnResult`, for
@@ -161,8 +158,7 @@ Automated tests:
     `--wait` calls the real blocking-agent path.
   - Add a new `--as-check` test proving check mode still calls
     `run_check_blocking()` and prints verdict JSON.
-  - Add a help-output regression test that `--as-check` is visible and
-    `--agent-wait` remains hidden.
+  - Add a help-output regression test that `--as-check` is visible.
   - Add a usage test for `--post-event` without `--as-check`.
 
 - `tests/test_subagent_blocking.py`
@@ -219,8 +215,8 @@ Exit-code contract:
 ## Implementation Plan
 
 1. Write failing tests for CLI semantics and max-turn error rendering.
-2. Add `--as-check`, update dispatch ordering, and keep `--agent-wait` as a
-   hidden compatibility alias.
+2. Add `--as-check`, update dispatch ordering, and remove the hidden
+   `--agent-wait` alias.
 3. Update monitor scheduler subprocess argv to use `--as-check`.
 4. Add structured terminal error normalization in the brain adapter layer and
    render it in `subagent.py`.
@@ -234,8 +230,8 @@ Architecture / edge cases / tests:
 
 - The check harness remains available and explicit; monitor cost controls are not
   weakened.
-- Existing callers of hidden `--agent-wait` keep working while public users move
-  to `--wait`.
+- The cutover intentionally removes hidden `--agent-wait`; stale callers fail
+  fast with Click's normal unknown-option handling.
 - The largest compatibility risk is any external automation relying on old
   `--wait` check semantics. Introducing `--as-check` and updating internal
   scheduler callers gives those automations a clear migration path.

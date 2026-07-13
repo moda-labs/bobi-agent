@@ -2751,8 +2751,6 @@ main.add_command(event_server_cmd)
 @click.option("--wait", is_flag=True, help="Block until the launched agent completes")
 @click.option("--as-check", "as_check", is_flag=True,
               help="Run the task as a short-lived monitoring check")
-@click.option("--agent-wait", "agent_wait", is_flag=True, hidden=True,
-              help="Deprecated alias for --wait")
 @click.option("--post-event", "post_event", default=None,
               help="Post this event type on completion (for --as-check)")
 @click.option("--requested-by", "requested_by", default=None,
@@ -2767,8 +2765,8 @@ main.add_command(event_server_cmd)
               help="Model override for this launch (provider-native, e.g. haiku, "
                    "opus, or a full model ID). Wins over step and role config.")
 def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
-                     agent_wait, post_event, requested_by, non_interactive,
-                     persistent, subscribe, model):
+                     post_event, requested_by, non_interactive, persistent,
+                     subscribe, model):
     """Launch a sub-agent with a workflow and role.
 
     Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
@@ -2782,8 +2780,7 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
         persistent = True
     _dispatch_agent(task=task, workflow=workflow, role=role, run_key=run_key,
                     timeout=timeout, wait=wait, as_check=as_check,
-                    agent_wait=agent_wait, post_event=post_event,
-                    requested_by=requested_by,
+                    post_event=post_event, requested_by=requested_by,
                     interactive=not non_interactive,
                     persistent=persistent,
                     subscribe=list(subscribe),
@@ -2791,9 +2788,9 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
 
 
 def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
-                    as_check=False, agent_wait=False, post_event=None,
-                    requested_by=None, interactive=True, persistent=False,
-                    subscribe=None, model=""):
+                    as_check=False, post_event=None, requested_by=None,
+                    interactive=True, persistent=False, subscribe=None,
+                    model=""):
     """Dispatch logic for the agent command."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
@@ -2806,8 +2803,8 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
     project_path = _detect_project_root()
     cwd = str(project_path)
 
-    if as_check and (wait or agent_wait):
-        click.echo("--as-check cannot be combined with --wait or --agent-wait", err=True)
+    if as_check and wait:
+        click.echo("--as-check cannot be combined with --wait", err=True)
         raise SystemExit(1)
     if post_event and not as_check:
         click.echo("--post-event requires --as-check", err=True)
@@ -2825,7 +2822,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
         click.echo(f"Unknown role '{role}'. Available: {names}", err=True)
         raise SystemExit(1)
 
-    if wait or agent_wait:
+    if wait:
         _run_agent_wait(cwd=cwd, task=task, workflow=workflow, role=role,
                         run_key=run_key, timeout=timeout,
                         requested_by=requested_by, interactive=interactive,
