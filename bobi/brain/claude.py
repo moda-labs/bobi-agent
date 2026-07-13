@@ -280,10 +280,12 @@ class ClaudeBrain:
         from bobi.sdk import get_cli_path
 
         from bobi.brain import with_default_model_option
+        from bobi.brain.claude_hooks import make_default_pre_tool_use_hooks
 
         extra = with_default_model_option(options)
         # Defaults every call site shared; an explicit value in ``options`` wins.
         extra.setdefault("permission_mode", "bypassPermissions")
+        extra["hooks"] = make_default_pre_tool_use_hooks(cwd, extra.get("hooks"))
         # Never inherit the SDK's 1 MB max_buffer_size default — a single >1 MB
         # message (large Read, inlined image) would kill the session (#719).
         extra.setdefault("max_buffer_size", _max_buffer_size())
@@ -328,10 +330,12 @@ class ClaudeBrain:
             DEFAULT_CONNECT_BACKOFF_SECONDS,
         )
         from bobi.brain import resolve_model_option
+        from bobi.brain.claude_hooks import make_default_pre_tool_use_hooks
 
         extra = dict(options or {})
         model = resolve_model_option(model)
         extra.setdefault("permission_mode", "bypassPermissions")
+        extra["hooks"] = make_default_pre_tool_use_hooks(cwd, extra.get("hooks"))
         extra.setdefault("include_partial_messages", True)
         # Match the persistent-session guard: a >1 MB message must not kill the
         # one-shot stream either (#719).

@@ -90,6 +90,11 @@ therefore runs untrusted-author code against your credentials.
 - The installed `run/package/` image is a frozen build artifact: regenerated
   verbatim on every install, never hand-edited. `bobi agent <name> doctor` flags
   drift against the install manifest.
+- Claude-backed agents run unattended with permission prompts bypassed, so Bobi
+  installs a default tool-use guard that blocks known write tools from patching
+  Bobi's installed framework, Python virtualenvs, or package-managed dependency
+  directories. This is defense in depth rather than an OS sandbox: source changes
+  still belong in the checked-out repo and should land through normal review.
 
 ## Deployed instances
 
