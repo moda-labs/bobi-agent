@@ -14,11 +14,11 @@ replies to the bot's own messages. It does not read the full channel
 firehose. Replies go out through the Discord REST API (2000-character
 messages, edits supported).
 
-**Not an auth bootstrap channel:** Bobi's subscription-login bootstrap
-(`bobi login-bootstrap`, including Codex device auth) is still Slack-only
-because that flow needs a private `BOBI_LOGIN_CHANNEL` and, for paste-back
-logins, a Slack event-bus reply path. Discord v1 is a runtime chat transport
-for agent work, not a channel for CLI/Codex OAuth onboarding.
+**Not an auth bootstrap channel:** Bobi's subscription-login bootstrap,
+including Codex device auth, is still Slack-only because that flow needs a
+private `BOBI_LOGIN_CHANNEL` and, for paste-back logins, a Slack event-bus
+reply path. Discord v1 is a runtime chat transport for agent work, not a
+channel for CLI/Codex OAuth onboarding.
 
 ## 1. Create the application and bot
 
