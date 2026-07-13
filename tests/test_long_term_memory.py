@@ -54,6 +54,44 @@ class TestLoadLongTermMemory:
         assert len(result) <= MAX_MEMORY_CHARS + 200
         assert "[memory truncated]" in result
 
+    def test_truncates_oversized_policy_loudly(self, tmp_path, caplog):
+        from bobi.memory import load_long_term_memory, MAX_MEMORY_CHARS
+        state = tmp_path / "state"
+        _write_policy(state, "## Facts\n\n" + ("x" * (MAX_MEMORY_CHARS + 1)))
+        with caplog.at_level("WARNING"):
+            result = load_long_term_memory(state)
+        assert len(result) <= MAX_MEMORY_CHARS
+        assert "long_term_memory.md exceeds cap" in caplog.text
+
+    def test_truncates_both_sections_when_possible(self, tmp_path):
+        from bobi.memory import load_long_term_memory, MAX_MEMORY_CHARS
+        state = tmp_path / "state"
+        _write_policy(
+            state,
+            "## Facts\n\n"
+            + ("fact-signal " * 2500)
+            + "\n\n## Decisions\n\n"
+            + ("decision-signal " * 2500),
+        )
+        result = load_long_term_memory(state)
+        assert len(result) <= MAX_MEMORY_CHARS
+        assert "## Facts" in result
+        assert "fact-signal" in result
+        assert "## Decisions" in result
+        assert "decision-signal" in result
+        assert result.count("[memory truncated]") == 2
+
+    def test_load_raw_long_term_memory_returns_full_migrated_file(self, tmp_path):
+        from bobi.memory import load_raw_long_term_memory, MAX_MEMORY_CHARS
+        state = tmp_path / "state"
+        state.mkdir(parents=True)
+        legacy = state / "policy.md"
+        legacy.write_text("## Facts\n\n" + ("x" * (MAX_MEMORY_CHARS + 5000)))
+        result = load_raw_long_term_memory(state)
+        assert len(result) > MAX_MEMORY_CHARS
+        assert not legacy.exists()
+        assert (state / "long_term_memory.md").is_file()
+
 
 # ---------------------------------------------------------------------------
 # memory.format_long_term_memory_prompt

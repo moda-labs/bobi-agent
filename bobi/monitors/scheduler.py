@@ -1095,12 +1095,17 @@ class MonitorScheduler:
         cursor and publishes on success.
         """
         from bobi import history, paths
-        from bobi.memory import collect_legacy_journals, load_long_term_memory
+        from bobi.memory import (
+            MAX_MEMORY_CHARS,
+            collect_legacy_journals,
+            load_raw_long_term_memory,
+        )
         from bobi.monitors import sleep_cycle as sleep_cycle_mod
 
         root = self._project_root(projects)
         paths.migrate_long_term_memory_state(root)
         state_dir = paths.state_path(root)
+        memory_path = paths.long_term_memory_path(root)
         cursor_path = paths.long_term_memory_cursor_path(root)
         cursor = sleep_cycle_mod.read_cursor(cursor_path)
 
@@ -1116,25 +1121,32 @@ class MonitorScheduler:
         # so accumulated knowledge isn't discarded at rollout. Guarded on
         # long_term_memory.md absence -> idempotent: once written, the seed never re-fires.
         seed = ""
-        if not paths.long_term_memory_path(root).is_file():
+        if not memory_path.is_file():
             seed = collect_legacy_journals(state_dir, sleep_cycle_mod.MAX_SEED_INPUT_CHARS)
 
-        if not rows and not seed:
+        try:
+            current_memory = load_raw_long_term_memory(state_dir)
+        except Exception:
+            current_memory = ""
+        compaction_required = len(current_memory) > MAX_MEMORY_CHARS
+
+        if not rows and not seed and not compaction_required:
             log.info("Monitor %s due - no new transcript messages since cursor %d "
                      "and nothing to seed", monitor.name, cursor)
             return False
 
         ingested, highest_id, flags = sleep_cycle_mod.select_messages(
             rows, sleep_cycle_mod.MAX_SLEEP_CYCLE_INPUT_CHARS)
-        if highest_id is None and not seed:
+        if highest_id is None and not seed and not compaction_required:
             log.info("Monitor %s: nothing ingestable this run", monitor.name)
             return False
 
+        if compaction_required:
+            flags["memory_over_cap"] = True
+            flags["memory_chars"] = len(current_memory)
+            flags["memory_cap"] = MAX_MEMORY_CHARS
+
         transcript = sleep_cycle_mod.render_transcript(ingested)
-        try:
-            current_memory = load_long_term_memory(state_dir)
-        except Exception:
-            current_memory = ""
         task = sleep_cycle_mod.build_sleep_cycle_task(
             self._load_sleep_cycle_prompt(root), transcript, current_memory, flags, seed=seed)
         if seed:
@@ -1143,12 +1155,14 @@ class MonitorScheduler:
 
         cwd = str(projects[0]) if projects else None
         log.info("Monitor %s due - spawning sleep cycle over %d new message(s) "
-                 "(highest id %d, deferred=%s)",
-                 monitor.name, len(ingested), highest_id, flags.get("input_truncated"))
+                 "(highest id %s, deferred=%s, compaction_required=%s)",
+                 monitor.name, len(ingested), highest_id,
+                 flags.get("input_truncated"), compaction_required)
         self.spawn_sleep_cycle(
             monitor, cwd, task,
             lambda result: self._on_sleep_cycle_result(
-                monitor, result, highest_id, cursor_path),
+                monitor, result, highest_id, cursor_path, memory_path,
+                compaction_required),
         )
         return True
 
@@ -1157,7 +1171,9 @@ class MonitorScheduler:
         return self._spawn_sleep_cycle(monitor, projects)
 
     def _on_sleep_cycle_result(self, monitor, result: dict | None,
-                               highest_id: int | None, cursor_path: Path) -> None:
+                               highest_id: int | None, cursor_path: Path,
+                               memory_path: Path | None = None,
+                               compaction_required: bool = False) -> None:
         """Waiter-thread callback for a finished sleep-cycle run.
 
         Advances the cursor ONLY on success (a failed/indeterminate run leaves
@@ -1165,6 +1181,7 @@ class MonitorScheduler:
         skipped). Publishes `system/memory.updated` only when the run actually
         changed long_term_memory.md.
         """
+        from bobi.memory import MAX_MEMORY_CHARS
         from bobi.monitors import sleep_cycle as sleep_cycle_mod
 
         if not isinstance(result, dict):
@@ -1177,6 +1194,41 @@ class MonitorScheduler:
                         "retrying next interval: %s", monitor.name, summary)
             _publish_monitor_error(
                 monitor.name, "sleep-cycle", "indeterminate-result", summary,
+                publish=self.publish)
+            return
+
+        path = memory_path or cursor_path.with_name("long_term_memory.md")
+        should_exist = bool(result.get("updated")) or compaction_required
+        try:
+            if path.is_file():
+                actual_chars = len(path.read_text())
+            elif should_exist:
+                raise FileNotFoundError(path)
+            else:
+                actual_chars = 0
+        except OSError as e:
+            detail = (
+                f"long_term_memory.md artifact unreadable at {path}: {e}; "
+                f"compaction_required={compaction_required}; "
+                f"updated={bool(result.get('updated'))}"
+            )
+            log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
+                        monitor.name, detail)
+            _publish_monitor_error(
+                monitor.name, "sleep-cycle", "memory-artifact-unreadable", detail,
+                publish=self.publish)
+            return
+        if actual_chars > MAX_MEMORY_CHARS:
+            detail = (
+                "long_term_memory.md output exceeded cap: "
+                f"{actual_chars} chars (cap {MAX_MEMORY_CHARS}) at {path}; "
+                f"compaction_required={compaction_required}; "
+                f"updated={bool(result.get('updated'))}"
+            )
+            log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
+                        monitor.name, detail)
+            _publish_monitor_error(
+                monitor.name, "sleep-cycle", "memory-cap-exceeded", detail,
                 publish=self.publish)
             return
 
