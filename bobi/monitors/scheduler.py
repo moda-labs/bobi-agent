@@ -354,11 +354,11 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict,
                          publish=None) -> None:
     """Launch a non-interactive check subprocess and report its verdict.
 
-    Runs `bobi agent <name> subagents launch --wait` out-of-band so the scheduler thread
-    is never blocked, captures the check's stdout, and hands the trailing
-    verdict JSON (or None) to ``on_verdict`` from a waiter thread when the
-    process exits. The check agent only observes — converting the verdict to
-    conditions, dedup, and publishing all happen in the scheduler.
+    Runs `bobi agent <name> subagents launch --as-check` out-of-band so the
+    scheduler thread is never blocked, captures the check's stdout, and hands
+    the trailing verdict JSON (or None) to ``on_verdict`` from a waiter thread
+    when the process exits. The check agent only observes — converting the
+    verdict to conditions, dedup, and publishing all happen in the scheduler.
     """
     role = _monitor_agent_role(monitor)
 
@@ -370,7 +370,7 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict,
         "-w", "adhoc",
         "--role", role,
         "--non-interactive",
-        "--wait",
+        "--as-check",
         "--task", monitor.description or monitor.name,
     ]
     _spawn_monitor_agent(
@@ -513,10 +513,10 @@ def _default_spawn_sleep_cycle(monitor, cwd: str | None, task: str, on_result,
 
     Mirrors _default_spawn_gate: the full rendered task rides in a request
     file under run/state/sleep-cycle/ (it can exceed argv limits) and the child
-    runs the dedicated `monitors curator` command - NOT `subagents launch`,
-    whose --wait path wraps the task in check-verdict semantics that swallow
-    the summary (#695). The agent WRITES long_term_memory.md and prints a
-    JSON summary; the waiter thread hands the parsed summary (or None) to
+    runs the dedicated `monitors curator` command - NOT the `subagents launch
+    --as-check` harness, whose check-verdict semantics would swallow the
+    summary (#695). The agent WRITES long_term_memory.md and prints a JSON
+    summary; the waiter thread hands the parsed summary (or None) to
     ``on_result`` when the process exits. The scheduler - not the agent -
     owns the cursor advance and the publish.
     """

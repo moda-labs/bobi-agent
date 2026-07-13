@@ -373,6 +373,44 @@ def test_result_to_turn_handles_error_and_status():
     assert turn.result_text == "API Error: 529 Overloaded"
 
 
+def test_result_to_turn_normalizes_max_turns_error():
+    msg = _result(
+        is_error=True,
+        result=None,
+        stop_reason="max_turns_reached",
+        errors=[
+            '{"type":"attachment","attachment":{"type":"max_turns_reached",'
+            '"maxTurns":8,"turnCount":9}}',
+        ],
+    )
+    turn = _result_to_turn(msg)
+    assert turn.is_error is True
+    assert turn.error_kind == "max_turns_reached"
+    assert turn.max_turns == 8
+    assert turn.turn_count == 9
+    assert turn.error_message == "max_turns_reached (max=8, turns=9)"
+
+
+def test_result_to_turn_marks_max_turns_as_error_without_error_flag():
+    msg = _result(
+        is_error=False,
+        result=None,
+        stop_reason="max_turns_reached",
+        errors={
+            "type": "attachment",
+            "attachment": {
+                "type": "max_turns_reached",
+                "max_turns": 8,
+                "turn_count": 9,
+            },
+        },
+    )
+    turn = _result_to_turn(msg)
+    assert turn.is_error is True
+    assert turn.error_kind == "max_turns_reached"
+    assert turn.error_message == "max_turns_reached (max=8, turns=9)"
+
+
 def test_result_to_turn_translates_deferred_tool():
     msg = _result()
 

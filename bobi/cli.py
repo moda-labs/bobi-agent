@@ -177,13 +177,13 @@ def _bind_agent_runtime(name: str) -> Path:
 def _pin_team_brain(root: Path) -> None:
     """Select the team's brain for the CLI process itself (#655).
 
-    Sessions this process runs directly (the `--wait` completion check, ad-hoc
-    verdict agents) must use the team's configured brain, not the framework
-    default - a gateway team's check would otherwise hit real Anthropic with
-    the gateway's token. Detached children don't rely on this: their env is
-    rewritten by ``child_agent_env()``. Direct CLI sessions still need runtime
-    .env credentials (for example gateway auth) in this process, so this CLI
-    runtime-binding path loads them explicitly instead of hiding that side
+    Sessions this process runs directly (`--as-check` monitor checks, ad-hoc
+    wait runs, verdict agents) must use the team's configured brain, not the
+    framework default - a gateway team's check would otherwise hit real
+    Anthropic with the gateway's token. Detached children don't rely on this:
+    their env is rewritten by ``child_agent_env()``. Direct CLI sessions still
+    need runtime .env credentials (for example gateway auth) in this process, so
+    this CLI runtime-binding path loads them explicitly instead of hiding that side
     effect inside ``Config.load()``.
     """
     from bobi.brain import set_process_brain_from_config
@@ -2748,11 +2748,13 @@ main.add_command(event_server_cmd)
 @click.option("--id", "run_key", default=None, help="Explicit run key for correlation (e.g. issue number)")
 @click.option("--task", default=None, help="Task description / context for the agent")
 @click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
-@click.option("--wait", is_flag=True, help="Block until the agent completes")
+@click.option("--wait", is_flag=True, help="Block until the launched agent completes")
+@click.option("--as-check", "as_check", is_flag=True,
+              help="Run the task as a short-lived monitoring check")
 @click.option("--agent-wait", "agent_wait", is_flag=True, hidden=True,
-              help="Block on the requested agent instead of the check harness")
+              help="Deprecated alias for --wait")
 @click.option("--post-event", "post_event", default=None,
-              help="Post this event type on completion (for --wait checks)")
+              help="Post this event type on completion (for --as-check)")
 @click.option("--requested-by", "requested_by", default=None,
               help='JSON identity of requester, e.g. \'{"from":"Alice","channel":"C1"}\'')
 @click.option("--non-interactive", "non_interactive", is_flag=True,
@@ -2764,9 +2766,9 @@ main.add_command(event_server_cmd)
 @click.option("--model", default="",
               help="Model override for this launch (provider-native, e.g. haiku, "
                    "opus, or a full model ID). Wins over step and role config.")
-def subagents_launch(workflow, role, run_key, task, timeout, wait, agent_wait,
-                     post_event, requested_by, non_interactive, persistent,
-                     subscribe, model):
+def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
+                     agent_wait, post_event, requested_by, non_interactive,
+                     persistent, subscribe, model):
     """Launch a sub-agent with a workflow and role.
 
     Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
@@ -2779,8 +2781,8 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, agent_wait,
     if subscribe:
         persistent = True
     _dispatch_agent(task=task, workflow=workflow, role=role, run_key=run_key,
-                    timeout=timeout, wait=wait, agent_wait=agent_wait,
-                    post_event=post_event,
+                    timeout=timeout, wait=wait, as_check=as_check,
+                    agent_wait=agent_wait, post_event=post_event,
                     requested_by=requested_by,
                     interactive=not non_interactive,
                     persistent=persistent,
@@ -2789,9 +2791,9 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, agent_wait,
 
 
 def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
-                    agent_wait=False, post_event=None, requested_by=None,
-                    interactive=True, persistent=False, subscribe=None,
-                    model=""):
+                    as_check=False, agent_wait=False, post_event=None,
+                    requested_by=None, interactive=True, persistent=False,
+                    subscribe=None, model=""):
     """Dispatch logic for the agent command."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
@@ -2804,7 +2806,14 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
     project_path = _detect_project_root()
     cwd = str(project_path)
 
-    if wait and not agent_wait:
+    if as_check and (wait or agent_wait):
+        click.echo("--as-check cannot be combined with --wait or --agent-wait", err=True)
+        raise SystemExit(1)
+    if post_event and not as_check:
+        click.echo("--post-event requires --as-check", err=True)
+        raise SystemExit(1)
+
+    if as_check:
         _run_check(cwd=cwd, task=task, timeout=timeout, post_event=post_event)
         return
 
@@ -2816,7 +2825,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
         click.echo(f"Unknown role '{role}'. Available: {names}", err=True)
         raise SystemExit(1)
 
-    if wait and agent_wait:
+    if wait or agent_wait:
         _run_agent_wait(cwd=cwd, task=task, workflow=workflow, role=role,
                         run_key=run_key, timeout=timeout,
                         requested_by=requested_by, interactive=interactive,
@@ -2858,10 +2867,10 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
                     model: str = "") -> None:
     """Run a real agent synchronously and print its final text."""
     if workflow != "adhoc":
-        click.echo("--agent-wait only supports adhoc workflow runs", err=True)
+        click.echo("--wait only supports adhoc workflow runs", err=True)
         raise SystemExit(1)
     if persistent:
-        click.echo("--agent-wait cannot be used with --persistent", err=True)
+        click.echo("--wait cannot be used with --persistent", err=True)
         raise SystemExit(1)
 
     requester: dict = {}
