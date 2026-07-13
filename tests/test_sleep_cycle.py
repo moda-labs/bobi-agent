@@ -581,9 +581,9 @@ class TestCuratorSpawnContract:
     """Regression tests for #695: the curator argv is parsed against the real
     click command so a CLI contract drift (a required option the spawn does
     not pass - the way `subagents launch --role` broke every curator run)
-    fails here, not in production. The curator must NOT ride `subagents
-    launch`: its --wait path wraps the task in check-verdict semantics that
-    swallow the curator's summary and never advance the cursor."""
+    fails here, not in production. The curator must NOT ride the `subagents
+    launch --as-check` harness: its check-verdict semantics would swallow the
+    curator's summary and never advance the cursor."""
 
     def test_curator_argv_satisfies_monitors_curator_cli_contract(
         self, tmp_path, monkeypatch, monitor

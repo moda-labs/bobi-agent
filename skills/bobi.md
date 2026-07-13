@@ -96,10 +96,16 @@ them for delegated work and workflow steps.
 
 ```bash
 bobi agent <name> subagents launch -w adhoc --role engineer --task "Fix CI"
+bobi agent <name> subagents launch -w adhoc --role engineer --wait --task "Fix CI"
+bobi agent <name> subagents launch -w adhoc --role monitor --as-check --task "Check prod"
 bobi agent <name> subagents list
 bobi agent <name> subagents show <id>
 bobi agent <name> subagents cancel <id>
 ```
+
+`--wait` blocks until the launched adhoc agent completes. `--as-check` is the
+explicit short-lived monitoring-check harness; it prints verdict JSON and is the
+only `subagents launch` mode that accepts `--post-event`.
 
 ## Package Surfaces
 
