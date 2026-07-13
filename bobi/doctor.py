@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import logging
 import shutil
 from dataclasses import dataclass
@@ -39,7 +37,6 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_local_config())
     results.append(_check_runtime_layout())
     results.append(_check_install_integrity())
-    results.append(_check_bobi_install_integrity())
     results.extend(_check_package_requires())
     results.extend(_check_host_caps())
     results.extend(_check_services())
@@ -131,89 +128,6 @@ def _check_install_integrity() -> CheckResult:
                  "source and re-run `bobi agents install ... --name <agent>`")
     return CheckResult("Installed team", ok=True,
                        detail=f"{manifest.get('agent', '?')} (frozen, clean)")
-
-
-def _check_bobi_install_integrity(distribution_getter=None) -> CheckResult:
-    """Flag edits to the installed Bobi wheel against RECORD hashes."""
-    from importlib.metadata import PackageNotFoundError, distribution
-
-    getter = distribution_getter or (lambda: distribution("bobi"))
-    try:
-        dist = getter()
-    except PackageNotFoundError:
-        return CheckResult("Bobi install", ok=True,
-                           detail="distribution metadata unavailable")
-
-    if _is_editable_distribution(dist):
-        return CheckResult("Bobi install", ok=True,
-                           detail="editable/source install")
-
-    files = getattr(dist, "files", None)
-    if not files:
-        return CheckResult("Bobi install", ok=True,
-                           detail="no RECORD hashes")
-
-    drifted: list[str] = []
-    checked = 0
-    for record_file in files:
-        record_hash = getattr(record_file, "hash", None)
-        if getattr(record_hash, "mode", None) != "sha256":
-            continue
-        expected = _decode_record_sha256(getattr(record_hash, "value", ""))
-        if expected is None:
-            continue
-        checked += 1
-        rel = str(record_file)
-        path = dist.locate_file(record_file)
-        try:
-            actual = hashlib.sha256(path.read_bytes()).digest()
-        except FileNotFoundError:
-            drifted.append(f"{rel} (missing)")
-            continue
-        except OSError:
-            drifted.append(f"{rel} (unreadable)")
-            continue
-        if actual != expected:
-            drifted.append(rel)
-
-    if checked == 0:
-        return CheckResult("Bobi install", ok=True,
-                           detail="no RECORD hashes")
-    if drifted:
-        shown = ", ".join(drifted[:3]) + ("…" if len(drifted) > 3 else "")
-        return CheckResult(
-            "Bobi install", ok=False,
-            detail=f"{len(drifted)} file(s) differ from installed wheel: {shown}",
-            hint="Reinstall or upgrade Bobi, and move any desired framework "
-                 "change into a source PR.")
-    return CheckResult("Bobi install", ok=True,
-                       detail=f"{checked} RECORD file(s) clean")
-
-
-def _decode_record_sha256(value: str) -> bytes | None:
-    if not value:
-        return None
-    try:
-        padded = value + ("=" * (-len(value) % 4))
-        return base64.urlsafe_b64decode(padded.encode())
-    except Exception:
-        return None
-
-
-def _is_editable_distribution(dist) -> bool:
-    import json
-
-    try:
-        raw = dist.read_text("direct_url.json")
-    except Exception:
-        return False
-    if not raw:
-        return False
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return False
-    return bool((data.get("dir_info") or {}).get("editable"))
 
 
 def _check_package_requires() -> list[CheckResult]:
