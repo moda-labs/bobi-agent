@@ -29,7 +29,6 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from bobi.brain import BRAIN_ENV, set_process_brain
 from bobi.config import Config
@@ -297,6 +296,53 @@ def _post_login_message(project_path: Path, cfg: Config, channel: LoginChannel,
     channels_send(project_path, channel.destination, text, mode="post")
 
 
+def _ensure_discord_paste_back_ready(
+    project_path: Path,
+    cfg: Config,
+    channel: LoginChannel,
+    timeout: float = 10,
+) -> None:
+    """Fail before posting if the event server cannot receive Discord messages."""
+    _register_login_channel(project_path, cfg, channel)
+    deadline = time.monotonic() + timeout
+    app_id = channel.topic.removeprefix("discord:")
+    last_health: dict | None = None
+    from bobi.events.server import health
+
+    while time.monotonic() < deadline:
+        last_health = health(cfg.event_server_url)
+        entries = (
+            last_health.get("discord_gateway", [])
+            if isinstance(last_health, dict) else []
+        )
+        entry = next(
+            (
+                e for e in entries
+                if isinstance(e, dict) and str(e.get("application_id")) == app_id
+            ),
+            None,
+        )
+        if entry:
+            state = str(entry.get("state") or "")
+            if state == "connected":
+                return
+            if state == "fatal":
+                reason = entry.get("fatal_reason") or "unknown fatal error"
+                raise RuntimeError(
+                    "Discord subscription-login paste-back cannot receive "
+                    f"Gateway events: {reason}."
+                )
+        time.sleep(0.5)
+
+    mode = last_health.get("mode") if isinstance(last_health, dict) else None
+    raise RuntimeError(
+        "Discord subscription-login paste-back requires an event server with "
+        "the local Discord Gateway driver. The configured event server did not "
+        f"report a connected Gateway for application {app_id}"
+        + (f" (mode: {mode})." if mode else ".")
+    )
+
+
 def _conversation_matches(expected: str, actual: object, source: str) -> bool:
     if not expected:
         return True
@@ -322,13 +368,6 @@ def _paste_back_instruction(channel: LoginChannel) -> str:
         "Open this URL, authorize, then paste the code back "
         "*in this channel*:\n"
     )
-
-
-def _is_local_event_server_url(url: str) -> bool:
-    if not url:
-        return True
-    host = urlsplit(url).hostname or ""
-    return host in ("localhost", "127.0.0.1", "::1")
 
 
 def _extract_code(event: dict, channel: LoginChannel | str) -> str | None:
@@ -485,17 +524,8 @@ def run_bootstrap(
             "the login URL into."
         )
     login_channel = _resolve_login_channel(cfg, channel_ref)
-    if (
-        spec.flow == "paste_back"
-        and login_channel.source == "discord"
-        and not _is_local_event_server_url(cfg.event_server_url)
-    ):
-        raise RuntimeError(
-            "Discord subscription-login paste-back requires the local event "
-            "server Gateway driver; the remote event server can send Discord "
-            "messages but does not receive Discord Gateway events. Use a local "
-            "event_server_url or use Codex device auth."
-        )
+    if spec.flow == "paste_back" and login_channel.source == "discord":
+        _ensure_discord_paste_back_ready(project_path, cfg, login_channel)
 
     login_cmd_str = " ".join(spec.login_cmd)
     proc, master = spawn_login(home)

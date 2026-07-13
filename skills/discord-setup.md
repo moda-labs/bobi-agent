@@ -21,9 +21,9 @@ auth. Set it to a Discord conversation reference such as
 server channel). Bobi posts the login prompt through the channel gateway and,
 for paste-back logins, listens on the app-wide `discord:<application_id>` topic
 for the code pasted into that same conversation. Paste-back login requires the
-local event server Gateway driver; with a remote/Cloudflare event server,
-Discord can still carry Codex device-auth prompts because Codex does not wait
-for a pasted chat message.
+event server to report a connected Discord Gateway for that application; with a
+remote/Cloudflare event server, Discord can still carry Codex device-auth
+prompts because Codex does not wait for a pasted chat message.
 
 ## 1. Create the application and bot
 
@@ -107,7 +107,8 @@ To use Discord for subscription-login bootstrap, first send the bot a DM (or
 @mention it in the target server channel) and copy the `conversation:` value
 from the received event. Put that exact value in `BOBI_LOGIN_CHANNEL`; the
 legacy raw channel-id form remains Slack-only. For Claude paste-back login,
-keep `event_server_url` local so the Gateway driver receives the pasted code.
+use an event server with the local Gateway driver; Bobi checks `/health` for a
+connected `discord_gateway` entry before posting the login URL.
 
 ## Troubleshooting
 
