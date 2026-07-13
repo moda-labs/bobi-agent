@@ -562,17 +562,17 @@ def _materialize_local_deps(pack_dir: Path, project_path: Path, *,
 
 @main.command("login-bootstrap")
 @click.option("--channel", default=None,
-              help="Private Slack channel ID to post the login URL into "
-                   "(default: $BOBI_LOGIN_CHANNEL).")
+              help="Private chat channel or gateway conversation ref to post "
+                   "the login URL into (default: $BOBI_LOGIN_CHANNEL).")
 @click.option("--timeout", default=600, type=int,
               help="Seconds to wait for the pasted auth code (default: 600).")
 def login_bootstrap(channel, timeout):
-    """Bootstrap subscription auth over Slack + the event bus.
+    """Bootstrap subscription auth over a chat channel + the event bus.
 
     For BOBI_AUTH=subscription first boot with no credentials on the
     volume: drive `claude auth login --claudeai` under a pty, post the OAuth
-    URL to a private Slack channel, and wait for the pasted code to arrive as
-    a Slack event over the event bus. Idempotent — a no-op if credentials
+    URL to a private chat channel, and wait for the pasted code to arrive as
+    a chat event over the event bus. Idempotent — a no-op if credentials
     already exist. Fallback: `fly ssh console` then `claude auth login`.
     """
     from bobi import auth_bootstrap

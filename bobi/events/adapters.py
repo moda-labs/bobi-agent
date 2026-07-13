@@ -273,6 +273,46 @@ def _detect_whatsapp(project_path: Path, cfg: "Config") -> list[str]:
     return [key]
 
 
+def _detect_discord(project_path: Path, cfg: "Config") -> list[str]:
+    """Detect the Discord subscription key from the configured app (#2).
+
+    Validates the credential upstream before subscribing, same contract as
+    ``_detect_whatsapp``: the ``discord:<application_id>`` grant is written by
+    the signed app registration, so subscribing with a credential the
+    registration will reject would hard-fail the WHOLE deployment
+    registration (#488 rejects unauthorized global topics atomically).
+    """
+    import os
+
+    app_id = cfg.credential("discord", "application_id")
+    token = cfg.credential("discord", "bot_token")
+    if not (app_id and token):
+        return []
+    from bobi import http as pooled
+
+    api = os.environ.get("BOBI_ES_DISCORD_API_URL", "https://discord.com/api/v10/")
+    if not api.endswith("/"):
+        api += "/"
+    try:
+        resp = pooled.get(
+            f"{api}applications/@me",
+            headers={"Authorization": f"Bot {token}"},
+            timeout=5.0,
+        )
+        if str(resp.json().get("id", "")) != app_id:
+            log.warning(
+                "Discord credential rejected by the API for application %s "
+                "- not subscribing (check DISCORD_BOT_TOKEN / "
+                "DISCORD_APPLICATION_ID)", app_id)
+            return []
+    except Exception as e:
+        log.warning("Discord auto-detection failed for %s: %s", app_id, e)
+        return []
+    key = f"discord:{app_id}"
+    log.info(f"Auto-detected Discord app {app_id}; subscribing: [{key!r}]")
+    return [key]
+
+
 def _detect_linear(project_path: Path, cfg: "Config") -> list[str]:
     """Detect linear:TEAM from the Linear API."""
     api_key = cfg.credential("linear", "api_key")
@@ -306,3 +346,4 @@ register("github", _detect_github)
 register("slack", _detect_slack)
 register("linear", _detect_linear)
 register("whatsapp", _detect_whatsapp)
+register("discord", _detect_discord)

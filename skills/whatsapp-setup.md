@@ -14,6 +14,13 @@ window the gateway returns an `outside_message_window` error; agent-initiated
 messages require pre-approved template messages, which bobi does not support
 yet.
 
+**Auth bootstrap:** WhatsApp can be used as `BOBI_LOGIN_CHANNEL` for
+subscription-login bootstrap when the target chat has an open 24-hour
+customer-service window. First message the number from the target account, copy
+the received event's `conversation:` value such as
+`whatsapp:<phone_number_id>:dm:<wa_id>`, and use that as `BOBI_LOGIN_CHANNEL`.
+The legacy raw channel-id form remains Slack-only.
+
 ## 1. Create the Meta app and add WhatsApp
 
 1. Open https://developers.facebook.com/apps → **Create App** → type
@@ -68,13 +75,17 @@ WHATSAPP_ACCESS_TOKEN=EAAG…
 WHATSAPP_PHONE_NUMBER_ID=747556541
 ```
 
-And declare the service in `agent.yaml` so subscription detection picks the
-number up:
+And declare the service in `agent.yaml` with the credential mapping -
+subscription detection and registration read `credentials:`, not the bare
+environment:
 
 ```yaml
 services:
   - name: whatsapp
     events: true
+    credentials:
+      access_token: ${WHATSAPP_ACCESS_TOKEN}
+      phone_number_id: ${WHATSAPP_PHONE_NUMBER_ID}
 ```
 
 At session start the agent registers the number with the event server (a

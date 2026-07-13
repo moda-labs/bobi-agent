@@ -217,6 +217,41 @@ _NATIVE = [
         aliases=("meta-whatsapp", "wa"),
     ),
     Connector(
+        key="discord", name="Discord", kind="native",
+        summary="Chat with the agent over Discord (DMs, mentions, replies).",
+        scopes=("send and receive messages",
+                "reply in channels and DMs"),
+        methods=(
+            AuthMethod(
+                key="token", label="Bot token",
+                summary="A Discord application with a bot user; the agent "
+                        "answers DMs, @mentions, and replies to its messages.",
+                steps=(
+                    "Create an application at discord.com/developers → Bot, "
+                    "and copy the bot token; the Application ID is on the "
+                    "General Information page.",
+                    "Invite the bot with an OAuth2 URL using the `bot` scope "
+                    "and Send Messages + Read Message History permissions.",
+                    "Inbound messages need a locally running event server "
+                    "(the Discord Gateway is a persistent connection, not a "
+                    "webhook).",
+                    "Full walkthrough: skills/discord-setup.md.",
+                ),
+                secrets=(
+                    Secret("DISCORD_BOT_TOKEN", "Bot token", ""),
+                    Secret("DISCORD_APPLICATION_ID", "Application ID",
+                           "digits only"),
+                    Secret("DISCORD_MESSAGE_CONTENT", "Message Content intent", "",
+                           "Set to 1 only after enabling the privileged "
+                           "Message Content intent in the developer portal; "
+                           "DMs and mentions work without it.", optional=True),
+                ),
+                docs_url="https://discord.com/developers/applications",
+            ),
+        ),
+        aliases=("discord-bot",),
+    ),
+    Connector(
         key="linear", name="Linear", kind="native",
         summary="Read and update issues, projects, and cycles.",
         scopes=("read/write issues", "receive webhooks"),

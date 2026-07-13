@@ -2,21 +2,21 @@
 
 At container first boot in subscription auth mode with no credentials on the
 volume, drive the brain's login CLI under a pty, scrape the sign-in URL, post it
-to a private Slack channel via the bot token already in env, and land the OAuth
-credentials on the volume. Two flow shapes, picked per brain:
+to a private chat channel, and land the OAuth credentials on the volume. Two
+flow shapes, picked per brain:
 
 - **Claude** (``claude auth login --claudeai``, *paste-back*): scrape the URL,
   post it, wait for the human to paste the auth code back — which arrives as a
-  Slack message event over the event bus — and write it into the pty.
+  chat message event over the event bus — and write it into the pty.
 - **Codex** (``codex login --device-auth``, *device-poll*): scrape the sign-in
   URL **and** the one-time code, post both, then just wait — the CLI polls the
   token endpoint until the human authorizes; nothing is pasted back.
 
 Refresh-token rotation makes this a once-per-machine ceremony
 (docs/CONTAINERIZED_DEPLOYMENT.md); the manual fallback is ``fly ssh console`` +
-the brain's login command. The live round-trip needs a real Worker + Slack and
-is exercised in the deployed environment; the mechanism here is unit-tested with
-the pty, the Slack post, and the event source faked — see
+the brain's login command. The live round-trip needs a real event server and is
+exercised in the deployed environment; the mechanism here is unit-tested with
+the pty, the chat post, and the event source faked — see
 tests/test_auth_bootstrap.py.
 """
 from __future__ import annotations
@@ -36,9 +36,10 @@ from bobi.slack import post_slack_message
 
 log = logging.getLogger(__name__)
 
-# Env var naming the private Slack channel to post the login URL into. A
-# private channel is a hard requirement (§6.1, C23): the code is single-use but
-# grants the login to whoever pastes it first.
+# Env var naming where to post the login URL. Legacy Slack deployments set a
+# raw Slack channel/DM id (``C...``/``D...``). Newer deployments may set the
+# channel-gateway conversation ref carried by chat events, e.g.
+# ``discord:<application_id>:dm:<channel_id>``.
 LOGIN_CHANNEL_ENV = "BOBI_LOGIN_CHANNEL"
 
 # ANSI escape sequences. codex/claude colorize their login output, and a color
@@ -59,6 +60,16 @@ class SubscriptionLogin:
     flow: str                        # "paste_back" (claude) | "device_poll" (codex)
     url_re: re.Pattern               # scrape the sign-in URL from pty output
     code_re: "re.Pattern | None" = None  # device_poll: also scrape the one-time code
+
+
+@dataclass(frozen=True)
+class LoginChannel:
+    """Destination and subscription details for the bootstrap chat channel."""
+
+    destination: str
+    source: str
+    topic: str
+    legacy_slack_channel: str = ""
 
 
 _SPECS: dict[str, SubscriptionLogin] = {
@@ -178,15 +189,211 @@ def _write_line(master_fd: int, text: str) -> None:
 
 # --- event-bus wait ---------------------------------------------------------
 
-def _extract_code(event: dict, channel: str) -> str | None:
-    """Pull an auth code out of a Slack message event for ``channel``."""
-    if (event.get("source") or "").lower() != "slack":
+def _parse_conversation(ref: str) -> tuple[str, str, str, str] | None:
+    """Return ``(source, scope, chat_type, chat_id)`` for a gateway ref."""
+    parts = ref.split(":")
+    if len(parts) not in (4, 6):
+        return None
+    if any(not p for p in parts):
+        return None
+    if len(parts) == 6 and parts[4] != "thread":
+        return None
+    source, scope, chat_type, chat_id = parts[:4]
+    if chat_type not in {"dm", "group", "channel"}:
+        return None
+    return source, scope, chat_type, chat_id
+
+
+def _slack_topic(cfg: Config) -> str:
+    from bobi.events.server import _slack_app_id, _slack_auth_info
+
+    token = cfg.credential("slack", "bot_token")
+    team_id, bot_id, _ = _slack_auth_info(token)
+    if not team_id:
+        raise RuntimeError("could not resolve Slack team_id from bot_token.")
+    app_id = _slack_app_id(token, bot_id)
+    return f"slack:{team_id}:app:{app_id}" if app_id else f"slack:{team_id}"
+
+
+def _resolve_login_channel(cfg: Config, raw: str) -> LoginChannel:
+    """Resolve ``BOBI_LOGIN_CHANNEL`` to a post destination and bus topic."""
+    conv = _parse_conversation(raw)
+    if conv is None:
+        token = cfg.credential("slack", "bot_token")
+        if not token:
+            raise RuntimeError(
+                f"{LOGIN_CHANNEL_ENV} is not a conversation ref, and no Slack "
+                "bot_token is configured for the legacy Slack channel-id path."
+            )
+        from bobi.slack import resolve_channel_id
+        channel = resolve_channel_id(token, raw)
+        return LoginChannel(
+            destination=channel,
+            source="slack",
+            topic="",
+            legacy_slack_channel=channel,
+        )
+
+    source, scope, _chat_type, _chat_id = conv
+    if source == "slack":
+        return LoginChannel(destination=raw, source=source, topic=_slack_topic(cfg))
+    if source in {"discord", "whatsapp"}:
+        return LoginChannel(destination=raw, source=source, topic=f"{source}:{scope}")
+    raise RuntimeError(
+        f"{LOGIN_CHANNEL_ENV} source '{source}' is not supported for "
+        "subscription login bootstrap."
+    )
+
+
+def _register_login_channel(project_path: Path, cfg: Config, channel: LoginChannel) -> None:
+    """Ensure channel-gateway credentials and resource grants exist."""
+    from bobi.events.server import (
+        ensure_bubble,
+        register_discord_apps,
+        register_slack_workspaces,
+        register_whatsapp_numbers,
+    )
+
+    es_url = cfg.event_server_url
+    if not es_url:
+        raise RuntimeError(
+            "event_server_url is not configured — cannot post the login URL "
+            "through the channel gateway."
+        )
+    bubble = ensure_bubble(es_url, project_path)
+    if channel.source == "slack":
+        registered = register_slack_workspaces(
+            es_url, cfg,
+            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+        )
+    elif channel.source == "discord":
+        registered = register_discord_apps(
+            es_url, cfg,
+            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+        )
+    elif channel.source == "whatsapp":
+        registered = register_whatsapp_numbers(
+            es_url, cfg,
+            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+        )
+    else:
+        registered = []
+    if not registered:
+        raise RuntimeError(
+            f"could not register {channel.source} credentials for "
+            "subscription login bootstrap."
+        )
+
+
+def _post_login_message(project_path: Path, cfg: Config, channel: LoginChannel,
+                        text: str, post_message) -> None:
+    if channel.legacy_slack_channel:
+        token = cfg.credential("slack", "bot_token")
+        post_message(token, channel.destination, text)
+        return
+    _register_login_channel(project_path, cfg, channel)
+    from bobi.events.gateway import channels_send
+    channels_send(project_path, channel.destination, text, mode="post")
+
+
+def _ensure_discord_paste_back_ready(
+    project_path: Path,
+    cfg: Config,
+    channel: LoginChannel,
+    timeout: float = 10,
+) -> None:
+    """Fail before posting if the event server cannot receive Discord messages."""
+    _register_login_channel(project_path, cfg, channel)
+    deadline = time.monotonic() + timeout
+    app_id = channel.topic.removeprefix("discord:")
+    last_health: dict | None = None
+    from bobi.events.server import health
+
+    while time.monotonic() < deadline:
+        last_health = health(cfg.event_server_url)
+        entries = (
+            last_health.get("discord_gateway", [])
+            if isinstance(last_health, dict) else []
+        )
+        entry = next(
+            (
+                e for e in entries
+                if isinstance(e, dict) and str(e.get("application_id")) == app_id
+            ),
+            None,
+        )
+        if entry:
+            state = str(entry.get("state") or "")
+            if state == "connected":
+                return
+            if state == "fatal":
+                reason = entry.get("fatal_reason") or "unknown fatal error"
+                raise RuntimeError(
+                    "Discord subscription-login paste-back cannot receive "
+                    f"Gateway events: {reason}."
+                )
+        time.sleep(0.5)
+
+    mode = last_health.get("mode") if isinstance(last_health, dict) else None
+    raise RuntimeError(
+        "Discord subscription-login paste-back requires an event server with "
+        "the local Discord Gateway driver. The configured event server did not "
+        f"report a connected Gateway for application {app_id}"
+        + (f" (mode: {mode})." if mode else ".")
+    )
+
+
+def _conversation_matches(expected: str, actual: object, source: str) -> bool:
+    if not expected:
+        return True
+    if actual == expected:
+        return True
+    # Slack inbound refs always include a thread anchor; allow a configured
+    # base conversation ref to match the resulting thread conversation.
+    return (
+        source == "slack"
+        and isinstance(actual, str)
+        and len(expected.split(":")) == 4
+        and actual.startswith(f"{expected}:thread:")
+    )
+
+
+def _paste_back_instruction(channel: LoginChannel) -> str:
+    if channel.source == "discord" and ":channel:" in channel.destination:
+        return (
+            "Open this URL, authorize, then reply to this message with the "
+            "code, or @mention the bot with the code:\n"
+        )
+    return (
+        "Open this URL, authorize, then paste the code back "
+        "*in this channel*:\n"
+    )
+
+
+def _extract_code(event: dict, channel: LoginChannel | str) -> str | None:
+    """Pull an auth code out of a chat event for the login destination."""
+    if isinstance(channel, str):
+        expected_source = "slack"
+        expected_conversation = ""
+        expected_channel = channel
+    else:
+        expected_source = channel.source
+        expected_conversation = (
+            "" if channel.legacy_slack_channel else channel.destination
+        )
+        expected_channel = channel.legacy_slack_channel
+
+    if (event.get("source") or "").lower() != expected_source:
+        return None
+    if not _conversation_matches(
+        expected_conversation, event.get("conversation"), expected_source
+    ):
         return None
     fields = event.get("fields") if isinstance(event.get("fields"), dict) else {}
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     ev_channel = fields.get("channel") or payload.get("channel")
     # Filter to the login channel; a workspace subscription sees every channel.
-    if channel and ev_channel and ev_channel != channel:
+    if expected_channel and ev_channel and ev_channel != expected_channel:
         return None
     # The real Slack adapter (event-server/core/src/adapters/chat-sdk-slack.ts) puts the
     # message text at the event TOP LEVEL and in `payload.text`; `fields` carries only
@@ -201,18 +408,13 @@ def _extract_code(event: dict, channel: str) -> str | None:
     return text.split()[-1]
 
 
-def _wait_for_code(project_path: Path, channel: str, timeout: float) -> str:
-    """Subscribe to the workspace Slack topic and block for the pasted code."""
+def _wait_for_code(project_path: Path, channel: LoginChannel | str,
+                   timeout: float) -> str:
+    """Subscribe to the chat topic and block for the pasted code."""
     from queue import Empty, SimpleQueue
 
     from bobi.events.client import EventServerClient
-    from bobi.events.server import (
-        _slack_auth_info,
-        _slack_app_id,
-        ensure_bubble,
-        register,
-        register_slack_workspaces,
-    )
+    from bobi.events.server import ensure_bubble, register
 
     cfg = Config.load(project_path)
     es_url = cfg.event_server_url
@@ -220,25 +422,24 @@ def _wait_for_code(project_path: Path, channel: str, timeout: float) -> str:
         raise RuntimeError(
             "event_server_url is not configured — cannot receive the auth code."
         )
-    token = cfg.credential("slack", "bot_token")
+    login_channel = (
+        _resolve_login_channel(cfg, channel) if isinstance(channel, str) else channel
+    )
+    if login_channel.source == "slack" and not login_channel.topic:
+        login_channel = LoginChannel(
+            destination=login_channel.destination,
+            source="slack",
+            topic=_slack_topic(cfg),
+            legacy_slack_channel=login_channel.legacy_slack_channel,
+        )
 
-    # Resolve the bubble first so the Slack registration can be signed — a signed
+    # Resolve the bubble first so chat registration can be signed. Signed
     # registration also creates the bubble-scoped record outbound send needs.
     bubble = ensure_bubble(es_url, project_path)
-
-    # Ensure the Worker holds the bot token so it ingests this channel's messages.
-    register_slack_workspaces(
-        es_url, cfg,
-        bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
-    )
-    team_id, bot_id, _ = _slack_auth_info(token)
-    if not team_id:
-        raise RuntimeError("could not resolve Slack team_id from bot_token.")
-    app_id = _slack_app_id(token, bot_id)
-    topic = f"slack:{team_id}:app:{app_id}" if app_id else f"slack:{team_id}"
+    _register_login_channel(project_path, cfg, login_channel)
 
     deployment_id, api_key = register(
-        es_url, "login-bootstrap", [topic],
+        es_url, "login-bootstrap", [login_channel.topic],
         bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
     )
 
@@ -254,7 +455,7 @@ def _wait_for_code(project_path: Path, channel: str, timeout: float) -> str:
                 event = q.get(timeout=2)
             except Empty:
                 continue
-            code = _extract_code(event, channel)
+            code = _extract_code(event, login_channel)
             if code:
                 return code
     finally:
@@ -316,21 +517,15 @@ def run_bootstrap(
             "Unset it before subscription login."
         )
 
-    token = cfg.credential("slack", "bot_token")
-    if not token:
+    channel_ref = channel or os.environ.get(LOGIN_CHANNEL_ENV, "")
+    if not channel_ref:
         raise RuntimeError(
-            "No Slack bot_token configured — cannot post the login URL."
+            f"{LOGIN_CHANNEL_ENV} is unset — need a private chat channel to post "
+            "the login URL into."
         )
-    channel = channel or os.environ.get(LOGIN_CHANNEL_ENV, "")
-    if not channel:
-        raise RuntimeError(
-            f"{LOGIN_CHANNEL_ENV} is unset — need a private channel to post the "
-            "login URL into."
-        )
-    # Accept a readable '#name' in the config; resolve to the ID the post + the
-    # event-bus filter both need.
-    from bobi.slack import resolve_channel_id
-    channel = resolve_channel_id(token, channel)
+    login_channel = _resolve_login_channel(cfg, channel_ref)
+    if spec.flow == "paste_back" and login_channel.source == "discord":
+        _ensure_discord_paste_back_ready(project_path, cfg, login_channel)
 
     login_cmd_str = " ".join(spec.login_cmd)
     proc, master = spawn_login(home)
@@ -339,14 +534,18 @@ def run_bootstrap(
             # Claude: scrape the URL, post it, wait for the human to paste the
             # code back over Slack, write it into the pty.
             url = _read_until_url(master, url_timeout)
-            log.info("Captured login URL; posting to Slack channel %s.", channel)
-            post_message(
-                token, channel,
-                "🔐 *bobi subscription login*\n"
-                "Open this URL, authorize, then paste the code back "
-                "*in this channel*:\n" + url,
+            log.info(
+                "Captured login URL; posting to %s login channel %s.",
+                login_channel.source, login_channel.destination,
             )
-            code = wait_for_code(project_path, channel, timeout)
+            _post_login_message(
+                project_path, cfg, login_channel,
+                "🔐 *bobi subscription login*\n"
+                + _paste_back_instruction(login_channel)
+                + url,
+                post_message,
+            )
+            code = wait_for_code(project_path, login_channel, timeout)
             _write_line(master, code)
             try:
                 proc.wait(timeout=60)
@@ -357,15 +556,18 @@ def run_bootstrap(
             # both, then just wait — the CLI polls until the human authorizes;
             # nothing is pasted back.
             url, code = scrape_login(master, url_timeout, spec)
-            log.info("Captured device URL + code; posting to Slack channel %s.",
-                     channel)
-            post_message(
-                token, channel,
+            log.info(
+                "Captured device URL + code; posting to %s login channel %s.",
+                login_channel.source, login_channel.destination,
+            )
+            _post_login_message(
+                project_path, cfg, login_channel,
                 "🔐 *bobi subscription login*\n"
                 "Open this link, sign in, then enter the one-time code:\n"
                 f"{url}\n"
                 f"Code: `{code}`\n"
                 "_Waiting for you to authorize…_",
+                post_message,
             )
             try:
                 proc.wait(timeout=timeout)
@@ -388,7 +590,7 @@ def run_bootstrap(
         f"`fly ssh console` then `{login_cmd_str}`."
     )
     try:
-        post_message(token, channel, result_msg)
+        _post_login_message(project_path, cfg, login_channel, result_msg, post_message)
     except Exception as exc:  # noqa: BLE001 — best-effort status post
-        log.warning("Could not post bootstrap result to Slack: %s", exc)
+        log.warning("Could not post bootstrap result to chat channel: %s", exc)
     return ok

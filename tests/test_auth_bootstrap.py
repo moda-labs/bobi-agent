@@ -14,6 +14,13 @@ import pytest
 from bobi import auth_bootstrap as ab
 
 
+@pytest.fixture(autouse=True)
+def default_claude_brain(monkeypatch):
+    from bobi.brain import BRAIN_ENV
+
+    monkeypatch.setenv(BRAIN_ENV, "claude")
+
+
 # --- credentials / needs_bootstrap ------------------------------------------
 
 def test_credentials_path_follows_home(tmp_path):
@@ -102,6 +109,113 @@ def test_extract_code_ignores_empty_text():
     assert ab._extract_code(ev, "C123") is None
 
 
+def test_extract_code_from_discord_conversation():
+    channel = ab.LoginChannel(
+        destination="discord:111222333444555666:dm:999888777666555444",
+        source="discord",
+        topic="discord:111222333444555666",
+    )
+    ev = {
+        "source": "discord",
+        "type": "discord.message_create",
+        "conversation": "discord:111222333444555666:dm:999888777666555444",
+        "text": "code: abc#def",
+        "fields": {"channel": "999888777666555444"},
+    }
+    assert ab._extract_code(ev, channel) == "abc#def"
+
+
+def test_extract_code_from_discord_reply_event_shape():
+    channel = ab.LoginChannel(
+        destination="discord:111222333444555666:channel:999888777666555444",
+        source="discord",
+        topic="discord:111222333444555666",
+    )
+    ev = {
+        "source": "discord",
+        "type": "discord.reply",
+        "conversation": "discord:111222333444555666:channel:999888777666555444",
+        "text": "code: abc#def",
+        "fields": {
+            "channel_id": "999888777666555444",
+            "message_id": "1300000000000000001",
+        },
+    }
+    assert ab._extract_code(ev, channel) == "abc#def"
+
+
+def test_extract_code_rejects_other_discord_conversation():
+    channel = ab.LoginChannel(
+        destination="discord:111222333444555666:dm:999888777666555444",
+        source="discord",
+        topic="discord:111222333444555666",
+    )
+    ev = {
+        "source": "discord",
+        "conversation": "discord:111222333444555666:dm:000000000000000000",
+        "text": "abc#def",
+    }
+    assert ab._extract_code(ev, channel) is None
+
+
+def test_extract_code_from_whatsapp_conversation():
+    channel = ab.LoginChannel(
+        destination="whatsapp:111222333444555666:dm:15551234567",
+        source="whatsapp",
+        topic="whatsapp:111222333444555666",
+    )
+    ev = {
+        "source": "whatsapp",
+        "type": "whatsapp.message",
+        "conversation": "whatsapp:111222333444555666:dm:15551234567",
+        "text": "code: abc#def",
+        "fields": {
+            "phone_number_id": "111222333444555666",
+            "user_id": "15551234567",
+        },
+    }
+    assert ab._extract_code(ev, channel) == "abc#def"
+
+
+def test_extract_code_accepts_slack_thread_for_base_conversation():
+    channel = ab.LoginChannel(
+        destination="slack:T123:dm:D456",
+        source="slack",
+        topic="slack:T123:app:A123",
+    )
+    ev = {
+        "source": "slack",
+        "conversation": "slack:T123:dm:D456:thread:1779500000.000100",
+        "text": "abc#def",
+    }
+    assert ab._extract_code(ev, channel) == "abc#def"
+
+
+def test_extract_code_rejects_wrong_slack_thread_for_thread_conversation():
+    channel = ab.LoginChannel(
+        destination="slack:T123:dm:D456:thread:1779500000.000100",
+        source="slack",
+        topic="slack:T123:app:A123",
+    )
+    ev = {
+        "source": "slack",
+        "conversation": "slack:T123:dm:D456:thread:1779500000.000200",
+        "text": "abc#def",
+    }
+    assert ab._extract_code(ev, channel) is None
+
+
+def test_paste_back_instruction_for_discord_server_channel_mentions_reply():
+    channel = ab.LoginChannel(
+        destination="discord:111222333444555666:channel:999888777666555444",
+        source="discord",
+        topic="discord:111222333444555666",
+    )
+    instruction = ab._paste_back_instruction(channel)
+    assert "reply to this message" in instruction
+    assert "@mention the bot" in instruction
+
+
 def test_extract_code_from_real_adapter_dm_shape():
     """Reproduces the prod bug: the Slack adapter (event-server/core/src/
     adapters/chat-sdk-slack.ts) emits `text` at the TOP LEVEL and in `payload`, with `fields`
@@ -161,6 +275,70 @@ def slack_config(tmp_path, monkeypatch):
     return project
 
 
+@pytest.fixture
+def discord_config(tmp_path, monkeypatch):
+    from bobi import paths
+
+    monkeypatch.setattr(paths, "_root", None, raising=False)
+    project = tmp_path / "proj"
+    paths.package_dir(project).mkdir(parents=True)
+    paths.agent_yaml_path(project).write_text(
+        "agent: test\n"
+        "event_server_url: http://localhost:8080\n"
+        "services:\n"
+        "  - name: discord\n"
+        "    credentials:\n"
+        "      bot_token: dc-test\n"
+        "      application_id: '111222333444555666'\n"
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv(
+        ab.LOGIN_CHANNEL_ENV,
+        "discord:111222333444555666:dm:999888777666555444",
+    )
+    return project
+
+
+@pytest.fixture
+def remote_discord_config(discord_config):
+    from bobi import paths
+
+    agent_yaml = paths.agent_yaml_path(discord_config)
+    agent_yaml.write_text(
+        agent_yaml.read_text().replace(
+            "event_server_url: http://localhost:8080",
+            "event_server_url: https://event.example",
+        )
+    )
+    return discord_config
+
+
+@pytest.fixture
+def whatsapp_config(tmp_path, monkeypatch):
+    from bobi import paths
+
+    monkeypatch.setattr(paths, "_root", None, raising=False)
+    project = tmp_path / "proj"
+    paths.package_dir(project).mkdir(parents=True)
+    paths.agent_yaml_path(project).write_text(
+        "agent: test\n"
+        "event_server_url: https://event.example\n"
+        "services:\n"
+        "  - name: whatsapp\n"
+        "    credentials:\n"
+        "      access_token: wa-test\n"
+        "      phone_number_id: '111222333444555666'\n"
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv(
+        ab.LOGIN_CHANNEL_ENV,
+        "whatsapp:111222333444555666:dm:15551234567",
+    )
+    return project
+
+
 def test_run_bootstrap_happy_path(slack_config, monkeypatch):
     posts = []
     written = []
@@ -206,6 +384,163 @@ def test_run_bootstrap_happy_path(slack_config, monkeypatch):
     assert any("oauth/authorize" in p[2] for p in posts)
     assert any("complete" in p[2] for p in posts)
     assert all(p[1] == "C0LOGIN42" for p in posts)
+
+
+def test_run_bootstrap_posts_to_discord_conversation(discord_config, monkeypatch):
+    import bobi.events.gateway as gateway_mod
+    import bobi.events.server as server_mod
+
+    sent = []
+    written = []
+    creds = os.path.join(os.environ["HOME"], ".claude", ".credentials.json")
+
+    class FakeProc:
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(ab, "_read_until_url", lambda fd, timeout: "https://x/oauth/authorize?c=1")
+    monkeypatch.setattr(ab, "_write_line", lambda fd, text: written.append(text))
+    monkeypatch.setattr(
+        server_mod,
+        "ensure_bubble",
+        lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"},
+    )
+    monkeypatch.setattr(server_mod, "register_discord_apps", lambda *a, **k: ["111222333444555666"])
+    monkeypatch.setattr(
+        server_mod,
+        "health",
+        lambda es_url: {
+            "status": "ok",
+            "mode": "local",
+            "discord_gateway": [{
+                "application_id": "111222333444555666",
+                "state": "connected",
+            }],
+        },
+    )
+    monkeypatch.setattr(gateway_mod, "channels_send", lambda project, conv, text, mode="post": sent.append((conv, text, mode)))
+
+    def fake_spawn(home):
+        return FakeProc(), -1
+
+    def fake_wait(project_path, channel, timeout):
+        assert channel == ab.LoginChannel(
+            destination="discord:111222333444555666:dm:999888777666555444",
+            source="discord",
+            topic="discord:111222333444555666",
+        )
+        os.makedirs(os.path.dirname(creds), exist_ok=True)
+        with open(creds, "w") as f:
+            f.write("{}")
+        return "the-code"
+
+    ok = ab.run_bootstrap(
+        discord_config,
+        spawn_login=fake_spawn,
+        post_message=lambda *a, **k: (_ for _ in ()).throw(AssertionError("Slack post unused")),
+        wait_for_code=fake_wait,
+    )
+
+    assert ok is True
+    assert written == ["the-code"]
+    assert sent[0][0] == "discord:111222333444555666:dm:999888777666555444"
+    assert "oauth/authorize" in sent[0][1]
+    assert "complete" in sent[-1][1]
+
+
+def test_run_bootstrap_rejects_discord_paste_back_on_remote_event_server(
+    remote_discord_config,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        ab,
+        "_ensure_discord_paste_back_ready",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError(
+            "Discord subscription-login paste-back requires an event server "
+            "with the local Discord Gateway driver."
+        )),
+    )
+    with pytest.raises(RuntimeError, match="local Discord Gateway driver"):
+        ab.run_bootstrap(remote_discord_config, spawn_login=lambda h: None)
+
+
+def test_ensure_discord_paste_back_ready_rejects_event_server_without_gateway(
+    discord_config,
+    monkeypatch,
+):
+    import bobi.events.server as server_mod
+
+    monkeypatch.setattr(
+        server_mod,
+        "ensure_bubble",
+        lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"},
+    )
+    monkeypatch.setattr(server_mod, "register_discord_apps", lambda *a, **k: ["111222333444555666"])
+    monkeypatch.setattr(
+        server_mod,
+        "health",
+        lambda es_url: {"status": "ok", "mode": "worker"},
+    )
+
+    with pytest.raises(RuntimeError, match="connected Gateway"):
+        ab._ensure_discord_paste_back_ready(
+            discord_config,
+            ab.Config.load(discord_config),
+            ab.LoginChannel(
+                destination="discord:111222333444555666:dm:999888777666555444",
+                source="discord",
+                topic="discord:111222333444555666",
+            ),
+            timeout=0.01,
+        )
+
+
+def test_ensure_discord_paste_back_ready_allows_internal_local_hostname(
+    discord_config,
+    monkeypatch,
+):
+    from bobi import paths
+    import bobi.events.server as server_mod
+
+    agent_yaml = paths.agent_yaml_path(discord_config)
+    agent_yaml.write_text(
+        agent_yaml.read_text().replace(
+            "event_server_url: http://localhost:8080",
+            "event_server_url: http://event-server:8080",
+        )
+    )
+    monkeypatch.setattr(
+        server_mod,
+        "ensure_bubble",
+        lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"},
+    )
+    monkeypatch.setattr(server_mod, "register_discord_apps", lambda *a, **k: ["111222333444555666"])
+    monkeypatch.setattr(
+        server_mod,
+        "health",
+        lambda es_url: {
+            "status": "ok",
+            "mode": "local",
+            "discord_gateway": [{
+                "application_id": "111222333444555666",
+                "state": "connected",
+            }],
+        },
+    )
+
+    ab._ensure_discord_paste_back_ready(
+        discord_config,
+        ab.Config.load(discord_config),
+        ab.LoginChannel(
+            destination="discord:111222333444555666:dm:999888777666555444",
+            source="discord",
+            topic="discord:111222333444555666",
+        ),
+        timeout=0.01,
+    )
 
 
 def test_run_bootstrap_skips_when_creds_present(slack_config, monkeypatch):
@@ -291,6 +626,106 @@ def test_wait_for_code_subscribes_to_app_qualified_slack_topic(slack_config, mon
 
     assert ab._wait_for_code(slack_config, "D0LOGIN", timeout=1) == "the-code"
     assert registered["topics"] == ["slack:T123:app:A123"]
+
+
+def test_wait_for_code_subscribes_to_discord_app_topic(discord_config, monkeypatch):
+    import bobi.events.client as client_mod
+    import bobi.events.server as server_mod
+
+    registered = {}
+
+    monkeypatch.setattr(
+        server_mod,
+        "ensure_bubble",
+        lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"},
+    )
+    monkeypatch.setattr(server_mod, "register_discord_apps", lambda *a, **k: ["111222333444555666"])
+
+    def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
+        registered["topics"] = topics
+        return "dep", "api-key"
+
+    monkeypatch.setattr(server_mod, "register", fake_register)
+
+    class FakeClient:
+        def __init__(self, es_url, deployment_id, api_key, queue):
+            self.queue = queue
+
+        def start(self):
+            self.queue.put({
+                "source": "discord",
+                "conversation": "discord:111222333444555666:dm:999888777666555444",
+                "text": "the-code",
+            })
+
+        def wait_connected(self, timeout):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(client_mod, "EventServerClient", FakeClient)
+
+    assert ab._wait_for_code(
+        discord_config,
+        ab.LoginChannel(
+            destination="discord:111222333444555666:dm:999888777666555444",
+            source="discord",
+            topic="discord:111222333444555666",
+        ),
+        timeout=1,
+    ) == "the-code"
+    assert registered["topics"] == ["discord:111222333444555666"]
+
+
+def test_wait_for_code_subscribes_to_whatsapp_number_topic(whatsapp_config, monkeypatch):
+    import bobi.events.client as client_mod
+    import bobi.events.server as server_mod
+
+    registered = {}
+
+    monkeypatch.setattr(
+        server_mod,
+        "ensure_bubble",
+        lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"},
+    )
+    monkeypatch.setattr(server_mod, "register_whatsapp_numbers", lambda *a, **k: ["111222333444555666"])
+
+    def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
+        registered["topics"] = topics
+        return "dep", "api-key"
+
+    monkeypatch.setattr(server_mod, "register", fake_register)
+
+    class FakeClient:
+        def __init__(self, es_url, deployment_id, api_key, queue):
+            self.queue = queue
+
+        def start(self):
+            self.queue.put({
+                "source": "whatsapp",
+                "conversation": "whatsapp:111222333444555666:dm:15551234567",
+                "text": "the-code",
+            })
+
+        def wait_connected(self, timeout):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(client_mod, "EventServerClient", FakeClient)
+
+    assert ab._wait_for_code(
+        whatsapp_config,
+        ab.LoginChannel(
+            destination="whatsapp:111222333444555666:dm:15551234567",
+            source="whatsapp",
+            topic="whatsapp:111222333444555666",
+        ),
+        timeout=1,
+    ) == "the-code"
+    assert registered["topics"] == ["whatsapp:111222333444555666"]
 
 
 def test_wait_for_code_falls_back_to_legacy_slack_topic(slack_config, monkeypatch):

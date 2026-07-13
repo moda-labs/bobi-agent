@@ -27,10 +27,10 @@ class TestAdapterRegistry:
         assert is_registered("github")
         assert is_registered("slack")
         assert is_registered("linear")
+        assert is_registered("discord")
 
     def test_unknown_service_not_registered(self):
         assert not is_registered("email")
-        assert not is_registered("discord")
 
     def test_detect_unregistered_falls_back_to_name(self):
         cfg = Config()

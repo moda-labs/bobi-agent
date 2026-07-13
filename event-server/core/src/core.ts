@@ -66,7 +66,7 @@ export interface ResourceGrant {
 	id: string;
 	account_id: string | null; // null in MVP; account layer fills it later
 	bubble_id: string;
-	service: "github" | "linear" | "slack" | "whatsapp";
+	service: "github" | "linear" | "slack" | "whatsapp" | "discord";
 	resource: string;
 	granted_by: "upstream_token_verification" | "test_seed";
 	// Linear: the team's organization id, recorded so a future fix can
@@ -324,7 +324,7 @@ import { normalizeGitHubWebhook } from "./adapters/github.js";
 import { normalizeLinearWebhook } from "./adapters/linear.js";
 import { bridgeSlackWebhook } from "./adapters/chat-sdk-slack.js";
 import { normalizeWhatsAppWebhook } from "./adapters/whatsapp.js";
-import { chunkForChannel, getChannelAdapter, slackApiUrl, truncateForChannel, whatsappApi, type OutboundFile } from "./channels.js";
+import { chunkForChannel, discordApi, getChannelAdapter, slackApiUrl, truncateForChannel, whatsappApi, type OutboundFile } from "./channels.js";
 import { parseConversation, type Conversation } from "./conversation.js";
 
 export { normalizeGitHubWebhook as normalizeGitHubPayload } from "./adapters/github.js";
@@ -339,7 +339,7 @@ export { normalizeLinearWebhook as normalizeLinearPayload } from "./adapters/lin
 // accepted cross-tenant read hole, to be closed by #239 (inbound subscription
 // auth). Slack inbound rides this path, so it keeps working. Everything else
 // (inbox/*, reply/*, monitor/*, agent/*, custom topics) is bubble-scoped.
-const GLOBAL_TOPIC_PREFIXES = ["github:", "linear:", "slack:", "whatsapp:"];
+const GLOBAL_TOPIC_PREFIXES = ["github:", "linear:", "slack:", "whatsapp:", "discord:"];
 
 export function isGlobalTopic(key: string): boolean {
 	return GLOBAL_TOPIC_PREFIXES.some((p) => key.startsWith(p));
@@ -1787,7 +1787,7 @@ export async function handleTestSeedResourceGrants(
 		const service = typeof grant.service === "string" ? grant.service : "";
 		const rawResource = typeof grant.resource === "string" ? grant.resource.trim() : "";
 		if ((service !== "github" && service !== "linear" && service !== "slack"
-			&& service !== "whatsapp") || !rawResource) {
+			&& service !== "whatsapp" && service !== "discord") || !rawResource) {
 			return { status: 400, body: { error: "invalid_request" } };
 		}
 		const resource = normalizeResource(service, rawResource);
@@ -1927,6 +1927,11 @@ async function resolveChannelSendToken(
 		const rec = await storage.getChannelState(whatsappNumberKey(bubbleId, conv.scope));
 		return (rec?.access_token as string) || "";
 	}
+	if (conv.source === "discord") {
+		// Same bubble-scoped tenancy boundary as WhatsApp.
+		const rec = await storage.getChannelState(discordAppKey(bubbleId, conv.scope));
+		return (rec?.bot_token as string) || "";
+	}
 	return "";
 }
 
@@ -1988,6 +1993,65 @@ export async function handleWhatsAppNumberRegister(
 	});
 
 	return { status: 200, body: { ok: true, phone_number_id: phoneNumberId } };
+}
+
+// Storage key for a bubble-scoped Discord app registration. Like WhatsApp
+// there is no global record: loop prevention happens in the Gateway
+// normalizer (bot-authored messages are dropped), not via a self-id lookup.
+export function discordAppKey(bubbleId: string, applicationId: string): string {
+	return `discord_app:${bubbleId}:${applicationId}`;
+}
+
+// POST /discord/apps - registration mirror of handleWhatsAppNumberRegister,
+// signed-only. Verifies the bot token upstream (GET /applications/@me must
+// return the claimed application id), stores the bubble-scoped send
+// credential, and writes the discord resource grant that lets this bubble
+// subscribe to `discord:<application_id>` (#488). On the local runtime the
+// transport also starts a Gateway connection for the registered app; the
+// worker stores the credential only (the remote Gateway driver is a
+// follow-up).
+export async function handleDiscordAppRegister(
+	storage: StorageAdapter,
+	body: Record<string, unknown>,
+	bubbleId?: string,
+): Promise<HandlerResult> {
+	const applicationId = body.application_id as string;
+	const botToken = body.bot_token as string;
+	if (!applicationId || !botToken) {
+		return { status: 400, body: { error: "application_id and bot_token required" } };
+	}
+	if (!bubbleId) {
+		return { status: 403, body: { error: "forbidden" } };
+	}
+
+	try {
+		const data = await discordApi(botToken, "applications/@me", { method: "GET" });
+		if (String(data.id ?? "") !== applicationId) {
+			return { status: 403, body: { error: "forbidden" } };
+		}
+	} catch {
+		return { status: 403, body: { error: "forbidden" } };
+	}
+
+	await storage.putChannelState(discordAppKey(bubbleId, applicationId), {
+		bot_token: botToken,
+	});
+	// Upstream token verification IS the proof of access, same convergence as
+	// Slack and WhatsApp (#488 §6): the grant gates inbound
+	// `discord:<application_id>` delivery.
+	await storage.putResourceGrant({
+		id: `discord:${applicationId}:${bubbleId}`,
+		account_id: null,
+		bubble_id: bubbleId,
+		service: "discord",
+		resource: applicationId,
+		granted_by: "upstream_token_verification",
+		organization_id: null,
+		created_at: new Date().toISOString(),
+		expires_at: null,
+	});
+
+	return { status: 200, body: { ok: true, application_id: applicationId } };
 }
 
 // One outbound file on /channels/send: { name, content_b64, title? }.

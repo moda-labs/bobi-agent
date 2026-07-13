@@ -48,8 +48,10 @@ import {
 	handleWebhookHandshake,
 	handleWhatsAppWebhook,
 	handleWhatsAppNumberRegister,
+	handleDiscordAppRegister,
 	channelWindowKey,
 	whatsappNumberKey,
+	discordAppKey,
 	handleIngestTokenCreate,
 	handleIngestTokenList,
 	handleIngestTokenRevoke,
@@ -62,7 +64,7 @@ import {
 } from "@moda-labs/bobi-events-core";
 import { hmacHex } from "./helpers";
 import { bridgeSlackWebhook } from "@moda-labs/bobi-events-core/adapters/chat-sdk-slack";
-import { setWhatsAppApiUrl } from "@moda-labs/bobi-events-core/channels";
+import { setDiscordApiUrl, setWhatsAppApiUrl } from "@moda-labs/bobi-events-core/channels";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -3021,9 +3023,16 @@ describe("parseGlobalTopic / normalizeResource", () => {
 	});
 });
 
-// A Response-ish stub for the verifier fetch (Worker/Node `fetch`).
+// A Response-ish stub for the verifier fetch (Worker/Node `fetch`). Carries
+// both accessors a real Response has: whatsappApi reads json(), discordApi
+// reads text() (Discord's typing trigger answers 204 with no body).
 function fetchOk(status: number, json: unknown = {}) {
-	return { ok: status >= 200 && status < 300, status, json: async () => json };
+	return {
+		ok: status >= 200 && status < 300,
+		status,
+		json: async () => json,
+		text: async () => JSON.stringify(json),
+	};
 }
 
 // --- WhatsApp gateway (#656, epic #190 Phase 3) -----------------------------
@@ -3348,6 +3357,228 @@ describe("whatsapp number registration and outbound send", () => {
 		}, "bubA");
 		expect(res.status).toBe(200);
 		expect(await store.hasResourceGrant("whatsapp", WA_PNID, "bubA")).toBe(true);
+	});
+});
+
+describe("discord app registration and outbound send", () => {
+	const DC_APP = "111222333444555666";
+	const DC_CHAN = "888777666555444333";
+	const DC_CONV = `discord:${DC_APP}:channel:${DC_CHAN}`;
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		setDiscordApiUrl(undefined);
+	});
+
+	// Discord REST stub: GET /applications/@me verifies the bot token; message
+	// posts/edits and the typing trigger are recorded.
+	function stubDiscordApi() {
+		const calls: Array<{ method: string; path: string; body?: Record<string, unknown> }> = [];
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const path = new URL(String(url)).pathname;
+			const method = init?.method ?? "POST";
+			const call: { method: string; path: string; body?: Record<string, unknown> } =
+				{ method, path };
+			if (typeof init?.body === "string") call.body = JSON.parse(init.body);
+			calls.push(call);
+			if (method === "GET" && path.endsWith("/applications/@me")) {
+				return fetchOk(200, { id: DC_APP, name: "bobi" });
+			}
+			if (method === "POST" && path.endsWith(`/channels/${DC_CHAN}/typing`)) {
+				return new Response(null, { status: 204 });
+			}
+			if (method === "POST" && path.endsWith(`/channels/${DC_CHAN}/messages`)) {
+				return fetchOk(200, { id: `msg.${calls.length}` });
+			}
+			if (method === "PATCH" && path.includes(`/channels/${DC_CHAN}/messages/`)) {
+				return fetchOk(200, { id: path.split("/").pop() });
+			}
+			if (method === "GET" && path.endsWith(`/channels/${DC_CHAN}/messages`)) {
+				// Discord returns newest-first.
+				return fetchOk(200, [
+					{ id: "m2", content: "newer", author: { id: "u1", username: "ada" } },
+					{ id: "m1", content: "older", author: { id: "u2", username: "bot" } },
+				]);
+			}
+			return fetchOk(404, { message: `unexpected ${method} ${path}` });
+		}));
+		return calls;
+	}
+
+	async function register(store: ReturnType<typeof createMockStorage>, bubbleId = "bubA") {
+		return handleDiscordAppRegister(
+			store, { application_id: DC_APP, bot_token: "dc-token" }, bubbleId);
+	}
+
+	it("verifies the token upstream, stores the credential, writes the grant", async () => {
+		const store = createMockStorage();
+		stubDiscordApi();
+		const res = await register(store);
+		expect(res.status).toBe(200);
+		expect(store.channelState.get(discordAppKey("bubA", DC_APP))).toEqual(
+			{ bot_token: "dc-token" });
+		expect(await store.hasResourceGrant("discord", DC_APP, "bubA")).toBe(true);
+	});
+
+	it("rejects unsigned registration and a token the API disowns", async () => {
+		const store = createMockStorage();
+		stubDiscordApi();
+		expect((await register(store, "")).status).toBe(403);
+
+		// A valid token for a DIFFERENT application must not register this one.
+		vi.stubGlobal("fetch", vi.fn(async () => fetchOk(200, { id: "other-app" })));
+		expect((await register(store)).status).toBe(403);
+		expect(store.channelState.size).toBe(0);
+	});
+
+	it("sends through the REST API with the Bot auth scheme", async () => {
+		const store = createMockStorage();
+		const calls = stubDiscordApi();
+		await register(store);
+
+		const res = await handleChannelsSend(
+			store, { conversation: DC_CONV, text: "reply *text*" }, "bubA");
+		expect(res.status).toBe(200);
+		const send = calls.find((c) => c.path.endsWith("/messages") && c.method === "POST")!;
+		expect(send.body).toEqual({ content: "reply *text*" });
+		expect((res.body as Record<string, unknown>).ts).toMatch(/^msg\./);
+	});
+
+	it("mode update edits the placeholder in place (edit capability)", async () => {
+		const store = createMockStorage();
+		const calls = stubDiscordApi();
+		await register(store);
+
+		const res = await handleChannelsSend(store, {
+			conversation: DC_CONV, text: "updated", mode: "update", edit_ref: "msg.7",
+		}, "bubA");
+		expect(res.status).toBe(200);
+		const patch = calls.find((c) => c.method === "PATCH")!;
+		expect(patch.path.endsWith("/messages/msg.7")).toBe(true);
+		expect(patch.body).toEqual({ content: "updated" });
+	});
+
+	it("typing on triggers the indicator; off is a silent no-op", async () => {
+		const store = createMockStorage();
+		const calls = stubDiscordApi();
+		await register(store);
+
+		const on = await handleChannelsTyping(
+			store, { conversation: DC_CONV, on: true }, "bubA");
+		expect(on.status).toBe(200);
+		expect((on.body as Record<string, unknown>).supported).toBe(true);
+		expect(calls.filter((c) => c.path.endsWith("/typing"))).toHaveLength(1);
+
+		// Discord has no explicit "off" - it must not call the API.
+		await handleChannelsTyping(store, { conversation: DC_CONV, on: false }, "bubA");
+		expect(calls.filter((c) => c.path.endsWith("/typing"))).toHaveLength(1);
+	});
+
+	it("history returns oldest-first", async () => {
+		const store = createMockStorage();
+		stubDiscordApi();
+		await register(store);
+
+		const res = await handleChannelsHistory(store, DC_CONV, 10, "bubA");
+		expect(res.status).toBe(200);
+		const messages = (res.body as Record<string, unknown>).messages as Array<Record<string, string>>;
+		expect(messages.map((m) => m.ts)).toEqual(["m1", "m2"]);
+	});
+
+	// Multipart upload stub: verifies the token like stubDiscordApi, records
+	// each multipart message post's payload_json + file-part count, and fails
+	// the batch at `failOn` (1-based) with a Discord error body.
+	function stubDiscordUploads(failOn = 0) {
+		const posts: Array<{ payload: Record<string, unknown>; parts: number }> = [];
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const path = new URL(String(url)).pathname;
+			if ((init?.method ?? "POST") === "GET" && path.endsWith("/applications/@me")) {
+				return fetchOk(200, { id: DC_APP, name: "bobi" });
+			}
+			if (path.endsWith(`/channels/${DC_CHAN}/messages`) && init?.body instanceof FormData) {
+				const form = init.body;
+				posts.push({
+					payload: JSON.parse(String(form.get("payload_json"))),
+					parts: [...form.keys()].filter((k) => k.startsWith("files[")).length,
+				});
+				if (posts.length === failOn) return fetchOk(400, { message: "boom" });
+				return fetchOk(200, { id: `upload.${posts.length}` });
+			}
+			return fetchOk(404, { message: `unexpected ${path}` });
+		}));
+		return posts;
+	}
+
+	it("uploads files in multipart batches of 10, the first carrying the comment", async () => {
+		const store = createMockStorage();
+		const posts = stubDiscordUploads();
+		await register(store);
+
+		// 11 files: one over Discord's per-message attachment cap.
+		const res = await handleChannelsSend(store, {
+			conversation: DC_CONV, text: "the report",
+			files: Array.from({ length: 11 }, (_, i) => (
+				{ name: `f${i}.txt`, content_b64: btoa(`file ${i}`), ...(i === 0 ? { title: "First" } : {}) }
+			)),
+		}, "bubA");
+
+		expect(res.status).toBe(200);
+		expect(posts).toHaveLength(2);
+		expect(posts[0].parts).toBe(10);
+		expect(posts[0].payload.content).toBe("the report");
+		const first = posts[0].payload.attachments as Array<Record<string, unknown>>;
+		expect(first.map((a) => a.id)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+		expect(first[0].description).toBe("First");
+		// The second batch restarts attachment ids at 0 (they are message-local)
+		// and must not duplicate the comment.
+		expect(posts[1].parts).toBe(1);
+		expect(posts[1].payload.content).toBeUndefined();
+		expect((posts[1].payload.attachments as Array<Record<string, unknown>>)[0]).toMatchObject(
+			{ id: 0, filename: "f10.txt" });
+		// ts names the LAST message so a follow-up edit targets the newest post.
+		expect((res.body as Record<string, unknown>).ts).toBe("upload.2");
+	});
+
+	it("a failed later batch surfaces the partial-delivery contract", async () => {
+		const store = createMockStorage();
+		stubDiscordUploads(2); // first batch lands, second fails
+		await register(store);
+
+		const res = await handleChannelsSend(store, {
+			conversation: DC_CONV, text: "the report",
+			files: Array.from({ length: 11 }, (_, i) => (
+				{ name: `f${i}.txt`, content_b64: btoa(`file ${i}`) }
+			)),
+		}, "bubA");
+
+		expect(res.status).toBe(502);
+		const error = (res.body as Record<string, string>).error;
+		// Once batch 1 reached the user the caller must not blind-retry the set.
+		expect(error).toContain("10 file(s) are already visible");
+		expect(error).toContain("boom");
+	});
+
+	it("does not read another bubble's app registration", async () => {
+		const store = createMockStorage();
+		stubDiscordApi();
+		await register(store, "bubB");
+		const res = await handleChannelsSend(
+			store, { conversation: DC_CONV, text: "hi" }, "bubA");
+		expect(res.status).toBe(400);
+		expect((res.body as Record<string, string>).error).toContain("no send credential");
+	});
+
+	it("discord topics are global and grant-gated like the other channels", async () => {
+		expect(namespaceSubKey("bubA", `discord:${DC_APP}`)).toBe(`discord:${DC_APP}`);
+		expect(parseGlobalTopic(`discord:${DC_APP}`)).toEqual(
+			{ service: "discord", resource: DC_APP });
+
+		const store = createMockStorage();
+		const res = await handleTestSeedResourceGrants(store, {
+			grants: [{ service: "discord", resource: DC_APP }],
+		}, "bubA");
+		expect(res.status).toBe(200);
+		expect(await store.hasResourceGrant("discord", DC_APP, "bubA")).toBe(true);
 	});
 });
 
