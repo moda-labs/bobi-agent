@@ -159,9 +159,24 @@ class TestConditionEquality:
         ctx.set_flat("needs_spec", "true")
         assert ctx.evaluate_condition("needs_spec == true") is True
 
+    def test_python_bool_true_matches_lowercase_literal(self):
+        ctx = VariableContext()
+        ctx.set_flat("needs_spec", True)
+        assert ctx.evaluate_condition("needs_spec == true") is True
+
+    def test_python_bool_true_matches_capitalized_literal(self):
+        ctx = VariableContext()
+        ctx.set_flat("needs_spec", True)
+        assert ctx.evaluate_condition("needs_spec == True") is True
+
     def test_bool_false_literal(self):
         ctx = VariableContext()
         ctx.set_flat("needs_spec", "false")
+        assert ctx.evaluate_condition("needs_spec == false") is True
+
+    def test_python_bool_false_matches_lowercase_literal(self):
+        ctx = VariableContext()
+        ctx.set_flat("needs_spec", False)
         assert ctx.evaluate_condition("needs_spec == false") is True
 
 
@@ -279,6 +294,16 @@ class TestConditionWithVariables:
         ctx.set_scope("handoff", {"complexity": "medium"})
         assert ctx.evaluate_condition("${{handoff.complexity}} == medium") is True
 
+    def test_scoped_python_bool_matches_lowercase_literal(self):
+        ctx = VariableContext()
+        ctx.set_scope("handoff", {"scope_clear": True})
+        assert ctx.evaluate_condition("${{handoff.scope_clear}} == true") is True
+
+    def test_scoped_python_false_matches_lowercase_literal(self):
+        ctx = VariableContext()
+        ctx.set_scope("handoff", {"scope_clear": False})
+        assert ctx.evaluate_condition("${{handoff.scope_clear}} == false") is True
+
     def test_scoped_variable_not_equal(self):
         ctx = VariableContext()
         ctx.set_scope("handoff", {"complexity": "trivial"})
@@ -314,6 +339,16 @@ class TestParseValue:
         val, rest = _parse_value("false rest")
         assert val == "false"
         assert rest == " rest"
+
+    def test_capitalized_boolean_literal(self):
+        val, rest = _parse_value("True == true")
+        assert val == "true"
+        assert rest == " == true"
+
+    def test_boolean_prefix_without_boundary_is_bare_word(self):
+        val, rest = _parse_value("TrueValue == true")
+        assert val == "TrueValue"
+        assert rest == " == true"
 
     def test_bare_word(self):
         val, rest = _parse_value("medium == something")
