@@ -30,6 +30,11 @@ export function mountAgent(el, { api, name }) {
       <div class="cards" data-el="cards"></div>
       <p class="empty" data-el="empty" hidden>No active subagents. Press Start
         above to bring the team up.</p>
+      <div class="sessions-panel" data-el="sessionsPanel" hidden>
+        <div class="sessions-head mono"><span>session log</span>
+          <span class="sessions-counts" data-el="sessionCounts"></span></div>
+        <div data-el="sessionRows"></div>
+      </div>
     </aside>
     <section class="pane">
       <div class="placeholder" data-el="placeholder">
@@ -51,6 +56,7 @@ export function mountAgent(el, { api, name }) {
           <span class="chip" data-el="chatStatus"></span>
         </div>
         <div class="slab" data-el="transcript" aria-live="polite"></div>
+        <p class="chat-ended mono" data-el="chatEnded" hidden></p>
         <form class="composer" data-el="composer">
           <textarea data-el="input" rows="1" placeholder="Message this agent…"
                     autocomplete="off"></textarea>
@@ -121,8 +127,9 @@ export function mountAgent(el, { api, name }) {
     }
     busyVerb = null;
     renderControls();
-    poll();         // refresh the roster right away
-    pollHealth();   // and the health panel/chip
+    poll();          // refresh the roster right away
+    pollHealth();    // and the health panel/chip
+    pollSessions();  // a stop lands sessions in the log
   }
 
   els.edit.addEventListener("click", async () => {
@@ -142,8 +149,19 @@ export function mountAgent(el, { api, name }) {
   const history = new Map();
   let selected = null;
   let lastAgents = [];
+  let sessionLog = [];   // last /sessions payload rows (active + terminal)
   let sending = false;
   let messagesLoading = false;
+
+  // Ended-session vocabulary: the MDS-65 terminal words plus the statuses
+  // older writers still record ("done" = success, "error" = a turn-level
+  // failure, stopped/cancelled = torn down). These sessions are over - the
+  // transcript is readable but the composer makes no sense.
+  const TERMINAL_SET = new Set(["completed", "done", "failed", "crashed",
+                                "error", "stopped", "cancelled"]);
+  const CHIP_ALIAS = { done: "completed", error: "failed", cancelled: "stopped" };
+  const chipClass = (s) =>
+    Object.hasOwn(CHIP_ALIAS, s) ? CHIP_ALIAS[s] : s;
 
   // --- tiny, safe markdown (agent replies) ---------------------------
   // Everything is HTML-escaped FIRST, then a fixed set of inline/block
@@ -267,8 +285,9 @@ export function mountAgent(el, { api, name }) {
     els.chat.hidden = false;
     updateChatHead();
     renderCards(lastAgents);
+    renderSessionRows();
     renderTranscript();
-    els.input.focus();
+    if (!els.composer.hidden) els.input.focus();
     loadMessages(sub);
   }
 
@@ -312,11 +331,25 @@ export function mountAgent(el, { api, name }) {
   }
 
   function updateChatHead() {
-    const a = lastAgents.find((x) => x.name === selected) || { name: selected };
+    // The roster (3s poll) is the fresher source for active sessions; a
+    // terminal session only appears in the session log.
+    const a = lastAgents.find((x) => x.name === selected)
+      || sessionLog.find((x) => x.name === selected)
+      || { name: selected };
     els.chatName.textContent = a.name;
     els.chatRole.textContent = a.is_manager ? "manager" : (a.role || "agent");
     els.chatStatus.textContent = a.status || "";
     els.chatStatus.hidden = !a.status;
+    // An ended session's transcript stays readable; the composer goes away
+    // (chat targets a live process). Re-derived on every poll, so a session
+    // that ends while selected flips read-only by itself.
+    const ended = !!a.status && TERMINAL_SET.has(a.status);
+    els.composer.hidden = ended;
+    els.chatEnded.hidden = !ended;
+    if (ended) {
+      els.chatEnded.textContent = "session ended: " + a.status
+        + (a.error ? " · " + a.error : "");
+    }
   }
 
   function renderTranscript() {
@@ -415,6 +448,82 @@ export function mountAgent(el, { api, name }) {
 
   function pollMessages() {
     if (selected) loadMessages(selected);
+  }
+
+  // --- session log (observability, #733 vertical 3) --------------------
+  // Terminal outcomes under the roster: what ended, how, and why. Active
+  // sessions already live above as roster cards, so the panel lists only
+  // ended runs; the counts line covers the whole history. Clicking a row
+  // opens the session's transcript read-only in the chat pane.
+  const MAX_SESSION_ROWS = 50;
+
+  function renderSessionRows() {
+    const rows = sessionLog.filter((s) => TERMINAL_SET.has(s.status));
+    if (!rows.length) { els.sessionsPanel.hidden = true; return; }
+    els.sessionsPanel.hidden = false;
+    els.sessionRows.innerHTML = "";
+    for (const s of rows.slice(0, MAX_SESSION_ROWS)) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "session-row" + (s.name === selected ? " active" : "");
+      const top = document.createElement("div");
+      top.className = "session-top";
+      const nm = document.createElement("span");
+      nm.className = "session-name";
+      nm.textContent = s.name;
+      top.appendChild(nm);
+      const chip = document.createElement("span");
+      chip.className = "status " + chipClass(s.status);
+      chip.textContent = s.status;
+      top.appendChild(chip);
+      row.appendChild(top);
+      const bits = [];
+      const when = fmtAgo((s.terminal_at || s.last_activity || 0) * 1000);
+      if (when) bits.push(when);
+      if (s.role && !s.is_manager) bits.push(s.role);
+      if (s.is_manager) bits.push("manager");
+      const cost = fmtUsd(s.total_cost_usd);
+      if (cost) bits.push(cost);
+      if (bits.length) {
+        const meta = document.createElement("div");
+        meta.className = "session-meta mono";
+        meta.textContent = bits.join(" · ");
+        row.appendChild(meta);
+      }
+      if (s.error) {
+        const err = document.createElement("div");
+        err.className = "session-error";
+        err.textContent = s.error;
+        err.title = s.error;
+        row.appendChild(err);
+      }
+      row.addEventListener("click", () => selectAgent(s.name));
+      els.sessionRows.appendChild(row);
+    }
+    if (rows.length > MAX_SESSION_ROWS) {
+      const more = document.createElement("div");
+      more.className = "session-more mono";
+      more.textContent = "+ " + (rows.length - MAX_SESSION_ROWS)
+        + " older sessions";
+      els.sessionRows.appendChild(more);
+    }
+  }
+
+  function renderSessionCounts(counts) {
+    const bits = [];
+    if (counts.completed) bits.push(counts.completed + " completed");
+    if (counts.failed) bits.push(counts.failed + " failed");
+    if (counts.crashed) bits.push(counts.crashed + " crashed");
+    els.sessionCounts.textContent = bits.join(" · ");
+  }
+
+  async function pollSessions() {
+    const { ok, data } = await api(base + "/sessions");
+    if (!ok || !data) return;
+    sessionLog = data.sessions || [];
+    renderSessionCounts(data.counts || {});
+    renderSessionRows();
+    if (selected) updateChatHead();
   }
 
   // --- spend panel (observability, #733) ------------------------------
@@ -583,9 +692,11 @@ export function mountAgent(el, { api, name }) {
   pollMessages();
   pollSpend();
   pollHealth();
+  pollSessions();
   const t1 = setInterval(poll, 3000);
   const t2 = setInterval(pollMessages, 3000);
   const t3 = setInterval(pollHealth, 4000);
   const t4 = setInterval(pollSpend, 8000);
-  return () => { [t1, t2, t3, t4].forEach(clearInterval); };
+  const t5 = setInterval(pollSessions, 5000);
+  return () => { [t1, t2, t3, t4, t5].forEach(clearInterval); };
 }

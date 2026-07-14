@@ -282,6 +282,98 @@ class TestHealth:
         assert _client().get("/api/agents/nope/health").status_code == 404
 
 
+# --- session logs (observability #733 vertical 3) ---------------------------
+
+def _seed_history_session(sessions_dir, name, *, status, role="engineer",
+                          error="", terminal_at=0.0, last_activity=0.0,
+                          pid=0, cost=0.0):
+    d = sessions_dir / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "state.json").write_text(json.dumps({
+        "name": name, "role": role, "status": status, "pid": pid,
+        "error": error, "terminal_at": terminal_at,
+        "last_activity": last_activity, "total_cost_usd": cost,
+        "session_id": f"sid-{name}",
+    }))
+
+
+class TestSessionLog:
+    MGR = "bobi-test-agent-director"
+
+    def _get(self, bobi_install):
+        r = _client().get(f"/api/agents/{bobi_install.agent_name}/sessions")
+        assert r.status_code == 200
+        return r.json()
+
+    def test_empty_history(self, bobi_install):
+        assert self._get(bobi_install) == {
+            "sessions": [],
+            "counts": {"active": 0, "completed": 0, "failed": 0, "crashed": 0},
+            "truncated": False,
+        }
+
+    def test_outcomes_listed_newest_first(self, bobi_install):
+        import os
+
+        sd = bobi_install.sessions_dir
+        _seed_history_session(sd, "old-done", status="completed",
+                              terminal_at=100.0, last_activity=100.0)
+        _seed_history_session(sd, "boom", status="failed",
+                              error="turn errored", terminal_at=200.0,
+                              last_activity=200.0, cost=0.25)
+        _seed_history_session(sd, "live", status="running", pid=os.getpid(),
+                              last_activity=300.0)
+        body = self._get(bobi_install)
+        assert [s["name"] for s in body["sessions"]] == \
+            ["live", "boom", "old-done"]
+        boom = body["sessions"][1]
+        assert boom["status"] == "failed"
+        assert boom["error"] == "turn errored"
+        assert boom["terminal_at"] == 200.0
+        assert boom["session_id"] == "sid-boom"
+        assert boom["total_cost_usd"] == 0.25
+        live = body["sessions"][0]
+        assert live["error"] == ""
+        assert live["terminal_at"] is None   # null, never omitted
+        assert body["counts"] == {"active": 1, "completed": 1,
+                                  "failed": 1, "crashed": 0}
+        assert body["truncated"] is False
+
+    def test_dead_pid_reads_crashed_not_running(self, bobi_install):
+        _seed_history_session(bobi_install.sessions_dir, "zombie",
+                              status="running", pid=999999999,
+                              last_activity=100.0)
+        body = self._get(bobi_install)
+        [z] = body["sessions"]
+        assert z["status"] == "crashed"
+        assert z["error"]                     # the honest-status message
+        assert z["terminal_at"] is not None
+        assert body["counts"] == {"active": 0, "completed": 0,
+                                  "failed": 0, "crashed": 1}
+
+    def test_manager_flagged(self, bobi_install):
+        _seed_history_session(bobi_install.sessions_dir, self.MGR,
+                              status="completed", role="director",
+                              terminal_at=1.0, last_activity=1.0)
+        [row] = self._get(bobi_install)["sessions"]
+        assert row["is_manager"] is True
+
+    def test_legacy_done_counts_completed(self, bobi_install):
+        _seed_history_session(bobi_install.sessions_dir, "old",
+                              status="done", last_activity=1.0)
+        assert self._get(bobi_install)["counts"]["completed"] == 1
+
+    def test_error_status_counts_failed(self, bobi_install):
+        # "error" is still written for turn-level failures (rotation death,
+        # monitor timeouts) - the log counts it as a failure.
+        _seed_history_session(bobi_install.sessions_dir, "curator",
+                              status="error", last_activity=1.0)
+        assert self._get(bobi_install)["counts"]["failed"] == 1
+
+    def test_unknown_agent_404(self, bobi_install):
+        assert _client().get("/api/agents/nope/sessions").status_code == 404
+
+
 # --- lifecycle actions -----------------------------------------------------
 
 class _FakeStartup:

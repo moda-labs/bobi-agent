@@ -164,6 +164,12 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def agent_health(name: str) -> JSONResponse:
         return JSONResponse(rt.health_summary(name))
 
+    # Session logs (#733 vertical 3): the full session history with honest
+    # terminal outcomes; transcripts drill in via the messages route below.
+    @app.get("/api/agents/{name}/sessions")
+    def agent_sessions(name: str) -> JSONResponse:
+        return JSONResponse(rt.session_log(name))
+
     @app.get("/api/agents/{name}/status")
     def agent_status(name: str) -> JSONResponse:
         return JSONResponse(rt.team_status(name))
