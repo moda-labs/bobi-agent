@@ -14,8 +14,9 @@ loop drives — the manager already injects between turns — at the cost of a
 process spawn per turn. A hot ``app-server`` session is a later optimization.
 
 MVP scope / known gaps (tracked in the spec): no per-message cost in dollars
-(token counts only); the system prompt is prepended to the first turn of a fresh
-thread rather than written as ``AGENTS.md``.
+(token counts only - the spend surfaces estimate dollars at fold time from the
+recorded token facts, see ``bobi.costs``, #760); the system prompt is prepended
+to the first turn of a fresh thread rather than written as ``AGENTS.md``.
 
 MCP servers (#428 Stage 4): Codex reads them from ``~/.codex/config.toml`` at
 process start (nothing rides the CLI invocation), so :meth:`CodexBrain.make_session`
@@ -71,8 +72,13 @@ def _instructions(system_prompt: Any) -> str:
 
 
 def _costs(u: dict, model: str) -> list[BrainCost]:
-    inp = (u.get("input_tokens", 0) or 0) + (u.get("cached_input_tokens", 0) or 0)
-    return [BrainCost(model=model or "codex", input_tokens=inp,
+    # codex's usage reports input_tokens INCLUSIVE of cached_input_tokens
+    # (its non_cached_input() is input - cached), so record both as-is;
+    # summing them double-counts every cache read. reasoning_output_tokens
+    # is likewise a subset of output_tokens - never add it. #760
+    return [BrainCost(model=model or "codex",
+                      input_tokens=u.get("input_tokens", 0) or 0,
+                      cached_input_tokens=u.get("cached_input_tokens", 0) or 0,
                       output_tokens=u.get("output_tokens", 0) or 0)]
 
 

@@ -3,7 +3,8 @@
    standalone agentui SPA, routed under #/agents/<name> with team-scoped
    endpoints. */
 
-import { openSetup, fmtUsd, healthChip, fmtAgo } from "../shell.js";
+import { openSetup, fmtUsd, fmtEst, fmtSpend, fmtTok, EST_NOTE, healthChip,
+         fmtAgo } from "../shell.js";
 
 export function mountAgent(el, { api, name }) {
   const base = "/api/agents/" + encodeURIComponent(name);
@@ -569,28 +570,50 @@ export function mountAgent(el, { api, name }) {
   // --- spend panel (observability, #733) ------------------------------
   // Team total plus the top-spend models, folded from existing per-session
   // cost. A read-only surface: no controls, hidden until there is spend.
+  // Models that report no dollars (the codex brain, #760) show a fold-time
+  // estimate marked "~ … est", or raw token volume when no defensible
+  // estimate exists (model not in the price table, or pre-split history).
   function renderSpend(data) {
-    const total = fmtUsd(data && data.total_cost_usd);
-    if (!total) { els.spendPanel.hidden = true; return; }
+    const recorded = (data && data.total_cost_usd) || 0;
+    const estimated = (data && data.estimated_cost_usd) || 0;
+    const byModel = (data && data.by_model) || {};
+    const byEst = (data && data.estimated_by_model) || {};
+    const tokens = (data && data.tokens_by_model) || {};
+    const total = fmtSpend(recorded, estimated);
+    const hasTokens = Object.keys(tokens).length > 0;
+    if (!total && !hasTokens) { els.spendPanel.hidden = true; return; }
     els.spendPanel.hidden = false;
     // The figure is lifetime-cumulative: it sums each session's recorded cost
     // across all sessions still on disk, persists across restarts, and is not
     // scoped to a time period. Label it so it is not read as "today".
     els.spendPanel.title =
-      "Cumulative recorded spend across all sessions on disk (not a time period)";
+      "Cumulative recorded spend across all sessions on disk (not a time period)."
+      + (estimated > 0 || hasTokens ? EST_NOTE : "");
     const n = data.sessions_counted || 0;
-    const rows = Object.entries(data.by_model || {})
-      .filter(([, v]) => v > 0).slice(0, 4);
+    // Recorded dollars rank first, then estimates, then token-only volume.
+    const rows = Object.entries(byModel)
+      .filter(([, v]) => v > 0)
+      .map(([k, v]) => [k, fmtUsd(v)]);
+    for (const [k, v] of Object.entries(byEst)) {
+      if (v > 0) rows.push([k, fmtEst(v)]);
+    }
+    for (const [k, t] of Object.entries(tokens)) {
+      if (byModel[k] > 0 || byEst[k] > 0) continue;
+      rows.push(
+        [k, `${fmtTok(t.input_tokens)} in / ${fmtTok(t.output_tokens)} out`]);
+    }
     els.spendPanel.innerHTML = "";
     const head = document.createElement("div");
     head.className = "spend-head mono";
-    head.innerHTML = `<span>spend</span><span class="spend-total">${total}</span>`;
+    // fmtSpend output is our own formatted string, never agent/user data.
+    head.innerHTML =
+      `<span>spend</span><span class="spend-total">${total || "-"}</span>`;
     els.spendPanel.appendChild(head);
     const sub = document.createElement("div");
     sub.className = "spend-sub";
     sub.textContent = `cumulative · ${n} session${n === 1 ? "" : "s"}`;
     els.spendPanel.appendChild(sub);
-    for (const [key, val] of rows) {
+    for (const [key, val] of rows.slice(0, 4)) {
       const row = document.createElement("div");
       row.className = "spend-row";
       const label = document.createElement("span");
@@ -600,7 +623,7 @@ export function mountAgent(el, { api, name }) {
       label.title = key;
       const amt = document.createElement("span");
       amt.className = "spend-amt";
-      amt.textContent = fmtUsd(val);
+      amt.textContent = val;
       row.appendChild(label);
       row.appendChild(amt);
       els.spendPanel.appendChild(row);

@@ -3,7 +3,7 @@
    design-only → the editor); lifecycle actions live on the agent's own
    dashboard, not here. */
 
-import { openSetup, fmtUsd, healthChip } from "../shell.js";
+import { openSetup, fmtSpend, EST_NOTE, healthChip } from "../shell.js";
 
 export function mountDashboard(el, { api }) {
   el.innerHTML = "";
@@ -29,7 +29,10 @@ export function mountDashboard(el, { api }) {
   el.appendChild(page);
 
   let lastAgents = [];
-  let spendByTeam = new Map();   // name -> total_cost_usd (installed teams)
+  // name -> {total, estimated} (installed teams). estimated is fold-time
+  // list-price math for models that report tokens only (#760), rendered
+  // with the ~ marker so it never reads as a bill.
+  let spendByTeam = new Map();
 
   function card(a) {
     const c = document.createElement("button");
@@ -60,12 +63,14 @@ export function mountDashboard(el, { api }) {
 
     const foot = document.createElement("div");
     foot.className = "agent-foot";
-    const spend = fmtUsd(spendByTeam.get(a.name));
+    const t = spendByTeam.get(a.name) || {};
+    const spend = fmtSpend(t.total, t.estimated);
     if (a.installed && spend) {
       const s = document.createElement("span");
       s.className = "tile-spend";
       s.textContent = spend;
-      s.title = "Cumulative recorded spend for this team";
+      s.title = "Cumulative recorded spend for this team."
+        + (t.estimated > 0 ? EST_NOTE : "");
       foot.appendChild(s);
     }
     const go = document.createElement("span");
@@ -116,13 +121,15 @@ export function mountDashboard(el, { api }) {
   }
 
   function renderFleetSpend(data) {
-    const total = fmtUsd(data && data.total_cost_usd);
+    const estimated = (data && data.estimated_cost_usd) || 0;
+    const total = fmtSpend(data && data.total_cost_usd, estimated);
     if (!total) { fleetSpend.hidden = true; return; }
     const n = data.sessions_counted || 0;
     fleetSpend.textContent = `${total} spent · ${n} session${n === 1 ? "" : "s"}`;
     // Lifetime-cumulative across every session on disk, not a time period.
     fleetSpend.title =
-      "Cumulative recorded spend across all teams and sessions on disk (not a time period)";
+      "Cumulative recorded spend across all teams and sessions on disk (not a time period)."
+      + (estimated > 0 ? EST_NOTE : "");
     fleetSpend.hidden = false;
   }
 
@@ -133,7 +140,10 @@ export function mountDashboard(el, { api }) {
     ]);
     if (spend.ok && spend.data) {
       spendByTeam = new Map(
-        (spend.data.teams || []).map((t) => [t.name, t.total_cost_usd]));
+        (spend.data.teams || []).map((t) => [t.name, {
+          total: t.total_cost_usd,
+          estimated: t.estimated_cost_usd,
+        }]));
       renderFleetSpend(spend.data);
     }
     if (dash.ok && dash.data && Array.isArray(dash.data.agents)) {

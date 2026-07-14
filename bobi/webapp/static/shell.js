@@ -63,6 +63,37 @@ export function fmtUsd(n) {
   return "$" + (n >= 1 ? n.toFixed(2) : n.toFixed(4));
 }
 
+// The "~$X est" honesty marker (#760): estimated figures are fold-time
+// list-price math over token counts for models that report no dollars (the
+// codex brain), and must never render indistinguishably from a bill. One
+// home for the marker so the total and the per-model rows cannot drift.
+export function fmtEst(n) {
+  const e = fmtUsd(n);
+  return e ? `~${e} est` : "";
+}
+
+// Combined recorded + estimated spend display (#760). Recorded dollars are
+// provider-reported. "" when there is neither, same as fmtUsd.
+export function fmtSpend(recorded, estimated) {
+  const r = fmtUsd(recorded);
+  const e = fmtEst(estimated);
+  if (r && e) return `${r} + ${e}`;
+  return e || r;
+}
+
+// Compact token count for spend fallbacks: 1234 -> "1.2K", 3400000 -> "3.4M".
+export function fmtTok(n) {
+  if (!n || n <= 0) return "0";
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "K";
+  return String(n);
+}
+
+// Tooltip suffix explaining the ~ figures wherever they appear.
+export const EST_NOTE =
+  " Figures marked ~ are estimates: token usage priced at current list " +
+  "rates, not provider billing (plan-based usage has no marginal dollar cost).";
+
 // Health chip derivation, shared by the dashboard cards and the agent
 // header (#733 system health): hosted cards carry `reachability` (heartbeat
 // age: live/stale/unreachable) and the sidecar's `manager_status`; local

@@ -226,6 +226,11 @@ class SessionEntry:
     model: str = ""
     provider: str = ""
     total_cost_usd: float = 0.0
+    # model_usage: "provider:model" -> {cost_usd, input_tokens, output_tokens,
+    # cached_input_tokens}. Entries are built ONLY by record_cost below; the
+    # presence of the cached_input_tokens key marks an entry recorded after
+    # the #760 cached/uncached split and licenses fold-time dollar estimation
+    # (bobi.costs.rollup_costs). Legacy entries lack the key and never gain it.
     model_usage: dict = field(default_factory=dict)
     rotation_count: int = 0
     started_at: float = field(default_factory=time.time)
@@ -308,8 +313,20 @@ class SessionRegistry:
 
     def record_cost(self, name: str, cost_usd: float,
                     model: str = "", provider: str = "",
-                    input_tokens: int = 0, output_tokens: int = 0) -> None:
-        """Accumulate cost and model_usage on a session entry."""
+                    input_tokens: int = 0, output_tokens: int = 0,
+                    cached_input_tokens: int = 0) -> None:
+        """Accumulate cost and model_usage on a session entry.
+
+        ``cached_input_tokens`` is the cached SUBSET of ``input_tokens``, kept
+        split because cache reads bill at a per-model discount. The key is
+        written on every FRESH entry (even 0), which marks it as carrying the
+        split: the fold-time dollar estimator (#760) refuses to price entries
+        without it, since legacy recordings folded cached tokens into
+        ``input_tokens`` at full weight. An existing entry that lacks the key
+        never gains it - one post-upgrade turn on a straddling session would
+        otherwise mark the whole merged entry priceable and bill its inflated
+        legacy input at the full rate.
+        """
         path = self._state_path(name)
         if not path.exists():
             return
@@ -318,15 +335,19 @@ class SessionRegistry:
         except (json.JSONDecodeError, TypeError):
             return
         data["total_cost_usd"] = data.get("total_cost_usd", 0.0) + cost_usd
-        if model or provider:
+        if model:
             usage = data.get("model_usage", {})
             key = f"{provider}:{model}" if provider else model
             if key:
-                entry = usage.get(key, {"cost_usd": 0.0, "input_tokens": 0,
-                                         "output_tokens": 0})
+                entry = usage.get(key)
+                if entry is None:
+                    entry = {"cost_usd": 0.0, "input_tokens": 0,
+                             "output_tokens": 0, "cached_input_tokens": 0}
                 entry["cost_usd"] = entry.get("cost_usd", 0.0) + cost_usd
                 entry["input_tokens"] = entry.get("input_tokens", 0) + input_tokens
                 entry["output_tokens"] = entry.get("output_tokens", 0) + output_tokens
+                if "cached_input_tokens" in entry:
+                    entry["cached_input_tokens"] += cached_input_tokens
                 usage[key] = entry
                 data["model_usage"] = usage
         if model and not data.get("model"):

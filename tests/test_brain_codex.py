@@ -65,7 +65,7 @@ async def test_turn_converts_messages_and_captures_thread():
         {"type": "item.completed",
          "item": {"id": "i2", "type": "agent_message", "text": "done."}},
         {"type": "turn.completed",
-         "usage": {"input_tokens": 2, "cached_input_tokens": 1000,
+         "usage": {"input_tokens": 1002, "cached_input_tokens": 1000,
                    "output_tokens": 9}},
     ]
     s = _CodexSession(cwd="/tmp/x", instructions="SYS", runner=_runner_of(events))
@@ -81,7 +81,11 @@ async def test_turn_converts_messages_and_captures_thread():
     assert isinstance(result, TurnResult)
     assert result.session_id == "th-1"
     assert result.is_error is False
-    assert result.costs[0].input_tokens == 1002   # input + cached
+    # codex reports input_tokens INCLUSIVE of cached_input_tokens (its
+    # non_cached_input() is input - cached); record both as-is - the old
+    # sum double-counted every cache read. #760
+    assert result.costs[0].input_tokens == 1002
+    assert result.costs[0].cached_input_tokens == 1000
     assert s._thread_id == "th-1"
 
 

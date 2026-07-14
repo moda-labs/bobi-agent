@@ -150,17 +150,42 @@ class TestSpend:
     def test_team_spend_unknown_agent_404(self, bobi_install):
         assert _client().get("/api/agents/nope/spend").status_code == 404
 
+    def test_team_spend_estimates_codex_tokens(self, bobi_install):
+        # A codex-brained session records tokens with the cached split but
+        # cost 0 (#760): the wire carries a fold-time estimate + raw token
+        # volume on the additive fields, and recorded dollars stay 0.
+        _seed_session(bobi_install.sessions_dir, "dev", role="dev", cost=0.0,
+                      model_usage={"openai:gpt-5.6": {
+                          "cost_usd": 0.0, "input_tokens": 1_000_000,
+                          "cached_input_tokens": 900_000,
+                          "output_tokens": 10_000}})
+        body = _client().get(
+            f"/api/agents/{bobi_install.agent_name}/spend").json()
+        assert body["total_cost_usd"] == 0.0
+        assert body["estimated_cost_usd"] == 1.25
+        assert body["estimated_by_model"] == {"openai:gpt-5.6": 1.25}
+        assert body["tokens_by_model"]["openai:gpt-5.6"] == {
+            "input_tokens": 1_000_000, "cached_input_tokens": 900_000,
+            "output_tokens": 10_000}
+
     def test_fleet_spend_totals(self, bobi_install):
         _seed_session(bobi_install.sessions_dir, "director", cost=1.25)
+        _seed_session(bobi_install.sessions_dir, "dev", role="dev", cost=0.0,
+                      model_usage={"openai:gpt-5.6": {
+                          "cost_usd": 0.0, "input_tokens": 1_000_000,
+                          "cached_input_tokens": 900_000,
+                          "output_tokens": 10_000}})
         r = _client().get("/api/fleet/spend")
         assert r.status_code == 200
         body = r.json()
         assert body["total_cost_usd"] == 1.25
-        assert body["sessions_counted"] == 1
+        assert body["estimated_cost_usd"] == 1.25
+        assert body["sessions_counted"] == 2
         team = next(t for t in body["teams"]
                     if t["name"] == bobi_install.agent_name)
         assert team["total_cost_usd"] == 1.25
-        assert team["sessions_counted"] == 1
+        assert team["estimated_cost_usd"] == 1.25
+        assert team["sessions_counted"] == 2
 
     def test_spend_read_does_not_create_sessions_dir(self, bobi_install):
         import shutil

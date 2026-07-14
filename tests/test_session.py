@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from bobi.brain import TurnResult
+from bobi.brain import BrainCost, TurnResult
 from bobi.inbox import Message
 from bobi.session import Session
 
@@ -82,6 +82,46 @@ def test_emit_session_unreachable_alert_posts_expected_event(monkeypatch):
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_drain_turn_records_each_model_usage_entry(bobi_install):
+    from bobi.sdk import SessionEntry, get_registry
+
+    registry = get_registry()
+    registry.register(SessionEntry(name="test-multi-cost", role="engineer"))
+
+    class FakeClient:
+        provider = "anthropic"
+
+        async def receive_response(self):
+            yield TurnResult(
+                session_id="sess-1",
+                total_cost_usd=0.30,
+                duration_ms=10,
+                num_turns=1,
+                costs=[
+                    BrainCost(model="claude-opus-4-8",
+                              input_tokens=10, output_tokens=2),
+                    BrainCost(model="claude-haiku-3-5-20241022",
+                              input_tokens=5, output_tokens=1),
+                ],
+            )
+
+    s = Session(name="test-multi-cost", cwd=str(bobi_install.repo_path))
+    s._input_ready = asyncio.Event()
+    s._client = FakeClient()
+
+    await s._drain_turn()
+
+    entry = registry.get("test-multi-cost")
+    assert entry is not None
+    assert abs(entry.total_cost_usd - 0.30) < 0.001
+    assert entry.model_usage[
+        "anthropic:claude-opus-4-8"]["input_tokens"] == 10
+    assert entry.model_usage[
+        "anthropic:claude-haiku-3-5-20241022"]["input_tokens"] == 5
+    assert sum(v["cost_usd"] for v in entry.model_usage.values()) == 0.0
 
 
 class TestInputReadyWake:
