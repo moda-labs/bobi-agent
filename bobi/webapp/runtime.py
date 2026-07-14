@@ -141,7 +141,7 @@ class TeamRuntime(ABC):
         ``estimated_*`` is fold-time list-price math over recorded token
         counts for models that report no dollars (#760), kept separate so an
         estimate is never mistaken for a bill. ``tokens_by_model`` carries the
-        raw token volumes — the render fallback when no estimate exists.
+        raw token volumes - the render fallback when no estimate exists.
         """
 
     @abstractmethod

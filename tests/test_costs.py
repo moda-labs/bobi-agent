@@ -31,7 +31,7 @@ class TestPriceTable:
 
     def test_cached_subset_priced_at_cached_rate(self):
         # gpt-5.6: $5/M input, $0.50/M cached, $30/M output. input_tokens is
-        # INCLUSIVE of cached (900K cached + 100K uncached here) — the whole
+        # INCLUSIVE of cached (900K cached + 100K uncached here) - the whole
         # point of #760's split: pricing 1M cache-heavy input at the full
         # rate would fabricate ~$5 where ~$0.95 is defensible.
         cost = estimate_cost("openai", "gpt-5.6",
@@ -182,7 +182,7 @@ class TestEstimatedRollup:
         sessions_dir = self._make_sessions(
             tmp_path, {"dev-1-task": self._codex_session()})
         summary = rollup_costs(sessions_dir)
-        # Recorded dollars stay zero — the estimate rides separate fields.
+        # Recorded dollars stay zero - the estimate rides separate fields.
         assert summary.total_cost_usd == 0.0
         assert summary.by_model["openai:gpt-5.6"] == 0.0
         # 100K uncached * $5 + 900K cached * $0.50 + 10K out * $30 per Mtok
@@ -219,6 +219,16 @@ class TestEstimatedRollup:
         assert summary.total_cost_usd == 0.42
         assert summary.estimated_cost_usd == 0.0
         assert "openai:gpt-5.6" in summary.tokens_by_model
+
+    def test_string_token_counts_do_not_crash_the_fold(self, tmp_path):
+        # A hand-edited state.json can carry a string count; the fold backs a
+        # web endpoint and must skip it (treat as 0), not 500 the whole fleet.
+        s = self._codex_session()
+        s["model_usage"]["openai:gpt-5.6"]["input_tokens"] = "1000000"
+        sessions_dir = self._make_sessions(tmp_path, {"dev-1-task": s})
+        summary = rollup_costs(sessions_dir)
+        assert summary.tokens_by_model["openai:gpt-5.6"]["input_tokens"] == 0
+        assert summary.tokens_by_model["openai:gpt-5.6"]["output_tokens"] == 10_000
 
     def test_estimates_accumulate_across_sessions(self, tmp_path):
         sessions_dir = self._make_sessions(tmp_path, {

@@ -63,17 +63,22 @@ export function fmtUsd(n) {
   return "$" + (n >= 1 ? n.toFixed(2) : n.toFixed(4));
 }
 
+// The "~$X est" honesty marker (#760): estimated figures are fold-time
+// list-price math over token counts for models that report no dollars (the
+// codex brain), and must never render indistinguishably from a bill. One
+// home for the marker so the total and the per-model rows cannot drift.
+export function fmtEst(n) {
+  const e = fmtUsd(n);
+  return e ? `~${e} est` : "";
+}
+
 // Combined recorded + estimated spend display (#760). Recorded dollars are
-// provider-reported; estimated is fold-time list-price math over token counts
-// for models that report no dollars (the codex brain). The "~ … est" marker
-// is the honesty contract: an estimate must never render indistinguishably
-// from a bill. "" when there is neither, same as fmtUsd.
+// provider-reported. "" when there is neither, same as fmtUsd.
 export function fmtSpend(recorded, estimated) {
   const r = fmtUsd(recorded);
-  const e = fmtUsd(estimated);
-  if (r && e) return `${r} + ~${e} est`;
-  if (e) return `~${e} est`;
-  return r;
+  const e = fmtEst(estimated);
+  if (r && e) return `${r} + ${e}`;
+  return e || r;
 }
 
 // Compact token count for spend fallbacks: 1234 -> "1.2K", 3400000 -> "3.4M".

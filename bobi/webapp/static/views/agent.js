@@ -3,7 +3,7 @@
    standalone agentui SPA, routed under #/agents/<name> with team-scoped
    endpoints. */
 
-import { openSetup, fmtUsd, fmtSpend, fmtTok, EST_NOTE, healthChip,
+import { openSetup, fmtUsd, fmtEst, fmtSpend, fmtTok, EST_NOTE, healthChip,
          fmtAgo } from "../shell.js";
 
 export function mountAgent(el, { api, name }) {
@@ -584,7 +584,7 @@ export function mountAgent(el, { api, name }) {
       .filter(([, v]) => v > 0)
       .map(([k, v]) => [k, fmtUsd(v)]);
     for (const [k, v] of Object.entries(byEst)) {
-      if (v > 0) rows.push([k, `~${fmtUsd(v)} est`]);
+      if (v > 0) rows.push([k, fmtEst(v)]);
     }
     for (const [k, t] of Object.entries(tokens)) {
       if (byModel[k] > 0 || byEst[k] > 0) continue;
@@ -594,13 +594,9 @@ export function mountAgent(el, { api, name }) {
     els.spendPanel.innerHTML = "";
     const head = document.createElement("div");
     head.className = "spend-head mono";
-    const headLabel = document.createElement("span");
-    headLabel.textContent = "spend";
-    const headTotal = document.createElement("span");
-    headTotal.className = "spend-total";
-    headTotal.textContent = total || "—";
-    head.appendChild(headLabel);
-    head.appendChild(headTotal);
+    // fmtSpend output is our own formatted string, never agent/user data.
+    head.innerHTML =
+      `<span>spend</span><span class="spend-total">${total || "-"}</span>`;
     els.spendPanel.appendChild(head);
     const sub = document.createElement("div");
     sub.className = "spend-sub";

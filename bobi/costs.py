@@ -15,22 +15,22 @@ log = logging.getLogger(__name__)
 
 # Fallback price per million tokens (input, cached_input, output) by
 # provider:model. Used only when the provider doesn't report cost directly
-# (e.g. the codex brain reports token counts only — #760); an estimate is
+# (e.g. the codex brain reports token counts only - #760); an estimate is
 # never mixed into recorded dollars, it rides the separate estimated_* fields.
 # The cached-input rate is carried per model because the discount is NOT a
 # constant: gpt-5.x cache reads are 10% of input, o-series and codex-mini are
 # 25%, gpt-4o was 50%. Models a fleet may have recorded historically stay in
-# the table — the fold prices the model each session actually recorded, never
+# the table - the fold prices the model each session actually recorded, never
 # "the current default". Approximate list prices as of 2026-07
 # (developers.openai.com/api/docs/pricing; cross-checked against LiteLLM's
-# model_prices json and models.dev) and should be updated periodically — the
+# model_prices json and models.dev) and should be updated periodically - the
 # authoritative source of cost is always the provider's own billing.
 PRICE_TABLE: dict[str, tuple[float, float, float]] = {
     # Anthropic (cache read = 10% of input)
     "anthropic:claude-sonnet-4-20250514": (3.0, 0.30, 15.0),
     "anthropic:claude-opus-4-20250514": (15.0, 1.50, 75.0),
     "anthropic:claude-haiku-3-5-20241022": (0.80, 0.08, 4.0),
-    # OpenAI — current codex lineup (gpt-5.6 family) and still-offered tiers
+    # OpenAI - current codex lineup (gpt-5.6 family) and still-offered tiers
     "openai:gpt-5.6": (5.00, 0.50, 30.00),
     "openai:gpt-5.6-sol": (5.00, 0.50, 30.00),
     "openai:gpt-5.6-terra": (2.50, 0.25, 15.00),
@@ -40,7 +40,7 @@ PRICE_TABLE: dict[str, tuple[float, float, float]] = {
     "openai:gpt-5.4-mini": (0.75, 0.075, 4.50),
     "openai:gpt-5.3-codex": (1.75, 0.175, 14.00),
     "openai:gpt-5.3-codex-spark": (1.75, 0.175, 14.00),
-    # OpenAI — legacy codex-era models a fleet may have recorded
+    # OpenAI - legacy codex-era models a fleet may have recorded
     "openai:gpt-5.2": (1.75, 0.175, 14.00),
     "openai:gpt-5.2-codex": (1.75, 0.175, 14.00),
     "openai:gpt-5.1": (1.25, 0.125, 10.00),
@@ -50,7 +50,7 @@ PRICE_TABLE: dict[str, tuple[float, float, float]] = {
     "openai:gpt-5": (1.25, 0.125, 10.00),
     "openai:gpt-5-codex": (1.25, 0.125, 10.00),
     "openai:codex-mini-latest": (1.50, 0.375, 6.00),
-    # OpenAI — older API models
+    # OpenAI - older API models
     "openai:gpt-4o": (2.50, 1.25, 10.0),
     "openai:gpt-4o-mini": (0.15, 0.075, 0.60),
     "openai:gpt-4.1": (2.0, 0.50, 8.0),
@@ -78,7 +78,7 @@ def estimate_cost(provider: str, model: str,
     ``cached_input_tokens`` is the cached SUBSET of ``input_tokens`` (the
     provider convention), priced at the per-model cached rate; the remainder
     bills at the full input rate. ``output_tokens`` already includes any
-    reasoning tokens — callers must not add those separately.
+    reasoning tokens - callers must not add those separately.
     """
     key = f"{provider}:{model}"
     prices = PRICE_TABLE.get(key)
@@ -97,11 +97,11 @@ class CostSummary:
 
     ``total_cost_usd`` and the ``by_*`` maps hold PROVIDER-REPORTED dollars
     only. Usage with no reported dollars (the codex brain records token counts
-    only — #760) is estimated at fold time from :data:`PRICE_TABLE` into the
+    only - #760) is estimated at fold time from :data:`PRICE_TABLE` into the
     separate ``estimated_*`` fields, never mixed into the recorded figures:
     an estimate is honest only while it is distinguishable from a bill.
     ``tokens_by_model`` carries the raw token volumes for every model with
-    usage — the display fallback when no defensible estimate exists (model not
+    usage - the display fallback when no defensible estimate exists (model not
     in the table, or history recorded before the cached/uncached split).
     """
     total_cost_usd: float = 0.0
@@ -143,6 +143,14 @@ class CostSummary:
             "estimated_by_model": ranked(self.estimated_by_model),
             "tokens_by_model": tokens,
         }
+
+
+def _tok(v) -> int:
+    """A token count usable in arithmetic. isinstance (not just ``or 0``) for
+    the same reason the cost fold coerces null: a hand-edited state.json can
+    carry a string count, and the fold backs a web endpoint that must not 500
+    on one malformed session."""
+    return v if isinstance(v, int) else 0
 
 
 def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
@@ -200,9 +208,9 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
                 summary.by_model.get(key, 0.0) + usage_cost
             )
 
-            input_tokens = usage.get("input_tokens") or 0
-            output_tokens = usage.get("output_tokens") or 0
-            cached_tokens = usage.get("cached_input_tokens") or 0
+            input_tokens = _tok(usage.get("input_tokens"))
+            output_tokens = _tok(usage.get("output_tokens"))
+            cached_tokens = _tok(usage.get("cached_input_tokens"))
             if input_tokens or output_tokens:
                 t = summary.tokens_by_model.setdefault(
                     key, {"input_tokens": 0, "cached_input_tokens": 0,
@@ -213,7 +221,7 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
             # Estimate dollars only where honesty allows (#760): the model
             # reported no cost, the entry carries the cached/uncached split
             # (its absence marks pre-split history, where cached tokens were
-            # folded into input_tokens at full weight — pricing those would
+            # folded into input_tokens at full weight - pricing those would
             # overestimate ~10x on cache-heavy turns), and the model is in
             # the table (unknown models render as token volume, not $0).
             if (not usage_cost and "cached_input_tokens" in usage

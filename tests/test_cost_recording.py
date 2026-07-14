@@ -141,9 +141,9 @@ class TestRecordCost:
         registry.record_cost("nonexistent", 0.10, model="test", provider="test")
 
     def test_record_cost_cached_split(self, bobi_install):
-        """The cached subset accumulates, and the key is ALWAYS written (even
-        when 0) — its presence marks the entry as post-split, which is what
-        licenses the fold-time dollar estimator to price it (#760)."""
+        """The cached subset accumulates, and every FRESH entry carries the
+        key (even when 0) - its presence marks the entry as post-split, which
+        is what licenses the fold-time dollar estimator to price it (#760)."""
         from bobi.sdk import get_registry, SessionEntry
         registry = get_registry()
         registry.register(SessionEntry(name="codex-test", role="dev"))
@@ -168,3 +168,28 @@ class TestRecordCost:
         u = registry.get("claude-test").model_usage[
             "anthropic:claude-sonnet-4-20250514"]
         assert u["cached_input_tokens"] == 0
+
+    def test_record_cost_legacy_entry_never_gains_split(self, bobi_install):
+        """A pre-split entry (recorded when cached tokens were folded into
+        input_tokens at full weight) must NOT gain the marker key from a
+        post-upgrade turn: that would license the estimator to price the
+        whole merged entry, billing the inflated legacy input at the full
+        rate - the exact overestimate #760 guards against."""
+        import json as _json
+        from bobi.sdk import get_registry, SessionEntry
+        registry = get_registry()
+        registry.register(SessionEntry(name="straddle-test", role="dev"))
+        # Seed a legacy-shaped entry directly (no cached_input_tokens key).
+        path = registry.session_dir("straddle-test") / "state.json"
+        data = _json.loads(path.read_text())
+        data["model_usage"] = {"openai:gpt-5.6": {
+            "cost_usd": 0.0, "input_tokens": 5_000_000,
+            "output_tokens": 100_000}}
+        path.write_text(_json.dumps(data))
+
+        registry.record_cost("straddle-test", 0.0, model="gpt-5.6",
+                             provider="openai", input_tokens=1000,
+                             output_tokens=50, cached_input_tokens=900)
+        u = registry.get("straddle-test").model_usage["openai:gpt-5.6"]
+        assert "cached_input_tokens" not in u   # stays legacy, never priced
+        assert u["input_tokens"] == 5_001_000   # facts still accumulate
