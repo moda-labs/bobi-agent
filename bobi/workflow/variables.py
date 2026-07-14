@@ -188,10 +188,10 @@ def _parse_value(expr: str) -> tuple[Any, str]:
         return items, expr[end + 1:]
 
     # Boolean literals
-    if expr.startswith("true"):
-        return "true", expr[4:]
-    if expr.startswith("false"):
-        return "false", expr[5:]
+    bool_match = re.match(r'(true|false)(?=$|[\s=!<>])', expr, re.IGNORECASE)
+    if bool_match:
+        value = bool_match.group(1).lower()
+        return value, expr[bool_match.end():]
 
     # Bare word (until whitespace or operator)
     match = re.match(r'([^\s=!<>]+)', expr)
