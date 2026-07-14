@@ -57,6 +57,7 @@ class AgentResult:
     duration_ms: int = 0
     total_cost_usd: float = 0.0
     num_turns: int = 0
+    error_kind: str = ""
     error: str = ""
     final_text: str = ""
     # The model that served the run (from the brain's per-call cost breakdown) —
@@ -464,6 +465,7 @@ async def _run_agent_supervised(
 
             result.success = not (result_msg.is_error or result_msg.error_kind)
             if not result.success:
+                result.error_kind = result_msg.error_kind
                 if result_msg.error_message and result_msg.result_text:
                     result.error = (
                         f"{result_msg.error_message}: {result_msg.result_text}"
@@ -1787,6 +1789,8 @@ def _run_verdict_agent_blocking(
             last_error = result.error or f"{phase} agent failed"
             log.warning(f"{phase.capitalize()} '{slug}' attempt "
                         f"{attempt}/{attempts} failed: {last_error}")
+            if result.error_kind == "max_turns_reached":
+                break
             continue
 
         verdict = parse(result.final_text)

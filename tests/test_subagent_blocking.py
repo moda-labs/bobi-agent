@@ -35,6 +35,7 @@ from bobi.subagent import (
     GATE_MAX_TURNS,
     AgentResult,
     CheckResult,
+    CURATOR_MAX_TURNS,
     GateResult,
     InputHandler,
     _build_check_prompt,
@@ -51,6 +52,7 @@ from bobi.subagent import (
     _session_name,
     _summarize_output,
     run_check_blocking,
+    run_curator_blocking,
     run_gate_blocking,
     run_phase_blocking,
     spawn_adhoc,
@@ -1461,6 +1463,61 @@ class TestRunCheckBlocking:
         # A check observes current runtime state; resuming a previous
         # transcript can replay stale observations and stale verdicts.
         assert [call["fresh"] for call in captured] == [True, True]
+
+
+# ---------------------------------------------------------------------------
+# Tests: run_curator_blocking
+# ---------------------------------------------------------------------------
+
+class TestRunCuratorBlocking:
+    def test_max_turns_result_error_is_actionable_and_not_retried(self):
+        calls: list[dict] = []
+
+        async def _mock(prompt, cwd, run_key, phase, timeout, **kw):
+            calls.append({**kw, "run_key": run_key, "phase": phase})
+            return AgentResult(
+                session_id="s", run_key=run_key, phase=phase, success=False,
+                error_kind="max_turns_reached",
+                error="max_turns_reached (max=10, turns=11)",
+            )
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            summary, error = run_curator_blocking(
+                task="Rewrite policy memory", cwd="/tmp", attempts=2,
+            )
+
+        assert summary is None
+        assert error == "max_turns_reached (max=10, turns=11)"
+        assert len(calls) == 1
+        assert calls[0]["role"] == "curator"
+        assert calls[0]["max_turns"] == CURATOR_MAX_TURNS
+        assert calls[0]["fresh"] is True
+
+    def test_no_parseable_curator_summary_retries(self):
+        calls: list[str] = []
+
+        async def _mock(prompt, cwd, run_key, phase, timeout, **kw):
+            calls.append(run_key)
+            text = (
+                "not a parseable curator summary"
+                if len(calls) == 1
+                else '{"success": true, "updated": false}'
+            )
+            return AgentResult(
+                session_id="sess-curator", run_key=run_key, phase=phase,
+                success=True, final_text=text,
+            )
+
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            summary, error = run_curator_blocking(
+                task="Rewrite policy memory", cwd="/tmp", attempts=2,
+            )
+
+        assert summary == {"success": True, "updated": False}
+        assert error == ""
+        assert len(calls) == 2
 
 
 # ---------------------------------------------------------------------------
