@@ -101,7 +101,14 @@ def _is_sleep_cycle_task(text: str) -> bool:
     sleep-cycle prompt, rendered transcript delta, and current memory back into
     later sleep-cycle runs.
     """
-    return text.lstrip().startswith("You are the **sleep cycle** for this agent team.")
+    stripped = text.lstrip()
+    return (
+        stripped.startswith("You are the **sleep cycle** for this agent team.")
+        or (
+            "=== CURRENT long_term_memory.md (rewrite this in full via Write) ===" in stripped
+            and "=== NEW TRANSCRIPT DELTA (since your last run) ===" in stripped
+        )
+    )
 
 
 def _is_role_startup_prompt(text: str) -> bool:
@@ -161,8 +168,20 @@ def _is_sleep_cycle_session(session_id: str, lines: list[str]) -> bool:
         if msg.get("type") != "user":
             continue
         text = _extract_text(msg.get("message", {}).get("content", ""))
-        return _is_sleep_cycle_task(text)
+        if _is_sleep_cycle_task(text):
+            return True
     return False
+
+
+def _sleep_cycle_echo_session_sql() -> str:
+    return """
+        SELECT DISTINCT session_id FROM messages
+        WHERE content LIKE 'You are the **sleep cycle** for this agent team.%'
+           OR (
+             content LIKE '%=== CURRENT long_term_memory.md (rewrite this in full via Write) ===%'
+             AND content LIKE '%=== NEW TRANSCRIPT DELTA (since your last run) ===%'
+           )
+    """
 
 
 def _project_from_path(file_path: Path) -> str:
@@ -400,6 +419,7 @@ def messages_since(cursor: int, limit: int | None = None) -> list[dict]:
         SELECT * FROM messages
         WHERE id > ?
           AND session_id NOT LIKE 'curator-%-curator'
+          AND session_id NOT IN (""" + _sleep_cycle_echo_session_sql() + """)
           AND content NOT LIKE 'You are the **sleep cycle** for this agent team.%'
           AND NOT (
             type = 'user'

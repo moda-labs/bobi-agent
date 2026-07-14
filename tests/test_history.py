@@ -72,6 +72,16 @@ def _role_startup_prompt(role: str = "gtm-director") -> str:
     )
 
 
+def _sleep_cycle_rendered_task(prompt: str = "Custom team memory distillation prompt.") -> str:
+    return (
+        f"{prompt}\n\n"
+        "=== CURRENT long_term_memory.md (rewrite this in full via Write) ===\n"
+        "existing memory\n\n"
+        "=== NEW TRANSCRIPT DELTA (since your last run) ===\n"
+        "copied team transcript"
+    )
+
+
 # ---------------------------------------------------------------------------
 # _extract_text
 # ---------------------------------------------------------------------------
@@ -379,9 +389,7 @@ class TestIndexFile:
         f.parent.mkdir(parents=True)
         _write_jsonl(f, [
             _user_msg(
-                "Custom team memory distillation prompt.\n\n"
-                "## NEW TRANSCRIPT DELTA\n\n"
-                "copied team transcript",
+                _sleep_cycle_rendered_task(),
                 timestamp="2026-07-14T00:00:00",
             ),
             _assistant_msg("custom summary", timestamp="2026-07-14T00:00:01"),
@@ -408,9 +416,7 @@ class TestIndexFile:
         f.parent.mkdir(parents=True)
         _write_jsonl(f, [
             _user_msg(
-                "Custom team memory distillation prompt.\n\n"
-                "## NEW TRANSCRIPT DELTA\n\n"
-                "copied team transcript",
+                _sleep_cycle_rendered_task(),
                 timestamp="2026-07-14T00:00:00",
             ),
             _assistant_msg("custom summary", timestamp="2026-07-14T00:00:01"),
@@ -421,6 +427,29 @@ class TestIndexFile:
         assert db.execute(
             "SELECT lines_read FROM index_state WHERE file_path = ?", (str(f),)
         ).fetchone()[0] == 2
+
+    def test_skips_sleep_cycle_session_when_first_user_line_is_preamble(
+        self, db, tmp_path
+    ):
+        f = tmp_path / "proj" / "claude-session-with-preamble.jsonl"
+        f.parent.mkdir(parents=True)
+        _write_jsonl(f, [
+            _user_msg("transcript preamble", timestamp="2026-07-14T00:00:00"),
+            _assistant_msg("prelude", timestamp="2026-07-14T00:00:01"),
+            _user_msg(
+                "You are the **sleep cycle** for this agent team.\n\n"
+                "=== NEW TRANSCRIPT DELTA (since your last run) ===\n"
+                "copied team transcript",
+                timestamp="2026-07-14T00:00:02",
+            ),
+            _assistant_msg("custom summary", timestamp="2026-07-14T00:00:03"),
+        ])
+
+        assert _index_file(db, f) == 0
+        assert db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+        assert db.execute(
+            "SELECT lines_read FROM index_state WHERE file_path = ?", (str(f),)
+        ).fetchone()[0] == 4
 
     def test_skips_rotation_base_prompt_reinjection(self, db, tmp_path):
         f = tmp_path / "proj" / "director-rotation.jsonl"
@@ -870,8 +899,32 @@ class TestMessagesSince:
         """)
         conn.execute("""
             INSERT INTO messages (session_id, type, role, content, timestamp, line_number)
+            VALUES ('claude-unmapped-default-sleep-cycle', 'assistant', 'assistant',
+                    'sleep-cycle assistant summary',
+                    '2026-07-14T00:00:03', 2)
+        """)
+        conn.execute("""
+            INSERT INTO messages (session_id, type, role, content, tool_name,
+                                  tool_input, timestamp, line_number)
+            VALUES ('claude-unmapped-default-sleep-cycle', 'assistant', 'assistant',
+                    '', 'Write', '{"file_path": "long_term_memory.md"}',
+                    '2026-07-14T00:00:03', 2)
+        """)
+        conn.execute("""
+            INSERT INTO messages (session_id, type, role, content, timestamp, line_number)
+            VALUES ('claude-unmapped-custom-sleep-cycle', 'user', 'user', ?,
+                    '2026-07-14T00:00:04', 1)
+        """, (_sleep_cycle_rendered_task(),))
+        conn.execute("""
+            INSERT INTO messages (session_id, type, role, content, timestamp, line_number)
+            VALUES ('claude-unmapped-custom-sleep-cycle', 'assistant', 'assistant',
+                    'custom sleep-cycle assistant summary',
+                    '2026-07-14T00:00:05', 2)
+        """)
+        conn.execute("""
+            INSERT INTO messages (session_id, type, role, content, timestamp, line_number)
             VALUES ('director-rotated', 'user', 'user', ?,
-                    '2026-07-14T00:00:03', 1)
+                    '2026-07-14T00:00:06', 1)
         """, (_role_startup_prompt(),))
         conn.commit()
         conn.close()
