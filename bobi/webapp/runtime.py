@@ -72,6 +72,17 @@ class TeamRuntime(ABC):
     chat. Chat is deliberately two calls (submit returns a message id, the
     outcome lands on the job) so no request is held open for a minutes-long
     agent reply regardless of what transport an implementation uses.
+
+    Widening this ABC: an out-of-tree subclass lives in the private
+    bobi-deploy repo (``EventBusRuntime``), whose CI tracks this repo's
+    ``dev`` channel (auto-advanced to every green main push, #740). Adding
+    an ``@abstractmethod`` here therefore breaks that repo's CI the moment
+    this repo merges - Python rejects instantiating the subclass until it
+    implements the method. Sequencing rule: land the private subclass
+    implementation FIRST, then the abstract method here (an extra method on
+    a subclass is harmless; see the #733 system-health PR pair). Keep new
+    methods read-only-safe and document the wire shape in the docstring, as
+    below - both runtimes must emit it identically, it is rendered once.
     """
 
     @abstractmethod
