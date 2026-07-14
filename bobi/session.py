@@ -728,22 +728,26 @@ class Session:
                     # breakdown, attributed to the brain's provider (not a
                     # hardcoded "anthropic" — #485).
                     if cost > 0 or msg.costs:
-                        model = ""
-                        input_tokens = 0
-                        output_tokens = 0
-                        cached_input_tokens = 0
-                        for c in msg.costs:
-                            model = c.model or model
-                            input_tokens += c.input_tokens
-                            output_tokens += c.output_tokens
-                            cached_input_tokens += c.cached_input_tokens
-                        registry.record_cost(
-                            self.name, cost, model=model,
-                            provider=getattr(self._client, "provider", "anthropic"),
-                            input_tokens=input_tokens,
-                            output_tokens=output_tokens,
-                            cached_input_tokens=cached_input_tokens,
-                        )
+                        provider = getattr(self._client, "provider", "anthropic")
+                        if msg.costs:
+                            single_model = len(msg.costs) == 1
+                            for c in msg.costs:
+                                registry.record_cost(
+                                    self.name, cost if single_model else 0.0,
+                                    model=c.model,
+                                    provider=provider,
+                                    input_tokens=c.input_tokens,
+                                    output_tokens=c.output_tokens,
+                                    cached_input_tokens=c.cached_input_tokens,
+                                )
+                            if not single_model and cost > 0:
+                                registry.record_cost(
+                                    self.name, cost, provider=provider,
+                                )
+                        else:
+                            registry.record_cost(
+                                self.name, cost, provider=provider,
+                            )
                     self._last_api_error_status = msg.api_error_status
                     if msg.is_error:
                         # A turn-level API error (e.g. 529 Overloaded, rate

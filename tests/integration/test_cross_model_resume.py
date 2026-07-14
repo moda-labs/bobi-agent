@@ -66,8 +66,7 @@ class TestBrainCrossModelResume:
 
         # system_prompt=None keeps the Claude Code preset, whose system prompt
         # names the running model - the ground truth for "did the switch
-        # actually happen" (TurnResult.costs carries no model name on this
-        # path: the SDK's dict-shaped model_usage is a known legacy no-op).
+        # actually happen" rather than just which model usage was reported.
         second = brain.make_session(
             cwd="/tmp",
             system_prompt=None,

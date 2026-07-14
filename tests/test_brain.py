@@ -333,9 +333,7 @@ def test_result_to_turn_carries_core_fields():
 
 
 def test_result_to_turn_normalizes_model_usage_list_of_objects():
-    """The breakdown is read per-element via getattr (model/input/output) — the
-    shape ``session.py`` has always consumed. A list of usage objects populates
-    the BrainCost list."""
+    """A list of usage objects still populates the BrainCost list."""
 
     class _MU:
         def __init__(self, model, i, o):
@@ -349,19 +347,34 @@ def test_result_to_turn_normalizes_model_usage_list_of_objects():
     ]
 
 
-def test_result_to_turn_dict_model_usage_preserves_legacy_noop():
-    """Behavior-preservation guard (#485 Phase 1): the SDK actually types
-    ``model_usage`` as ``dict[str, Any]``, but the legacy code (and this faithful
-    adapter) iterate it as a list-of-objects, so a dict is wrapped as one element
-    whose getattr lookups miss → an empty/zero BrainCost. This is a pre-existing
-    latent bug, deliberately preserved here; fixing the dict shape is a tracked
-    follow-up, not a Phase-1 behavior change."""
-    msg = _result(model_usage={"claude-opus-4-8": {"input_tokens": 10, "output_tokens": 3}})
+def test_result_to_turn_normalizes_dict_model_usage():
+    """Claude's SDK reports model_usage as model -> usage; keep those token
+    facts so Claude has parity with the token-volume surfaces."""
+    msg = _result(model_usage={
+        "claude-opus-4-8": {"input_tokens": 10, "output_tokens": 3}
+    })
     turn = _result_to_turn(msg)
     assert len(turn.costs) == 1
-    assert turn.costs[0].model == ""
-    assert turn.costs[0].input_tokens == 0
-    assert turn.costs[0].output_tokens == 0
+    assert turn.costs[0].model == "claude-opus-4-8"
+    assert turn.costs[0].input_tokens == 10
+    assert turn.costs[0].output_tokens == 3
+
+
+def test_result_to_turn_includes_claude_cache_tokens_in_input_volume():
+    msg = _result(model_usage={
+        "claude-opus-4-8": {
+            "input_tokens": 2,
+            "cache_read_input_tokens": 422_468,
+            "cache_creation_input_tokens": 1_262,
+            "output_tokens": 3_432,
+        }
+    })
+    turn = _result_to_turn(msg)
+    assert len(turn.costs) == 1
+    assert turn.costs[0].model == "claude-opus-4-8"
+    assert turn.costs[0].input_tokens == 423_732
+    assert turn.costs[0].cached_input_tokens == 422_468
+    assert turn.costs[0].output_tokens == 3_432
 
 
 def test_result_to_turn_handles_error_and_status():

@@ -193,9 +193,11 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
         summary.by_session[name] = summary.by_session.get(name, 0.0) + cost
         summary.by_role[role] = summary.by_role.get(role, 0.0) + cost
 
+        attributed_cost = 0.0
         for key, usage in model_usage.items():
             usage = usage or {}
             usage_cost = usage.get("cost_usd") or 0.0
+            attributed_cost += usage_cost
             # key format is "provider:model"
             parts = key.split(":", 1)
             provider = parts[0] if len(parts) > 1 else "unknown"
@@ -224,7 +226,7 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
             # folded into input_tokens at full weight - pricing those would
             # overestimate ~10x on cache-heavy turns), and the model is in
             # the table (unknown models render as token volume, not $0).
-            if (not usage_cost and "cached_input_tokens" in usage
+            if (not cost and not usage_cost and "cached_input_tokens" in usage
                     and (input_tokens or output_tokens)):
                 est = estimate_cost(provider, model,
                                     input_tokens=input_tokens,
@@ -236,16 +238,21 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
                         summary.estimated_by_model.get(key, 0.0) + est
                     )
 
-        # If no model_usage but has cost, attribute to provider from entry
-        if not model_usage and cost > 0:
+        # If some provider-reported cost is not attributable to a concrete
+        # model (e.g. a multi-model turn only reported aggregate dollars),
+        # keep provider/session/role totals honest without inventing per-model
+        # reported dollars.
+        unattributed_cost = cost - attributed_cost
+        if unattributed_cost > 0:
             provider = data.get("provider", "anthropic") or "anthropic"
-            model_key = f"{provider}:{data.get('model', 'unknown')}"
             summary.by_provider[provider] = (
-                summary.by_provider.get(provider, 0.0) + cost
+                summary.by_provider.get(provider, 0.0) + unattributed_cost
             )
-            summary.by_model[model_key] = (
-                summary.by_model.get(model_key, 0.0) + cost
-            )
+            if not model_usage:
+                model_key = f"{provider}:{data.get('model', 'unknown')}"
+                summary.by_model[model_key] = (
+                    summary.by_model.get(model_key, 0.0) + unattributed_cost
+                )
 
     return summary
 

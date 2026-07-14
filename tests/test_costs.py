@@ -135,6 +135,40 @@ class TestCostRollup:
         assert summary.total_cost_usd == 1.00
         assert summary.by_provider["anthropic"] == 1.00
 
+    def test_unattributed_provider_cost_with_token_usage(self, tmp_path):
+        """A multi-model turn can report aggregate provider dollars only.
+        Tokens stay per-model; the aggregate dollars count at provider level
+        without pretending either model's cost_usd was reported."""
+        sessions_dir = self._make_sessions(tmp_path, {
+            "multi-model": {
+                "name": "multi-model",
+                "role": "engineer",
+                "total_cost_usd": 0.30,
+                "provider": "anthropic",
+                "model_usage": {
+                    "anthropic:claude-opus-4-8": {
+                        "cost_usd": 0.0,
+                        "input_tokens": 10,
+                        "output_tokens": 2,
+                        "cached_input_tokens": 0,
+                    },
+                    "anthropic:claude-haiku-3-5-20241022": {
+                        "cost_usd": 0.0,
+                        "input_tokens": 5,
+                        "output_tokens": 1,
+                        "cached_input_tokens": 0,
+                    },
+                },
+            }
+        })
+        summary = rollup_costs(sessions_dir)
+        assert summary.total_cost_usd == 0.30
+        assert summary.by_provider["anthropic"] == 0.30
+        assert summary.estimated_cost_usd == 0.0
+        assert summary.by_model["anthropic:claude-opus-4-8"] == 0.0
+        assert summary.tokens_by_model[
+            "anthropic:claude-opus-4-8"]["input_tokens"] == 10
+
     def test_null_cost_coerces_to_zero(self, tmp_path):
         # A hand-edited or partially-written state.json can carry an explicit
         # null; the fold must not crash (it now backs a web endpoint).

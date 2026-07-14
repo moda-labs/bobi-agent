@@ -335,7 +335,7 @@ class SessionRegistry:
         except (json.JSONDecodeError, TypeError):
             return
         data["total_cost_usd"] = data.get("total_cost_usd", 0.0) + cost_usd
-        if model or provider:
+        if model:
             usage = data.get("model_usage", {})
             key = f"{provider}:{model}" if provider else model
             if key:

@@ -160,23 +160,7 @@ class _ClaudeSession:
 
 def _result_to_turn(msg: Any) -> TurnResult:
     """Normalize an SDK ``ResultMessage`` into a :class:`TurnResult`."""
-    costs: list[BrainCost] = []
-    model_usage = getattr(msg, "model_usage", None)
-    # NOTE (#485 follow-up): this mirrors the legacy session.py handling exactly
-    # — it reads each element via getattr(model/input_tokens/output_tokens). The
-    # SDK actually types model_usage as ``dict[str, Any]`` (model -> usage), so a
-    # real dict is wrapped as a single element whose getattr lookups miss, giving
-    # an empty/zero breakdown. Preserved verbatim for Phase 1 (zero behavior
-    # change); fixing the dict shape is a tracked follow-up, not done here.
-    if model_usage:
-        for m in model_usage if isinstance(model_usage, list) else [model_usage]:
-            costs.append(
-                BrainCost(
-                    model=getattr(m, "model", "") or "",
-                    input_tokens=getattr(m, "input_tokens", 0) or 0,
-                    output_tokens=getattr(m, "output_tokens", 0) or 0,
-                )
-            )
+    costs = _model_usage_to_costs(getattr(msg, "model_usage", None))
 
     deferred = None
     dtu = getattr(msg, "deferred_tool_use", None)
@@ -204,6 +188,56 @@ def _result_to_turn(msg: Any) -> TurnResult:
         deferred_tool=deferred,
         costs=costs,
     )
+
+
+def _model_usage_to_costs(model_usage: Any) -> list[BrainCost]:
+    """Normalize Claude SDK per-model usage into stored token facts.
+
+    The SDK's real shape is ``dict[model, usage]``. Older tests and call sites
+    also exercise a list-of-objects shape, so keep both. Anthropic reports
+    prompt-cache reads/writes as separate fields; for display parity the
+    recorded input volume is the full context input, while cache reads stay
+    split for downstream renderers.
+    """
+    if not model_usage:
+        return []
+
+    if isinstance(model_usage, dict):
+        return [
+            _one_model_usage_to_cost(model, usage)
+            for model, usage in model_usage.items()
+        ]
+
+    items = model_usage if isinstance(model_usage, list) else [model_usage]
+    return [_one_model_usage_to_cost("", usage) for usage in items]
+
+
+def _one_model_usage_to_cost(model: str, usage: Any) -> BrainCost:
+    raw_input = _usage_int(usage, "input_tokens")
+    cache_read = _usage_int(usage, "cache_read_input_tokens")
+    cache_creation = _usage_int(usage, "cache_creation_input_tokens")
+    return BrainCost(
+        model=model or _usage_str(usage, "model"),
+        input_tokens=raw_input + cache_read + cache_creation,
+        cached_input_tokens=cache_read,
+        output_tokens=_usage_int(usage, "output_tokens"),
+    )
+
+
+def _usage_int(usage: Any, key: str) -> int:
+    if isinstance(usage, dict):
+        value = usage.get(key)
+    else:
+        value = getattr(usage, key, None)
+    return value if isinstance(value, int) else 0
+
+
+def _usage_str(usage: Any, key: str) -> str:
+    if isinstance(usage, dict):
+        value = usage.get(key)
+    else:
+        value = getattr(usage, key, None)
+    return value if isinstance(value, str) else ""
 
 
 def _terminal_error(msg: Any) -> tuple[str, str, int | None, int | None]:
