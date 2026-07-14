@@ -102,6 +102,22 @@ def _load_framework_checks() -> dict:
     return checks
 
 
+def _facts_section_has_reference_pointer(content: str) -> bool:
+    """Return true when the reference pointer appears as a Facts bullet."""
+    in_facts = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped == "## Facts":
+            in_facts = True
+            continue
+        if stripped.startswith("## ") and in_facts:
+            return False
+        if in_facts and stripped.startswith(("-", "*")):
+            if "workspace/memory/reference.md" in stripped:
+                return True
+    return False
+
+
 def _load_checks(project_path: Path | None = None) -> dict:
     """Load check runners from framework and installed monitors/*_checks.py files.
 
@@ -1097,6 +1113,7 @@ class MonitorScheduler:
         from bobi import history, paths
         from bobi.memory import (
             MAX_MEMORY_CHARS,
+            WORKING_MEMORY_CHARS,
             collect_legacy_journals,
             load_raw_long_term_memory,
         )
@@ -1106,6 +1123,7 @@ class MonitorScheduler:
         paths.migrate_long_term_memory_state(root)
         state_dir = paths.state_path(root)
         memory_path = paths.long_term_memory_path(root)
+        reference_path = paths.workspace_dir(root) / "memory" / "reference.md"
         cursor_path = paths.long_term_memory_cursor_path(root)
         cursor = sleep_cycle_mod.read_cursor(cursor_path)
 
@@ -1128,7 +1146,12 @@ class MonitorScheduler:
             current_memory = load_raw_long_term_memory(state_dir)
         except Exception:
             current_memory = ""
-        compaction_required = len(current_memory) > MAX_MEMORY_CHARS
+        try:
+            current_reference = reference_path.read_text() if reference_path.is_file() else ""
+        except OSError:
+            current_reference = ""
+        memory_chars = len(current_memory)
+        compaction_required = memory_chars > WORKING_MEMORY_CHARS
 
         if not rows and not seed and not compaction_required:
             log.info("Monitor %s due - no new transcript messages since cursor %d "
@@ -1142,13 +1165,16 @@ class MonitorScheduler:
             return False
 
         if compaction_required:
-            flags["memory_over_cap"] = True
-            flags["memory_chars"] = len(current_memory)
+            flags["memory_over_budget"] = True
+            flags["memory_over_cap"] = memory_chars > MAX_MEMORY_CHARS
+            flags["memory_chars"] = memory_chars
+            flags["memory_budget"] = WORKING_MEMORY_CHARS
             flags["memory_cap"] = MAX_MEMORY_CHARS
 
         transcript = sleep_cycle_mod.render_transcript(ingested)
         task = sleep_cycle_mod.build_sleep_cycle_task(
-            self._load_sleep_cycle_prompt(root), transcript, current_memory, flags, seed=seed)
+            self._load_sleep_cycle_prompt(root), transcript, current_memory, flags,
+            seed=seed, current_reference=current_reference)
         if seed:
             log.info("Monitor %s: seeding first long_term_memory.md from %d chars of legacy "
                      "journals", monitor.name, len(seed))
@@ -1162,7 +1188,8 @@ class MonitorScheduler:
             monitor, cwd, task,
             lambda result: self._on_sleep_cycle_result(
                 monitor, result, highest_id, cursor_path, memory_path,
-                compaction_required),
+                compaction_required, reference_path,
+                hashlib.sha256(current_reference.encode()).hexdigest()),
         )
         return True
 
@@ -1173,7 +1200,9 @@ class MonitorScheduler:
     def _on_sleep_cycle_result(self, monitor, result: dict | None,
                                highest_id: int | None, cursor_path: Path,
                                memory_path: Path | None = None,
-                               compaction_required: bool = False) -> None:
+                               compaction_required: bool = False,
+                               reference_path: Path | None = None,
+                               reference_before_hash: str | None = None) -> None:
         """Waiter-thread callback for a finished sleep-cycle run.
 
         Advances the cursor ONLY on success (a failed/indeterminate run leaves
@@ -1181,7 +1210,7 @@ class MonitorScheduler:
         skipped). Publishes `system/memory.updated` only when the run actually
         changed long_term_memory.md.
         """
-        from bobi.memory import MAX_MEMORY_CHARS
+        from bobi.memory import MAX_MEMORY_CHARS, WORKING_MEMORY_CHARS
         from bobi.monitors import sleep_cycle as sleep_cycle_mod
 
         if not isinstance(result, dict):
@@ -1231,6 +1260,78 @@ class MonitorScheduler:
                 monitor.name, "sleep-cycle", "memory-cap-exceeded", detail,
                 publish=self.publish)
             return
+        if actual_chars > WORKING_MEMORY_CHARS and (
+            compaction_required or result.get("updated")
+        ):
+            detail = (
+                "long_term_memory.md output exceeded working budget: "
+                f"{actual_chars} chars (budget {WORKING_MEMORY_CHARS}, "
+                f"hard cap {MAX_MEMORY_CHARS}) at {path}; "
+                f"compaction_required={compaction_required}; "
+                f"updated={bool(result.get('updated'))}"
+            )
+            log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
+                        monitor.name, detail)
+            _publish_monitor_error(
+                monitor.name, "sleep-cycle", "memory-working-budget-exceeded", detail,
+                publish=self.publish)
+            return
+        reference_changed_required = bool(
+            result.get("demoted") or result.get("reference_updated")
+        )
+        if reference_changed_required:
+            ref_path = reference_path or path.parent.parent / "workspace" / "memory" / "reference.md"
+            try:
+                reference = ref_path.read_text()
+            except OSError as e:
+                detail = (
+                    f"workspace/memory/reference.md artifact unreadable at {ref_path}: {e}; "
+                    f"demoted={result.get('demoted')}"
+                )
+                log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
+                            monitor.name, detail)
+                _publish_monitor_error(
+                    monitor.name, "sleep-cycle", "reference-artifact-unreadable", detail,
+                    publish=self.publish)
+                return
+            if not reference.strip() or "## " not in reference:
+                detail = (
+                    f"workspace/memory/reference.md artifact invalid at {ref_path}; "
+                    f"demoted={result.get('demoted')}"
+                )
+                log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
+                            monitor.name, detail)
+                _publish_monitor_error(
+                    monitor.name, "sleep-cycle", "reference-artifact-invalid", detail,
+                    publish=self.publish)
+                return
+            after_hash = hashlib.sha256(reference.encode()).hexdigest()
+            if reference_before_hash is not None and after_hash == reference_before_hash:
+                detail = (
+                    f"workspace/memory/reference.md artifact unchanged at {ref_path}; "
+                    f"demoted={result.get('demoted', 0)}; "
+                    f"reference_updated={bool(result.get('reference_updated'))}"
+                )
+                log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
+                            monitor.name, detail)
+                _publish_monitor_error(
+                    monitor.name, "sleep-cycle", "reference-artifact-unchanged", detail,
+                    publish=self.publish)
+                return
+            memory_content = path.read_text() if path.is_file() else ""
+            if not _facts_section_has_reference_pointer(memory_content):
+                detail = (
+                    f"long_term_memory.md missing workspace/memory/reference.md Facts pointer "
+                    f"at {path}; "
+                    f"demoted={result.get('demoted', 0)}; "
+                    f"reference_updated={bool(result.get('reference_updated'))}"
+                )
+                log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
+                            monitor.name, detail)
+                _publish_monitor_error(
+                    monitor.name, "sleep-cycle", "reference-pointer-missing", detail,
+                    publish=self.publish)
+                return
 
         # A seed-only first run ingests no transcript rows (highest_id is None) -
         # there is nothing to advance; the cursor stays at 0 and the next run

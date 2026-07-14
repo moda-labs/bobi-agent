@@ -34,9 +34,18 @@ MAX_SLEEP_CYCLE_INPUT_CHARS = 200_000
 # truncate the very knowledge it exists to preserve. A generous one-shot budget.
 MAX_SEED_INPUT_CHARS = 2_000_000
 
+# Reference memory can grow beyond the injected hot-memory budget. Keep the
+# sleep-cycle task bounded; the file remains available on disk for exact edits.
+MAX_REFERENCE_INPUT_CHARS = 80_000
+
 # Marker left in a force-truncated oversized message so the lossy edit is visible
 # in the rendered transcript the sleep cycle reads.
 _ELISION = "\n… [truncated {n} chars] …\n"
+
+_REFERENCE_ELISION = (
+    "\n\n[reference preview truncated; read workspace/memory/reference.md "
+    "before editing]\n"
+)
 
 
 def read_cursor(cursor_path: Path) -> int:
@@ -89,6 +98,14 @@ def _truncate_head_tail(text: str, budget: int) -> str:
     if tail:
         return text[:head] + marker + text[-tail:]
     return text[:head] + marker
+
+
+def _reference_for_prompt(text: str) -> str:
+    """Bound the reference preview embedded in the sleep-cycle task."""
+    if len(text) <= MAX_REFERENCE_INPUT_CHARS:
+        return text
+    keep = max(MAX_REFERENCE_INPUT_CHARS - len(_REFERENCE_ELISION), 0)
+    return text[:keep] + _REFERENCE_ELISION
 
 
 def select_messages(rows: list[dict], max_chars: int) -> tuple[list[dict], int | None, dict]:
@@ -171,7 +188,8 @@ def render_transcript(rows: list[dict]) -> str:
 
 
 def build_sleep_cycle_task(prompt_template: str, transcript: str,
-                       current_policy: str, flags: dict, seed: str = "") -> str:
+                       current_policy: str, flags: dict, seed: str = "",
+                       current_reference: str = "") -> str:
     """Assemble the sleep cycle agent's task: the dedicated sleep cycle prompt, the
     current long_term_memory.md, and the rendered transcript delta. The agent does the
     judgment and rewrites long_term_memory.md via Write, then prints the JSON summary.
@@ -188,13 +206,22 @@ def build_sleep_cycle_task(prompt_template: str, transcript: str,
         notes.append(f"- {flags['oversized_truncated']} oversized message(s) were "
                      f"head+tail truncated to fit (ids {flags.get('oversized_ids')}); "
                      f"set oversized_truncated and name them.")
-    if flags.get("memory_over_cap"):
+    if flags.get("memory_over_budget"):
         observed = flags.get("memory_chars")
+        budget = flags.get("memory_budget")
         cap = flags.get("memory_cap")
-        notes.append(f"- Current long_term_memory.md exceeds the {cap}-character cap "
-                     f"({observed} chars). This is a compaction-required run: "
-                     f"rewrite long_term_memory.md under the cap even if there are "
-                     f"no new transcript messages.")
+        if flags.get("memory_over_cap"):
+            notes.append(f"- Current long_term_memory.md exceeds the {cap}-character cap "
+                         f"({observed} chars) and the {budget}-character working "
+                         f"budget. This is a compaction-required run: rewrite "
+                         f"long_term_memory.md under the working budget even if there "
+                         f"are no new transcript messages.")
+        else:
+            notes.append(f"- Current long_term_memory.md exceeds the {budget}-character "
+                         f"working budget ({observed} chars; hard cap {cap}). This is "
+                         f"a compaction-required run: rewrite long_term_memory.md "
+                         f"under the working budget even if there are no new transcript "
+                         f"messages.")
     notes_block = ("\n\nIngest notes (from the deterministic input cap):\n"
                    + "\n".join(notes)) if notes else ""
 
@@ -211,6 +238,8 @@ def build_sleep_cycle_task(prompt_template: str, transcript: str,
         f"{prompt_template}\n\n"
         f"=== CURRENT long_term_memory.md (rewrite this in full via Write) ===\n"
         f"{current_policy or '(empty — no long_term_memory.md yet)'}\n\n"
+        f"=== CURRENT workspace/memory/reference.md (update in place if needed) ===\n"
+        f"{_reference_for_prompt(current_reference) or '(empty — no reference.md yet)'}\n\n"
         f"=== NEW TRANSCRIPT DELTA (since your last run) ===\n"
         f"{transcript or '(no new messages)'}"
         f"{notes_block}"

@@ -19,6 +19,9 @@ from bobi.monitors import curator as curator_mod
 from bobi.monitors.schema import Monitor
 from bobi.monitors.scheduler import MonitorScheduler
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SLEEP_CYCLE_PROMPT = REPO_ROOT / "bobi" / "prompts" / "sleep_cycle.md"
+
 
 def _row(id: int, content: str = "", session_id: str = "s1",
          tool_name: str = "", tool_input: str = "", role: str = "assistant",
@@ -181,12 +184,56 @@ class TestBuildCuratorTask:
         task = curator_mod.build_curator_task("PROMPT", "transcript", "", {})
         assert "ONE-TIME SEED" not in task
 
+    def test_includes_current_reference_file(self):
+        task = curator_mod.build_curator_task(
+            "PROMPT", "transcript", "memory", {}, current_reference="## Tools\n\ncold detail")
+        assert "CURRENT workspace/memory/reference.md" in task
+        assert "cold detail" in task
+
+    def test_bounds_current_reference_preview(self):
+        from bobi.monitors.sleep_cycle import MAX_REFERENCE_INPUT_CHARS
+
+        task = curator_mod.build_curator_task(
+            "PROMPT", "transcript", "memory", {},
+            current_reference="x" * (MAX_REFERENCE_INPUT_CHARS + 1000),
+        )
+        assert len(task) < MAX_REFERENCE_INPUT_CHARS + 5000
+        assert "reference preview truncated" in task
+
     def test_surfaces_ingest_notes(self):
         flags = {"input_truncated": True, "deferred_id_range": (5, 9),
                  "oversized_truncated": 1, "oversized_ids": [2]}
         task = curator_mod.build_curator_task("P", "t", "", flags)
         assert "DEFERRED" in task and "5" in task and "9" in task
         assert "oversized" in task.lower()
+
+    def test_surfaces_working_budget_compaction_note(self):
+        flags = {"memory_over_budget": True, "memory_over_cap": False,
+                 "memory_chars": 17_000, "memory_budget": 16_000,
+                 "memory_cap": 24_000}
+        task = curator_mod.build_curator_task("P", "t", "memory", flags)
+        assert "16000-character working budget" in task
+        assert "hard cap 24000" in task
+        assert "under the working budget" in task
+
+
+class TestSleepCyclePromptContract:
+    def setup_method(self):
+        self.text = SLEEP_CYCLE_PROMPT.read_text()
+
+    def test_prompt_defines_working_budget_below_hard_cap(self):
+        assert "16,000 characters" in self.text
+        assert "24,000-character hard cap" in self.text
+        assert "emergency bound, never the target" in self.text
+
+    def test_prompt_defines_lossless_reference_demotion_tier(self):
+        assert "workspace/memory/reference.md" in self.text
+        assert "Demotion is NOT loss" in self.text
+        assert "one standing pointer fact" in self.text
+
+    def test_prompt_requires_demoted_summary_count(self):
+        assert '"demoted": 0' in self.text
+        assert "`demoted`" in self.text
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +362,45 @@ class TestCuratorDispatch:
                                  "urgent": False})
         assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
 
+    def test_dispatches_compaction_only_when_memory_over_working_budget(
+        self, tmp_path, monitor
+    ):
+        from bobi.memory import MAX_MEMORY_CHARS, WORKING_MEMORY_CHARS
+        from bobi import paths
+
+        state = paths.state_path(tmp_path)
+        state.mkdir(parents=True)
+        oversized = "## Facts\n\n" + ("x" * (WORKING_MEMORY_CHARS + 50))
+        assert len(oversized) < MAX_MEMORY_CHARS
+        paths.long_term_memory_path(tmp_path).write_text(oversized)
+        h = _CuratorHarness(tmp_path, [])
+
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+
+        assert "task" in h.captured
+        assert "exceeds the 16000-character working budget" in h.captured["task"]
+        assert "hard cap 24000" in h.captured["task"]
+        h.captured["on_result"]({"success": True, "updated": False,
+                                 "summary": "no durable changes",
+                                 "urgent": False})
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert h.published == [(
+            "system/monitor.error",
+            {
+                "monitor": "policy-curator",
+                "flavor": "sleep-cycle",
+                "reason": "memory-working-budget-exceeded",
+                "detail": (
+                    "long_term_memory.md output exceeded working budget: "
+                    f"{len(oversized)} chars (budget {WORKING_MEMORY_CHARS}, "
+                    f"hard cap {MAX_MEMORY_CHARS}) at "
+                    f"{paths.long_term_memory_path(tmp_path)}; "
+                    "compaction_required=True; updated=False"
+                ),
+            },
+        )]
+
     def test_dispatches_compaction_when_raw_whitespace_pushes_memory_over_cap(
         self, tmp_path, monitor
     ):
@@ -423,15 +509,15 @@ class TestCuratorDispatch:
         assert [event for event, _ in h.published] == ["system/monitor.error"]
         assert "memory-artifact-unreadable" == h.published[0][1]["reason"]
 
-    def test_accepts_updated_file_exactly_at_cap(self, tmp_path, monitor):
-        from bobi.memory import MAX_MEMORY_CHARS
+    def test_accepts_updated_file_exactly_at_working_budget(self, tmp_path, monitor):
+        from bobi.memory import WORKING_MEMORY_CHARS
         from bobi import paths
 
         h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
         with _patch_history(h):
             h.sched._spawn_curator(monitor, [tmp_path])
         paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
-        paths.long_term_memory_path(tmp_path).write_text("x" * MAX_MEMORY_CHARS)
+        paths.long_term_memory_path(tmp_path).write_text("x" * WORKING_MEMORY_CHARS)
         h.captured["on_result"]({"success": True, "updated": True,
                                  "summary": "added signal", "bytes": 999999,
                                  "urgent": False})
@@ -441,6 +527,153 @@ class TestCuratorDispatch:
             "system/policy.updated",
             "system/memory.updated",
         ]
+
+    def test_rejects_updated_file_over_working_budget_even_under_cap(self, tmp_path, monitor):
+        from bobi.memory import MAX_MEMORY_CHARS, WORKING_MEMORY_CHARS
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        over_budget = "x" * (WORKING_MEMORY_CHARS + 1)
+        assert len(over_budget) < MAX_MEMORY_CHARS
+        paths.long_term_memory_path(tmp_path).write_text(over_budget)
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "added signal", "bytes": 999999,
+                                 "urgent": False})
+
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert [event for event, _ in h.published] == ["system/monitor.error"]
+        assert h.published[0][1]["reason"] == "memory-working-budget-exceeded"
+        assert "updated=True" in h.published[0][1]["detail"]
+
+    def test_demoted_result_requires_reference_artifact(self, tmp_path, monitor):
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text("## Facts\n\nok\n\n## Decisions\n\n")
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "demoted cold details", "bytes": 42,
+                                 "urgent": False, "demoted": 2})
+
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert [event for event, _ in h.published] == ["system/monitor.error"]
+        assert h.published[0][1]["reason"] == "reference-artifact-unreadable"
+
+    def test_demoted_result_accepts_reference_artifact(self, tmp_path, monitor):
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text(
+            "## Facts\n\n- Cold reference lives in workspace/memory/reference.md.\n\n"
+            "## Decisions\n\n"
+        )
+        reference = paths.workspace_dir(tmp_path) / "memory" / "reference.md"
+        reference.parent.mkdir(parents=True)
+        reference.write_text(
+            "Maintained by the sleep cycle.\n"
+            "May lag reality; transcripts are the source of truth.\n\n"
+            "## Tools\n\n- cold detail\n"
+        )
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "demoted cold details", "bytes": 42,
+                                 "urgent": False, "demoted": 2})
+
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 10
+        assert [event for event, _ in h.published] == [
+            "system/policy.updated",
+            "system/memory.updated",
+        ]
+
+    def test_demoted_result_rejects_unchanged_reference_artifact(self, tmp_path, monitor):
+        from bobi import paths
+
+        reference = paths.workspace_dir(tmp_path) / "memory" / "reference.md"
+        reference.parent.mkdir(parents=True)
+        reference.write_text("Header\n\n## Tools\n\n- existing detail\n")
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text(
+            "## Facts\n\n- Cold reference lives in workspace/memory/reference.md.\n\n"
+            "## Decisions\n\n"
+        )
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "demoted cold details", "bytes": 42,
+                                 "urgent": False, "demoted": 2})
+
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert [event for event, _ in h.published] == ["system/monitor.error"]
+        assert h.published[0][1]["reason"] == "reference-artifact-unchanged"
+
+    def test_demoted_result_requires_hot_pointer_fact(self, tmp_path, monitor):
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text("## Facts\n\nok\n\n## Decisions\n\n")
+        reference = paths.workspace_dir(tmp_path) / "memory" / "reference.md"
+        reference.parent.mkdir(parents=True)
+        reference.write_text("Header\n\n## Tools\n\n- new detail\n")
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "demoted cold details", "bytes": 42,
+                                 "urgent": False, "demoted": 2})
+
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert [event for event, _ in h.published] == ["system/monitor.error"]
+        assert h.published[0][1]["reason"] == "reference-pointer-missing"
+
+    def test_demoted_result_rejects_pointer_outside_facts(self, tmp_path, monitor):
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text(
+            "## Facts\n\n- ok\n\n"
+            "## Decisions\n\n- Mention workspace/memory/reference.md here only.\n"
+        )
+        reference = paths.workspace_dir(tmp_path) / "memory" / "reference.md"
+        reference.parent.mkdir(parents=True)
+        reference.write_text("Header\n\n## Tools\n\n- new detail\n")
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "demoted cold details", "bytes": 42,
+                                 "urgent": False, "demoted": 2})
+
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert [event for event, _ in h.published] == ["system/monitor.error"]
+        assert h.published[0][1]["reason"] == "reference-pointer-missing"
+
+    def test_reference_updated_requires_reference_artifact(self, tmp_path, monitor):
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text(
+            "## Facts\n\n- Cold reference lives in workspace/memory/reference.md.\n\n"
+            "## Decisions\n\n"
+        )
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "reference_updated": True,
+                                 "summary": "updated cold reference", "bytes": 42,
+                                 "urgent": False, "demoted": 0})
+
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert [event for event, _ in h.published] == ["system/monitor.error"]
+        assert h.published[0][1]["reason"] == "reference-artifact-unreadable"
 
     def test_failed_curator_result_publishes_monitor_error(self, tmp_path, monitor):
         h = _CuratorHarness(tmp_path, [_row(10, "a")])
