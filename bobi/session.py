@@ -341,6 +341,9 @@ class Session:
         ``_extra_options``; the adapter supplies the shared defaults
         (``permission_mode``, ``cli_path``).
         """
+        from bobi.runtime_guard import prepare_brain_runtime
+
+        prepare_brain_runtime()
         return self._brain.make_session(
             cwd=self.cwd,
             system_prompt=self._system_prompt,

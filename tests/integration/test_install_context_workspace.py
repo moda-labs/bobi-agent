@@ -15,6 +15,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from bobi.runtime_guard import with_mutable_runtime_package
+
 # Run subprocesses against this checkout, not whatever copy of bobi
 # happens to be pip-installed in the venv.
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -90,7 +92,8 @@ class TestInstallContextWorkspace:
         assert _install(home, pack).returncode == 0
 
         context_file = run / "package" / "context" / "style-guide.md"
-        context_file.write_text("hand-edited\n")
+        with with_mutable_runtime_package(run):
+            context_file.write_text("hand-edited\n")
         seeded = run / "workspace" / "domain-context.md"
         seeded.write_text("user filled this in\n")
 

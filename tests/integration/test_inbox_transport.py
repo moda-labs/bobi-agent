@@ -23,6 +23,8 @@ import urllib.request
 import pytest
 import yaml
 
+from bobi.runtime_guard import with_mutable_runtime_package
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -43,7 +45,8 @@ def inbox_event_server(bobi_env):
     original = agent_yaml.read_text()
     data = yaml.safe_load(original)
     data["event_server_url"] = url
-    agent_yaml.write_text(yaml.dump(data))
+    with with_mutable_runtime_package(bobi_env.project_path):
+        agent_yaml.write_text(yaml.dump(data))
     _pub._es_url_cache.clear()  # resolved URL is cached per project root
 
     ensure_running(port, project_path=bobi_env.project_path)
@@ -69,7 +72,8 @@ def inbox_event_server(bobi_env):
             os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
         except (ProcessLookupError, ValueError, OSError):
             pass
-    agent_yaml.write_text(original)
+    with with_mutable_runtime_package(bobi_env.project_path):
+        agent_yaml.write_text(original)
     _pub._es_url_cache.clear()
 
 
@@ -264,7 +268,8 @@ def fast_eviction_event_server(bobi_env):
     original = agent_yaml.read_text()
     data = yaml.safe_load(original)
     data["event_server_url"] = url
-    agent_yaml.write_text(yaml.dump(data))
+    with with_mutable_runtime_package(bobi_env.project_path):
+        agent_yaml.write_text(yaml.dump(data))
     _pub._es_url_cache.clear()
 
     ensure_running(port, project_path=bobi_env.project_path, extra_env={
@@ -293,7 +298,8 @@ def fast_eviction_event_server(bobi_env):
             os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
         except (ProcessLookupError, ValueError, OSError):
             pass
-    agent_yaml.write_text(original)
+    with with_mutable_runtime_package(bobi_env.project_path):
+        agent_yaml.write_text(original)
     _pub._es_url_cache.clear()
 
 

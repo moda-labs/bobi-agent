@@ -2411,6 +2411,7 @@ def monitor_add(name, interval, at_times, tz, days, notify, description, event, 
 
     from .monitors.schema import Monitor, parse_at, parse_days, parse_interval
     from .monitors.registry import MonitorRegistry
+    from .runtime_guard import with_mutable_runtime_package
 
     project_path = _detect_project_root()
     if not project_path:
@@ -2452,7 +2453,8 @@ def monitor_add(name, interval, at_times, tz, days, notify, description, event, 
         extra=extra,
     )
 
-    MonitorRegistry.add_project(m, project_path)
+    with with_mutable_runtime_package(project_path):
+        MonitorRegistry.add_project(m, project_path)
     click.echo(f"Added monitor '{slug}' to {paths.package_dir(project_path) / 'monitors.yaml'}")
     if at_list:
         schedule = f"at={','.join(at_list)}"
@@ -2475,9 +2477,15 @@ def monitor_pause(name):
         bobi agent eng monitors pause stale-pr-check
     """
     from .monitors.registry import MonitorRegistry
+    from .runtime_guard import with_mutable_runtime_package
 
     project_path = _detect_project_root()
-    if MonitorRegistry.pause(name, project_path):
+    if project_path:
+        with with_mutable_runtime_package(project_path):
+            paused = MonitorRegistry.pause(name, project_path)
+    else:
+        paused = MonitorRegistry.pause(name, project_path)
+    if paused:
         where = str(paths.package_dir(project_path) / "monitors.yaml") if project_path else "package/monitors.yaml"
         click.echo(f"Paused monitor '{name}' (enabled: false in {where})")
     else:
@@ -2496,9 +2504,14 @@ def monitor_remove(name):
         bobi agent eng monitors remove deploy-health
     """
     from .monitors.registry import MonitorRegistry
+    from .runtime_guard import with_mutable_runtime_package
 
     project_path = _detect_project_root()
-    result = MonitorRegistry.remove(name, project_path)
+    if project_path:
+        with with_mutable_runtime_package(project_path):
+            result = MonitorRegistry.remove(name, project_path)
+    else:
+        result = MonitorRegistry.remove(name, project_path)
     if result == "removed":
         click.echo(f"Removed monitor '{name}'.")
     elif result == "default-only":

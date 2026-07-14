@@ -372,6 +372,9 @@ async def _run_agent_supervised(
     label = role or "agent"
 
     def _build_client(resume_id: str):
+        from bobi.runtime_guard import prepare_brain_runtime
+
+        prepare_brain_runtime()
         return get_brain().make_session(
             cwd=cwd,
             system_prompt={

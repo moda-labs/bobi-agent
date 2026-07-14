@@ -429,10 +429,12 @@ async def _async_probe_mcp(
     project_path: Path,
 ) -> list[CheckResult]:
     from bobi.brain import get_brain
+    from bobi.runtime_guard import prepare_brain_runtime
 
     # Build the probe session through the brain (Claude today). No system prompt
     # — this is a connect-and-poll MCP probe, not a turn. ``get_mcp_status`` is a
     # Claude-adapter capability (see #485 open Q4 on per-brain MCP discovery).
+    prepare_brain_runtime(project_path)
     brain = get_brain()
     client = brain.make_session(
         cwd=str(project_path),

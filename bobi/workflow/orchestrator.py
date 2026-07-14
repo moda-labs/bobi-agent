@@ -407,6 +407,9 @@ async def _run_workflow_async(
         )
 
     def _make_session(resume_id=None, agent_name="", model=""):
+        from bobi.runtime_guard import prepare_brain_runtime
+
+        prepare_brain_runtime()
         agent_prompt = ""
         if agent_name:
             agent_prompt = resolve_agent_prompt(agent_name, project_root, interactive=interactive)
