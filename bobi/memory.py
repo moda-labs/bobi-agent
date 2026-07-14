@@ -19,6 +19,11 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+# Target size for the sleep cycle's normal compaction work. The hard cap below
+# is a safety wall; the working budget keeps enough headroom that prompt
+# injection never silently truncates hot memory state.
+WORKING_MEMORY_CHARS = 16_000
+
 # Hard cap on the injected long-term memory doc so it stays small and bounded — the whole
 # point of #456 (the decision log it replaces grew to 127KB live and bloated
 # every prompt). The sleep cycle keeps long_term_memory.md under this;
