@@ -301,15 +301,16 @@ html[data-retro="on"] body {
 /* sidebar panels - the read-only observability folds at the top of the
    roster (#733): health (manager liveness + lifecycle trail) and spend.
    One shared shell so the stacked panels always match. */
-.spend-panel, .health-panel {
+.spend-panel, .health-panel, .attention-panel {
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--raised);
 }
-.health-panel { margin: 12px 12px 0; }
-.spend-panel  { margin: 12px 12px 4px; }
-.spend-head, .health-head {
+.health-panel    { margin: 12px 12px 0; }
+.spend-panel     { margin: 12px 12px 4px; }
+.attention-panel { margin: 12px 12px 0; }
+.spend-head, .health-head, .attention-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -368,7 +369,7 @@ html[data-retro="on"] body {
 }
 .sessions-head > span:first-child { white-space: nowrap; }
 .sessions-counts { font-size: 10px; color: var(--faint); text-align: right; }
-.session-row {
+.session-row, .attention-row {
   display: block;
   width: 100%;
   text-align: left;
@@ -376,19 +377,24 @@ html[data-retro="on"] body {
   border: 0;
   border-top: 1px solid var(--border);
   padding: 6px 0;
-  cursor: pointer;
   font: inherit;
   color: inherit;
 }
+.session-row, button.attention-row { cursor: pointer; }
 .session-row:first-of-type { border-top: 0; margin-top: 6px; }
-.session-row.active .session-name { color: var(--text); font-weight: 600; }
-.session-top {
+/* Attention rows mix <button> (session) and <div> (lifecycle) siblings of
+   the head div, so :first-of-type cannot single out the first ROW - key the
+   header gap off adjacency to the head instead. */
+.attention-head + .attention-row { border-top: 0; margin-top: 6px; }
+.session-row.active .session-name,
+.attention-row.active .attention-label { color: var(--text); font-weight: 600; }
+.session-top, .attention-top {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
 }
-.session-name {
+.session-name, .attention-label {
   font-family: var(--font-mono);
   font-size: 11.5px;
   color: var(--muted);
@@ -397,7 +403,7 @@ html[data-retro="on"] body {
   white-space: nowrap;
 }
 .session-meta { font-size: 10px; color: var(--faint); margin-top: 1px; }
-.session-error {
+.session-error, .attention-detail {
   font-size: 10.5px;
   color: var(--err);
   margin-top: 2px;
@@ -405,7 +411,33 @@ html[data-retro="on"] body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.session-more { font-size: 10px; color: var(--faint); padding-top: 4px; }
+.session-more, .attention-more {
+  font-size: 10px;
+  color: var(--faint);
+  padding-top: 4px;
+}
+
+/* needs attention (#733 vertical 4) - the alarm fold at the top of the
+   sidebar: trouble lifecycle events + recent failed/crashed sessions,
+   hidden when all is well. The shell/head/row/label/detail styles join the
+   shared groups above so the stacked panels always match; below are only
+   the attention-specific accents - the red count is the one alarm accent,
+   so a healthy sidebar stays calm. */
+.attention-count {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--err);
+}
+button.attention-row:hover .attention-label { color: var(--text); }
+.attention-what {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  overflow: hidden;
+}
+.attention-what .health-event { font-size: 11.5px; }
+.attention-when { font-size: 10px; color: var(--faint); flex: none; }
+
 /* read-only note where the composer sits for an ended session */
 .chat-ended {
   margin: 0;

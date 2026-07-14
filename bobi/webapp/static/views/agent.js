@@ -24,6 +24,7 @@ export function mountAgent(el, { api, name }) {
   shell.className = "shell";
   shell.innerHTML = `
     <aside class="sidebar">
+      <div class="attention-panel" data-el="attentionPanel" hidden></div>
       <div class="health-panel" data-el="healthPanel" hidden></div>
       <div class="spend-panel" data-el="spendPanel" hidden></div>
       <div class="side-head mono"><a class="side-back" href="#/">&larr; agents</a> · subagents</div>
@@ -151,15 +152,19 @@ export function mountAgent(el, { api, name }) {
   let lastAgents = [];
   let sessionLog = [];            // last /sessions payload rows
   let sessionLogTruncated = false; // the runtime capped the row list
+  let lastHealth = null;          // last /health payload (lifecycle trail)
   let sending = false;
   let messagesLoading = false;
 
   // Whether a session is over comes from the wire (`ended`, derived
   // server-side from the active vocabulary) so this view never has to
-  // enumerate terminal words. The alias map is presentation only: legacy
-  // words reuse an existing chip color ("done" = success, "error" = a
-  // turn-level failure, cancelled = torn down); an unmapped word degrades
-  // to the neutral dot.
+  // enumerate terminal words. The alias map folds legacy words onto an
+  // existing chip ("done" = success, "error" = a turn-level failure,
+  // cancelled = torn down); an unmapped word degrades to the neutral dot.
+  // NOTE: since #733 vertical 4 this map is load-bearing beyond styling -
+  // the needs-attention feed alarms on chips that resolve to
+  // failed/crashed (ATTENTION_OUTCOMES below), so aliasing a word here
+  // also decides whether it alarms.
   const CHIP_ALIAS = { done: "completed", error: "failed", cancelled: "stopped" };
   const chipClass = (s) =>
     Object.hasOwn(CHIP_ALIAS, s) ? CHIP_ALIAS[s] : s;
@@ -287,6 +292,7 @@ export function mountAgent(el, { api, name }) {
     updateChatHead();
     renderCards(lastAgents);
     renderSessionRows();
+    renderAttention();
     renderTranscript();
     if (!els.composer.hidden) els.input.focus();
     loadMessages(sub);
@@ -467,6 +473,10 @@ export function mountAgent(el, { api, name }) {
   // opens the session's transcript read-only in the chat pane.
   const MAX_SESSION_ROWS = 50;
 
+  // When a session "happened" for log/alarm ordering, epoch ms: when it
+  // ended, else its last activity. Shared with the attention feed.
+  const sessionWhen = (s) => (s.terminal_at || s.last_activity || 0) * 1000;
+
   function renderSessionRows() {
     const rows = sessionLog.filter((s) => s.ended);
     if (!rows.length) { els.sessionsPanel.hidden = true; return; }
@@ -488,7 +498,7 @@ export function mountAgent(el, { api, name }) {
       top.appendChild(chip);
       row.appendChild(top);
       const bits = [];
-      const when = fmtAgo((s.terminal_at || s.last_activity || 0) * 1000);
+      const when = fmtAgo(sessionWhen(s));
       if (when) bits.push(when);
       if (s.role && !s.is_manager) bits.push(s.role);
       if (s.is_manager) bits.push("manager");
@@ -552,6 +562,7 @@ export function mountAgent(el, { api, name }) {
     sessionLogTruncated = !!data.truncated;
     renderSessionCounts(data.counts || {});
     renderSessionRows();
+    renderAttention();
     if (selected) updateChatHead();
   }
 
@@ -614,6 +625,26 @@ export function mountAgent(el, { api, name }) {
     manager_restarted: "warn",
   };
 
+  // One timestamp per lifecycle event, epoch ms: server receipt
+  // (authoritative) first, the box's own clock as the fallback; 0 when
+  // neither is usable. Shared by the trail and the attention feed.
+  const evWhen = (ev) =>
+    ev.received_at || (ev.at ? Date.parse(ev.at) : NaN) || 0;
+
+  // The severity-dotted event label, shared by the health trail and the
+  // attention feed so one vocabulary and one guard serve both. hasOwn: an
+  // event name from the wire must never resolve an inherited Object
+  // property into the class list.
+  function lifecycleEventEl(ev) {
+    const el = document.createElement("span");
+    el.className = "health-event " +
+      (Object.hasOwn(LIFECYCLE_CLASS, ev.event)
+        ? LIFECYCLE_CLASS[ev.event] : "");
+    el.textContent = ev.event;
+    if (ev.reason) el.title = ev.reason;
+    return el;
+  }
+
   function renderHealth(data) {
     const mgr = data && data.manager;
     if (!mgr) { els.healthPanel.hidden = true; return; }
@@ -665,19 +696,10 @@ export function mountAgent(el, { api, name }) {
     for (const ev of (data.lifecycle || []).slice(0, 6)) {
       const row = document.createElement("div");
       row.className = "health-row";
-      const evEl = document.createElement("span");
-      // hasOwn guard: an event name from the wire must never resolve an
-      // inherited Object property into the class list.
-      evEl.className = "health-event " +
-        (Object.hasOwn(LIFECYCLE_CLASS, ev.event)
-          ? LIFECYCLE_CLASS[ev.event] : "");
-      evEl.textContent = ev.event;
-      if (ev.reason) evEl.title = ev.reason;
       const when = document.createElement("span");
       when.className = "health-when";
-      when.textContent =
-        fmtAgo(ev.received_at || (ev.at ? Date.parse(ev.at) : NaN));
-      row.appendChild(evEl);
+      when.textContent = fmtAgo(evWhen(ev));
+      row.appendChild(lifecycleEventEl(ev));
       row.appendChild(when);
       els.healthPanel.appendChild(row);
     }
@@ -686,7 +708,9 @@ export function mountAgent(el, { api, name }) {
   async function pollHealth() {
     const { ok, data } = await api(base + "/health");
     if (!ok || !data) return;
+    lastHealth = data;
     renderHealth(data);
+    renderAttention();
     // One liveness source: the header chip derives from the same payload
     // (installed is implied - only installed teams have an agent view).
     const mgr = data.manager || {};
@@ -694,6 +718,162 @@ export function mountAgent(el, { api, name }) {
                  reachability: data.reachability,
                  manager_status: mgr.status };
     if (!busyVerb) renderControls();
+  }
+
+  // --- needs attention (observability, #733 vertical 4) ----------------
+  // Harness errors, surfaced: one panel that says "something went wrong"
+  // without reading logs. A pure client-side composition of the two feeds
+  // the panels below already poll - trouble lifecycle events from /health
+  // (probe_failing / manager_restarted / budget_exhausted, hosted-only
+  // data) and failed/crashed sessions with their error lines from
+  // /sessions - merged newest first. No new endpoint, runtime method, or
+  // admin command backs this surface.
+  //
+  // Which words alarm derives from the presentation maps above, so one
+  // vocabulary serves dot color and alarm alike: every lifecycle event
+  // whose severity is not "ok", and every ended session whose chip
+  // resolves to failed/crashed (CHIP_ALIAS folds legacy "error" in). An
+  // event or outcome those maps do not know simply does not alarm - the
+  // panels below still show it.
+  const ATTENTION_LIFECYCLE = new Set(
+    Object.entries(LIFECYCLE_CLASS)
+      .filter(([, cls]) => cls !== "ok")
+      .map(([event]) => event));
+  const ATTENTION_OUTCOMES = new Set(["failed", "crashed"]);
+  const MAX_ATTENTION_ROWS = 8;
+  // Trouble decays: the hosted lifecycle trail is 48h-bounded server-side,
+  // and session failures observe the same window here - an alarm surface
+  // that never ages out just teaches the operator to ignore it. The full
+  // failure history stays in the session log below.
+  const ATTENTION_WINDOW_MS = 48 * 3600 * 1000;
+
+  function attentionItems() {
+    const items = [];
+    const trail = (lastHealth && lastHealth.lifecycle) || [];
+    // A probe episode closes with probe_recovered, and the trail is newest
+    // first (the wire contract) - so "still open" is an ORDER question,
+    // not a clock question: a probe_failing is open trouble only while no
+    // recovery sits above it. This never compares the box's own clock
+    // (`at`) against server receipt, and an event with no usable
+    // timestamp still alarms. Restarts and budget exhaustion have no
+    // "recovered" edge; they stay listed until the trail ages them out.
+    const recovered = trail.findIndex(
+      (ev) => ev && ev.event === "probe_recovered");
+    trail.forEach((ev, i) => {
+      if (!ev || !ATTENTION_LIFECYCLE.has(ev.event)) return;
+      if (ev.event === "probe_failing" && recovered !== -1
+          && i > recovered) return;
+      items.push({ kind: "lifecycle", when: evWhen(ev), ev });
+    });
+    const cutoff = Date.now() - ATTENTION_WINDOW_MS;
+    for (const s of sessionLog) {
+      if (!s.ended || !ATTENTION_OUTCOMES.has(chipClass(s.status))) continue;
+      const when = sessionWhen(s);
+      if (when < cutoff) continue;
+      items.push({ kind: "session", when,
+                   name: s.name, status: s.status, detail: s.error || "" });
+    }
+    items.sort((a, b) => b.when - a.when);
+    return items;
+  }
+
+  // Two pollers land here (health at 4s, sessions at 10s), and the rows
+  // are clickable buttons - rebuilding nodes whose content did not change
+  // would swallow a click landing mid-rebuild. Same-content renders only
+  // refresh the relative "ago" labels in place.
+  let attentionSig = "";
+
+  function renderAttention() {
+    const items = attentionItems();
+    if (!items.length) {
+      els.attentionPanel.hidden = true;
+      attentionSig = "";
+      return;
+    }
+    const sig = JSON.stringify([selected, sessionLogTruncated,
+      items.map((it) => it.kind === "session"
+        ? [it.when, it.name, it.status, it.detail]
+        : [it.when, it.ev.event, it.ev.reason])]);
+    if (sig === attentionSig && !els.attentionPanel.hidden) {
+      const whens = els.attentionPanel.querySelectorAll(".attention-when");
+      items.slice(0, MAX_ATTENTION_ROWS).forEach((it, i) => {
+        if (whens[i]) whens[i].textContent = fmtAgo(it.when);
+      });
+      return;
+    }
+    attentionSig = sig;
+    els.attentionPanel.hidden = false;
+    els.attentionPanel.innerHTML = "";
+
+    const head = document.createElement("div");
+    head.className = "attention-head mono";
+    const label = document.createElement("span");
+    label.textContent = "needs attention";
+    const count = document.createElement("span");
+    count.className = "attention-count";
+    count.textContent = String(items.length);
+    head.appendChild(label);
+    head.appendChild(count);
+    els.attentionPanel.appendChild(head);
+
+    for (const it of items.slice(0, MAX_ATTENTION_ROWS)) {
+      // A session row drills into its (read-only) transcript, like the
+      // session log below; a lifecycle event has nowhere to go.
+      const row = document.createElement(
+        it.kind === "session" ? "button" : "div");
+      row.className = "attention-row"
+        + (it.kind === "session" && it.name === selected ? " active" : "");
+      const top = document.createElement("div");
+      top.className = "attention-top";
+      const what = document.createElement("span");
+      what.className = "attention-what";
+      if (it.kind === "session") {
+        row.type = "button";
+        const nm = document.createElement("span");
+        nm.className = "attention-label";
+        nm.textContent = it.name;
+        const chip = document.createElement("span");
+        chip.className = "status " + chipClass(it.status);
+        chip.textContent = it.status;
+        what.appendChild(nm);
+        what.appendChild(chip);
+        row.addEventListener("click", () => selectAgent(it.name));
+      } else {
+        what.appendChild(lifecycleEventEl(it.ev));
+      }
+      top.appendChild(what);
+      const when = document.createElement("span");
+      when.className = "attention-when mono";
+      when.textContent = fmtAgo(it.when);
+      top.appendChild(when);
+      row.appendChild(top);
+      const detail = it.kind === "session" ? it.detail
+        : (it.ev.reason || "");
+      if (detail) {
+        const detailEl = document.createElement("div");
+        detailEl.className = "attention-detail";
+        detailEl.textContent = detail;
+        detailEl.title = detail;
+        row.appendChild(detailEl);
+      }
+      els.attentionPanel.appendChild(row);
+    }
+
+    // Honest footer, like the session log's: what this render hides, and
+    // the runtime's own cap (a hosted box sends only the newest rows, so
+    // older failures may never reach this feed at all).
+    const hidden = items.length - MAX_ATTENTION_ROWS;
+    if (hidden > 0 || sessionLogTruncated) {
+      const more = document.createElement("div");
+      more.className = "attention-more mono";
+      const bits = [];
+      if (hidden > 0) bits.push("+ " + hidden + " older");
+      if (sessionLogTruncated) {
+        bits.push("older history capped by the runtime");
+      }
+      more.textContent = bits.join(" · ");
+      els.attentionPanel.appendChild(more);
+    }
   }
 
   els.composer.addEventListener("submit", (e) => {
