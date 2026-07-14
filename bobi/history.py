@@ -60,9 +60,9 @@ def _init_db(conn: sqlite3.Connection):
             VALUES (new.id, new.content, new.tool_name, new.session_id, new.id);
         END;
 
-        CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-            INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, session_id, msg_id)
-            VALUES ('delete', old.id, old.content, old.tool_name, old.session_id, old.id);
+        DROP TRIGGER IF EXISTS messages_ad;
+        CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+            DELETE FROM messages_fts WHERE rowid = old.id;
         END;
     """)
 

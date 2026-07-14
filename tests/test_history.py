@@ -342,6 +342,77 @@ class TestFtsTriggers:
         ).fetchall()
         assert len(fts) == 1
 
+    def test_delete_removes_fts_row(self, db):
+        db.execute("""
+            INSERT INTO messages (session_id, type, role, content, timestamp, line_number)
+            VALUES ('s1', 'user', 'user', 'delete target', '2024-01-01', 1)
+        """)
+
+        db.execute("DELETE FROM messages WHERE content = 'delete target'")
+
+        fts = db.execute(
+            "SELECT * FROM messages_fts WHERE messages_fts MATCH '\"delete\"'"
+        ).fetchall()
+        assert fts == []
+        assert db.execute("SELECT rowid FROM messages_fts").fetchall() == []
+        db.execute("INSERT INTO messages_fts(messages_fts) VALUES ('integrity-check')")
+
+    def test_init_replaces_legacy_delete_trigger(self, db):
+        db.executescript("""
+            DROP TRIGGER messages_ad;
+            CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, session_id, msg_id)
+                VALUES ('delete', old.id, old.content, old.tool_name, old.session_id, old.id);
+            END;
+        """)
+
+        _init_db(db)
+        db.execute("""
+            INSERT INTO messages (session_id, type, role, content, timestamp, line_number)
+            VALUES ('s1', 'user', 'user', 'legacy trigger target', '2024-01-01', 1)
+        """)
+
+        db.execute("DELETE FROM messages WHERE content = 'legacy trigger target'")
+
+        fts = db.execute(
+            "SELECT * FROM messages_fts WHERE messages_fts MATCH '\"legacy\"'"
+        ).fetchall()
+        assert fts == []
+        assert db.execute("SELECT rowid FROM messages_fts").fetchall() == []
+        db.execute("INSERT INTO messages_fts(messages_fts) VALUES ('integrity-check')")
+
+    def test_init_migrates_persisted_legacy_delete_trigger(self, tmp_path):
+        db_path = tmp_path / "history.db"
+        conn = sqlite3.connect(db_path)
+        _init_db(conn)
+        conn.executescript("""
+            DROP TRIGGER messages_ad;
+            CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, session_id, msg_id)
+                VALUES ('delete', old.id, old.content, old.tool_name, old.session_id, old.id);
+            END;
+            INSERT INTO messages (session_id, type, role, content, timestamp, line_number)
+            VALUES ('s1', 'user', 'user', 'persisted legacy target', '2024-01-01', 1);
+        """)
+        conn.commit()
+
+        with pytest.raises(sqlite3.OperationalError, match="SQL logic error"):
+            conn.execute("DELETE FROM messages WHERE content = 'persisted legacy target'")
+        conn.rollback()
+        conn.close()
+
+        conn = sqlite3.connect(db_path)
+        _init_db(conn)
+        trigger_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'messages_ad'"
+        ).fetchone()[0]
+        assert "DELETE FROM messages_fts WHERE rowid = old.id" in trigger_sql
+
+        conn.execute("DELETE FROM messages WHERE content = 'persisted legacy target'")
+        assert conn.execute("SELECT rowid FROM messages_fts").fetchall() == []
+        conn.execute("INSERT INTO messages_fts(messages_fts) VALUES ('integrity-check')")
+        conn.close()
+
 
 # ---------------------------------------------------------------------------
 # index() — top-level orchestrator
