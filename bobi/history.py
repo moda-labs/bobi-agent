@@ -94,11 +94,83 @@ def _extract_tool_calls(content) -> list[dict]:
     return calls
 
 
+def _is_sleep_cycle_task(text: str) -> bool:
+    """True for the out-of-band sleep-cycle task prompt.
+
+    These sessions are distillation machinery. Indexing them feeds the full
+    sleep-cycle prompt, rendered transcript delta, and current memory back into
+    later sleep-cycle runs.
+    """
+    return text.lstrip().startswith("You are the **sleep cycle** for this agent team.")
+
+
+def _is_role_startup_prompt(text: str) -> bool:
+    """True for framework startup/base prompt injections.
+
+    Persistent agent starts and rotation reconnects send the composed base prompt
+    as a giant first user message. It is framework boilerplate already present in
+    every prompt, not team activity worth indexing.
+    """
+    stripped = text.lstrip()
+    return (
+        stripped.startswith("You are a bobi ")
+        and "Act directly using your tools.\n\n# Bobi Agent" in stripped
+        and "## Available workflows" in stripped
+    )
+
+
+def _is_sleep_cycle_session_id(session_id: str) -> bool:
+    return session_id.startswith("curator-") and session_id.endswith("-curator")
+
+
+def _sleep_cycle_transcript_ids() -> set[str]:
+    """Claude transcript ids for Bobi's sleep-cycle/curator sessions."""
+    try:
+        from bobi import paths
+        sessions = paths.sessions_path()
+    except Exception:
+        return set()
+    try:
+        id_files = sessions.glob("curator-*-curator.id")
+    except OSError:
+        return set()
+    ids: set[str] = set()
+    for id_file in id_files:
+        if not _is_sleep_cycle_session_id(id_file.stem):
+            continue
+        try:
+            session_id = id_file.read_text().strip()
+        except OSError:
+            continue
+        if session_id:
+            ids.add(session_id)
+    return ids
+
+
+def _is_sleep_cycle_session(session_id: str, lines: list[str]) -> bool:
+    if (
+        _is_sleep_cycle_session_id(session_id)
+        or session_id in _sleep_cycle_transcript_ids()
+    ):
+        return True
+    for line in lines:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if msg.get("type") != "user":
+            continue
+        text = _extract_text(msg.get("message", {}).get("content", ""))
+        return _is_sleep_cycle_task(text)
+    return False
+
+
 def _project_from_path(file_path: Path) -> str:
     return file_path.parent.name.replace("-", "/", 1).replace("-", "/")
 
 
 def _index_file(conn: sqlite3.Connection, file_path: Path) -> int:
+    session_id = file_path.stem
     state = conn.execute(
         "SELECT lines_read FROM index_state WHERE file_path = ?",
         (str(file_path),),
@@ -106,11 +178,17 @@ def _index_file(conn: sqlite3.Connection, file_path: Path) -> int:
     skip = state[0] if state else 0
 
     lines = file_path.read_text().splitlines()
+    if _is_sleep_cycle_session(session_id, lines):
+        conn.execute("""
+            INSERT OR REPLACE INTO index_state (file_path, lines_read, last_indexed)
+            VALUES (?, ?, ?)
+        """, (str(file_path), len(lines), time.strftime("%Y-%m-%dT%H:%M:%S")))
+        return 0
+
     if len(lines) <= skip:
         return 0
 
     new_lines = lines[skip:]
-    session_id = file_path.stem
     project = _project_from_path(file_path)
     inserted = 0
 
@@ -146,7 +224,9 @@ def _index_file(conn: sqlite3.Connection, file_path: Path) -> int:
         text = _extract_text(raw_content)
         tool_calls = _extract_tool_calls(raw_content)
 
-        if text.strip():
+        if text.strip() and not (
+            msg_type == "user" and role == "user" and _is_role_startup_prompt(text)
+        ):
             conn.execute("""
                 INSERT INTO messages (session_id, type, role, content, timestamp, line_number)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -315,8 +395,26 @@ def messages_since(cursor: int, limit: int | None = None) -> list[dict]:
 
     conn = sqlite3.connect(str(_db_path()))
     conn.row_factory = sqlite3.Row
-    sql = "SELECT * FROM messages WHERE id > ? ORDER BY id"
+    excluded_session_ids = sorted(_sleep_cycle_transcript_ids())
+    sql = """
+        SELECT * FROM messages
+        WHERE id > ?
+          AND session_id NOT LIKE 'curator-%-curator'
+          AND content NOT LIKE 'You are the **sleep cycle** for this agent team.%'
+          AND NOT (
+            type = 'user'
+            AND role = 'user'
+            AND content LIKE 'You are a bobi %'
+            AND content LIKE '%Act directly using your tools.%# Bobi Agent%'
+            AND content LIKE '%## Available workflows%'
+          )
+    """
     params: list = [int(cursor)]
+    if excluded_session_ids:
+        placeholders = ",".join("?" for _ in excluded_session_ids)
+        sql += f" AND session_id NOT IN ({placeholders})"
+        params.extend(excluded_session_ids)
+    sql += " ORDER BY id"
     if limit is not None:
         sql += " LIMIT ?"
         params.append(int(limit))
