@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from bobi import history
+from bobi import history, paths
 from bobi.history import (
     _extract_text,
     _extract_tool_calls,
@@ -58,6 +58,28 @@ def _assistant_msg(text: str, **extra) -> dict:
 
 def _tool_msg(blocks: list[dict], **extra) -> dict:
     return {"type": "assistant", "message": {"role": "assistant", "content": blocks}, **extra}
+
+
+def _role_startup_prompt(role: str = "gtm-director") -> str:
+    return (
+        f"You are a bobi {role} for gtm-team. Act directly using your tools.\n\n"
+        "# Bobi Agent\n\n"
+        "Shared framework instructions that are already present in every prompt.\n\n"
+        "## Long-Term Memory\n\n"
+        "Injected durable memory.\n\n"
+        "## Available workflows\n\n"
+        "- adhoc"
+    )
+
+
+def _sleep_cycle_rendered_task(prompt: str = "Custom team memory distillation prompt.") -> str:
+    return (
+        f"{prompt}\n\n"
+        "=== CURRENT long_term_memory.md (rewrite this in full via Write) ===\n"
+        "existing memory\n\n"
+        "=== NEW TRANSCRIPT DELTA (since your last run) ===\n"
+        "copied team transcript"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +337,144 @@ class TestIndexFile:
         ])
         count = _index_file(db, f)
         assert count == 0
+
+    def test_skips_sleep_cycle_harness_session(self, db, tmp_path):
+        f = tmp_path / "proj" / "curator-sleep-cycle-curator.jsonl"
+        f.parent.mkdir(parents=True)
+        _write_jsonl(f, [
+            _user_msg(
+                "You are the **sleep cycle** for this agent team.\n\n"
+                "## CURRENT `long_term_memory.md`\n\n"
+                "existing memory\n\n"
+                "## NEW TRANSCRIPT DELTA\n\n"
+                "real team transcript copied into the task",
+                timestamp="2026-07-14T00:00:00",
+                cwd="/run",
+                gitBranch="main",
+            ),
+            _assistant_msg(
+                '{"success": true, "updated": false, "summary": "no durable changes"}',
+                timestamp="2026-07-14T00:00:01",
+            ),
+        ])
+
+        count = _index_file(db, f)
+
+        assert count == 0
+        assert db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0
+        assert db.execute(
+            "SELECT lines_read FROM index_state WHERE file_path = ?", (str(f),)
+        ).fetchone()[0] == 2
+
+    def test_sleep_cycle_harness_session_stays_skipped_incrementally(self, db, tmp_path):
+        f = tmp_path / "proj" / "curator-sleep-cycle-curator.jsonl"
+        f.parent.mkdir(parents=True)
+        _write_jsonl(f, [
+            _user_msg("You are the **sleep cycle** for this agent team.", timestamp="2026-07-14T00:00:00"),
+        ])
+        assert _index_file(db, f) == 0
+
+        with f.open("a") as fh:
+            fh.write(json.dumps(_assistant_msg("later summary", timestamp="2026-07-14T00:00:01")) + "\n")
+
+        assert _index_file(db, f) == 0
+        assert db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+        assert db.execute(
+            "SELECT lines_read FROM index_state WHERE file_path = ?", (str(f),)
+        ).fetchone()[0] == 2
+
+    def test_skips_curator_session_with_custom_sleep_cycle_prompt(self, db, tmp_path):
+        f = tmp_path / "proj" / "curator-curator-deadbeef-curator.jsonl"
+        f.parent.mkdir(parents=True)
+        _write_jsonl(f, [
+            _user_msg(
+                _sleep_cycle_rendered_task(),
+                timestamp="2026-07-14T00:00:00",
+            ),
+            _assistant_msg("custom summary", timestamp="2026-07-14T00:00:01"),
+        ])
+
+        assert _index_file(db, f) == 0
+        assert db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+        assert db.execute(
+            "SELECT lines_read FROM index_state WHERE file_path = ?", (str(f),)
+        ).fetchone()[0] == 2
+
+    def test_skips_mapped_claude_transcript_for_custom_sleep_cycle_prompt(
+        self, db, tmp_path, monkeypatch
+    ):
+        state = tmp_path / "state"
+        sessions = state / "sessions"
+        sessions.mkdir(parents=True)
+        monkeypatch.setattr(paths, "state_path", lambda *a, **k: state)
+        (sessions / "curator-curator-deadbeef-curator.id").write_text(
+            "claude-session-uuid"
+        )
+
+        f = tmp_path / "proj" / "claude-session-uuid.jsonl"
+        f.parent.mkdir(parents=True)
+        _write_jsonl(f, [
+            _user_msg(
+                _sleep_cycle_rendered_task(),
+                timestamp="2026-07-14T00:00:00",
+            ),
+            _assistant_msg("custom summary", timestamp="2026-07-14T00:00:01"),
+        ])
+
+        assert _index_file(db, f) == 0
+        assert db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+        assert db.execute(
+            "SELECT lines_read FROM index_state WHERE file_path = ?", (str(f),)
+        ).fetchone()[0] == 2
+
+    def test_skips_sleep_cycle_session_when_first_user_line_is_preamble(
+        self, db, tmp_path
+    ):
+        f = tmp_path / "proj" / "claude-session-with-preamble.jsonl"
+        f.parent.mkdir(parents=True)
+        _write_jsonl(f, [
+            _user_msg("transcript preamble", timestamp="2026-07-14T00:00:00"),
+            _assistant_msg("prelude", timestamp="2026-07-14T00:00:01"),
+            _user_msg(
+                "You are the **sleep cycle** for this agent team.\n\n"
+                "=== NEW TRANSCRIPT DELTA (since your last run) ===\n"
+                "copied team transcript",
+                timestamp="2026-07-14T00:00:02",
+            ),
+            _assistant_msg("custom summary", timestamp="2026-07-14T00:00:03"),
+        ])
+
+        assert _index_file(db, f) == 0
+        assert db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+        assert db.execute(
+            "SELECT lines_read FROM index_state WHERE file_path = ?", (str(f),)
+        ).fetchone()[0] == 4
+
+    def test_skips_rotation_base_prompt_reinjection(self, db, tmp_path):
+        f = tmp_path / "proj" / "director-rotation.jsonl"
+        f.parent.mkdir(parents=True)
+        _write_jsonl(f, [
+            _user_msg(
+                _role_startup_prompt(),
+                timestamp="2026-07-14T00:00:00",
+                cwd="/run",
+                gitBranch="main",
+            ),
+            _assistant_msg("ready", timestamp="2026-07-14T00:00:01"),
+            _user_msg("Human asked the team to remember the deploy command.", timestamp="2026-07-14T00:00:02"),
+        ])
+
+        count = _index_file(db, f)
+
+        assert count == 2
+        contents = [
+            r[0] for r in db.execute(
+                "SELECT content FROM messages ORDER BY id"
+            ).fetchall()
+        ]
+        assert contents == ["ready", "Human asked the team to remember the deploy command."]
+        assert _role_startup_prompt() not in contents
 
 
 # ---------------------------------------------------------------------------
@@ -775,3 +935,71 @@ class TestMessagesSince:
         ids = [m["id"] for m in delta]
         assert ids == sorted(ids)  # oldest-first by id
         assert len(messages_since(0, limit=2)) == 2
+
+    def test_excludes_previously_indexed_sleep_cycle_and_startup_echoes(
+        self, projects_dir, tmp_path, monkeypatch
+    ):
+        state = tmp_path / "state"
+        sessions = state / "sessions"
+        sessions.mkdir(parents=True)
+        monkeypatch.setattr(paths, "state_path", lambda *a, **k: state)
+        (sessions / "curator-curator-oldhash-curator.id").write_text(
+            "claude-old-sleep-cycle"
+        )
+
+        proj = projects_dir / "-Users-d-dev"
+        proj.mkdir()
+        _write_jsonl(proj / "normal.jsonl", [
+            _user_msg("real team signal", timestamp="2026-07-14T00:00:00"),
+        ])
+        index()
+
+        db_path = history._db_path()
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            INSERT INTO messages (session_id, type, role, content, timestamp, line_number)
+            VALUES ('claude-old-sleep-cycle', 'user', 'user',
+                    'Custom old sleep-cycle prompt with transcript delta',
+                    '2026-07-14T00:00:01', 1)
+        """)
+        conn.execute("""
+            INSERT INTO messages (session_id, type, role, content, timestamp, line_number)
+            VALUES ('claude-unmapped-default-sleep-cycle', 'user', 'user',
+                    'You are the **sleep cycle** for this agent team. old prompt',
+                    '2026-07-14T00:00:02', 1)
+        """)
+        conn.execute("""
+            INSERT INTO messages (session_id, type, role, content, timestamp, line_number)
+            VALUES ('claude-unmapped-default-sleep-cycle', 'assistant', 'assistant',
+                    'sleep-cycle assistant summary',
+                    '2026-07-14T00:00:03', 2)
+        """)
+        conn.execute("""
+            INSERT INTO messages (session_id, type, role, content, tool_name,
+                                  tool_input, timestamp, line_number)
+            VALUES ('claude-unmapped-default-sleep-cycle', 'assistant', 'assistant',
+                    '', 'Write', '{"file_path": "long_term_memory.md"}',
+                    '2026-07-14T00:00:03', 2)
+        """)
+        conn.execute("""
+            INSERT INTO messages (session_id, type, role, content, timestamp, line_number)
+            VALUES ('claude-unmapped-custom-sleep-cycle', 'user', 'user', ?,
+                    '2026-07-14T00:00:04', 1)
+        """, (_sleep_cycle_rendered_task(),))
+        conn.execute("""
+            INSERT INTO messages (session_id, type, role, content, timestamp, line_number)
+            VALUES ('claude-unmapped-custom-sleep-cycle', 'assistant', 'assistant',
+                    'custom sleep-cycle assistant summary',
+                    '2026-07-14T00:00:05', 2)
+        """)
+        conn.execute("""
+            INSERT INTO messages (session_id, type, role, content, timestamp, line_number)
+            VALUES ('director-rotated', 'user', 'user', ?,
+                    '2026-07-14T00:00:06', 1)
+        """, (_role_startup_prompt(),))
+        conn.commit()
+        conn.close()
+
+        delta = messages_since(0)
+
+        assert [m["content"] for m in delta] == ["real team signal"]
