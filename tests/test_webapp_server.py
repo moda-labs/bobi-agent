@@ -187,6 +187,101 @@ class TestSpend:
         assert bobi_install.agent_name in names
 
 
+# --- system health (observability #733) --------------------------------------
+
+def _seed_active_session(sessions_dir, name, *, status, role="engineer"):
+    """A registry entry list_active() keeps: an active status and pid 0
+    (no liveness check), so the health fold sees it."""
+    d = sessions_dir / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "state.json").write_text(json.dumps(
+        {"name": name, "role": role, "status": status, "pid": 0}))
+
+
+class TestHealth:
+    # manager_session_name: bobi-<agent>-<entry_role>; the fixture's
+    # agent.yaml declares entry_point "director".
+    MGR = "bobi-test-agent-director"
+
+    def _get(self, bobi_install):
+        r = _client().get(f"/api/agents/{bobi_install.agent_name}/health")
+        assert r.status_code == 200
+        return r.json()
+
+    def test_stopped_team(self, bobi_install):
+        body = self._get(bobi_install)
+        # Local teams share the webapp's host: live by construction, no
+        # heartbeats, no supervisor trail.
+        assert body["reachability"] == "live"
+        assert body["last_heartbeat_at"] is None
+        assert body["lifecycle"] == []
+        mgr = body["manager"]
+        assert mgr["status"] == "stopped"
+        assert mgr["running"] is False
+        assert mgr["healthy"] is False
+        assert mgr["pid"] == 0
+        assert mgr["restart_count"] is None
+        assert body["sessions"] == []
+
+    def test_running_manager_reports_registry_status(self, bobi_install):
+        import os
+
+        from bobi import paths
+        pid_path = paths.manager_pid_path(bobi_install.repo_path)
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_path.write_text(str(os.getpid()))   # a live pid: this process
+        _seed_active_session(bobi_install.sessions_dir, self.MGR,
+                             status="idle", role="director")
+        _seed_active_session(bobi_install.sessions_dir, "eng",
+                             status="running")
+        body = self._get(bobi_install)
+        mgr = body["manager"]
+        assert mgr["running"] is True
+        assert mgr["pid"] == os.getpid()
+        assert mgr["status"] == "idle"     # the registry's word, not just "up"
+        assert mgr["healthy"] is True
+        # manager-first ordering, roles and statuses carried through
+        sessions = body["sessions"]
+        assert sessions[0]["name"] == self.MGR
+        assert {"name": "eng", "role": "engineer",
+                "status": "running"} in sessions
+
+    def test_boot_window_reads_starting(self, bobi_install):
+        import os
+
+        from bobi import paths
+        pid_path = paths.manager_pid_path(bobi_install.repo_path)
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_path.write_text(str(os.getpid()))
+        # pid alive but no registered manager session yet: fail open to
+        # "starting" (the same verdict the hosted sidecar reports pre-spawn).
+        body = self._get(bobi_install)
+        assert body["manager"]["status"] == "starting"
+        assert body["manager"]["running"] is True
+
+    def test_stale_pid_reads_stopped(self, bobi_install):
+        from bobi import paths
+        pid_path = paths.manager_pid_path(bobi_install.repo_path)
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_path.write_text("999999999")
+        _seed_active_session(bobi_install.sessions_dir, self.MGR,
+                             status="idle", role="director")
+        body = self._get(bobi_install)
+        assert body["manager"]["status"] == "stopped"
+        assert body["manager"]["running"] is False
+
+    def test_terminal_sessions_not_listed(self, bobi_install):
+        d = bobi_install.sessions_dir / "done-run"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "state.json").write_text(json.dumps(
+            {"name": "done-run", "role": "engineer", "status": "completed"}))
+        body = self._get(bobi_install)
+        assert body["sessions"] == []
+
+    def test_unknown_agent_404(self, bobi_install):
+        assert _client().get("/api/agents/nope/health").status_code == 404
+
+
 # --- lifecycle actions -----------------------------------------------------
 
 class _FakeStartup:

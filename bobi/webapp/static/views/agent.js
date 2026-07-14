@@ -3,7 +3,7 @@
    standalone agentui SPA, routed under #/agents/<name> with team-scoped
    endpoints. */
 
-import { openSetup, fmtUsd } from "../shell.js";
+import { openSetup, fmtUsd, healthChip, fmtAgo } from "../shell.js";
 
 export function mountAgent(el, { api, name }) {
   const base = "/api/agents/" + encodeURIComponent(name);
@@ -24,6 +24,7 @@ export function mountAgent(el, { api, name }) {
   shell.className = "shell";
   shell.innerHTML = `
     <aside class="sidebar">
+      <div class="health-panel" data-el="healthPanel" hidden></div>
       <div class="spend-panel" data-el="spendPanel" hidden></div>
       <div class="side-head mono"><a class="side-back" href="#/">&larr; agents</a> · subagents</div>
       <div class="cards" data-el="cards"></div>
@@ -69,12 +70,12 @@ export function mountAgent(el, { api, name }) {
   let busyVerb = null;   // "starting" | "stopping" | "restarting" while acting
 
   function renderControls() {
-    const st = busyVerb ? busyVerb
-      : !runState ? "…"
-      : runState.running ? "running" : "stopped";
-    els.runStatus.className = "status " +
-      (busyVerb ? "starting" : runState && runState.running ? "running" : "stopped");
-    els.runStatus.textContent = st;
+    // Same worst-signal-wins derivation as the dashboard cards (#733):
+    // hosted /status cards carry reachability + manager_status.
+    const chip = busyVerb ? { label: busyVerb, cls: "starting" }
+                          : healthChip(runState);
+    els.runStatus.className = "status " + chip.cls;
+    els.runStatus.textContent = chip.label;
 
     els.actions.innerHTML = "";
     const btn = (label, kind, onClick, disabled) => {
@@ -96,13 +97,9 @@ export function mountAgent(el, { api, name }) {
     }
   }
 
-  async function pollStatus() {
-    const { ok, data } = await api(base + "/status");
-    if (ok && data) {
-      runState = data;
-      if (!busyVerb) renderControls();
-    }
-  }
+  // No standalone /status poller: the health poll below carries a superset
+  // of what the header chip needs and keeps runState fresh. act() still
+  // probes /status directly for its settle loop.
 
   async function act(verb) {
     busyVerb = verb === "start" ? "starting"
@@ -124,7 +121,8 @@ export function mountAgent(el, { api, name }) {
     }
     busyVerb = null;
     renderControls();
-    poll();   // refresh the roster right away
+    poll();         // refresh the roster right away
+    pollHealth();   // and the health panel/chip
   }
 
   els.edit.addEventListener("click", async () => {
@@ -465,6 +463,101 @@ export function mountAgent(el, { api, name }) {
     if (ok && data) renderSpend(data);
   }
 
+  // --- health panel (observability, #733) ------------------------------
+  // Manager liveness + the supervisor's lifecycle trail, above the roster.
+  // A local team has no supervisor: the restart fields are null and the
+  // trail is empty, so the panel shows just the manager line. A hosted
+  // team adds reachability, restart count, and the 48h lifecycle trail.
+  // Severity per supervisor lifecycle event (the sidecar's vocabulary);
+  // an event not listed here renders with the neutral dot.
+  const LIFECYCLE_CLASS = {
+    probe_failing: "bad", budget_exhausted: "bad",
+    probe_recovered: "ok", manager_started: "ok",
+    manager_restarted: "warn",
+  };
+
+  function renderHealth(data) {
+    const mgr = data && data.manager;
+    if (!mgr) { els.healthPanel.hidden = true; return; }
+    els.healthPanel.hidden = false;
+    els.healthPanel.innerHTML = "";
+
+    // Degraded reachability outranks the manager's own status: a stale or
+    // unreachable heartbeat means the status line can no longer be trusted.
+    const reach = data.reachability;
+    const degraded = reach === "stale" || reach === "unreachable";
+    const st = degraded ? reach
+      : mgr.status || (mgr.running ? "running" : "stopped");
+
+    const head = document.createElement("div");
+    head.className = "health-head mono";
+    const label = document.createElement("span");
+    label.textContent = "health";
+    const chip = document.createElement("span");
+    chip.className = "status " + st;
+    chip.textContent = st;
+    head.appendChild(label);
+    head.appendChild(chip);
+    els.healthPanel.appendChild(head);
+
+    const bits = [];
+    if (mgr.pid) bits.push("pid " + mgr.pid);
+    if (typeof mgr.restart_count === "number") {
+      bits.push(mgr.restart_count + " restart" +
+                (mgr.restart_count === 1 ? "" : "s"));
+    }
+    // Heartbeat age answers "how long since we last heard" - meaningful
+    // only when degraded. On a live box it is implied, and the timestamp is
+    // the box's own clock, so skew would contradict the (server-derived)
+    // live chip.
+    if (degraded && data.last_heartbeat_at) {
+      const ago = fmtAgo(Date.parse(data.last_heartbeat_at));
+      if (ago) bits.push("hb " + ago);
+    }
+    if (bits.length) {
+      const sub = document.createElement("div");
+      sub.className = "health-sub";
+      sub.textContent = bits.join(" · ");
+      if (mgr.last_restart_reason) {
+        sub.title = "last restart: " + mgr.last_restart_reason;
+      }
+      els.healthPanel.appendChild(sub);
+    }
+
+    for (const ev of (data.lifecycle || []).slice(0, 6)) {
+      const row = document.createElement("div");
+      row.className = "health-row";
+      const evEl = document.createElement("span");
+      // hasOwn guard: an event name from the wire must never resolve an
+      // inherited Object property into the class list.
+      evEl.className = "health-event " +
+        (Object.hasOwn(LIFECYCLE_CLASS, ev.event)
+          ? LIFECYCLE_CLASS[ev.event] : "");
+      evEl.textContent = ev.event;
+      if (ev.reason) evEl.title = ev.reason;
+      const when = document.createElement("span");
+      when.className = "health-when";
+      when.textContent =
+        fmtAgo(ev.received_at || (ev.at ? Date.parse(ev.at) : NaN));
+      row.appendChild(evEl);
+      row.appendChild(when);
+      els.healthPanel.appendChild(row);
+    }
+  }
+
+  async function pollHealth() {
+    const { ok, data } = await api(base + "/health");
+    if (!ok || !data) return;
+    renderHealth(data);
+    // One liveness source: the header chip derives from the same payload
+    // (installed is implied - only installed teams have an agent view).
+    const mgr = data.manager || {};
+    runState = { installed: true, running: !!mgr.running,
+                 reachability: data.reachability,
+                 manager_status: mgr.status };
+    if (!busyVerb) renderControls();
+  }
+
   els.composer.addEventListener("submit", (e) => {
     e.preventDefault();
     const text = els.input.value.trim();
@@ -488,11 +581,11 @@ export function mountAgent(el, { api, name }) {
 
   poll();
   pollMessages();
-  pollStatus();
   pollSpend();
+  pollHealth();
   const t1 = setInterval(poll, 3000);
   const t2 = setInterval(pollMessages, 3000);
-  const t3 = setInterval(pollStatus, 4000);
+  const t3 = setInterval(pollHealth, 4000);
   const t4 = setInterval(pollSpend, 8000);
   return () => { [t1, t2, t3, t4].forEach(clearInterval); };
 }
