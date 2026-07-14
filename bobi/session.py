@@ -731,15 +731,18 @@ class Session:
                         model = ""
                         input_tokens = 0
                         output_tokens = 0
+                        cached_input_tokens = 0
                         for c in msg.costs:
                             model = c.model or model
                             input_tokens += c.input_tokens
                             output_tokens += c.output_tokens
+                            cached_input_tokens += c.cached_input_tokens
                         registry.record_cost(
                             self.name, cost, model=model,
                             provider=getattr(self._client, "provider", "anthropic"),
                             input_tokens=input_tokens,
                             output_tokens=output_tokens,
+                            cached_input_tokens=cached_input_tokens,
                         )
                     self._last_api_error_status = msg.api_error_status
                     if msg.is_error:

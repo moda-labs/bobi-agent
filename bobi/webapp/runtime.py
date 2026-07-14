@@ -134,15 +134,25 @@ class TeamRuntime(ABC):
         Shape (see ``bobi.costs.CostSummary.to_dict``)::
 
             {"total_cost_usd", "sessions_counted",
-             "by_provider", "by_model", "by_session", "by_role"}
+             "by_provider", "by_model", "by_session", "by_role",
+             "estimated_cost_usd", "estimated_by_model", "tokens_by_model"}
+
+        ``total_cost_usd``/``by_*`` are provider-reported dollars only;
+        ``estimated_*`` is fold-time list-price math over recorded token
+        counts for models that report no dollars (#760), kept separate so an
+        estimate is never mistaken for a bill. ``tokens_by_model`` carries the
+        raw token volumes — the render fallback when no estimate exists.
         """
 
     @abstractmethod
     def fleet_spend(self) -> dict:
         """Fleet-wide spend for the dashboard: a total plus per-team totals::
 
-            {"total_cost_usd", "sessions_counted",
-             "teams": [{"name", "total_cost_usd", "sessions_counted"}, ...]}
+            {"total_cost_usd", "estimated_cost_usd", "sessions_counted",
+             "teams": [{"name", "total_cost_usd", "estimated_cost_usd",
+                        "sessions_counted"}, ...]}
+
+        Same recorded/estimated separation as ``spend_summary``.
         """
 
     @abstractmethod
@@ -489,6 +499,7 @@ class LocalRuntime(TeamRuntime):
         from bobi.costs import rollup_costs
 
         total = 0.0
+        estimated = 0.0
         counted = 0
         teams: list[dict] = []
         for team in paths.list_agents():
@@ -498,16 +509,21 @@ class LocalRuntime(TeamRuntime):
             # equals the sum of the visible tiles (no sub-cent drift where the
             # header shows spend no tile accounts for).
             team_total = round(summary.total_cost_usd, 4)
+            team_estimated = round(summary.estimated_cost_usd, 4)
             teams.append({
                 "name": team,
                 "total_cost_usd": team_total,
+                "estimated_cost_usd": team_estimated,
                 "sessions_counted": summary.sessions_counted,
             })
             total += team_total
+            estimated += team_estimated
             counted += summary.sessions_counted
-        teams.sort(key=lambda t: t["total_cost_usd"], reverse=True)
+        teams.sort(key=lambda t: (t["total_cost_usd"]
+                                  + t["estimated_cost_usd"]), reverse=True)
         return {
             "total_cost_usd": round(total, 4),
+            "estimated_cost_usd": round(estimated, 4),
             "sessions_counted": counted,
             "teams": teams,
         }

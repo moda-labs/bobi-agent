@@ -29,6 +29,26 @@ class TestPriceTable:
         cost = estimate_cost("anthropic", "claude-sonnet-4-20250514")
         assert cost == 0.0
 
+    def test_cached_subset_priced_at_cached_rate(self):
+        # gpt-5.6: $5/M input, $0.50/M cached, $30/M output. input_tokens is
+        # INCLUSIVE of cached (900K cached + 100K uncached here) — the whole
+        # point of #760's split: pricing 1M cache-heavy input at the full
+        # rate would fabricate ~$5 where ~$0.95 is defensible.
+        cost = estimate_cost("openai", "gpt-5.6",
+                             input_tokens=1_000_000,
+                             output_tokens=10_000,
+                             cached_input_tokens=900_000)
+        # 100K * 5.0 + 900K * 0.50 + 10K * 30.0 = 0.5 + 0.45 + 0.3
+        assert abs(cost - 1.25) < 0.001
+
+    def test_cached_clamped_to_input(self):
+        # A malformed entry claiming more cached than input must not go
+        # negative on the uncached remainder.
+        cost = estimate_cost("openai", "gpt-5.6",
+                             input_tokens=100,
+                             cached_input_tokens=500)
+        assert abs(cost - 100 * 0.50 / 1_000_000) < 1e-9
+
 
 class TestCostRollup:
     def _make_sessions(self, tmp_path, sessions):
@@ -141,6 +161,75 @@ class TestCostRollup:
         assert summary.sessions_counted == 0
 
 
+class TestEstimatedRollup:
+    """Fold-time dollar estimation for models that report tokens only (#760)."""
+
+    _make_sessions = TestCostRollup._make_sessions
+
+    def _codex_session(self, *, cached_key=True, model="gpt-5.6",
+                       cost=0.0):
+        usage = {"cost_usd": cost, "input_tokens": 1_000_000,
+                 "output_tokens": 10_000}
+        if cached_key:
+            usage["cached_input_tokens"] = 900_000
+        return {
+            "name": "dev-1-task", "role": "dev", "total_cost_usd": cost,
+            "model": model, "provider": "openai",
+            "model_usage": {f"openai:{model}": usage},
+        }
+
+    def test_codex_entry_estimated(self, tmp_path):
+        sessions_dir = self._make_sessions(
+            tmp_path, {"dev-1-task": self._codex_session()})
+        summary = rollup_costs(sessions_dir)
+        # Recorded dollars stay zero — the estimate rides separate fields.
+        assert summary.total_cost_usd == 0.0
+        assert summary.by_model["openai:gpt-5.6"] == 0.0
+        # 100K uncached * $5 + 900K cached * $0.50 + 10K out * $30 per Mtok
+        assert abs(summary.estimated_cost_usd - 1.25) < 0.001
+        assert abs(summary.estimated_by_model["openai:gpt-5.6"] - 1.25) < 0.001
+        assert summary.tokens_by_model["openai:gpt-5.6"] == {
+            "input_tokens": 1_000_000, "cached_input_tokens": 900_000,
+            "output_tokens": 10_000}
+
+    def test_legacy_entry_without_split_not_estimated(self, tmp_path):
+        # Pre-split history folded cached tokens into input_tokens at full
+        # weight; estimating it would overestimate ~10x on cache-heavy
+        # turns. Token volume still surfaces.
+        sessions_dir = self._make_sessions(
+            tmp_path, {"dev-1-task": self._codex_session(cached_key=False)})
+        summary = rollup_costs(sessions_dir)
+        assert summary.estimated_cost_usd == 0.0
+        assert summary.estimated_by_model == {}
+        assert summary.tokens_by_model["openai:gpt-5.6"]["input_tokens"] == 1_000_000
+
+    def test_unknown_model_not_estimated(self, tmp_path):
+        sessions_dir = self._make_sessions(
+            tmp_path, {"dev-1-task": self._codex_session(model="codex")})
+        summary = rollup_costs(sessions_dir)
+        assert summary.estimated_cost_usd == 0.0
+        assert "openai:codex" in summary.tokens_by_model
+
+    def test_reported_cost_never_reestimated(self, tmp_path):
+        # An entry with provider-reported dollars must not ALSO contribute
+        # an estimate (double counting).
+        sessions_dir = self._make_sessions(
+            tmp_path, {"dev-1-task": self._codex_session(cost=0.42)})
+        summary = rollup_costs(sessions_dir)
+        assert summary.total_cost_usd == 0.42
+        assert summary.estimated_cost_usd == 0.0
+        assert "openai:gpt-5.6" in summary.tokens_by_model
+
+    def test_estimates_accumulate_across_sessions(self, tmp_path):
+        sessions_dir = self._make_sessions(tmp_path, {
+            "dev-1-a": self._codex_session(),
+            "dev-1-b": self._codex_session(),
+        })
+        summary = rollup_costs(sessions_dir)
+        assert abs(summary.estimated_cost_usd - 2.50) < 0.001
+        assert summary.tokens_by_model["openai:gpt-5.6"]["output_tokens"] == 20_000
+
+
 class TestFormatCosts:
     def test_by_provider(self):
         summary = CostSummary(
@@ -168,6 +257,13 @@ class TestFormatCosts:
         summary = CostSummary()
         output = format_costs(summary)
         assert "Total cost: $0.0000" in output
+        assert "Estimated" not in output  # no line when nothing is estimated
+
+    def test_estimated_line(self):
+        summary = CostSummary(total_cost_usd=1.0, estimated_cost_usd=0.25,
+                              sessions_counted=1)
+        output = format_costs(summary)
+        assert "Estimated:  ~$0.2500" in output
 
 
 class TestToDict:
@@ -199,3 +295,26 @@ class TestToDict:
         assert d["total_cost_usd"] == 0.0
         assert d["sessions_counted"] == 0
         assert d["by_model"] == {}
+        # Additive #760 fields are always present (value-branching wire
+        # convention: null/empty, never omitted).
+        assert d["estimated_cost_usd"] == 0.0
+        assert d["estimated_by_model"] == {}
+        assert d["tokens_by_model"] == {}
+
+    def test_estimated_fields_rounded_and_ranked(self):
+        summary = CostSummary(
+            estimated_cost_usd=0.123456,
+            estimated_by_model={"openai:a": 0.02, "openai:b": 0.103456},
+            tokens_by_model={
+                "openai:a": {"input_tokens": 10, "cached_input_tokens": 5,
+                             "output_tokens": 1},
+                "openai:b": {"input_tokens": 999, "cached_input_tokens": 0,
+                             "output_tokens": 100},
+            },
+        )
+        d = summary.to_dict()
+        assert d["estimated_cost_usd"] == 0.1235
+        assert list(d["estimated_by_model"]) == ["openai:b", "openai:a"]
+        # tokens ranked by volume, values untouched (raw facts, not dollars)
+        assert list(d["tokens_by_model"]) == ["openai:b", "openai:a"]
+        assert d["tokens_by_model"]["openai:a"]["cached_input_tokens"] == 5

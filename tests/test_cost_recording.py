@@ -139,3 +139,32 @@ class TestRecordCost:
         registry = get_registry()
         # Should not raise
         registry.record_cost("nonexistent", 0.10, model="test", provider="test")
+
+    def test_record_cost_cached_split(self, bobi_install):
+        """The cached subset accumulates, and the key is ALWAYS written (even
+        when 0) — its presence marks the entry as post-split, which is what
+        licenses the fold-time dollar estimator to price it (#760)."""
+        from bobi.sdk import get_registry, SessionEntry
+        registry = get_registry()
+        registry.register(SessionEntry(name="codex-test", role="dev"))
+
+        registry.record_cost("codex-test", 0.0, model="gpt-5.6",
+                             provider="openai", input_tokens=1000,
+                             output_tokens=50, cached_input_tokens=900)
+        registry.record_cost("codex-test", 0.0, model="gpt-5.6",
+                             provider="openai", input_tokens=2000,
+                             output_tokens=100, cached_input_tokens=1800)
+
+        u = registry.get("codex-test").model_usage["openai:gpt-5.6"]
+        assert u["input_tokens"] == 3000
+        assert u["cached_input_tokens"] == 2700
+        assert u["output_tokens"] == 150
+
+        # Default (no cached kwarg) still writes the marker key.
+        registry.register(SessionEntry(name="claude-test", role="dev"))
+        registry.record_cost("claude-test", 0.10, model="claude-sonnet-4-20250514",
+                             provider="anthropic", input_tokens=5000,
+                             output_tokens=1000)
+        u = registry.get("claude-test").model_usage[
+            "anthropic:claude-sonnet-4-20250514"]
+        assert u["cached_input_tokens"] == 0

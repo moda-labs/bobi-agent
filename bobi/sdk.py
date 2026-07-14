@@ -308,8 +308,17 @@ class SessionRegistry:
 
     def record_cost(self, name: str, cost_usd: float,
                     model: str = "", provider: str = "",
-                    input_tokens: int = 0, output_tokens: int = 0) -> None:
-        """Accumulate cost and model_usage on a session entry."""
+                    input_tokens: int = 0, output_tokens: int = 0,
+                    cached_input_tokens: int = 0) -> None:
+        """Accumulate cost and model_usage on a session entry.
+
+        ``cached_input_tokens`` is the cached SUBSET of ``input_tokens``, kept
+        split because cache reads bill at a per-model discount. The key is
+        always written (even 0), which marks the entry as carrying the split:
+        the fold-time dollar estimator (#760) refuses to price entries without
+        it, since legacy recordings folded cached tokens into ``input_tokens``
+        at full weight.
+        """
         path = self._state_path(name)
         if not path.exists():
             return
@@ -323,10 +332,13 @@ class SessionRegistry:
             key = f"{provider}:{model}" if provider else model
             if key:
                 entry = usage.get(key, {"cost_usd": 0.0, "input_tokens": 0,
-                                         "output_tokens": 0})
+                                         "output_tokens": 0,
+                                         "cached_input_tokens": 0})
                 entry["cost_usd"] = entry.get("cost_usd", 0.0) + cost_usd
                 entry["input_tokens"] = entry.get("input_tokens", 0) + input_tokens
                 entry["output_tokens"] = entry.get("output_tokens", 0) + output_tokens
+                entry["cached_input_tokens"] = (
+                    entry.get("cached_input_tokens", 0) + cached_input_tokens)
                 usage[key] = entry
                 data["model_usage"] = usage
         if model and not data.get("model"):

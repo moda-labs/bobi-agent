@@ -24,11 +24,18 @@ class BrainCost:
     Normalized from the SDK's per-model usage breakdown. The dollar figure is
     carried on :class:`TurnResult` (``total_cost_usd``) because only some brains
     report cost directly; others compute it from these token counts.
+
+    ``cached_input_tokens`` is a SUBSET of ``input_tokens`` (codex's
+    ``non_cached_input()`` is ``input - cached``), not an addition to it.
+    Cache reads bill at a steep per-model discount, so folding the split away
+    would make any downstream dollar estimate a large overestimate on
+    cache-heavy agentic turns (#760).
     """
 
     model: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_input_tokens: int = 0
 
 
 @dataclass
