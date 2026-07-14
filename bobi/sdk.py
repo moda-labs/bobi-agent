@@ -19,7 +19,7 @@ import os
 import platform
 import shutil
 import time
-from dataclasses import dataclass, field, fields, asdict
+from dataclasses import dataclass, field, fields, asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -387,11 +387,15 @@ class SessionRegistry:
             return entry
         if not entry.pid or pid_alive(entry.pid):
             return entry
-        self.mark_terminal(
-            entry.name, TERMINAL_CRASHED,
-            error="agent process died without reporting a terminal status",
-        )
-        return self.get(entry.name) or entry
+        msg = "agent process died without reporting a terminal status"
+        self.mark_terminal(entry.name, TERMINAL_CRASHED, error=msg)
+        # Return the crashed view synthesized in memory, NOT a re-read of
+        # state.json: the marking can race a concurrent cleanup or rewrite
+        # (mark_terminal no-ops on a missing/torn file), and a re-read could
+        # then hand back the stale active entry - the one thing a reap must
+        # never return.
+        return replace(entry, status=TERMINAL_CRASHED, pid=0,
+                       error=entry.error or msg, terminal_at=time.time())
 
     def list_active(self) -> list[SessionEntry]:
         return [e for e in self.list_all(reap_dead=True)

@@ -149,16 +149,17 @@ export function mountAgent(el, { api, name }) {
   const history = new Map();
   let selected = null;
   let lastAgents = [];
-  let sessionLog = [];   // last /sessions payload rows (active + terminal)
+  let sessionLog = [];            // last /sessions payload rows
+  let sessionLogTruncated = false; // the runtime capped the row list
   let sending = false;
   let messagesLoading = false;
 
-  // Ended-session vocabulary: the MDS-65 terminal words plus the statuses
-  // older writers still record ("done" = success, "error" = a turn-level
-  // failure, stopped/cancelled = torn down). These sessions are over - the
-  // transcript is readable but the composer makes no sense.
-  const TERMINAL_SET = new Set(["completed", "done", "failed", "crashed",
-                                "error", "stopped", "cancelled"]);
+  // Whether a session is over comes from the wire (`ended`, derived
+  // server-side from the active vocabulary) so this view never has to
+  // enumerate terminal words. The alias map is presentation only: legacy
+  // words reuse an existing chip color ("done" = success, "error" = a
+  // turn-level failure, cancelled = torn down); an unmapped word degrades
+  // to the neutral dot.
   const CHIP_ALIAS = { done: "completed", error: "failed", cancelled: "stopped" };
   const chipClass = (s) =>
     Object.hasOwn(CHIP_ALIAS, s) ? CHIP_ALIAS[s] : s;
@@ -343,7 +344,7 @@ export function mountAgent(el, { api, name }) {
     // An ended session's transcript stays readable; the composer goes away
     // (chat targets a live process). Re-derived on every poll, so a session
     // that ends while selected flips read-only by itself.
-    const ended = !!a.status && TERMINAL_SET.has(a.status);
+    const ended = a.ended === true;
     els.composer.hidden = ended;
     els.chatEnded.hidden = !ended;
     if (ended) {
@@ -443,6 +444,15 @@ export function mountAgent(el, { api, name }) {
       lastAgents = data.subagents || [];
       renderCards(lastAgents);
       if (selected) updateChatHead();
+      // The selected session just left the active roster and the log
+      // doesn't know it ended yet: refresh the log now so the pane flips
+      // read-only without waiting out the slower session poll (during
+      // which a stale log row would keep the composer live against a
+      // dead process). The `ended` guard keeps this a one-shot.
+      if (selected && !lastAgents.some((x) => x.name === selected)) {
+        const row = sessionLog.find((x) => x.name === selected);
+        if (!row || !row.ended) pollSessions();
+      }
     }
   }
 
@@ -458,7 +468,7 @@ export function mountAgent(el, { api, name }) {
   const MAX_SESSION_ROWS = 50;
 
   function renderSessionRows() {
-    const rows = sessionLog.filter((s) => TERMINAL_SET.has(s.status));
+    const rows = sessionLog.filter((s) => s.ended);
     if (!rows.length) { els.sessionsPanel.hidden = true; return; }
     els.sessionsPanel.hidden = false;
     els.sessionRows.innerHTML = "";
@@ -500,11 +510,17 @@ export function mountAgent(el, { api, name }) {
       row.addEventListener("click", () => selectAgent(s.name));
       els.sessionRows.appendChild(row);
     }
-    if (rows.length > MAX_SESSION_ROWS) {
+    // Honest footer: what this render hides, plus the runtime's own cap
+    // (`truncated`: a hosted box sends only the newest rows, so the counts
+    // line above may cover more history than arrived here).
+    const hidden = rows.length - MAX_SESSION_ROWS;
+    if (hidden > 0 || sessionLogTruncated) {
       const more = document.createElement("div");
       more.className = "session-more mono";
-      more.textContent = "+ " + (rows.length - MAX_SESSION_ROWS)
-        + " older sessions";
+      const bits = [];
+      if (hidden > 0) bits.push("+ " + hidden + " older sessions");
+      if (sessionLogTruncated) bits.push("older history capped by the runtime");
+      more.textContent = bits.join(" · ");
       els.sessionRows.appendChild(more);
     }
   }
@@ -517,10 +533,23 @@ export function mountAgent(el, { api, name }) {
     els.sessionCounts.textContent = bits.join(" · ");
   }
 
+  // A hosted supervisor that predates the session_log command never replies,
+  // so a failed poll there costs a full command timeout server-side. After
+  // two straight misses, back off to every 6th tick (~1 minute) until a poll
+  // succeeds again.
+  let sessionPollMisses = 0;
+  let sessionPollSkips = 0;
+
   async function pollSessions() {
+    if (sessionPollMisses >= 2) {
+      sessionPollSkips = (sessionPollSkips + 1) % 6;
+      if (sessionPollSkips !== 0) return;
+    }
     const { ok, data } = await api(base + "/sessions");
-    if (!ok || !data) return;
+    if (!ok || !data) { sessionPollMisses++; return; }
+    sessionPollMisses = 0;
     sessionLog = data.sessions || [];
+    sessionLogTruncated = !!data.truncated;
     renderSessionCounts(data.counts || {});
     renderSessionRows();
     if (selected) updateChatHead();
@@ -697,6 +726,9 @@ export function mountAgent(el, { api, name }) {
   const t2 = setInterval(pollMessages, 3000);
   const t3 = setInterval(pollHealth, 4000);
   const t4 = setInterval(pollSpend, 8000);
-  const t5 = setInterval(pollSessions, 5000);
+  // The log only changes when a session ends, and the hosted read is a
+  // full command RPC - poll slower than the live surfaces. Lifecycle
+  // actions and a roster drop of the selected session refresh it directly.
+  const t5 = setInterval(pollSessions, 10000);
   return () => { [t1, t2, t3, t4, t5].forEach(clearInterval); };
 }

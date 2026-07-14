@@ -332,9 +332,11 @@ class TestSessionLog:
         assert boom["terminal_at"] == 200.0
         assert boom["session_id"] == "sid-boom"
         assert boom["total_cost_usd"] == 0.25
+        assert boom["ended"] is True
         live = body["sessions"][0]
         assert live["error"] == ""
         assert live["terminal_at"] is None   # null, never omitted
+        assert live["ended"] is False
         assert body["counts"] == {"active": 1, "completed": 1,
                                   "failed": 1, "crashed": 0}
         assert body["truncated"] is False
@@ -348,6 +350,7 @@ class TestSessionLog:
         assert z["status"] == "crashed"
         assert z["error"]                     # the honest-status message
         assert z["terminal_at"] is not None
+        assert z["ended"] is True
         assert body["counts"] == {"active": 0, "completed": 0,
                                   "failed": 0, "crashed": 1}
 

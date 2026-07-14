@@ -181,6 +181,8 @@ class TeamRuntime(ABC):
                                                  #  "error" = failed)
                            "error",              # terminal failure message,
                                                  # "" otherwise
+                           "ended",              # bool: status has left the
+                                                 # active vocabulary
                            "model", "provider", "total_cost_usd", "run_key",
                            "started_at", "last_activity",  # epoch seconds
                            "terminal_at",        # epoch seconds | None
@@ -283,11 +285,17 @@ def serialize_session(entry, *, manager_name: str = "") -> dict:
     """A session-log row (#733 vertical 3): the roster card view plus the
     honest terminal outcome. ``status`` already carries the MDS-65 vocabulary
     (completed/failed/crashed); ``error``/``terminal_at`` say why and when.
-    The hosted supervisor builds the identical row from the same helpers."""
+    ``ended`` derives from the ACTIVE vocabulary (not the terminal one) so
+    render code never has to enumerate every word a writer may record -
+    stopped/cancelled/legacy words are all honestly "over". The hosted
+    supervisor builds the identical row."""
+    from bobi.sdk import ACTIVE_STATUSES
+
     row = serialize_subagent(entry, manager_name=manager_name)
     row["session_id"] = entry.session_id
     row["error"] = entry.error
     row["terminal_at"] = entry.terminal_at or None
+    row["ended"] = entry.status not in ACTIVE_STATUSES
     return row
 
 
