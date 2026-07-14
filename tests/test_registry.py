@@ -120,6 +120,45 @@ class TestSessionRegistry:
         assert got is not None
         assert got.run_key == "42"
 
+    def test_list_all_reap_dead_marks_crashed(self, tmp_registry):
+        """History reads are honest too (#733 vertical 3): with reap_dead an
+        active status with a dead pid reads crashed, never running."""
+        tmp_registry.register(
+            SessionEntry(name="a", status="running", pid=999999999))
+        [entry] = tmp_registry.list_all(reap_dead=True)
+        assert entry.status == "crashed"
+        assert entry.pid == 0
+        assert entry.terminal_at > 0
+        assert "died" in entry.error
+        # durably written, not just the returned view
+        assert tmp_registry.get("a").status == "crashed"
+
+    def test_list_all_raw_by_default(self, tmp_registry):
+        # The reconciler sweeps list_all() and owns crash-closing there
+        # (reconciled_at + emit) - the default read must not preempt it.
+        tmp_registry.register(
+            SessionEntry(name="a", status="running", pid=999999999))
+        assert tmp_registry.list_all()[0].status == "running"
+        assert tmp_registry.get("a").status == "running"
+
+    def test_list_active_marks_and_excludes_dead_pid(self, tmp_registry):
+        tmp_registry.register(
+            SessionEntry(name="a", status="running", pid=999999999))
+        assert tmp_registry.list_active() == []
+        assert tmp_registry.get("a").status == "crashed"
+
+    def test_live_pid_stays_active(self, tmp_registry):
+        tmp_registry.register(
+            SessionEntry(name="a", status="running", pid=os.getpid()))
+        assert [e.name for e in tmp_registry.list_active()] == ["a"]
+        assert tmp_registry.list_all(reap_dead=True)[0].status == "running"
+
+    def test_terminal_entry_never_remarked(self, tmp_registry):
+        # A terminal record is settled, whatever its pid field says.
+        tmp_registry.register(
+            SessionEntry(name="a", status="completed", pid=999999999))
+        assert tmp_registry.list_all(reap_dead=True)[0].status == "completed"
+
     def test_completed_session_stays_for_history(self, tmp_path, monkeypatch):
         paths.bind_root(tmp_path)
 

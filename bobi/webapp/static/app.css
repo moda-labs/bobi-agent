@@ -255,6 +255,10 @@ html[data-retro="on"] body {
 /* health badge states (#733): degraded reachability + wedged manager */
 .status.stale::before    { background: var(--warn); }
 .status.unreachable::before, .status.wedged::before { background: var(--err); }
+/* terminal outcomes (#733 vertical 3, MDS-65 vocabulary); legacy "done"
+   records render through the completed class (agent.js chipClass) */
+.status.completed::before { background: var(--ok); }
+.status.failed::before, .status.crashed::before { background: var(--err); }
 
 .action-error {
   background: rgba(181, 70, 43, 0.08);
@@ -345,6 +349,71 @@ html[data-retro="on"] body {
 .health-event.warn::before { background: var(--warn); }
 .health-event.bad::before  { background: var(--err); }
 .health-when { font-family: var(--font-mono); color: var(--faint); flex: none; }
+
+/* session log (#733 vertical 3) - terminal outcomes under the roster.
+   Same raised-panel shell as spend/health so the sidebar stack matches. */
+.sessions-panel {
+  margin: 4px 12px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--raised);
+}
+.sessions-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+}
+.sessions-head > span:first-child { white-space: nowrap; }
+.sessions-counts { font-size: 10px; color: var(--faint); text-align: right; }
+.session-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--border);
+  padding: 6px 0;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.session-row:first-of-type { border-top: 0; margin-top: 6px; }
+.session-row.active .session-name { color: var(--text); font-weight: 600; }
+.session-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.session-name {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-meta { font-size: 10px; color: var(--faint); margin-top: 1px; }
+.session-error {
+  font-size: 10.5px;
+  color: var(--err);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-more { font-size: 10px; color: var(--faint); padding-top: 4px; }
+/* read-only note where the composer sits for an ended session */
+.chat-ended {
+  margin: 0;
+  padding: 10px 4px 4px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+}
 
 .spend-total { color: var(--text); font-size: 13px; letter-spacing: 0.02em; }
 .spend-label {

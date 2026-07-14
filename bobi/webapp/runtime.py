@@ -166,6 +166,37 @@ class TeamRuntime(ABC):
         presence.
         """
 
+    @abstractmethod
+    def session_log(self, name: str) -> dict:
+        """One team's session history, newest first: every session the
+        registry still holds - active and terminal - with its honest outcome.
+
+        Shape (each row is the ``serialize_session`` view: the roster card
+        fields plus ``session_id``/``error``/``terminal_at``)::
+
+            {"sessions": [{"name", "session_id", "role", "title", "phase",
+                           "project", "status",  # starting|running|idle|
+                                                 # completed|failed|crashed
+                                                 # (+ "done" = completed,
+                                                 #  "error" = failed)
+                           "error",              # terminal failure message,
+                                                 # "" otherwise
+                           "ended",              # bool: status has left the
+                                                 # active vocabulary
+                           "model", "provider", "total_cost_usd", "run_key",
+                           "started_at", "last_activity",  # epoch seconds
+                           "terminal_at",        # epoch seconds | None
+                           "is_manager"}, ...],
+             "counts": {"active", "completed", "failed", "crashed"},
+             "truncated": bool}
+
+        ``sessions`` is newest first by last activity. ``counts`` covers the
+        whole history even when an implementation caps ``sessions`` for
+        transport (``truncated`` flags that cap). Transcripts drill in via
+        ``messages(name, session)`` - a terminal session's transcript stays
+        readable as long as its registry entry exists.
+        """
+
 
 # --- Local implementation ----------------------------------------------------
 
@@ -248,6 +279,56 @@ def ordered_subagents(entries, *, manager_name: str = "") -> list:
     return sorted(entries,
                   key=lambda e: (0 if manager_name and e.name == manager_name
                                  else 1, e.started_at or 0))
+
+
+def serialize_session(entry, *, manager_name: str = "") -> dict:
+    """A session-log row (#733 vertical 3): the roster card view plus the
+    honest terminal outcome. ``status`` already carries the MDS-65 vocabulary
+    (completed/failed/crashed); ``error``/``terminal_at`` say why and when.
+    ``ended`` derives from the ACTIVE vocabulary (not the terminal one) so
+    render code never has to enumerate every word a writer may record -
+    stopped/cancelled/legacy words are all honestly "over". The hosted
+    supervisor builds the identical row."""
+    from bobi.sdk import ACTIVE_STATUSES
+
+    row = serialize_subagent(entry, manager_name=manager_name)
+    row["session_id"] = entry.session_id
+    row["error"] = entry.error
+    row["terminal_at"] = entry.terminal_at or None
+    row["ended"] = entry.status not in ACTIVE_STATUSES
+    return row
+
+
+def session_outcome_counts(entries) -> dict:
+    """Outcome buckets over a team's whole history. Legacy ``done`` records
+    (pre-MDS-65 successes) count as completed; ``error`` counts as failed
+    (session.py/subagent.py still write it for turn-level failures -
+    rotation-recovery death, monitor timeouts, unparseable verdicts).
+    Statuses outside the vocabulary (stopped/cancelled) stay listed but
+    uncounted."""
+    from bobi.sdk import (
+        ACTIVE_STATUSES,
+        TERMINAL_COMPLETED,
+        TERMINAL_CRASHED,
+        TERMINAL_FAILED,
+    )
+
+    counts = {"active": 0, "completed": 0, "failed": 0, "crashed": 0}
+    for e in entries:
+        if e.status in ACTIVE_STATUSES:
+            counts["active"] += 1
+        elif e.status in (TERMINAL_COMPLETED, "done"):
+            counts["completed"] += 1
+        elif e.status in (TERMINAL_FAILED, "error"):
+            counts["failed"] += 1
+        elif e.status == TERMINAL_CRASHED:
+            counts["crashed"] += 1
+    return counts
+
+
+def ordered_session_log(entries) -> list:
+    """Session-log order: newest activity first (a log, not a roster)."""
+    return sorted(entries, key=lambda e: e.last_activity or 0.0, reverse=True)
 
 
 class LocalRuntime(TeamRuntime):
@@ -471,4 +552,24 @@ class LocalRuntime(TeamRuntime):
             "sessions": [{"name": e.name, "role": e.role, "status": e.status}
                          for e in entries],
             "lifecycle": [],
+        }
+
+    def session_log(self, name: str) -> dict:
+        """The whole registry, terminal sessions included. ``reap_dead``
+        runs the same dead-pid crash marking as the roster read, so a
+        session whose process died reads ``crashed`` here, never
+        ``running``. Local responses are never capped - the history is on
+        this disk."""
+        from bobi import service
+        from bobi.sdk import SessionRegistry
+
+        root = self._resolve(name)
+        mgr = service.manager_session_name(root)
+        entries = ordered_session_log(
+            SessionRegistry(root).list_all(reap_dead=True))
+        return {
+            "sessions": [serialize_session(e, manager_name=mgr)
+                         for e in entries],
+            "counts": session_outcome_counts(entries),
+            "truncated": False,
         }

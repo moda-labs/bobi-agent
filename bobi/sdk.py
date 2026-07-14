@@ -19,7 +19,7 @@ import os
 import platform
 import shutil
 import time
-from dataclasses import dataclass, field, fields, asdict
+from dataclasses import dataclass, field, fields, asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -374,37 +374,43 @@ class SessionRegistry:
         except (json.JSONDecodeError, TypeError):
             return None
 
-    def list_active(self) -> list[SessionEntry]:
-        result = []
-        sd = _sessions_dir(self._root)
-        for d in sd.iterdir():
-            if not d.is_dir():
-                continue
-            state = d / "state.json"
-            if not state.exists():
-                continue
-            try:
-                data = json.loads(state.read_text())
-                entry = SessionEntry.from_dict(data)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if entry.status not in ("starting", "running", "idle"):
-                continue
-            if entry.pid and not pid_alive(entry.pid):
-                # A live status with a dead pid is a crash, not a clean finish.
-                # Recording it `crashed` (not the old `done`) is the core
-                # honest-status fix (MDS-65 RC#2/#3): "crashes recorded as done"
-                # is exactly the gtm-team bug. The reconciler then re-emits an
-                # honest agent/session.failed for it (emit_confirmed is False).
-                self.mark_terminal(
-                    entry.name, TERMINAL_CRASHED,
-                    error="agent process died without reporting a terminal status",
-                )
-                continue
-            result.append(entry)
-        return result
+    def _reap_if_dead(self, entry: SessionEntry) -> SessionEntry:
+        """An active status with a dead pid is a crash, not a clean finish.
 
-    def list_all(self) -> list[SessionEntry]:
+        Recording it `crashed` (not the old `done`) is the core honest-status
+        fix (MDS-65 RC#2/#3): "crashes recorded as done" is exactly the
+        gtm-team bug. The reconciler then re-emits an honest
+        agent/session.failed for it (emit_confirmed is False). Runs on every
+        list read so history views never show a dead session as running.
+        """
+        if entry.status not in ACTIVE_STATUSES:
+            return entry
+        if not entry.pid or pid_alive(entry.pid):
+            return entry
+        msg = "agent process died without reporting a terminal status"
+        self.mark_terminal(entry.name, TERMINAL_CRASHED, error=msg)
+        # Return the crashed view synthesized in memory, NOT a re-read of
+        # state.json: the marking can race a concurrent cleanup or rewrite
+        # (mark_terminal no-ops on a missing/torn file), and a re-read could
+        # then hand back the stale active entry - the one thing a reap must
+        # never return.
+        return replace(entry, status=TERMINAL_CRASHED, pid=0,
+                       error=entry.error or msg, terminal_at=time.time())
+
+    def list_active(self) -> list[SessionEntry]:
+        return [e for e in self.list_all(reap_dead=True)
+                if e.status in ACTIVE_STATUSES]
+
+    def list_all(self, *, reap_dead: bool = False) -> list[SessionEntry]:
+        """Every session still on disk, history included.
+
+        ``reap_dead`` runs the same dead-pid crash marking ``list_active``
+        performs, so a history render (#733 session log) never shows a dead
+        session as running. The default stays raw on purpose: the reconciler
+        sweeps ``list_all()`` and owns crash-closing there (``reconciled_at``
+        + the bus emit), including the exclusion window it grants a
+        restarting manager - reaping unconditionally would steal that branch.
+        """
         result = []
         sd = _sessions_dir(self._root)
         for d in sd.iterdir():
@@ -414,9 +420,10 @@ class SessionRegistry:
             if not state.exists():
                 continue
             try:
-                result.append(SessionEntry.from_dict(json.loads(state.read_text())))
+                entry = SessionEntry.from_dict(json.loads(state.read_text()))
             except (json.JSONDecodeError, TypeError):
-                pass
+                continue
+            result.append(self._reap_if_dead(entry) if reap_dead else entry)
         return result
 
     def get_by_role(self, role: str) -> list[SessionEntry]:
