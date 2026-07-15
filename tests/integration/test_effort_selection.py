@@ -9,13 +9,15 @@ The Claude tests require the ``claude`` CLI; the Codex test requires the
 ``codex`` CLI (and burns one real turn). All skipped in CI.
 """
 
+import json
 import os
 import subprocess
+import time
 
 import pytest
 import yaml
 
-from bobi.sdk import SessionRegistry
+from bobi.sdk import SessionRegistry, _sessions_dir
 from .conftest import _drain, requires_claude, requires_codex
 
 # No module-level claude mark: the codex leg below must not be deselected by
@@ -144,8 +146,6 @@ class TestCodexEffortSelection:
         # Ground truth: the rollout records the effective effort per turn
         # (verified live on codex-cli 0.144.4: turn_context.payload.effort).
         # _codex_rollout_path honors $CODEX_HOME, unlike a ~/.codex glob.
-        import json
-
         from bobi.chat_history import _codex_rollout_path
 
         rollout = _codex_rollout_path(thread_id)
@@ -159,3 +159,58 @@ class TestCodexEffortSelection:
             if event.get("type") == "turn_context":
                 efforts.append(event.get("payload", {}).get("effort"))
         assert "low" in efforts, efforts
+
+
+@pytest.mark.timeout(120)
+class TestCliEffortSeam:
+    """The full CLI seam on the stub brain, so it runs in CI: --effort on
+    ``subagents launch`` -> detached subprocess args blob -> workflow
+    orchestrator -> brain session options. The ``__stub__:options`` directive
+    makes the stub reply with the options ``make_session`` received, and the
+    session log records that reply."""
+
+    def test_launch_flags_reach_detached_session_options(
+            self, stub_bobi_env, stub_cli_run):
+        # No clean_session here: it drags in the claude-env fixture, and this
+        # module's stub home is fresh (module-scoped), so 303 cannot pre-exist.
+        session_name = "wf-adhoc-test-repo-303"
+
+        result = stub_cli_run(
+            "subagents", "launch",
+            "-w", "adhoc", "--role", "engineer", "--id", "303",
+            "--task", "__stub__:options",
+            "--model", "stub-model-x", "--effort", "xhigh",
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        session_dir = _sessions_dir() / session_name
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            state_path = session_dir / "state.json"
+            if state_path.exists():
+                if json.loads(state_path.read_text()).get("status") == "completed":
+                    break
+            time.sleep(2)
+        else:
+            pytest.fail("detached stub agent did not complete within 90s")
+
+        # The stub's options-echo reply is logged as a `response` event.
+        echoed = None
+        for line in (session_dir / "log.jsonl").read_text().splitlines():
+            entry = json.loads(line)
+            if entry.get("event") == "response" and "effort" in entry.get("text", ""):
+                echoed = json.loads(entry["text"])
+        assert echoed is not None, "no options echo found in the session log"
+        assert echoed["effort"] == "xhigh"
+        assert echoed["model"] == "stub-model-x"
+
+    def test_as_check_rejects_effort_flag(self, stub_bobi_env, stub_cli_run):
+        result = stub_cli_run(
+            "subagents", "launch",
+            "-w", "adhoc", "--role", "monitor", "--as-check",
+            "--task", "check", "--effort", "low",
+            timeout=10,
+        )
+        assert result.returncode != 0
+        assert "--as-check" in result.stderr
