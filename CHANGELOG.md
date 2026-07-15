@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.44.1 - 2026-07-14
+
+Patch release: unblock the 0.44.0 fleet rollout. The 0.44.0 private release
+train failed at the canary gate because the new runtime write guard crashed
+the manager session on hosted containers; 0.44.0 was never rolled to the
+fleet, so this is the version deployments should adopt.
+
+### Fixed
+- **Runtime write guard tolerates unowned files (#774).** #752's guard chmods
+  Bobi-owned install roots read-only before brain sessions, tolerating only
+  missing files. Hosted containers bake the venv as root while the runtime
+  runs unprivileged, so the first `os.chmod` raised `PermissionError` and
+  killed the manager session at startup (caught by the release canary; 0.44.0
+  never reached the fleet). The read-only sweep now records unchmoddable paths
+  in `GuardReport.skipped`, logs a warning, and continues — such files are
+  unwritable to the runtime uid anyway. The mutable (+w) sweep stays strict so
+  an install can never open a destructive mutation window over a tree it
+  cannot fully unlock. Follow-up #775 tracks the `doctor` check's ownership
+  awareness on hosted boxes.
+
 ## 0.44.0 - 2026-07-14
 
 Minor release: Discord lands as a first-class channel, the #733 fleet
