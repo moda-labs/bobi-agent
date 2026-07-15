@@ -68,7 +68,12 @@ def _chmod_tree(root: Path, mode_fn) -> None:
         try:
             current = path.stat().st_mode
             os.chmod(path, mode_fn(current))
-        except FileNotFoundError:
+        except OSError:
+            # Best-effort: a path this uid cannot chmod (EPERM on files owned
+            # by another user, e.g. a root-baked container venv; EROFS on a
+            # read-only mount) is already unwritable to the same-uid agent
+            # this guard defends against, so skip it rather than kill the
+            # session.
             continue
 
 
