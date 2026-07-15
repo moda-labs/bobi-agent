@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.44.0 - 2026-07-14
+
+Minor release: Discord lands as a first-class channel, the #733 fleet
+observability epic completes in the webapp (health badges, session log,
+needs-attention panel), codex-brained teams get honest spend estimates instead
+of $0, and a batch of sleep-cycle, history, and runtime hardening fixes.
+
+### Added
+- **Discord channel v1 (#2).** Inbound over a persistent Gateway WebSocket held
+  by the local event server, outbound over plain REST through the existing
+  channel gateway. Local runtime only; the remote/Durable-Object driver and
+  polish are follow-ups. Setup guide at `skills/discord-setup.md`.
+- **System-health badges + per-team health/lifecycle panel (#733).** New
+  `TeamRuntime.health_summary(name)` seam and `GET /api/agents/{name}/health`
+  route. The webapp shows reachability, the manager verdict
+  (idle/running/stopped/starting), session roster, restart history, and the
+  48h lifecycle trail — hosted data the `/fleet` read model already carried,
+  now rendered, with a local-runtime fold from this machine's files.
+- **First-class session log with honest terminal outcomes (#733).** New
+  `TeamRuntime.session_log(name)` seam and
+  `GET /api/agents/{name}/sessions` route over
+  `SessionRegistry.list_all(reap_dead=True)`, so a history render never shows
+  a dead session as running. The webapp gains a session-log panel with outcome
+  counts, terminal rows (status, age, role, cost, error line), and read-only
+  transcript drill-in; the composer hides for ended sessions.
+- **Needs-attention panel surfacing harness errors (#733).** The agent view
+  merges trouble lifecycle events (probe failures, manager restarts, budget
+  exhaustion) with recent failed/crashed sessions into one alarm surface,
+  hidden when all is well. Closes out the #733 epic.
+- **Honest codex spend: fold-time dollar estimates + token volume (#760).**
+  Codex-brained teams showed $0 everywhere because codex reports tokens, never
+  dollars. `BrainCost` now records the cached/uncached input split as raw
+  facts (fixing a double-count of cached input), and `rollup_costs` prices
+  token-only entries against a per-model table at fold time. Estimates render
+  as `~$Y est`, always distinguishable from recorded dollars; unpriceable
+  models show token volume instead.
+- **Dev pre-release channel (#740 Track A).** Every fully-green push to `main`
+  fast-forwards the `dev` branch, which `bobi-deploy` CI/staging track — so
+  private-side work no longer waits on a formal public release. Production
+  cuts still pin exact PyPI versions via this runbook.
+
+### Fixed
+- **Sleep-cycle memory cap enforced (#747).** The 24k long-term-memory cap is
+  enforced deterministically during artifact handling with section-aware
+  compaction (`## Decisions` preserved first) instead of silent truncation
+  later.
+- **Sleep-cycle working budget (#765).** A 16k working budget below the 24k
+  hard cap dispatches compaction early, with a lossless demotion tier at
+  `workspace/memory/reference.md` treated as a checked artifact.
+- **Sleep-cycle prompt echoes filtered from history (#763).** Curator/harness
+  transcripts and framework startup re-injections are excluded from history
+  indexing, and already-indexed echoes are filtered out of `messages_since()`,
+  so agents stop re-reading their own boilerplate.
+- **History FTS delete trigger repaired (#764).** The `messages_ad` trigger
+  used the FTS5 special-delete form against a regular table; it now performs a
+  normal row delete and legacy databases are repaired on open.
+- **Runtime installs guarded from agent writes (#751).** Installed
+  `run/package/` images are read-only outside Bobi-owned mutation windows via
+  the new `bobi.runtime_guard` policy, with doctor checks for writable roots
+  and wheel `RECORD` drift.
+- **`subagents launch --wait` blocks on agents (#753).** The public `--wait`
+  flag now uses the real blocking-agent path (`--as-check` covers the
+  monitoring harness), and Claude max-turn terminals surface as actionable
+  `max_turns_reached` errors instead of `unknown error`.
+- **Monitor checks start fresh (#750).** `run_check_blocking()` passes
+  `fresh=True` so checks stop resuming stale transcripts.
+- **Workflow boolean conditions normalized (#758).** Capitalized `True`/`False`
+  are parsed as boolean literals in workflow conditions (with token-boundary
+  care so `TrueValue` stays a bare word).
+- **Setup picker stale selection (#745-adjacent flake).** The folder picker
+  blocks selection while an async browse navigation is pending, so a quick
+  click can no longer submit the parent folder instead of the selected child.
+
 ## 0.43.0 - 2026-07-10
 
 Minor release: fleet spend observability in the hosted webapp, headless
