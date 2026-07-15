@@ -64,6 +64,10 @@ def pin_brain_from_root(
         gateway_base_url=brain.get("base_url", ""),
         gateway_small_model=brain.get("small_model", ""),
         gateway_wire_api=brain.get("wire_api", "") or "chat",
+        # Presence-based, mirroring Config.brain_is_gateway: a base_url key
+        # whose ${VAR} resolved empty must fail the spawn loud, not pin a
+        # native session that dials the real vendor with gateway credentials.
+        gateway_declared="base_url" in brain,
     )
 
 

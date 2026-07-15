@@ -164,13 +164,14 @@ Make sure the matching CLI is installed and authenticated (see
 For Claude-backed teams, `model` can be an alias such as `haiku`, `sonnet`, or
 `opus`, or a full Claude model ID.
 
-To run a team on **local or self-hosted models**, use `kind: gateway` - it
-drives the Claude CLI against any Anthropic-compatible endpoint (LiteLLM,
-Ollama's Anthropic-compat API):
+To run a team on **local or self-hosted models**, add `base_url` - the engine
+you picked with `kind` then dials that gateway instead of its native vendor
+endpoint. The claude engine works with any Anthropic-compatible endpoint
+(LiteLLM, Ollama's Anthropic-compat API):
 
 ```yaml
 brain:
-  kind: gateway
+  kind: claude
   base_url: ${LLM_GATEWAY_URL}   # the /v1/messages-compatible endpoint
   model: qwen3:14b               # gateway-native model id
 ```
@@ -178,11 +179,11 @@ brain:
 If the gateway needs auth, put `ANTHROPIC_AUTH_TOKEN` in the team's runtime
 `.env`. See `skills/create-agent.md` for the details.
 
-For an **OpenAI-compatible** gateway, use the Codex CLI brain instead:
+For an **OpenAI-compatible** gateway, use the codex engine instead:
 
 ```yaml
 brain:
-  kind: gateway-openai
+  kind: codex
   base_url: ${LLM_GATEWAY_URL}   # OpenAI-compatible /v1 endpoint
   model: gpt-5.5                # gateway-native model id
   wire_api: chat                # optional: chat (default) or responses
@@ -191,6 +192,9 @@ brain:
 If the gateway needs auth, put `BOBI_GATEWAY_API_KEY` in the team's runtime
 `.env`. Bobi references that dedicated key from Codex and never sends an ambient
 real `OPENAI_API_KEY` to the gateway.
+
+(The pre-0.46 spellings `kind: gateway` and `kind: gateway-openai` remain
+accepted aliases for exactly these two configurations.)
 
 Workflow steps can override the team default for that step:
 
@@ -268,8 +272,8 @@ Full walkthrough: **[Slack setup](skills/slack-setup.md)**.
   else, then fans them out to the agents subscribed to each topic.
 - **Runtime-agnostic brains.** Each agent is a Claude Code or OpenAI Codex
   session; choose per agent with `brain: {kind: claude|codex}`, or point a
-  team at local models via an Anthropic-compatible gateway with
-  `brain: {kind: gateway}`.
+  team at local models by adding a gateway endpoint with
+  `brain: {kind: claude, base_url: ...}`.
 - **Deterministic workflows.** YAML DAGs force multi-step work through a fixed
   recipe with role routing - code review before merge, CI before PRs - instead of
   trusting the model to remember.

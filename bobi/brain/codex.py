@@ -315,24 +315,46 @@ class _CodexSession:
 
 
 class CodexBrain:
-    """Factory for Codex sessions (``brain: {kind: codex}``)."""
+    """Factory for Codex sessions (``brain: {kind: codex}``).
+
+    Gateway-aware (#789): when a gateway base URL is pinned (``brain.base_url``
+    on a codex-engine team), every invocation carries the ``bobi_gateway``
+    provider overrides, the cost-attribution provider flips to ``"gateway"``,
+    and cross-model resume drops to the conservative fresh+reinject path. Same
+    machinery either way - gateway mode is endpoint config, not a different
+    brain.
+    """
 
     name = "codex"
-    provider = "openai"
-    # ``codex exec resume <thread> -m <other-model>`` genuinely switches the
-    # thread's model with the transcript intact - verified 2026-07-04 on
-    # codex-cli 0.142.2 (#649): the rollout records turn_context model
-    # gpt-5.4 then gpt-5.5, and the resumed turn recalled conversation-only
-    # state. Note the usable model set depends on the account's auth mode
-    # (ChatGPT-plan auth rejects some models with a 400 at turn start).
     # Efforts per the OpenAI API's ReasoningEffortParam enum (verified live
     # 2026-07-14 on codex-cli 0.144.4: an unknown value 400s at turn start).
-    capabilities = BrainCapabilities(
-        cross_model_resume=True,
-        efforts=frozenset(
-            {"none", "minimal", "low", "medium", "high", "xhigh"}
-        ),
-    )
+    # The vocabulary holds in gateway mode too - the value rides codex's
+    # model_reasoning_effort config, whatever endpoint it dials.
+    _EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+
+    @property
+    def provider(self) -> str:
+        from bobi.brain.gateway import gateway_base_url
+
+        return "gateway" if gateway_base_url() else "openai"
+
+    @property
+    def capabilities(self) -> BrainCapabilities:
+        # ``codex exec resume <thread> -m <other-model>`` genuinely switches
+        # the thread's model with the transcript intact - verified 2026-07-04
+        # on codex-cli 0.142.2 (#649): the rollout records turn_context model
+        # gpt-5.4 then gpt-5.5, and the resumed turn recalled conversation-only
+        # state. Note the usable model set depends on the account's auth mode
+        # (ChatGPT-plan auth rejects some models with a 400 at turn start).
+        # Whether a gateway backend honors resume-with-another-model is
+        # backend-dependent: gateway mode ships conservative (fresh+reinject
+        # on model switches), the #649 arc.
+        from bobi.brain.gateway import gateway_base_url
+
+        return BrainCapabilities(
+            cross_model_resume=not gateway_base_url(),
+            efforts=self._EFFORTS,
+        )
 
     def make_session(
         self,
@@ -343,6 +365,7 @@ class CodexBrain:
         options: dict | None = None,
     ) -> BrainSession:
         from bobi.brain import resolve_effort_option, resolve_model_option
+        from bobi.brain.gateway import gateway_base_url
 
         opts = options or {}
         model = resolve_model_option(str(opts.get("model", "") or ""))
@@ -362,6 +385,11 @@ class CodexBrain:
         home = codex_home()
         if mcp_servers or config_has_managed_block(home):
             write_codex_config(mcp_servers, home)
+        config_overrides: list[str] = []
+        if gateway_base_url():
+            from bobi.brain.gateway_openai import gateway_openai_overrides
+
+            config_overrides = gateway_openai_overrides()
         return _CodexSession(
             cwd=cwd or ".",
             instructions=_instructions(system_prompt),
@@ -372,4 +400,6 @@ class CodexBrain:
             effort=effort,
             mcp_servers=mcp_servers,
             mcp_env=opts.get("env") if isinstance(opts.get("env"), dict) else None,
+            config_overrides=config_overrides,
+            provider=self.provider,
         )

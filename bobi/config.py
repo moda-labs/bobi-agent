@@ -342,12 +342,13 @@ class Config:
         "init_failure_window_seconds": 600,
         "init_failure_backoff_threshold": 2,
     })
-    # Which agent "brain" drives this team's agents (#485). `{kind: claude|codex|
-    # gateway|gateway-openai, model: <optional override>, effort: <optional
-    # reasoning effort>}`; gateway kinds additionally take `base_url` (required).
-    # `kind: gateway` takes `small_model` (#655); `kind: gateway-openai` takes
-    # `wire_api` (chat|responses, default chat). Empty = the framework default
-    # (claude).
+    # Which agent "brain" (ENGINE) drives this team's agents (#485). `{kind:
+    # claude|codex, model: <optional override>, effort: <optional reasoning
+    # effort>}`. Setting `base_url` points the engine at a gateway endpoint
+    # (#655/#777/#789): a claude engine additionally takes `small_model`, a
+    # codex engine `wire_api` (chat|responses, default chat). The deprecated
+    # kinds `gateway`/`gateway-openai` remain accepted aliases for
+    # claude/codex-with-base_url. Empty = the framework default (claude).
     brain: dict = field(default_factory=dict)
     # Per-role settings (#617, #778). `roles: {<role>: {model: <override>,
     # effort: <override>}}`. A role's model and reasoning effort are
@@ -382,8 +383,24 @@ class Config:
 
     @property
     def brain_base_url(self) -> str:
-        """The gateway endpoint for `kind: gateway` (#655), or ""."""
+        """The configured gateway endpoint (#655/#789), or ""."""
         return str((self.brain or {}).get("base_url", "") or "")
+
+    @property
+    def brain_is_gateway(self) -> bool:
+        """Whether this team DECLARES a gateway endpoint (#789).
+
+        Presence-based, not value-based: a ``base_url`` key whose ``${VAR}``
+        resolved empty still counts, so validation and the pin-time guard can
+        fail loud instead of silently running the engine against the real
+        vendor endpoint. The alias kind strings are literals here (not imported
+        from ``bobi.brain``) to keep this module import-free of the brain
+        package, matching the duck-typing on the other side.
+        """
+        return (
+            self.brain_kind in ("gateway", "gateway-openai")
+            or "base_url" in (self.brain or {})
+        )
 
     @property
     def brain_small_model(self) -> str:

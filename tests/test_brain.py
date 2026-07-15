@@ -768,10 +768,11 @@ async def test_claude_stream_once_retries_initialize_timeout_before_output(
 
 def test_brains_support_cross_model_resume():
     from bobi.brain import CodexBrain
-    assert ClaudeBrain.capabilities.cross_model_resume is True
+    # capabilities is a property (gateway mode flips it, #789): instance access
+    assert ClaudeBrain().capabilities.cross_model_resume is True
     # Verified live: `codex exec resume -m` switches the thread's model
     # (#649; see tests/integration/test_cross_model_resume.py).
-    assert CodexBrain.capabilities.cross_model_resume is True
+    assert CodexBrain().capabilities.cross_model_resume is True
 
 
 @pytest.mark.parametrize("session_id,frm,to,capable,expected", [

@@ -27,12 +27,33 @@ def _codex_supports_chat_gateway() -> bool:
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
     if not match:
         return False
-    return tuple(int(p) for p in match.groups()) >= (0, 144, 4)
+    if tuple(int(p) for p in match.groups()) < (0, 144, 4):
+        return False
+    # Some codex builds have DROPPED `wire_api = "chat"` support entirely
+    # (config load fails with "no longer supported", see openai/codex
+    # discussion #7782) - a version floor can't detect that, so probe the
+    # config parser directly: a chat-provider override against a dead socket
+    # fails at config load on such builds, and at (or past) the network on
+    # builds that still support chat.
+    try:
+        probe = subprocess.run(
+            [exe, "exec", "-s", "read-only", "--skip-git-repo-check",
+             "-c", 'model_provider="probe"',
+             "-c", 'model_providers.probe.name="probe"',
+             "-c", 'model_providers.probe.base_url="http://127.0.0.1:9/v1"',
+             "-c", 'model_providers.probe.wire_api="chat"',
+             "probe"],
+            text=True, capture_output=True, timeout=20, check=False,
+        )
+    except Exception:
+        return False
+    return "no longer supported" not in (probe.stderr + probe.stdout)
 
 
 requires_codex_chat_gateway = pytest.mark.skipif(
     not _codex_supports_chat_gateway(),
-    reason="codex CLI >=0.144.4 with chat wire support not installed",
+    reason="codex CLI with chat wire_api support not installed "
+           "(newer builds dropped wire_api=chat, openai/codex#7782)",
 )
 
 
@@ -147,7 +168,11 @@ async def test_gateway_openai_session_routes_fresh_and_resume_to_stub(
     monkeypatch.setenv("BOBI_BRAIN_MODEL", "stub-model")
     monkeypatch.setenv("BOBI_GATEWAY_API_KEY", "gateway-key")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-real-openai")
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    # Recent codex CLIs refuse to start when CODEX_HOME does not exist
+    # (pre-existing failure on main; unrelated to the session machinery).
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
     session = get_brain("gateway-openai").make_session(
         cwd=str(tmp_path),

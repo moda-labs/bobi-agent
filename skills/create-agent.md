@@ -234,12 +234,14 @@ brain:
   effort: high         # optional reasoning effort (provider-native value)
 ```
 
-To run a team on local or self-hosted models, point the Claude CLI at an
-Anthropic-compatible gateway (LiteLLM, Ollama's Anthropic-compat API):
+To run a team on local or self-hosted models, add `base_url`: the engine you
+picked with `kind` then dials that gateway instead of its native vendor
+endpoint. The claude engine works with any Anthropic-compatible gateway
+(LiteLLM, Ollama's Anthropic-compat API):
 
 ```yaml
 brain:
-  kind: gateway
+  kind: claude
   base_url: ${LLM_GATEWAY_URL}   # required; the /v1/messages-compatible endpoint
   model: qwen3:14b               # gateway-native model id
   small_model: qwen3:4b          # optional; background/fast tasks (defaults to model)
@@ -254,11 +256,11 @@ disabled for gateways (a model switch starts fresh and re-injects context),
 and costs reported through a gateway are nominal, attributed to provider
 `gateway` in `bobi agent <name> costs`.
 
-For an OpenAI-compatible gateway, use the Codex CLI harness:
+For an OpenAI-compatible gateway, use the codex engine:
 
 ```yaml
 brain:
-  kind: gateway-openai
+  kind: codex
   base_url: ${LLM_GATEWAY_URL}   # required; OpenAI-compatible /v1 endpoint
   model: gpt-5.5                # gateway-native model id
   wire_api: chat                # optional: chat (default) or responses
@@ -267,6 +269,10 @@ brain:
 If the OpenAI-compatible gateway needs auth, put `BOBI_GATEWAY_API_KEY` in the
 runtime `.env`. Bobi configures Codex to read that dedicated key and never sends
 an ambient real `OPENAI_API_KEY` to the gateway.
+
+The pre-0.46 spellings `kind: gateway` and `kind: gateway-openai` remain
+accepted aliases for exactly these two configurations (`bobi validate`
+suggests the current form).
 
 Individual roles can declare their own model and reasoning effort, applied
 whenever an agent launches with that role (subagents, workflow steps, monitor
@@ -287,9 +293,9 @@ accepts `none`-`xhigh`, claude accepts `low`-`max`, and `low`, `medium`,
 `high`, `xhigh` work on both. A typo'd effort fails codex's first turn with
 a 400 but the claude CLI just warns and runs on its default effort, so trust
 the doctor warning (it checks against the configured brain's accepted set)
-rather than the run's apparent success. On a `kind: gateway` team, `effort`
-rides the Claude CLI to the backend like `model` does: whether the backend
-honors, ignores, or rejects it is the backend's own behavior.
+rather than the run's apparent success. On a gateway team, `effort` rides the
+engine CLI to the backend like `model` does: whether the backend honors,
+ignores, or rejects it is the backend's own behavior.
 
 Workflow prompt steps can override that team default for just one step:
 

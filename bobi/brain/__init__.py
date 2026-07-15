@@ -38,20 +38,34 @@ from bobi.brain.gateway import (
 from bobi.brain.gateway_openai import GATEWAY_WIRE_API_ENV, GatewayOpenAIBrain
 from bobi.brain.stub import STUB_BRAIN_ENV, StubBrain
 
-# Registry of available brains by kind. Gemini/Grok adapters register here as
-# they land (#485 phase 4). ``stub`` is a test-only brain: registered so the
-# public integration suites and the private deploy e2e resolve the identical
-# brain, but ``StubBrain.make_session`` refuses to run unless BOBI_STUB_BRAIN is
-# set, so an accidental production selection fails loud.
+# Registry of available brains by kind: the ENGINES - which CLI/session
+# machinery runs the agent. Gemini/Grok adapters register here as they land
+# (#485 phase 4). ``stub`` is a test-only brain: registered so the public
+# integration suites and the private deploy e2e resolve the identical brain,
+# but ``StubBrain.make_session`` refuses to run unless BOBI_STUB_BRAIN is set,
+# so an accidental production selection fails loud.
 _BRAINS: dict[str, BrainFactory] = {
     "claude": ClaudeBrain(),
     "codex": CodexBrain(),
-    "gateway": GatewayBrain(),
-    "gateway-openai": GatewayOpenAIBrain(),
     "stub": StubBrain(),
 }
 
+# Deprecated kind spellings (#789). Gateway mode is an ENDPOINT property, not
+# an engine: ``kind: claude|codex`` + ``brain.base_url`` is the current form.
+# The old flat kinds stay accepted - shipped agent.yaml files and ambient
+# BOBI_BRAIN pins from running fleets resolve through this map.
+BRAIN_KIND_ALIASES: dict[str, str] = {
+    "gateway": "claude",
+    "gateway-openai": "codex",
+}
+
 DEFAULT_BRAIN = "claude"
+
+
+def normalize_brain_kind(kind: str | None) -> str:
+    """Collapse a deprecated alias kind to its engine; pass others through."""
+    name = str(kind or "")
+    return BRAIN_KIND_ALIASES.get(name, name)
 
 # Env var carrying the active process brain kind. The process entrypoint seeds
 # it from ``agent.yaml`` ``brain.kind`` (see ``set_process_brain``). Launched
@@ -181,6 +195,23 @@ def _pin_env(
         target.pop(key, None)
 
 
+def _require_declared_gateway_url(kind: str | None, base_url: str) -> None:
+    """Fail loud when a team declared a gateway but its base URL is empty.
+
+    The empty value is almost always a ``${VAR}`` that did not resolve at
+    spawn/startup. Proceeding would pin nothing and the session would silently
+    dial the real vendor endpoint carrying the gateway's credentials - the
+    exact leak the old session-time guard prevented (#655), moved to pin time
+    now that gateway mode is config, not kind (#789).
+    """
+    if not base_url:
+        raise RuntimeError(
+            f"brain kind {kind or DEFAULT_BRAIN!r} declares a gateway but "
+            "brain.base_url is empty - set brain.base_url in agent.yaml "
+            "(and ensure its ${VAR} resolves in the runtime .env)."
+        )
+
+
 def pin_process_brain(
     kind: str | None,
     model: str | None,
@@ -190,25 +221,32 @@ def pin_process_brain(
     gateway_base_url: str = "",
     gateway_small_model: str = "",
     gateway_wire_api: str = "",
+    gateway_declared: bool = False,
 ) -> None:
     """Pin the process brain kind, model, and effort into *env*, clearing stale values.
 
-    The gateway pins carry gateway-specific ``brain.*`` values for gateway
-    teams; for any other kind they are cleared so a stale parent gateway
-    endpoint never leaks into another team's sessions.
+    ``kind`` is pinned verbatim (alias spellings included) so the env keeps
+    saying exactly what the config said; readers normalize. The gateway pins
+    are driven by ``gateway_base_url``: set for a claude/codex engine with a
+    base URL, cleared otherwise so a stale parent gateway endpoint never leaks
+    into another team's sessions. ``gateway_declared`` marks a team whose
+    config declares a gateway (an alias kind, or a ``base_url`` key present) -
+    with an empty resolved URL that raises instead of silently pinning nothing.
     """
+    engine = normalize_brain_kind(kind) or DEFAULT_BRAIN
+    if gateway_declared or kind in BRAIN_KIND_ALIASES:
+        _require_declared_gateway_url(kind, gateway_base_url)
     target = os.environ if env is None else env
     _pin_env(target, BRAIN_ENV, kind)
     _set_process_brain_model(model, env=target)
     _set_process_brain_effort(effort, env=target)
-    is_gateway = kind in ("gateway", "gateway-openai")
+    is_gateway = bool(gateway_base_url) and engine in ("claude", "codex")
     _pin_env(target, GATEWAY_BASE_URL_ENV,
              gateway_base_url if is_gateway else "")
     _pin_env(target, GATEWAY_WIRE_API_ENV,
-             gateway_wire_api if kind == "gateway-openai" else "")
-    is_claude_gateway = kind == "gateway"
+             gateway_wire_api if is_gateway and engine == "codex" else "")
     _pin_env(target, GATEWAY_SMALL_MODEL_ENV,
-             gateway_small_model if is_claude_gateway else "")
+             gateway_small_model if is_gateway and engine == "claude" else "")
 
 
 def set_process_brain(
@@ -219,6 +257,7 @@ def set_process_brain(
     gateway_base_url: str = "",
     gateway_small_model: str = "",
     gateway_wire_api: str = "",
+    gateway_declared: bool = False,
 ) -> None:
     """Record the team's brain kind for the current process.
 
@@ -227,8 +266,13 @@ def set_process_brain(
     is left untouched so an operator override can select the current process's
     brain. Detached child launches do not rely on this ambient inheritance:
     ``bobi.env.child_agent_env()`` rewrites the child's value from the
-    verified installation root.
+    verified installation root. Alias and current gateway spellings are
+    equivalent here: the match below compares ENGINES, so a config saying
+    ``kind: gateway`` still tunes a process whose operator pinned
+    ``BOBI_BRAIN=claude`` (and vice versa).
     """
+    if gateway_declared or kind in BRAIN_KIND_ALIASES:
+        _require_declared_gateway_url(kind, gateway_base_url)
     existing_kind = os.environ.get(BRAIN_ENV, "")
     if kind and not existing_kind:
         os.environ[BRAIN_ENV] = kind
@@ -238,9 +282,11 @@ def set_process_brain(
     # it nor a gateway endpoint may cross onto an operator-overridden brain.
     # Within the active brain, first writer wins (an existing NON-EMPTY value
     # is an operator override; an empty string is treated as unset).
+    engine = normalize_brain_kind(kind)
+    existing_engine = normalize_brain_kind(existing_kind)
     config_matches_active_brain = (
-        (kind and existing_kind == kind)
-        or (not kind and existing_kind in ("", DEFAULT_BRAIN))
+        (engine and existing_engine == engine)
+        or (not engine and existing_engine in ("", DEFAULT_BRAIN))
     )
     if not config_matches_active_brain:
         return
@@ -248,12 +294,13 @@ def set_process_brain(
         _set_process_brain_model(model)
     if effort and not get_process_brain_effort():
         _set_process_brain_effort(effort)
-    if kind in ("gateway", "gateway-openai"):
+    active_engine = engine or DEFAULT_BRAIN
+    if gateway_base_url and active_engine in ("claude", "codex"):
         pairs = [(GATEWAY_BASE_URL_ENV, gateway_base_url)]
-        if kind == "gateway":
+        if active_engine == "claude":
             os.environ.pop(GATEWAY_WIRE_API_ENV, None)
             pairs.append((GATEWAY_SMALL_MODEL_ENV, gateway_small_model))
-        if kind == "gateway-openai":
+        else:
             os.environ.pop(GATEWAY_SMALL_MODEL_ENV, None)
             pairs.append((GATEWAY_WIRE_API_ENV, gateway_wire_api))
         for var, value in pairs:
@@ -276,6 +323,7 @@ def set_process_brain_from_config(cfg) -> None:
         gateway_base_url=cfg.brain_base_url,
         gateway_small_model=cfg.brain_small_model,
         gateway_wire_api=cfg.brain_wire_api,
+        gateway_declared=cfg.brain_is_gateway,
     )
 
 
@@ -329,12 +377,25 @@ def get_brain(kind: str | None = None) -> BrainFactory:
     installation root, not blindly inherited from the parent process. Raises
     ``ValueError`` for an unknown kind so a typo in ``agent.yaml`` ``brain.kind``
     fails loud at session construction rather than silently falling back.
+
+    Alias kinds resolve to their engine. An AMBIENT alias (``BOBI_BRAIN=gateway``
+    with no explicit ``kind`` arg) additionally requires the gateway base-url
+    pin: that spelling promises a gateway, and without the pin the engine would
+    silently dial the real vendor endpoint - the operator-override gap the old
+    session-time guard covered (#655).
     """
     name = kind or os.environ.get(BRAIN_ENV) or DEFAULT_BRAIN
+    if (not kind and name in BRAIN_KIND_ALIASES
+            and not os.environ.get(GATEWAY_BASE_URL_ENV)):
+        raise RuntimeError(
+            f"{BRAIN_ENV}={name} requires a pinned gateway base URL - set "
+            "brain.base_url in agent.yaml (and ensure its ${VAR} resolves)."
+        )
+    name = normalize_brain_kind(name)
     try:
         return _BRAINS[name]
     except KeyError:
-        known = ", ".join(sorted(_BRAINS))
+        known = ", ".join(sorted(_BRAINS) + sorted(BRAIN_KIND_ALIASES))
         raise ValueError(
             f"unknown brain kind {name!r} (known: {known})"
         ) from None
@@ -356,6 +417,7 @@ __all__ = [
     "DeferredTool",
     "StreamDelta",
     "TurnResult",
+    "BRAIN_KIND_ALIASES",
     "DEFAULT_BRAIN",
     "BRAIN_ENV",
     "GATEWAY_BASE_URL_ENV",
@@ -366,6 +428,7 @@ __all__ = [
     "get_process_brain_effort",
     "get_process_brain_model",
     "known_brain_kinds",
+    "normalize_brain_kind",
     "pin_process_brain",
     "resolve_effort",
     "resolve_effort_option",

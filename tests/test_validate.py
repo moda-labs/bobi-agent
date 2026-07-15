@@ -254,58 +254,87 @@ class TestCheckWorkflowEffort:
 
 
 class TestCheckBrain:
-    """kind: gateway without a resolvable base_url fails every session at its
-    first turn, so validate must block it (#655)."""
+    """A gateway team without a resolvable base_url fails every session at its
+    first turn, so validate must block it (#655, #789)."""
 
     def _check(self, cfg):
         from bobi.validate import _check_brain
         return _check_brain(cfg)
 
-    def test_gateway_with_base_url_passes(self):
+    def _gateway_results(self, cfg):
+        """The non-deprecation results (alias kinds add an advisory check)."""
+        return [r for r in self._check(cfg) if r.name != "brain.kind"]
+
+    def test_engine_kind_with_base_url_passes(self):
+        for kind, name in (("claude", "brain.gateway"),
+                           ("codex", "brain.gateway_openai")):
+            cfg = Config(brain={"kind": kind,
+                                "base_url": "http://localhost:4000"})
+            results = self._check(cfg)
+            assert len(results) == 1
+            assert results[0].ok
+            assert results[0].name == name
+
+    def test_alias_kind_passes_with_deprecation_notice(self):
         cfg = Config(brain={"kind": "gateway",
                             "base_url": "http://localhost:4000"})
         results = self._check(cfg)
-        assert len(results) == 1
-        assert results[0].ok
+        assert [r.name for r in results] == ["brain.kind", "brain.gateway"]
+        assert all(r.ok for r in results)
+        assert "deprecated" in results[0].detail
+        assert "kind: claude" in results[0].hint
 
-    def test_gateway_without_base_url_blocks(self):
+    def test_alias_kind_without_base_url_blocks(self):
         cfg = Config(brain={"kind": "gateway", "model": "qwen3:14b"})
-        results = self._check(cfg)
+        results = self._gateway_results(cfg)
         assert len(results) == 1
         assert not results[0].ok
         assert results[0].required  # blocking, not a warning
         assert "base_url" in results[0].detail
 
     def test_uninterpolated_base_url_blocks(self):
-        # Config interpolation turns an unset ${VAR} into "" - same failure.
-        cfg = Config(brain={"kind": "gateway", "base_url": ""})
-        assert not self._check(cfg)[0].ok
+        # Config interpolation turns an unset ${VAR} into "" - same failure,
+        # in both spellings (presence of the key declares the gateway).
+        for brain in ({"kind": "gateway", "base_url": ""},
+                      {"kind": "claude", "base_url": ""},
+                      {"base_url": ""}):
+            assert not self._gateway_results(Config(brain=brain))[0].ok
 
-    def test_gateway_openai_with_base_url_passes(self):
+    def test_gateway_openai_alias_with_base_url_passes(self):
         cfg = Config(brain={"kind": "gateway-openai",
                             "base_url": "http://localhost:9000/v1"})
-        results = self._check(cfg)
+        results = self._gateway_results(cfg)
         assert len(results) == 1
         assert results[0].ok
+        assert results[0].name == "brain.gateway_openai"
 
-    def test_gateway_openai_without_base_url_blocks(self):
+    def test_gateway_openai_alias_without_base_url_blocks(self):
         cfg = Config(brain={"kind": "gateway-openai", "model": "gpt-5.5"})
-        results = self._check(cfg)
+        results = self._gateway_results(cfg)
         assert len(results) == 1
         assert not results[0].ok
         assert results[0].required
         assert "base_url" in results[0].detail
 
-    def test_gateway_openai_invalid_wire_api_blocks(self):
-        cfg = Config(brain={"kind": "gateway-openai",
-                            "base_url": "http://localhost:9000/v1",
-                            "wire_api": "legacy"})
+    def test_codex_gateway_invalid_wire_api_blocks(self):
+        for kind in ("codex", "gateway-openai"):
+            cfg = Config(brain={"kind": kind,
+                                "base_url": "http://localhost:9000/v1",
+                                "wire_api": "legacy"})
+            results = self._gateway_results(cfg)
+            assert len(results) == 1
+            assert not results[0].ok
+            assert "wire_api" in results[0].detail
+
+    def test_base_url_on_non_engine_kind_warns_ignored(self):
+        cfg = Config(brain={"kind": "stub",
+                            "base_url": "http://localhost:4000"})
         results = self._check(cfg)
         assert len(results) == 1
-        assert not results[0].ok
-        assert "wire_api" in results[0].detail
+        assert results[0].ok  # advisory, not blocking
+        assert "ignored" in results[0].detail
 
-    def test_other_brains_are_not_checked(self):
+    def test_native_brains_are_not_checked(self):
         assert self._check(Config()) == []
         assert self._check(Config(brain={"kind": "codex"})) == []
         # unknown kinds fail loud at get_brain(), not here
