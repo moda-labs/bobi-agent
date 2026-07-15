@@ -27,6 +27,7 @@ def _write(p: Path, text: str) -> None:
 
 
 def _team(root: Path, name: str, agent_yaml: str, *, agent_md: str | None = None,
+          agents_md: str | None = None,
           roles: dict[str, str] | None = None, tools: dict[str, str] | None = None,
           monitors: str | None = None, workspace: dict[str, str] | None = None) -> Path:
     """Create a team source dir under root/agents/<name>."""
@@ -34,6 +35,8 @@ def _team(root: Path, name: str, agent_yaml: str, *, agent_md: str | None = None
     _write(d / "agent.yaml", agent_yaml)
     if agent_md is not None:
         _write(d / "agent.md", agent_md)
+    if agents_md is not None:
+        _write(d / "AGENTS.md", agents_md)
     for role, body in (roles or {}).items():
         _write(d / "roles" / role / "ROLE.md", body)
     for fn, body in (tools or {}).items():
@@ -213,6 +216,55 @@ def test_replace_frontmatter_drops_base(project):
     role = (dest / "roles" / "engineer" / "ROLE.md").read_text()
     assert "base craft" not in role
     assert role == "# Engineer\nfull override\n"
+
+
+def test_agents_md_base_ships_instructions(project):
+    _team(project, "core", 'version: "1.0.0"\n', agents_md="# House rules\n")
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n')
+    dest, prov = _compose(project, leaf)
+    assert (dest / "AGENTS.md").read_text() == "# House rules\n"
+    assert prov.items["AGENTS.md"].startswith("core")
+
+
+def test_agents_md_overlay_replaces_wholesale(project):
+    """Per-file replace (#779): the overlay's AGENTS.md wins entirely - global
+    instructions never concatenate like agent.md prose does."""
+    _team(project, "core", 'version: "1.0.0"\n', agents_md="# Base rules\n")
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n',
+                 agents_md="# Override rules\n")
+    dest, prov = _compose(project, leaf)
+    assert (dest / "AGENTS.md").read_text() == "# Override rules\n"
+    assert "Base rules" not in (dest / "AGENTS.md").read_text()
+    assert prov.items["AGENTS.md"].startswith("moda")
+
+
+def test_agents_md_absent_when_no_layer_ships_it(project):
+    _team(project, "core", 'version: "1.0.0"\n')
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n')
+    dest, _ = _compose(project, leaf)
+    assert not (dest / "AGENTS.md").exists()
+
+
+def test_agents_md_recompose_without_it_drops_stale_copy(project):
+    """A chain that stopped shipping AGENTS.md must not leave the old frozen
+    copy behind - the runtime render's removal lifecycle reads this file."""
+    core = _team(project, "core", 'version: "1.0.0"\n', agents_md="# rules\n")
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n')
+    dest, _ = _compose(project, leaf)
+    assert (dest / "AGENTS.md").is_file()
+    (core / "AGENTS.md").unlink()
+    dest, _ = _compose(project, leaf)
+    assert not (dest / "AGENTS.md").exists()
+
+
+def test_agents_md_overlay_empty_file_neutralizes_base_rules(project):
+    """The escape hatch for dropping inherited rules: an overlay ships an
+    EMPTY AGENTS.md, which replaces the base's and renders nothing at boot."""
+    _team(project, "core", 'version: "1.0.0"\n', agents_md="# Base rules\n")
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n',
+                 agents_md="")
+    dest, _ = _compose(project, leaf)
+    assert (dest / "AGENTS.md").read_text() == ""
 
 
 def test_overlay_only_role_appears(project):

@@ -515,6 +515,16 @@ def run_manager_from_config(
 
     set_process_brain_from_config(cfg)
 
+    # Render the team's global instructions (package AGENTS.md) into the paths
+    # the active brain auto-loads (#779) - once per boot, before any brain
+    # session spawns, and (in a container) after the deploy entrypoint has
+    # re-linked the brain config dirs onto the durable volume. Errors propagate
+    # for the same reason the codex MCP render's do: a team that ships house
+    # rules and can't render them would silently build without the standards.
+    from bobi.brain.instructions import render_team_instructions
+
+    render_team_instructions(project_path)
+
     agent_name = cfg.agent
     role = cfg.entry_role
 

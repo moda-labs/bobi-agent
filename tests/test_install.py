@@ -100,6 +100,26 @@ def test_install_is_idempotent(pack, project):
     assert (paths.install_manifest_path(project)).read_text() == manifest_first
 
 
+def test_agents_md_installs_and_reinstall_drops_stale_copy(pack, project):
+    """AGENTS.md (#779) freezes into run/package/ like the other surfaces, but
+    unlike them a chain that stops shipping it must drop the stale copy - the
+    runtime instructions render's removal lifecycle reads this file."""
+    (pack / "AGENTS.md").write_text("# House rules\n")
+    _install_pack(pack, project)
+    installed = paths.package_dir(project) / "AGENTS.md"
+    assert installed.read_text() == "# House rules\n"
+    manifest = json.loads(
+        (paths.package_dir(project) / "install-manifest.json").read_text())
+    assert "AGENTS.md" in manifest["files"]
+
+    _force_unlink(pack / "AGENTS.md")
+    _install_pack(pack, project)
+    assert not installed.exists()
+    manifest = json.loads(
+        (paths.package_dir(project) / "install-manifest.json").read_text())
+    assert "AGENTS.md" not in manifest["files"]
+
+
 def test_manifest_covers_installed_files(pack, project):
     _install_pack(pack, project)
     manifest = json.loads(
@@ -115,8 +135,8 @@ def test_local_source_gitignore_covers_image(pack, project):
     _install_pack(pack, project)
     _write_install_gitignore(project, local_source=True)
     entries = (paths.package_dir(project) / ".gitignore").read_text().splitlines()
-    for artifact in ["agent.yaml", "agent.md", "roles/", "install-manifest.json",
-                     ".gitignore"]:
+    for artifact in ["agent.yaml", "agent.md", "AGENTS.md", "roles/",
+                     "install-manifest.json", ".gitignore"]:
         assert artifact in entries
     _write_install_gitignore(project, local_source=False)
     entries = (paths.package_dir(project) / ".gitignore").read_text().splitlines()
