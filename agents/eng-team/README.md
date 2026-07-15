@@ -19,6 +19,7 @@ sessions, workflow handoffs, GitHub or Linear state, and monitor findings.
 agents/eng-team/
   agent.yaml
   agent.md
+  AGENTS.md
   README.md
   roles/
     director/ROLE.md
@@ -41,6 +42,13 @@ agents/eng-team/
     slack.md
     prep-doc.md
 ```
+
+`AGENTS.md` ships the general engineering rules (bug-fix discipline, testing
+standards, proof-of-work, commit rules). At boot the runtime renders it into
+the paths the team's brain auto-loads globally (`~/AGENTS.md`;
+`$CODEX_HOME/AGENTS.md` for codex, `$CLAUDE_CONFIG_DIR/CLAUDE.md` for claude),
+so every repo the agents work in gets the same standards. An overlay team
+replaces it wholesale by shipping its own `AGENTS.md` (empty to disable).
 
 `tools/` files are loaded directly into prompts as CLI guides. `context/` files
 are indexed and read on demand.
