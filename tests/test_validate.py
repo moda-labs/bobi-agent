@@ -135,6 +135,54 @@ class TestCheckRoles:
         assert self._check(Config(), tmp_path) == []
 
 
+class TestCheckEffort:
+    """effort: is pass-through like model, so validate only warns on values
+    outside the known vendor union (#778) — never blocks."""
+
+    def _check(self, cfg):
+        from bobi.validate import _check_effort
+        return _check_effort(cfg)
+
+    def test_known_values_pass(self):
+        cfg = Config(
+            brain={"kind": "codex", "effort": "high"},
+            roles={"monitor": {"effort": "none"},
+                   "planner": {"effort": "xhigh"},
+                   "reviewer": {"effort": "max"}},
+        )
+        assert self._check(cfg) == []
+
+    def test_unknown_brain_effort_warns(self):
+        cfg = Config(brain={"effort": "turbo"})
+        results = self._check(cfg)
+        assert len(results) == 1
+        assert results[0].name == "brain.effort"
+        assert not results[0].ok
+        assert not results[0].required  # warning, not blocking
+        assert "unrecognized effort" in results[0].detail
+
+    def test_unknown_role_effort_warns(self):
+        cfg = Config(roles={"monitor": {"effort": "extreme"}})
+        results = self._check(cfg)
+        assert len(results) == 1
+        assert results[0].name == "roles.monitor.effort"
+        assert not results[0].ok
+        assert not results[0].required
+
+    def test_non_string_effort_warns(self):
+        cfg = Config(roles={"monitor": {"effort": 3}})
+        results = self._check(cfg)
+        assert len(results) == 1
+        assert not results[0].ok
+
+    def test_no_effort_configured_passes(self):
+        assert self._check(Config()) == []
+        assert self._check(Config(
+            brain={"kind": "codex", "model": "gpt-5.6"},
+            roles={"monitor": {"model": "haiku"}},
+        )) == []
+
+
 class TestCheckBrain:
     """kind: gateway without a resolvable base_url fails every session at its
     first turn, so validate must block it (#655)."""

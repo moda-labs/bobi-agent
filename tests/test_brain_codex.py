@@ -294,6 +294,50 @@ async def test_model_override_adds_flag(monkeypatch):
     assert "gpt-5-codex" not in sink[0][0]
 
 
+@pytest.mark.asyncio
+async def test_env_effort_default_adds_config_flag(monkeypatch):
+    sink = []
+    events = [{"type": "turn.completed", "usage": {}}]
+    monkeypatch.setenv("BOBI_BRAIN_EFFORT", "high")
+
+    s = CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"})
+    s._runner = _runner_of(events, sink)
+    await s.connect("hi")
+    await _drain(s)
+
+    argv = sink[0][0]
+    assert "-c" in argv and "model_reasoning_effort=high" in argv
+
+
+@pytest.mark.asyncio
+async def test_effort_override_adds_config_flag(monkeypatch):
+    sink = []
+    events = [{"type": "turn.completed", "usage": {}}]
+    monkeypatch.setenv("BOBI_BRAIN_EFFORT", "medium")
+    s = CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"},
+                                  options={"effort": "xhigh"})
+    s._runner = _runner_of(events, sink)
+    await s.connect("hi")
+    await _drain(s)
+    argv = sink[0][0]
+    assert "model_reasoning_effort=xhigh" in argv
+    assert "model_reasoning_effort=medium" not in argv
+
+
+@pytest.mark.asyncio
+async def test_no_effort_omits_config_flag(monkeypatch):
+    sink = []
+    events = [{"type": "turn.completed", "usage": {}}]
+    monkeypatch.delenv("BOBI_BRAIN_EFFORT", raising=False)
+    s = CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"})
+    s._runner = _runner_of(events, sink)
+    await s.connect("hi")
+    await _drain(s)
+    assert not any(
+        str(a).startswith("model_reasoning_effort=") for a in sink[0][0]
+    )
+
+
 # --- MCP config rendering (#428 Stage 4) ------------------------------------
 
 

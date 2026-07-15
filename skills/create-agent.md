@@ -268,8 +268,10 @@ Precedence: `--model` launch flag > step `model:` > `roles.<role>.model` >
 `brain.model` > provider default. `effort` follows the identical chain
 (`--effort` flag > step `effort:` > `roles.<role>.effort` > `brain.effort` >
 provider default). Effort values are provider-native like models: codex
-accepts `minimal`–`xhigh`, claude accepts `low`–`max`, and `low`, `medium`,
-`high`, `xhigh` work on both.
+accepts `none`–`xhigh`, claude accepts `low`–`max`, and `low`, `medium`,
+`high`, `xhigh` work on both. A typo'd effort fails codex's first turn with
+a 400 but the claude CLI just warns and runs on its default effort, so trust
+the validate warning rather than the run's apparent success.
 
 Workflow prompt steps can override that team default for just one step:
 

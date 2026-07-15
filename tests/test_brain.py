@@ -29,6 +29,7 @@ from bobi.brain.claude import _ClaudeSession, _result_to_turn
 def default_brain_env(monkeypatch):
     monkeypatch.delenv("BOBI_BRAIN", raising=False)
     monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
+    monkeypatch.delenv("BOBI_BRAIN_EFFORT", raising=False)
 
 
 # --- registry / selector ---------------------------------------------------
@@ -162,6 +163,130 @@ def test_resolve_model_precedence(monkeypatch):
     assert resolve_model(cfg, role="monitor") == "haiku"    # role beats team default
     assert resolve_model(cfg, role="engineer") == "sonnet"  # falls to team default
     assert resolve_model(None) == "sonnet"
+
+
+# --- reasoning-effort selection (#778) — the model chain's sibling ----------
+
+
+def test_config_parses_effort(tmp_path):
+    """agent.yaml `brain.effort` + `roles.<role>.effort` round-trip (#778)."""
+    from bobi.config import Config
+    from bobi import paths
+
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text(
+        "agent: t\nbrain:\n  kind: codex\n  effort: high\n"
+        "roles:\n  monitor:\n    effort: low\n  planner: {}\n"
+    )
+    cfg = Config.load(tmp_path)
+    assert cfg.brain_effort == "high"
+    assert cfg.role_effort("monitor") == "low"
+    assert cfg.role_effort("planner") == ""     # role entry without an effort
+    assert cfg.role_effort("engineer") == ""    # unknown role
+    # Absent config → empty, everything falls through.
+    paths.agent_yaml_path(tmp_path).write_text("agent: t\n")
+    assert Config.load(tmp_path).brain_effort == ""
+    assert Config.load(tmp_path).role_effort("monitor") == ""
+
+
+def test_resolve_effort_precedence(monkeypatch):
+    """explicit > roles.<role>.effort > process default > "" (#778)."""
+    from bobi.brain import resolve_effort
+    from bobi.config import Config
+
+    cfg = Config(roles={"monitor": {"effort": "low"}})
+
+    assert resolve_effort(cfg, role="monitor", explicit="xhigh") == "xhigh"
+    assert resolve_effort(cfg, role="monitor") == "low"
+    assert resolve_effort(cfg, role="engineer") == ""   # unconfigured → unchanged
+    assert resolve_effort(None, role="monitor") == ""
+
+    monkeypatch.setenv("BOBI_BRAIN_EFFORT", "medium")
+    assert resolve_effort(cfg, role="monitor") == "low"      # role beats team default
+    assert resolve_effort(cfg, role="engineer") == "medium"  # falls to team default
+    assert resolve_effort(None) == "medium"
+
+
+def test_set_process_brain_pins_effort():
+    from bobi.brain import (
+        BRAIN_ENV,
+        get_process_brain_effort,
+        set_process_brain,
+    )
+
+    effort_env = "BOBI_BRAIN_EFFORT"
+    saved = os.environ.pop(BRAIN_ENV, None)
+    saved_effort = os.environ.pop(effort_env, None)
+    try:
+        set_process_brain("", effort="high")  # effort-only tunes default Claude
+        assert get_process_brain_effort() == "high"
+        set_process_brain("", effort="low")   # first writer wins
+        assert get_process_brain_effort() == "high"
+        os.environ.pop(effort_env)
+        os.environ[BRAIN_ENV] = "codex"
+        set_process_brain("", effort="high")  # default-brain config ≠ active brain
+        assert get_process_brain_effort() == ""
+    finally:
+        if saved is None:
+            os.environ.pop(BRAIN_ENV, None)
+        else:
+            os.environ[BRAIN_ENV] = saved
+        if saved_effort is None:
+            os.environ.pop(effort_env, None)
+        else:
+            os.environ[effort_env] = saved_effort
+
+
+def test_pin_process_brain_pins_and_clears_effort():
+    from bobi.brain import pin_process_brain
+
+    env: dict[str, str] = {"BOBI_BRAIN_EFFORT": "stale"}
+    pin_process_brain("codex", "gpt-5.6", env, effort="high")
+    assert env["BOBI_BRAIN_EFFORT"] == "high"
+    pin_process_brain("codex", "gpt-5.6", env)
+    assert "BOBI_BRAIN_EFFORT" not in env  # unset config clears a stale pin
+
+
+def test_claude_brain_uses_env_effort_default(monkeypatch):
+    captured, _options = _capture_options()
+    monkeypatch.setenv("BOBI_BRAIN_EFFORT", "medium")
+    with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+        ClaudeSDKClient=MagicMock(),
+        ClaudeAgentOptions=_options,
+    )}):
+        ClaudeBrain().make_session(cwd="/tmp", system_prompt=None)
+
+    assert captured["effort"] == "medium"
+
+
+def test_claude_brain_explicit_effort_overrides_env(monkeypatch):
+    captured, _options = _capture_options()
+    monkeypatch.setenv("BOBI_BRAIN_EFFORT", "medium")
+    with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+        ClaudeSDKClient=MagicMock(),
+        ClaudeAgentOptions=_options,
+    )}):
+        ClaudeBrain().make_session(
+            cwd="/tmp", system_prompt=None,
+            options={"effort": "xhigh"},
+        )
+
+    assert captured["effort"] == "xhigh"
+
+
+def test_claude_brain_omits_unset_effort():
+    """No configured effort → the option key never reaches the SDK (an empty
+    string would render as a literal --effort value)."""
+    captured, _options = _capture_options()
+    with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+        ClaudeSDKClient=MagicMock(),
+        ClaudeAgentOptions=_options,
+    )}):
+        ClaudeBrain().make_session(
+            cwd="/tmp", system_prompt=None, options={"effort": ""},
+        )
+
+    assert "effort" not in captured
 
 
 def test_claude_brain_uses_env_model_default(monkeypatch):

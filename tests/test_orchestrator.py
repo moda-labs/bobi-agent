@@ -78,6 +78,19 @@ class TestSchemaLoad:
         wf = load_workflow(f)
         assert wf.steps[0].model == "haiku"
 
+    def test_load_step_effort(self, tmp_path):
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent("""\
+            name: test-wf
+            steps:
+              - name: implement
+                effort: xhigh
+                prompt: "Build it"
+        """))
+        wf = load_workflow(f)
+        assert wf.steps[0].effort == "xhigh"
+        assert wf.steps[0].model == ""
+
     def test_load_route_step(self, tmp_path):
         f = tmp_path / "test.yaml"
         f.write_text(textwrap.dedent("""\
@@ -610,6 +623,187 @@ class TestRunWorkflow:
     def test_model_precedence(self, tmp_path, monkeypatch, steps, kwargs, expected):
         models = self._run_with_scorer_role(tmp_path, monkeypatch, steps, **kwargs)
         assert models == expected
+
+    def test_step_effort_passed_to_brain_session(self, monkeypatch):
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="implement", prompt="build", effort="xhigh"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is True
+        assert calls[0]["options"]["effort"] == "xhigh"
+
+    def _run_with_scorer_effort(self, tmp_path, monkeypatch, steps, **kwargs):
+        """One workflow run against a root whose config maps scorer→effort low;
+        returns the efforts captured from every make_session call (#778)."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.agent_yaml_path(root).write_text(
+            "agent: test\nentry_point: manager\n"
+            "roles:\n  scorer:\n    effort: low\n"
+        )
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kw):
+                calls.append(kw)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=steps)
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1", **kwargs,
+        )
+        assert result is True
+        return [c["options"].get("effort") for c in calls]
+
+    @pytest.mark.parametrize("steps,kwargs,expected", [
+        # role effort applies when the step has none
+        ([StepDef(name="score", prompt="score", agent="scorer")],
+         {}, ["low"]),
+        # explicit step effort beats the role effort
+        ([StepDef(name="score", prompt="score", agent="scorer", effort="high")],
+         {}, ["high"]),
+        # launch --effort beats step and role config for the whole run
+        ([StepDef(name="discover", prompt="discover", effort="high"),
+          StepDef(name="score", prompt="score", agent="scorer")],
+         {"effort": "xhigh"}, ["xhigh"]),
+    ], ids=["role-fallback", "step-beats-role", "launch-beats-all"])
+    def test_effort_precedence(self, tmp_path, monkeypatch, steps, kwargs, expected):
+        efforts = self._run_with_scorer_effort(
+            tmp_path, monkeypatch, steps, **kwargs,
+        )
+        assert efforts == expected
+
+    def test_env_effort_default_passed_to_brain_session(self, monkeypatch):
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        monkeypatch.setenv("BOBI_BRAIN_EFFORT", "medium")
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is True
+        assert calls[0]["options"]["effort"] == "medium"
+
+    def test_effort_only_change_reconnects_natively(self, monkeypatch):
+        """An effort-only step change is exempt from the resume guard (#778):
+        the session reconnects natively under the new dial — same session id,
+        no YAML reinject — even on a brain without cross_model_resume."""
+        calls = []
+        clients = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                client = FakeBrainClient()
+                clients.append(client)
+                return client
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="draft", prompt="draft", effort="low"),
+            StepDef(name="implement", prompt="build", effort="xhigh"),
+        ])
+
+        cwd = "/tmp"
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   side_effect=["", "sess-live"]), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(
+                wf, task="t", repo="r", cwd=cwd, run_key="1",
+            )
+
+        assert result is True
+        assert [c["options"].get("effort") for c in calls] == ["low", "xhigh"]
+        # Native reconnect: the live session id is resumed, and no scope
+        # reinjection turn ran (a model change without capability would have
+        # gone fresh with a "Continue workflow" prompt instead).
+        assert calls[1]["resume"] == "sess-live"
+        assert all(
+            "Continue workflow" not in q
+            for client in clients for q in client.queries
+        )
+
+    def test_resume_preserves_launch_effort(self, tmp_path, monkeypatch):
+        """A launch --effort override survives suspension via the _runtime
+        scope, like launch --model (#778)."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
+        monkeypatch.delenv("BOBI_BRAIN_EFFORT", raising=False)
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(
+            parents=True, exist_ok=True,
+        )
+
+        run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {
+            "input": {"task": "t", "repo": "r", "run_key": "1"},
+            "_runtime": {"model": "", "launch_model": "",
+                         "launch_effort": "xhigh"},
+        }
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.run_key = "1"
+        run.save()
+
+        calls = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value="old-session"), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            success = resume_workflow(run, wf)
+
+        assert success is True
+        # Effort never trips the resume guard: the saved session is kept AND
+        # runs under the preserved launch effort.
+        assert calls[0]["resume"] == "old-session"
+        assert calls[0]["options"]["effort"] == "xhigh"
 
     def test_env_model_default_passed_to_brain_session(self, monkeypatch):
         calls = []

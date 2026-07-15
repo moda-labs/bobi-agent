@@ -175,18 +175,20 @@ def _check_brain(cfg) -> list[CheckResult]:
 _BUILTIN_ROLES = {"monitor"}
 
 # The union of reasoning-effort values the known brains accept (#778):
-# codex takes minimal..xhigh, claude takes low..max. Effort is pass-through
-# like model — an unknown value is a warning here (the vendor CLIs grow new
-# tiers), and fails at session start if the brain rejects it.
-_KNOWN_EFFORTS = {"minimal", "low", "medium", "high", "xhigh", "max"}
+# codex takes none..xhigh, claude takes low..max (verified live on codex-cli
+# 0.144.4 / claude CLI 2026-07). Effort is pass-through like model, so an
+# unknown value is only a warning here (the vendor CLIs grow new tiers).
+_KNOWN_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 
 def _check_effort(cfg) -> list[CheckResult]:
     """Warn on unrecognized `effort:` values (#778).
 
-    A wrong value fails only at session start (codex CLI / claude CLI reject
-    it), so surface likely typos at validate time. Warnings, never blocking:
-    the union is a snapshot of today's vendor tiers, not an allowlist.
+    A wrong value never fails at validate: codex 400s at the first turn,
+    and the claude CLI warns and silently runs on its default effort — the
+    worst failure mode, because the run LOOKS fine. So surface likely typos
+    here. Warnings, never blocking: the union is a snapshot of today's
+    vendor tiers, not an allowlist.
     """
     found: list[tuple[str, object]] = []
     if isinstance(cfg.brain, dict) and cfg.brain.get("effort"):

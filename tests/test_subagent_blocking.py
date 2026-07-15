@@ -1476,7 +1476,7 @@ def _write_roles_yaml(root: Path) -> None:
     from bobi import paths
     paths.package_dir(root).mkdir(parents=True, exist_ok=True)
     paths.agent_yaml_path(root).write_text(
-        "agent: t\nroles:\n  monitor:\n    model: haiku\n"
+        "agent: t\nroles:\n  monitor:\n    model: haiku\n    effort: low\n"
     )
 
 
@@ -1566,6 +1566,79 @@ class TestLaunchModelResolution:
 
         assert result.success is True
         assert captured["options"]["model"] == "haiku"
+
+
+class TestLaunchEffortResolution:
+    """Per-role reasoning effort threads into every launch path (#778),
+    mirroring TestLaunchModelResolution."""
+
+    @pytest.fixture(autouse=True)
+    def no_ambient_effort(self, monkeypatch):
+        monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
+        monkeypatch.delenv("BOBI_BRAIN_EFFORT", raising=False)
+
+    def _capture_session_cls(self, captured: dict):
+        def _cls(*args, **kwargs):
+            captured.update(kwargs)
+            return FakeSession(success=True)
+        return _cls
+
+    def test_spawn_adhoc_passes_role_effort(self, tmp_path):
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+        with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event"):
+            spawn_adhoc(cwd="/tmp", task="t", name="x", role="monitor")
+        assert captured["extra_options"]["effort"] == "low"
+
+    def test_spawn_adhoc_explicit_effort_wins(self, tmp_path):
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+        with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event"):
+            spawn_adhoc(cwd="/tmp", task="t", name="x", role="monitor",
+                        effort="xhigh")
+        assert captured["extra_options"]["effort"] == "xhigh"
+
+    def test_spawn_adhoc_unconfigured_role_omits_effort(self, tmp_path):
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+        with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event"):
+            spawn_adhoc(cwd="/tmp", task="t", name="x", role="engineer")
+        assert "effort" not in captured["extra_options"]
+
+    def test_run_phase_blocking_passes_role_effort(self, tmp_path):
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+        with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event"):
+            run_phase_blocking(run_key="1", phase="implement", cwd="/tmp",
+                               role="monitor")
+        assert captured["extra_options"]["effort"] == "low"
+
+    @pytest.mark.asyncio
+    async def test_supervised_check_uses_monitor_role_effort(self, tmp_path):
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                captured.update(kwargs)
+                return _CapturingBrainSession()
+
+        with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
+             patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = await _run_agent_supervised(
+                prompt="check", cwd="/tmp", run_key="k", phase="check",
+                timeout=5, role="monitor",
+            )
+
+        assert result.success is True
+        assert captured["options"]["effort"] == "low"
 
 
 class TestModelAwareSessionResume:

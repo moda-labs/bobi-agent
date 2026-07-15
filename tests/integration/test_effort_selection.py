@@ -1,0 +1,176 @@
+"""Live tests for reasoning-effort selection (#778).
+
+Proves the effort dial actually reaches the real vendor CLIs — the part a
+mocked brain cannot: the claude CLI is spawned carrying ``--effort``, the
+codex rollout records the turn's effort, and an effort-only workflow step
+change keeps the conversation (the resume-guard exemption) end to end.
+
+The Claude tests require the ``claude`` CLI; the Codex test requires the
+``codex`` CLI (and burns one real turn). All skipped in CI.
+"""
+
+import os
+import shutil
+import subprocess
+
+import pytest
+import yaml
+
+from bobi.sdk import SessionRegistry
+from .conftest import requires_claude
+
+pytestmark = pytest.mark.claude
+
+
+async def _drain(client):
+    """Drain one turn; return (final_text, turn_result)."""
+    from bobi.brain import AssistantText, TurnResult
+
+    text, result = "", None
+    async for msg in client.receive_response():
+        if isinstance(msg, AssistantText) and msg.text:
+            text = msg.text
+        elif isinstance(msg, TurnResult):
+            result = msg
+    return text, result
+
+
+def _child_process_args() -> list[str]:
+    """argv strings of this process's direct children (the SDK-spawned CLI)."""
+    out = subprocess.run(
+        ["ps", "-axo", "ppid=,args="], capture_output=True, text=True,
+    ).stdout
+    me = str(os.getpid())
+    args = []
+    for line in out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0] == me:
+            args.append(parts[1])
+    return args
+
+
+@requires_claude
+@pytest.mark.asyncio
+@pytest.mark.timeout(180)
+class TestClaudeEffortSelection:
+    """The effort option reaches the live claude CLI process."""
+
+    async def test_effort_flag_reaches_spawned_cli(self):
+        from bobi.brain import get_brain
+
+        brain = get_brain("claude")
+        session = brain.make_session(
+            cwd="/tmp",
+            system_prompt="You are a test assistant. Reply concisely.",
+            options={"effort": "low", "max_turns": 3},
+        )
+        try:
+            await session.connect("Reply with exactly: OK")
+            # The persistent CLI subprocess is alive now — the ground truth
+            # for "the dial reached the real session" is its own argv (the
+            # claude CLI warns-and-ignores bad values and records effort
+            # nowhere else observable, so argv IS the wire).
+            children = _child_process_args()
+            assert any(
+                "--effort" in argv and "low" in argv for argv in children
+            ), f"no child claude process carries --effort low: {children}"
+            _, result = await _drain(session)
+        finally:
+            await session.disconnect()
+        assert result is not None and not result.is_error
+
+
+@requires_claude
+@pytest.mark.timeout(300)
+class TestWorkflowEffortContinuation:
+    """An effort-only step change keeps conversation state end to end (#778):
+    effort is exempt from the resume guard, so the session must reconnect
+    natively — the code word below survives ONLY via the live transcript."""
+
+    def test_effort_only_switch_keeps_conversation(self, bobi_env, clean_session):
+        from bobi.workflow.orchestrator import make_session_name, run_workflow
+        from bobi.workflow.schema import HandoffContract, StepDef, Workflow
+
+        session_name = make_session_name("xeffort", "test-repo", "302")
+        clean_session(session_name)
+
+        wf = Workflow(name="xeffort", steps=[
+            StepDef(
+                name="seed", prompt=(
+                    "The code word is PANGOLIN. Do not write it to any file "
+                    "or repeat it yet. Write your handoff file with exactly "
+                    "one field: ack: yes"
+                ),
+                effort="low", timeout=90,
+                handoff=HandoffContract(required=["ack"]),
+            ),
+            StepDef(
+                name="recall", prompt=(
+                    "State the code word from earlier in this conversation. "
+                    "Write your handoff file with exactly one field: "
+                    "word: <the code word>"
+                ),
+                effort="medium", timeout=90,
+                handoff=HandoffContract(required=["word"]),
+            ),
+        ])
+
+        result = run_workflow(
+            wf, task="Effort continuation test #302", repo="test-repo",
+            cwd=str(bobi_env.project_path), run_key="302",
+            timeout=240, interactive=False,
+        )
+
+        assert result is True
+        handoff = yaml.safe_load(
+            SessionRegistry().handoff_path(session_name, "recall").read_text()
+        )
+        assert "PANGOLIN" in str(handoff.get("word", "")).upper(), handoff
+
+
+requires_codex = pytest.mark.skipif(
+    not shutil.which("codex"),
+    reason="codex CLI not installed",
+)
+
+
+@requires_codex
+@pytest.mark.asyncio
+@pytest.mark.timeout(240)
+class TestCodexEffortSelection:
+    """``-c model_reasoning_effort=...`` lands in the real codex turn."""
+
+    async def test_effort_recorded_in_rollout(self, tmp_path):
+        from bobi.brain import get_brain
+
+        brain = get_brain("codex")
+        session = brain.make_session(
+            cwd=str(tmp_path),
+            system_prompt="You are a test assistant. Reply concisely.",
+            options={"effort": "low"},
+        )
+        await session.connect("Reply with exactly: OK")
+        _, result = await _drain(session)
+        await session.disconnect()
+
+        assert result is not None and not result.is_error
+        thread_id = result.session_id
+        assert thread_id
+
+        # Ground truth: the rollout records the effective effort per turn
+        # (verified live on codex-cli 0.144.4: turn_context.payload.effort).
+        import json
+        from pathlib import Path
+        rollouts = sorted(
+            Path.home().glob(f".codex/sessions/**/*{thread_id}*.jsonl")
+        )
+        assert rollouts, "no codex rollout found for the thread"
+        efforts = []
+        for line in rollouts[-1].read_text().splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "turn_context":
+                efforts.append(event.get("payload", {}).get("effort"))
+        assert "low" in efforts, efforts

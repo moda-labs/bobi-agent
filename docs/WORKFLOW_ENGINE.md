@@ -126,9 +126,13 @@ steps:
 `effort` is the model's sibling dial (#778): the reasoning effort for the
 step, with the identical precedence chain — `--effort` launch flag > step
 `effort:` > `roles.<role>.effort` > `brain.effort` > provider default. Values
-are provider-native and pass through untranslated: codex accepts `minimal`,
-`low`, `medium`, `high`, `xhigh`; claude accepts `low`, `medium`, `high`,
-`xhigh`, `max` (so `low`–`xhigh` is the portable subset).
+are provider-native and pass through untranslated: codex accepts `none`,
+`minimal`, `low`, `medium`, `high`, `xhigh`; claude accepts `low`, `medium`,
+`high`, `xhigh`, `max` (so `low`–`xhigh` is the portable subset). A value the
+brain doesn't know is NOT translated or caught by bobi: codex fails the first
+turn with a 400, and the claude CLI warns and silently runs on its default
+effort — `bobi agent <name> validate` warns about values outside the known
+union to catch typos early.
 
 ```yaml
 steps:
