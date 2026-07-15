@@ -3280,6 +3280,40 @@ def kb_remove(name):
 main.add_command(kb)
 
 
+@main.command("recall-memory")
+@click.argument("query")
+@click.option("--limit", "-n", default=5, type=click.IntRange(1, 50),
+              help="Max results")
+def recall_memory(query, limit):
+    """Search the cold long-term memory reference KB."""
+    from bobi.kb.store import KBStore
+    from bobi.kb.embedder import embed
+    from bobi.memory import cold_memory_kb_name
+
+    _ensure_root_bound()
+    name = cold_memory_kb_name()
+    try:
+        store = KBStore(name)
+    except FileNotFoundError:
+        click.echo("No cold memory index yet.")
+        return
+
+    results = store.search(query, limit=limit, embed_fn=embed)
+    if not results:
+        click.echo("No memory matches.")
+        return
+
+    for i, r in enumerate(results, 1):
+        metadata = r.get("metadata") or {}
+        category = metadata.get("category", "memory")
+        source = r.get("source", "")
+        score = r.get("score", 0)
+        content = r["content"][:500].replace("\n", " ")
+        click.echo(f"{i}. [{score:.3f}] {category} {source}")
+        click.echo(f"   {content}")
+        click.echo()
+
+
 # ---------------------------------------------------------------------------
 # costs command
 # ---------------------------------------------------------------------------
@@ -3315,7 +3349,7 @@ def costs(group_by):
 
 for _cmd_name in [
     "start", "stop", "restart", "status", "ui", "message", "ask", "compact",
-    "events", "costs", "doctor", "login-bootstrap",
+    "events", "costs", "doctor", "login-bootstrap", "recall-memory",
 ]:
     if _cmd_name in main.commands:
         agent.add_command(main.commands[_cmd_name])
@@ -3331,7 +3365,7 @@ for _cmd_name in ["install"]:
 for _old_top_level in [
     "start", "stop", "restart", "status", "ui", "message", "ask", "compact",
     "events", "costs", "doctor", "transcript", "workflows", "roles", "monitors", "kb",
-    "event-server", "login-bootstrap", "install",
+    "event-server", "login-bootstrap", "recall-memory", "install",
 ]:
     main.commands.pop(_old_top_level, None)
 

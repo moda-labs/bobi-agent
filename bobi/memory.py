@@ -14,7 +14,10 @@ existing journals into the first long_term_memory.md.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -34,6 +37,9 @@ MAX_MEMORY_CHARS = 24_000
 # the decision log is the primary continuity spine when sessions rotate,
 # so it needs room for accumulated operational state.
 MAX_LEGACY_MEMORY_CHARS = 32_000
+
+COLD_MEMORY_KB_NAME = "long_term_memory"
+COLD_MEMORY_REFERENCE_SOURCE = "workspace/memory/reference.md"
 
 
 def load_raw_long_term_memory(state_dir: Path) -> str:
@@ -158,6 +164,139 @@ def format_long_term_memory_prompt(content: str) -> str:
         "decisions.\n\n"
         f"{content}"
     )
+
+
+def reference_memory_path(root: Path | None = None) -> Path:
+    """Return the cold, human-readable reference memory path."""
+    from bobi import paths
+    return paths.workspace_dir(root) / "memory" / "reference.md"
+
+
+def cold_memory_kb_path(root: Path | None = None) -> Path:
+    """Return the team-scoped cold-memory KB database path."""
+    from bobi import paths
+    return paths.state_path(root) / "kb" / f"{COLD_MEMORY_KB_NAME}.db"
+
+
+def cold_memory_kb_name() -> str:
+    return COLD_MEMORY_KB_NAME
+
+
+def _reference_category(text: str) -> str:
+    headings = [
+        line.strip("# ").lower()
+        for line in text.splitlines()
+        if line.startswith("## ")
+    ]
+    if any("decision" in heading for heading in headings):
+        return "decision"
+    return "fact"
+
+
+def _cold_memory_store(root: Path | None = None):
+    from bobi.kb.store import KBStore
+
+    db_path = cold_memory_kb_path(root)
+    if db_path.exists():
+        return KBStore(COLD_MEMORY_KB_NAME, db_path=db_path)
+    return KBStore.create(COLD_MEMORY_KB_NAME, db_path=db_path)
+
+
+def cold_memory_kb_needs_sync(root: Path | None, reference_path: Path) -> bool:
+    """Return true when reference.md exists but the cold KB is absent or stale."""
+    if not reference_path.is_file():
+        return False
+    db_path = cold_memory_kb_path(root)
+    if not db_path.exists():
+        return True
+    try:
+        content = reference_path.read_text()
+        current_hash = hashlib.sha256(content.encode()).hexdigest()
+        from bobi.kb.store import KBStore, _chunk_text, _fetchone
+
+        with KBStore(COLD_MEMORY_KB_NAME, db_path=db_path) as store:
+            conn = store._connect()
+            existing = _fetchone(
+                conn,
+                """SELECT COUNT(*) AS entry_count,
+                          COUNT(v.entry_id) AS vector_count
+                   FROM entries
+                   LEFT JOIN entries_vec v ON v.entry_id = entries.id
+                   WHERE source = ? AND source_hash = ?""",
+                (COLD_MEMORY_REFERENCE_SOURCE, current_hash),
+            )
+        expected = len(_chunk_text(content))
+        return (
+            int((existing or {}).get("entry_count", 0) or 0) != expected
+            or int((existing or {}).get("vector_count", 0) or 0) != expected
+        )
+    except Exception:
+        return True
+
+
+def sync_reference_to_cold_memory_kb(
+    root: Path | None,
+    reference_path: Path,
+    *,
+    source_session: str,
+    embed_fn: Callable[[list[str]], list[list[float]]] | None = None,
+) -> dict:
+    """Index the current reference.md into the cold-memory KB and dedup it.
+
+    The scheduler calls this only after validating the reference artifact. Any
+    exception is intentionally allowed to bubble so the scheduler can keep the
+    cursor unmoved and retry the same transcript window.
+    """
+    if embed_fn is None:
+        from bobi.kb.embedder import embed as embed_fn
+
+    content = reference_path.read_text()
+    current_hash = hashlib.sha256(content.encode()).hexdigest()
+    metadata = {
+        "category": _reference_category(content),
+        "source_session": source_session,
+        "first_seen": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+    with _cold_memory_store(root) as store:
+        conn = store._connect()
+        from bobi.kb.store import _chunk_text, _fetchone
+
+        existing = _fetchone(
+            conn,
+            """SELECT COUNT(*) AS entry_count,
+                      COUNT(v.entry_id) AS vector_count
+               FROM entries
+               LEFT JOIN entries_vec v ON v.entry_id = entries.id
+               WHERE source = ? AND source_hash = ?""",
+            (COLD_MEMORY_REFERENCE_SOURCE, current_hash),
+        )
+        expected_chunks = len(_chunk_text(content))
+        indexed = 0
+        if (
+            int((existing or {}).get("entry_count", 0) or 0) != expected_chunks
+            or int((existing or {}).get("vector_count", 0) or 0) != expected_chunks
+        ):
+            store.remove_source(COLD_MEMORY_REFERENCE_SOURCE)
+            indexed = len(store.add_text(
+                content,
+                source=COLD_MEMORY_REFERENCE_SOURCE,
+                metadata=metadata,
+                embed_fn=embed_fn,
+            ))
+
+        exact = store.dedup_exact_by_source_hash()
+        semantic = store.dedup_semantic(
+            auto_merge_threshold=0.95,
+            flag_threshold=0.85,
+        )
+
+    return {
+        "indexed": indexed,
+        "deduped": int(exact.get("deduped", 0) or 0),
+        "merged": int(semantic.get("merged", 0) or 0),
+        "flagged": int(semantic.get("flagged", 0) or 0),
+    }
 
 
 def memory_dir_for_session(state_dir: Path, session_name: str) -> Path:

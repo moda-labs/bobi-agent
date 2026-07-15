@@ -1154,6 +1154,21 @@ class MonitorScheduler:
         compaction_required = memory_chars > WORKING_MEMORY_CHARS
 
         if not rows and not seed and not compaction_required:
+            try:
+                from bobi.memory import cold_memory_kb_needs_sync
+
+                if cold_memory_kb_needs_sync(root, reference_path):
+                    self._sync_reference_kb_or_publish_error(
+                        monitor, root, reference_path, demoted=0, reference_updated=False)
+            except Exception as e:
+                detail = (
+                    f"workspace/memory/reference.md KB sync check failed at "
+                    f"{reference_path}: {e}"
+                )
+                log.warning("Monitor %s: %s", monitor.name, detail)
+                _publish_monitor_error(
+                    monitor.name, "sleep-cycle", "reference-kb-index-failed", detail,
+                    publish=self.publish)
             log.info("Monitor %s due - no new transcript messages since cursor %d "
                      "and nothing to seed", monitor.name, cursor)
             return False
@@ -1332,6 +1347,17 @@ class MonitorScheduler:
                     monitor.name, "sleep-cycle", "reference-pointer-missing", detail,
                     publish=self.publish)
                 return
+            sync = self._sync_reference_kb_or_publish_error(
+                monitor, path.parent.parent, ref_path,
+                demoted=result.get("demoted", 0),
+                reference_updated=bool(result.get("reference_updated")),
+                retry_note=True,
+            )
+            if sync is None:
+                return
+            result["deduped"] = int(sync.get("deduped", 0) or 0)
+            result["merged"] = int(sync.get("merged", 0) or 0)
+            result["flagged"] = int(sync.get("flagged", 0) or 0)
 
         # A seed-only first run ingests no transcript rows (highest_id is None) -
         # there is nothing to advance; the cursor stays at 0 and the next run
@@ -1355,6 +1381,36 @@ class MonitorScheduler:
             log.info("Monitor %s: sleep cycle found nothing durable - no publish",
                      monitor.name)
 
+    def _sync_reference_kb_or_publish_error(
+        self,
+        monitor,
+        root: Path,
+        reference_path: Path,
+        *,
+        demoted: int = 0,
+        reference_updated: bool = False,
+        retry_note: bool = False,
+    ) -> dict | None:
+        try:
+            from bobi.memory import sync_reference_to_cold_memory_kb
+
+            return sync_reference_to_cold_memory_kb(
+                root,
+                reference_path,
+                source_session=monitor.name,
+            )
+        except Exception as e:
+            detail = (
+                f"workspace/memory/reference.md KB indexing failed at {reference_path}: {e}; "
+                f"demoted={demoted}; reference_updated={reference_updated}"
+            )
+            suffix = " - cursor NOT advanced, retrying next interval" if retry_note else ""
+            log.warning("Monitor %s: %s%s", monitor.name, detail, suffix)
+            _publish_monitor_error(
+                monitor.name, "sleep-cycle", "reference-kb-index-failed", detail,
+                publish=self.publish)
+            return None
+
     def _on_curator_result(self, monitor, result: dict | None,
                            highest_id: int | None, cursor_path: Path) -> None:
         """Deprecated compatibility wrapper for one release."""
@@ -1375,6 +1431,9 @@ class MonitorScheduler:
             "bytes": int(result.get("bytes", 0) or 0),
             "urgent": bool(result.get("urgent", False)),
         }
+        for key in ("deduped", "merged", "flagged"):
+            if key in result:
+                payload[key] = int(result.get(key, 0) or 0)
         published = False
         published_events = set()
         for candidate in (event, "system/memory.updated", "system/policy.updated"):

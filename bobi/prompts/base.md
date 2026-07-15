@@ -172,6 +172,19 @@ maintain and no flush step on rotation.
 The `## Long-Term Memory` block is already in your prompt — apply its facts,
 decisions, and standing instructions from your first event onward.
 
+### Cold recall
+
+Older detailed reference material is not injected into every prompt. When you
+need prior cold context that is not in the hot memory block, use the read-only
+recall tool:
+
+```bash
+bobi agent <agent> recall-memory "what you need to remember"
+```
+
+Treat recall results as retrieved context: cite or verify the underlying source
+when precision matters, and do not edit the cold memory files yourself.
+
 ## Output quality
 
 Keep messages short and scannable. Walls of text get skimmed; bullets

@@ -375,6 +375,110 @@ class KBStore:
             r["score"] = 1.0 / (60 + i + 1)
         return fts_results[:limit]
 
+    def near_duplicates(self, entry_id: int, limit: int = 10,
+                        min_similarity: float = 0.85) -> list[dict]:
+        """Return vector-near entries for an existing entry.
+
+        sqlite-vec's cosine metric reports distance, so similarity is
+        ``1 - distance``. The entry itself is excluded.
+        """
+        conn = self._connect()
+        row = _fetchone(
+            conn,
+            "SELECT vec_to_json(embedding) AS embedding FROM entries_vec WHERE entry_id = ?",
+            (entry_id,),
+        )
+        if not row:
+            return []
+
+        try:
+            embedding = json.loads(row["embedding"])
+        except (TypeError, json.JSONDecodeError):
+            return []
+
+        candidates = self._vec_search(conn, embedding, limit + 1)
+        results: list[dict] = []
+        for candidate in candidates:
+            if candidate["id"] == entry_id:
+                continue
+            similarity = 1.0 - float(candidate.get("distance", 1.0) or 0.0)
+            if similarity < min_similarity:
+                continue
+            item = dict(candidate)
+            item["similarity"] = similarity
+            results.append(item)
+            if len(results) >= limit:
+                break
+        return results
+
+    def dedup_exact_by_source_hash(self) -> dict:
+        """Remove older duplicate chunks that share source_hash and chunk_index."""
+        conn = self._connect()
+        rows = _fetchall(
+            conn,
+            """SELECT id, source_hash, chunk_index
+               FROM entries
+               WHERE source_hash IS NOT NULL
+               ORDER BY id DESC""",
+        )
+        seen: set[tuple[str, int]] = set()
+        delete_ids: list[int] = []
+        for row in rows:
+            key = (row["source_hash"], int(row["chunk_index"] or 0))
+            if key in seen:
+                delete_ids.append(row["id"])
+            else:
+                seen.add(key)
+        if delete_ids:
+            with conn:
+                self._delete_entry_ids(conn, delete_ids)
+        return {"deduped": len(delete_ids)}
+
+    def dedup_semantic(self, *, auto_merge_threshold: float = 0.95,
+                       flag_threshold: float = 0.85,
+                       limit_per_entry: int = 5) -> dict:
+        """Merge high-confidence vector duplicates and count gray-zone pairs."""
+        conn = self._connect()
+        rows = _fetchall(
+            conn,
+            "SELECT id, source, source_hash FROM entries ORDER BY id DESC",
+        )
+        live_ids = {r["id"] for r in rows}
+        by_id = {r["id"]: r for r in rows}
+        delete_ids: set[int] = set()
+        flagged: set[tuple[int, int]] = set()
+
+        for row in rows:
+            entry_id = row["id"]
+            if entry_id not in live_ids:
+                continue
+            for candidate in self.near_duplicates(
+                entry_id, limit=limit_per_entry, min_similarity=flag_threshold
+            ):
+                other_id = candidate["id"]
+                if other_id not in live_ids or other_id == entry_id:
+                    continue
+                current = by_id.get(entry_id) or {}
+                other = by_id.get(other_id) or {}
+                if (
+                    current.get("source") == other.get("source")
+                    and current.get("source_hash") == other.get("source_hash")
+                ):
+                    continue
+                similarity = float(candidate.get("similarity", 0.0) or 0.0)
+                older_id, newer_id = sorted((entry_id, other_id))
+                if similarity >= auto_merge_threshold:
+                    self._record_merged_provenance(conn, newer_id, older_id, similarity)
+                    delete_ids.add(older_id)
+                    live_ids.discard(older_id)
+                else:
+                    flagged.add((older_id, newer_id))
+
+        if delete_ids:
+            with conn:
+                self._delete_entry_ids(conn, sorted(delete_ids))
+        return {"merged": len(delete_ids), "flagged": len(flagged)}
+
     def info(self) -> dict:
         conn = self._connect()
         entry_count = _fetchval(conn, "SELECT COUNT(*) FROM entries")
@@ -413,10 +517,10 @@ class KBStore:
     def _fts_search(self, conn: apsw.Connection, query: str,
                     limit: int) -> list[dict]:
         fts = _fts_query(query)
-        return _fetchall(
+        rows = _fetchall(
             conn,
-            """SELECT e.id, e.content, e.source, e.chunk_index,
-                      e.created_at, entries_fts.rank
+            """SELECT e.id, e.content, e.source, e.source_hash, e.chunk_index,
+                      e.metadata, e.created_at, e.updated_at, entries_fts.rank
                FROM entries_fts
                JOIN entries e ON e.id = entries_fts.rowid
                WHERE entries_fts MATCH ?
@@ -424,6 +528,7 @@ class KBStore:
                LIMIT ?""",
             (fts, limit),
         )
+        return [self._decode_metadata(r) for r in rows]
 
     def _vec_search(self, conn: apsw.Connection,
                     query_embedding: list[float], limit: int) -> list[dict]:
@@ -447,7 +552,8 @@ class KBStore:
         placeholders = ",".join("?" * len(entry_ids))
         entries = _fetchall(
             conn,
-            f"""SELECT id, content, source, chunk_index, created_at
+            f"""SELECT id, content, source, source_hash, chunk_index, metadata,
+                       created_at, updated_at
                 FROM entries WHERE id IN ({placeholders})""",
             entry_ids,
         )
@@ -458,8 +564,53 @@ class KBStore:
             entry = entries_by_id.get(r["entry_id"])
             if entry:
                 entry["distance"] = r["distance"]
-                results.append(entry)
+                results.append(self._decode_metadata(entry))
         return results
+
+    @staticmethod
+    def _decode_metadata(row: dict) -> dict:
+        value = row.get("metadata")
+        if value:
+            try:
+                row["metadata"] = json.loads(value)
+            except (TypeError, json.JSONDecodeError):
+                row["metadata"] = {}
+        else:
+            row["metadata"] = {}
+        return row
+
+    def _record_merged_provenance(self, conn: apsw.Connection, keep_id: int,
+                                  merged_id: int, similarity: float) -> None:
+        keep = _fetchone(
+            conn,
+            """SELECT id, metadata FROM entries WHERE id = ?""",
+            (keep_id,),
+        )
+        merged = _fetchone(
+            conn,
+            """SELECT id, source, source_hash, chunk_index, metadata, created_at
+               FROM entries WHERE id = ?""",
+            (merged_id,),
+        )
+        if not keep or not merged:
+            return
+        keep_meta = self._decode_metadata(keep).get("metadata") or {}
+        merged_meta = self._decode_metadata(merged).get("metadata") or {}
+        provenance = list(keep_meta.get("merged_from") or [])
+        provenance.append({
+            "id": merged["id"],
+            "source": merged.get("source"),
+            "source_hash": merged.get("source_hash"),
+            "chunk_index": merged.get("chunk_index"),
+            "created_at": merged.get("created_at"),
+            "metadata": merged_meta,
+            "similarity": similarity,
+        })
+        keep_meta["merged_from"] = provenance
+        conn.execute(
+            "UPDATE entries SET metadata = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(keep_meta), _now(), keep_id),
+        )
 
     def _store_embeddings(self, conn: apsw.Connection,
                           ids: list[int],
@@ -477,15 +628,21 @@ class KBStore:
         )]
 
         if ids:
-            placeholders = ",".join("?" * len(ids))
-            conn.execute(
-                f"DELETE FROM entries_vec WHERE entry_id IN ({placeholders})",
-                ids,
-            )
-            conn.execute(
-                f"DELETE FROM entries WHERE id IN ({placeholders})",
-                ids,
-            )
+            self._delete_entry_ids(conn, ids)
+        return len(ids)
+
+    def _delete_entry_ids(self, conn: apsw.Connection, ids: list[int]) -> int:
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        conn.execute(
+            f"DELETE FROM entries_vec WHERE entry_id IN ({placeholders})",
+            ids,
+        )
+        conn.execute(
+            f"DELETE FROM entries WHERE id IN ({placeholders})",
+            ids,
+        )
         return len(ids)
 
     # --- Class methods for KB management ---

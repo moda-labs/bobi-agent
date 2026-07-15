@@ -157,7 +157,7 @@ After writing (or deciding not to), print **exactly one** JSON object as the
 last line of your output (nothing after it):
 
 ```json
-{"success": true, "updated": true, "reference_updated": false, "summary": "<one-line change summary>", "bytes": 0, "urgent": false, "lossy_drops": 0, "demoted": 0, "input_truncated": false, "oversized_truncated": 0}
+{"success": true, "updated": true, "reference_updated": false, "summary": "<one-line change summary>", "bytes": 0, "urgent": false, "lossy_drops": 0, "demoted": 0, "deduped": 0, "merged": 0, "flagged": 0, "input_truncated": false, "oversized_truncated": 0}
 ```
 
 - `success` — `true` if the run completed (even if `updated: false`). `false`
@@ -182,6 +182,9 @@ last line of your output (nothing after it):
   space. `> 0` means the budget/cap needs revisiting; the summary must name
   them. A demotion is NOT a lossy drop.
 - `demoted` — count of items moved to `workspace/memory/reference.md` this run.
+- `deduped` / `merged` / `flagged` — leave these at `0`; the deterministic
+  scheduler indexes and deduplicates the cold KB after validating
+  `workspace/memory/reference.md` and reports the real counts.
 - `input_truncated` — set from the ingest notes: `true` if a deferred id range
   was reported (name the range in the summary). The deferred messages are NOT
   lost — they re-run next interval.
