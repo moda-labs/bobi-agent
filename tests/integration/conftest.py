@@ -33,7 +33,8 @@ class BobiEnv:
     env: dict[str, str]
 
 
-def _provision_bobi_env(base: Path, *, agent_name: str, brain: str | None):
+def _provision_bobi_env(base: Path, *, agent_name: str, brain: str | None,
+                        agents_md: str | None = None):
     """Build + install an isolated Bobi home and return its :class:`BobiEnv`.
 
     The ONE scaffold both the default (Claude) integration fixture and the
@@ -75,6 +76,10 @@ def _provision_bobi_env(base: Path, *, agent_name: str, brain: str | None):
     if brain:
         agent_yaml["brain"] = {"kind": brain}
     (pack_dir / "agent.yaml").write_text(yaml.dump(agent_yaml))
+    if agents_md is not None:
+        # Team-shipped global instructions (#779), installed to
+        # run/package/AGENTS.md and rendered at manager boot.
+        (pack_dir / "AGENTS.md").write_text(agents_md)
     for role_name, content in [
         ("manager", "# Manager\n\nYou are a test manager agent.\n"),
         ("engineer", "# Engineer\n\nYou are a test engineer agent. Complete tasks quickly.\n"),

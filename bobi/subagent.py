@@ -1479,6 +1479,15 @@ def _run_agent_entry(args: dict) -> None:
         )
     pin_brain_from_root(project_root, os.environ)
 
+    # Re-render the team's global instructions (#779) at child entry, the
+    # sibling of the manager-boot render: a subagent launched after a
+    # reinstall (or on a host whose manager never booted, e.g. a direct
+    # `subagents launch`) must do its repo work under the CURRENT package
+    # AGENTS.md, not whatever the last manager boot rendered. Idempotent
+    # no-op when nothing changed.
+    from bobi.brain.instructions import render_team_instructions
+    render_team_instructions(project_root)
+
     # Subscription is owned by the Session now: every Session subscribes to
     # inbox/<self> on start, and extra topics (the persistent agent's
     # --subscribe list) flow in via the Session's `subscribe` argument. The

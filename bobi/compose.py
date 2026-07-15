@@ -34,6 +34,12 @@ log = logging.getLogger(__name__)
 # else under a team dir is composed by the **structured** rule (deep-merge).
 PROSE_AGENT_MD = "agent.md"
 
+# Team-shipped global instructions (#779), at the package root. Composed by
+# per-file REPLACE (the last layer shipping it wins wholesale, same rule as a
+# structured-dir file) - the base team ships the house rules; an overlay that
+# ships its own AGENTS.md overrides them entirely, never concatenates.
+INSTRUCTIONS_AGENTS_MD = "AGENTS.md"
+
 # Structured directory surfaces and their per-file merge key.
 STRUCTURED_DIRS = ("tools", "workflows", "monitors", "context")
 
@@ -316,6 +322,7 @@ def compose(chain: list[ResolvedLayer], dest: Path) -> Provenance:
     dest.mkdir(parents=True, exist_ok=True)
 
     _compose_prose_files(chain, dest, prov)
+    _compose_instructions_file(chain, dest, prov)
     _compose_roles(chain, dest, prov)
     for sub in STRUCTURED_DIRS:
         _compose_structured_dir(chain, dest, sub, prov)
@@ -432,6 +439,29 @@ def _compose_prose_files(chain: list[ResolvedLayer], dest: Path,
     merged = _concat_prose(contributions, prov, PROSE_AGENT_MD)
     if merged is not None:
         (dest / PROSE_AGENT_MD).write_text(merged)
+
+
+def _compose_instructions_file(chain: list[ResolvedLayer], dest: Path,
+                               prov: Provenance) -> None:
+    """AGENTS.md - per-file replace: the last layer shipping it wins (#779).
+
+    A chain shipping none DELETES a stale copy at `dest`, deviating from the
+    untouched-when-uncontributed install rule: this file feeds the runtime
+    instructions render, whose removal lifecycle (clean a previously managed
+    block) only works if a re-install of a chain that dropped the file also
+    drops the frozen copy. Compose owns the whole lifecycle so install and
+    deploy can't drift.
+    """
+    winner: ResolvedLayer | None = None
+    for layer in chain:
+        if (layer.dir / INSTRUCTIONS_AGENTS_MD).is_file():
+            winner = layer
+    if winner is None:
+        (dest / INSTRUCTIONS_AGENTS_MD).unlink(missing_ok=True)
+        return
+    shutil.copy2(winner.dir / INSTRUCTIONS_AGENTS_MD,
+                 dest / INSTRUCTIONS_AGENTS_MD)
+    prov.record(INSTRUCTIONS_AGENTS_MD, _layer_label(winner))
 
 
 def _compose_roles(chain: list[ResolvedLayer], dest: Path,
