@@ -1,7 +1,7 @@
 """Concurrency semaphore — caps simultaneous subagent sessions.
 
-Counts active (starting/running/idle) non-manager, non-monitor sessions
-in the SessionRegistry and blocks new launches when the cap is reached.
+Counts active (starting/running/idle) non-infrastructure sessions in the
+SessionRegistry and blocks new launches when the cap is reached.
 Launches beyond the cap queue: the caller polls until a slot opens or
 the timeout expires.
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import time
 
+from bobi import paths
 from bobi.sdk import get_registry
 
 log = logging.getLogger(__name__)
@@ -23,18 +24,42 @@ DEFAULT_CAP = 2
 # Polling interval (seconds) when waiting for a slot to open.
 _POLL_INTERVAL = 5.0
 
-# Roles excluded from the concurrency count: managers are infrastructure,
-# monitors are short-lived read-only checks — neither should consume a
-# concurrency slot or be blocked by the semaphore.
-_EXCLUDED_ROLES = frozenset(("manager", "monitor"))
+# Roles excluded from the concurrency count by role alone. The manager is
+# excluded by session name because regular workers can also use the entry role.
+_EXCLUDED_ROLES = frozenset(("monitor",))
+
+
+def _excluded_session_names(root=None) -> frozenset[str]:
+    """Session names excluded from the concurrency count for a runtime."""
+    try:
+        root = root or paths.bound_root()
+        if root is None:
+            return frozenset()
+        from bobi.service import manager_session_name
+        return frozenset((manager_session_name(root),))
+    except Exception:
+        log.warning("Failed to resolve manager session for concurrency semaphore",
+                    exc_info=True)
+        return frozenset()
+
+
+def is_excluded_from_concurrency(entry, excluded_session_names=None) -> bool:
+    """Return True for infrastructure sessions that should not consume slots."""
+    session_names = (
+        excluded_session_names
+        if excluded_session_names is not None
+        else _excluded_session_names()
+    )
+    return entry.role in _EXCLUDED_ROLES or entry.name in session_names
 
 
 def count_active_agents() -> int:
-    """Count active subagent sessions (excluding managers and monitors)."""
+    """Count active subagent sessions, excluding infrastructure roles."""
     registry = get_registry()
+    excluded_session_names = _excluded_session_names()
     return sum(
         1 for entry in registry.list_active()
-        if entry.role not in _EXCLUDED_ROLES
+        if not is_excluded_from_concurrency(entry, excluded_session_names)
     )
 
 

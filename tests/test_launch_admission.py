@@ -2,15 +2,20 @@
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+from bobi import paths
 from bobi.launch_admission import (
     LaunchAdmissionPolicy,
     LaunchAdmissionSnapshot,
+    build_snapshot,
     classify_init_failure,
     evaluate_launch_admission,
     load_init_health,
     record_init_health,
 )
+from bobi.sdk import SessionEntry
+from bobi.service import manager_session_name
 
 
 def _snapshot(**overrides):
@@ -150,6 +155,33 @@ def test_fails_open_to_static_and_starting_guards_when_metrics_unreadable():
     assert allowed.binding_signal == "metrics_unreadable"
     assert capped.allowed is False
     assert capped.binding_signal == "static_cap"
+
+
+def test_build_snapshot_excludes_only_entry_manager_session(tmp_path):
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text("entry_point: gtm-director\n")
+    registry = MagicMock()
+    registry.list_active.return_value = [
+        SessionEntry(name=manager_session_name(tmp_path), role="gtm-director",
+                     status="idle"),
+        SessionEntry(name="wf-adhoc-repo-1", role="gtm-director",
+                     status="running"),
+        SessionEntry(name="wf-adhoc-repo-2", role="engineer",
+                     status="starting"),
+        SessionEntry(name="wf-adhoc-repo-3", role="manager",
+                     status="running"),
+        SessionEntry(name="check-1", role="monitor", status="running"),
+    ]
+
+    with patch("bobi.launch_admission.get_registry", return_value=registry):
+        with patch("bobi.launch_admission.read_host_metrics",
+                   return_value=(0.5, 2, 2048.0, 4096.0, True)):
+            snapshot = build_snapshot(
+                tmp_path, LaunchAdmissionPolicy(max_concurrent_agents=4)
+            )
+
+    assert snapshot.active_agents == 3
+    assert snapshot.starting_agents == 1
 
 
 def test_metrics_unreadable_still_blocks_on_init_health():

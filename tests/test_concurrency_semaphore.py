@@ -6,10 +6,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from bobi import paths
+from bobi.service import manager_session_name
 from bobi.sdk import SessionEntry
 from bobi.concurrency_semaphore import (
     DEFAULT_CAP,
-    _EXCLUDED_ROLES,
     _POLL_INTERVAL,
     check_concurrency,
     count_active_agents,
@@ -45,14 +45,77 @@ class TestCountActiveAgents:
                    return_value=_mock_registry(entries)):
             assert count_active_agents() == 2
 
-    def test_excludes_managers(self):
+    def test_excludes_managers(self, tmp_path):
         entries = [
-            _make_entry("mgr-1", role="manager"),
+            _make_entry(manager_session_name(tmp_path), role="manager"),
             _make_entry("agent-1", role="engineer"),
         ]
-        with patch("bobi.concurrency_semaphore.get_registry",
-                   return_value=_mock_registry(entries)):
-            assert count_active_agents() == 1
+        paths.bind_root(tmp_path)
+        try:
+            with patch("bobi.concurrency_semaphore.get_registry",
+                       return_value=_mock_registry(entries)):
+                assert count_active_agents() == 1
+        finally:
+            paths.bind_root(None)
+
+    def test_counts_non_manager_sessions_with_manager_role(self, tmp_path):
+        entries = [
+            _make_entry("wf-adhoc-repo-1", role="manager"),
+            _make_entry("agent-1", role="engineer"),
+        ]
+        paths.bind_root(tmp_path)
+        try:
+            with patch("bobi.concurrency_semaphore.get_registry",
+                       return_value=_mock_registry(entries)):
+                assert count_active_agents() == 2
+        finally:
+            paths.bind_root(None)
+
+    def test_excludes_configured_entry_role(self, tmp_path):
+        config_dir = paths.package_dir(tmp_path)
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text("entry_point: gtm-director\n")
+        entries = [
+            _make_entry(manager_session_name(tmp_path), role="gtm-director",
+                        status="idle"),
+            _make_entry("agent-1", role="engineer"),
+        ]
+
+        paths.bind_root(tmp_path)
+        try:
+            with patch("bobi.concurrency_semaphore.get_registry",
+                       return_value=_mock_registry(entries)):
+                assert count_active_agents() == 1
+        finally:
+            paths.bind_root(None)
+
+    def test_counts_non_manager_sessions_with_entry_role(self, tmp_path):
+        config_dir = paths.package_dir(tmp_path)
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text("entry_point: gtm-director\n")
+        entries = [
+            _make_entry("wf-adhoc-repo-1", role="gtm-director"),
+            _make_entry("agent-1", role="engineer"),
+        ]
+
+        paths.bind_root(tmp_path)
+        try:
+            with patch("bobi.concurrency_semaphore.get_registry",
+                       return_value=_mock_registry(entries)):
+                assert count_active_agents() == 2
+        finally:
+            paths.bind_root(None)
+
+    def test_uses_default_exclusions_when_manager_session_resolution_fails(self):
+        entries = [
+            _make_entry("check-1", role="monitor"),
+            _make_entry("agent-1", role="engineer"),
+        ]
+        with patch("bobi.service.manager_session_name",
+                   side_effect=RuntimeError("missing config")):
+            with patch("bobi.concurrency_semaphore.get_registry",
+                       return_value=_mock_registry(entries)):
+                assert count_active_agents() == 1
 
     def test_excludes_monitors(self):
         entries = [

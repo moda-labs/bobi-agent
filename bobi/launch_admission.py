@@ -11,7 +11,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from bobi import paths
-from bobi.concurrency_semaphore import _EXCLUDED_ROLES
+from bobi.concurrency_semaphore import (
+    _excluded_session_names,
+    is_excluded_from_concurrency,
+)
 from bobi.sdk import get_registry
 
 log = logging.getLogger(__name__)
@@ -200,8 +203,9 @@ def _read_meminfo() -> tuple[float, float]:
 def build_snapshot(root: Path, policy: LaunchAdmissionPolicy) -> LaunchAdmissionSnapshot:
     active_agents = 0
     starting_agents = 0
+    excluded_session_names = _excluded_session_names(root)
     for entry in get_registry().list_active():
-        if entry.role in _EXCLUDED_ROLES:
+        if is_excluded_from_concurrency(entry, excluded_session_names):
             continue
         active_agents += 1
         if entry.status == "starting":
