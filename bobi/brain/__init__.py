@@ -35,6 +35,7 @@ from bobi.brain.gateway import (
     GATEWAY_SMALL_MODEL_ENV,
     GatewayBrain,
 )
+from bobi.brain.gateway_openai import GATEWAY_WIRE_API_ENV, GatewayOpenAIBrain
 from bobi.brain.stub import STUB_BRAIN_ENV, StubBrain
 
 # Registry of available brains by kind. Gemini/Grok adapters register here as
@@ -46,6 +47,7 @@ _BRAINS: dict[str, BrainFactory] = {
     "claude": ClaudeBrain(),
     "codex": CodexBrain(),
     "gateway": GatewayBrain(),
+    "gateway-openai": GatewayOpenAIBrain(),
     "stub": StubBrain(),
 }
 
@@ -133,21 +135,25 @@ def pin_process_brain(
     *,
     gateway_base_url: str = "",
     gateway_small_model: str = "",
+    gateway_wire_api: str = "",
 ) -> None:
     """Pin the process brain kind and model into *env*, clearing stale values.
 
-    The gateway pins carry ``brain.base_url`` / ``brain.small_model`` for a
-    ``kind: gateway`` team (#655); for any other kind they are cleared so a
-    stale parent gateway endpoint never leaks into another team's sessions.
+    The gateway pins carry gateway-specific ``brain.*`` values for gateway
+    teams; for any other kind they are cleared so a stale parent gateway
+    endpoint never leaks into another team's sessions.
     """
     target = os.environ if env is None else env
     _pin_env(target, BRAIN_ENV, kind)
     _set_process_brain_model(model, env=target)
-    is_gateway = kind == "gateway"
+    is_gateway = kind in ("gateway", "gateway-openai")
     _pin_env(target, GATEWAY_BASE_URL_ENV,
              gateway_base_url if is_gateway else "")
+    _pin_env(target, GATEWAY_WIRE_API_ENV,
+             gateway_wire_api if kind == "gateway-openai" else "")
+    is_claude_gateway = kind == "gateway"
     _pin_env(target, GATEWAY_SMALL_MODEL_ENV,
-             gateway_small_model if is_gateway else "")
+             gateway_small_model if is_claude_gateway else "")
 
 
 def set_process_brain(
@@ -156,6 +162,7 @@ def set_process_brain(
     *,
     gateway_base_url: str = "",
     gateway_small_model: str = "",
+    gateway_wire_api: str = "",
 ) -> None:
     """Record the team's brain kind for the current process.
 
@@ -183,9 +190,15 @@ def set_process_brain(
         return
     if model and not get_process_brain_model():
         _set_process_brain_model(model)
-    if kind == "gateway":
-        for var, value in ((GATEWAY_BASE_URL_ENV, gateway_base_url),
-                           (GATEWAY_SMALL_MODEL_ENV, gateway_small_model)):
+    if kind in ("gateway", "gateway-openai"):
+        pairs = [(GATEWAY_BASE_URL_ENV, gateway_base_url)]
+        if kind == "gateway":
+            os.environ.pop(GATEWAY_WIRE_API_ENV, None)
+            pairs.append((GATEWAY_SMALL_MODEL_ENV, gateway_small_model))
+        if kind == "gateway-openai":
+            os.environ.pop(GATEWAY_SMALL_MODEL_ENV, None)
+            pairs.append((GATEWAY_WIRE_API_ENV, gateway_wire_api))
+        for var, value in pairs:
             if value and not os.environ.get(var):
                 os.environ[var] = value
 
@@ -203,6 +216,7 @@ def set_process_brain_from_config(cfg) -> None:
         cfg.brain_kind, cfg.brain_model,
         gateway_base_url=cfg.brain_base_url,
         gateway_small_model=cfg.brain_small_model,
+        gateway_wire_api=cfg.brain_wire_api,
     )
 
 
@@ -270,6 +284,7 @@ __all__ = [
     "ClaudeBrain",
     "CodexBrain",
     "GatewayBrain",
+    "GatewayOpenAIBrain",
     "StubBrain",
     "STUB_BRAIN_ENV",
     "DeferredTool",
@@ -279,6 +294,7 @@ __all__ = [
     "BRAIN_ENV",
     "GATEWAY_BASE_URL_ENV",
     "GATEWAY_SMALL_MODEL_ENV",
+    "GATEWAY_WIRE_API_ENV",
     "continuation_token",
     "get_brain",
     "get_process_brain_model",

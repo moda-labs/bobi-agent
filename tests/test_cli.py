@@ -72,6 +72,7 @@ def test_agent_group_pins_team_brain_for_cli_process(bobi_install, monkeypatch):
 
     for var in ("BOBI_BRAIN", "BOBI_BRAIN_MODEL",
                 "BOBI_GATEWAY_BASE_URL", "BOBI_GATEWAY_SMALL_MODEL",
+                "BOBI_GATEWAY_WIRE_API",
                 "ANTHROPIC_AUTH_TOKEN"):
         monkeypatch.delenv(var, raising=False)
     agent_yaml = bobi_install.repo_path / "package" / "agent.yaml"
@@ -89,6 +90,37 @@ def test_agent_group_pins_team_brain_for_cli_process(bobi_install, monkeypatch):
     assert os.environ.get("BOBI_BRAIN_MODEL") == "qwen3:14b"
     assert os.environ.get("BOBI_GATEWAY_BASE_URL") == "http://localhost:4000"
     assert os.environ.get("ANTHROPIC_AUTH_TOKEN") == "from-runtime-dotenv"
+
+
+def test_agent_group_pins_gateway_openai_brain_for_cli_process(
+    bobi_install, monkeypatch,
+):
+    import os
+    import yaml
+
+    for var in ("BOBI_BRAIN", "BOBI_BRAIN_MODEL",
+                "BOBI_GATEWAY_BASE_URL", "BOBI_GATEWAY_SMALL_MODEL",
+                "BOBI_GATEWAY_WIRE_API"):
+        monkeypatch.delenv(var, raising=False)
+    agent_yaml = bobi_install.repo_path / "package" / "agent.yaml"
+    cfg = yaml.safe_load(agent_yaml.read_text())
+    cfg["brain"] = {
+        "kind": "gateway-openai",
+        "base_url": "http://localhost:9000/v1",
+        "model": "gpt-5.5",
+        "wire_api": "responses",
+        "small_model": "must-not-pin",
+    }
+    agent_yaml.write_text(yaml.dump(cfg))
+
+    result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "status"])
+
+    assert result.exit_code == 0, result.output
+    assert os.environ.get("BOBI_BRAIN") == "gateway-openai"
+    assert os.environ.get("BOBI_BRAIN_MODEL") == "gpt-5.5"
+    assert os.environ.get("BOBI_GATEWAY_BASE_URL") == "http://localhost:9000/v1"
+    assert os.environ.get("BOBI_GATEWAY_WIRE_API") == "responses"
+    assert "BOBI_GATEWAY_SMALL_MODEL" not in os.environ
 
 
 def test_missing_agent_errors_without_cwd_fallback(tmp_path, monkeypatch):

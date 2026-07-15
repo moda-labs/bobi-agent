@@ -62,6 +62,7 @@ def pin_brain_from_root(
         brain.get("kind", ""), brain.get("model", ""), env,
         gateway_base_url=brain.get("base_url", ""),
         gateway_small_model=brain.get("small_model", ""),
+        gateway_wire_api=brain.get("wire_api", "") or "chat",
     )
 
 

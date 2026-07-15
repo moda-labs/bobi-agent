@@ -60,7 +60,7 @@ def _agent_yaml(dest: Path) -> dict:
     return yaml.safe_load((dest / "agent.yaml").read_text())
 
 
-CODEX_PIN = "@openai/codex@0.142.0"
+CODEX_PIN = "@openai/codex@0.144.4"
 VENN_PIN = "venn-cli==0.2.0"
 
 
@@ -642,7 +642,7 @@ def _dep(name, success="ok", **kw):
 
 def test_dependency_list_hash_is_stable():
     """Same declared set → same hash (the warm-boot skip key)."""
-    deps = [_dep("codex", install={"npm": ["@openai/codex@0.142.0"]}),
+    deps = [_dep("codex", install={"npm": ["@openai/codex@0.144.4"]}),
             _dep("venn", guide="x")]
     assert tool_library.dependency_list_hash(deps) == \
         tool_library.dependency_list_hash(list(deps))
@@ -660,7 +660,7 @@ def test_dependency_list_hash_is_order_independent():
 def test_dependency_list_hash_changes_on_materialization_change():
     """A change to any field a bootstrap would act on (success/guide/install/
     host/mcp) changes the hash, so a changed set triggers re-bootstrap."""
-    base = [_dep("codex", install={"npm": ["@openai/codex@0.142.0"]})]
+    base = [_dep("codex", install={"npm": ["@openai/codex@0.144.4"]})]
     assert tool_library.dependency_list_hash(base) != \
         tool_library.dependency_list_hash(
             [_dep("codex", install={"npm": ["@openai/codex@0.143.0"]})])
@@ -691,15 +691,15 @@ agent: acme
 requires:
   - name: codex
     why: "Delegate a coding sub-task to the Codex CLI (tools/codex.md)."
-    check: "command -v codex >/dev/null 2>&1 && { if [ \\"${BOBI_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; fi; if [ -f ~/.codex/auth.json ]; then if [ \\"${BOBI_AUTH:-api_key}\\" = \\"subscription\\" ] && python3 -c 'import json, pathlib, sys; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; data=json.loads(p.read_text()); sys.exit(0 if isinstance(data, dict) and data.get(\\"OPENAI_API_KEY\\") and not data.get(\\"tokens\\") else 1)'; then false; else python3 -c 'import subprocess, sys; sys.exit(subprocess.run([\\"codex\\", \\"exec\\", \\"-s\\", \\"read-only\\", \\"--skip-git-repo-check\\", \\"reply OK\\"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=8).returncode)'; fi; elif [ \\"${BOBI_VERIFY_PHASE:-}\\" = \\"build\\" ]; then codex --version >/dev/null 2>&1; else false; fi; }"
-    fix: "npm install -g @openai/codex@0.142.0 && { if [ \\"${BOBI_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; else codex auth login || echo 'Set OPENAI_API_KEY in run/.env or run codex auth login'; fi; }"
+    check: "command -v codex >/dev/null 2>&1 && { if [ \\"${BOBI_BRAIN:-}\\" = \\"gateway-openai\\" ] && [ -n \\"${BOBI_GATEWAY_BASE_URL:-}\\" ]; then python3 -c 'import re, subprocess, sys; out=subprocess.check_output([\\"codex\\", \\"--version\\"], text=True); m=re.search(r\\"(\\\\d+)\\\\.(\\\\d+)\\\\.(\\\\d+)\\", out); sys.exit(0 if m and tuple(map(int, m.groups())) >= (0, 144, 4) else 1)'; elif [ \\"${BOBI_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; fi; if [ \\"${BOBI_BRAIN:-}\\" = \\"gateway-openai\\" ] && [ -n \\"${BOBI_GATEWAY_BASE_URL:-}\\" ]; then true; elif [ -f ~/.codex/auth.json ]; then if [ \\"${BOBI_AUTH:-api_key}\\" = \\"subscription\\" ] && python3 -c 'import json, pathlib, sys; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; data=json.loads(p.read_text()); sys.exit(0 if isinstance(data, dict) and data.get(\\"OPENAI_API_KEY\\") and not data.get(\\"tokens\\") else 1)'; then false; else python3 -c 'import subprocess, sys; sys.exit(subprocess.run([\\"codex\\", \\"exec\\", \\"-s\\", \\"read-only\\", \\"--skip-git-repo-check\\", \\"reply OK\\"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=8).returncode)'; fi; elif [ \\"${BOBI_VERIFY_PHASE:-}\\" = \\"build\\" ]; then codex --version >/dev/null 2>&1; else false; fi; }"
+    fix: "npm install -g @openai/codex@0.144.4 && { if [ \\"${BOBI_BRAIN:-}\\" = \\"gateway-openai\\" ] && [ -n \\"${BOBI_GATEWAY_BASE_URL:-}\\" ]; then codex --version >/dev/null 2>&1; elif [ \\"${BOBI_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; else codex auth login || echo 'Set OPENAI_API_KEY in run/.env or run codex auth login'; fi; }"
   - name: venn
     why: "Reach external services (email, calendar, CRM) via the Venn CLI (tools/venn.md). Auth via VENN_API_KEY."
     check: "command -v venn >/dev/null 2>&1 && venn --help >/dev/null 2>&1"
     fix: "python3 -m venv /opt/venn-cli && /opt/venn-cli/bin/pip install venn-cli==0.2.0 && ln -sf /opt/venn-cli/bin/venn /usr/local/bin/venn && echo 'Set VENN_API_KEY in run/.env'"
 build:
   apt: [nodejs, npm, python3-venv]
-  npm: ["@openai/codex@0.142.0"]
+  npm: ["@openai/codex@0.144.4"]
   run_root:
     - >-
       python3 -m venv /opt/venn-cli &&

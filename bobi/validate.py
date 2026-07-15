@@ -149,23 +149,36 @@ def _check_brain(cfg) -> list[CheckResult]:
     """Validate the `brain:` block where a bad value fails mid-session (#655).
 
     Unknown kinds already fail loud at session construction (``get_brain``
-    raises), so only `kind: gateway` needs a validate-time check: without a
+    raises), so only gateway kinds need validate-time checks: without a
     resolvable `base_url` every session would 404/hang at its first turn.
     A `${VAR}` that didn't resolve interpolates to "" and lands here too.
     The auth token (``ANTHROPIC_AUTH_TOKEN``) is deliberately not required -
     Ollama serves unauthenticated.
     """
-    if cfg.brain_kind != "gateway":
+    if cfg.brain_kind not in ("gateway", "gateway-openai"):
         return []
     if not cfg.brain_base_url:
+        name = "brain.gateway_openai" if cfg.brain_kind == "gateway-openai" \
+            else "brain.gateway"
+        endpoint = "OpenAI-compatible /v1 endpoint" \
+            if cfg.brain_kind == "gateway-openai" else "gateway endpoint"
         return [CheckResult(
-            "brain.gateway", ok=False,
-            detail="kind: gateway requires brain.base_url",
-            hint="set brain.base_url to the Anthropic-compatible endpoint "
+            name, ok=False,
+            detail=f"kind: {cfg.brain_kind} requires brain.base_url",
+            hint=f"set brain.base_url to the {endpoint} "
                  "(e.g. http://localhost:4000 or ${LLM_GATEWAY_URL} with the "
                  "variable in the runtime .env)",
         )]
-    return [CheckResult("brain.gateway", ok=True, detail=cfg.brain_base_url)]
+    if cfg.brain_kind == "gateway-openai" \
+            and cfg.brain_wire_api not in ("chat", "responses"):
+        return [CheckResult(
+            "brain.gateway_openai", ok=False,
+            detail="kind: gateway-openai requires brain.wire_api to be chat or responses",
+            hint="remove brain.wire_api for the chat default, or set it to responses",
+        )]
+    name = "brain.gateway_openai" if cfg.brain_kind == "gateway-openai" \
+        else "brain.gateway"
+    return [CheckResult(name, ok=True, detail=cfg.brain_base_url)]
 
 
 # Roles the runtime uses without a roles/ prompt directory. Monitor checks

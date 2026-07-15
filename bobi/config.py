@@ -343,9 +343,10 @@ class Config:
         "init_failure_backoff_threshold": 2,
     })
     # Which agent "brain" drives this team's agents (#485). `{kind: claude|codex|
-    # gateway, model: <optional override>}`; `kind: gateway` additionally takes
-    # `base_url` (required) and `small_model` (#655). Empty = the framework
-    # default (claude).
+    # gateway|gateway-openai, model: <optional override>}`; gateway kinds
+    # additionally take `base_url` (required). `kind: gateway` takes
+    # `small_model` (#655); `kind: gateway-openai` takes `wire_api`
+    # (chat|responses, default chat). Empty = the framework default (claude).
     brain: dict = field(default_factory=dict)
     # Per-role settings (#617). `roles: {<role>: {model: <override>}}`. A role's
     # model is a provider-native string for the team's brain (Claude aliases
@@ -380,6 +381,11 @@ class Config:
     def brain_small_model(self) -> str:
         """The gateway's small/fast model override (#655), or ""."""
         return str((self.brain or {}).get("small_model", "") or "")
+
+    @property
+    def brain_wire_api(self) -> str:
+        """The OpenAI-compatible gateway wire API (#777), defaulting to chat."""
+        return str((self.brain or {}).get("wire_api", "") or "chat")
 
     def role_model(self, role: str) -> str:
         """The model configured for *role*, or "" when unconfigured."""

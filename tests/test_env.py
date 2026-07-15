@@ -234,6 +234,34 @@ class TestChildAgentEnv:
         assert env["BOBI_GATEWAY_BASE_URL"] == "http://localhost:4000"
         assert env["BOBI_GATEWAY_SMALL_MODEL"] == "qwen3:4b"
 
+    def test_pins_gateway_openai_config_with_dotenv_interpolation(
+        self, tmp_path, monkeypatch,
+    ):
+        """A `kind: gateway-openai` team pins base_url/wire_api for Codex."""
+        from bobi.env import child_agent_env
+
+        root = tmp_path / "install"
+        config_dir = paths.package_dir(root)
+        config_dir.mkdir(parents=True)
+        (config_dir / "agent.yaml").write_text(
+            "agent: local-team\n"
+            "brain:\n"
+            "  kind: gateway-openai\n"
+            "  base_url: ${LLM_GATEWAY_URL}\n"
+            "  model: gpt-5.5\n"
+            "  small_model: should-not-pin\n"
+        )
+        paths.env_path(root).write_text("LLM_GATEWAY_URL=http://localhost:9000/v1\n")
+        monkeypatch.delenv("LLM_GATEWAY_URL", raising=False)
+
+        env = child_agent_env(root)
+
+        assert env["BOBI_BRAIN"] == "gateway-openai"
+        assert env["BOBI_BRAIN_MODEL"] == "gpt-5.5"
+        assert env["BOBI_GATEWAY_BASE_URL"] == "http://localhost:9000/v1"
+        assert env["BOBI_GATEWAY_WIRE_API"] == "chat"
+        assert "BOBI_GATEWAY_SMALL_MODEL" not in env
+
     def test_brain_interpolation_matches_config_semantics(
         self, tmp_path, monkeypatch,
     ):
@@ -271,11 +299,13 @@ class TestChildAgentEnv:
         (config_dir / "agent.yaml").write_text("agent: eng-team\n")
         monkeypatch.setenv("BOBI_GATEWAY_BASE_URL", "http://stale:4000")
         monkeypatch.setenv("BOBI_GATEWAY_SMALL_MODEL", "stale-model")
+        monkeypatch.setenv("BOBI_GATEWAY_WIRE_API", "responses")
 
         env = child_agent_env(root)
 
         assert "BOBI_GATEWAY_BASE_URL" not in env
         assert "BOBI_GATEWAY_SMALL_MODEL" not in env
+        assert "BOBI_GATEWAY_WIRE_API" not in env
 
     def test_uses_same_path_normalization_as_spawn_env(self, tmp_path, monkeypatch):
         from bobi.env import agent_spawn_env, child_agent_env

@@ -178,6 +178,20 @@ brain:
 If the gateway needs auth, put `ANTHROPIC_AUTH_TOKEN` in the team's runtime
 `.env`. See `skills/create-agent.md` for the details.
 
+For an **OpenAI-compatible** gateway, use the Codex CLI brain instead:
+
+```yaml
+brain:
+  kind: gateway-openai
+  base_url: ${LLM_GATEWAY_URL}   # OpenAI-compatible /v1 endpoint
+  model: gpt-5.5                # gateway-native model id
+  wire_api: chat                # optional: chat (default) or responses
+```
+
+If the gateway needs auth, put `BOBI_GATEWAY_API_KEY` in the team's runtime
+`.env`. Bobi references that dedicated key from Codex and never sends an ambient
+real `OPENAI_API_KEY` to the gateway.
+
 Workflow steps can override the team default for that step:
 
 ```yaml
