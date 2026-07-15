@@ -254,6 +254,20 @@ disabled for gateways (a model switch starts fresh and re-injects context),
 and costs reported through a gateway are nominal, attributed to provider
 `gateway` in `bobi agent <name> costs`.
 
+For an OpenAI-compatible gateway, use the Codex CLI harness:
+
+```yaml
+brain:
+  kind: gateway-openai
+  base_url: ${LLM_GATEWAY_URL}   # required; OpenAI-compatible /v1 endpoint
+  model: gpt-5.5                # gateway-native model id
+  wire_api: chat                # optional: chat (default) or responses
+```
+
+If the OpenAI-compatible gateway needs auth, put `BOBI_GATEWAY_API_KEY` in the
+runtime `.env`. Bobi configures Codex to read that dedicated key and never sends
+an ambient real `OPENAI_API_KEY` to the gateway.
+
 Individual roles can declare their own model and reasoning effort, applied
 whenever an agent launches with that role (subagents, workflow steps, monitor
 checks):

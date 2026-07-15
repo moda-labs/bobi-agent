@@ -496,7 +496,7 @@ def _materialize_local_deps(pack_dir: Path, project_path: Path, *,
 
     # The team's declared brain drives the install, else the local default.
     try:
-        brain = Config.load(project_path).brain_kind() or DEFAULT_BRAIN
+        brain = Config.load(project_path).brain_kind or DEFAULT_BRAIN
     except Exception:
         brain = DEFAULT_BRAIN
 

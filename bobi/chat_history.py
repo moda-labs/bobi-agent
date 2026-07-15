@@ -117,16 +117,17 @@ def read_transcript_messages(session_id: str,
                              *, brain: str | None = None) -> list[dict]:
     """Replay an agent session's transcript as ``{role, text}`` messages.
 
-    *brain* selects the on-disk format: ``"codex"`` reads a Codex rollout,
-    anything else (``"claude"``, ``"gateway"``, ``"stub"``) reads a Claude Code
-    JSONL transcript. When the brain is unrecorded (``""``/``None``) and no
-    Claude transcript resolves, a Codex rollout is tried as a last resort so a
-    codex-brained session still renders for callers that don't record which
-    brain wrote it (e.g. the hosted supervisor). A Claude session id never
-    matches a Codex rollout filename, so the fallback is safe. An explicit
-    non-codex brain never triggers the codex tree walk.
+    *brain* selects the on-disk format: ``"codex"`` and
+    ``"gateway-openai"`` read Codex rollouts, anything else (``"claude"``,
+    ``"gateway"``, ``"stub"``) reads a Claude Code JSONL transcript. When the
+    brain is unrecorded (``""``/``None``) and no Claude transcript resolves, a
+    Codex rollout is tried as a last resort so a codex-brained session still
+    renders for callers that don't record which brain wrote it (e.g. the hosted
+    supervisor). A Claude session id never matches a Codex rollout filename, so
+    the fallback is safe. An explicit non-codex brain never triggers the codex
+    tree walk.
     """
-    if brain == "codex":
+    if brain in ("codex", "gateway-openai"):
         return read_codex_transcript_messages(session_id, limit)
     messages = _read_claude_transcript_messages(session_id, limit)
     if messages or brain not in (None, ""):

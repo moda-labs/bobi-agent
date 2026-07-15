@@ -17,6 +17,7 @@ import pytest
 from bobi.brain import (
     GATEWAY_BASE_URL_ENV,
     GATEWAY_SMALL_MODEL_ENV,
+    GATEWAY_WIRE_API_ENV,
     GatewayBrain,
     get_brain,
     pin_process_brain,
@@ -26,7 +27,8 @@ from bobi.brain import (
 from bobi.brain.gateway import _gateway_session_env, _with_gateway_env
 
 _PIN_VARS = ("BOBI_BRAIN", "BOBI_BRAIN_MODEL",
-             GATEWAY_BASE_URL_ENV, GATEWAY_SMALL_MODEL_ENV)
+             GATEWAY_BASE_URL_ENV, GATEWAY_SMALL_MODEL_ENV,
+             GATEWAY_WIRE_API_ENV)
 
 
 @pytest.fixture(autouse=True)

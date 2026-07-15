@@ -209,6 +209,27 @@ class TestBrainDispatch:
         for brain in ("claude", "gateway", "stub"):
             assert read_transcript_messages("SID", brain=brain) == []
 
+    def test_gateway_openai_reads_codex_rollout(self, codex_home):
+        _write_rollout(codex_home, "SID", CODEX_ROWS)
+
+        msgs = read_transcript_messages("SID", brain="gateway-openai")
+
+        assert [m["text"] for m in msgs][-1] == \
+            "Yes. Manager is alive and standing by."
+
+    def test_gateway_openai_session_records_brain_kind(self, tmp_path,
+                                                       monkeypatch):
+        from bobi import paths
+        from bobi.sdk import load_session_brain, save_session_id
+
+        paths.bind_root(tmp_path)
+        paths.sessions_dir(tmp_path)
+        monkeypatch.setenv("BOBI_BRAIN", "gateway-openai")
+
+        save_session_id("s", "codex-thread-id", root=tmp_path)
+
+        assert load_session_brain("s", root=tmp_path) == "gateway-openai"
+
     def test_claude_transcript_wins_when_present(self, codex_home, tmp_path,
                                                  monkeypatch):
         # When a claude transcript resolves, codex is never consulted.

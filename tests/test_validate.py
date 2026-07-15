@@ -281,6 +281,30 @@ class TestCheckBrain:
         cfg = Config(brain={"kind": "gateway", "base_url": ""})
         assert not self._check(cfg)[0].ok
 
+    def test_gateway_openai_with_base_url_passes(self):
+        cfg = Config(brain={"kind": "gateway-openai",
+                            "base_url": "http://localhost:9000/v1"})
+        results = self._check(cfg)
+        assert len(results) == 1
+        assert results[0].ok
+
+    def test_gateway_openai_without_base_url_blocks(self):
+        cfg = Config(brain={"kind": "gateway-openai", "model": "gpt-5.5"})
+        results = self._check(cfg)
+        assert len(results) == 1
+        assert not results[0].ok
+        assert results[0].required
+        assert "base_url" in results[0].detail
+
+    def test_gateway_openai_invalid_wire_api_blocks(self):
+        cfg = Config(brain={"kind": "gateway-openai",
+                            "base_url": "http://localhost:9000/v1",
+                            "wire_api": "legacy"})
+        results = self._check(cfg)
+        assert len(results) == 1
+        assert not results[0].ok
+        assert "wire_api" in results[0].detail
+
     def test_other_brains_are_not_checked(self):
         assert self._check(Config()) == []
         assert self._check(Config(brain={"kind": "codex"})) == []

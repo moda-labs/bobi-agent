@@ -192,7 +192,10 @@ class _CodexSession:
         runner=None,
         mcp_servers: dict | None = None,
         mcp_env: dict[str, str] | None = None,
+        config_overrides: list[str] | None = None,
+        provider: str = "openai",
     ) -> None:
+        self.provider = provider
         self._cwd = cwd or "."
         self._instructions = instructions
         self._thread_id = resume or None
@@ -205,6 +208,7 @@ class _CodexSession:
         # each server directly through get_mcp_status below (#428 Stage 4).
         self._mcp_servers = mcp_servers or {}
         self._mcp_env = mcp_env
+        self._config_overrides = list(config_overrides or [])
 
     async def get_mcp_status(self) -> dict:
         """A Claude-``get_mcp_status``-shaped MCP status for the preflight probe.
@@ -245,6 +249,8 @@ class _CodexSession:
             flags += ["-m", self._model]
         if self._effort:
             flags += ["-c", f"model_reasoning_effort={self._effort}"]
+        for override in self._config_overrides:
+            flags += ["-c", override]
         if self._thread_id:
             # `resume` has a narrower flag set (no -C/--sandbox); cwd comes from
             # the subprocess cwd. The bypass/skip flags are accepted here too.

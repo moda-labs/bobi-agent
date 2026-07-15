@@ -578,6 +578,18 @@ def test_run_bootstrap_refuses_gateway_brain(slack_config, monkeypatch):
         ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
 
 
+def test_run_bootstrap_refuses_gateway_openai_brain(slack_config, monkeypatch):
+    """An OpenAI-compatible gateway team has no subscription login either."""
+    from bobi import paths
+
+    paths.agent_yaml_path(slack_config).write_text(
+        paths.agent_yaml_path(slack_config).read_text()
+        + "brain:\n  kind: gateway-openai\n  base_url: http://localhost:9000/v1\n"
+    )
+    with pytest.raises(RuntimeError, match="gateway"):
+        ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
+
+
 def test_run_bootstrap_requires_channel(slack_config, monkeypatch):
     monkeypatch.delenv(ab.LOGIN_CHANNEL_ENV, raising=False)
     with pytest.raises(RuntimeError, match="BOBI_LOGIN_CHANNEL"):
