@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,7 @@ from bobi.runtime_guard import (
     check_bobi_distribution_integrity,
     check_runtime_write_policy,
     protected_runtime_roots,
+    with_mutable_runtime_package,
 )
 
 
@@ -50,8 +52,6 @@ class TestRuntimeWritePolicy:
         assert "agent.yaml" in result.detail or result.failures
 
     def test_apply_policy_tolerates_unowned_files(self, tmp_path, monkeypatch):
-        import os
-
         package = _write_runtime(tmp_path)
         denied = package / "roles" / "ROLE.md"
         real_chmod = os.chmod
@@ -66,8 +66,28 @@ class TestRuntimeWritePolicy:
         report = apply_runtime_write_policy(tmp_path)
 
         assert any(root.kind == "team-package" for root in report.protected)
+        assert any("ROLE.md" in entry for entry in report.skipped)
         agent_yaml = paths.agent_yaml_path(tmp_path)
         assert not (agent_yaml.stat().st_mode & 0o222)
+
+    def test_mutable_window_fails_loud_on_unowned_files(self, tmp_path, monkeypatch):
+        package = _write_runtime(tmp_path)
+        denied = package / "roles" / "ROLE.md"
+        real_chmod = os.chmod
+
+        def chmod(path, mode, **kwargs):
+            if Path(path) == denied:
+                raise PermissionError(1, "Operation not permitted", str(path))
+            return real_chmod(path, mode, **kwargs)
+
+        monkeypatch.setattr(os, "chmod", chmod)
+
+        entered = False
+        with pytest.raises(PermissionError):
+            with with_mutable_runtime_package(tmp_path):
+                entered = True
+
+        assert not entered
 
     def test_check_fails_for_symlink_escaping_package(self, tmp_path):
         package = _write_runtime(tmp_path)

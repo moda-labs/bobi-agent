@@ -6,6 +6,7 @@ import base64
 import contextlib
 import hashlib
 import importlib.metadata as metadata
+import logging
 import os
 import stat
 from dataclasses import dataclass, field
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Iterator, Literal
 
 from bobi import paths
+
+logger = logging.getLogger(__name__)
 
 ProtectedKind = Literal[
     "team-package",
@@ -57,9 +60,10 @@ def _mutable_mode(mode: int) -> int:
     return mode | stat.S_IWUSR
 
 
-def _chmod_tree(root: Path, mode_fn) -> None:
+def _chmod_tree(root: Path, mode_fn, *, strict: bool = False) -> list[str]:
+    skipped: list[str] = []
     if not root.exists() or root.is_symlink():
-        return
+        return skipped
     entries = sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True)
     entries.append(root)
     for path in entries:
@@ -68,13 +72,20 @@ def _chmod_tree(root: Path, mode_fn) -> None:
         try:
             current = path.stat().st_mode
             os.chmod(path, mode_fn(current))
-        except OSError:
-            # Best-effort: a path this uid cannot chmod (EPERM on files owned
-            # by another user, e.g. a root-baked container venv; EROFS on a
-            # read-only mount) is already unwritable to the same-uid agent
-            # this guard defends against, so skip it rather than kill the
-            # session.
+        except FileNotFoundError:
             continue
+        except OSError as exc:
+            # A path this uid cannot chmod (EPERM on files owned by another
+            # user, e.g. a root-baked container venv; EROFS on a read-only
+            # mount). The read-only sweep records and skips it: usually such
+            # files are unwritable to the runtime uid anyway, and killing the
+            # session cannot protect them. The mutable (+w) sweep must stay
+            # strict: opening a mutation window over a tree we cannot fully
+            # unlock risks a half-applied destructive change.
+            if strict:
+                raise
+            skipped.append(f"{path}: {exc}")
+    return skipped
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -168,7 +179,14 @@ def protected_runtime_roots(runtime_root: Path | None) -> list[ProtectedRoot]:
 def apply_runtime_write_policy(runtime_root: Path | None) -> GuardReport:
     report = GuardReport()
     for root in protected_runtime_roots(runtime_root):
-        _chmod_tree(root.path, _readonly_mode)
+        skipped = _chmod_tree(root.path, _readonly_mode)
+        if skipped:
+            logger.warning(
+                "Runtime write guard could not chmod %d path(s) under %s "
+                "(left as-is; first: %s)",
+                len(skipped), root.path, skipped[0],
+            )
+            report.skipped.extend(skipped)
         report.protected.append(root)
     return report
 
@@ -221,7 +239,7 @@ def check_runtime_write_policy(runtime_root: Path | None) -> PolicyCheck:
 def with_mutable_runtime_package(runtime_root: Path) -> Iterator[None]:
     package = paths.package_dir(runtime_root)
     if package.exists():
-        _chmod_tree(package, _mutable_mode)
+        _chmod_tree(package, _mutable_mode, strict=True)
     try:
         yield
     finally:
