@@ -158,13 +158,18 @@ def _check_brain(cfg) -> list[CheckResult]:
     here too. The auth token (``ANTHROPIC_AUTH_TOKEN``) is deliberately not
     required - Ollama serves unauthenticated.
     """
-    from bobi.brain import BRAIN_KIND_ALIASES, normalize_brain_kind
+    from bobi.brain import (
+        BRAIN_KIND_ALIASES,
+        DEFAULT_BRAIN,
+        GATEWAY_ENGINES,
+        normalize_brain_kind,
+    )
 
     results: list[CheckResult] = []
     kind = cfg.brain_kind
     # An empty kind is the framework default engine, so a kind-less
     # `brain: {base_url: ...}` is a claude-engine gateway team.
-    engine = normalize_brain_kind(kind) or "claude"
+    engine = normalize_brain_kind(kind) or DEFAULT_BRAIN
     if kind in BRAIN_KIND_ALIASES:
         results.append(CheckResult(
             "brain.kind", ok=True,
@@ -173,7 +178,7 @@ def _check_brain(cfg) -> list[CheckResult]:
         ))
     if not cfg.brain_is_gateway:
         return results
-    if engine not in ("claude", "codex"):
+    if engine not in GATEWAY_ENGINES:
         # base_url on a non-engine kind (stub) is ignored by the pin sites;
         # say so rather than let the config imply a gateway that never dials.
         results.append(CheckResult(
@@ -227,10 +232,10 @@ def _accepted_efforts(cfg) -> set[str]:
     parses the value (#789). Only an unknown/undeclared brain (stub) falls
     back to the union.
     """
-    from bobi.brain import get_brain, normalize_brain_kind
+    from bobi.brain import DEFAULT_BRAIN, get_brain, normalize_brain_kind
 
     try:
-        engine = normalize_brain_kind(cfg.brain_kind) or "claude"
+        engine = normalize_brain_kind(cfg.brain_kind) or DEFAULT_BRAIN
         efforts = get_brain(engine).capabilities.efforts
     except Exception:
         efforts = frozenset()

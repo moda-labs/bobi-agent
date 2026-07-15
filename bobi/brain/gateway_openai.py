@@ -9,8 +9,7 @@ not a separate brain: ``CodexBrain`` injects these overrides whenever the
 gateway base-url pin is set.
 
 ``kind: gateway-openai`` remains an accepted alias for this configuration
-(``BRAIN_KIND_ALIASES``); ``GatewayOpenAIBrain`` below is the matching import
-alias.
+(``BRAIN_KIND_ALIASES``); ``GatewayOpenAIBrain`` is the matching import alias.
 """
 
 from __future__ import annotations
@@ -18,15 +17,19 @@ from __future__ import annotations
 import json
 import os
 
-from bobi.brain.codex import CodexBrain
-
 GATEWAY_WIRE_API_ENV = "BOBI_GATEWAY_WIRE_API"
 _PROVIDER_ID = "bobi_gateway"
 _GATEWAY_API_KEY_ENV = "BOBI_GATEWAY_API_KEY"
 
-# Deprecated: gateway mode no longer has its own factory class (#789). Kept so
-# `from bobi.brain import GatewayOpenAIBrain` keeps resolving for external code.
-GatewayOpenAIBrain = CodexBrain
+
+def __getattr__(name: str):
+    # Deprecated: gateway mode no longer has its own factory class (#789).
+    # Resolved lazily so this module needn't import the engine at load time.
+    if name == "GatewayOpenAIBrain":
+        from bobi.brain.codex import CodexBrain
+
+        return CodexBrain
+    raise AttributeError(name)
 
 
 def _toml_string(value: str) -> str:
@@ -35,21 +38,10 @@ def _toml_string(value: str) -> str:
 
 
 def gateway_openai_overrides() -> list[str]:
-    """Provider overrides for one gateway-mode Codex invocation.
+    """Provider overrides for one gateway-mode Codex invocation."""
+    from bobi.brain.gateway import require_gateway_base_url
 
-    Raises when called without a pinned base URL - see
-    ``gateway._gateway_session_env`` for the guard rationale; the pin sites
-    and ``get_brain``'s ambient-alias check catch the gap before sessions
-    get here.
-    """
-    from bobi.brain.gateway import gateway_base_url
-
-    base_url = gateway_base_url()
-    if not base_url:
-        raise RuntimeError(
-            "gateway session requested but no base URL is pinned - set "
-            "brain.base_url in agent.yaml (and ensure its ${VAR} resolves)."
-        )
+    base_url = require_gateway_base_url()
     wire_api = os.environ.get(GATEWAY_WIRE_API_ENV, "") or "chat"
     return [
         f"model_provider={_toml_string(_PROVIDER_ID)}",

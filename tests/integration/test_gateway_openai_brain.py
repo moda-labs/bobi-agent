@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -13,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 
-def _codex_supports_chat_gateway() -> bool:
+def _codex_meets_version_floor() -> bool:
     exe = shutil.which("codex")
     if not exe:
         return False
@@ -27,17 +28,24 @@ def _codex_supports_chat_gateway() -> bool:
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
     if not match:
         return False
-    if tuple(int(p) for p in match.groups()) < (0, 144, 4):
-        return False
-    # Some codex builds have DROPPED `wire_api = "chat"` support entirely
-    # (config load fails with "no longer supported", see openai/codex
-    # discussion #7782) - a version floor can't detect that, so probe the
-    # config parser directly: a chat-provider override against a dead socket
-    # fails at config load on such builds, and at (or past) the network on
-    # builds that still support chat.
+    return tuple(int(p) for p in match.groups()) >= (0, 144, 4)
+
+
+@functools.lru_cache(maxsize=1)
+def _codex_supports_chat_wire() -> bool:
+    """Whether the installed codex still parses `wire_api = \"chat\"`.
+
+    Some codex builds have DROPPED chat support entirely (config load fails
+    with "no longer supported", see openai/codex discussion #7782) - a
+    version floor can't detect that, so probe the config parser directly: a
+    chat-provider override against a dead socket fails at config load on such
+    builds, and at (or past) the network on builds that still support chat.
+    This runs a codex subprocess, so it is called from the TEST BODY (cached),
+    never at collection time.
+    """
     try:
         probe = subprocess.run(
-            [exe, "exec", "-s", "read-only", "--skip-git-repo-check",
+            ["codex", "exec", "-s", "read-only", "--skip-git-repo-check",
              "-c", 'model_provider="probe"',
              "-c", 'model_providers.probe.name="probe"',
              "-c", 'model_providers.probe.base_url="http://127.0.0.1:9/v1"',
@@ -51,10 +59,15 @@ def _codex_supports_chat_gateway() -> bool:
 
 
 requires_codex_chat_gateway = pytest.mark.skipif(
-    not _codex_supports_chat_gateway(),
-    reason="codex CLI with chat wire_api support not installed "
-           "(newer builds dropped wire_api=chat, openai/codex#7782)",
+    not _codex_meets_version_floor(),
+    reason="codex CLI >=0.144.4 not installed",
 )
+
+
+def _skip_unless_chat_wire_supported() -> None:
+    if not _codex_supports_chat_wire():
+        pytest.skip("installed codex dropped wire_api=chat "
+                    "(openai/codex#7782)")
 
 
 class _ChatCompletionsStub(BaseHTTPRequestHandler):
@@ -162,6 +175,7 @@ async def test_gateway_openai_session_routes_fresh_and_resume_to_stub(
 ):
     from bobi.brain import GATEWAY_BASE_URL_ENV, GATEWAY_WIRE_API_ENV, get_brain
 
+    _skip_unless_chat_wire_supported()
     base_url = f"http://127.0.0.1:{chat_stub.server_address[1]}/v1"
     monkeypatch.setenv(GATEWAY_BASE_URL_ENV, base_url)
     monkeypatch.setenv(GATEWAY_WIRE_API_ENV, "chat")

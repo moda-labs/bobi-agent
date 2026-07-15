@@ -44,7 +44,8 @@ def clean_brain_env(monkeypatch):
 # --- alias resolution / capabilities -----------------------------------------
 
 
-def test_gateway_alias_resolves_to_claude_engine():
+def test_gateway_alias_resolves_to_claude_engine(monkeypatch):
+    monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "http://localhost:4000")
     brain = get_brain("gateway")
     assert isinstance(brain, ClaudeBrain)
     assert brain.name == "claude"
@@ -52,15 +53,19 @@ def test_gateway_alias_resolves_to_claude_engine():
     assert GatewayBrain is ClaudeBrain
 
 
-def test_ambient_gateway_alias_requires_base_url_pin(monkeypatch):
-    """BOBI_BRAIN=gateway promises a gateway; without the base-url pin the
-    engine would silently dial real Anthropic - refuse at resolution (the
-    operator-override gap the old session-time guard covered)."""
+def test_gateway_alias_requires_base_url_pin(monkeypatch):
+    """An alias kind promises a gateway; without the base-url pin the engine
+    would silently dial real Anthropic carrying the gateway team's ambient
+    credentials - refuse at resolution, ambient and explicit alike (the old
+    subclasses' session-time guard, #655)."""
     monkeypatch.setenv("BOBI_BRAIN", "gateway")
     with pytest.raises(RuntimeError, match="base URL"):
         get_brain()
+    with pytest.raises(RuntimeError, match="base URL"):
+        get_brain("gateway")
     monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "http://localhost:4000")
     assert get_brain().name == "claude"
+    assert get_brain("gateway").name == "claude"
 
 
 def test_gateway_mode_flips_provider_and_cross_model_resume(monkeypatch):
@@ -319,15 +324,97 @@ def test_set_process_brain_from_config():
 def test_set_process_brain_from_config_declared_empty_base_url_poisons():
     """Presence-based declaration: a base_url key whose ${VAR} resolved empty
     pins the .invalid sentinel - operator commands (doctor/stop/status) keep
-    working, but no session can silently dial real Anthropic."""
+    working, but no session can silently dial real Anthropic. Sessions get
+    the ACTIONABLE config error, not DNS noise from the sentinel host."""
     from bobi.brain import GATEWAY_UNRESOLVED_BASE_URL
     from bobi.config import Config
 
     cfg = Config(brain={"kind": "claude", "base_url": ""})
     set_process_brain_from_config(cfg)
     assert os.environ[GATEWAY_BASE_URL_ENV] == GATEWAY_UNRESOLVED_BASE_URL
-    # the poisoned endpoint reaches sessions like any pinned gateway would
-    from bobi.brain.gateway import _gateway_session_env
+    with pytest.raises(RuntimeError, match="brain.base_url"):
+        _gateway_session_env()
 
-    assert (_gateway_session_env()["ANTHROPIC_BASE_URL"]
-            == GATEWAY_UNRESOLVED_BASE_URL)
+
+def test_set_process_brain_rebind_replaces_sentinel():
+    """A rebind after the operator fixes the .env must replace the sentinel -
+    it is a degraded state, never an operator override."""
+    from bobi.brain import GATEWAY_UNRESOLVED_BASE_URL
+    from bobi.config import Config
+
+    set_process_brain_from_config(Config(brain={"kind": "claude",
+                                                "base_url": ""}))
+    assert os.environ[GATEWAY_BASE_URL_ENV] == GATEWAY_UNRESOLVED_BASE_URL
+    set_process_brain_from_config(Config(brain={
+        "kind": "claude", "base_url": "http://localhost:4000"}))
+    assert os.environ[GATEWAY_BASE_URL_ENV] == "http://localhost:4000"
+
+
+def test_set_process_brain_native_config_clears_stale_gateway_pins():
+    """The engines consult the pin unconditionally, so a native team bound
+    after a gateway team in the same process (or under a stale ambient value)
+    must clear it - pre-#789 a stale pin was inert for native brains and
+    native configs stay immune."""
+    from bobi.config import Config
+
+    set_process_brain_from_config(Config(brain={
+        "kind": "claude", "base_url": "http://localhost:4000",
+        "small_model": "qwen3:4b"}))
+    assert os.environ[GATEWAY_BASE_URL_ENV] == "http://localhost:4000"
+
+    set_process_brain_from_config(Config(brain={"kind": "claude"}))
+    assert GATEWAY_BASE_URL_ENV not in os.environ
+    assert GATEWAY_SMALL_MODEL_ENV not in os.environ
+    assert GATEWAY_WIRE_API_ENV not in os.environ
+
+
+def test_pin_process_brain_ignores_base_url_on_non_engine_kind():
+    """validate reports base_url on kind: stub as ignored; the pin sites must
+    agree - no raise, no pins - or a config doctor blesses fails at spawn."""
+    env: dict = {}
+    pin_process_brain("stub", "", env,
+                      gateway_base_url="", gateway_declared=True)
+    assert env["BOBI_BRAIN"] == "stub"
+    assert GATEWAY_BASE_URL_ENV not in env
+
+
+# --- session provenance labels (#789) ----------------------------------------
+
+
+def test_session_brain_label_matrix(monkeypatch):
+    from bobi.brain import session_brain_label
+
+    assert session_brain_label() == "claude"
+    monkeypatch.setenv("BOBI_BRAIN", "codex")
+    assert session_brain_label() == "codex"
+    monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "http://localhost:4000")
+    assert session_brain_label() == "gateway-openai"
+    monkeypatch.setenv("BOBI_BRAIN", "claude")
+    assert session_brain_label() == "gateway"
+    # alias spellings label identically to their engine+endpoint equivalent
+    monkeypatch.setenv("BOBI_BRAIN", "gateway")
+    assert session_brain_label() == "gateway"
+
+
+def test_resume_guard_keeps_pre_789_gateway_records(tmp_path, monkeypatch):
+    """Fleet upgrade continuity: a session recorded under the old 'gateway'
+    factory name must still resume on a claude-engine gateway team - and a
+    native<->gateway endpoint switch must still start fresh."""
+    from bobi import paths
+    from bobi.sdk import _sessions_dir, load_resumable_session_id, \
+        save_session_id
+
+    paths.bind_root(tmp_path)
+    paths.sessions_dir(tmp_path)
+    monkeypatch.setenv("BOBI_BRAIN", "claude")
+    monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "http://localhost:4000")
+
+    save_session_id("mgr", "sess-1", model="qwen3:14b")
+    assert (_sessions_dir() / "mgr.brain").read_text() == "gateway"
+    # pre-#789 record spelled identically - same-model resume continues
+    assert load_resumable_session_id("mgr", "qwen3:14b") == "sess-1"
+
+    # dropping base_url = endpoint switch: the token must not be replayed
+    # against real Anthropic
+    monkeypatch.delenv(GATEWAY_BASE_URL_ENV)
+    assert load_resumable_session_id("mgr", "qwen3:14b") == ""

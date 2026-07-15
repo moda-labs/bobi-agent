@@ -217,11 +217,11 @@ class TestBrainDispatch:
         assert [m["text"] for m in msgs][-1] == \
             "Yes. Manager is alive and standing by."
 
-    def test_gateway_openai_session_records_engine_brain_kind(self, tmp_path,
-                                                              monkeypatch):
-        """New gateway sessions record their ENGINE name (#789); records
-        written under the old alias kinds keep dispatching via the tuple in
-        read_transcript_messages (covered above)."""
+    def test_gateway_openai_session_records_brain_kind(self, tmp_path,
+                                                       monkeypatch):
+        """Gateway sessions keep recording the alias-style provenance label
+        (#789 session_brain_label): pre-upgrade records match, and this
+        module's format dispatch keeps working unchanged."""
         from bobi import paths
         from bobi.sdk import load_session_brain, save_session_id
 
@@ -232,7 +232,7 @@ class TestBrainDispatch:
 
         save_session_id("s", "codex-thread-id", root=tmp_path)
 
-        assert load_session_brain("s", root=tmp_path) == "codex"
+        assert load_session_brain("s", root=tmp_path) == "gateway-openai"
 
     def test_claude_transcript_wins_when_present(self, codex_home, tmp_path,
                                                  monkeypatch):

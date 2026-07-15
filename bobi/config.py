@@ -391,14 +391,16 @@ class Config:
         """Whether this team DECLARES a gateway endpoint (#789).
 
         Presence-based, not value-based: a ``base_url`` key whose ``${VAR}``
-        resolved empty still counts, so validation and the pin-time guard can
-        fail loud instead of silently running the engine against the real
-        vendor endpoint. The alias kind strings are literals here (not imported
-        from ``bobi.brain``) to keep this module import-free of the brain
-        package, matching the duck-typing on the other side.
+        resolved empty still counts, so validation and the startup guard can
+        act on the declaration instead of silently running the engine against
+        the real vendor endpoint. The alias set is imported lazily so this
+        module stays import-free of the brain package at load time while a
+        future alias can never desynchronize the two.
         """
+        from bobi.brain import BRAIN_KIND_ALIASES
+
         return (
-            self.brain_kind in ("gateway", "gateway-openai")
+            self.brain_kind in BRAIN_KIND_ALIASES
             or "base_url" in (self.brain or {})
         )
 

@@ -41,7 +41,8 @@ def clean_brain_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-def test_gateway_openai_alias_resolves_to_codex_engine():
+def test_gateway_openai_alias_resolves_to_codex_engine(monkeypatch):
+    monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "http://localhost:9000/v1")
     brain = get_brain("gateway-openai")
     assert isinstance(brain, CodexBrain)
     assert brain.name == "codex"
@@ -49,12 +50,15 @@ def test_gateway_openai_alias_resolves_to_codex_engine():
     assert GatewayOpenAIBrain is CodexBrain
 
 
-def test_ambient_gateway_openai_alias_requires_base_url_pin(monkeypatch):
+def test_gateway_openai_alias_requires_base_url_pin(monkeypatch):
     monkeypatch.setenv("BOBI_BRAIN", "gateway-openai")
     with pytest.raises(RuntimeError, match="base URL"):
         get_brain()
+    with pytest.raises(RuntimeError, match="base URL"):
+        get_brain("gateway-openai")
     monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "http://localhost:9000/v1")
     assert get_brain().name == "codex"
+    assert get_brain("gateway-openai").name == "codex"
 
 
 def test_gateway_mode_flips_provider_and_cross_model_resume(monkeypatch):

@@ -14,6 +14,7 @@ kind to its factory; Phase 1 ships only ``claude``.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import MutableMapping
 
@@ -59,13 +60,39 @@ BRAIN_KIND_ALIASES: dict[str, str] = {
     "gateway-openai": "codex",
 }
 
+# The engines that can dial a gateway endpoint. Shared with validate so the
+# pin sites and the checks can never disagree about which kinds a base_url
+# applies to.
+GATEWAY_ENGINES = ("claude", "codex")
+
 DEFAULT_BRAIN = "claude"
+
+log = logging.getLogger(__name__)
 
 
 def normalize_brain_kind(kind: str | None) -> str:
     """Collapse a deprecated alias kind to its engine; pass others through."""
     name = str(kind or "")
     return BRAIN_KIND_ALIASES.get(name, name)
+
+
+def session_brain_label(kind: str | None = None) -> str:
+    """The provenance label recorded next to a session's resume token.
+
+    A resume token is only meaningful to the brain configuration that minted
+    it, and "configuration" includes the ENDPOINT: a transcript built against
+    a gateway backend must not be replayed to the real vendor (or vice versa)
+    when ``brain.base_url`` is added or removed. So gateway sessions keep the
+    historical alias-style labels - which also makes every pre-#789 on-disk
+    ``<name>.brain`` record match its post-upgrade equivalent, preserving
+    session continuity across the rename, and keeps the transcript reader's
+    format dispatch (``chat_history``) working unchanged.
+    """
+    engine = normalize_brain_kind(
+        kind or os.environ.get(BRAIN_ENV) or DEFAULT_BRAIN)
+    if os.environ.get(GATEWAY_BASE_URL_ENV) and engine in GATEWAY_ENGINES:
+        return "gateway" if engine == "claude" else "gateway-openai"
+    return engine
 
 # Env var carrying the active process brain kind. The process entrypoint seeds
 # it from ``agent.yaml`` ``brain.kind`` (see ``set_process_brain``). Launched
@@ -243,13 +270,17 @@ def pin_process_brain(
     with an empty resolved URL that raises instead of silently pinning nothing.
     """
     engine = normalize_brain_kind(kind) or DEFAULT_BRAIN
-    if gateway_declared or kind in BRAIN_KIND_ALIASES:
+    if ((gateway_declared or kind in BRAIN_KIND_ALIASES)
+            and engine in GATEWAY_ENGINES):
+        # Only gateway-capable engines enforce the declaration - validate
+        # reports base_url on other kinds (stub) as ignored, and the pin
+        # sites must agree with that verdict rather than fail the spawn.
         _require_declared_gateway_url(kind, gateway_base_url)
     target = os.environ if env is None else env
     _pin_env(target, BRAIN_ENV, kind)
     _set_process_brain_model(model, env=target)
     _set_process_brain_effort(effort, env=target)
-    is_gateway = bool(gateway_base_url) and engine in ("claude", "codex")
+    is_gateway = bool(gateway_base_url) and engine in GATEWAY_ENGINES
     _pin_env(target, GATEWAY_BASE_URL_ENV,
              gateway_base_url if is_gateway else "")
     _pin_env(target, GATEWAY_WIRE_API_ENV,
@@ -286,11 +317,12 @@ def set_process_brain(
     against a misconfigured team while sessions stay unable to dial the real
     vendor endpoint.
     """
+    engine = normalize_brain_kind(kind)
+    active_engine = engine or DEFAULT_BRAIN
     if ((gateway_declared or kind in BRAIN_KIND_ALIASES)
+            and active_engine in GATEWAY_ENGINES
             and not gateway_base_url):
-        import logging
-
-        logging.getLogger(__name__).warning(
+        log.warning(
             "brain kind %r declares a gateway but brain.base_url is empty; "
             "sessions will fail until it resolves (see `bobi agent <name> "
             "doctor`).", kind or DEFAULT_BRAIN)
@@ -303,8 +335,9 @@ def set_process_brain(
     # the active one - a model-only config tunes the default brain, but neither
     # it nor a gateway endpoint may cross onto an operator-overridden brain.
     # Within the active brain, first writer wins (an existing NON-EMPTY value
-    # is an operator override; an empty string is treated as unset).
-    engine = normalize_brain_kind(kind)
+    # is an operator override; an empty string OR the unresolved sentinel is
+    # treated as unset, so a rebind after the operator fixes the .env replaces
+    # the sentinel with the real endpoint).
     existing_engine = normalize_brain_kind(existing_kind)
     config_matches_active_brain = (
         (engine and existing_engine == engine)
@@ -316,8 +349,7 @@ def set_process_brain(
         _set_process_brain_model(model)
     if effort and not get_process_brain_effort():
         _set_process_brain_effort(effort)
-    active_engine = engine or DEFAULT_BRAIN
-    if gateway_base_url and active_engine in ("claude", "codex"):
+    if gateway_base_url and active_engine in GATEWAY_ENGINES:
         pairs = [(GATEWAY_BASE_URL_ENV, gateway_base_url)]
         if active_engine == "claude":
             os.environ.pop(GATEWAY_WIRE_API_ENV, None)
@@ -326,8 +358,18 @@ def set_process_brain(
             os.environ.pop(GATEWAY_SMALL_MODEL_ENV, None)
             pairs.append((GATEWAY_WIRE_API_ENV, gateway_wire_api))
         for var, value in pairs:
-            if value and not os.environ.get(var):
+            existing = os.environ.get(var, "")
+            if value and existing in ("", GATEWAY_UNRESOLVED_BASE_URL):
                 os.environ[var] = value
+    else:
+        # This team declares NO gateway: clear every gateway pin. The engines
+        # consult the pin unconditionally now, so a stale value left by an
+        # earlier bind in the same process (or an ambient parent env) would
+        # silently reroute this native team's sessions - pre-#789 that stale
+        # value was inert, and native configs must stay immune to it.
+        for var in (GATEWAY_BASE_URL_ENV, GATEWAY_SMALL_MODEL_ENV,
+                    GATEWAY_WIRE_API_ENV):
+            os.environ.pop(var, None)
 
 
 def set_process_brain_from_config(cfg) -> None:
@@ -400,17 +442,20 @@ def get_brain(kind: str | None = None) -> BrainFactory:
     ``ValueError`` for an unknown kind so a typo in ``agent.yaml`` ``brain.kind``
     fails loud at session construction rather than silently falling back.
 
-    Alias kinds resolve to their engine. An AMBIENT alias (``BOBI_BRAIN=gateway``
-    with no explicit ``kind`` arg) additionally requires the gateway base-url
-    pin: that spelling promises a gateway, and without the pin the engine would
-    silently dial the real vendor endpoint - the operator-override gap the old
-    session-time guard covered (#655).
+    Alias kinds resolve to their engine and additionally require the gateway
+    base-url pin: that spelling promises a gateway, and without the pin the
+    engine would silently dial the real vendor endpoint carrying the gateway
+    team's ambient credentials - the leak the old subclasses' session-time
+    guard prevented (#655). This covers both the ambient form
+    (``BOBI_BRAIN=gateway``, an operator override or old install) and an
+    explicit ``get_brain("gateway")`` from an external caller.
     """
+    from bobi.brain.gateway import gateway_base_url
+
     name = kind or os.environ.get(BRAIN_ENV) or DEFAULT_BRAIN
-    if (not kind and name in BRAIN_KIND_ALIASES
-            and not os.environ.get(GATEWAY_BASE_URL_ENV)):
+    if name in BRAIN_KIND_ALIASES and not gateway_base_url():
         raise RuntimeError(
-            f"{BRAIN_ENV}={name} requires a pinned gateway base URL - set "
+            f"brain kind {name!r} requires a pinned gateway base URL - set "
             "brain.base_url in agent.yaml (and ensure its ${VAR} resolves)."
         )
     name = normalize_brain_kind(name)
@@ -440,6 +485,7 @@ __all__ = [
     "StreamDelta",
     "TurnResult",
     "BRAIN_KIND_ALIASES",
+    "GATEWAY_ENGINES",
     "DEFAULT_BRAIN",
     "BRAIN_ENV",
     "GATEWAY_BASE_URL_ENV",
@@ -457,6 +503,7 @@ __all__ = [
     "resolve_effort_option",
     "resolve_model",
     "resolve_model_option",
+    "session_brain_label",
     "set_process_brain",
     "set_process_brain_from_config",
     "with_default_effort_option",
