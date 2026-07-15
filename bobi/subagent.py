@@ -372,8 +372,9 @@ async def _run_agent_supervised(
     from bobi.brain import AssistantText, TurnResult, get_brain
 
     name = _session_name(run_key, role=role, phase=phase)
-    model = _resolve_launch_model(role)
-    effort = _resolve_launch_effort(role)
+    _cfg = _load_team_config()
+    model = _resolve_launch_model(role, cfg=_cfg)
+    effort = _resolve_launch_effort(role, cfg=_cfg)
     saved_id = "" if fresh else load_resumable_session_id(name, model)
     registry = get_registry()
 

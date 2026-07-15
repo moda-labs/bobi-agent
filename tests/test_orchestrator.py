@@ -708,8 +708,8 @@ class TestRunWorkflow:
 
     def test_effort_only_change_reconnects_natively(self, monkeypatch):
         """An effort-only step change is exempt from the resume guard (#778):
-        the session reconnects natively under the new dial — same session id,
-        no YAML reinject — even on a brain without cross_model_resume."""
+        the session reconnects natively under the new dial - same session id,
+        no YAML reinject - even on a brain without cross_model_resume."""
         calls = []
         clients = []
 

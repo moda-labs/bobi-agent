@@ -295,18 +295,14 @@ def resume_workflow(
 
     # A launch-time --model/--effort override survives suspension via the
     # _runtime scope; without it the resume would re-resolve to the config
-    # default — for the model that would trip the mismatch guard, discard the
+    # default - for the model that would trip the mismatch guard, discard the
     # saved session, and silently change the run's model; for the effort it
     # would silently change the run's dial.
     runtime_scope = run.variable_scopes.get("_runtime", {})
-    launch_model = (
-        str(runtime_scope.get("launch_model", "") or "")
-        if isinstance(runtime_scope, dict) else ""
-    )
-    launch_effort = (
-        str(runtime_scope.get("launch_effort", "") or "")
-        if isinstance(runtime_scope, dict) else ""
-    )
+    if not isinstance(runtime_scope, dict):
+        runtime_scope = {}
+    launch_model = str(runtime_scope.get("launch_model", "") or "")
+    launch_effort = str(runtime_scope.get("launch_effort", "") or "")
 
     success = asyncio.run(
         _run_workflow_async(
@@ -478,7 +474,7 @@ async def _run_workflow_async(
     first_prompt_model = _effective_step_model(first_prompt_step)
     # Effort is exempt from the resume guard (#778): both brains accept a new
     # effort on a resumed session, so the effective dial is simply recomputed
-    # for the next step — no saved-effort record, no continue-vs-fresh check.
+    # for the next step - no saved-effort record, no continue-vs-fresh check.
     current_effort = _effective_step_effort(first_prompt_step)
     runtime_scope = ctx.scopes.get("_runtime", {})
     saved_session_model = (
@@ -726,13 +722,16 @@ async def _run_workflow_async(
                 # Continue the live session natively on the new model when
                 # the brain supports it (#642); otherwise fresh + re-inject
                 # the workflow scopes as YAML (lossy fallback). An agent
-                # change always starts fresh: the new agent must not inherit
-                # the previous agent's transcript under its system prompt
-                # (e.g. a reviewer step contaminated by the builder's
-                # reasoning). An effort-only change is exempt from the guard
-                # (#778): continuation_token sees the same model on both
-                # sides and always continues, so the session just reconnects
-                # under the new dial.
+                # change entering this branch starts fresh: the new agent
+                # must not inherit the previous agent's transcript under its
+                # system prompt (e.g. a reviewer step contaminated by the
+                # builder's reasoning; an agent change with identical dials
+                # never enters the branch - a pre-existing gap in that
+                # isolation, not one this condition can close). An
+                # effort-only change is exempt from the resume guard (#778):
+                # continuation_token sees the same model on both sides, so
+                # whenever a resumable session id exists the session just
+                # reconnects natively under the new dial.
                 next_agent = (
                     current_agent if role else (step.agent or current_agent)
                 )
@@ -743,8 +742,8 @@ async def _run_workflow_async(
                         from_model=current_model, to_model=step_model,
                     )
                 log.info(
-                    "Step %s: switching model from %r to %r, effort from %r "
-                    "to %r (%s)",
+                    "Step %s: switching session options (model %r -> %r, "
+                    "effort %r -> %r): %s",
                     step.name, current_model or "<default>",
                     step_model or "<default>",
                     current_effort or "<default>",

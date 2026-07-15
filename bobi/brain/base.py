@@ -107,9 +107,16 @@ class BrainCapabilities:
     different model, keeping the full transcript. When False, callers that
     need to continue context on another model must start a fresh session and
     re-inject whatever context they can reconstruct.
+
+    ``efforts``: the reasoning-effort values this brain's CLI accepts (#778).
+    Empty means "unknown" - validation falls back to the cross-vendor union
+    instead of warning on everything. Advisory only: effort stays
+    pass-through at session construction, so a stale set here can never
+    block a value the vendor actually accepts.
     """
 
     cross_model_resume: bool = False
+    efforts: frozenset = frozenset()
 
 
 # --- the session + factory protocols --------------------------------------

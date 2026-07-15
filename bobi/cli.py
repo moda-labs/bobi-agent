@@ -2823,6 +2823,12 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
     if as_check and wait:
         click.echo("--as-check cannot be combined with --wait", err=True)
         raise SystemExit(1)
+    if as_check and (model or effort):
+        # The check harness resolves roles.monitor.* itself; silently
+        # ignoring an explicit override would misreport what the check ran at.
+        click.echo("--model/--effort are not supported with --as-check "
+                   "(configure roles.monitor instead)", err=True)
+        raise SystemExit(1)
     if post_event and not as_check:
         click.echo("--post-event requires --as-check", err=True)
         raise SystemExit(1)

@@ -18,22 +18,9 @@ import pytest
 import yaml
 
 from bobi.sdk import SessionRegistry
-from .conftest import requires_claude
+from .conftest import _drain, requires_claude
 
 pytestmark = pytest.mark.claude
-
-
-async def _drain(client):
-    """Drain one turn; return (final_text, turn_result)."""
-    from bobi.brain import AssistantText, TurnResult
-
-    text, result = "", None
-    async for msg in client.receive_response():
-        if isinstance(msg, AssistantText) and msg.text:
-            text = msg.text
-        elif isinstance(msg, TurnResult):
-            result = msg
-    return text, result
 
 
 @requires_claude

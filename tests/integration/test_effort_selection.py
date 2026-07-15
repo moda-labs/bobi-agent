@@ -1,6 +1,6 @@
 """Live tests for reasoning-effort selection (#778).
 
-Proves the effort dial actually reaches the real vendor CLIs — the part a
+Proves the effort dial actually reaches the real vendor CLIs - the part a
 mocked brain cannot: the claude CLI is spawned carrying ``--effort``, the
 codex rollout records the turn's effort, and an effort-only workflow step
 change keeps the conversation (the resume-guard exemption) end to end.
@@ -10,29 +10,17 @@ The Claude tests require the ``claude`` CLI; the Codex test requires the
 """
 
 import os
-import shutil
 import subprocess
 
 import pytest
 import yaml
 
 from bobi.sdk import SessionRegistry
-from .conftest import requires_claude
+from .conftest import _drain, requires_claude, requires_codex
 
-pytestmark = pytest.mark.claude
-
-
-async def _drain(client):
-    """Drain one turn; return (final_text, turn_result)."""
-    from bobi.brain import AssistantText, TurnResult
-
-    text, result = "", None
-    async for msg in client.receive_response():
-        if isinstance(msg, AssistantText) and msg.text:
-            text = msg.text
-        elif isinstance(msg, TurnResult):
-            result = msg
-    return text, result
+# No module-level claude mark: the codex leg below must not be deselected by
+# a `-m "not claude"` run - it needs the codex CLI, not the claude one.
+claude_marked = pytest.mark.claude
 
 
 def _child_process_args() -> list[str]:
@@ -49,6 +37,7 @@ def _child_process_args() -> list[str]:
     return args
 
 
+@claude_marked
 @requires_claude
 @pytest.mark.asyncio
 @pytest.mark.timeout(180)
@@ -66,7 +55,7 @@ class TestClaudeEffortSelection:
         )
         try:
             await session.connect("Reply with exactly: OK")
-            # The persistent CLI subprocess is alive now — the ground truth
+            # The persistent CLI subprocess is alive now - the ground truth
             # for "the dial reached the real session" is its own argv (the
             # claude CLI warns-and-ignores bad values and records effort
             # nowhere else observable, so argv IS the wire).
@@ -80,12 +69,13 @@ class TestClaudeEffortSelection:
         assert result is not None and not result.is_error
 
 
+@claude_marked
 @requires_claude
 @pytest.mark.timeout(300)
 class TestWorkflowEffortContinuation:
     """An effort-only step change keeps conversation state end to end (#778):
     effort is exempt from the resume guard, so the session must reconnect
-    natively — the code word below survives ONLY via the live transcript."""
+    natively - the code word below survives ONLY via the live transcript."""
 
     def test_effort_only_switch_keeps_conversation(self, bobi_env, clean_session):
         from bobi.workflow.orchestrator import make_session_name, run_workflow
@@ -128,12 +118,6 @@ class TestWorkflowEffortContinuation:
         assert "PANGOLIN" in str(handoff.get("word", "")).upper(), handoff
 
 
-requires_codex = pytest.mark.skipif(
-    not shutil.which("codex"),
-    reason="codex CLI not installed",
-)
-
-
 @requires_codex
 @pytest.mark.asyncio
 @pytest.mark.timeout(240)
@@ -159,14 +143,15 @@ class TestCodexEffortSelection:
 
         # Ground truth: the rollout records the effective effort per turn
         # (verified live on codex-cli 0.144.4: turn_context.payload.effort).
+        # _codex_rollout_path honors $CODEX_HOME, unlike a ~/.codex glob.
         import json
-        from pathlib import Path
-        rollouts = sorted(
-            Path.home().glob(f".codex/sessions/**/*{thread_id}*.jsonl")
-        )
-        assert rollouts, "no codex rollout found for the thread"
+
+        from bobi.chat_history import _codex_rollout_path
+
+        rollout = _codex_rollout_path(thread_id)
+        assert rollout is not None, "no codex rollout found for the thread"
         efforts = []
-        for line in rollouts[-1].read_text().splitlines():
+        for line in rollout.read_text().splitlines():
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:

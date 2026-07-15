@@ -165,7 +165,7 @@ def test_resolve_model_precedence(monkeypatch):
     assert resolve_model(None) == "sonnet"
 
 
-# --- reasoning-effort selection (#778) — the model chain's sibling ----------
+# --- reasoning-effort selection (#778) - the model chain's sibling ----------
 
 
 def test_config_parses_effort(tmp_path):

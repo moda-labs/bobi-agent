@@ -319,7 +319,14 @@ class CodexBrain:
     # gpt-5.4 then gpt-5.5, and the resumed turn recalled conversation-only
     # state. Note the usable model set depends on the account's auth mode
     # (ChatGPT-plan auth rejects some models with a 400 at turn start).
-    capabilities = BrainCapabilities(cross_model_resume=True)
+    # Efforts per the OpenAI API's ReasoningEffortParam enum (verified live
+    # 2026-07-14 on codex-cli 0.144.4: an unknown value 400s at turn start).
+    capabilities = BrainCapabilities(
+        cross_model_resume=True,
+        efforts=frozenset(
+            {"none", "minimal", "low", "medium", "high", "xhigh"}
+        ),
+    )
 
     def make_session(
         self,

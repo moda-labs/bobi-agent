@@ -137,20 +137,37 @@ class TestCheckRoles:
 
 class TestCheckEffort:
     """effort: is pass-through like model, so validate only warns on values
-    outside the known vendor union (#778) — never blocks."""
+    the configured brain does not declare (#778) - never blocks."""
 
     def _check(self, cfg):
         from bobi.validate import _check_effort
         return _check_effort(cfg)
 
-    def test_known_values_pass(self):
-        cfg = Config(
+    def test_brain_accepted_values_pass(self):
+        codex = Config(
             brain={"kind": "codex", "effort": "high"},
             roles={"monitor": {"effort": "none"},
-                   "planner": {"effort": "xhigh"},
-                   "reviewer": {"effort": "max"}},
+                   "planner": {"effort": "xhigh"}},
         )
-        assert self._check(cfg) == []
+        assert self._check(codex) == []
+        claude = Config(
+            brain={"kind": "claude", "effort": "max"},
+            roles={"monitor": {"effort": "low"}},
+        )
+        assert self._check(claude) == []
+
+    def test_cross_vendor_value_warns_per_brain(self):
+        """The check consults the configured brain's declared set, so a value
+        valid only on the OTHER vendor warns instead of hiding in the union."""
+        codex_with_max = Config(brain={"kind": "codex", "effort": "max"})
+        results = self._check(codex_with_max)
+        assert len(results) == 1
+        assert "codex brain" in results[0].detail
+        # Default (claude) brain rejects the codex-only tiers.
+        claude_with_none = Config(roles={"monitor": {"effort": "none"}})
+        results = self._check(claude_with_none)
+        assert len(results) == 1
+        assert results[0].name == "roles.monitor.effort"
 
     def test_unknown_brain_effort_warns(self):
         cfg = Config(brain={"effort": "turbo"})
@@ -159,7 +176,6 @@ class TestCheckEffort:
         assert results[0].name == "brain.effort"
         assert not results[0].ok
         assert not results[0].required  # warning, not blocking
-        assert "unrecognized effort" in results[0].detail
 
     def test_unknown_role_effort_warns(self):
         cfg = Config(roles={"monitor": {"effort": "extreme"}})
@@ -175,12 +191,66 @@ class TestCheckEffort:
         assert len(results) == 1
         assert not results[0].ok
 
+    def test_falsy_non_string_effort_warns(self):
+        """`effort: no` parses as YAML False and the runtime silently drops
+        it, so validate must not skip falsy values."""
+        cfg = Config(roles={"monitor": {"effort": False}})
+        results = self._check(cfg)
+        assert len(results) == 1
+        assert not results[0].ok
+        cfg = Config(brain={"effort": 0})
+        assert len(self._check(cfg)) == 1
+
     def test_no_effort_configured_passes(self):
         assert self._check(Config()) == []
         assert self._check(Config(
             brain={"kind": "codex", "model": "gpt-5.6"},
             roles={"monitor": {"model": "haiku"}},
         )) == []
+
+    def test_gateway_brain_falls_back_to_union(self):
+        """A gateway backend's accepted set is unknown, so any union value
+        passes rather than warning on everything."""
+        cfg = Config(brain={"kind": "gateway", "base_url": "http://x",
+                            "effort": "max"})
+        assert self._check(cfg) == []
+
+
+class TestCheckWorkflowEffort:
+    """Step-level effort: gets the same typo warning as config-level (#778)."""
+
+    def _check(self, cfg, project_path):
+        from bobi.validate import _check_workflow_effort
+        return _check_workflow_effort(cfg, project_path)
+
+    def _write_workflow(self, tmp_path, effort_line):
+        wf_dir = tmp_path / "package" / "workflows"
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        (wf_dir / "adhoc.yaml").write_text(
+            "name: adhoc\nsteps:\n  - name: task\n"
+            f"    prompt: p\n{effort_line}"
+        )
+
+    def test_valid_step_effort_passes(self, tmp_path):
+        self._write_workflow(tmp_path, "    effort: high\n")
+        assert self._check(Config(), tmp_path) == []
+
+    def test_bogus_step_effort_warns(self, tmp_path):
+        self._write_workflow(tmp_path, "    effort: hihg\n")
+        results = self._check(Config(), tmp_path)
+        assert len(results) == 1
+        assert results[0].name == "adhoc.yaml:task.effort"
+        assert not results[0].ok
+        assert not results[0].required
+
+    def test_malformed_workflow_skipped(self, tmp_path):
+        wf_dir = tmp_path / "package" / "workflows"
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        (wf_dir / "bad.yaml").write_text("steps: [unclosed\n")
+        assert self._check(Config(), tmp_path) == []
+
+    def test_no_workflows_dir_passes(self, tmp_path):
+        assert self._check(Config(), tmp_path) == []
 
 
 class TestCheckBrain:

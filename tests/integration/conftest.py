@@ -277,6 +277,28 @@ requires_claude = pytest.mark.skipif(
     reason="claude CLI not installed",
 )
 
+requires_codex = pytest.mark.skipif(
+    not shutil.which("codex"),
+    reason="codex CLI not installed",
+)
+
+
+async def _drain(client):
+    """Drain one live brain turn; return (final_text, turn_result).
+
+    Shared by the live-brain integration suites (cross-model resume, gateway,
+    effort selection) so the brain message protocol is consumed in one place.
+    """
+    from bobi.brain import AssistantText, TurnResult
+
+    text, result = "", None
+    async for msg in client.receive_response():
+        if isinstance(msg, AssistantText) and msg.text:
+            text = msg.text
+        elif isinstance(msg, TurnResult):
+            result = msg
+    return text, result
+
 
 def _make_cli_run(env_obj: BobiEnv):
     """Return a ``bobi`` CLI runner bound to *env_obj* (Claude or stub)."""

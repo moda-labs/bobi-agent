@@ -61,7 +61,6 @@ _BRAIN_MODEL_ENV = "BOBI_BRAIN_MODEL"
 # Bobi internals should use the helpers below so model env handling stays here.
 BRAIN_MODEL_ENV = _BRAIN_MODEL_ENV
 _BRAIN_EFFORT_ENV = "BOBI_BRAIN_EFFORT"
-BRAIN_EFFORT_ENV = _BRAIN_EFFORT_ENV
 
 
 def get_process_brain_model(
