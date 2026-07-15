@@ -299,6 +299,13 @@ def continuation_token(
     return ""
 
 
+def known_brain_kinds() -> list[str]:
+    """Every registered brain kind, sorted. The instructions render uses this
+    to clean a previously managed block from a brain the team no longer runs
+    (a brain-kind switch must not leave stale global instructions behind)."""
+    return sorted(_BRAINS)
+
+
 def get_brain(kind: str | None = None) -> BrainFactory:
     """Resolve a brain kind to its factory.
 
@@ -342,6 +349,7 @@ __all__ = [
     "get_brain",
     "get_process_brain_effort",
     "get_process_brain_model",
+    "known_brain_kinds",
     "pin_process_brain",
     "resolve_effort",
     "resolve_effort_option",

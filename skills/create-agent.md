@@ -11,6 +11,7 @@ runnable `agents/<pack-name>/` directory.
 agents/<pack-name>/
 ├── agent.md              # Human-readable team description
 ├── agent.yaml            # Team config (entry point, services, credentials)
+├── AGENTS.md             # Optional: global instructions rendered brain-natively
 ├── roles/                # System prompts for each agent role
 │   └── <role>/
 │       └── ROLE.md
@@ -362,6 +363,26 @@ prompt, so make the first line of each file a one-line description.
 Use context/ instead of tools/ when the content is reference material
 rather than a service guide — tools load fully into every role's
 prompt; context files cost nothing until an agent reads one.
+
+### Global instructions (AGENTS.md)
+
+Optional team-shipped engineering/house rules that apply to EVERY repo the
+agents work in - coding standards, testing discipline, commit rules. At
+manager boot, bobi renders the package `AGENTS.md` into the locations the
+team's brain natively auto-loads (`~/AGENTS.md` always; `$CODEX_HOME/AGENTS.md`
+for codex; `$CLAUDE_CONFIG_DIR/CLAUDE.md` for claude/gateway), inside a
+managed block that preserves any foreign content (e.g. Claude's own memory
+writes). A team without one renders nothing.
+
+Compose semantics differ from `agent.md`: an overlay's `AGENTS.md` REPLACES
+the base's wholesale (per-file replace, like structured dirs), never
+concatenates - the base team ships the house rules; an overlay overrides them
+entirely or inherits them untouched. To drop inherited rules without
+supplying new ones, ship an EMPTY `AGENTS.md` in the overlay.
+
+Use `AGENTS.md` for standards the brains must load in every repository they
+touch; use `context/` for reference material agents read on demand; use role
+prompts for per-role behavior.
 
 ### Workspace templates (workspace/)
 
