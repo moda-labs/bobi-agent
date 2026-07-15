@@ -81,9 +81,9 @@ every tick, so monitors added at runtime take effect without a restart.
   interpretation, the scheduler spawns a short-lived check agent that observes
   and returns a verdict. Costs an LLM call per interval; use when diffable JSON
   isn't available. Check agents run with role `monitor`, so
-  `roles: {monitor: {model: haiku}}` in `agent.yaml` puts every check on a
-  cheap model instead of the manager's (setup-generated packs ship this
-  default).
+  `roles: {monitor: {model: haiku, effort: low}}` in `agent.yaml` puts every
+  check on a cheap model and dial instead of the manager's (setup-generated
+  packs ship the haiku default).
 - **Sleep cycle** (`sleep_cycle: true`) - the one flavor whose agent *writes* an
   artifact (`long_term_memory.md`) instead of returning a verdict. Sleep-cycle
   input can be large, so the scheduler writes the rendered task to

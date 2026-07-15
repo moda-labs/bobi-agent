@@ -2777,9 +2777,13 @@ main.add_command(event_server_cmd)
 @click.option("--model", default="",
               help="Model override for this launch (provider-native, e.g. haiku, "
                    "opus, or a full model ID). Wins over step and role config.")
+@click.option("--effort", default="",
+              help="Reasoning-effort override for this launch (provider-native, "
+                   "e.g. low, medium, high, xhigh). Wins over step and role "
+                   "config.")
 def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
                      post_event, requested_by, non_interactive, persistent,
-                     subscribe, model):
+                     subscribe, model, effort):
     """Launch a sub-agent with a workflow and role.
 
     Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
@@ -2797,13 +2801,13 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
                     interactive=not non_interactive,
                     persistent=persistent,
                     subscribe=list(subscribe),
-                    model=model)
+                    model=model, effort=effort)
 
 
 def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
                     as_check=False, post_event=None, requested_by=None,
                     interactive=True, persistent=False, subscribe=None,
-                    model=""):
+                    model="", effort=""):
     """Dispatch logic for the agent command."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
@@ -2818,6 +2822,12 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
 
     if as_check and wait:
         click.echo("--as-check cannot be combined with --wait", err=True)
+        raise SystemExit(1)
+    if as_check and (model or effort):
+        # The check harness resolves roles.monitor.* itself; silently
+        # ignoring an explicit override would misreport what the check ran at.
+        click.echo("--model/--effort are not supported with --as-check "
+                   "(configure roles.monitor instead)", err=True)
         raise SystemExit(1)
     if post_event and not as_check:
         click.echo("--post-event requires --as-check", err=True)
@@ -2840,7 +2850,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
                         run_key=run_key, timeout=timeout,
                         requested_by=requested_by, interactive=interactive,
                         persistent=persistent, subscribe=subscribe or [],
-                        model=model)
+                        model=model, effort=effort)
         return
 
     requester: dict = {}
@@ -2866,6 +2876,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
         subscribe=subscribe or [],
         run_key=run_key,
         model=model,
+        effort=effort,
     )
     click.echo(f"Agent started: {session_name}")
 
@@ -2874,7 +2885,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
 def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
                     run_key: str | None, timeout: int, requested_by,
                     interactive: bool, persistent: bool, subscribe: list[str],
-                    model: str = "") -> None:
+                    model: str = "", effort: str = "") -> None:
     """Run a real agent synchronously and print its final text."""
     if workflow != "adhoc":
         click.echo("--wait only supports adhoc workflow runs", err=True)
@@ -2900,7 +2911,7 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
     result = spawn_adhoc(
         cwd=cwd, task=task, timeout=timeout, name=run_key,
         requested_by=requester, persistent=False, role=role,
-        subscribe=subscribe, model=model,
+        subscribe=subscribe, model=model, effort=effort,
     )
     if result.final_text:
         click.echo(result.final_text)

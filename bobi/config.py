@@ -343,14 +343,17 @@ class Config:
         "init_failure_backoff_threshold": 2,
     })
     # Which agent "brain" drives this team's agents (#485). `{kind: claude|codex|
-    # gateway|gateway-openai, model: <optional override>}`; gateway kinds
-    # additionally take `base_url` (required). `kind: gateway` takes
-    # `small_model` (#655); `kind: gateway-openai` takes `wire_api`
-    # (chat|responses, default chat). Empty = the framework default (claude).
+    # gateway|gateway-openai, model: <optional override>, effort: <optional
+    # reasoning effort>}`; gateway kinds additionally take `base_url` (required).
+    # `kind: gateway` takes `small_model` (#655); `kind: gateway-openai` takes
+    # `wire_api` (chat|responses, default chat). Empty = the framework default
+    # (claude).
     brain: dict = field(default_factory=dict)
-    # Per-role settings (#617). `roles: {<role>: {model: <override>}}`. A role's
-    # model is a provider-native string for the team's brain (Claude aliases
-    # like `haiku`, full Claude IDs, Codex IDs) - never translated.
+    # Per-role settings (#617, #778). `roles: {<role>: {model: <override>,
+    # effort: <override>}}`. A role's model and reasoning effort are
+    # provider-native strings for the team's brain (Claude aliases like
+    # `haiku`, full Claude IDs, Codex IDs; efforts like `low`..`xhigh`) -
+    # never translated.
     roles: dict = field(default_factory=dict)
 
     @property
@@ -373,6 +376,11 @@ class Config:
         return str((self.brain or {}).get("model", "") or "")
 
     @property
+    def brain_effort(self) -> str:
+        """The configured brain reasoning effort, or "" for the provider default."""
+        return str((self.brain or {}).get("effort", "") or "")
+
+    @property
     def brain_base_url(self) -> str:
         """The gateway endpoint for `kind: gateway` (#655), or ""."""
         return str((self.brain or {}).get("base_url", "") or "")
@@ -392,6 +400,13 @@ class Config:
         entry = (self.roles or {}).get(role)
         if isinstance(entry, dict):
             return str(entry.get("model", "") or "")
+        return ""
+
+    def role_effort(self, role: str) -> str:
+        """The reasoning effort configured for *role*, or "" when unconfigured."""
+        entry = (self.roles or {}).get(role)
+        if isinstance(entry, dict):
+            return str(entry.get("effort", "") or "")
         return ""
 
     def credential(self, service: str, key: str) -> str:

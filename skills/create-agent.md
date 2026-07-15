@@ -11,6 +11,7 @@ runnable `agents/<pack-name>/` directory.
 agents/<pack-name>/
 ├── agent.md              # Human-readable team description
 ├── agent.yaml            # Team config (entry point, services, credentials)
+├── AGENTS.md             # Optional: global instructions rendered brain-natively
 ├── roles/                # System prompts for each agent role
 │   └── <role>/
 │       └── ROLE.md
@@ -230,6 +231,7 @@ Runtime model selection lives in `agent.yaml` by default:
 brain:
   kind: codex          # omit the block entirely for Claude Code
   model: gpt-5-codex   # optional provider-specific model or alias
+  effort: high         # optional reasoning effort (provider-native value)
 ```
 
 To run a team on local or self-hosted models, point the Claude CLI at an
@@ -266,18 +268,28 @@ If the OpenAI-compatible gateway needs auth, put `BOBI_GATEWAY_API_KEY` in the
 runtime `.env`. Bobi configures Codex to read that dedicated key and never sends
 an ambient real `OPENAI_API_KEY` to the gateway.
 
-Individual roles can declare their own model, applied whenever an agent
-launches with that role (subagents, workflow steps, monitor checks):
+Individual roles can declare their own model and reasoning effort, applied
+whenever an agent launches with that role (subagents, workflow steps, monitor
+checks):
 
 ```yaml
 roles:
-  monitor: {model: haiku}    # cheap observe-and-report checks
-  planner: {model: opus}
+  monitor: {model: haiku, effort: low}    # cheap observe-and-report checks
+  planner: {model: opus, effort: xhigh}
 ```
 
 Role models pick a model within the team's brain, never a different brain.
 Precedence: `--model` launch flag > step `model:` > `roles.<role>.model` >
-`brain.model` > provider default.
+`brain.model` > provider default. `effort` follows the identical chain
+(`--effort` flag > step `effort:` > `roles.<role>.effort` > `brain.effort` >
+provider default). Effort values are provider-native like models: codex
+accepts `none`-`xhigh`, claude accepts `low`-`max`, and `low`, `medium`,
+`high`, `xhigh` work on both. A typo'd effort fails codex's first turn with
+a 400 but the claude CLI just warns and runs on its default effort, so trust
+the doctor warning (it checks against the configured brain's accepted set)
+rather than the run's apparent success. On a `kind: gateway` team, `effort`
+rides the Claude CLI to the backend like `model` does: whether the backend
+honors, ignores, or rejects it is the backend's own behavior.
 
 Workflow prompt steps can override that team default for just one step:
 
@@ -290,10 +302,12 @@ steps:
 ```
 
 For Claude-backed teams, `model` can be an alias such as `haiku`, `sonnet`, or
-`opus`, or a full Claude model ID. Bobi passes provider-native model strings to
-the selected backend; it does not translate model names across providers, and
-it does not verify them: a wrong or unavailable model fails at runtime when
-the session starts its first turn, not at validate. Availability can depend
+`opus`, or a full Claude model ID. Bobi passes provider-native model and
+effort strings to the selected backend; it does not translate them across
+providers, and it does not verify them: a wrong or unavailable value fails at
+runtime when the session starts its first turn, not at validate (config
+validation via `bobi agent <name> doctor` does warn on effort values outside
+the known vendor tiers). Availability can depend
 on the deployment's account and auth mode (Codex ChatGPT-plan auth, for
 example, rejects models an API key would accept), so prefer the provider's
 well-known names and the aliases above over exotic IDs.
@@ -363,6 +377,26 @@ prompt, so make the first line of each file a one-line description.
 Use context/ instead of tools/ when the content is reference material
 rather than a service guide — tools load fully into every role's
 prompt; context files cost nothing until an agent reads one.
+
+### Global instructions (AGENTS.md)
+
+Optional team-shipped engineering/house rules that apply to EVERY repo the
+agents work in - coding standards, testing discipline, commit rules. At
+manager boot, bobi renders the package `AGENTS.md` into the locations the
+team's brain natively auto-loads (`~/AGENTS.md` always; `$CODEX_HOME/AGENTS.md`
+for codex; `$CLAUDE_CONFIG_DIR/CLAUDE.md` for claude/gateway), inside a
+managed block that preserves any foreign content (e.g. Claude's own memory
+writes). A team without one renders nothing.
+
+Compose semantics differ from `agent.md`: an overlay's `AGENTS.md` REPLACES
+the base's wholesale (per-file replace, like structured dirs), never
+concatenates - the base team ships the house rules; an overlay overrides them
+entirely or inherits them untouched. To drop inherited rules without
+supplying new ones, ship an EMPTY `AGENTS.md` in the overlay.
+
+Use `AGENTS.md` for standards the brains must load in every repository they
+touch; use `context/` for reference material agents read on demand; use role
+prompts for per-role behavior.
 
 ### Workspace templates (workspace/)
 

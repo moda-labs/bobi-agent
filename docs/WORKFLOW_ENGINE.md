@@ -123,6 +123,26 @@ steps:
     prompt: "Find companies matching the wedge..."
 ```
 
+`effort` is the model's sibling dial (#778): the reasoning effort for the
+step, with the identical precedence chain - `--effort` launch flag > step
+`effort:` > `roles.<role>.effort` > `brain.effort` > provider default. Values
+are provider-native and pass through untranslated: codex accepts `none`,
+`minimal`, `low`, `medium`, `high`, `xhigh`; claude accepts `low`, `medium`,
+`high`, `xhigh`, `max` (so `low`-`xhigh` is the portable subset). A value the
+brain doesn't know is NOT translated or caught by bobi at session start:
+codex fails the first turn with a 400, and the claude CLI warns and silently
+runs on its default effort - config validation (`bobi agent <name> doctor`,
+and the check at agent start) warns about config and step values the
+configured brain does not accept, to catch typos early.
+
+```yaml
+steps:
+  - name: implement
+    agent: engineer
+    effort: xhigh
+    prompt: "Implement the change with tests..."
+```
+
 Model changes are prompt-step boundaries. When a workflow reaches a prompt
 step whose model differs from the session's current model, the engine
 continues the same session natively on the new model when the brain supports
@@ -134,6 +154,13 @@ workflow context, so the handoff chain remains intact either way. Note that
 native continuation carries the full transcript into the new model's context,
 so a step that switches a long conversation onto a pricier model pays for
 that history in input tokens.
+
+Effort changes are cheaper boundaries: effort never affects
+continue-vs-fresh. A step that changes only the effort reconnects the same
+session natively under the new dial on every brain, keeping the transcript
+whenever a resumable session id exists (the rare fallbacks that clear it - a
+stale resume, a session that never reported an id - re-seed a fresh session
+from the workflow context, exactly as a model switch would).
 
 ### Route step
 

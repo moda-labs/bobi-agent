@@ -33,7 +33,8 @@ class BobiEnv:
     env: dict[str, str]
 
 
-def _provision_bobi_env(base: Path, *, agent_name: str, brain: str | None):
+def _provision_bobi_env(base: Path, *, agent_name: str, brain: str | None,
+                        agents_md: str | None = None):
     """Build + install an isolated Bobi home and return its :class:`BobiEnv`.
 
     The ONE scaffold both the default (Claude) integration fixture and the
@@ -75,6 +76,10 @@ def _provision_bobi_env(base: Path, *, agent_name: str, brain: str | None):
     if brain:
         agent_yaml["brain"] = {"kind": brain}
     (pack_dir / "agent.yaml").write_text(yaml.dump(agent_yaml))
+    if agents_md is not None:
+        # Team-shipped global instructions (#779), installed to
+        # run/package/AGENTS.md and rendered at manager boot.
+        (pack_dir / "AGENTS.md").write_text(agents_md)
     for role_name, content in [
         ("manager", "# Manager\n\nYou are a test manager agent.\n"),
         ("engineer", "# Engineer\n\nYou are a test engineer agent. Complete tasks quickly.\n"),
@@ -276,6 +281,28 @@ requires_claude = pytest.mark.skipif(
     not shutil.which("claude"),
     reason="claude CLI not installed",
 )
+
+requires_codex = pytest.mark.skipif(
+    not shutil.which("codex"),
+    reason="codex CLI not installed",
+)
+
+
+async def _drain(client):
+    """Drain one live brain turn; return (final_text, turn_result).
+
+    Shared by the live-brain integration suites (cross-model resume, gateway,
+    effort selection) so the brain message protocol is consumed in one place.
+    """
+    from bobi.brain import AssistantText, TurnResult
+
+    text, result = "", None
+    async for msg in client.receive_response():
+        if isinstance(msg, AssistantText) and msg.text:
+            text = msg.text
+        elif isinstance(msg, TurnResult):
+            result = msg
+    return text, result
 
 
 def _make_cli_run(env_obj: BobiEnv):

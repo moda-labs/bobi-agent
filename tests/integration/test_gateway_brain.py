@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from .conftest import requires_claude
+from .conftest import _drain, requires_claude
 
 pytestmark = pytest.mark.claude
 
@@ -103,18 +103,6 @@ def stub_gateway():
     finally:
         server.shutdown()
         thread.join(timeout=5)
-
-
-async def _drain(session):
-    from bobi.brain import AssistantText, TurnResult
-
-    text, result = "", None
-    async for msg in session.receive_response():
-        if isinstance(msg, AssistantText) and msg.text:
-            text = msg.text
-        elif isinstance(msg, TurnResult):
-            result = msg
-    return text, result
 
 
 @requires_claude

@@ -370,7 +370,13 @@ class ClaudeBrain:
     # The Claude CLI accepts --resume together with a different --model, so a
     # session's transcript continues under the new model (#642; verified live
     # by tests/integration/test_cross_model_resume.py).
-    capabilities = BrainCapabilities(cross_model_resume=True)
+    # Efforts per the claude CLI's --effort choices (verified 2026-07-14; an
+    # unknown value is warned about and IGNORED, so validation is the only
+    # place a typo surfaces).
+    capabilities = BrainCapabilities(
+        cross_model_resume=True,
+        efforts=frozenset({"low", "medium", "high", "xhigh", "max"}),
+    )
 
     def make_session(
         self,
@@ -384,9 +390,9 @@ class ClaudeBrain:
 
         from bobi.sdk import get_cli_path
 
-        from bobi.brain import with_default_model_option
+        from bobi.brain import with_default_effort_option, with_default_model_option
 
-        extra = with_default_model_option(options)
+        extra = with_default_effort_option(with_default_model_option(options))
         # Defaults every call site shared; an explicit value in ``options`` wins.
         extra.setdefault("permission_mode", "bypassPermissions")
         # Never inherit the SDK's 1 MB max_buffer_size default — a single >1 MB
@@ -432,9 +438,9 @@ class ClaudeBrain:
             "BOBI_CLAUDE_CONNECT_BACKOFF_SECONDS",
             DEFAULT_CONNECT_BACKOFF_SECONDS,
         )
-        from bobi.brain import resolve_model_option
+        from bobi.brain import resolve_model_option, with_default_effort_option
 
-        extra = dict(options or {})
+        extra = with_default_effort_option(options)
         model = resolve_model_option(model)
         extra.setdefault("permission_mode", "bypassPermissions")
         extra.setdefault("include_partial_messages", True)

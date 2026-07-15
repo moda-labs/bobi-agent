@@ -151,7 +151,7 @@ def write_install_manifest(dest: Path, pack_dir: Path,
                 if f.is_file() and "__pycache__" not in f.parts:
                     files[f.relative_to(dest).as_posix()] = \
                         hashlib.sha256(f.read_bytes()).hexdigest()
-    for name in ["agent.yaml", "agent.md"]:
+    for name in ["agent.yaml", "agent.md", "AGENTS.md"]:
         f = dest / name
         if f.exists():
             files[name] = hashlib.sha256(f.read_bytes()).hexdigest()
@@ -176,7 +176,7 @@ def write_install_gitignore(project_path: Path, local_source: bool) -> None:
     entries = [".gitignore", "install-manifest.json", "compose-lock.json"]
     if local_source:
         entries += ["roles/", "tools/", "workflows/", "monitors/", "context/",
-                    "agent.md", "agent.yaml"]
+                    "agent.md", "agent.yaml", "AGENTS.md"]
     from bobi.runtime_guard import with_mutable_runtime_package
 
     with with_mutable_runtime_package(project_path):

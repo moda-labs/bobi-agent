@@ -107,6 +107,15 @@ bobi agent <name> subagents cancel <id>
 explicit short-lived monitoring-check harness; it prints verdict JSON and is the
 only `subagents launch` mode that accepts `--post-event`.
 
+`--model` and `--effort` override the launched agent's model and reasoning
+effort for the whole run (provider-native values; they win over workflow step
+and role config), so an agent can pick both dials per delegation:
+
+```bash
+bobi agent <name> subagents launch -w adhoc --role engineer \
+  --model gpt-5.6 --effort xhigh --task "Design the migration"
+```
+
 ## Package Surfaces
 
 Installed package files live under `run/package/`:
