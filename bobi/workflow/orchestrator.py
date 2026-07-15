@@ -17,6 +17,7 @@ import logging
 import os
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,12 @@ from bobi.workflow.variables import VariableContext
 log = logging.getLogger(__name__)
 
 MAX_HANDOFF_RETRIES = 2
+
+
+@dataclass(frozen=True)
+class _NotifyOutcome:
+    delivered: bool
+    error: str = ""
 
 
 def _close_if_still_active(registry, session_name: str) -> None:
@@ -670,7 +677,27 @@ async def _run_workflow_async(
 
             # Notify step — deterministic, no LLM
             if step.notify:
-                _execute_notify_step(step, ctx, cwd, run_key, workflow.name)
+                outcome = _execute_notify_step(
+                    step, ctx, cwd, run_key, workflow.name,
+                )
+                next_step = (
+                    workflow.steps[step_idx + 1]
+                    if step_idx + 1 < len(workflow.steps) else None
+                )
+                if (
+                    not outcome.delivered
+                    and next_step is not None
+                    and next_step.await_event
+                ):
+                    failed_step = step.name
+                    error = (
+                        "workflow.notify_undeliverable: "
+                        f"{outcome.error}; refusing to arm await step "
+                        f"{next_step.name}"
+                    )
+                    run_failed, failure_error = True, error
+                    _emit_step_failed(run_key, workflow.name, step.name, error)
+                    return False
                 step_idx += 1
                 continue
 
@@ -1070,36 +1097,45 @@ def _execute_notify_step(
     cwd: str,
     run_key: str,
     workflow_name: str,
-) -> None:
+) -> _NotifyOutcome:
     """Execute a notify step — deterministic Slack message, no LLM.
 
     Resolves the message template, finds Slack credentials from the project
     config, and posts to the appropriate channel.  Channel resolution:
     1. requested_by.channel (reply in the requester's thread)
-    2. Falls back silently if no channel is available.
+    2. Returns an undeliverable outcome if no channel is available.
     """
     message = ctx.resolve(step.message)
 
+    def _undeliverable(reason: str) -> _NotifyOutcome:
+        error = f"Notify step {step.name}: {reason}"
+        log.warning(error)
+        _emit_lifecycle_event("engineer/notify.undeliverable", {
+            "run_key": run_key,
+            "workflow": workflow_name,
+            "step": step.name,
+            "error": reason,
+            "text": error,
+        })
+        return _NotifyOutcome(delivered=False, error=error)
+
     if step.notify != "slack":
-        log.warning(f"Notify step {step.name}: unknown target '{step.notify}', skipping")
-        return
+        return _undeliverable(f"unknown target '{step.notify}'")
 
     from bobi.config import Config
     project_root = _find_project_root(cwd)
     cfg = Config.load(project_root)
     token = cfg.credential("slack", "bot_token")
     if not token:
-        log.warning(f"Notify step {step.name}: no Slack bot_token configured, skipping")
-        return
+        return _undeliverable("no Slack bot_token configured")
 
     # Determine channel and thread from the requester context
-    requester = ctx.scopes.get("requested_by", {})
+    requester = ctx.scopes.get("requested_by") or {}
     channel = requester.get("channel", "")
     thread_ts = requester.get("thread_ts", "")
 
     if not channel:
-        log.warning(f"Notify step {step.name}: no Slack channel available, skipping")
-        return
+        return _undeliverable("no Slack channel available")
 
     from bobi.slack import post_slack_message
     try:
@@ -1112,9 +1148,11 @@ def _execute_notify_step(
             "channel": channel,
             "text": f"Notify {step.name}: {message[:200]}",
         })
+        return _NotifyOutcome(delivered=True)
     except Exception as e:
         # Notification failures are non-fatal — log and continue
-        log.warning(f"Notify step {step.name}: Slack post failed: {e}")
+        error = f"Notify step {step.name}: Slack post failed: {e}"
+        log.warning(error)
         _emit_lifecycle_event("engineer/notify.failed", {
             "run_key": run_key,
             "workflow": workflow_name,
@@ -1122,6 +1160,7 @@ def _execute_notify_step(
             "error": str(e),
             "text": f"Notify {step.name} failed: {e}",
         })
+        return _NotifyOutcome(delivered=False, error=error)
 
 
 def _build_step_prompt(step: StepDef, ctx: VariableContext, session_name: str = "", step_name: str = "") -> str:

@@ -448,28 +448,26 @@ class FakeBrainClient(FakeClient):
         yield TurnResult(session_id="test-session-id")
 
 
+class DefaultFakeBrain:
+    def make_session(self, **_kwargs):
+        return FakeBrainClient()
+
+
 class TestRunWorkflow:
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
         _bind_runtime_root(tmp_path, monkeypatch)
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: DefaultFakeBrain())
 
     def _mock_asyncio_run(self, workflow, **kwargs):
-        """Run the workflow with a mocked SDK client."""
+        """Run the workflow with a mocked brain client."""
         cwd = kwargs.get("cwd", "/tmp")
         with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
              patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
              patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
-             patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
-                 ClaudeSDKClient=lambda opts: FakeClient(),
-                 ClaudeAgentOptions=MagicMock,
-                 AssistantMessage=FakeAssistantMessage,
-                 ResultMessage=FakeResultMessage,
-                 TextBlock=FakeTextBlock,
-             )}):
+             patch("bobi.workflow.orchestrator.log_activity"):
             mock_reg.return_value = MagicMock()
             return run_workflow(workflow, **kwargs)
 

@@ -292,12 +292,16 @@ class TestExecuteNotifyStep:
                        message="Working on #${{input.run_key}}: ${{input.task}}")
         ctx = self._make_ctx()
 
-        _execute_notify_step(step, ctx, str(tmp_path), "42", "issue-lifecycle")
+        outcome = _execute_notify_step(
+            step, ctx, str(tmp_path), "42", "issue-lifecycle",
+        )
 
         mock_post.assert_called_once_with(
             "xoxb-test", "C123", "Working on #42: fix the bug",
             thread_ts="171.42",
         )
+        assert outcome.delivered is True
+        assert outcome.error == ""
         # Lifecycle event emitted
         mock_emit.assert_called_once()
         assert mock_emit.call_args[0][0] == "engineer/notify.sent"
@@ -313,10 +317,13 @@ class TestExecuteNotifyStep:
         ctx.set_scope("input", {"task": "t", "repo": "r", "run_key": "1"})
         # No requested_by scope → no channel
 
-        _execute_notify_step(step, ctx, str(tmp_path), "1", "test-wf")
+        outcome = _execute_notify_step(step, ctx, str(tmp_path), "1", "test-wf")
 
         mock_post.assert_not_called()
-        mock_emit.assert_not_called()
+        assert outcome.delivered is False
+        assert "no Slack channel available" in outcome.error
+        mock_emit.assert_called_once()
+        assert mock_emit.call_args[0][0] == "engineer/notify.undeliverable"
 
     @patch("bobi.slack.post_slack_message")
     @patch("bobi.workflow.orchestrator._emit_lifecycle_event")
@@ -329,9 +336,13 @@ class TestExecuteNotifyStep:
         step = StepDef(name="notify_start", notify="slack", message="Hello")
         ctx = self._make_ctx()
 
-        _execute_notify_step(step, ctx, str(tmp_path), "1", "test-wf")
+        outcome = _execute_notify_step(step, ctx, str(tmp_path), "1", "test-wf")
 
         mock_post.assert_not_called()
+        assert outcome.delivered is False
+        assert "no Slack bot_token configured" in outcome.error
+        mock_emit.assert_called_once()
+        assert mock_emit.call_args[0][0] == "engineer/notify.undeliverable"
 
     @patch("bobi.slack.post_slack_message")
     @patch("bobi.workflow.orchestrator._emit_lifecycle_event")
@@ -341,9 +352,13 @@ class TestExecuteNotifyStep:
         step = StepDef(name="notify_start", notify="email", message="Hello")
         ctx = self._make_ctx()
 
-        _execute_notify_step(step, ctx, str(tmp_path), "1", "test-wf")
+        outcome = _execute_notify_step(step, ctx, str(tmp_path), "1", "test-wf")
 
         mock_post.assert_not_called()
+        assert outcome.delivered is False
+        assert "unknown target" in outcome.error
+        mock_emit.assert_called_once()
+        assert mock_emit.call_args[0][0] == "engineer/notify.undeliverable"
 
     @patch("bobi.slack.post_slack_message",
            side_effect=RuntimeError("network error"))
@@ -355,9 +370,11 @@ class TestExecuteNotifyStep:
         ctx = self._make_ctx()
 
         # Should not raise
-        _execute_notify_step(step, ctx, str(tmp_path), "42", "test-wf")
+        outcome = _execute_notify_step(step, ctx, str(tmp_path), "42", "test-wf")
 
         # Failure event emitted
+        assert outcome.delivered is False
+        assert "Slack post failed" in outcome.error
         assert any(
             call[0][0] == "engineer/notify.failed"
             for call in mock_emit.call_args_list
@@ -415,11 +432,23 @@ class FakeClient:
         self.queries.append(text)
 
     async def receive_response(self):
-        yield FakeAssistantMessage(content=[FakeTextBlock(text="Done.")])
-        yield FakeResultMessage()
+        from bobi.brain import AssistantText, TurnResult
+
+        yield AssistantText(text="Done.")
+        yield TurnResult(
+            session_id="test-session-id",
+            duration_ms=1000,
+            total_cost_usd=0.01,
+            num_turns=1,
+        )
 
     async def disconnect(self):
         self.connected = False
+
+
+class FakeBrain:
+    def make_session(self, **_kwargs):
+        return FakeClient()
 
 
 class TestNotifyStepInWorkflow:
@@ -431,16 +460,9 @@ class TestNotifyStepInWorkflow:
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.get_brain", return_value=FakeBrain()), \
              patch("bobi.workflow.orchestrator._execute_notify_step") as mock_notify, \
-             patch("bobi.workflow.orchestrator._find_project_root", return_value=Path(tmp_path or "/tmp")), \
-             patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
-                 ClaudeSDKClient=lambda opts: FakeClient(),
-                 ClaudeAgentOptions=MagicMock,
-                 AssistantMessage=FakeAssistantMessage,
-                 ResultMessage=FakeResultMessage,
-                 TextBlock=FakeTextBlock,
-             )}):
+             patch("bobi.workflow.orchestrator._find_project_root", return_value=Path(tmp_path or "/tmp")):
             mock_reg.return_value = MagicMock()
             result = run_workflow(workflow, **kwargs)
             return result, mock_notify
