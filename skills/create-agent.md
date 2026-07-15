@@ -271,8 +271,8 @@ runtime `.env`. Bobi configures Codex to read that dedicated key and never sends
 an ambient real `OPENAI_API_KEY` to the gateway.
 
 The pre-0.46 spellings `kind: gateway` and `kind: gateway-openai` remain
-accepted aliases for exactly these two configurations (`bobi validate`
-suggests the current form).
+accepted aliases for exactly these two configurations (`bobi agent <name>
+doctor` suggests the current form).
 
 Individual roles can declare their own model and reasoning effort, applied
 whenever an agent launches with that role (subagents, workflow steps, monitor

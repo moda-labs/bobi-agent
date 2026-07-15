@@ -316,11 +316,18 @@ def test_set_process_brain_from_config():
     assert os.environ[GATEWAY_SMALL_MODEL_ENV] == "qwen3:4b"
 
 
-def test_set_process_brain_from_config_declared_empty_base_url_raises():
+def test_set_process_brain_from_config_declared_empty_base_url_poisons():
     """Presence-based declaration: a base_url key whose ${VAR} resolved empty
-    fails startup loud instead of running the engine natively."""
+    pins the .invalid sentinel - operator commands (doctor/stop/status) keep
+    working, but no session can silently dial real Anthropic."""
+    from bobi.brain import GATEWAY_UNRESOLVED_BASE_URL
     from bobi.config import Config
 
     cfg = Config(brain={"kind": "claude", "base_url": ""})
-    with pytest.raises(RuntimeError, match="base_url"):
-        set_process_brain_from_config(cfg)
+    set_process_brain_from_config(cfg)
+    assert os.environ[GATEWAY_BASE_URL_ENV] == GATEWAY_UNRESOLVED_BASE_URL
+    # the poisoned endpoint reaches sessions like any pinned gateway would
+    from bobi.brain.gateway import _gateway_session_env
+
+    assert (_gateway_session_env()["ANTHROPIC_BASE_URL"]
+            == GATEWAY_UNRESOLVED_BASE_URL)

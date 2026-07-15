@@ -195,14 +195,23 @@ def _pin_env(
         target.pop(key, None)
 
 
+# Pinned in place of a declared-but-empty gateway base URL (#789). RFC 2606
+# reserves .invalid, so a session built against it fails its first turn with a
+# resolution error naming the problem - it can never silently dial the real
+# vendor endpoint carrying the gateway's credentials (the leak the old
+# session-time guard prevented, #655). Non-session commands (doctor, stop,
+# status) keep working, and validate reports the real fix.
+GATEWAY_UNRESOLVED_BASE_URL = "http://bobi-gateway-base-url-unresolved.invalid"
+
+
 def _require_declared_gateway_url(kind: str | None, base_url: str) -> None:
     """Fail loud when a team declared a gateway but its base URL is empty.
 
     The empty value is almost always a ``${VAR}`` that did not resolve at
-    spawn/startup. Proceeding would pin nothing and the session would silently
-    dial the real vendor endpoint carrying the gateway's credentials - the
-    exact leak the old session-time guard prevented (#655), moved to pin time
-    now that gateway mode is config, not kind (#789).
+    spawn. Proceeding would pin nothing and the child's sessions would
+    silently dial the real vendor endpoint - fail the spawn instead. Process
+    startup (``set_process_brain``) degrades to the sentinel pin rather than
+    raising, so operator commands still work against a broken team.
     """
     if not base_url:
         raise RuntimeError(
@@ -270,9 +279,22 @@ def set_process_brain(
     equivalent here: the match below compares ENGINES, so a config saying
     ``kind: gateway`` still tunes a process whose operator pinned
     ``BOBI_BRAIN=claude`` (and vice versa).
+
+    A declared gateway whose base URL resolved empty pins the ``.invalid``
+    sentinel instead of raising: this runs at every ``bobi agent`` command's
+    runtime binding, and ``stop``/``status``/``doctor`` must keep working
+    against a misconfigured team while sessions stay unable to dial the real
+    vendor endpoint.
     """
-    if gateway_declared or kind in BRAIN_KIND_ALIASES:
-        _require_declared_gateway_url(kind, gateway_base_url)
+    if ((gateway_declared or kind in BRAIN_KIND_ALIASES)
+            and not gateway_base_url):
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "brain kind %r declares a gateway but brain.base_url is empty; "
+            "sessions will fail until it resolves (see `bobi agent <name> "
+            "doctor`).", kind or DEFAULT_BRAIN)
+        gateway_base_url = GATEWAY_UNRESOLVED_BASE_URL
     existing_kind = os.environ.get(BRAIN_ENV, "")
     if kind and not existing_kind:
         os.environ[BRAIN_ENV] = kind
@@ -422,6 +444,7 @@ __all__ = [
     "BRAIN_ENV",
     "GATEWAY_BASE_URL_ENV",
     "GATEWAY_SMALL_MODEL_ENV",
+    "GATEWAY_UNRESOLVED_BASE_URL",
     "GATEWAY_WIRE_API_ENV",
     "continuation_token",
     "get_brain",
