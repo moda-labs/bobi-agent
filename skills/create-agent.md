@@ -230,6 +230,7 @@ Runtime model selection lives in `agent.yaml` by default:
 brain:
   kind: codex          # omit the block entirely for Claude Code
   model: gpt-5-codex   # optional provider-specific model or alias
+  effort: high         # optional reasoning effort (provider-native value)
 ```
 
 To run a team on local or self-hosted models, point the Claude CLI at an
@@ -252,18 +253,23 @@ disabled for gateways (a model switch starts fresh and re-injects context),
 and costs reported through a gateway are nominal, attributed to provider
 `gateway` in `bobi agent <name> costs`.
 
-Individual roles can declare their own model, applied whenever an agent
-launches with that role (subagents, workflow steps, monitor checks):
+Individual roles can declare their own model and reasoning effort, applied
+whenever an agent launches with that role (subagents, workflow steps, monitor
+checks):
 
 ```yaml
 roles:
-  monitor: {model: haiku}    # cheap observe-and-report checks
-  planner: {model: opus}
+  monitor: {model: haiku, effort: low}    # cheap observe-and-report checks
+  planner: {model: opus, effort: xhigh}
 ```
 
 Role models pick a model within the team's brain, never a different brain.
 Precedence: `--model` launch flag > step `model:` > `roles.<role>.model` >
-`brain.model` > provider default.
+`brain.model` > provider default. `effort` follows the identical chain
+(`--effort` flag > step `effort:` > `roles.<role>.effort` > `brain.effort` >
+provider default). Effort values are provider-native like models: codex
+accepts `minimal`–`xhigh`, claude accepts `low`–`max`, and `low`, `medium`,
+`high`, `xhigh` work on both.
 
 Workflow prompt steps can override that team default for just one step:
 
@@ -276,10 +282,12 @@ steps:
 ```
 
 For Claude-backed teams, `model` can be an alias such as `haiku`, `sonnet`, or
-`opus`, or a full Claude model ID. Bobi passes provider-native model strings to
-the selected backend; it does not translate model names across providers, and
-it does not verify them: a wrong or unavailable model fails at runtime when
-the session starts its first turn, not at validate. Availability can depend
+`opus`, or a full Claude model ID. Bobi passes provider-native model and
+effort strings to the selected backend; it does not translate them across
+providers, and it does not verify them: a wrong or unavailable value fails at
+runtime when the session starts its first turn, not at validate (`bobi agent
+<name> validate` does warn on effort values outside the known vendor tiers).
+Availability can depend
 on the deployment's account and auth mode (Codex ChatGPT-plan auth, for
 example, rejects models an API key would accept), so prefer the provider's
 well-known names and the aliases above over exotic IDs.

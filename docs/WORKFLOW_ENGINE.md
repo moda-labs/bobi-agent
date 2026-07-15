@@ -123,6 +123,21 @@ steps:
     prompt: "Find companies matching the wedge..."
 ```
 
+`effort` is the model's sibling dial (#778): the reasoning effort for the
+step, with the identical precedence chain — `--effort` launch flag > step
+`effort:` > `roles.<role>.effort` > `brain.effort` > provider default. Values
+are provider-native and pass through untranslated: codex accepts `minimal`,
+`low`, `medium`, `high`, `xhigh`; claude accepts `low`, `medium`, `high`,
+`xhigh`, `max` (so `low`–`xhigh` is the portable subset).
+
+```yaml
+steps:
+  - name: implement
+    agent: engineer
+    effort: xhigh
+    prompt: "Implement the change with tests..."
+```
+
 Model changes are prompt-step boundaries. When a workflow reaches a prompt
 step whose model differs from the session's current model, the engine
 continues the same session natively on the new model when the brain supports
@@ -134,6 +149,11 @@ workflow context, so the handoff chain remains intact either way. Note that
 native continuation carries the full transcript into the new model's context,
 so a step that switches a long conversation onto a pricier model pays for
 that history in input tokens.
+
+Effort changes are cheaper boundaries: effort never affects
+continue-vs-fresh. A step that changes only the effort reconnects the same
+session natively under the new dial on every brain — the transcript and the
+saved session id are always kept.
 
 ### Route step
 

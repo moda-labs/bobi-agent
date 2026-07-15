@@ -112,6 +112,7 @@ def validate_config(project_path: Path) -> ValidationResult:
     checks.append(_check_entry_point(cfg, project_path))
     checks.extend(_check_brain(cfg))
     checks.extend(_check_roles(cfg, project_path))
+    checks.extend(_check_effort(cfg))
     checks.extend(_check_monitor_relevance(project_path))
     checks.extend(_check_service_credentials(cfg))
     checks.extend(_check_venn_services(cfg))
@@ -172,6 +173,40 @@ def _check_brain(cfg) -> list[CheckResult]:
 # always launch as role "monitor" (bobi/subagent.py run_check_blocking), so
 # roles.monitor.* is meaningful in every pack.
 _BUILTIN_ROLES = {"monitor"}
+
+# The union of reasoning-effort values the known brains accept (#778):
+# codex takes minimal..xhigh, claude takes low..max. Effort is pass-through
+# like model — an unknown value is a warning here (the vendor CLIs grow new
+# tiers), and fails at session start if the brain rejects it.
+_KNOWN_EFFORTS = {"minimal", "low", "medium", "high", "xhigh", "max"}
+
+
+def _check_effort(cfg) -> list[CheckResult]:
+    """Warn on unrecognized `effort:` values (#778).
+
+    A wrong value fails only at session start (codex CLI / claude CLI reject
+    it), so surface likely typos at validate time. Warnings, never blocking:
+    the union is a snapshot of today's vendor tiers, not an allowlist.
+    """
+    found: list[tuple[str, object]] = []
+    if isinstance(cfg.brain, dict) and cfg.brain.get("effort"):
+        found.append(("brain.effort", cfg.brain["effort"]))
+    if isinstance(cfg.roles, dict):
+        for name, entry in cfg.roles.items():
+            if isinstance(entry, dict) and entry.get("effort"):
+                found.append((f"roles.{name}.effort", entry["effort"]))
+
+    checks = []
+    for label, value in found:
+        if not isinstance(value, str) or value not in _KNOWN_EFFORTS:
+            checks.append(CheckResult(
+                label, ok=False, required=False,
+                detail=f"unrecognized effort {value!r}; the brain may reject "
+                       "it at session start",
+                hint=f"known values: {', '.join(sorted(_KNOWN_EFFORTS))} "
+                     "(minimal is codex-only, max is claude-only)",
+            ))
+    return checks
 
 
 def _check_roles(cfg, project_path: Path) -> list[CheckResult]:
