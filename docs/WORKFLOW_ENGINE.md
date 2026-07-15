@@ -131,8 +131,8 @@ are provider-native and pass through untranslated: codex accepts `none`,
 `high`, `xhigh`, `max` (so `low`–`xhigh` is the portable subset). A value the
 brain doesn't know is NOT translated or caught by bobi: codex fails the first
 turn with a 400, and the claude CLI warns and silently runs on its default
-effort — `bobi agent <name> validate` warns about values outside the known
-union to catch typos early.
+effort — config validation (`bobi agent <name> doctor`, and the check at
+agent start) warns about values outside the known union to catch typos early.
 
 ```yaml
 steps:

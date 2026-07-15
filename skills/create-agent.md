@@ -271,7 +271,7 @@ provider default). Effort values are provider-native like models: codex
 accepts `none`–`xhigh`, claude accepts `low`–`max`, and `low`, `medium`,
 `high`, `xhigh` work on both. A typo'd effort fails codex's first turn with
 a 400 but the claude CLI just warns and runs on its default effort, so trust
-the validate warning rather than the run's apparent success.
+the doctor warning rather than the run's apparent success.
 
 Workflow prompt steps can override that team default for just one step:
 
@@ -287,9 +287,9 @@ For Claude-backed teams, `model` can be an alias such as `haiku`, `sonnet`, or
 `opus`, or a full Claude model ID. Bobi passes provider-native model and
 effort strings to the selected backend; it does not translate them across
 providers, and it does not verify them: a wrong or unavailable value fails at
-runtime when the session starts its first turn, not at validate (`bobi agent
-<name> validate` does warn on effort values outside the known vendor tiers).
-Availability can depend
+runtime when the session starts its first turn, not at validate (config
+validation via `bobi agent <name> doctor` does warn on effort values outside
+the known vendor tiers). Availability can depend
 on the deployment's account and auth mode (Codex ChatGPT-plan auth, for
 example, rejects models an API key would accept), so prefer the provider's
 well-known names and the aliases above over exotic IDs.
