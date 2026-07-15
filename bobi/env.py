@@ -51,7 +51,7 @@ def pin_brain_from_root(
     """Pin the installed team's brain selection from *root* into *env*.
 
     The single place agent.yaml ``brain.*`` becomes process env (``BOBI_BRAIN``
-    / ``BOBI_BRAIN_MODEL`` / the gateway pins, #655), shared by
+    / ``BOBI_BRAIN_MODEL`` / ``BOBI_BRAIN_EFFORT`` / the gateway pins, #655), shared by
     ``child_agent_env`` and the spawned child's own re-pin at startup
     (``subagent.py``).
     """
@@ -60,6 +60,7 @@ def pin_brain_from_root(
     brain = _configured_brain(root, env)
     pin_process_brain(
         brain.get("kind", ""), brain.get("model", ""), env,
+        effort=brain.get("effort", ""),
         gateway_base_url=brain.get("base_url", ""),
         gateway_small_model=brain.get("small_model", ""),
     )

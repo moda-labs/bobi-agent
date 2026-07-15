@@ -60,6 +60,7 @@ _BRAIN_MODEL_ENV = "BOBI_BRAIN_MODEL"
 # Compatibility for older external code that imported the constant directly.
 # Bobi internals should use the helpers below so model env handling stays here.
 BRAIN_MODEL_ENV = _BRAIN_MODEL_ENV
+_BRAIN_EFFORT_ENV = "BOBI_BRAIN_EFFORT"
 
 
 def get_process_brain_model(
@@ -83,6 +84,22 @@ def _set_process_brain_model(
     _pin_env(os.environ if env is None else env, _BRAIN_MODEL_ENV, model)
 
 
+def get_process_brain_effort(
+    env: MutableMapping[str, str] | None = None,
+) -> str:
+    """Return the configured default reasoning effort for the process brain."""
+    lookup = os.environ if env is None else env
+    return lookup.get(_BRAIN_EFFORT_ENV, "")
+
+
+def _set_process_brain_effort(
+    effort: str | None,
+    env: MutableMapping[str, str] | None = None,
+) -> None:
+    """Pin or clear the process brain reasoning effort in *env*."""
+    _pin_env(os.environ if env is None else env, _BRAIN_EFFORT_ENV, effort)
+
+
 def with_default_model_option(options: dict | None) -> dict:
     """Return *options* with the process default model filled in if absent."""
     extra = dict(options or {})
@@ -93,9 +110,31 @@ def with_default_model_option(options: dict | None) -> dict:
     return extra
 
 
+def with_default_effort_option(options: dict | None) -> dict:
+    """Return *options* with the process default effort filled in if absent.
+
+    An empty effort is dropped rather than left in place: brain adapters splat
+    options into vendor session kwargs, and ``effort=""`` must never reach a
+    CLI that would render it as a literal flag value.
+    """
+    extra = dict(options or {})
+    if not extra.get("effort"):
+        effort = get_process_brain_effort()
+        if effort:
+            extra["effort"] = effort
+        else:
+            extra.pop("effort", None)
+    return extra
+
+
 def resolve_model_option(model: str | None) -> str:
     """Return an explicit model or the process default model."""
     return str(model or "") or get_process_brain_model()
+
+
+def resolve_effort_option(effort: str | None) -> str:
+    """Return an explicit reasoning effort or the process default effort."""
+    return str(effort or "") or get_process_brain_effort()
 
 
 def resolve_model(cfg, role: str | None = None, explicit: str | None = None) -> str:
@@ -116,6 +155,20 @@ def resolve_model(cfg, role: str | None = None, explicit: str | None = None) -> 
     return resolve_model_option(chosen)
 
 
+def resolve_effort(cfg, role: str | None = None, explicit: str | None = None) -> str:
+    """Resolve the reasoning effort for an agent launch (#778).
+
+    The exact sibling of :func:`resolve_model`: *explicit* (a launch flag or
+    caller override) > ``roles.<role>.effort`` from team config > the process
+    default (``brain.effort``, pinned as ``BOBI_BRAIN_EFFORT``) > "" (the
+    provider default). Values are provider-native strings, never translated.
+    """
+    chosen = str(explicit or "")
+    if not chosen and role and cfg is not None:
+        chosen = cfg.role_effort(role)
+    return resolve_effort_option(chosen)
+
+
 def _pin_env(
     target: MutableMapping[str, str], key: str, value: str | None,
 ) -> None:
@@ -131,10 +184,11 @@ def pin_process_brain(
     model: str | None,
     env: MutableMapping[str, str] | None = None,
     *,
+    effort: str | None = None,
     gateway_base_url: str = "",
     gateway_small_model: str = "",
 ) -> None:
-    """Pin the process brain kind and model into *env*, clearing stale values.
+    """Pin the process brain kind, model, and effort into *env*, clearing stale values.
 
     The gateway pins carry ``brain.base_url`` / ``brain.small_model`` for a
     ``kind: gateway`` team (#655); for any other kind they are cleared so a
@@ -143,6 +197,7 @@ def pin_process_brain(
     target = os.environ if env is None else env
     _pin_env(target, BRAIN_ENV, kind)
     _set_process_brain_model(model, env=target)
+    _set_process_brain_effort(effort, env=target)
     is_gateway = kind == "gateway"
     _pin_env(target, GATEWAY_BASE_URL_ENV,
              gateway_base_url if is_gateway else "")
@@ -154,6 +209,7 @@ def set_process_brain(
     kind: str | None,
     model: str | None = None,
     *,
+    effort: str | None = None,
     gateway_base_url: str = "",
     gateway_small_model: str = "",
 ) -> None:
@@ -170,9 +226,9 @@ def set_process_brain(
     if kind and not existing_kind:
         os.environ[BRAIN_ENV] = kind
         existing_kind = kind
-    # The model and gateway pins only apply when the configured brain IS the
-    # active one - a model-only config tunes the default brain, but neither it
-    # nor a gateway endpoint may cross onto an operator-overridden brain.
+    # The model/effort and gateway pins only apply when the configured brain IS
+    # the active one - a model-only config tunes the default brain, but neither
+    # it nor a gateway endpoint may cross onto an operator-overridden brain.
     # Within the active brain, first writer wins (an existing NON-EMPTY value
     # is an operator override; an empty string is treated as unset).
     config_matches_active_brain = (
@@ -183,6 +239,8 @@ def set_process_brain(
         return
     if model and not get_process_brain_model():
         _set_process_brain_model(model)
+    if effort and not get_process_brain_effort():
+        _set_process_brain_effort(effort)
     if kind == "gateway":
         for var, value in ((GATEWAY_BASE_URL_ENV, gateway_base_url),
                            (GATEWAY_SMALL_MODEL_ENV, gateway_small_model)):
@@ -201,6 +259,7 @@ def set_process_brain_from_config(cfg) -> None:
     """
     set_process_brain(
         cfg.brain_kind, cfg.brain_model,
+        effort=cfg.brain_effort,
         gateway_base_url=cfg.brain_base_url,
         gateway_small_model=cfg.brain_small_model,
     )
@@ -288,12 +347,16 @@ __all__ = [
     "GATEWAY_SMALL_MODEL_ENV",
     "continuation_token",
     "get_brain",
-    "known_brain_kinds",
+    "get_process_brain_effort",
     "get_process_brain_model",
+    "known_brain_kinds",
     "pin_process_brain",
+    "resolve_effort",
+    "resolve_effort_option",
     "resolve_model",
     "resolve_model_option",
     "set_process_brain",
     "set_process_brain_from_config",
+    "with_default_effort_option",
     "with_default_model_option",
 ]

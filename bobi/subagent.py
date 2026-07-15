@@ -125,6 +125,15 @@ def _resolve_launch_model(role: str, explicit: str = "", cfg=None) -> str:
     return resolve_model(cfg, role=role, explicit=explicit)
 
 
+def _resolve_launch_effort(role: str, explicit: str = "", cfg=None) -> str:
+    """Resolve the reasoning effort for a launch (#778), like ``_resolve_launch_model``."""
+    from bobi.brain import resolve_effort
+
+    if cfg is None and not explicit:
+        cfg = _load_team_config()
+    return resolve_effort(cfg, role=role, explicit=explicit)
+
+
 def _session_name(run_key: str, role: str = "", phase: str = "") -> str:
     prefix = role.lower() if role else "agent"
     if phase:
@@ -363,7 +372,9 @@ async def _run_agent_supervised(
     from bobi.brain import AssistantText, TurnResult, get_brain
 
     name = _session_name(run_key, role=role, phase=phase)
-    model = _resolve_launch_model(role)
+    _cfg = _load_team_config()
+    model = _resolve_launch_model(role, cfg=_cfg)
+    effort = _resolve_launch_effort(role, cfg=_cfg)
     saved_id = "" if fresh else load_resumable_session_id(name, model)
     registry = get_registry()
 
@@ -390,6 +401,7 @@ async def _run_agent_supervised(
             options={
                 "max_turns": max_turns, "hooks": hooks, "skills": "all",
                 **({"model": model} if model else {}),
+                **({"effort": effort} if effort else {}),
             },
         )
 
@@ -558,6 +570,7 @@ def run_phase_blocking(
     _cfg = _load_team_config()
     _mcp = _cfg.mcp_servers if _cfg else None
     model = _resolve_launch_model(role, cfg=_cfg)
+    effort = _resolve_launch_effort(role, cfg=_cfg)
 
     session = Session(
         name=name,
@@ -572,6 +585,7 @@ def run_phase_blocking(
             "max_turns": 200,
             **({"mcp_servers": _mcp} if _mcp else {}),
             **({"model": model} if model else {}),
+            **({"effort": effort} if effort else {}),
         },
     )
 
@@ -655,6 +669,7 @@ def spawn_adhoc(
     mcp_servers: dict | None = None,
     subscribe: list[str] | None = None,
     model: str = "",
+    effort: str = "",
 ) -> AgentResult:
     """Spawn an agent with a freeform task prompt.
 
@@ -664,8 +679,8 @@ def spawn_adhoc(
     ``subscribe`` adds event topics beyond the session's own ``inbox/<self>``
     (the manager passes its external resource topics here).
 
-    ``model`` is an explicit override (e.g. the launch flag); when empty the
-    role's configured model or the team default applies.
+    ``model`` and ``effort`` are explicit overrides (e.g. the launch flags);
+    when empty the role's configured value or the team default applies.
 
     With ``persistent=True`` the session stays alive after the initial
     task completes, accepting messages via its inbox until explicitly
@@ -714,6 +729,7 @@ def spawn_adhoc(
     _cfg = _load_team_config()
     merged_mcp = mcp_servers or (_cfg.mcp_servers if _cfg else None)
     model = _resolve_launch_model(role, explicit=model, cfg=_cfg)
+    effort = _resolve_launch_effort(role, explicit=effort, cfg=_cfg)
 
     session = Session(
         name=run_key,
@@ -728,6 +744,7 @@ def spawn_adhoc(
             "max_turns": 200,
             **({"mcp_servers": merged_mcp} if merged_mcp else {}),
             **({"model": model} if model else {}),
+            **({"effort": effort} if effort else {}),
         },
         role=role,
         subscribe=subscribe,
@@ -945,6 +962,7 @@ def launch_agent(
     run_key: str | None = None,
     input_fields: dict | None = None,
     model: str = "",
+    effort: str = "",
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
@@ -1006,6 +1024,7 @@ def launch_agent(
         "subscribe": subscribe or [],
         "input_fields": input_fields or {},
         "model": model,
+        "effort": effort,
     })
     script = (
         "import json, sys; "
@@ -1454,6 +1473,7 @@ def _run_agent_entry(args: dict) -> None:
     subscribe = args.get("subscribe", [])
     input_fields = args.get("input_fields", {})
     model = args.get("model", "")
+    effort = args.get("effort", "")
 
     from bobi.paths import bind_root, bobi_root
     # The spawner tells the child its installation root — identity is
@@ -1503,6 +1523,7 @@ def _run_agent_entry(args: dict) -> None:
             role=role,
             subscribe=subscribe,
             model=model,
+            effort=effort,
         )
         return
 
@@ -1529,6 +1550,7 @@ def _run_agent_entry(args: dict) -> None:
         role=role,
         input_fields=input_fields,
         model=model,
+        effort=effort,
     )
 
 

@@ -59,6 +59,23 @@ def test_reply_directive_sets_assistant_text(stub_enabled):
     assert msgs[-1].result_text == "pong"
 
 
+def test_options_directive_echoes_session_options(stub_enabled):
+    """`__stub__:options` replies with the scalar options make_session got -
+    the observability seam e2e tests use to prove a launch flag (model,
+    effort) actually reached the session (#778)."""
+    import json
+
+    session = get_brain("stub").make_session(
+        cwd=None, system_prompt=None,
+        options={"model": "stub-m", "effort": "xhigh", "max_turns": 200,
+                 "hooks": object()},
+    )
+    msgs = asyncio.run(_drain(session, "__stub__:options"))
+    texts = [m.text for m in msgs if isinstance(m, AssistantText)]
+    echoed = json.loads(texts[0])
+    assert echoed == {"model": "stub-m", "effort": "xhigh", "max_turns": 200}
+
+
 def test_error_directive_flags_turn(stub_enabled):
     session = get_brain("stub").make_session(cwd=None, system_prompt=None)
     msgs = asyncio.run(_drain(session, "__stub__:error"))

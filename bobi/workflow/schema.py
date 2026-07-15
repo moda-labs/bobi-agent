@@ -32,6 +32,7 @@ class StepDef:
     prompt: str = ""
     agent: str = ""
     model: str = ""
+    effort: str = ""
     handoff: HandoffContract = field(default_factory=HandoffContract)
     timeout: int = 1800
     worktree: bool = False
@@ -91,6 +92,7 @@ def load_workflow(path: Path) -> Workflow:
             prompt=s.get("prompt", ""),
             agent=s.get("agent", ""),
             model=s.get("model", ""),
+            effort=s.get("effort", ""),
             handoff=handoff,
             timeout=s.get("timeout", 1800),
             worktree=s.get("worktree", False),

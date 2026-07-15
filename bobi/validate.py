@@ -112,6 +112,8 @@ def validate_config(project_path: Path) -> ValidationResult:
     checks.append(_check_entry_point(cfg, project_path))
     checks.extend(_check_brain(cfg))
     checks.extend(_check_roles(cfg, project_path))
+    checks.extend(_check_effort(cfg))
+    checks.extend(_check_workflow_effort(cfg, project_path))
     checks.extend(_check_monitor_relevance(project_path))
     checks.extend(_check_service_credentials(cfg))
     checks.extend(_check_venn_services(cfg))
@@ -172,6 +174,108 @@ def _check_brain(cfg) -> list[CheckResult]:
 # always launch as role "monitor" (bobi/subagent.py run_check_blocking), so
 # roles.monitor.* is meaningful in every pack.
 _BUILTIN_ROLES = {"monitor"}
+
+# The union of reasoning-effort values across the known brains (#778), the
+# fallback when the configured brain does not declare its own accepted set
+# (BrainCapabilities.efforts). Effort is pass-through like model, so an
+# unknown value is only a warning here (the vendor CLIs grow new tiers).
+_KNOWN_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+
+def _accepted_efforts(cfg) -> set[str]:
+    """The effort values the configured brain accepts, else the union.
+
+    Each brain adapter declares its accepted set on ``capabilities.efforts``
+    (claude: low..max; codex: none..xhigh), so a cross-vendor value like
+    ``kind: codex`` + ``effort: max`` warns instead of hiding in the union.
+    An unknown/undeclared brain (gateway, stub) falls back to the union.
+    """
+    from bobi.brain import get_brain
+
+    try:
+        efforts = get_brain(cfg.brain_kind or None).capabilities.efforts
+    except Exception:
+        efforts = frozenset()
+    return set(efforts) or set(_KNOWN_EFFORTS)
+
+
+def _check_effort(cfg) -> list[CheckResult]:
+    """Warn on unrecognized `effort:` values (#778).
+
+    A wrong value never fails at validate: codex 400s at the first turn,
+    and the claude CLI warns and silently runs on its default effort - the
+    worst failure mode, because the run LOOKS fine. So surface likely typos
+    here. Warnings, never blocking: the accepted set is a snapshot of
+    today's vendor tiers, not an allowlist.
+    """
+    # Presence-based, not truthiness: `effort: no` (YAML False) or `effort: 0`
+    # is a malformed value the runtime silently drops (str(value or "") -> ""),
+    # exactly what this check must catch. None/"" mean "unset" and pass.
+    def _configured(entry: dict) -> object | None:
+        value = entry.get("effort")
+        return None if value is None or value == "" else value
+
+    found: list[tuple[str, object]] = []
+    if isinstance(cfg.brain, dict) and _configured(cfg.brain) is not None:
+        found.append(("brain.effort", cfg.brain["effort"]))
+    if isinstance(cfg.roles, dict):
+        for name, entry in cfg.roles.items():
+            if isinstance(entry, dict) and _configured(entry) is not None:
+                found.append((f"roles.{name}.effort", entry["effort"]))
+
+    accepted = _accepted_efforts(cfg)
+    brain_label = cfg.brain_kind or "claude"
+    checks = []
+    for label, value in found:
+        if not isinstance(value, str) or value not in accepted:
+            checks.append(CheckResult(
+                label, ok=False, required=False,
+                detail=f"effort {value!r} is not accepted by the "
+                       f"{brain_label} brain",
+                hint=f"accepted values: {', '.join(sorted(accepted))}",
+            ))
+    return checks
+
+
+def _check_workflow_effort(cfg, project_path: Path) -> list[CheckResult]:
+    """Warn on unrecognized step-level `effort:` in workflow YAMLs (#778).
+
+    The step field rides the same pass-through contract as the config-level
+    values `_check_effort` covers, and fails the same silent way at runtime,
+    so it gets the same typo warning. Malformed workflow files are skipped -
+    they surface through the workflow loader's own paths.
+    """
+    import yaml as _yaml
+
+    from bobi import paths
+
+    wf_dir = paths.workflows_dir(project_path)
+    if not wf_dir.is_dir():
+        return []
+
+    accepted = _accepted_efforts(cfg)
+    brain_label = cfg.brain_kind or "claude"
+    checks = []
+    for wf_path in sorted(wf_dir.glob("*.yaml")):
+        try:
+            raw = _yaml.safe_load(wf_path.read_text()) or {}
+        except Exception:
+            continue
+        for step in raw.get("steps", []) if isinstance(raw, dict) else []:
+            if not isinstance(step, dict):
+                continue
+            value = step.get("effort")
+            if value is None or value == "":
+                continue
+            if not isinstance(value, str) or value not in accepted:
+                label = f"{wf_path.name}:{step.get('name', '?')}.effort"
+                checks.append(CheckResult(
+                    label, ok=False, required=False,
+                    detail=f"effort {value!r} is not accepted by the "
+                           f"{brain_label} brain",
+                    hint=f"accepted values: {', '.join(sorted(accepted))}",
+                ))
+    return checks
 
 
 def _check_roles(cfg, project_path: Path) -> list[CheckResult]:

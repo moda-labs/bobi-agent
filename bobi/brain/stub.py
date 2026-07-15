@@ -22,6 +22,10 @@ text and lifecycle that come back - the bidirectional seam.
 Directives:
   ``__stub__:idle``          complete the turn (the default) -> manager idle.
   ``__stub__:reply:<text>``  complete, using ``<text>`` as the assistant reply.
+  ``__stub__:options``       complete, replying with a JSON dump of the scalar
+                             session options ``make_session`` received - lets
+                             an e2e prove a launch flag (model, effort) reached
+                             the session (#778).
   ``__stub__:hang[:<secs>]`` stall the turn ``<secs>`` seconds (default: long
                              enough to trip wedge detection) before completing,
                              so the manager reads as ``running``/``wedged``.
@@ -76,10 +80,13 @@ class _StubSession:
 
     provider = "stub"
 
-    def __init__(self, resume: str | None = None) -> None:
+    def __init__(
+        self, resume: str | None = None, options: dict | None = None,
+    ) -> None:
         # The resume token echoes back on every TurnResult so a resumed session
         # keeps a stable id, matching how a real brain threads session_id.
         self._session_id = resume or "stub-session"
+        self._options = options or {}
         self._pending: str | None = None
 
     async def connect(self, prompt: str | None = None) -> None:
@@ -107,7 +114,20 @@ class _StubSession:
         if verb == "hang":
             await asyncio.sleep(_float_arg(arg, _DEFAULT_HANG_SECONDS))
 
-        reply = arg if verb == "reply" else f"stub ack: {(self._pending or '').strip()[:120]}"
+        if verb == "options":
+            # Echo the scalar session options make_session received - the
+            # observability seam for e2e tests proving a launch flag or
+            # config value (model, effort) actually reached the session.
+            import json
+            reply = json.dumps(
+                {k: v for k, v in self._options.items()
+                 if isinstance(v, (str, int, bool))},
+                sort_keys=True,
+            )
+        elif verb == "reply":
+            reply = arg
+        else:
+            reply = f"stub ack: {(self._pending or '').strip()[:120]}"
         yield AssistantText(text=reply, usage=None)
         yield TurnResult(
             session_id=self._session_id,
@@ -153,7 +173,7 @@ class StubBrain:
         options: dict | None = None,
     ) -> BrainSession:
         self._guard()
-        return _StubSession(resume=resume)
+        return _StubSession(resume=resume, options=options)
 
     async def stream_once(
         self,

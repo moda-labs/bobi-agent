@@ -188,6 +188,7 @@ class _CodexSession:
         instructions: str,
         resume: str | None = None,
         model: str = "",
+        effort: str = "",
         runner=None,
         mcp_servers: dict | None = None,
         mcp_env: dict[str, str] | None = None,
@@ -196,6 +197,7 @@ class _CodexSession:
         self._instructions = instructions
         self._thread_id = resume or None
         self._model = model
+        self._effort = effort
         self._runner = runner or _spawn_codex
         self._pending: str | None = None
         # Effective MCP servers (rendered into config.toml at make_session).
@@ -241,6 +243,8 @@ class _CodexSession:
         flags = list(_EXEC_FLAGS)
         if self._model:
             flags += ["-m", self._model]
+        if self._effort:
+            flags += ["-c", f"model_reasoning_effort={self._effort}"]
         if self._thread_id:
             # `resume` has a narrower flag set (no -C/--sandbox); cwd comes from
             # the subprocess cwd. The bypass/skip flags are accepted here too.
@@ -315,7 +319,14 @@ class CodexBrain:
     # gpt-5.4 then gpt-5.5, and the resumed turn recalled conversation-only
     # state. Note the usable model set depends on the account's auth mode
     # (ChatGPT-plan auth rejects some models with a 400 at turn start).
-    capabilities = BrainCapabilities(cross_model_resume=True)
+    # Efforts per the OpenAI API's ReasoningEffortParam enum (verified live
+    # 2026-07-14 on codex-cli 0.144.4: an unknown value 400s at turn start).
+    capabilities = BrainCapabilities(
+        cross_model_resume=True,
+        efforts=frozenset(
+            {"none", "minimal", "low", "medium", "high", "xhigh"}
+        ),
+    )
 
     def make_session(
         self,
@@ -325,10 +336,11 @@ class CodexBrain:
         resume: str | None = None,
         options: dict | None = None,
     ) -> BrainSession:
-        from bobi.brain import resolve_model_option
+        from bobi.brain import resolve_effort_option, resolve_model_option
 
         opts = options or {}
         model = resolve_model_option(str(opts.get("model", "") or ""))
+        effort = resolve_effort_option(str(opts.get("effort", "") or ""))
         # Codex reads MCP servers from ~/.codex/config.toml, not from the CLI
         # invocation, so render the team's effective mcp_servers to disk before
         # the session's first `codex exec`. Render when there is a set to write OR
@@ -349,8 +361,9 @@ class CodexBrain:
             instructions=_instructions(system_prompt),
             resume=resume,
             # Claude-specific options (skills/hooks/permission_mode/max_turns)
-            # don't apply to Codex; only a model override is honored.
+            # don't apply to Codex; only model and effort overrides are honored.
             model=model,
+            effort=effort,
             mcp_servers=mcp_servers,
             mcp_env=opts.get("env") if isinstance(opts.get("env"), dict) else None,
         )

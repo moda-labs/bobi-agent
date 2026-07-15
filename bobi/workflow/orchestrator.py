@@ -160,11 +160,12 @@ def run_workflow(
     role: str = "",
     input_fields: dict | None = None,
     model: str = "",
+    effort: str = "",
 ) -> bool:
     """Execute a workflow end-to-end with a single agent session.
 
-    ``model`` is an explicit launch override: like ``--role``, it wins over
-    every step-level and config-level model for the whole run.
+    ``model`` and ``effort`` are explicit launch overrides: like ``--role``,
+    each wins over every step-level and config-level value for the whole run.
     """
     run_key = run_key or "adhoc"
     requested_by = requested_by or {}
@@ -214,7 +215,7 @@ def run_workflow(
         _run_workflow_async(
             workflow, task, repo, work_cwd, run_key, session_name,
             registry, ctx, requested_by, timeout, interactive, role=role,
-            launch_model=model,
+            launch_model=model, launch_effort=effort,
         )
     )
 
@@ -292,21 +293,23 @@ def resume_workflow(
         "text": f"Workflow {workflow.name} resumed for {run_key}",
     })
 
-    # A launch-time --model override survives suspension via the _runtime
-    # scope; without it the resume would re-resolve to the config default,
-    # trip the model-mismatch guard, and both discard the saved session and
-    # silently change the run's model.
+    # A launch-time --model/--effort override survives suspension via the
+    # _runtime scope; without it the resume would re-resolve to the config
+    # default - for the model that would trip the mismatch guard, discard the
+    # saved session, and silently change the run's model; for the effort it
+    # would silently change the run's dial.
     runtime_scope = run.variable_scopes.get("_runtime", {})
-    launch_model = (
-        str(runtime_scope.get("launch_model", "") or "")
-        if isinstance(runtime_scope, dict) else ""
-    )
+    if not isinstance(runtime_scope, dict):
+        runtime_scope = {}
+    launch_model = str(runtime_scope.get("launch_model", "") or "")
+    launch_effort = str(runtime_scope.get("launch_effort", "") or "")
 
     success = asyncio.run(
         _run_workflow_async(
             workflow, f"Resuming workflow from step {step_idx}", repo, cwd,
             run_key, session_name, registry, ctx, requested_by, timeout,
             interactive, start_step=step_idx, launch_model=launch_model,
+            launch_effort=launch_effort,
         )
     )
 
@@ -350,10 +353,12 @@ async def _run_workflow_async(
     start_step: int = 0,
     role: str = "",
     launch_model: str = "",
+    launch_effort: str = "",
 ) -> bool:
     """Async core: one brain session for all steps."""
     from bobi.brain import (
-        continuation_token, get_brain, get_process_brain_model, resolve_model,
+        continuation_token, get_brain, get_process_brain_model,
+        resolve_effort, resolve_model,
     )
 
     _brain = get_brain()
@@ -379,6 +384,16 @@ async def _run_workflow_async(
             return step.model
         step_role = role or ((step.agent if step else "") or current_agent)
         return resolve_model(team_cfg, role=step_role)
+
+    def _effective_step_effort(step: StepDef | None) -> str:
+        # The reasoning-effort sibling of _effective_step_model (#778), same
+        # precedence: launch flag > step override > role > team default.
+        if launch_effort:
+            return launch_effort
+        if step and step.effort:
+            return step.effort
+        step_role = role or ((step.agent if step else "") or current_agent)
+        return resolve_effort(team_cfg, role=step_role)
 
     def _is_prompt_step(step: StepDef) -> bool:
         return not (
@@ -406,7 +421,7 @@ async def _run_workflow_async(
             "```"
         )
 
-    def _make_session(resume_id=None, agent_name="", model=""):
+    def _make_session(resume_id=None, agent_name="", model="", effort=""):
         from bobi.runtime_guard import prepare_brain_runtime
 
         prepare_brain_runtime()
@@ -419,6 +434,8 @@ async def _run_workflow_async(
         options = {"max_turns": 200, "skills": "all"}
         if model:
             options["model"] = model
+        if effort:
+            options["effort"] = effort
 
         return _brain.make_session(
             cwd=cwd,
@@ -455,6 +472,10 @@ async def _run_workflow_async(
     current_agent = first_agent
     first_prompt_step = _first_prompt_step()
     first_prompt_model = _effective_step_model(first_prompt_step)
+    # Effort is exempt from the resume guard (#778): both brains accept a new
+    # effort on a resumed session, so the effective dial is simply recomputed
+    # for the next step - no saved-effort record, no continue-vs-fresh check.
+    current_effort = _effective_step_effort(first_prompt_step)
     runtime_scope = ctx.scopes.get("_runtime", {})
     saved_session_model = (
         str(runtime_scope.get("model", "") or "")
@@ -517,6 +538,7 @@ async def _run_workflow_async(
         resume_id = (saved_id or None) if attempt == 0 else None
         client = _make_session(
             resume_id, agent_name=current_agent, model=current_model,
+            effort=current_effort,
         )
         try:
             if resume_id:
@@ -665,6 +687,7 @@ async def _run_workflow_async(
                 ctx.set_scope("_runtime", {
                     "model": current_model,
                     "launch_model": launch_model,
+                    "launch_effort": launch_effort,
                     "visits": visit_counts,
                 })
                 run.variable_scopes = ctx.scopes
@@ -694,14 +717,21 @@ async def _run_workflow_async(
             registry.update(session_name, phase=step.name)
 
             step_model = _effective_step_model(step)
-            if step_model != current_model:
+            step_effort = _effective_step_effort(step)
+            if step_model != current_model or step_effort != current_effort:
                 # Continue the live session natively on the new model when
                 # the brain supports it (#642); otherwise fresh + re-inject
                 # the workflow scopes as YAML (lossy fallback). An agent
-                # change always starts fresh: the new agent must not inherit
-                # the previous agent's transcript under its system prompt
-                # (e.g. a reviewer step contaminated by the builder's
-                # reasoning).
+                # change entering this branch starts fresh: the new agent
+                # must not inherit the previous agent's transcript under its
+                # system prompt (e.g. a reviewer step contaminated by the
+                # builder's reasoning; an agent change with identical dials
+                # never enters the branch - a pre-existing gap in that
+                # isolation, not one this condition can close). An
+                # effort-only change is exempt from the resume guard (#778):
+                # continuation_token sees the same model on both sides, so
+                # whenever a resumable session id exists the session just
+                # reconnects natively under the new dial.
                 next_agent = (
                     current_agent if role else (step.agent or current_agent)
                 )
@@ -712,9 +742,12 @@ async def _run_workflow_async(
                         from_model=current_model, to_model=step_model,
                     )
                 log.info(
-                    "Step %s: switching model from %r to %r (%s)",
+                    "Step %s: switching session options (model %r -> %r, "
+                    "effort %r -> %r): %s",
                     step.name, current_model or "<default>",
                     step_model or "<default>",
+                    current_effort or "<default>",
+                    step_effort or "<default>",
                     "native resume" if token else "fresh session",
                 )
                 try:
@@ -722,11 +755,12 @@ async def _run_workflow_async(
                 except Exception:
                     pass
                 current_model = step_model
+                current_effort = step_effort
                 current_agent = next_agent
                 if token:
                     client = _make_session(
                         resume_id=token, agent_name=current_agent,
-                        model=current_model,
+                        model=current_model, effort=current_effort,
                     )
                     try:
                         await client.connect(None)
@@ -746,7 +780,7 @@ async def _run_workflow_async(
                 if not token:
                     client = _make_session(
                         resume_id=None, agent_name=current_agent,
-                        model=current_model,
+                        model=current_model, effort=current_effort,
                     )
                     await client.connect(_continuation_prompt(step))
                     _, drain_error = await _drain_response(
