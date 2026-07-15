@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.45.0 - 2026-07-15
+
+Minor release: reasoning-effort selection lands as the sibling of per-role
+model selection, teams can ship global engineering instructions that render
+brain-natively at boot (and eng-team now ships the house rules), and a new
+`gateway-openai` brain kind targets OpenAI-compatible gateways.
+
+### Added
+- **Reasoning-effort selection (#778, PR #782).** Agents choose model + effort
+  per delegation with the same precedence shape as #617 model selection:
+  `--effort` launch flag > workflow step `effort:` > `roles.<role>.effort` >
+  `brain.effort` (`BOBI_BRAIN_EFFORT`) > provider default. Values are
+  pass-through and brain-native: codex renders
+  `-c model_reasoning_effort=<v>` (works on `exec` and `exec resume`), claude
+  passes `ClaudeAgentOptions(effort=...)`. Brains declare accepted efforts on
+  `BrainCapabilities.efforts`, and doctor/agent-start validation warns (never
+  blocks) on config, role, and workflow-step values the configured brain does
+  not accept — the only early signal for claude brains, whose CLI
+  warns-and-ignores invalid efforts. Effort is exempt from the cross-model
+  resume guard: an effort-only step change reconnects the same session
+  natively. `--effort` under `--as-check` is rejected with a clear error
+  (previously `--model` was silently ignored there too; now both error).
+- **Team-shipped global instructions (#779, PR #783).** A team package ships a
+  root-level `AGENTS.md` (frozen to `run/package/AGENTS.md`), and at process
+  bootstrap it renders into every path the active brain auto-loads:
+  `~/AGENTS.md` always, `$CODEX_HOME/AGENTS.md` for codex,
+  `$CLAUDE_CONFIG_DIR/CLAUDE.md` for claude/gateway. Rendering uses a
+  sentinel-delimited managed block — foreign content (including Claude's own
+  `#`-memory writes) survives verbatim, writes are atomic and idempotent, a
+  team dropping the file removes its block, and a brain-kind switch cleans the
+  previous brain's target. Compose semantics are per-file REPLACE: the last
+  layer shipping `AGENTS.md` wins wholesale; an overlay ships an empty file to
+  neutralize inherited rules.
+- **eng-team ships the house engineering rules (#779, PR #784).** The general
+  engineering standards (bug-fix discipline, testing standards, proof-of-work
+  requirements, writing style, commit/release rules) move from the operator's
+  unversioned `~/AGENTS.md` into `agents/eng-team/AGENTS.md`, so every
+  `from: eng-team` overlay inherits them under version pins. eng-team
+  `1.1.4` -> `1.2.0`.
+- **`gateway-openai` brain (#777, PR #781).** New `brain.kind: gateway-openai`
+  backed by Codex CLI provider overrides, for OpenAI-compatible gateways.
+  Threads the gateway base URL and wire-API pins through config/env/process
+  setup with validation for a missing base URL or invalid wire API, and
+  updates codex tool-library verification, subscription bootstrap, and chat
+  history dispatch for the new kind.
+
 ## 0.44.1 - 2026-07-14
 
 Patch release: unblock the 0.44.0 fleet rollout. The 0.44.0 private release
