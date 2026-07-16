@@ -259,7 +259,7 @@ class TestChildAgentEnv:
         assert env["BOBI_BRAIN"] == "gateway-openai"
         assert env["BOBI_BRAIN_MODEL"] == "gpt-5.5"
         assert env["BOBI_GATEWAY_BASE_URL"] == "http://localhost:9000/v1"
-        assert env["BOBI_GATEWAY_WIRE_API"] == "chat"
+        assert env["BOBI_GATEWAY_WIRE_API"] == "responses"
         assert "BOBI_GATEWAY_SMALL_MODEL" not in env
 
     def test_brain_interpolation_matches_config_semantics(

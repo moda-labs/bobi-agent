@@ -42,7 +42,7 @@ def gateway_openai_overrides() -> list[str]:
     from bobi.brain.gateway import require_gateway_base_url
 
     base_url = require_gateway_base_url()
-    wire_api = os.environ.get(GATEWAY_WIRE_API_ENV, "") or "chat"
+    wire_api = os.environ.get(GATEWAY_WIRE_API_ENV, "") or "responses"
     return [
         f"model_provider={_toml_string(_PROVIDER_ID)}",
         f"model_providers.{_PROVIDER_ID}.name={_toml_string('bobi gateway')}",

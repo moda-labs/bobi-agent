@@ -57,6 +57,27 @@ class TestCheckProjectConfig:
         assert "missing" in r.detail
 
 
+class TestCheckServices:
+    def test_explicit_codex_chat_wire_api_is_warning(self, tmp_path):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "agent: local-team\n"
+            "brain:\n"
+            "  kind: codex\n"
+            "  base_url: http://localhost:9000/v1\n"
+            "  wire_api: chat\n"
+        )
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_services
+            checks = _check_services()
+
+        warning = next(c for c in checks if c.name == "brain.gateway_openai")
+        assert not warning.ok
+        assert not warning.required
+        assert "wire_api: chat" in warning.detail
+        assert "LiteLLM" in warning.hint
+
+
 # --- Team policy ---
 
 class TestCheckPolicy:

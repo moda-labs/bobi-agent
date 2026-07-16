@@ -326,6 +326,18 @@ class TestCheckBrain:
             assert not results[0].ok
             assert "wire_api" in results[0].detail
 
+    def test_codex_gateway_explicit_chat_wire_api_warns(self):
+        cfg = Config(brain={"kind": "codex",
+                            "base_url": "http://localhost:9000/v1",
+                            "wire_api": "chat"})
+        results = self._gateway_results(cfg)
+        assert len(results) == 1
+        assert not results[0].ok
+        assert not results[0].required
+        assert "wire_api: chat" in results[0].detail
+        assert "LiteLLM" in results[0].hint
+        assert "kind: claude" in results[0].hint
+
     def test_base_url_on_non_engine_kind_warns_ignored(self):
         cfg = Config(brain={"kind": "stub",
                             "base_url": "http://localhost:4000"})
@@ -665,6 +677,26 @@ class TestValidateConfig:
         email = next(c for c in result.checks if c.name == "email")
         assert not email.ok
         assert email.required is False
+
+    def test_explicit_codex_chat_wire_api_warns_without_blocking(self, tmp_path):
+        config_dir = tmp_path / "package"
+        config_dir.mkdir()
+        (config_dir / "agent.yaml").write_text(dedent("""\
+            agent: local-team
+            brain:
+              kind: codex
+              base_url: http://localhost:9000/v1
+              wire_api: chat
+        """))
+
+        result = validate_config(tmp_path)
+
+        assert result.ok is True
+        warning = next(c for c in result.checks if c.name == "brain.gateway_openai")
+        assert not warning.ok
+        assert warning.required is False
+        assert "wire_api: chat" in warning.detail
+        assert "LiteLLM" in warning.hint
 
     def test_pack_with_required_venn_service_blocks(self, tmp_path):
         # Mirrors the dogfood-content-review decision (#329 / PR #405): a venn

@@ -263,12 +263,19 @@ brain:
   kind: codex
   base_url: ${LLM_GATEWAY_URL}   # required; OpenAI-compatible /v1 endpoint
   model: gpt-5.5                # gateway-native model id
-  wire_api: chat                # optional: chat (default) or responses
+  wire_api: responses           # optional: responses (default)
 ```
 
 If the OpenAI-compatible gateway needs auth, put `BOBI_GATEWAY_API_KEY` in the
 runtime `.env`. Bobi configures Codex to read that dedicated key and never sends
 an ambient real `OPENAI_API_KEY` to the gateway.
+
+Current Codex builds use the Responses API for custom providers.
+Bobi keeps `wire_api: chat` as a pass-through for deliberately pinned older
+Codex builds, but `bobi agent <name> doctor` warns on it.
+For a chat-completions-only OpenAI-compatible gateway, front it with LiteLLM so
+Codex can call `/v1/responses`, or use `kind: claude` + `base_url` when the
+backend exposes an Anthropic-compatible endpoint.
 
 The pre-0.46 spellings `kind: gateway` and `kind: gateway-openai` remain
 accepted aliases for exactly these two configurations (`bobi agent <name>

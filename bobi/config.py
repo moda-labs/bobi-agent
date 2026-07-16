@@ -346,7 +346,8 @@ class Config:
     # claude|codex, model: <optional override>, effort: <optional reasoning
     # effort>}`. Setting `base_url` points the engine at a gateway endpoint
     # (#655/#777/#789): a claude engine additionally takes `small_model`, a
-    # codex engine `wire_api` (chat|responses, default chat). The deprecated
+    # codex engine `wire_api` (responses by default; chat remains a pass-through
+    # escape hatch for pinned older Codex builds). The deprecated
     # kinds `gateway`/`gateway-openai` remain accepted aliases for
     # claude/codex-with-base_url. Empty = the framework default (claude).
     brain: dict = field(default_factory=dict)
@@ -411,8 +412,8 @@ class Config:
 
     @property
     def brain_wire_api(self) -> str:
-        """The OpenAI-compatible gateway wire API (#777), defaulting to chat."""
-        return str((self.brain or {}).get("wire_api", "") or "chat")
+        """The OpenAI-compatible gateway wire API (#777), defaulting to responses."""
+        return str((self.brain or {}).get("wire_api", "") or "responses")
 
     def role_model(self, role: str) -> str:
         """The model configured for *role*, or "" when unconfigured."""
