@@ -116,6 +116,41 @@ class TestKBSearch:
         assert "does not exist" in result.output
 
 
+class TestRecallMemory:
+    def test_recall_memory_searches_cold_kb(self, runner, setup_project_root):
+        runner.invoke(main, ["agent", "test", "kb", "create", "long_term_memory"])
+        with patch("bobi.kb.embedder.embed", return_value=[[0.1] * 384]):
+            runner.invoke(
+                main,
+                [
+                    "agent", "test", "kb", "add", "long_term_memory",
+                    "--text", "Cold memory says use the release runbook",
+                ],
+            )
+            result = runner.invoke(
+                main,
+                ["agent", "test", "recall-memory", "release runbook", "--limit", "3"],
+            )
+
+        assert result.exit_code == 0
+        assert "release runbook" in result.output
+
+    def test_recall_memory_without_index_is_empty(self, runner, setup_project_root):
+        result = runner.invoke(main, ["agent", "test", "recall-memory", "anything"])
+
+        assert result.exit_code == 0
+        assert "No cold memory index yet" in result.output
+
+    def test_recall_memory_rejects_negative_limit(self, runner, setup_project_root):
+        result = runner.invoke(
+            main,
+            ["agent", "test", "recall-memory", "anything", "--limit", "-1"],
+        )
+
+        assert result.exit_code != 0
+        assert "Invalid value for '--limit'" in result.output
+
+
 # ---------------------------------------------------------------------------
 # kb list
 # ---------------------------------------------------------------------------

@@ -277,6 +277,194 @@ class TestSearchHybrid:
             assert "score" in results[0]
             assert results[0]["score"] > 0
 
+    def test_search_returns_metadata(self, store):
+        store.add_text(
+            "Memory recall should include provenance",
+            source="workspace/memory/reference.md",
+            metadata={"category": "fact", "source_session": "sleep-cycle"},
+            embed_fn=_mock_embed,
+        )
+
+        results = store.search("provenance", embed_fn=_mock_embed)
+
+        assert results[0]["metadata"] == {
+            "category": "fact",
+            "source_session": "sleep-cycle",
+        }
+        assert results[0]["source_hash"]
+
+
+@requires_kb
+class TestDedup:
+    def test_exact_dedup_by_source_hash_keeps_newest_chunk_set(self, store):
+        first = store.add_text("Same full document", source="old.md")
+        second = store.add_text("Same full document", source="new.md")
+
+        result = store.dedup_exact_by_source_hash()
+
+        assert result == {"deduped": len(first)}
+        conn = store._connect()
+        rows = _fetchall(conn, "SELECT id, source FROM entries ORDER BY id")
+        conn.close()
+        assert [r["id"] for r in rows] == second
+        assert {r["source"] for r in rows} == {"new.md"}
+
+    def test_semantic_dedup_merges_high_similarity_and_flags_gray_zone(self, store):
+        ids = store.add_text("alpha preference", source="a.md")
+        ids += store.add_text("alpha preference copy", source="b.md")
+        ids += store.add_text("alpha related but not identical", source="c.md")
+
+        vectors = {
+            ids[0]: [1.0] + [0.0] * (EMBEDDING_DIM - 1),
+            ids[1]: [0.98] + [0.0] * (EMBEDDING_DIM - 1),
+            ids[2]: [0.88] + [0.0] * (EMBEDDING_DIM - 1),
+        }
+
+        def fake_near(entry_id, limit=5, min_similarity=0.85):
+            return [
+                {"id": other, "similarity": 1.0 - abs(vectors[entry_id][0] - vector[0])}
+                for other, vector in vectors.items()
+                if other != entry_id and 1.0 - abs(vectors[entry_id][0] - vector[0]) >= min_similarity
+            ]
+
+        with patch.object(store, "near_duplicates", side_effect=fake_near):
+            result = store.dedup_semantic(auto_merge_threshold=0.95, flag_threshold=0.85)
+
+        assert result["merged"] == 1
+        assert result["flagged"] >= 1
+        conn = store._connect()
+        rows = _fetchall(conn, "SELECT id, metadata FROM entries ORDER BY id")
+        conn.close()
+        assert ids[0] not in [r["id"] for r in rows]
+        survivor = next(r for r in rows if r["id"] == ids[1])
+        assert json.loads(survivor["metadata"])["merged_from"][0]["id"] == ids[0]
+
+    def test_semantic_dedup_does_not_merge_same_document_chunks(self, store):
+        para = "alpha preference " * 20
+        ids = store.add_text(f"{para}\n\n{para} copy", source="reference.md")
+
+        def fake_near(entry_id, limit=5, min_similarity=0.85):
+            return [
+                {"id": other, "similarity": 0.99}
+                for other in ids
+                if other != entry_id
+            ]
+
+        with patch.object(store, "near_duplicates", side_effect=fake_near):
+            result = store.dedup_semantic(auto_merge_threshold=0.95, flag_threshold=0.85)
+
+        assert result["merged"] == 0
+        conn = store._connect()
+        rows = _fetchall(conn, "SELECT id FROM entries ORDER BY id")
+        conn.close()
+        assert [r["id"] for r in rows] == ids
+
+
+@requires_kb
+class TestColdMemorySync:
+    def test_indexes_reference_and_noops_when_unchanged(self, tmp_path):
+        from bobi.memory import (
+            COLD_MEMORY_REFERENCE_SOURCE,
+            cold_memory_kb_path,
+            sync_reference_to_cold_memory_kb,
+        )
+
+        reference = tmp_path / "workspace" / "memory" / "reference.md"
+        reference.parent.mkdir(parents=True)
+        reference.write_text("Header\n\n## Tools\n\n- use the release runbook\n")
+
+        first = sync_reference_to_cold_memory_kb(
+            tmp_path,
+            reference,
+            source_session="sleep-cycle",
+            embed_fn=_mock_embed,
+        )
+        second = sync_reference_to_cold_memory_kb(
+            tmp_path,
+            reference,
+            source_session="sleep-cycle",
+            embed_fn=_mock_embed,
+        )
+
+        assert first["indexed"] == 1
+        assert second["indexed"] == 0
+        store = KBStore("long_term_memory", db_path=cold_memory_kb_path(tmp_path))
+        conn = store._connect()
+        rows = _fetchall(conn, "SELECT source, metadata FROM entries")
+        conn.close()
+        assert rows[0]["source"] == COLD_MEMORY_REFERENCE_SOURCE
+        assert json.loads(rows[0]["metadata"])["source_session"] == "sleep-cycle"
+
+    def test_unchanged_reference_repairs_missing_chunks(self, tmp_path):
+        from bobi.memory import cold_memory_kb_path, sync_reference_to_cold_memory_kb
+
+        reference = tmp_path / "workspace" / "memory" / "reference.md"
+        reference.parent.mkdir(parents=True)
+        para = "release runbook detail " * 20
+        reference.write_text(f"Header\n\n## Tools\n\n{para}\n\n{para} more\n")
+
+        sync_reference_to_cold_memory_kb(
+            tmp_path,
+            reference,
+            source_session="sleep-cycle",
+            embed_fn=_mock_embed,
+        )
+        store = KBStore("long_term_memory", db_path=cold_memory_kb_path(tmp_path))
+        conn = store._connect()
+        first_id = _fetchone(conn, "SELECT id FROM entries ORDER BY id")["id"]
+        store._delete_entry_ids(conn, [first_id])
+        before = _fetchval(conn, "SELECT COUNT(*) FROM entries")
+        conn.close()
+
+        result = sync_reference_to_cold_memory_kb(
+            tmp_path,
+            reference,
+            source_session="sleep-cycle",
+            embed_fn=_mock_embed,
+        )
+
+        assert result["indexed"] > 0
+        store = KBStore("long_term_memory", db_path=cold_memory_kb_path(tmp_path))
+        conn = store._connect()
+        after = _fetchval(conn, "SELECT COUNT(*) FROM entries")
+        conn.close()
+        assert after > before
+
+    def test_unchanged_reference_repairs_missing_vectors(self, tmp_path):
+        from bobi.memory import (
+            cold_memory_kb_needs_sync,
+            cold_memory_kb_path,
+            sync_reference_to_cold_memory_kb,
+        )
+
+        reference = tmp_path / "workspace" / "memory" / "reference.md"
+        reference.parent.mkdir(parents=True)
+        reference.write_text("Header\n\n## Tools\n\n- release runbook detail\n")
+        sync_reference_to_cold_memory_kb(
+            tmp_path,
+            reference,
+            source_session="sleep-cycle",
+            embed_fn=_mock_embed,
+        )
+        store = KBStore("long_term_memory", db_path=cold_memory_kb_path(tmp_path))
+        conn = store._connect()
+        conn.execute("DELETE FROM entries_vec")
+        conn.close()
+
+        assert cold_memory_kb_needs_sync(tmp_path, reference) is True
+        result = sync_reference_to_cold_memory_kb(
+            tmp_path,
+            reference,
+            source_session="sleep-cycle",
+            embed_fn=_mock_embed,
+        )
+
+        assert result["indexed"] == 1
+        store = KBStore("long_term_memory", db_path=cold_memory_kb_path(tmp_path))
+        conn = store._connect()
+        assert _fetchval(conn, "SELECT COUNT(*) FROM entries_vec") == 1
+        conn.close()
+
 
 # ---------------------------------------------------------------------------
 # RRF merge

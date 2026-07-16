@@ -341,6 +341,36 @@ class TestCuratorDispatch:
             h.sched._spawn_curator(monitor, [tmp_path])
         assert h.captured == {}  # nothing dispatched
 
+    def test_idle_tick_backfills_existing_reference_kb(
+        self, tmp_path, monitor, monkeypatch
+    ):
+        from bobi import paths
+
+        reference = paths.workspace_dir(tmp_path) / "memory" / "reference.md"
+        reference.parent.mkdir(parents=True)
+        reference.write_text("Header\n\n## Tools\n\n- existing cold detail\n")
+        calls = []
+
+        monkeypatch.setattr(
+            "bobi.memory.cold_memory_kb_needs_sync",
+            lambda root, reference_path: True,
+        )
+
+        def fake_sync(root, reference_path, *, source_session, embed_fn=None):
+            calls.append((root, reference_path, source_session))
+            return {"indexed": 1, "deduped": 0, "merged": 0, "flagged": 0}
+
+        monkeypatch.setattr("bobi.memory.sync_reference_to_cold_memory_kb", fake_sync)
+        h = _CuratorHarness(tmp_path, [])
+
+        with _patch_history(h):
+            dispatched = h.sched._spawn_curator(monitor, [tmp_path])
+
+        assert dispatched is False
+        assert h.captured == {}
+        assert calls == [(tmp_path, reference, "policy-curator")]
+        assert h.published == []
+
     def test_dispatches_compaction_only_when_memory_over_cap(self, tmp_path, monitor):
         from bobi.memory import MAX_MEMORY_CHARS
         from bobi import paths
@@ -564,9 +594,13 @@ class TestCuratorDispatch:
         assert [event for event, _ in h.published] == ["system/monitor.error"]
         assert h.published[0][1]["reason"] == "reference-artifact-unreadable"
 
-    def test_demoted_result_accepts_reference_artifact(self, tmp_path, monitor):
+    def test_demoted_result_accepts_reference_artifact(self, tmp_path, monitor, monkeypatch):
         from bobi import paths
 
+        monkeypatch.setattr(
+            "bobi.memory.sync_reference_to_cold_memory_kb",
+            lambda *args, **kwargs: {"indexed": 1, "deduped": 0, "merged": 0, "flagged": 0},
+        )
         h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
         with _patch_history(h):
             h.sched._spawn_curator(monitor, [tmp_path])
@@ -591,6 +625,69 @@ class TestCuratorDispatch:
             "system/policy.updated",
             "system/memory.updated",
         ]
+
+    def test_demoted_result_indexes_reference_before_cursor_advance(
+        self, tmp_path, monitor, monkeypatch
+    ):
+        from bobi import paths
+
+        calls = []
+
+        def fake_sync(root, reference_path, *, source_session, embed_fn=None):
+            calls.append((root, reference_path, source_session, embed_fn))
+            return {"indexed": 1, "deduped": 0, "merged": 0, "flagged": 0}
+
+        monkeypatch.setattr("bobi.memory.sync_reference_to_cold_memory_kb", fake_sync)
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text(
+            "## Facts\n\n- Cold reference lives in workspace/memory/reference.md.\n\n"
+            "## Decisions\n\n"
+        )
+        reference = paths.workspace_dir(tmp_path) / "memory" / "reference.md"
+        reference.parent.mkdir(parents=True)
+        reference.write_text("Header\n\n## Tools\n\n- new detail\n")
+
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "demoted cold details", "bytes": 42,
+                                 "urgent": False, "demoted": 2})
+
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 10
+        assert calls == [
+            (tmp_path, reference, "policy-curator", None),
+        ]
+
+    def test_reference_index_failure_leaves_cursor_unmoved(
+        self, tmp_path, monitor, monkeypatch
+    ):
+        from bobi import paths
+
+        def fail_sync(*args, **kwargs):
+            raise RuntimeError("embed sidecar unavailable")
+
+        monkeypatch.setattr("bobi.memory.sync_reference_to_cold_memory_kb", fail_sync)
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text(
+            "## Facts\n\n- Cold reference lives in workspace/memory/reference.md.\n\n"
+            "## Decisions\n\n"
+        )
+        reference = paths.workspace_dir(tmp_path) / "memory" / "reference.md"
+        reference.parent.mkdir(parents=True)
+        reference.write_text("Header\n\n## Tools\n\n- new detail\n")
+
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "demoted cold details", "bytes": 42,
+                                 "urgent": False, "demoted": 2})
+
+        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert [event for event, _ in h.published] == ["system/monitor.error"]
+        assert h.published[0][1]["reason"] == "reference-kb-index-failed"
+        assert "embed sidecar unavailable" in h.published[0][1]["detail"]
 
     def test_demoted_result_rejects_unchanged_reference_artifact(self, tmp_path, monitor):
         from bobi import paths
