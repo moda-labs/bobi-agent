@@ -549,6 +549,98 @@ def test_result_to_turn_marks_max_turns_as_error_without_error_flag():
     assert turn.error_message == "max_turns_reached (max=8, turns=9)"
 
 
+def test_result_to_turn_falls_back_to_transcript_max_turns_attachment(
+    tmp_path, monkeypatch
+):
+    claude_dir = tmp_path / "claude"
+    transcript = claude_dir / "projects" / "proj" / "sess-curator.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        '{"type":"assistant","message":{"content":"not json"}}\n'
+        '{"type":"attachment","attachment":{"type":"max_turns_reached",'
+        '"maxTurns":10,"turnCount":11}}\n'
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+
+    msg = _result(
+        is_error=True,
+        result=None,
+        session_id="sess-curator",
+        errors=[],
+    )
+    turn = _result_to_turn(msg)
+    assert turn.is_error is True
+    assert turn.error_kind == "max_turns_reached"
+    assert turn.max_turns == 10
+    assert turn.turn_count == 11
+    assert turn.error_message == "max_turns_reached (max=10, turns=11)"
+
+
+def test_result_to_turn_falls_back_to_transcript_when_error_flag_missing(
+    tmp_path, monkeypatch
+):
+    claude_dir = tmp_path / "claude"
+    transcript = claude_dir / "projects" / "proj" / "sess-curator.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        '{"type":"attachment","attachment":{"type":"max_turns_reached",'
+        '"maxTurns":10,"turnCount":11}}\n'
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+
+    turn = _result_to_turn(_result(
+        is_error=False,
+        result=None,
+        session_id="sess-curator",
+        errors=[],
+    ))
+    assert turn.is_error is True
+    assert turn.error_kind == "max_turns_reached"
+    assert turn.error_message == "max_turns_reached (max=10, turns=11)"
+
+
+def test_result_to_turn_handles_transcript_max_turns_without_counts(
+    tmp_path, monkeypatch
+):
+    claude_dir = tmp_path / "claude"
+    transcript = claude_dir / "projects" / "proj" / "sess-curator.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        '{"type":"attachment","attachment":{"type":"max_turns_reached"}}\n'
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+
+    turn = _result_to_turn(_result(
+        is_error=True,
+        result=None,
+        session_id="sess-curator",
+        errors=[],
+    ))
+    assert turn.is_error is True
+    assert turn.error_kind == "max_turns_reached"
+    assert turn.max_turns is None
+    assert turn.turn_count is None
+    assert turn.error_message == "max_turns_reached"
+
+
+def test_result_to_turn_does_not_use_transcript_for_successful_result(
+    tmp_path, monkeypatch
+):
+    claude_dir = tmp_path / "claude"
+    transcript = claude_dir / "projects" / "proj" / "sess-curator.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        '{"type":"attachment","attachment":{"type":"max_turns_reached",'
+        '"maxTurns":10,"turnCount":11}}\n'
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+
+    turn = _result_to_turn(_result(session_id="sess-curator", result="ok"))
+    assert turn.is_error is False
+    assert turn.error_kind == ""
+    assert turn.result_text == "ok"
+
+
 def test_result_to_turn_translates_deferred_tool():
     msg = _result()
 

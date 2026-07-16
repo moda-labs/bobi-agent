@@ -18,6 +18,8 @@ import asyncio
 import json
 import logging
 import os
+from collections import deque
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
@@ -249,9 +251,19 @@ def _usage_str(usage: Any, key: str) -> str:
 def _terminal_error(msg: Any) -> tuple[str, str, int | None, int | None]:
     """Return provider-neutral terminal error details for known SDK failures."""
     stop_reason = str(getattr(msg, "stop_reason", "") or "")
-    max_turns, turn_count = _max_turns_from_errors(getattr(msg, "errors", None))
+    found, max_turns, turn_count = _max_turns_from_errors(
+        getattr(msg, "errors", None)
+    )
+    if (
+        stop_reason != "max_turns_reached"
+        and not found
+        and (getattr(msg, "is_error", False) or not getattr(msg, "result", None))
+    ):
+        found, max_turns, turn_count = _max_turns_from_transcript(
+            getattr(msg, "session_id", "") or ""
+        )
 
-    if stop_reason == "max_turns_reached" or max_turns is not None:
+    if stop_reason == "max_turns_reached" or found:
         kind = "max_turns_reached"
         message = _render_max_turns_error(max_turns, turn_count)
         return kind, message, max_turns, turn_count
@@ -259,9 +271,9 @@ def _terminal_error(msg: Any) -> tuple[str, str, int | None, int | None]:
     return "", "", None, None
 
 
-def _max_turns_from_errors(errors: Any) -> tuple[int | None, int | None]:
+def _max_turns_from_errors(errors: Any) -> tuple[bool, int | None, int | None]:
     if not errors:
-        return None, None
+        return False, None, None
     items = errors if isinstance(errors, (list, tuple)) else [errors]
     for item in items:
         parsed = item
@@ -279,6 +291,7 @@ def _max_turns_from_errors(errors: Any) -> tuple[int | None, int | None]:
             and attachment.get("type") == "max_turns_reached"
         ):
             return (
+                True,
                 _int_or_none(
                     attachment.get("maxTurns", attachment.get("max_turns"))
                 ),
@@ -286,7 +299,58 @@ def _max_turns_from_errors(errors: Any) -> tuple[int | None, int | None]:
                     attachment.get("turnCount", attachment.get("turn_count"))
                 ),
             )
-    return None, None
+    return False, None, None
+
+
+def _max_turns_from_transcript(
+    session_id: str,
+) -> tuple[bool, int | None, int | None]:
+    """Fallback for Claude SDK runs whose JSONL has terminal metadata only."""
+    transcript = _claude_transcript_path(session_id)
+    if transcript is None:
+        return False, None, None
+    try:
+        with transcript.open() as fh:
+            lines = deque(fh, maxlen=200)
+    except OSError:
+        return False, None, None
+    for line in reversed(lines):
+        try:
+            parsed = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        found, max_turns, turn_count = _max_turns_from_errors(parsed)
+        if found:
+            return found, max_turns, turn_count
+    return False, None, None
+
+
+def _claude_transcript_path(session_id: str) -> Path | None:
+    if not session_id:
+        return None
+    projects_dirs = []
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        projects_dirs.append(Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects")
+    projects_dirs.append(Path.home() / ".claude" / "projects")
+
+    seen: set[str] = set()
+    for projects in projects_dirs:
+        key = str(projects)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if not projects.is_dir():
+                continue
+            for project_dir in projects.iterdir():
+                if not project_dir.is_dir():
+                    continue
+                candidate = project_dir / f"{session_id}.jsonl"
+                if candidate.exists():
+                    return candidate
+        except OSError:
+            continue
+    return None
 
 
 def _render_max_turns_error(max_turns: int | None,
