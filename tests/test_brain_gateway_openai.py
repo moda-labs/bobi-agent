@@ -84,7 +84,6 @@ def test_overrides_require_pinned_base_url():
 
 def test_overrides_pin_custom_provider_without_openai_key(monkeypatch):
     monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "http://localhost:9000/v1")
-    monkeypatch.setenv(GATEWAY_WIRE_API_ENV, "responses")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-real-openai")
 
     overrides = gateway_openai_overrides()
@@ -94,6 +93,15 @@ def test_overrides_pin_custom_provider_without_openai_key(monkeypatch):
     assert 'model_providers.bobi_gateway.env_key="BOBI_GATEWAY_API_KEY"' in overrides
     assert 'model_providers.bobi_gateway.wire_api="responses"' in overrides
     assert not any("OPENAI_API_KEY" in item for item in overrides)
+
+
+def test_overrides_keep_explicit_chat_wire_api_for_pinned_codex(monkeypatch):
+    monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "http://localhost:9000/v1")
+    monkeypatch.setenv(GATEWAY_WIRE_API_ENV, "chat")
+
+    overrides = gateway_openai_overrides()
+
+    assert 'model_providers.bobi_gateway.wire_api="chat"' in overrides
 
 
 @pytest.mark.asyncio

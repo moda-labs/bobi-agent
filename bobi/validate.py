@@ -203,7 +203,17 @@ def _check_brain(cfg) -> list[CheckResult]:
         results.append(CheckResult(
             name, ok=False,
             detail="a codex gateway team requires brain.wire_api to be chat or responses",
-            hint="remove brain.wire_api for the chat default, or set it to responses",
+            hint="remove brain.wire_api for the responses default, or set it to responses",
+        ))
+        return results
+    if engine == "codex" and str((cfg.brain or {}).get("wire_api", "")) == "chat":
+        results.append(CheckResult(
+            name, ok=False,
+            detail="brain.wire_api: chat is deprecated for codex gateways",
+            hint="front chat-only OpenAI-compatible gateways with LiteLLM's "
+                 "Responses API translation, or use kind: claude + "
+                 "brain.base_url for Anthropic-compatible gateways",
+            required=False,
         ))
         return results
     results.append(CheckResult(name, ok=True, detail=cfg.brain_base_url))
