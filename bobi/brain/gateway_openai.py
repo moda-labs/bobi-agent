@@ -1,23 +1,35 @@
-"""OpenAI-compatible gateway brain backed by the Codex CLI (#777).
+"""OpenAI-compatible gateway endpoint support for the codex engine (#777, #789).
 
 Codex natively supports custom OpenAI-compatible providers via per-invocation
-``-c`` overrides. This brain keeps the normal Codex session machinery but pins
-one provider named ``bobi_gateway`` for every fresh and resumed turn, so no
-process-wide ``~/.codex/config.toml`` provider state is required.
+``-c`` overrides. Gateway mode keeps the normal Codex session machinery but
+pins one provider named ``bobi_gateway`` for every fresh and resumed turn, so
+no process-wide ``~/.codex/config.toml`` provider state is required. It is
+endpoint CONFIG on the codex engine (``kind: codex`` + ``brain.base_url``),
+not a separate brain: ``CodexBrain`` injects these overrides whenever the
+gateway base-url pin is set.
+
+``kind: gateway-openai`` remains an accepted alias for this configuration
+(``BRAIN_KIND_ALIASES``); ``GatewayOpenAIBrain`` is the matching import alias.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from typing import Any
-
-from bobi.brain.base import BrainCapabilities, BrainSession
-from bobi.brain.codex import CodexBrain, _CodexSession, _instructions
 
 GATEWAY_WIRE_API_ENV = "BOBI_GATEWAY_WIRE_API"
 _PROVIDER_ID = "bobi_gateway"
 _GATEWAY_API_KEY_ENV = "BOBI_GATEWAY_API_KEY"
+
+
+def __getattr__(name: str):
+    # Deprecated: gateway mode no longer has its own factory class (#789).
+    # Resolved lazily so this module needn't import the engine at load time.
+    if name == "GatewayOpenAIBrain":
+        from bobi.brain.codex import CodexBrain
+
+        return CodexBrain
+    raise AttributeError(name)
 
 
 def _toml_string(value: str) -> str:
@@ -25,16 +37,11 @@ def _toml_string(value: str) -> str:
     return json.dumps(value)
 
 
-def _gateway_openai_overrides() -> list[str]:
-    """Provider overrides for one gateway-openai Codex invocation."""
-    from bobi.brain import GATEWAY_BASE_URL_ENV
+def gateway_openai_overrides() -> list[str]:
+    """Provider overrides for one gateway-mode Codex invocation."""
+    from bobi.brain.gateway import require_gateway_base_url
 
-    base_url = os.environ.get(GATEWAY_BASE_URL_ENV, "")
-    if not base_url:
-        raise RuntimeError(
-            "gateway-openai brain selected but no base URL is pinned - set "
-            "brain.base_url in agent.yaml (and ensure its ${VAR} resolves)."
-        )
+    base_url = require_gateway_base_url()
     wire_api = os.environ.get(GATEWAY_WIRE_API_ENV, "") or "chat"
     return [
         f"model_provider={_toml_string(_PROVIDER_ID)}",
@@ -43,41 +50,3 @@ def _gateway_openai_overrides() -> list[str]:
         f"model_providers.{_PROVIDER_ID}.env_key={_toml_string(_GATEWAY_API_KEY_ENV)}",
         f"model_providers.{_PROVIDER_ID}.wire_api={_toml_string(wire_api)}",
     ]
-
-
-class GatewayOpenAIBrain(CodexBrain):
-    """Factory for Codex sessions against an OpenAI-compatible gateway."""
-
-    name = "gateway-openai"
-    provider = "gateway"
-    capabilities = BrainCapabilities(cross_model_resume=False)
-
-    def make_session(
-        self,
-        *,
-        cwd: str | None,
-        system_prompt: Any,
-        resume: str | None = None,
-        options: dict | None = None,
-    ) -> BrainSession:
-        from bobi.brain import resolve_model_option
-        from bobi.brain.codex_config import (
-            codex_home, config_has_managed_block, write_codex_config,
-        )
-
-        opts = options or {}
-        model = resolve_model_option(str(opts.get("model", "") or ""))
-        mcp_servers = opts.get("mcp_servers") or {}
-        home = codex_home()
-        if mcp_servers or config_has_managed_block(home):
-            write_codex_config(mcp_servers, home)
-        return _CodexSession(
-            cwd=cwd or ".",
-            instructions=_instructions(system_prompt),
-            resume=resume,
-            model=model,
-            mcp_servers=mcp_servers,
-            mcp_env=opts.get("env") if isinstance(opts.get("env"), dict) else None,
-            config_overrides=_gateway_openai_overrides(),
-            provider=self.provider,
-        )

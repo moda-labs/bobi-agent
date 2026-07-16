@@ -62,17 +62,23 @@ def instruction_targets(brain_kind: str) -> list[Path]:
     """The files brain *brain_kind* auto-loads as global instructions.
 
     ``~/AGENTS.md`` applies to every brain (it is what repo instruction files
-    point at); the brain-native path is added per kind. The gateway brain runs
-    the Claude CLI, so it reads Claude's user memory. A new brain kind that
-    auto-loads a global-instructions file must be added here, or its teams'
-    house rules silently never load - the bug this module exists to fix.
+    point at); the brain-native path is added per ENGINE - alias kinds
+    normalize first, so a gateway team reads exactly what its engine CLI
+    auto-loads (a ``kind: gateway-openai`` team previously matched neither
+    branch and never got codex's AGENTS.md, the #789 latent miss). A new
+    brain kind that auto-loads a global-instructions file must be added here,
+    or its teams' house rules silently never load - the bug this module
+    exists to fix.
     """
+    from bobi.brain import normalize_brain_kind
+
+    engine = normalize_brain_kind(brain_kind)
     targets = [Path.home() / "AGENTS.md"]
-    if brain_kind == "codex":
+    if engine == "codex":
         from bobi.brain.codex_config import codex_home
 
         targets.append(codex_home() / "AGENTS.md")
-    elif brain_kind in ("claude", "gateway"):
+    elif engine == "claude":
         targets.append(claude_config_dir() / "CLAUDE.md")
     return targets
 

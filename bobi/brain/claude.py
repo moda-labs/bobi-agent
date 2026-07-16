@@ -30,6 +30,11 @@ from bobi.brain.base import (
     StreamDelta,
     TurnResult,
 )
+from bobi.brain.gateway import (
+    GatewayAwareEngine,
+    gateway_base_url,
+    with_gateway_env,
+)
 
 log = logging.getLogger(__name__)
 
@@ -71,8 +76,9 @@ class _ClaudeSession:
 
     def __init__(self, options: Any, provider: str = "anthropic") -> None:
         self._options = options
-        # Instance label follows the factory (GatewayBrain sessions attribute
-        # their costs to "gateway", not real Anthropic spend).
+        # Instance label follows the factory's provider property (the gateway
+        # base-url pin flips it, so gateway sessions attribute their costs to
+        # "gateway", not real Anthropic spend).
         self.provider = provider
         self._client = self._new_client()
 
@@ -362,21 +368,27 @@ def _env_float(name: str, default: float) -> float:
     return max(value, 0.0)
 
 
-class ClaudeBrain:
-    """Factory for Claude Code sessions (the default brain)."""
+class ClaudeBrain(GatewayAwareEngine):
+    """Factory for Claude Code sessions (the default brain).
+
+    Gateway-aware (#789): when a gateway base URL is pinned (``brain.base_url``
+    on a claude-engine team), every session gets the ``ANTHROPIC_*`` rerouting
+    env merged in, and the mixin flips ``provider`` / ``capabilities``. Same
+    machinery either way - gateway mode is endpoint config, not a different
+    brain.
+    """
 
     name = "claude"
-    provider = "anthropic"
-    # The Claude CLI accepts --resume together with a different --model, so a
-    # session's transcript continues under the new model (#642; verified live
-    # by tests/integration/test_cross_model_resume.py).
+    native_provider = "anthropic"
+    # Cross-model resume (native): the Claude CLI accepts --resume together
+    # with a different --model, so a session's transcript continues under the
+    # new model (#642; verified live by
+    # tests/integration/test_cross_model_resume.py).
     # Efforts per the claude CLI's --effort choices (verified 2026-07-14; an
     # unknown value is warned about and IGNORED, so validation is the only
-    # place a typo surfaces).
-    capabilities = BrainCapabilities(
-        cross_model_resume=True,
-        efforts=frozenset({"low", "medium", "high", "xhigh", "max"}),
-    )
+    # place a typo surfaces). The vocabulary is the CLI's in gateway mode too -
+    # the CLI is what parses the flag.
+    _EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 
     def make_session(
         self,
@@ -393,6 +405,8 @@ class ClaudeBrain:
         from bobi.brain import with_default_effort_option, with_default_model_option
 
         extra = with_default_effort_option(with_default_model_option(options))
+        if gateway_base_url():
+            extra = with_gateway_env(extra)
         # Defaults every call site shared; an explicit value in ``options`` wins.
         extra.setdefault("permission_mode", "bypassPermissions")
         # Never inherit the SDK's 1 MB max_buffer_size default — a single >1 MB
@@ -441,6 +455,8 @@ class ClaudeBrain:
         from bobi.brain import resolve_model_option, with_default_effort_option
 
         extra = with_default_effort_option(options)
+        if gateway_base_url():
+            extra = with_gateway_env(extra)
         model = resolve_model_option(model)
         extra.setdefault("permission_mode", "bypassPermissions")
         extra.setdefault("include_partial_messages", True)

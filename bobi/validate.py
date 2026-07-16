@@ -151,36 +151,63 @@ def _check_brain(cfg) -> list[CheckResult]:
     """Validate the `brain:` block where a bad value fails mid-session (#655).
 
     Unknown kinds already fail loud at session construction (``get_brain``
-    raises), so only gateway kinds need validate-time checks: without a
-    resolvable `base_url` every session would 404/hang at its first turn.
-    A `${VAR}` that didn't resolve interpolates to "" and lands here too.
-    The auth token (``ANTHROPIC_AUTH_TOKEN``) is deliberately not required -
-    Ollama serves unauthenticated.
+    raises), so validate-time checks cover the gateway configuration (#789):
+    without a resolvable `base_url` every session would 404/hang at its first
+    turn - or worse, dial the real vendor endpoint carrying gateway
+    credentials. A `${VAR}` that didn't resolve interpolates to "" and lands
+    here too. The auth token (``ANTHROPIC_AUTH_TOKEN``) is deliberately not
+    required - Ollama serves unauthenticated.
     """
-    if cfg.brain_kind not in ("gateway", "gateway-openai"):
-        return []
+    from bobi.brain import (
+        BRAIN_KIND_ALIASES,
+        DEFAULT_BRAIN,
+        GATEWAY_ENGINES,
+        normalize_brain_kind,
+    )
+
+    results: list[CheckResult] = []
+    kind = cfg.brain_kind
+    # An empty kind is the framework default engine, so a kind-less
+    # `brain: {base_url: ...}` is a claude-engine gateway team.
+    engine = normalize_brain_kind(kind) or DEFAULT_BRAIN
+    if kind in BRAIN_KIND_ALIASES:
+        results.append(CheckResult(
+            "brain.kind", ok=True,
+            detail=f"kind: {kind} is a deprecated spelling",
+            hint=f"use kind: {engine} with brain.base_url instead",
+        ))
+    if not cfg.brain_is_gateway:
+        return results
+    if engine not in GATEWAY_ENGINES:
+        # base_url on a non-engine kind (stub) is ignored by the pin sites;
+        # say so rather than let the config imply a gateway that never dials.
+        results.append(CheckResult(
+            "brain.gateway", ok=True,
+            detail=f"brain.base_url is ignored for kind: {kind}",
+            hint="gateway mode applies to kind: claude or kind: codex",
+        ))
+        return results
+    name = "brain.gateway" if engine == "claude" else "brain.gateway_openai"
     if not cfg.brain_base_url:
-        name = "brain.gateway_openai" if cfg.brain_kind == "gateway-openai" \
-            else "brain.gateway"
         endpoint = "OpenAI-compatible /v1 endpoint" \
-            if cfg.brain_kind == "gateway-openai" else "gateway endpoint"
-        return [CheckResult(
+            if engine == "codex" else "gateway endpoint"
+        results.append(CheckResult(
             name, ok=False,
-            detail=f"kind: {cfg.brain_kind} requires brain.base_url",
+            detail="a gateway team requires a non-empty brain.base_url",
             hint=f"set brain.base_url to the {endpoint} "
                  "(e.g. http://localhost:4000 or ${LLM_GATEWAY_URL} with the "
                  "variable in the runtime .env)",
-        )]
-    if cfg.brain_kind == "gateway-openai" \
-            and cfg.brain_wire_api not in ("chat", "responses"):
-        return [CheckResult(
-            "brain.gateway_openai", ok=False,
-            detail="kind: gateway-openai requires brain.wire_api to be chat or responses",
+        ))
+        return results
+    if engine == "codex" and cfg.brain_wire_api not in ("chat", "responses"):
+        results.append(CheckResult(
+            name, ok=False,
+            detail="a codex gateway team requires brain.wire_api to be chat or responses",
             hint="remove brain.wire_api for the chat default, or set it to responses",
-        )]
-    name = "brain.gateway_openai" if cfg.brain_kind == "gateway-openai" \
-        else "brain.gateway"
-    return [CheckResult(name, ok=True, detail=cfg.brain_base_url)]
+        ))
+        return results
+    results.append(CheckResult(name, ok=True, detail=cfg.brain_base_url))
+    return results
 
 
 # Roles the runtime uses without a roles/ prompt directory. Monitor checks
@@ -198,15 +225,18 @@ _KNOWN_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 def _accepted_efforts(cfg) -> set[str]:
     """The effort values the configured brain accepts, else the union.
 
-    Each brain adapter declares its accepted set on ``capabilities.efforts``
+    Each engine declares its accepted set on ``capabilities.efforts``
     (claude: low..max; codex: none..xhigh), so a cross-vendor value like
     ``kind: codex`` + ``effort: max`` warns instead of hiding in the union.
-    An unknown/undeclared brain (gateway, stub) falls back to the union.
+    The engine's set applies in gateway mode too - the engine CLI is what
+    parses the value (#789). Only an unknown/undeclared brain (stub) falls
+    back to the union.
     """
-    from bobi.brain import get_brain
+    from bobi.brain import DEFAULT_BRAIN, get_brain, normalize_brain_kind
 
     try:
-        efforts = get_brain(cfg.brain_kind or "claude").capabilities.efforts
+        engine = normalize_brain_kind(cfg.brain_kind) or DEFAULT_BRAIN
+        efforts = get_brain(engine).capabilities.efforts
     except Exception:
         efforts = frozenset()
     return set(efforts) or set(_KNOWN_EFFORTS)

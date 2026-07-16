@@ -219,12 +219,16 @@ class TestBrainDispatch:
 
     def test_gateway_openai_session_records_brain_kind(self, tmp_path,
                                                        monkeypatch):
+        """Gateway sessions keep recording the alias-style provenance label
+        (#789 session_brain_label): pre-upgrade records match, and this
+        module's format dispatch keeps working unchanged."""
         from bobi import paths
         from bobi.sdk import load_session_brain, save_session_id
 
         paths.bind_root(tmp_path)
         paths.sessions_dir(tmp_path)
         monkeypatch.setenv("BOBI_BRAIN", "gateway-openai")
+        monkeypatch.setenv("BOBI_GATEWAY_BASE_URL", "http://localhost:9000/v1")
 
         save_session_id("s", "codex-thread-id", root=tmp_path)
 

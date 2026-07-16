@@ -475,10 +475,13 @@ def save_session_id(name: str, session_id: str, model: str | None = None,
     not know it); clearing the id (``session_id=""``) clears the model and
     brain records too, so a fresh session never inherits a stale note. The
     brain record (#642) is the session's provenance: a resume token is only
-    meaningful to the brain that minted it. ``root=None`` means the process's
-    bound root; multi-team hosts pass the target root explicitly.
+    meaningful to the brain CONFIGURATION that minted it, endpoint included -
+    ``session_brain_label`` keeps gateway sessions on the historical alias
+    labels so pre-#789 records still match and a native<->gateway endpoint
+    switch reads as a mismatch. ``root=None`` means the process's bound root;
+    multi-team hosts pass the target root explicitly.
     """
-    from bobi.brain import get_brain
+    from bobi.brain import session_brain_label
 
     sd = _sessions_dir(root)
     (sd / f"{name}.id").write_text(session_id)
@@ -490,7 +493,7 @@ def save_session_id(name: str, session_id: str, model: str | None = None,
     else:
         if model is not None:
             model_path.write_text(model)
-        brain_path.write_text(get_brain().name)
+        brain_path.write_text(session_brain_label())
     registry = SessionRegistry(root)
     registry.update(name, session_id=session_id)
 
@@ -525,21 +528,23 @@ def load_resumable_session_id(name: str, model: str) -> str:
     record at all (saved before #617) resume unconditionally, and they get a
     model record on their next save.
     """
-    from bobi.brain import continuation_token, get_brain
+    from bobi.brain import continuation_token, get_brain, session_brain_label
 
     saved_id = load_session_id(name)
     if not saved_id:
         return ""
     brain = get_brain()
+    active_label = session_brain_label()
     brain_path = _sessions_dir() / f"{name}.brain"
     recorded_brain = (
         brain_path.read_text().strip() if brain_path.exists() else ""
     )
-    if recorded_brain and recorded_brain != brain.name:
-        # A resume token is only meaningful to the brain that minted it.
+    if recorded_brain and recorded_brain != active_label:
+        # A resume token is only meaningful to the brain configuration that
+        # minted it - engine AND endpoint (see session_brain_label).
         log.info(
             "Session %s was recorded under brain %r but %r is active; "
-            "starting fresh.", name, recorded_brain, brain.name,
+            "starting fresh.", name, recorded_brain, active_label,
         )
         return ""
     model_path = _sessions_dir() / f"{name}.model"

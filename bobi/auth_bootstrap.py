@@ -494,7 +494,7 @@ def run_bootstrap(
     # all the right ones. Loading cfg here also seeds BOBI_BRAIN for the
     # spec lookups below (and the spawned login subprocess).
     cfg = Config.load(project_path)
-    if cfg.brain_kind in ("gateway", "gateway-openai"):
+    if cfg.brain_is_gateway:
         # No spec fallback: _active_spec would silently drive the CLAUDE
         # subscription login for a team that authenticates with gateway-specific
         # credentials (or nothing) - mirror the DeployError (#655/#777).

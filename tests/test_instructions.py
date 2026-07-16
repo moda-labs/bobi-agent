@@ -162,10 +162,14 @@ def test_targets_always_include_home_agents_md(fake_homes):
 
 
 def test_targets_codex(fake_homes):
-    assert instructions.instruction_targets("codex") == [
-        fake_homes / "home" / "AGENTS.md",
-        fake_homes / "codex" / "AGENTS.md",
-    ]
+    # gateway-openai is the codex engine's alias: it must get the identical
+    # targets (pre-#789 it matched neither branch and its teams' house rules
+    # silently never reached $CODEX_HOME/AGENTS.md - the latent miss).
+    for kind in ("codex", "gateway-openai"):
+        assert instructions.instruction_targets(kind) == [
+            fake_homes / "home" / "AGENTS.md",
+            fake_homes / "codex" / "AGENTS.md",
+        ]
 
 
 def test_targets_claude_and_gateway_use_claude_config_dir(fake_homes):
