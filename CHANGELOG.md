@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.46.0 - 2026-07-16
+
+Minor release: brain configuration is restructured around engines (gateway
+mode becomes endpoint config, fixing silently dropped reasoning effort on
+codex gateways), codex gateways move to the Responses wire API, the sleep
+cycle gains cold-memory recall, and reliability fixes land for curator
+retries, worker concurrency accounting, and workflow notify steps.
+
+### Changed
+- **`brain.kind` names the engine; gateway mode is `base_url` (#789, PR
+  #790).** `kind: claude|codex` selects the CLI engine, and setting
+  `brain.base_url` points that engine at a gateway endpoint (`small_model`
+  for claude engines, `wire_api` for codex engines). The old
+  `kind: gateway`/`gateway-openai` spellings remain accepted aliases (doctor
+  suggests the new form), ambient `BOBI_BRAIN` pins and
+  `GatewayBrain`/`GatewayOpenAIBrain` imports keep resolving, and on-disk
+  session provenance records keep matching, so no session continuity is lost
+  on upgrade. This structurally fixes #778 reasoning effort being silently
+  dropped on `gateway-openai` teams (the old subclass re-implemented session
+  construction and missed the effort plumbing) and a latent miss where
+  gateway-openai teams never rendered their shipped instructions to
+  `$CODEX_HOME/AGENTS.md`. Doctor/validate now check gateway teams' `effort:`
+  against the engine's real vocabulary instead of a cross-vendor union.
+  Behavior changes: `effort:` on a codex-gateway team now reaches the backend
+  (remove the key to restore the old accidental behavior); an operator
+  `BOBI_BRAIN=claude` override on a `kind: gateway` team no longer forces a
+  native run (same engine now - remove `base_url` to run natively). A
+  declared gateway whose `base_url` `${VAR}` resolves empty now fails loud:
+  child spawns refuse, and process startup pins an RFC 2606 `.invalid`
+  sentinel so `doctor`/`stop`/`status` keep working while sessions raise the
+  actionable config error instead of dialing the real vendor with gateway
+  credentials.
+- **Codex gateways default to `wire_api: responses` (#791, PR #792).** Newer
+  codex builds reject `wire_api = "chat"` at config load (openai/codex#7782),
+  so the default flips to `responses` and doctor warns (never blocks) on an
+  explicit `chat` - front chat-only OpenAI-compatible gateways with LiteLLM's
+  Responses translation, or use `kind: claude` + `base_url` for
+  Anthropic-compatible ones. The knob stays pass-through for pinned older
+  codex builds.
+
+### Added
+- **Cold-memory recall (#773, PR #780).** The sleep cycle indexes
+  `workspace/memory/reference.md` into a team-scoped `long_term_memory`
+  knowledge base (exact + semantic dedup with provenance, stale/partial index
+  repair), and a read-only `bobi agent <name> recall-memory` retrieves over
+  it; cold recall is documented in the base prompt.
+
+### Fixed
+- **Curator max-turn failures surface instead of retrying forever (#770, PR
+  #772).** Claude max-turn terminal details are normalized from the raw
+  session JSONL when the SDK result lacks them, and the structured error kind
+  is preserved on `AgentResult` so curator/check/gate retry logic stops
+  retrying deterministic max-turn failures.
+- **Entry-role workers count toward the concurrency cap (#785, PR #786).**
+  Only the persistent coordinator (by resolved session name) is excluded from
+  the cap; ordinary workers launched with the entry role now count, and
+  launch admission reuses the same predicate so both paths agree.
+- **Undeliverable notify fails the run before an await (#787, PR #788).**
+  Workflow notify steps return an explicit delivery outcome, emit
+  `notify.undeliverable` when Slack delivery cannot resolve a target or
+  token, and fail the workflow before arming an immediately following
+  `await` - runs no longer park forever waiting for a reply to a message that
+  was never sent.
+
+
 ## 0.45.0 - 2026-07-15
 
 Minor release: reasoning-effort selection lands as the sibling of per-role
