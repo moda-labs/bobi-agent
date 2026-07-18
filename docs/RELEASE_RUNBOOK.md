@@ -235,17 +235,34 @@ cd ~/dev/bobi-agent
 set -a; source .env; set +a
 ```
 
-Send a unique marker to `#bobi-eng-team` and explicitly mention Eng Team:
+The validation message doubles as the fleet's release announcement, so write
+it for the humans in the channel: lead with a plain-language changelog and
+tuck the machine-checkable marker at the end. Derive the highlights from this
+release's `CHANGELOG.md` entry, rewritten as what changed for the people
+using the team - not commit-log or PR jargon.
 
 ```bash
 MARKER="ENG_TEAM_E2E_$(date -u +%Y%m%d_%H%M%S)"
 printf '%s\n' "$MARKER" > /tmp/bobi-engteam-marker
 
+TEXT=$(cat <<EOF
+:rocket: *bobi <version> is live on this fleet*
+
+What's new:
+• <highlight 1, plain language - e.g. "you can now search cold memories with the recall-memory command">
+• <highlight 2>
+• <highlight 3>
+
+<@U0BCVME6Z60> quick post-deploy check: reply in this thread with ${MARKER} OK to confirm you're receiving events on the new build.
+EOF
+)
+export TEXT
+
 venn --json tools execute \
   -s moda-labs-slack \
   -t chat_postMessage \
   --confirm \
-  -a "{\"channel\":\"C0BAEN48KQR\",\"text\":\"<@U0BCVME6Z60> release validation ${MARKER}: please reply in this channel with ${MARKER} OK.\",\"link_names\":true}"
+  -a "$(python3 -c 'import json, os; print(json.dumps({"channel": "C0BAEN48KQR", "text": os.environ["TEXT"], "link_names": True}))')"
 ```
 
 Record the returned Slack `ts`, then fetch the thread:
