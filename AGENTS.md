@@ -61,8 +61,17 @@ General coding, bug-fix, testing, writing, and commit standards live in
 
 Skills own the SDLC stages. Default path for any ticketed change:
 
-1. **Scope and design**: write the design into the GitHub issue (see
-   `docs/TICKETING_POLICY.md`). Design docs live in issues, not in `docs/`.
+1. **Scope and design**: initiative-sized work (multiple coherent
+   deliverables, phased delivery) gets a plan artifact: `plans/<slug>.md`
+   in this repo, merged and amended via PR, with a lightweight GitHub
+   tracking issue labeled `plan` (the issue holds discussion and labels;
+   the plan file is the source of truth). Builders flip the plan's status
+   markers (`[ ]` / `[wip]` / `[x]` / `[f]`) inside their PRs, and
+   post-approval changes are dated amendments, never silent rewrites.
+   Single-ticket work skips the plan and writes its design into the GitHub
+   issue directly (see `docs/TICKETING_POLICY.md`). Legacy: epics already
+   in flight with design docs in their issue bodies stay that way until
+   they finish — do not migrate them.
 2. **Build**: `/build <issue#>` runs the full cycle for one ticket: scope from
    the issue, worktree from fresh `main`, implement with tests, verify, review,
    PR. Prefer it over ad-hoc implementation for anything ticketed.
