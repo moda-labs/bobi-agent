@@ -59,37 +59,42 @@ General coding, bug-fix, testing, writing, and commit standards live in
 
 ## Development Lifecycle
 
-Skills own the SDLC stages. Default path for any ticketed change:
+Work moves through four named stages — **plan**, **build**, **review**,
+**land**. Each stage has a defined contract; the tooling that implements
+them lives outside this repo, so this section names the stages generically.
 
-1. **Scope and design**: initiative-sized work (multiple coherent
-   deliverables, phased delivery) gets a plan artifact: `plans/<slug>.md`
-   in this repo, merged and amended via PR, with a lightweight GitHub
-   tracking issue labeled `plan` (the issue holds discussion and labels;
-   the plan file is the source of truth). Builders flip the plan's status
-   markers (`[ ]` / `[wip]` / `[x]` / `[f]`) inside their PRs, and
-   post-approval changes are dated amendments, never silent rewrites.
-   Single-ticket work skips the plan and writes its design into the GitHub
-   issue directly (see `docs/TICKETING_POLICY.md`). Legacy: epics already
-   in flight with design docs in their issue bodies stay that way until
-   they finish — do not migrate them.
-2. **Build**: `/build <issue#>` runs the full cycle for one ticket: scope from
-   the issue, worktree from fresh `main`, implement with tests, verify, review,
-   PR. Prefer it over ad-hoc implementation for anything ticketed.
-3. **Debug**: for bugs and CI failures, `/investigate` to root-cause before
-   writing a fix. Reproduce with a failing test first (see Bug fixes above).
-4. **Verify**: `/verify` after any nontrivial runtime change. Exercise the real
-   flow end-to-end (isolated `BOBI_HOME`, real agent sessions), not just the
-   test suite. `/build` runs this as its verification stage.
-5. **Review**: `/code-review high` on the working diff before opening a PR;
-   apply confirmed findings. `/build` runs this as its review stage. Use
-   `/simplify` for a quality-only pass when a diff has grown organically.
-6. **Ship**: open the PR from `/build`, or manually per Release Rules below.
-   No version or changelog edits in feature PRs.
-7. **Continuity**: `/handoff` at the end of a session with unfinished work so
-   a fresh session can resume; handoff files stay local and uncommitted.
+1. **Plan**: initiative-sized work (multiple coherent deliverables, phased
+   delivery) gets a plan artifact: `plans/<slug>.md` in this repo, merged
+   and amended via PR, with a lightweight GitHub tracking issue labeled
+   `plan` (the issue holds discussion and labels; the plan file is the
+   source of truth). Builders flip the plan's status markers (`[ ]` /
+   `[wip]` / `[x]` / `[f]`) inside their PRs, and post-approval changes are
+   dated amendments, never silent rewrites. Single-ticket work skips the
+   plan and writes its design into the GitHub issue directly (see
+   `docs/TICKETING_POLICY.md`). Legacy: epics already in flight with design
+   docs in their issue bodies stay that way until they finish — do not
+   migrate them.
+2. **Build**: the full cycle for one ticket: scope from the issue, worktree
+   from fresh `main`, implement with tests, verify, review, PR. For bugs
+   and CI failures, root-cause before writing a fix and reproduce with a
+   failing test first (per the bug-fix standards in `~/AGENTS.md`).
+   Verification means exercising
+   the real flow end-to-end (isolated `BOBI_HOME`, real agent sessions),
+   not just the test suite.
+3. **Review**: every nontrivial diff gets an adversarial review before it
+   merges — independent findings, each verified against the code, with an
+   explicit landable / needs-fixes verdict. Apply confirmed findings; the
+   build stage runs this before opening the PR, and it also stands alone
+   for reviewing someone else's diff.
+4. **Land**: merging is a deliberate step, distinct from opening the PR:
+   merge only when checks are green, watch the merge commit's post-merge
+   CI, then clean up the branch, worktree, and ticket. Landing never
+   touches versions or changelogs — release work follows Release Rules
+   below.
 
-Standalone stages (debugging an existing bug, reviewing someone else's diff)
-use the individual skills directly; `/build` is the umbrella for new work.
+Continuity: at a session boundary with unfinished work, write a handoff
+file capturing verified state so a fresh session can resume; handoff files
+stay local and uncommitted.
 
 ## Development Setup
 
