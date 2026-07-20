@@ -100,6 +100,9 @@ class _StubSession:
     async def disconnect(self) -> None:
         return None
 
+    def abort(self) -> None:
+        return None
+
     async def receive_response(self) -> AsyncIterator[BrainMessage]:
         """Yield one scripted turn, then stop (the TurnResult is the terminal
         marker the turn loop waits for)."""

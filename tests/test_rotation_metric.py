@@ -7,11 +7,11 @@ prompt caching on, ``input_tokens`` is just the *uncached* delta (≈2 on a
 warm turn) — the real conversation lives in ``cache_read_input_tokens``.
 So the 275K cap compared ~2 >= 275_000 and never fired. (#454)
 
-The 2026-06-24 recurrence was a *different* mechanism: the rotation reconnect
-(``connect()`` + the connect-turn drain) was unbounded, so a fresh ``claude``
-subprocess that never yielded a ``ResultMessage`` hung ``_rotate()`` forever —
-``_rotation_count`` stuck, the run loop off ``inbox.recv``. #456 bounds and
-recovers that reconnect.
+The 2026-06-24 recurrence was a different mechanism: a fresh ``claude``
+subprocess could hang while connecting. #456 bounds and recovers that work.
+Issue #799 exposed a separate contract bug: ``connect(None)`` opens the
+transport but starts no model turn, yet rotation tried to drain a terminal
+``ResultMessage`` from that nonexistent turn. That wait blocked the inbox.
 
 These tests pin the true metric (input + cache_read + cache_creation), the
 manual ``compact`` trigger, and the bounded/recoverable reconnect.
@@ -24,7 +24,7 @@ import pytest
 
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
-from bobi.brain import AssistantText, BrainCost, BrainSession, TurnResult
+from bobi.brain import AssistantText, BrainCost, TurnResult
 from bobi.brain.claude import DEFAULT_INITIALIZE_TIMEOUT_MS
 from bobi.inbox import Message
 from bobi.session import (
@@ -344,12 +344,11 @@ async def test_multi_call_turn_rotates_when_single_call_is_over_cap(bobi_install
 
 
 class _HangingClient:
-    """A client whose connect() returns fast but whose connect-turn drain
-    never yields a ResultMessage — the exact 2026-06-24 wedge shape. The fresh
-    ``claude`` subprocess connects but the first turn blocks forever."""
+    """A Claude-shaped promptless client with no turn to receive."""
 
     provider = "anthropic"
     instances = 0
+    receive_calls = 0
 
     def __init__(self, options=None):
         type(self).instances += 1
@@ -366,52 +365,22 @@ class _HangingClient:
         self.disconnected = True
 
     async def receive_response(self):
-        # Block forever — the connect-turn drain never completes. asyncio.wait_for
-        # in _attempt_reconnect must bound this; without the bound _rotate() hangs.
+        type(self).receive_calls += 1
+        # Claude emits nothing after connect(None). Any caller trying to drain
+        # here waits forever for a turn that was never created.
         await asyncio.Event().wait()
         yield  # pragma: no cover - unreachable
 
 
-class _ErrorTurnClient:
-    """A client that connects fine but whose connect-turn ResultMessage arrives
-    carrying an API error (e.g. 529 Overloaded) — the #443 *arrives-with-error*
-    shape, distinct from the never-yields hang."""
-
-    provider = "anthropic"
-
-    def __init__(self, options=None):
-        self.connected = False
-
-    async def connect(self):
-        self.connected = True
-
-    async def query(self, text):
-        pass
-
-    async def disconnect(self):
-        pass
-
-    async def receive_response(self):
-        yield _b_result(
-            {"input_tokens": 1, "cache_read_input_tokens": 10},
-            is_error=True,
-            api_error_status=529,
-        )
-
-
 @pytest.mark.asyncio
-async def test_rotation_reconnect_bounds_and_recovers_on_never_yields(
+async def test_rotation_promptless_connect_does_not_drain_nonexistent_turn(
     bobi_install, monkeypatch
 ):
-    """Mechanism #3 (the 2026-06-24 wedge): a connect turn that never yields a
-    ResultMessage must NOT hang _rotate() forever. The reconnect is bounded by
-    ROTATION_RECONNECT_TIMEOUT, retried ROTATION_MAX_RECONNECT_ATTEMPTS times,
-    then RECOVERS into an addressable connected client — never a silent park,
-    never the terminal "error" state that would deafen the session (#443).
-    """
+    """A successful promptless connect is ready without receiving a turn."""
     from bobi import session as session_mod
 
     _HangingClient.instances = 0
+    _HangingClient.receive_calls = 0
     # Tiny bounds so the test runs in a fraction of a second.
     monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_TIMEOUT", 0.05)
     monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_BACKOFF", 0.0)
@@ -422,47 +391,15 @@ async def test_rotation_reconnect_bounds_and_recovers_on_never_yields(
     s._client = None  # nothing to disconnect
     s._make_brain_session = lambda resume=None: _HangingClient()
 
-    # Must return (bounded) rather than block forever.
+    # Must return immediately rather than waiting for a phantom ResultMessage.
     await asyncio.wait_for(s._rotate(), timeout=5.0)
 
-    # Every connect-turn attempt hung and timed out; final fresh-connect
-    # recovery (connect-only, no drain) succeeded → session is addressable.
     assert s._client is not None
-    assert s.detect_state() == "waiting_input"   # NOT terminal "error"
-    assert s.detect_state() != "error"
-    # Reconnect attempts (2) + the final recovery client (1) were all built.
-    assert _HangingClient.instances == 3
-
-
-@pytest.mark.asyncio
-async def test_rotation_reconnect_clears_error_on_arrives_with_529(
-    bobi_install, monkeypatch
-):
-    """A connect-turn ResultMessage that arrives with is_error/529 must clear
-    via the #443 path and return the session to ready — NOT the terminal
-    "error" state. This is the *arrives-with-error* shape; step 1's timeout
-    covers the *never-arrives* shape (the test above)."""
-    from bobi import session as session_mod
-
-    monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_TIMEOUT", 2.0)
-    monkeypatch.setattr(session_mod, "ROTATION_MAX_RECONNECT_ATTEMPTS", 2)
-
-    s = Session(name="test-reconnect-529", cwd=str(bobi_install.repo_path))
-    s._input_ready = asyncio.Event()
-    s._client = None
-    s._make_brain_session = lambda resume=None: _ErrorTurnClient()
-
-    await asyncio.wait_for(s._rotate(), timeout=5.0)
-
-    # The error ResultMessage was handled (no exception, no timeout): the
-    # reconnect succeeded on the first attempt and the session is ready. The
-    # live client is now a brain session wrapping _ErrorTurnClient (the adapter
-    # converted its SDK ResultMessage into a normalized TurnResult).
-    assert s._client is not None
-    assert isinstance(s._client, BrainSession)
     assert s.detect_state() == "waiting_input"
     assert s.detect_state() != "error"
-    assert s._rotation_count == 1  # rotation completed, not wedged at 0
+    assert s._rotation_count == 1
+    assert _HangingClient.instances == 1
+    assert _HangingClient.receive_calls == 0
 
 
 class _ConnectHangsClient:
@@ -481,13 +418,18 @@ class _ConnectHangsClient:
     def __init__(self, options=None):
         type(self).instances += 1
         self.disconnected = False
+        self.connect_cancellations = 0
 
     async def connect(self):
-        # Never returns — the connect() hang the wedge was made of. The
-        # asyncio.wait_for in _attempt_reconnect / _recover_rotation_failure
-        # is the only thing that can unstick this; without it _rotate() blocks
-        # forever and the run loop never returns to inbox.recv.
-        await asyncio.Event().wait()
+        # Never returns and suppresses the first cancellation. A timeout helper
+        # that waits for cooperative cancellation would still wedge here.
+        while True:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.connect_cancellations += 1
+                if self.connect_cancellations >= 2:
+                    raise
 
     async def query(self, text):
         pass
@@ -497,6 +439,62 @@ class _ConnectHangsClient:
 
     async def receive_response(self):
         yield  # pragma: no cover - connect() never returns, drain never runs
+
+
+class _ConnectNeedsDisconnectClient:
+    """A connect task that ignores cancellation until adapter cleanup runs."""
+
+    provider = "anthropic"
+
+    def __init__(self):
+        self.release = asyncio.Event()
+        self.is_disconnected = False
+        self.is_aborted = False
+
+    async def connect(self):
+        while not self.release.is_set():
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                continue
+
+    async def disconnect(self):
+        self.is_disconnected = True
+
+    def abort(self):
+        self.is_aborted = True
+        self.release.set()
+
+
+@pytest.mark.asyncio
+async def test_timed_out_connect_is_tracked_until_adapter_cleanup(
+    bobi_install, monkeypatch
+):
+    """Hard timeout must retain and reap cancellation-resistant connect work."""
+    from bobi import session as session_mod
+
+    monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_TIMEOUT", 0.01)
+    client = _ConnectNeedsDisconnectClient()
+    session = Session(name="test-connect-reap", cwd=str(bobi_install.repo_path))
+    session._make_brain_session = lambda resume=None: client
+
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await session._attempt_reconnect()
+
+        for _ in range(20):
+            if not session._hard_timeout_tasks:
+                break
+            await asyncio.sleep(0.01)
+
+        assert client.is_disconnected is True
+        assert client.is_aborted is True
+        assert session._hard_timeout_tasks == set()
+    finally:
+        # Keep a failed pre-fix run from leaving an intentionally
+        # cancellation-resistant task alive in pytest's event loop.
+        client.abort()
+        await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
@@ -511,9 +509,9 @@ async def test_rotation_reconnect_bounds_hung_connect_and_surfaces_terminally(
 
     This pins the variant the other reconnect tests don't: ``_HangingClient``
     lets connect() return and hangs the drain (so connect-only recovery
-    succeeds → graceful); here connect() itself is the hang (so recovery can't
-    succeed → terminal-but-bounded). Both are bounded by the same
-    ``asyncio.wait_for``; removing it hangs this test forever.
+    succeeds, which is graceful); here connect() itself is the hang (so recovery
+    can't succeed, which is terminal-but-bounded). Both are bounded by the hard
+    timeout helper; removing it hangs this test forever.
     """
     from bobi import session as session_mod
 
@@ -541,7 +539,7 @@ async def test_rotation_reconnect_bounds_hung_connect_and_surfaces_terminally(
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(s._rotate(), timeout=5.0)
 
-    # Terminal-but-loud: error state set by _recover_rotation_failure, no
+    # Terminal-but-loud: the inline rotation wrapper sets error state, no
     # addressable client left behind, rotation never falsely counted.
     assert s.detect_state() == "error"
     assert s._client is None

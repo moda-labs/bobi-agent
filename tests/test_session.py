@@ -5,6 +5,7 @@ the session transitions to waiting_input, stopped, or error.
 """
 
 import asyncio
+import threading
 import time
 from unittest.mock import MagicMock
 
@@ -45,6 +46,106 @@ def _fake_client(session, drain_response="response text"):
 
     session._client = FakeClient()
     session._drain_turn = fake_drain
+
+
+@pytest.mark.asyncio
+async def test_run_bounds_hung_active_client_disconnect(
+    bobi_install, monkeypatch
+):
+    """A wedged brain cleanup must not prevent the session from stopping."""
+    monkeypatch.setattr("bobi.session.ROTATION_DISCONNECT_TIMEOUT", 0.01)
+
+    class HangingDisconnectClient:
+        provider = "anthropic"
+
+        def __init__(self):
+            self.cancellations = 0
+
+        async def connect(self, prompt=None):
+            pass
+
+        async def disconnect(self):
+            while True:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancellations += 1
+                    if self.cancellations >= 2:
+                        raise
+
+    s = Session(name="test-bounded-stop", cwd=str(bobi_install.repo_path))
+    client = HangingDisconnectClient()
+    s._make_brain_session = lambda resume=None: client
+    recv = s.inbox.recv
+    s.inbox.recv = lambda timeout=2.0: recv(timeout=0.01)
+
+    run_task = asyncio.create_task(s._run())
+    while s._keep_alive is None:
+        await asyncio.sleep(0)
+    s._keep_alive.set()
+
+    await asyncio.wait_for(run_task, timeout=0.2)
+
+    assert s.detect_state() == "stopped"
+    assert client.cancellations >= 1
+
+
+@pytest.mark.asyncio
+async def test_ack_timeout_surfaces_terminally_without_queue_growth(
+    bobi_install, monkeypatch
+):
+    """A blocked cursor callback must fail loudly without an unbounded queue."""
+    monkeypatch.setattr("bobi.session.MESSAGE_ACK_TIMEOUT", 0.01)
+
+    class Client:
+        provider = "anthropic"
+
+        def __init__(self):
+            self.queries = []
+
+        async def query(self, text):
+            self.queries.append(text)
+
+        async def receive_response(self):
+            yield TurnResult(session_id="ack-timeout", is_error=False)
+
+    session = Session(name="test-ack-timeout", cwd=str(bobi_install.repo_path))
+    session._input_ready = asyncio.Event()
+    session._set_state("waiting_input")
+    client = Client()
+    session._client = client
+
+    blocking_ack_started = threading.Event()
+    release_blocking_ack = threading.Event()
+    blocking_ack_finished = threading.Event()
+
+    first = Message(id="first", sender="event-bus", text="first")
+
+    def block_first_ack():
+        blocking_ack_started.set()
+        release_blocking_ack.wait()
+        blocking_ack_finished.set()
+
+    first.on_done = block_first_ack
+    try:
+        await asyncio.wait_for(session._process_message(first), timeout=0.2)
+        assert blocking_ack_started.is_set()
+        assert session.detect_state() == "error"
+
+        later_ack_calls = []
+        later = Message(id="later", sender="event-bus", text="later")
+        later.on_done = lambda: later_ack_calls.append(True)
+        await asyncio.wait_for(session._process_message(later), timeout=0.2)
+
+        assert client.queries == ["first"]
+        assert session._ack_queue.qsize() == 0
+        assert later_ack_calls == []
+    finally:
+        release_blocking_ack.set()
+        await asyncio.to_thread(blocking_ack_finished.wait, 0.5)
+        session._stop_ack_work()
+
+    assert blocking_ack_finished.is_set()
 
 
 def test_emit_session_unreachable_alert_posts_expected_event(monkeypatch):
@@ -399,6 +500,69 @@ class TestMessageAck:
         await session._process_message(msg)
 
         assert acked == []
+
+    @pytest.mark.asyncio
+    async def test_terminal_drain_failure_does_not_ack(self, session):
+        """A queried event is not processed until its terminal result arrives."""
+        session._set_state("waiting_input")
+
+        class BrokenDrainClient:
+            provider = "anthropic"
+
+            async def query(self, text):
+                pass
+
+            async def receive_response(self):
+                raise RuntimeError("transport closed before result")
+                yield  # pragma: no cover - required for an async generator
+
+        session._client = BrokenDrainClient()
+        acked = []
+        msg = _make_msg(wait=False)
+        msg.on_done = lambda: acked.append(True)
+
+        await session._process_message(msg)
+
+        assert session.detect_state() == "error"
+        assert acked == [], "incomplete turn acked - restart would lose the event"
+
+    @pytest.mark.asyncio
+    async def test_terminal_error_result_does_not_ack(
+        self, session, monkeypatch
+    ):
+        """A model/API error is terminal but not successful event handling."""
+        monkeypatch.setattr("bobi.session.TURN_RETRY_BASE", 0.0)
+        monkeypatch.setattr("bobi.session.TURN_RETRY_MAX_ATTEMPTS", 1)
+        session._set_state("waiting_input")
+
+        class ErrorResultClient:
+            provider = "anthropic"
+
+            def __init__(self):
+                self.queries = []
+
+            async def query(self, text):
+                self.queries.append(text)
+
+            async def receive_response(self):
+                yield TurnResult(
+                    session_id="error-turn",
+                    is_error=True,
+                    api_error_status=529,
+                    result_text="API Error: 529 Overloaded",
+                )
+
+        client = ErrorResultClient()
+        session._client = client
+        acked = []
+        msg = _make_msg(wait=False)
+        msg.on_done = lambda: acked.append(True)
+
+        await session._process_message(msg)
+
+        assert session.detect_state() == "waiting_input"
+        assert client.queries == ["hello", "hello"]
+        assert acked == [], "error turn acked - restart would lose the event"
 
     @pytest.mark.asyncio
     async def test_compact_sentinel_acks(self, session):

@@ -710,6 +710,27 @@ def test_claude_session_satisfies_brain_session_protocol():
     assert sess.provider == "anthropic"
 
 
+def test_claude_abort_force_kills_live_transport_process():
+    class Process:
+        returncode = None
+
+        def __init__(self):
+            self.is_killed = False
+
+        def kill(self):
+            self.is_killed = True
+
+    process = Process()
+    transport = SimpleNamespace(_process=process)
+    sdk_client = SimpleNamespace(_transport=transport, _query=None)
+    session = _ClaudeSession.__new__(_ClaudeSession)
+    session._client = sdk_client
+
+    session.abort()
+
+    assert process.is_killed is True
+
+
 @pytest.mark.asyncio
 async def test_claude_connect_retries_initialize_timeout(monkeypatch):
     """Startup initialize timeouts are transient under CPU/IO contention."""

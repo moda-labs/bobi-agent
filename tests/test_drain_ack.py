@@ -129,6 +129,28 @@ class TestAckAfterProcessing:
         inbox.messages[1].on_done()
         assert acks == [30]
 
+    def test_monitor_error_waits_for_message_completion(self):
+        from bobi.events.drain import _MONITOR_ERROR_DELIVERED
+
+        _MONITOR_ERROR_DELIVERED.clear()
+        event = {
+            "type": "system/monitor.error",
+            "seq": 31,
+            "payload": {
+                "monitor": "sleep-cycle",
+                "flavor": "curator",
+                "reason": "spawn-failed",
+            },
+        }
+
+        inbox, acks = _run_drain([[event]])
+
+        assert len(inbox.messages) == 1
+        assert acks == [], "monitor alert acked before the session handled it"
+        assert inbox.messages[0].on_done is not None
+        inbox.messages[0].on_done()
+        assert acks == [31]
+
 
 class TestAckWatermark:
     def test_out_of_order_completion_holds_ack_floor(self):

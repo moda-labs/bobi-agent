@@ -744,15 +744,23 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer, 
 		}
 		dep.websockets.clear();
 
-		const lastSeen = parseInt(url.searchParams.get("last_seen") || "0", 10);
-		if (lastSeen > 0) {
-			for (const stored of dep.eventBuffer) {
-				if (stored.seq > lastSeen) {
-					try {
-						ws.send(JSON.stringify({ type: "replay", data: stored }));
-					} catch {
-						break;
-					}
+		const requestedLastSeen = parseInt(
+			url.searchParams.get("last_seen") || "0",
+			10,
+		);
+		const lastSeen =
+			Number.isSafeInteger(requestedLastSeen) && requestedLastSeen >= 0
+				? requestedLastSeen
+				: 0;
+		// Zero is a real cursor: the client has processed nothing yet. Skipping
+		// replay at zero silently lost an unacked first event (seq=1) whenever a
+		// manager restarted before finishing it (#799).
+		for (const stored of dep.eventBuffer) {
+			if (stored.seq > lastSeen) {
+				try {
+					ws.send(JSON.stringify({ type: "replay", data: stored }));
+				} catch {
+					break;
 				}
 			}
 		}

@@ -350,6 +350,7 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                     id=_msg_id(),
                     sender="monitor-error",
                     text=text,
+                    on_done=batch_ack.attach() if batch_ack else None,
                 ))
             else:
                 external.append(e)

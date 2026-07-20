@@ -9,6 +9,8 @@ Per CLAUDE.md: tests must be written and failing BEFORE the fix.
 
 import asyncio
 import hashlib
+import queue
+import threading
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -169,6 +171,202 @@ class TestRotationInboxAlive:
         s = Session(name="test-inbox-alive", cwd=str(bobi_install.repo_path))
         assert hasattr(s, '_rotate'), "Session must have _rotate() method"
         # The rotate method signature should exist and not touch inbox
+
+    @pytest.mark.asyncio
+    async def test_priority_chat_drains_while_rotation_reconnect_is_hung(
+        self, bobi_install, monkeypatch
+    ):
+        """An over-cap manager must serve a human while reconnect is hung.
+
+        This drives the real Session startup, over-cap detection, idle rotation,
+        inbox loop, and event drain. The only fake boundary is the brain: the
+        startup client reports an over-cap turn, then the fresh rotation client
+        connects with no prompt and hangs while draining that phantom turn. A
+        Slack mention delivered after that hang begins must be processed before
+        the reconnect timeout, not parked behind it.
+        """
+        from bobi import session as session_mod
+        from bobi.brain import AssistantText, TurnResult
+        from bobi.events.client import format_event_for_manager
+        from bobi.events.drain import _DRAIN_STOP, drain_loop
+
+        reconnect_timeout = 1.0
+        monkeypatch.setattr(
+            session_mod, "ROTATION_RECONNECT_TIMEOUT", reconnect_timeout
+        )
+        monkeypatch.setattr(session_mod, "ROTATION_RECONNECT_BACKOFF", 0.0)
+        monkeypatch.setattr(
+            session_mod, "ROTATION_MAX_RECONNECT_ATTEMPTS", 1
+        )
+        # The Slack channel handler performs gateway I/O for typing status.
+        # Priority selection happens after this seam and is the behavior under
+        # test, so keep the lifecycle local and deterministic.
+        monkeypatch.setattr(
+            "bobi.events.drain._prepare_chat_events", lambda events: events
+        )
+        monkeypatch.setattr("bobi.events.drain.DRAIN_INTERVAL", 0)
+
+        promptless_connect_started = asyncio.Event()
+
+        class ReadyClient:
+            provider = "anthropic"
+
+            def __init__(self, *, over_cap_first_turn: bool = False):
+                self.over_cap_first_turn = over_cap_first_turn
+                self.turns = 0
+                self.queries = []
+                self.is_disconnected = False
+
+            async def connect(self, prompt=None):
+                return None
+
+            async def query(self, text):
+                if self.is_disconnected:
+                    raise RuntimeError("queried disconnected pre-rotation client")
+                self.queries.append(text)
+
+            async def receive_response(self):
+                self.turns += 1
+                cache_read = (
+                    2_000 if self.over_cap_first_turn and self.turns == 1 else 0
+                )
+                yield AssistantText(
+                    text="handled",
+                    usage={
+                        "input_tokens": 1,
+                        "cache_read_input_tokens": cache_read,
+                        "cache_creation_input_tokens": 0,
+                    },
+                )
+                yield TurnResult(
+                    session_id="manager-session",
+                    is_error=False,
+                    duration_ms=1,
+                    num_turns=1,
+                )
+
+            async def disconnect(self):
+                self.is_disconnected = True
+
+        class PromptlessClaudeClient:
+            provider = "anthropic"
+
+            def __init__(self):
+                self.queries = []
+                self.has_pending_turn = False
+
+            async def connect(self, prompt=None):
+                # Claude's connect(None) returns without starting a turn.
+                # Unlike Codex, it emits no no-op TurnResult for that empty
+                # stream, so the unconditional receive_response below hangs.
+                assert prompt is None
+                promptless_connect_started.set()
+                return None
+
+            async def query(self, text):
+                self.queries.append(text)
+                self.has_pending_turn = True
+
+            async def receive_response(self):
+                if not self.has_pending_turn:
+                    await asyncio.Event().wait()
+                    yield  # pragma: no cover - empty response stream never completes
+                self.has_pending_turn = False
+                yield AssistantText(
+                    text="handled after reconnect",
+                    usage={"input_tokens": 1},
+                )
+                yield TurnResult(
+                    session_id="rotated-manager-session",
+                    is_error=False,
+                    duration_ms=1,
+                    num_turns=1,
+                )
+
+            async def disconnect(self):
+                return None
+
+        startup_client = ReadyClient(over_cap_first_turn=True)
+        rotation_client = PromptlessClaudeClient()
+        recovery_client = ReadyClient()
+        clients = iter([startup_client, rotation_client, recovery_client])
+
+        session = Session(
+            name="test-priority-during-rotation",
+            cwd=str(bobi_install.repo_path),
+            extra_options={"rotation_token_cap": 1_000},
+        )
+        session._make_brain_session = lambda resume=None: next(clients)
+
+        # Preserve the real priority queue while shrinking its idle probe from
+        # two seconds so the integration regression stays fast.
+        recv = session.inbox.recv
+        session.inbox.recv = lambda timeout=2.0: recv(timeout=0.01)
+        session.inbox.start()
+
+        run_task = asyncio.create_task(session._run("manager startup"))
+        event_queue = queue.SimpleQueue()
+        acked = []
+        processed = threading.Event()
+
+        def ack(seq):
+            acked.append(seq)
+            processed.set()
+
+        try:
+            is_ready = await asyncio.to_thread(session._ready.wait, 0.5)
+            assert is_ready, "manager never completed its over-cap startup turn"
+            assert session._rotate_pending is True
+
+            await asyncio.wait_for(promptless_connect_started.wait(), timeout=0.5)
+
+            # This is the event shape and real drain path used by a queued
+            # Slack mention. delivery=chat makes the resulting inbox Message
+            # priority, and seq=1 remains unacked until the turn completes.
+            event_queue.put({
+                "type": "slack.mention",
+                "source": "slack",
+                "delivery": "chat",
+                "seq": 1,
+                "text": "<@U_BOT> are you there?",
+                "conversation": "slack:T_TEST:channel:C_TEST:thread:1.0",
+                "fields": {"user_id": "U_HUMAN", "channel": "C_TEST"},
+            })
+            event_queue.put(_DRAIN_STOP)
+            drain_thread = threading.Thread(
+                target=drain_loop,
+                kwargs={
+                    "session_name": session.name,
+                    "queue": event_queue,
+                    "formatter": format_event_for_manager,
+                    "cursor_ack": ack,
+                },
+                daemon=True,
+            )
+            drain_thread.start()
+            await asyncio.to_thread(drain_thread.join, 0.5)
+            assert not drain_thread.is_alive(), "Slack event drain did not finish"
+
+            started_waiting = time.monotonic()
+            processed_promptly = await asyncio.to_thread(processed.wait, 0.3)
+            elapsed = time.monotonic() - started_waiting
+
+            assert processed_promptly, (
+                "priority Slack mention stayed queued behind the hung rotation "
+                f"reconnect for {elapsed:.2f}s"
+            )
+            assert elapsed < reconnect_timeout / 2
+            assert acked == [1]
+            assert any("are you there?" in query for query in rotation_client.queries)
+        finally:
+            if session._keep_alive is not None:
+                session._keep_alive.set()
+            try:
+                await asyncio.wait_for(run_task, timeout=1.0)
+            except asyncio.TimeoutError:
+                run_task.cancel()
+                await asyncio.gather(run_task, return_exceptions=True)
+            session.inbox.close()
 
 
 # ---------------------------------------------------------------------------
