@@ -24,6 +24,24 @@ Use this structure consistently in both systems:
 - In GitHub, represent each epic as an issue labeled as an `epic` (or equivalent
   tag), with technical decomposition.
 
+### 1a) Plan-born initiatives (`plans/` convention)
+- Initiative-sized work designed as a plan artifact `plans/<slug>.md` in the
+  implementation repo (see `AGENTS.md`, Development Lifecycle step 1), with a
+  GitHub tracking issue labeled `plan`.
+- The Linear epic points at the plan: link the plan file on `main` and the
+  GitHub tracking issue in the epic description — do not duplicate the design
+  into Linear or into GitHub issue bodies. The plan file is the technical
+  decomposition (phases, ticket map); the tracking issue replaces the
+  GitHub `epic` issue for these initiatives.
+- Rule 2a applies to the tracking issue: when a Linear epic exists, the
+  tracking issue title carries the `[MOD-nnn]` prefix and both sides
+  backlink.
+- Tickets split from a plan are normal task-level GitHub issues (level 2,
+  below), self-contained (implementable from the issue body alone) and
+  titled with the initiative's bracket prefix (`[<slug>] …`). They get individual
+  `[MOD-nnn]` keys only when Linear tracks them individually — then rule 2a
+  applies to them unchanged.
+
 ### 2) Task-level implementation
 - Technical work to execute the epic.
 - Lives in GitHub issues.
