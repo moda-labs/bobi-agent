@@ -1,8 +1,20 @@
 # gstack dependency (#428 unified model). The headless-browser QA / dogfooding
-# toolchain — the browse, qa, ship, and review skills used across an engineering
-# lifecycle. Installed via its own `./setup` (a `bun` runtime + Playwright
-# Chromium). Self-contained: it declares its own nodejs/npm (the base image is
-# Node-free), so any team can pull it in with `tool_library: [gstack]`.
+# toolbox: browse, qa, and planning helpers, installed via gstack's own
+# `./setup` (a `bun` runtime + Playwright Chromium). Self-contained: it
+# declares its own nodejs/npm (the base image is Node-free), so any team can
+# pull it in with `tool_library: [gstack]`.
+#
+# `./setup --host auto --prefix -q`: `--host auto` links the skills for every
+# agent CLI present (Claude and codex on the standard base image; the default
+# is Claude-only); `--prefix` registers every skill namespaced as `gstack-*`
+# and is mandatory in a bake (a non-TTY/quiet run without it defaults to flat
+# names); `-q` quiets the log. The five lifecycle skills (ship, review,
+# land-and-deploy, landing-report, codex) are removed post-setup from both
+# skill dirs: the engineering lifecycle is owned by the consuming team's own
+# stage skills, and gstack's carry proactive-invocation descriptions that
+# would keep soliciting the model even when unbound. `success` enforces their
+# absence, so a post-bake resurrection (e.g. a re-run of gstack's setup) trips
+# the doctor/dispatch gate; `fix` is idempotent so it can repair that state.
 #
 # ffmpeg rides along so an engineering team can attach UI proof to its PRs
 # headless: record the flow with Playwright (`record_video_dir`) - already
@@ -16,9 +28,9 @@
 # AppArmor unprivileged-userns restriction, the sandbox needs
 # `host: [{sysctl: kernel.apparmor_restrict_unprivileged_userns=0}]` (see
 # bobi/host_caps.py); add it on the consuming team when targeting such a host.
-success: test -e ~/.claude/skills/browse/SKILL.md && test -x ~/.claude/skills/gstack/browse/dist/browse && command -v ffmpeg >/dev/null 2>&1
-why: QA, browse, ship, and review skills used throughout the engineering lifecycle, plus ffmpeg to transcode recorded UI walkthroughs to GIF for PR proof (tools/gstack.md).
-fix: git clone https://github.com/garrytan/gstack ~/dev/gstack && cd ~/dev/gstack && git checkout a861c00cfac6e2376d26c7d3ba5207cdc5aefc49 && ./setup
+success: test -e ~/.claude/skills/gstack-browse/SKILL.md && test -e ~/.claude/skills/gstack-qa/SKILL.md && test -x ~/.claude/skills/gstack/browse/dist/browse && command -v ffmpeg >/dev/null 2>&1 && for s in ship review land-and-deploy landing-report codex; do for d in "$HOME/.claude/skills" "$HOME/.codex/skills"; do if [ -e "$d/gstack-$s" ] || [ -L "$d/gstack-$s" ]; then exit 1; fi; done; done
+why: Browser-QA toolbox - the gstack-qa / gstack-browse skills (headless Chromium QA, dogfooding, UI evidence) plus the gstack-plan-*-review and gstack-office-hours planning helpers, and ffmpeg to transcode recorded UI walkthroughs to GIF for PR proof (tools/gstack.md).
+fix: '[ -d ~/dev/gstack/.git ] || git clone https://github.com/garrytan/gstack ~/dev/gstack; cd ~/dev/gstack && git checkout a861c00cfac6e2376d26c7d3ba5207cdc5aefc49 && ./setup --host auto --prefix -q && for s in ship review land-and-deploy landing-report codex; do rm -rf "$HOME/.claude/skills/gstack-$s" "$HOME/.codex/skills/gstack-$s"; done'
 install:
   apt:
   - nodejs
@@ -31,4 +43,7 @@ install:
   # (avoids hand-listing t64 names) before gstack `./setup`.
   - npx --yes playwright@1.61.0 install-deps chromium
   run:
-  - git clone https://github.com/garrytan/gstack ~/dev/gstack && cd ~/dev/gstack && git checkout a861c00cfac6e2376d26c7d3ba5207cdc5aefc49 && ./setup
+  - git clone https://github.com/garrytan/gstack ~/dev/gstack && cd ~/dev/gstack && git checkout a861c00cfac6e2376d26c7d3ba5207cdc5aefc49 && ./setup --host auto --prefix -q
+  # `rm -rf` handles both link shapes (Claude: real dir holding a SKILL.md
+  # symlink; codex: a directory symlink, removed not followed).
+  - for s in ship review land-and-deploy landing-report codex; do rm -rf "$HOME/.claude/skills/gstack-$s" "$HOME/.codex/skills/gstack-$s"; done

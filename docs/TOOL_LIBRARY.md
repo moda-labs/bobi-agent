@@ -32,7 +32,7 @@ tool_library:
   - name: gstack               # an inline dependency
     guide: https://github.com/<owner>/gstack/blob/<sha>/README.md
     success: |
-      The agent can run the gstack `browse` skill and get a screenshot back.
+      The agent can run the gstack `gstack-browse` skill and get a screenshot back.
     host:
       - sysctl: kernel.apparmor_restrict_unprivileged_userns=0
 ```

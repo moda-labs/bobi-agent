@@ -408,14 +408,27 @@ Set up the workspace, understand the problem, and classify it.
 Write a reviewed design spec — do NOT write implementation code.
 
 1. Read the handoff for issue details and triage results.
-2. Write the spec: Problem & Solution, Scope (in/out), Technical Approach,
+2. Check whether the work is plan-born: the issue body references a plan
+   artifact (`plans/<slug>.md` in the repo), or the title's bracket prefix
+   (`[<slug>] ...`) matches an existing `plans/<slug>.md` file. A bracket
+   prefix with no matching plan file (e.g. `[WIP]`, `[RFC]`) is NOT
+   plan-born. For plan-born work, read the plan file on `main` first - it
+   is the initiative's design source of truth. Spec only this ticket's
+   slice; do not re-derive or contradict decisions the plan already records.
+3. Write the spec: Problem & Solution, Scope (in/out), Technical Approach,
    Verification Plan, Implementation Plan. The spec MUST be a superset of
    the original issue description.
-3. Review the spec with your spec review gate (architecture / edge cases / test
+4. Review the spec with your spec review gate (architecture / edge cases / test
    coverage; UX / design; scope).
-4. **Update the issue description** with the spec (mandatory — the human reviews via the issue).
-5. Comment on the issue confirming the spec is ready for review.
-6. Update handoff: `phase: spec_complete`, `spec_url: <ISSUE URL>`. Then STOP.
+5. **Update the issue description** with the spec (mandatory — the human reviews via the issue).
+   For plan-born work, link the plan artifact from the spec instead of
+   duplicating its content. If the spec requires the plan itself to change,
+   say so explicitly in the spec; the change lands as a dated amendment to
+   the plan file in the implementing PR, never as a silent issue-side
+   divergence.
+6. Comment on the issue confirming the spec is ready for review.
+7. Update handoff: `phase: spec_complete`, `spec_url: <ISSUE URL>`, and for
+   plan-born work `plan_path: plans/<slug>.md`. Then STOP.
 
 **Rules**: Do NOT write code. Do NOT proceed to implementation.
 
