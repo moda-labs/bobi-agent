@@ -236,8 +236,8 @@ def _accepted_efforts(cfg) -> set[str]:
     """The effort values the configured brain accepts, else the union.
 
     Each engine declares its accepted set on ``capabilities.efforts``
-    (claude: low..max; codex: none..xhigh), so a cross-vendor value like
-    ``kind: codex`` + ``effort: max`` warns instead of hiding in the union.
+    (claude: low..max; codex: none..max), so a cross-vendor value like
+    ``kind: claude`` + ``effort: none`` warns instead of hiding in the union.
     The engine's set applies in gateway mode too - the engine CLI is what
     parses the value (#789). Only an unknown/undeclared brain (stub) falls
     back to the union.
