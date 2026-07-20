@@ -39,11 +39,14 @@ steps:
   - name: spec
     agent: engineer
     prompt: |
-      Follow the Spec Phase instructions in your role prompt.
+      Follow the Spec Phase instructions in your role prompt, including its
+      plan-born check (plan-born work specs only this ticket's slice of the
+      plan artifact, and records the plan path in the handoff).
       Write the implementation spec, review it, publish to the issue.
       Do NOT proceed to implementation — stop after the spec is written.
     handoff:
       required: [spec_url]
+      optional: [plan_path]
     timeout: 3000
 
   - name: plan_review
@@ -55,9 +58,13 @@ steps:
 
       1. Read the spec you published to the issue (spec_url from the previous
          step).
-      2. Run your adversarial review gate, asking it to attack the plan:
+      2. Run your adversarial review gate, asking it to attack the spec:
          unhandled edge cases, wrong assumptions, missing tests, simpler
-         alternatives, scope it gets wrong.
+         alternatives, scope it gets wrong. If the handoff records a
+         plan_path, hand the reviewer that plan artifact as context and ask
+         it to also flag contradictions with the plan; decisions the plan
+         already records are context to check against, not targets to
+         re-litigate.
       3. Write the reviewer's verbatim critique into the `review_critique`
          handoff field, plus a one-line `review_verdict` (e.g. "no blockers" /
          "blockers: ..."). Do NOT edit the spec here — the human decides at
