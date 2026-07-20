@@ -145,7 +145,7 @@ class TestCheckEffort:
 
     def test_brain_accepted_values_pass(self):
         codex = Config(
-            brain={"kind": "codex", "effort": "high"},
+            brain={"kind": "codex", "effort": "max"},
             roles={"monitor": {"effort": "none"},
                    "planner": {"effort": "xhigh"}},
         )
@@ -156,18 +156,14 @@ class TestCheckEffort:
         )
         assert self._check(claude) == []
 
-    def test_cross_vendor_value_warns_per_brain(self):
+    def test_codex_specific_value_warns_for_claude(self):
         """The check consults the configured brain's declared set, so a value
-        valid only on the OTHER vendor warns instead of hiding in the union."""
-        codex_with_max = Config(brain={"kind": "codex", "effort": "max"})
-        results = self._check(codex_with_max)
-        assert len(results) == 1
-        assert "codex brain" in results[0].detail
-        # Default (claude) brain rejects the codex-only tiers.
+        valid only on Codex warns instead of hiding in the vendor union."""
         claude_with_none = Config(roles={"monitor": {"effort": "none"}})
         results = self._check(claude_with_none)
         assert len(results) == 1
         assert results[0].name == "roles.monitor.effort"
+        assert "claude brain" in results[0].detail
 
     def test_unknown_brain_effort_warns(self):
         cfg = Config(brain={"effort": "turbo"})

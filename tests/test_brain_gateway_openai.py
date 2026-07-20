@@ -74,7 +74,7 @@ def test_gateway_mode_flips_provider_and_cross_model_resume(monkeypatch):
     # the effort vocabulary is the engine's in both modes (#789): validate
     # checks gateway teams against what codex's config actually parses
     assert "xhigh" in brain.capabilities.efforts
-    assert "max" not in brain.capabilities.efforts
+    assert "max" in brain.capabilities.efforts
 
 
 def test_overrides_require_pinned_base_url():

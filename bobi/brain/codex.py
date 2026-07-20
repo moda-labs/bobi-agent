@@ -334,11 +334,13 @@ class CodexBrain(GatewayAwareEngine):
     # resumed turn recalled conversation-only state. Note the usable model
     # set depends on the account's auth mode (ChatGPT-plan auth rejects some
     # models with a 400 at turn start).
-    # Efforts per the OpenAI API's ReasoningEffortParam enum (verified live
-    # 2026-07-14 on codex-cli 0.144.4: an unknown value 400s at turn start).
+    # Efforts per the OpenAI API's ReasoningEffortParam enum (unknown values
+    # 400; max accepted live on codex-cli 0.144.4 and 0.144.5).
     # The vocabulary holds in gateway mode too - the value rides codex's
     # model_reasoning_effort config, whatever endpoint it dials.
-    _EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+    _EFFORTS = frozenset({
+        "none", "minimal", "low", "medium", "high", "xhigh", "max",
+    })
 
     def make_session(
         self,

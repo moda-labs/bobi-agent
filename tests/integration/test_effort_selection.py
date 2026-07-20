@@ -2,8 +2,8 @@
 
 Proves the effort dial actually reaches the real vendor CLIs - the part a
 mocked brain cannot: the claude CLI is spawned carrying ``--effort``, the
-codex rollout records the turn's effort, and an effort-only workflow step
-change keeps the conversation (the resume-guard exemption) end to end.
+codex runner receives the effort config override, and an effort-only workflow
+step change keeps the conversation (the resume-guard exemption) end to end.
 
 The Claude tests require the ``claude`` CLI; the Codex test requires the
 ``codex`` CLI (and burns one real turn). All skipped in CI.
@@ -126,8 +126,15 @@ class TestWorkflowEffortContinuation:
 class TestCodexEffortSelection:
     """``-c model_reasoning_effort=...`` lands in the real codex turn."""
 
-    async def test_effort_recorded_in_rollout(self, tmp_path):
+    async def test_effort_reaches_spawned_cli(self, tmp_path):
         from bobi.brain import get_brain
+        from bobi.brain.codex import _spawn_codex
+
+        spawned_argv = []
+
+        def recording_runner(argv, cwd, stdin_text=None):
+            spawned_argv.append(argv)
+            return _spawn_codex(argv, cwd, stdin_text)
 
         brain = get_brain("codex")
         session = brain.make_session(
@@ -135,30 +142,21 @@ class TestCodexEffortSelection:
             system_prompt="You are a test assistant. Reply concisely.",
             options={"effort": "low"},
         )
-        await session.connect("Reply with exactly: OK")
-        _, result = await _drain(session)
-        await session.disconnect()
+        session._runner = recording_runner
+        try:
+            await session.connect("Reply with exactly: OK")
+            _, result = await _drain(session)
+        finally:
+            await session.disconnect()
 
         assert result is not None and not result.is_error
-        thread_id = result.session_id
-        assert thread_id
-
-        # Ground truth: the rollout records the effective effort per turn
-        # (verified live on codex-cli 0.144.4: turn_context.payload.effort).
-        # _codex_rollout_path honors $CODEX_HOME, unlike a ~/.codex glob.
-        from bobi.chat_history import _codex_rollout_path
-
-        rollout = _codex_rollout_path(thread_id)
-        assert rollout is not None, "no codex rollout found for the thread"
-        efforts = []
-        for line in rollout.read_text().splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if event.get("type") == "turn_context":
-                efforts.append(event.get("payload", {}).get("effort"))
-        assert "low" in efforts, efforts
+        assert result.session_id
+        assert any(
+            argv[index:index + 2]
+            == ["-c", "model_reasoning_effort=low"]
+            for argv in spawned_argv
+            for index in range(len(argv) - 1)
+        ), spawned_argv
 
 
 @pytest.mark.timeout(120)

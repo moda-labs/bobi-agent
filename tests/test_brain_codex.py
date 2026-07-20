@@ -45,6 +45,10 @@ def test_codex_registered():
     assert b.provider == "openai"
 
 
+def test_codex_capabilities_include_max_effort():
+    assert "max" in CodexBrain().capabilities.efforts
+
+
 def test_instructions_extraction():
     assert _instructions({"preset": "x", "append": "be good"}) == "be good"
     assert _instructions("raw text") == "raw text"
