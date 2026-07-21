@@ -1,6 +1,6 @@
 # Slack Socket Mode transport
 
-> **Status:** Draft
+> **Status:** Approved
 > **Tracking issue:** moda-labs/bobi-agent#749 · **Created:** 2026-07-21 · **Last amended:** - (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
@@ -79,7 +79,8 @@ Alternatives considered:
 ### New
 
 - `event-server/core/src/gateway/slack-socket.ts` - sans-IO Socket Mode session; no existing module owns WS protocol logic for Slack, and the Discord session is protocol-specific by design.
-- `event-server/src/slack-socket-local.ts` - the local driver; parallel to `discord-gateway-local.ts` rather than merged with it because the protocols share no frames (a shared-manager refactor is deferred until a third dial-out transport exists - see Notes).
+- `event-server/src/slack-socket-local.ts` - the local driver; parallel to `discord-gateway-local.ts` rather than merged with it because the protocols share no frames.
+- `event-server/src/socket-driver-common.ts` (name at builder's discretion) - the genuinely shared driver scaffolding (backoff+jitter, watchdog timers, generation guard) hoisted out per the Q1 decision and consumed by BOTH drivers; protocol logic stays out of it.
 - `event-server/test/slack-socket.spec.ts` - recorded-frame session tests, mirroring `discord.spec.ts`.
 - `tests/integration/test_slack_socket_mode.py` - end-to-end integration mirroring `test_discord_gateway.py`.
 
@@ -87,18 +88,22 @@ Alternatives considered:
 
 - **Q1:** Protocol implementation - (a) in-house sans-IO session mirroring the Discord pattern / (b) depend on `@slack/socket-mode` (official SDK).
   Recommendation: (a) - consistency with the Discord seam, deterministic recorded-frame tests, no new dependency tree in events-core; the protocol surface (hello, envelope+ack, disconnect taxonomy, ping-staleness) is small, and the review pass enumerated it fully.
+  **Decision (2026-07-21, Zach):** chose (a), with one addition: genuinely common socket-driver scaffolding (backoff+jitter, watchdog timers, generation guard) is hoisted into a shared helper both drivers consume during Phase 2, rather than copy-pasted a second time; protocol-specific logic stays per-transport.
 - **Q2:** App-token plumbing - (a) signed `/slack/workspaces` registration ONLY (no env fallback) / (b) signed registration plus a `BOBI_ES_SLACK_APP_TOKEN` + companion-identity env fallback with documented caveats.
   Recommendation: (a).
   Review evidence overturned the original both-paths recommendation: an env-only socket has no app identity to key the connection (`apps.connections.open` returns only `{ok, url}`; Discord's env shape needs a second variable), and with no workspace record the self-bot filter set is empty (`core.ts:159-189`), recreating the #86 self-loop shape.
   Registration runs at every session start, so (a) also cures the already-running-server case that env pass-through cannot reach (`ensure_running` health-probes and returns, `bobi/events/server.py:194-199`).
+  **Decision (2026-07-21, Zach):** chose (a).
 - **Q3:** Ingress-check scope - (a) make the check transport-aware in this initiative, fixing the Discord false positive too / (b) special-case Slack-with-app-token only, leave Discord as-is.
   Recommendation: (a) - one mechanism, and the Discord warning is a real current defect this plan already has to touch the check for.
   Either way the rule must cover prefixed topic strings (`slack:...`, `discord:...`), not just service names (`ingress.py:92-102`).
+  **Decision (2026-07-21, Zach):** chose (a).
 - **Q4:** Envelope retry handling - (a) deliver retransmissions, deduping only envelopes THIS process already acked (bounded acked-`envelope_id` LRU in the session) / (b) ack retransmissions (`retry_attempt > 0`) without delivering, mirroring the webhook `preVerify` drop (`core.ts:1051-1064`).
   Recommendation: (a).
   Review evidence overturned the original (b): the webhook parity argument is unsound for this transport - an HTTP retry follows a request the server already received, while a Socket Mode retransmission is Slack redelivering an envelope that was never acked (connection died pre-ack, or the event fired in a reconnect gap).
   Slack has no resume/replay; redelivery IS the gap-recovery mechanism, and with a single connection recycling roughly hourly, drop-on-retry guarantees permanent loss of every event landing in a gap.
   The dedup tests on both transports must cross-reference each other so the two policies cannot drift unnoticed.
+  **Decision (2026-07-21, Zach):** chose (a).
 
 ## Phases
 
@@ -119,6 +124,7 @@ Alternatives considered:
 ### Phase 2 - Local driver and wiring
 
 - [ ] `event-server/src/slack-socket-local.ts`: `SlackSocketManager` mirroring `DiscordGatewayManager` - connections keyed provisionally per registration and re-keyed by `hello`'s `connection_info.app_id`, `apps.connections.open` via `slackApiUrl()` with the app token, handshake watchdog plus staleness watchdog (reset on every frame AND on the ws `'ping'` event), generation guard for stale-socket callbacks, `health()` reporting state/last-event-at/delivered-event count/connect counts
+- [ ] Shared scaffolding hoist (Q1 decision): extract the genuinely common driver machinery (backoff+jitter schedule, watchdog timer management, generation-guard pattern, socket teardown incl. the sink-error-listener close dance) into a shared module consumed by both `discord-gateway-local.ts` and the new driver; behavior-preserving for Discord - the existing `tests/integration/test_discord_gateway.py` and `event-server/test/discord.spec.ts` stay green unmodified, which is the gate for the refactor being genuinely common rather than forced
 - [ ] Rate-limit-aware reconnect: `apps.connections.open` is Tier 1 (roughly 1/min) and every returned `wss` URL is single-use - re-call it on every reconnect, never reuse a URL, backoff floor of several seconds (NOT Discord's 1s base), honor `Retry-After` on 429/`rate_limited`
 - [ ] Fatal policy: `apps.connections.open` 4xx (bad/revoked app token, missing `connections:write`) and `link_disabled` park the connection fatal with the reason, no retry loop; transient failures back off
 - [ ] Trust hardening: the driver rejects a returned connection URL whose scheme is not `wss://`; the `BOBI_ES_SLACK_API_URL` override is a test-only seam and the driver refuses to start with it set when `BOBI_ES_BIND` is non-loopback (the socket path has no HMAC second line of defense, so a poisoned API base would otherwise be a single point of total compromise)
@@ -183,7 +189,8 @@ None yet.
 - Single connection per app is the deliberate v1 choice.
   Slack permits up to 10 simultaneous Socket Mode connections and recommends two for gapless hourly refresh; the acked-envelope dedup (Q4) plus redelivery covers the refresh gap at v1 scale, and a second connection is a small follow-up if gap loss is observed in practice.
 - Socket Mode apps cannot be listed in the public Slack Marketplace (Slack platform constraint) - irrelevant for manifest-created single-workspace apps, but it is the standing reason HTTP webhooks stay the default rather than being replaced.
-- A shared dial-out-connection-manager refactor (Discord + Slack drivers share backoff/watchdog/generation scaffolding) is deliberately deferred until a third transport wants it; two data points do not justify the abstraction.
+- Shared driver scaffolding: the original draft deferred any common-code extraction until a third transport existed; the Q1 decision (2026-07-21, Zach) overrides that - genuinely common scaffolding is hoisted in Phase 2, with "Discord tests stay green unmodified" as the line between common machinery and forced abstraction.
+  A full shared connection-MANAGER (one class driving both protocols) remains out of scope; the protocols share no frames.
 - Deferred follow-up: a Slack analog of the Discord login paste-back readiness gate (`_ensure_discord_paste_back_ready`); Phase 3 documents the limitation instead.
 - If the setup web UI grows an app-token field beyond the generic secret declaration, `DESIGN.md` and `docs/FRONTEND_QA.md` govern that work; Phase 3 as scoped expects no bespoke UI.
 - Plan review (2026-07-21, pre-approval): three adversarial lens passes (red-team, staff-engineer, implementer) produced 12 confirmed findings folded into this revision - signed-only socket lifecycle, staleness watchdog, rate-limit-aware reconnect, Q2/Q4 recommendations overturned with evidence, integration-test registration mechanics, manifest post-processing mechanism, doctor socket-state surfacing pulled into scope.
