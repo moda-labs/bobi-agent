@@ -176,11 +176,14 @@ Filled by the split workflow after approval.
 | Phase | Ticket | One-line scope | Status |
 |---|---|---|---|
 
-**Lanes:** expected shape - Phase 1 -> Phase 2 sequential (driver consumes the session); Phase 3 parallelizable with Phase 2 after the Q3 decision except its integration-gate lines, which need Phase 2 landed.
+**Lanes:** cut tickets LARGE, along parallel-lane seams only (sizing directive, 2026-07-21, Zach: plans are optimized for agent implementation, and parallelism - not piece-level revertability - is the split criterion; rollback happens at feature level in practice).
+Expected cut: **Lane A = Phases 1+2 as ONE ticket** (the transport, TS-side, proven end-to-end by the integration test - Phase 1 alone would land inert dead code and buys no parallelism), **Lane B = Phase 3 as one ticket** (Python-side opt-in surface; can build in parallel with A once the `app_token` registration-record field shape is fixed, lands after A; its integration-gate lines need A landed).
+Phases remain checkpoints INSIDE a lane - a builder works through successive phase gates in one session/PR, never stopping at a phase boundary because it is merely landable.
+A single builder executing both lanes in one session is acceptable; parallel dispatch is the optimization when available.
 
 ## Amendments
 
-None yet.
+- **2026-07-21** (Zach, via plan session): Lanes note rewritten with the ticket-sizing directive - large agent-sized tickets cut along parallel-lane seams (expected: two tickets, Phases 1+2 and Phase 3), phases as in-lane checkpoints rather than ticket boundaries, piece-level revertability dropped as a split criterion.
 
 ## Notes
 
