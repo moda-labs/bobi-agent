@@ -1,7 +1,7 @@
 # Full-repo review remediation (defects + mechanical quality)
 
-> **Status:** Draft
-> **Tracking issue:** moda-labs/bobi-agent#817 · **Created:** 2026-07-22 · **Last amended:** — (see Amendments)
+> **Status:** Approved
+> **Tracking issue:** moda-labs/bobi-agent#817 · **Created:** 2026-07-22 · **Last amended:** 2026-07-22 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -48,10 +48,15 @@ The authoritative per-item file inventory is the checklist below + appendix. Hot
 ## Questionables
 
 - **Q1:** Lane granularity — how many PRs? Options: (a) **5 lanes**: A = Phases 1–4 (behavioral fixes, bobi/), B = Phases 5–6 (behavior-preserving cleanup, bobi/; depends on A — same files), C = Phase 7 (event-server + web UI; parallel with A), D = Phase 8 (docs; parallel), E = Phase 9 (tests; lands after A) / (b) 9 lanes, one per phase. Recommendation: (a) — C and D are genuinely parallel to A; B/E serialize behind A anyway, so extra PRs buy review granularity we don't need given per-phase gates.
+  **Decision (2026-07-22, Zach):** chose (a) — 5 lanes, cut in Split below.
 - **Q2:** The 17 *plausible* and 12 *unverified* findings — (a) in scope, gated on builder re-verification (drop with a dated note in the PR if refuted) / (b) exclude. Recommendation: (a) — they're all low/medium and the re-verification cost is one read each.
+  **Decision (2026-07-22, Zach):** chose (a) — in scope, re-verify each before fixing; drop refuted ones with a dated PR note.
 - **Q3:** `bobi setup --resume` is a documented no-op (D084/Q116) — (a) remove the flag and its help text / (b) implement resume. Recommendation: (a) — `bobi setup` now opens the webapp daemon; the flag's premise died with the old flow (`run_setup()` itself is dead, Q023).
+  **Decision (2026-07-22, Zach):** chose (a) — remove the flag (Phase 5).
 - **Q4:** Expired compat surfaces (curator→sleep-cycle shims Q019/Q073, policy→long_term_memory aliases Q020/Q068/Q092, `BRAIN_MODEL_ENV` Q085, `_delta_text` re-export Q079) — (a) delete now (verifiers confirmed zero importers incl. bobi-deploy) / (b) hold another release. Recommendation: (a) — the windows were stated in-code and are 4+ releases past.
+  **Decision (2026-07-22, Zach):** chose (a) — delete now (Phase 5).
 - **Q5:** `/api/credential/value` env fallback serves arbitrary process env vars (D077) — (a) restrict to the credential var names declared by the installed pack's services/tools / (b) remove the env fallback entirely. Recommendation: (a) — the legitimate use (showing which declared secrets are already satisfied by the environment) survives; arbitrary reads die.
+  **Decision (2026-07-22, Zach):** chose (a) — restrict to declared credential var names (Phase 7).
 
 ## Phases
 
@@ -381,17 +386,25 @@ Decided here: every **bug** (Phases 1–4, 7) gets a failing test first. **Real-
 
 ## Lane map
 
-*(Filled by Split after approval, per the Q1 decision.)*
+Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first — it is the trust-restoring lane and gates the bot's own terminal-signal reliability; C and D run in parallel with A; B and E build in parallel but land after A since they share bobi/ files).
 
 | Lane | Dispatch issue | Phases | One-line scope | Status |
 |---|---|---|---|---|
-| — | — | — | — | — |
+| A | #TBD | 1–4 | Behavioral fixes in bobi/ (session honesty, workflow+pack routing, persistence atomicity, bug batch) | pending split |
+| B | #TBD | 5–6 | Behavior-preserving cleanup in bobi/ (dead-code purge, consolidations) — lands after A | pending split |
+| C | #TBD | 7 | event-server TS + web UI (bugs, security, duplication) — parallel with A | pending split |
+| D | #TBD | 8 | Documentation drift sweep — parallel with A | pending split |
+| E | #TBD | 9 | Test-suite cleanup — lands after A | pending split |
+
+**Lanes:** A: Phases 1–4. C: Phase 7 (parallel with A, no shared files). D: Phase 8 (docs, parallel). B: Phases 5–6 (builds in parallel, *lands after* A — shares bobi/ files, not a build-blocking dependency). E: Phase 9 (builds in parallel, *lands after* A). Only "lands after" ordering here — nothing build-blocks except that B/E should rebase onto A's merge to avoid churn.
 
 - [ ] Convergence gate: full `pytest tests/ -q` + `cd event-server && npm test` green on main after the last lane merges, plus the in-repo dogfood run (isolated `BOBI_HOME`, dogfood-content-review pack: agent boots, event round-trips, the D015 fix-step route actually takes) — run by the session landing the last lane
 
 ## Amendments
 
 *(append-only)*
+
+- **2026-07-22** (Zach + planning session): Q1–Q5 decided (all recommended option — 5 lanes, plausible/unverified in scope with re-verification, remove `--resume`, delete expired compat now, restrict credential endpoint to declared vars). Status → Approved. Lane map filled (A–E).
 
 ## Notes
 
