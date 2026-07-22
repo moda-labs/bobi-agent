@@ -41,8 +41,9 @@ Bobi is an event-driven AI agent framework.
 
 ## Coding Standards
 
-General coding, bug-fix, testing, writing, and commit standards live in
-`~/AGENTS.md`. Bobi-specific additions:
+General coding, bug-fix, testing, writing, and commit standards are the
+house standards; `~/AGENTS.md` points to them. This file carries only
+Bobi-specific deltas on top:
 
 - **Real-Claude e2e as acceptance criteria (judgement call).** Bobi's runtime
   runs through a real Claude brain. For a feature whose correctness depends on
@@ -59,42 +60,33 @@ General coding, bug-fix, testing, writing, and commit standards live in
 
 ## Development Lifecycle
 
-Work moves through four named stages — **plan**, **build**, **review**,
-**land**. Each stage has a defined contract; the tooling that implements
-them lives outside this repo, so this section names the stages generically.
+Engineering work in this repo moves through four staged contracts: plan,
+build, review, land. The stage contracts live in an installed skill
+pack, not in this repo; agents with the pack resolve the stages from the
+skills themselves. This section carries only the repo-anchored
+conventions that hold regardless of how the stages are tooled:
 
-1. **Plan**: initiative-sized work (multiple coherent deliverables, phased
-   delivery) gets a plan artifact: `plans/<slug>.md` in this repo, merged
-   and amended via PR, with a lightweight GitHub tracking issue labeled
-   `plan` (the issue holds discussion and labels; the plan file is the
-   source of truth). Builders flip the plan's status markers (`[ ]` /
-   `[wip]` / `[x]` / `[f]`) inside their PRs, and post-approval changes are
-   dated amendments, never silent rewrites. Single-ticket work skips the
-   plan and writes its design into the GitHub issue directly (see
-   `docs/TICKETING_POLICY.md`). Legacy: epics already in flight with design
-   docs in their issue bodies stay that way until they finish — do not
-   migrate them.
-2. **Build**: the full cycle for one ticket: scope from the issue, worktree
-   from fresh `main`, implement with tests, verify, review, PR. For bugs
-   and CI failures, root-cause before writing a fix and reproduce with a
-   failing test first (per the bug-fix standards in `~/AGENTS.md`).
-   Verification means exercising
-   the real flow end-to-end (isolated `BOBI_HOME`, real agent sessions),
-   not just the test suite.
-3. **Review**: every nontrivial diff gets an adversarial review before it
-   merges — independent findings, each verified against the code, with an
-   explicit landable / needs-fixes verdict. Apply confirmed findings; the
-   build stage runs this before opening the PR, and it also stands alone
-   for reviewing someone else's diff.
-4. **Land**: merging is a deliberate step, distinct from opening the PR:
-   merge only when checks are green, watch the merge commit's post-merge
-   CI, then clean up the branch, worktree, and ticket. Landing never
-   touches versions or changelogs — release work follows Release Rules
-   below.
-
-Continuity: at a session boundary with unfinished work, write a handoff
-file capturing verified state so a fresh session can resume; handoff files
-stay local and uncommitted.
+- **Plans**: initiative-sized work (multiple coherent deliverables) gets
+  a plan artifact `plans/<slug>.md`, merged and amended via PR, with a
+  lightweight GitHub tracking issue labeled `plan` (the issue holds
+  discussion and labels; the plan file is the source of truth). Builders
+  flip the plan's status markers (`[ ]` / `[wip]` / `[x]` / `[f]`)
+  inside their PRs; post-approval changes are dated amendments, never
+  silent rewrites. Single-unit work skips the plan and writes its design
+  into the GitHub issue directly (see `docs/TICKETING_POLICY.md`).
+  Legacy: epics already in flight with design docs in their issue bodies
+  stay that way until they finish - do not migrate them.
+- **Verification**: exercising the real flow end-to-end (isolated
+  `BOBI_HOME`, real agent sessions), not just the test suite. Update the
+  affected docs in the same PR as the change, never as a follow-up.
+- **Landing**: merging is a deliberate step, separately authorized per
+  PR. Merge only when checks are green, watch the merge commit's
+  post-merge CI, then clean up the branch, worktree, and ticket. Landing
+  never touches versions or changelogs - release work follows Release
+  Rules below.
+- **Continuity**: at a session boundary with unfinished work, write a
+  handoff file capturing verified state so a fresh session can resume;
+  handoff files stay local and uncommitted.
 
 ## Development Setup
 

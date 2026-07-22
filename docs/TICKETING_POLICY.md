@@ -26,21 +26,26 @@ Use this structure consistently in both systems:
 
 ### 1a) Plan-born initiatives (`plans/` convention)
 - Initiative-sized work designed as a plan artifact `plans/<slug>.md` in the
-  implementation repo (see `AGENTS.md`, Development Lifecycle step 1), with a
+  implementation repo (see `AGENTS.md`, Development Lifecycle), with a
   GitHub tracking issue labeled `plan`.
 - The Linear epic points at the plan: link the plan file on `main` and the
   GitHub tracking issue in the epic description — do not duplicate the design
   into Linear or into GitHub issue bodies. The plan file is the technical
-  decomposition (phases, ticket map); the tracking issue replaces the
-  GitHub `epic` issue for these initiatives.
+  decomposition and the source of truth for scope; the tracking issue
+  replaces the GitHub `epic` issue for these initiatives.
 - Rule 2a applies to the tracking issue: when a Linear epic exists, the
   tracking issue title carries the `[MOD-nnn]` prefix and both sides
   backlink.
-- Tickets split from a plan are normal task-level GitHub issues (level 2,
-  below), self-contained (implementable from the issue body alone) and
-  titled with the initiative's bracket prefix (`[<slug>] …`). They get individual
-  `[MOD-nnn]` keys only when Linear tracks them individually — then rule 2a
-  applies to them unchanged.
+- Work cut from an approved plan is routed by **dispatch issues**: thin
+  task-level GitHub issues (level 2, below) that point into the plan
+  instead of restating it. The plan stays the spec; the issue body carries
+  the pointer (the plan file's path and the slice of the plan it routes)
+  plus links and labels, nothing more. Dispatch issues are titled with the
+  initiative's bracket prefix (`[<slug>] …`) and get individual `[MOD-nnn]`
+  keys only when Linear tracks them individually - then rule 2a applies to
+  them unchanged.
+- Standalone (non-plan-born) work is the opposite: its design lives in the
+  issue body directly, per the Scope section above.
 
 ### 2) Task-level implementation
 - Technical work to execute the epic.
