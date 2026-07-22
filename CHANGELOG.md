@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.47.0 - 2026-07-21
+
+Minor release: the eng-team package's spec phase becomes plan-artifact-aware,
+the gstack tool-library entry narrows to a prefixed browser-QA toolbox, Codex
+`max` reasoning effort validates cleanly, and the repo's development
+lifecycle docs are rebuilt around plan artifacts and repo-anchored
+conventions.
+
+### Changed
+- **eng-team spec phase is plan-artifact-aware (eng-team 1.2.0 -> 1.3.0, PR
+  #804).** The engineer's Spec Phase detects plan-born tickets (body
+  references a `plans/<slug>.md` artifact, or the title's bracket prefix
+  matches an existing plan file), reads the plan on `main` as the design
+  source of truth, and specs only the ticket's slice without re-deriving
+  recorded plan decisions. Plan-born issues link the plan artifact instead of
+  duplicating it; plan changes land as dated amendments in the implementing
+  PR. The `plan_review` workflow step consumes an optional `plan_path`
+  handoff field so the adversarial reviewer checks the spec against the plan
+  rather than re-litigating it.
+- **gstack catalog becomes a prefixed browser-QA toolbox (PRs #804, #805).**
+  The gstack tool-library entry installs with `--host auto --prefix -q`
+  (skills land namespaced as `gstack-*` for every agent CLI present, not just
+  Claude), and a post-setup step removes the six displaced lifecycle skills -
+  `gstack-ship`, `gstack-review`, `gstack-land-and-deploy`,
+  `gstack-landing-report`, `gstack-codex`, and `gstack-upgrade` (#805, which
+  would resurrect the others by re-running gstack's setup) - from both the
+  Claude and codex skill dirs. The `success:` contract enforces the prefixed
+  core pair present and the six removed skills absent (including dangling
+  symlinks), and `fix:` is idempotent so doctor can repair a resurrected
+  install. The engineering lifecycle on a team box is owned by the team's own
+  stage skills; gstack is browser-QA only.
+- **Development lifecycle docs rebuilt (PRs #793, #801, #803, #807).**
+  Initiative-sized work now designs in a `plans/<slug>.md` artifact merged
+  via PR with a lightweight tracking issue; split tickets are thin dispatch
+  pointers into the plan (`docs/TICKETING_POLICY.md`). The CLAUDE.md
+  lifecycle section carries repo-anchored conventions only (plan markers and
+  amendments, design-in-issue for single-unit work, e2e verification with
+  docs in the same PR, deliberate per-PR landing, handoff continuity). The
+  release runbook's Slack E2E validation message doubles as a human-readable
+  release announcement (#793).
+
+### Fixed
+- **Codex `max` reasoning effort validates cleanly (#794, PR #795).** The
+  Codex engine's declared effort capabilities now include `max`, so
+  validation and `bobi doctor` stop warning for a value the runtime already
+  passed through; the live effort test asserts the spawned
+  `-c model_reasoning_effort=...` argv pair via Bobi's real runner seam
+  instead of a private Codex rollout field.
+
+
 ## 0.46.0 - 2026-07-16
 
 Minor release: brain configuration is restructured around engines (gateway
