@@ -109,17 +109,17 @@ Alternatives considered:
 
 ### Phase 1 - Socket Mode protocol core (sans-IO, events-core)
 
-- [ ] `event-server/core/src/gateway/slack-socket.ts`: session state machine consuming decoded frames - `hello` (connection established; carries `connection_info.app_id`, which the driver uses to key the connection), `events_api` envelope (emit ack action + deliver action carrying the inner payload), `disconnect` with per-reason policy (`warning` = advisory, no action - Slack sends it seconds before the real refresh; `refresh_requested` and close = reconnect action; `link_disabled` = fatal, the feature was turned off), `slash_commands`/`interactive`/unknown types (ack where an `envelope_id` is present, deliver nothing), malformed frames ignored without dying
-- [ ] Staleness input: an `onTimer("staleness")` session input mapping to a reconnect action - WS-level auto-pong (the `ws` library answers server pings automatically) keeps the connection alive but detects nothing; a half-open socket must not park as connected forever (mirror of Discord's missed-ACK zombie detection, `gateway/discord.ts:203-212`)
-- [ ] Retransmission dedup per Q4 decision: deliver by default; a bounded LRU of acked `envelope_id`s suppresses only true re-sends of envelopes this session already acked
-- [ ] Action vocabulary mirroring `GatewayAction` (`send`, `deliver`, `reconnect`, `connected`, `fatal`) so the driver loop stays structurally identical to Discord's
-- [ ] Export from the events-core package (`event-server/core/package.json` `exports` map, alongside `./gateway/discord`; the publish smoke auto-derives subpaths, no other packaging work)
-- [ ] `event-server/test/slack-socket.spec.ts`: recorded-frame tests mirroring `discord.spec.ts` - hello/ack ordering, envelope -> deliver payload fidelity, per-reason disconnect policy, staleness -> reconnect, acked-envelope dedup (with a cross-reference comment to the webhook `preVerify` dedup test so the two policies are compared deliberately), malformed-frame survival, ack-before-deliver ordering
+- [x] `event-server/core/src/gateway/slack-socket.ts`: session state machine consuming decoded frames - `hello` (connection established; carries `connection_info.app_id`, which the driver uses to key the connection), `events_api` envelope (emit ack action + deliver action carrying the inner payload), `disconnect` with per-reason policy (`warning` = advisory, no action - Slack sends it seconds before the real refresh; `refresh_requested` and close = reconnect action; `link_disabled` = fatal, the feature was turned off), `slash_commands`/`interactive`/unknown types (ack where an `envelope_id` is present, deliver nothing), malformed frames ignored without dying
+- [x] Staleness input: an `onTimer("staleness")` session input mapping to a reconnect action - WS-level auto-pong (the `ws` library answers server pings automatically) keeps the connection alive but detects nothing; a half-open socket must not park as connected forever (mirror of Discord's missed-ACK zombie detection, `gateway/discord.ts:203-212`)
+- [x] Retransmission dedup per Q4 decision: deliver by default; a bounded LRU of acked `envelope_id`s suppresses only true re-sends of envelopes this session already acked
+- [x] Action vocabulary mirroring `GatewayAction` (`send`, `deliver`, `reconnect`, `connected`, `fatal`) so the driver loop stays structurally identical to Discord's
+- [x] Export from the events-core package (`event-server/core/package.json` `exports` map, alongside `./gateway/discord`; the publish smoke auto-derives subpaths, no other packaging work)
+- [x] `event-server/test/slack-socket.spec.ts`: recorded-frame tests mirroring `discord.spec.ts` - hello/ack ordering, envelope -> deliver payload fidelity, per-reason disconnect policy, staleness -> reconnect, acked-envelope dedup (with a cross-reference comment to the webhook `preVerify` dedup test so the two policies are compared deliberately), malformed-frame survival, ack-before-deliver ordering
 
 **Validation gate** - do not exit this phase until every line passes; if a command fails, fix the cause and re-run.
 
-- [ ] `cd event-server && npm test` green, including the new spec
-- [ ] The new module is inert: no driver references it yet, `npm run build:local` output unchanged in behavior
+- [x] `cd event-server && npm test` green, including the new spec
+- [x] The new module is inert: no driver references it yet, `npm run build:local` output unchanged in behavior
 
 ### Phase 2 - Local driver and wiring
 
@@ -175,7 +175,7 @@ Filled by the split workflow after approval.
 
 | Phase | Ticket | One-line scope | Status |
 |---|---|---|---|
-| 1-2 (Lane A) | #808 | Sans-IO Socket Mode session + local driver, proven by the stubbed-server integration test | [ ] |
+| 1-2 (Lane A) | #808 | Sans-IO Socket Mode session + local driver, proven by the stubbed-server integration test | [wip] |
 | 3 (Lane B) | #809 | Opt-in surface: `SLACK_APP_TOKEN`, doctor socket-state surfacing, `create-slack-bot --socket-mode`, transport-aware ingress check, docs, live smoke | [ ] |
 
 Lane order: #809 builds in parallel with #808 (the `app_token` record contract

@@ -22,7 +22,8 @@
 		"./circuit-breaker": "./src/circuit-breaker.ts",
 		"./adapters/chat-sdk-slack": "./src/adapters/chat-sdk-slack.ts",
 		"./adapters/discord": "./src/adapters/discord.ts",
-		"./gateway/discord": "./src/gateway/discord.ts"
+		"./gateway/discord": "./src/gateway/discord.ts",
+		"./gateway/slack-socket": "./src/gateway/slack-socket.ts"
 	},
 	"dependencies": {
 		"@chat-adapter/slack": "^4.30.0"

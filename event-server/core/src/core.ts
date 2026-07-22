@@ -108,6 +108,8 @@ export interface SlackBotRecord {
 	signing_secret?: string;
 	/** Slack api_app_id; the map key, repeated here for convenience. */
 	app_id?: string;
+	/** App-level Socket Mode credential; accepted through signed registration only. */
+	app_token?: string;
 }
 
 export interface SlackWorkspaceRecord {
@@ -2356,6 +2358,16 @@ export async function handleSlackWorkspaceRegister(
 	if (!workspaceId || !botToken) {
 		return { status: 400, body: { error: "workspace_id and bot_token required" } };
 	}
+	const suppliedAppToken = body.app_token;
+	if (bubbleId && suppliedAppToken !== undefined
+		&& (typeof suppliedAppToken !== "string" || suppliedAppToken.trim().length === 0)) {
+		return { status: 400, body: { error: "app_token must be a non-empty string" } };
+	}
+	// Unsigned registrations remain useful for global self-loop filtering, but
+	// must never introduce or replace a credential that opens an outbound socket.
+	const appToken = bubbleId && typeof suppliedAppToken === "string"
+		? suppliedAppToken
+		: undefined;
 
 	// Accept explicit bot_id/app_id when the caller already resolved them (e.g.
 	// tests, or a Python client). Fall back to auth.test (bot_id) and
@@ -2430,6 +2442,7 @@ export async function handleSlackWorkspaceRegister(
 			bot_user_id: botUserId ?? prev.bot_user_id,
 			signing_secret: signingSecret ?? prev.signing_secret,
 			app_id: appId ?? prev.app_id,
+			app_token: appToken ?? prev.app_token,
 		};
 		return {
 			// Keep legacy fields reflecting the just-registered bot for back-compat
