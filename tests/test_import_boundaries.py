@@ -49,9 +49,14 @@ WORKER_ADAPTER_MODULES = {"index", "deployment-session", "internal-auth"}
 # WORKER_ADAPTER_MODULES this bounds src/ - every module present must be in
 # one of the two sets and the worker set must stay ABSENT
 # (test_src_modules_fully_classified), so new files cannot silently default
-# to public. discord-gateway-local is the local runtime's Discord Gateway
-# driver (#2) - Node `ws` client, no Cloudflare knowledge.
-PUBLIC_LOCAL_MODULES = {"local", "discord-gateway-local"}
+# to public. The two gateway drivers and their shared socket scaffolding are
+# local-runtime Node modules with no Cloudflare knowledge.
+PUBLIC_LOCAL_MODULES = {
+    "local",
+    "discord-gateway-local",
+    "slack-socket-local",
+    "socket-driver-common",
+}
 
 
 def _parsed_bobi_modules():

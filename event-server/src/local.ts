@@ -41,6 +41,10 @@ import {
 } from "@moda-labs/bobi-events-core";
 import { DiscordGatewayManager } from "./discord-gateway-local";
 import {
+	SlackSocketManager,
+	slackSocketConfigurationError,
+} from "./slack-socket-local";
+import {
 	isExemptFromBreaker,
 	recordDelivery,
 	drainPaused,
@@ -51,9 +55,14 @@ import { setSlackApiUrl, setWhatsAppApiUrl, setDiscordApiUrl } from "@moda-labs/
 
 // Integration-test seams: point the Slack Web API / Meta Graph API / Discord
 // API at local stubs. Unset in production, where the platform defaults apply.
-setSlackApiUrl(process.env.BOBI_ES_SLACK_API_URL);
+const slackApiUrlOverride = process.env.BOBI_ES_SLACK_API_URL || "";
+setSlackApiUrl(slackApiUrlOverride);
 setWhatsAppApiUrl(process.env.BOBI_ES_WHATSAPP_API_URL);
 setDiscordApiUrl(process.env.BOBI_ES_DISCORD_API_URL);
+
+const port = parseInt(process.env.BOBI_ES_PORT || "8080", 10);
+const bind = process.env.BOBI_ES_BIND || "127.0.0.1";
+const slackSocketConfigError = slackSocketConfigurationError(bind, slackApiUrlOverride);
 
 const MAX_BUFFER = 10_000;
 
@@ -373,6 +382,10 @@ const discordGateway = new DiscordGatewayManager(storage, {
 	messageContent: discordMessageContent,
 	...(discordGatewayUrl ? { gatewayUrlOverride: discordGatewayUrl } : {}),
 });
+const slackSocket = new SlackSocketManager(storage, {
+	bindAddress: bind,
+	apiUrlOverride: slackApiUrlOverride,
+});
 
 async function seedEnvIngestTokens() {
 	const configured = process.env.BOBI_ES_INGEST_TOKENS || "";
@@ -469,6 +482,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
 	if (method === "GET" && path === "/health") {
 		const discordHealth = discordGateway.health();
+		const slackHealth = slackSocket.health();
 		return json(res, {
 			status: "ok",
 			mode: "local",
@@ -481,6 +495,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 			bubbles: bubbles.size,
 			rejections: getAuthRejectionCounters(),
 			...(discordHealth.length > 0 ? { discord_gateway: discordHealth } : {}),
+			...(slackHealth.length > 0 ? { slack_socket: slackHealth } : {}),
 		});
 	}
 
@@ -592,7 +607,27 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		} else if (hasPartialBubbleSignature(ctx)) {
 			return json(res, { error: "forbidden" }, 403);
 		}
-		return respond(res, await handleSlackWorkspaceRegister(storage, data, bubbleId));
+		if (bubbleId && typeof data.app_token === "string"
+			&& data.app_token.trim().length > 0 && slackSocketConfigError) {
+			return json(res, { error: slackSocketConfigError }, 503);
+		}
+		const result = await handleSlackWorkspaceRegister(storage, data, bubbleId);
+		if (result.status === 200 && bubbleId && typeof data.app_token === "string") {
+			const response = result.body as Record<string, unknown>;
+			const workspaceId = typeof response.workspace_id === "string"
+				? response.workspace_id
+				: "";
+			const applicationId = typeof response.app_id === "string"
+				? response.app_id
+				: "";
+			const botId = typeof response.bot_id === "string" ? response.bot_id : "";
+			slackSocket.start({
+				registrationId: `${workspaceId}:${botId || "default"}`,
+				appToken: data.app_token,
+				...(applicationId ? { applicationId } : {}),
+			});
+		}
+		return respond(res, result);
 	}
 
 	if (method === "POST" && path === "/whatsapp/numbers") {
@@ -818,9 +853,6 @@ function evictStaleDeployments() {
 // ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
-
-const port = parseInt(process.env.BOBI_ES_PORT || "8080", 10);
-const bind = process.env.BOBI_ES_BIND || "127.0.0.1";
 
 const server = http.createServer(async (req, res) => {
 	try {

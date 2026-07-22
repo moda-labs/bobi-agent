@@ -2902,6 +2902,61 @@ describe("handleSlackWorkspaceRegister", () => {
 		expect(ws?.bots?.A1?.bot_user_id).toBe("U1");            // preserved
 		expect(ws?.bots?.A1?.bot_token).toBe("x1-rotated");      // token refreshed
 	});
+
+	it("stores app_token only for signed registrations and preserves it on omission", async () => {
+		const store = createMockStorage();
+		stubSlackAuth("T1", "B1", "A1");
+		const first = await handleSlackWorkspaceRegister(store, {
+			workspace_id: "T1",
+			bot_token: "xoxb-1",
+			bot_id: "B1",
+			app_id: "A1",
+			app_token: "xapp-signed",
+		}, "bubA");
+
+		expect(first.status).toBe(200);
+		expect(first.body).not.toHaveProperty("app_token");
+		expect(store.slackWorkspaces.get("T1")?.bots?.A1?.app_token).toBe("xapp-signed");
+		expect(store.slackWorkspaces.get("bubA:T1")?.bots?.A1?.app_token).toBe("xapp-signed");
+
+		await handleSlackWorkspaceRegister(store, {
+			workspace_id: "T1",
+			bot_token: "xoxb-rotated",
+			bot_id: "B1",
+			app_id: "A1",
+		}, "bubA");
+		expect(store.slackWorkspaces.get("T1")?.bots?.A1?.app_token).toBe("xapp-signed");
+		expect(store.slackWorkspaces.get("bubA:T1")?.bots?.A1?.app_token).toBe("xapp-signed");
+	});
+
+	it("ignores unsigned app_token without overwriting a signed value", async () => {
+		const store = createMockStorage();
+		stubSlackAuth("T1", "B1", "A1");
+		await handleSlackWorkspaceRegister(store, {
+			workspace_id: "T1", bot_token: "xoxb-1", bot_id: "B1", app_id: "A1",
+			app_token: "xapp-signed",
+		}, "bubA");
+
+		await handleSlackWorkspaceRegister(store, {
+			workspace_id: "T1", bot_token: "xoxb-unsigned", bot_id: "B1", app_id: "A1",
+			app_token: "xapp-attacker",
+		});
+
+		expect(store.slackWorkspaces.get("T1")?.bots?.A1?.app_token).toBe("xapp-signed");
+		expect(store.slackWorkspaces.get("bubA:T1")?.bots?.A1?.app_token).toBe("xapp-signed");
+	});
+
+	it("rejects an empty signed app_token before mutating storage", async () => {
+		const store = createMockStorage();
+		stubSlackAuth("T1", "B1", "A1");
+		const result = await handleSlackWorkspaceRegister(store, {
+			workspace_id: "T1", bot_token: "xoxb-1", bot_id: "B1", app_id: "A1",
+			app_token: "  ",
+		}, "bubA");
+
+		expect(result.status).toBe(400);
+		expect(store.slackWorkspaces.size).toBe(0);
+	});
 });
 
 describe("resolveSlackSigningSecret", () => {
