@@ -137,6 +137,8 @@ the QA phase will error loudly — never silently skip.
 Non-trivial specs should be reviewed before implementation. At minimum, review
 for architecture / edge cases / test coverage, for UX / design quality, and for
 scope (too narrow? too wide?). Bind these review lenses to **your review gate**.
+For plan-born work, the scope lens is exempt: the plan's approval merge already
+settled scope — spec only the ticket's slice and never re-litigate it.
 
 ### Tests
 
@@ -420,6 +422,9 @@ Write a reviewed design spec — do NOT write implementation code.
    the original issue description.
 4. Review the spec with your spec review gate (architecture / edge cases / test
    coverage; UX / design; scope).
+   For plan-born work, drop the scope lens from this review: the plan's
+   approval merge already settled scope (step 2's slice rule governs
+   instead).
 5. **Update the issue description** with the spec (mandatory — the human reviews via the issue).
    For plan-born work, link the plan artifact from the spec instead of
    duplicating its content. If the spec requires the plan itself to change,
