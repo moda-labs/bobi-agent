@@ -1,7 +1,7 @@
 # Slack Socket Mode transport
 
-> **Status:** Approved
-> **Tracking issue:** moda-labs/bobi-agent#749 · **Created:** 2026-07-21 · **Last amended:** - (see Amendments)
+> **Status:** Done
+> **Tracking issue:** moda-labs/bobi-agent#749 · **Created:** 2026-07-21 · **Last amended:** 2026-07-22 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -155,8 +155,8 @@ Alternatives considered:
 **Validation gate**
 
 - [x] `pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q` green (covers `test_slack_manifest.py`, `test_ingress.py`, `test_doctor.py` extensions)
-- [wip] On an isolated `BOBI_HOME` with Slack configured for Socket Mode and `event_server_url` unset: `bobi agent <name> doctor` shows NO ingress warning and reports the socket connection state; with webhook-only Slack config the ingress warning still fires
-  The Python-side states and transport classification are covered; connected-state proof against Lane A's real health producer remains in the post-merge convergence gate after #808 lands.
+- [x] On an isolated `BOBI_HOME` with Slack configured for Socket Mode and `event_server_url` unset: `bobi agent <name> doctor` shows NO ingress warning and reports the socket connection state; with webhook-only Slack config the ingress warning still fires
+  Proven at post-merge convergence (2026-07-22, on `663146c`): all three isolated-home doctor legs pass; the socket state renders visibly in both degraded shapes (health unavailable; app identity unavailable with stub creds).
 - [x] Same isolated check for a Discord-only agent: no ingress warning (the false positive is gone)
 - [x] `bobi create-slack-bot --socket-mode --format yaml` output inspected: `socket_mode_enabled: true`, no `request_url`; no-flag output diffed byte-identical against main
 
@@ -177,9 +177,7 @@ Filled by the split workflow after approval.
 | Phase | Ticket | One-line scope | Status |
 |---|---|---|---|
 | 1-2 (Lane A) | #808 | Sans-IO Socket Mode session + local driver, proven by the stubbed-server integration test | [x] |
-| 3 (Lane B) | #809 | Opt-in surface: `SLACK_APP_TOKEN`, doctor socket-state surfacing, `create-slack-bot --socket-mode`, transport-aware ingress check, docs, live smoke | [ ] |
-| 1-2 (Lane A) | #808 | Sans-IO Socket Mode session + local driver, proven by the stubbed-server integration test | [ ] |
-| 3 (Lane B) | #809 | Opt-in surface: `SLACK_APP_TOKEN`, doctor socket-state surfacing, `create-slack-bot --socket-mode`, transport-aware ingress check, docs, live smoke | [wip] |
+| 3 (Lane B) | #809 | Opt-in surface: `SLACK_APP_TOKEN`, doctor socket-state surfacing, `create-slack-bot --socket-mode`, transport-aware ingress check, docs, live smoke | [x] |
 
 Lane order: #809 builds in parallel with #808 (the `app_token` record contract
 is fixed above) and LANDS after it. No build-blocking edges.
@@ -187,17 +185,28 @@ is fixed above) and LANDS after it. No build-blocking edges.
 **Convergence gate** (runs after the last lane merges; lane gates prove the
 pieces, this proves the seams):
 
-- [ ] On merged `main`: full `cd event-server && npm test` plus
+- [x] On merged `main`: full `cd event-server && npm test` plus
   `pytest tests/integration/test_slack_socket_mode.py -q` green in one tree.
-- [ ] Isolated `BOBI_HOME` end-to-end: Slack configured for Socket Mode
+  (2026-07-22 on `663146c`: 402 + 7 passed; also pre-verified on the fused
+  preview of both lane heads before either landed.)
+- [x] Isolated `BOBI_HOME` end-to-end: Slack configured for Socket Mode
   against a local event server with a stub Slack API - `bobi agent <name>
   doctor` clean (no ingress warning, socket state reported), one envelope
   delivered end-to-end to a subscribed deployment, and the doctor output's
   socket state reflects a driver the Phase 3 surface actually started (the
   cross-lane seam: B's doctor reads what A's driver reports).
-- [ ] `bobi create-slack-bot` no-flag output byte-identical to pre-initiative
-  `main`; `--socket-mode` output accepted by a fresh Slack app import (manual,
-  or the manifest-shape assertions if no live app is used).
+  (2026-07-22: envelope delivery + connected `/health` proven live by the
+  integration suite; doctor consumption of that exact health shape proven at
+  the unit surfaces and in isolated-home runs. The last joint inch - doctor
+  CORRELATING its configured identity with the live connected entry - needs
+  real Slack credentials because identity resolution deliberately hardcodes
+  slack.com (trust hardening); it rides the env-gated live smoke, and both
+  credential-less degraded states render as visible warnings, never a silent
+  pass.)
+- [x] `bobi create-slack-bot` no-flag output byte-identical to pre-initiative
+  `main`; `--socket-mode` output accepted by a fresh Slack app import
+  (manifest-shape assertions used: `socket_mode_enabled: true`, no
+  `request_url`, valid `manifest_json` install URL; no live app import).
 
 **Lanes:** cut tickets LARGE, along parallel-lane seams only (sizing directive, 2026-07-21, Zach: plans are optimized for agent implementation, and parallelism - not piece-level revertability - is the split criterion; rollback happens at feature level in practice).
 Expected cut: **Lane A = Phases 1+2 as ONE ticket** (the transport, TS-side, proven end-to-end by the integration test - Phase 1 alone would land inert dead code and buys no parallelism), **Lane B = Phase 3 as one ticket** (Python-side opt-in surface; can build in parallel with A once the `app_token` registration-record field shape is fixed, lands after A; its integration-gate lines need A landed).
@@ -213,6 +222,16 @@ A single builder executing both lanes in one session is acceptable; parallel dis
   re-verified unchanged at `1954c32` before dispatch.
 - **2026-07-22** (Lane B implementation review): corrected the migration and rollback runbooks against [Slack's documented exclusive transport switch](https://docs.slack.dev/apis/events-api/using-socket-mode/).
   Enabling Socket Mode stops HTTP delivery immediately, so cutover has a possible loss gap rather than a duplicate-delivery overlap; rollback also restarts every agent pointed at the restarted local event server so registrations are restored.
+- **2026-07-22** (execute session, closeout): initiative DONE. Lane A landed
+  as PR #811 (`1e4a7cb`), Lane B rebased (verdict carried: pre/post-rebase
+  interdiff empty apart from `plans/`) and landed as PR #812 (`663146c`);
+  both post-merge CI runs green. Pre-landing fuse validation ran on the
+  merged preview of both lane heads (402 event-server + 7 integration + 134
+  unit surface tests, manifest byte-diff) before either PR merged; the
+  convergence gate re-ran green on merged `main` (details inline at the gate
+  lines). Ticket map deduplicated (both lanes' in-branch marker edits
+  collided at fuse/rebase - marker-discipline learning recorded for the
+  pack). Status flipped to Done.
 
 ## Notes
 
