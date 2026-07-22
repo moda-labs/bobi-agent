@@ -265,9 +265,9 @@ deployment for your machine: open a session and ask it to read
 Two limits to know about:
 
 - The agent only works while the machine is on.
-- Inbound webhooks from the public internet (Slack messages, GitHub events)
-  can't reach a loopback server. For those, deploy to Fly (Option B) or point
-  the agent at a deployed event server.
+- Inbound webhooks from the public internet, including GitHub and Slack's default HTTP Events API, can't reach a loopback server.
+  For those, deploy to Fly (Option B) or point the agent at a deployed event server.
+  A self-hosted Slack agent can instead use outbound [Socket Mode](../skills/slack-setup.md#verify-socket-mode-and-migrate-safely) with the local Node event server.
 
 If local covers your needs, skip ahead to
 [Step 6](#step-6-finalize-chat-slack-configuration) or
@@ -357,20 +357,22 @@ with the bobi-deploy distribution.
 
 ## Step 6: Finalize chat (Slack) configuration
 
-The command line works, but the real magic is talking to your Bobi team from
-Slack. If you set up Slack during `bobi setup`, one wiring step remains after
-you deploy, because Slack needs a reachable webhook URL:
+The command line works, but the real magic is talking to your Bobi team from Slack.
+If you set up Slack during `bobi setup`, choose the default HTTP Events API path or self-hosted Socket Mode:
 
-1. **Point Slack at your event server.** Go to your Slack app at
-   [api.slack.com/apps](https://api.slack.com/apps), open **Event
-   Subscriptions**, and set the Request URL to your event server's webhook
-   endpoint (`<event-server>/webhooks/slack`) with the scopes the Bobi Slack
-   adapter needs. The fastest way to get all of this right is Bobi's manifest
-   generator, which prefills the scopes and event subscriptions:
+1. **Create the Slack app.** The manifest generator prefills the scopes and event subscriptions.
+   Use the default command for a reachable HTTP webhook, or add `--socket-mode` when the local Node event server should dial out without a public Request URL:
 
    ```bash
+   # HTTP Events API
    bobi create-slack-bot --app-name "Bobi"
+
+   # Socket Mode for a self-hosted local Node event server
+   bobi create-slack-bot --socket-mode --app-name "Bobi"
    ```
+
+   HTTP mode points Slack's Event Subscriptions Request URL at `<event-server>/webhooks/slack`.
+   Socket Mode instead requires the generated `xapp-` app-level token to be saved as `SLACK_APP_TOKEN`.
 
 2. **Add the app to your workspace** and, ideally, invite it to a dedicated
    channel for the team (`/invite @your-bot`).
@@ -379,8 +381,7 @@ you deploy, because Slack needs a reachable webhook URL:
    post, then restart the agent. Send a test message in the channel to
    confirm the round trip.
 
-The full walkthrough, including the manifest contents, URL verification, and
-troubleshooting, is in [Slack setup](../skills/slack-setup.md).
+The full walkthrough, including manifest contents, transport verification, migration, and troubleshooting, is in [Slack setup](../skills/slack-setup.md).
 
 ## If you get stuck
 

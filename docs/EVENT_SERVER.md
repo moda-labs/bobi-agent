@@ -77,6 +77,10 @@ machine, or on its own box behind TLS - to receive provider webhooks on
 infrastructure you manage. Setup guide:
 [SELF_HOSTED_EVENT_SERVER.md](SELF_HOSTED_EVENT_SERVER.md).
 
+The local runtime also owns outbound channel transports.
+Discord Gateway is always outbound, and Slack Socket Mode is enabled per app when a bubble-signed workspace registration carries an app-level token.
+The hosted Worker has no persistent Slack socket driver.
+
 ### The client
 
 `bobi/events/client.py` (`EventServerClient`) is the outbound WebSocket client. It
@@ -168,6 +172,11 @@ signed body, never from client input**:
   runs through the Chat SDK bridge (`adapters/chat-sdk-slack.ts`, #628), the
   only Slack inbound normalizer (#647). Maps to `slack.mention` / `slack.dm` /
   `slack.thread_reply` and filters our own bots' messages.
+- **Slack Socket Mode** is an opt-in local-runtime transport into that same normalizer and delivery pipeline.
+  The local server calls `apps.connections.open` with an app-level `xapp-` token, holds the returned outbound WebSocket, acknowledges each envelope, and passes its inner Events API payload to `handleSlackWebhook`.
+  Python forwards the app token only through bubble-signed `POST /slack/workspaces` registration after `/health` reports `mode: local`; there is no event-server environment fallback.
+  `/health.slack_socket` reports per-app connection state for doctor.
+  The Worker remains webhook-only.
 - **Linear** (`POST /webhooks/linear`): `type = linear.<type>.<action>`, key
   `linear:<TEAM_KEY>`. Signature (`Linear-Signature`, HMAC-SHA256 of the raw body)
   is verified when `LINEAR_WEBHOOK_SECRET` (local: `BOBI_ES_LINEAR_WEBHOOK_SECRET`)
@@ -218,6 +227,23 @@ inter-agent inbox/reply, and any agent-emitted event publish here. It is
 routing fields (`repo` / `team_key` / `workspace`) - those are webhook-only. `{topic}`
 may contain slashes (e.g. `inbox/director`).
 
+### Slack transport migration boundary
+
+HTTP Events API stays the default for hosted or publicly reachable ingress.
+Socket Mode removes the public Request URL requirement for a self-hosted local Node event server.
+Both transports produce the same normalized Slack event shapes and topics.
+
+Slack switches a single app exclusively between HTTP and WebSocket delivery, so there is no same-app overlap window.
+Prepare the app token and bobi configuration while HTTP remains active, keep the existing Request URL and signing secret, and schedule a quiet cutover window.
+Toggle Socket Mode on, immediately start or restart the agent, and wait for doctor to report `connected` before sending a test event.
+Events that arrive after the toggle but before the socket connects can be lost.
+
+Slack has no equivalent of Discord's paste-back login readiness gate.
+A login DM emitted before the Socket Mode connection reaches `connected` can be lost; verify doctor before starting a Slack login flow.
+For rollback, toggle Socket Mode off first so Slack resumes the saved HTTP Request URL, then verify webhook delivery.
+Revoke the app-level token, remove `SLACK_APP_TOKEN`, restart the local event server, and immediately restart every agent pointed at it because the server restart clears registrations.
+Events arriving between the server restart and agent re-registration are dropped.
+
 ## Topic subscription model
 
 A **topic** is the routing key; a **subscription key** is the topic, optionally
@@ -229,8 +255,8 @@ prefixed by the subscriber's bubble id for tenant isolation (see Security).
 |---|---|---|
 | `github:<owner>/<repo>` | GitHub webhook | `github:moda-labs/bobi` |
 | `linear:<TEAM_KEY>` | Linear webhook | `linear:MOD` |
-| `slack:<team>` | Slack webhook (no app id) | `slack:T0ABC` |
-| `slack:<team>:app:<app_id>[:<channel>]` | Slack webhook (app-qualified) | `slack:T0ABC:app:A123:C0XYZ` |
+| `slack:<team>` | Slack webhook or Socket Mode (no app id) | `slack:T0ABC` |
+| `slack:<team>:app:<app_id>[:<channel>]` | Slack webhook or Socket Mode (app-qualified) | `slack:T0ABC:app:A123:C0XYZ` |
 | `whatsapp:<phone_number_id>` | WhatsApp webhook | `whatsapp:747556541` |
 | `discord:<application_id>` | Discord Gateway (local server) | `discord:111222333444555666` |
 | `inbox/<session>` | inter-agent fire-and-forget | `inbox/director` |
@@ -428,8 +454,8 @@ the grant, never the credential:
   access).
 - **Linear**: a teams query must return the specific team key (access to that team,
   not just the org).
-- **Slack**: the bubble-signed `/slack/workspaces` registration (proving the bot
-  token + signing secret via `auth.test`) doubles as the grant.
+- **Slack**: the bubble-signed `/slack/workspaces` registration (proving the bot token via `auth.test`) doubles as the grant and stores per-app send and verification credentials.
+  On a local runtime, the same signed record may carry the Socket Mode app token and start the outbound connection; unsigned registrations never do.
 - **WhatsApp**: the bubble-signed `/whatsapp/numbers` registration (proving the
   Cloud API token can read the phone-number node on the Graph API) doubles as
   the grant, and stores the bubble-scoped send credential.

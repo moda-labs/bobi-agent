@@ -171,6 +171,12 @@ _NATIVE = [
                 ),
                 secrets=(
                     Secret("SLACK_BOT_TOKEN", "Bot token", "xoxb-…"),
+                    Secret(
+                        "SLACK_APP_TOKEN", "App token", "xapp-…",
+                        "Optional - enables Socket Mode with the app-level "
+                        "connections:write scope.",
+                        optional=True,
+                    ),
                     Secret("SLACK_SIGNING_SECRET", "Signing secret", "",
                            "Optional — only to receive events via the event "
                            "server.", optional=True),

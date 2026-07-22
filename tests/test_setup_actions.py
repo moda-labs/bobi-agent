@@ -61,6 +61,7 @@ class TestConstants:
 
     def test_secret_shapes_matches_known_tokens(self):
         assert actions.SECRET_SHAPES.search("xoxb-abc")
+        assert actions.SECRET_SHAPES.search("xapp-abc")
         assert actions.SECRET_SHAPES.search("ghp_deadbeef")
         assert not actions.SECRET_SHAPES.search("a perfectly ordinary sentence")
 
@@ -71,6 +72,7 @@ class TestRedactSecrets:
             # built from parts so no contiguous token literal sits in source
             # (GitHub push protection flags Slack-shaped literals)
             "xoxb-" + "1" * 12 + "-" + "a" * 16,
+            "xapp-" + "1" * 12 + "-" + "a" * 16,
             "ghp_" + "a" * 36,
             "github_pat_" + "B" * 30,
             "sk-ant-api03-" + "c" * 40,

@@ -679,6 +679,10 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
         signing_secret = cfg.credential("slack", "signing_secret")
     except Exception:
         signing_secret = ""
+    try:
+        app_token = str(cfg.credential("slack", "app_token") or "").strip()
+    except Exception:
+        app_token = ""
     team_id, bot_id, bot_user_id = _slack_auth_info(token)
     if not team_id:
         return []
@@ -699,6 +703,14 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
             record["app_id"] = app_id
         if signing_secret:
             record["signing_secret"] = signing_secret
+        # Socket Mode is a local-runtime capability and app tokens may only
+        # cross this boundary on an authenticated registration. Trust the
+        # server's declared mode rather than its URL: a standalone local Node
+        # server may be reached over a LAN, tailnet, tunnel, or public host.
+        if app_token and bubble_id and bubble_key:
+            server_health = health(base_url)
+            if server_health and server_health.get("mode") == "local":
+                record["app_token"] = app_token
         # Signed when we hold a bubble key, so the server writes the
         # bubble-scoped record outbound channel sends require. Unsigned
         # otherwise (still writes the global self-reply record).
@@ -713,7 +725,11 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
         )
         return [team_id]
     except Exception as e:
-        log.warning("Slack workspace registration failed for %s: %s", team_id, e)
+        detail = str(e)
+        for secret in (token, signing_secret, app_token):
+            if secret:
+                detail = detail.replace(secret, "[redacted]")
+        log.warning("Slack workspace registration failed for %s: %s", team_id, detail)
         return []
 
 

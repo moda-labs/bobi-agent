@@ -1,7 +1,7 @@
 """Tests for named doctor health checks."""
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -147,6 +147,258 @@ class TestCheckIngressReachability:
             r = _check_ingress_reachability()
         assert r.ok
         assert "skipped" in r.detail
+
+
+# --- Slack Socket Mode ---
+
+def _write_slack_socket_config(tmp_path, *, event_server_url=""):
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    lines = ["agent: test"]
+    if event_server_url:
+        lines.append(f"event_server_url: {event_server_url}")
+    lines.extend([
+        "services:",
+        "  - name: slack",
+        "    events: true",
+        "    credentials:",
+        "      bot_token: xoxb-configured",
+        "      app_token: xapp-configured",
+    ])
+    paths.agent_yaml_path(tmp_path).write_text("\n".join(lines) + "\n")
+
+
+def _run_slack_socket_check(
+    tmp_path, health_payload, *, expected_url="http://localhost:8080",
+):
+    health_probe = Mock(return_value=health_payload)
+    with (
+        patch("bobi.doctor.bound_root", return_value=tmp_path),
+        patch("bobi.events.server.health", health_probe),
+        patch(
+            "bobi.events.server._slack_auth_info",
+            return_value=("T_TEAM", "B_BOT", "U_BOT"),
+        ),
+        patch("bobi.events.server._slack_app_id", return_value="A_APP"),
+    ):
+        from bobi.doctor import _check_slack_socket_mode
+        result = _check_slack_socket_mode()
+    health_probe.assert_called_once_with(expected_url)
+    return result
+
+
+class TestCheckSlackSocketMode:
+    def test_flags_app_token_paired_with_remote_event_server(self, tmp_path):
+        _write_slack_socket_config(
+            tmp_path, event_server_url="https://events.example.com",
+        )
+
+        result = _run_slack_socket_check(
+            tmp_path, {"status": "ok", "mode": "worker"},
+            expected_url="https://events.example.com",
+        )
+
+        assert not result.ok
+        assert not result.required
+        assert result.name == "Slack Socket Mode"
+        assert "remote" in (result.detail + result.hint).lower()
+        assert "local" in result.hint.lower()
+        assert "https://events.example.com" in result.detail
+        assert "xapp-configured" not in result.detail + result.hint
+
+    def test_flags_local_server_missing_socket_health_block(self, tmp_path):
+        _write_slack_socket_config(tmp_path)
+
+        result = _run_slack_socket_check(
+            tmp_path, {"status": "ok", "mode": "local"},
+        )
+
+        assert not result.ok
+        assert not result.required
+        assert any(
+            word in (result.detail + result.hint).lower()
+            for word in ("unsupported", "not registered", "unavailable")
+        )
+
+    def test_flags_unavailable_health_without_exposing_token(self, tmp_path):
+        _write_slack_socket_config(tmp_path)
+
+        result = _run_slack_socket_check(tmp_path, None)
+
+        assert not result.ok
+        assert not result.required
+        assert "unavailable" in (result.detail + result.hint).lower()
+        assert "http://localhost:8080" in result.detail
+        assert "xapp-configured" not in result.detail + result.hint
+
+    def test_reports_matching_connected_socket(self, tmp_path):
+        _write_slack_socket_config(tmp_path)
+        health_payload = {
+            "status": "ok",
+            "mode": "local",
+            "slack_socket": [{
+                "application_id": "A_APP",
+                "state": "connected",
+                "connect_count": 2,
+                "delivered_event_count": 5,
+                "last_event_at": "2026-07-22T12:00:00.000Z",
+            }],
+        }
+
+        result = _run_slack_socket_check(tmp_path, health_payload)
+
+        assert result.ok
+        assert not result.required
+        assert "connected" in result.detail.lower()
+        assert "A_APP" in result.detail
+
+    @pytest.mark.parametrize("entry", [
+        pytest.param(
+            {"application_id": "A_APP", "state": "backoff"},
+            id="transient-backoff",
+        ),
+        pytest.param(
+            {
+                "application_id": "A_APP",
+                "state": "fatal",
+                "fatal_reason": "authentication failed",
+            },
+            id="fatal",
+        ),
+    ])
+    def test_reports_matching_nonconnected_socket_as_warning(
+        self, tmp_path, entry,
+    ):
+        _write_slack_socket_config(tmp_path)
+
+        result = _run_slack_socket_check(tmp_path, {
+            "status": "ok",
+            "mode": "local",
+            "slack_socket": [entry],
+        })
+
+        assert not result.ok
+        assert not result.required
+        assert entry["state"] in (result.detail + result.hint).lower()
+        if entry["state"] == "fatal":
+            assert "authentication failed" in result.detail + result.hint
+
+    def test_does_not_treat_another_apps_connection_as_healthy(self, tmp_path):
+        _write_slack_socket_config(tmp_path)
+
+        result = _run_slack_socket_check(tmp_path, {
+            "status": "ok",
+            "mode": "local",
+            "slack_socket": [{
+                "application_id": "A_OTHER",
+                "state": "connected",
+            }],
+        })
+
+        assert not result.ok
+        assert not result.required
+        assert "A_APP" in result.detail + result.hint
+        assert "not registered" in (result.detail + result.hint).lower()
+
+    def test_redacts_secret_and_control_characters_from_health(self, tmp_path):
+        _write_slack_socket_config(tmp_path)
+
+        result = _run_slack_socket_check(tmp_path, {
+            "status": "ok",
+            "mode": "local",
+            "slack_socket": [{
+                "application_id": "A_APP",
+                "state": "fatal\x1b[31m",
+                "fatal_reason": "token xapp-configured rejected\nretry",
+            }],
+        })
+
+        output = result.detail + result.hint
+        assert "xapp-configured" not in output
+        assert "\x1b" not in output
+        assert "\n" not in output
+
+    def test_whitespace_app_token_is_treated_as_unconfigured(
+        self, tmp_path,
+    ):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "agent: test\n"
+            "services:\n"
+            "  - name: slack\n"
+            "    credentials:\n"
+            "      bot_token: xoxb-configured\n"
+            "      app_token: '   '\n"
+        )
+        with (
+            patch("bobi.doctor.bound_root", return_value=tmp_path),
+            patch(
+                "bobi.events.server.health",
+                side_effect=AssertionError(
+                    "blank app token must not probe socket health"
+                ),
+            ),
+        ):
+            from bobi.doctor import _check_slack_socket_mode
+            assert _check_slack_socket_mode() is None
+
+    def test_is_omitted_without_app_token_and_does_not_probe_health(
+        self, tmp_path,
+    ):
+        paths.package_dir(tmp_path).mkdir(parents=True)
+        paths.agent_yaml_path(tmp_path).write_text(
+            "agent: test\n"
+            "services:\n"
+            "  - name: slack\n"
+            "    credentials:\n"
+            "      bot_token: xoxb-configured\n"
+        )
+        with (
+            patch("bobi.doctor.bound_root", return_value=tmp_path),
+            patch(
+                "bobi.events.server.health",
+                side_effect=AssertionError(
+                    "webhook-only Slack must not probe socket health"
+                ),
+            ),
+        ):
+            from bobi.doctor import _check_slack_socket_mode
+            assert _check_slack_socket_mode() is None
+
+
+def test_run_doctor_surfaces_slack_socket_mode_check(monkeypatch):
+    import bobi.doctor as doctor
+
+    ordinary = CheckResult("ordinary", ok=True)
+    list_checks = {"_check_package_requires", "_check_host_caps", "_check_services"}
+    for name in (
+        "_check_claude_cli",
+        "_check_claude_auth",
+        "_check_local_config",
+        "_check_runtime_layout",
+        "_check_runtime_write_policy",
+        "_check_install_integrity",
+        "_check_bobi_install_integrity",
+        "_check_package_requires",
+        "_check_host_caps",
+        "_check_services",
+        "_check_workflows",
+        "_check_bubble_auth",
+        "_check_event_server",
+        "_check_ingress_reachability",
+        "_check_recent_events",
+        "_check_long_term_memory",
+    ):
+        result = [] if name in list_checks else ordinary
+        monkeypatch.setattr(doctor, name, lambda result=result: result)
+
+    socket_check = CheckResult(
+        "Slack Socket Mode", ok=True, detail="A_APP connected", required=False,
+    )
+    monkeypatch.setattr(
+        doctor, "_check_slack_socket_mode", lambda: socket_check, raising=False,
+    )
+
+    assert socket_check in doctor.run_doctor()
 
 
 # --- Host capabilities (#428 Stage 3) ---
