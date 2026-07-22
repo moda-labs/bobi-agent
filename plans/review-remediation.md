@@ -1,7 +1,7 @@
 # Full-repo review remediation (defects + mechanical quality)
 
 > **Status:** Draft
-> **Tracking issue:** moda-labs/bobi-agent#TBD · **Created:** 2026-07-22 · **Last amended:** — (see Amendments)
+> **Tracking issue:** moda-labs/bobi-agent#817 · **Created:** 2026-07-22 · **Last amended:** — (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
