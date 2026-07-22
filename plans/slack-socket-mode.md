@@ -175,6 +175,26 @@ Filled by the split workflow after approval.
 
 | Phase | Ticket | One-line scope | Status |
 |---|---|---|---|
+| 1-2 (Lane A) | #808 | Sans-IO Socket Mode session + local driver, proven by the stubbed-server integration test | [ ] |
+| 3 (Lane B) | #809 | Opt-in surface: `SLACK_APP_TOKEN`, doctor socket-state surfacing, `create-slack-bot --socket-mode`, transport-aware ingress check, docs, live smoke | [ ] |
+
+Lane order: #809 builds in parallel with #808 (the `app_token` record contract
+is fixed above) and LANDS after it. No build-blocking edges.
+
+**Convergence gate** (runs after the last lane merges; lane gates prove the
+pieces, this proves the seams):
+
+- [ ] On merged `main`: full `cd event-server && npm test` plus
+  `pytest tests/integration/test_slack_socket_mode.py -q` green in one tree.
+- [ ] Isolated `BOBI_HOME` end-to-end: Slack configured for Socket Mode
+  against a local event server with a stub Slack API - `bobi agent <name>
+  doctor` clean (no ingress warning, socket state reported), one envelope
+  delivered end-to-end to a subscribed deployment, and the doctor output's
+  socket state reflects a driver the Phase 3 surface actually started (the
+  cross-lane seam: B's doctor reads what A's driver reports).
+- [ ] `bobi create-slack-bot` no-flag output byte-identical to pre-initiative
+  `main`; `--socket-mode` output accepted by a fresh Slack app import (manual,
+  or the manifest-shape assertions if no live app is used).
 
 **Lanes:** cut tickets LARGE, along parallel-lane seams only (sizing directive, 2026-07-21, Zach: plans are optimized for agent implementation, and parallelism - not piece-level revertability - is the split criterion; rollback happens at feature level in practice).
 Expected cut: **Lane A = Phases 1+2 as ONE ticket** (the transport, TS-side, proven end-to-end by the integration test - Phase 1 alone would land inert dead code and buys no parallelism), **Lane B = Phase 3 as one ticket** (Python-side opt-in surface; can build in parallel with A once the `app_token` registration-record field shape is fixed, lands after A; its integration-gate lines need A landed).
@@ -184,6 +204,10 @@ A single builder executing both lanes in one session is acceptable; parallel dis
 ## Amendments
 
 - **2026-07-21** (Zach, via plan session): Lanes note rewritten with the ticket-sizing directive - large agent-sized tickets cut along parallel-lane seams (expected: two tickets, Phases 1+2 and Phase 3), phases as in-lane checkpoints rather than ticket boundaries, piece-level revertability dropped as a split criterion.
+- **2026-07-22** (execute session): split into #808 (Lane A, Phases 1-2) and
+  #809 (Lane B, Phase 3) per the Lanes note; Ticket map filled, initiative
+  convergence gate added; #749 retitled as the plan's tracking issue. Anchors
+  re-verified unchanged at `1954c32` before dispatch.
 
 ## Notes
 
