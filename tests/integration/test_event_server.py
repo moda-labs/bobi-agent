@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import json
 import os
+import queue
 import signal
 import socket
 import subprocess
@@ -729,7 +730,7 @@ class TestWebSocketDrain:
         assert seqs == sorted(seqs)
 
     def test_replay_after_disconnect(self, deployment):
-        """Post events, connect with last_seen=0, reconnect with last_seen > 0 to get replay."""
+        """The local server replays buffered events from the zero cursor."""
         base_url, dep_id, api_key = deployment
 
         # First: send an event while WS is connected (to populate the buffer)
@@ -743,14 +744,142 @@ class TestWebSocketDrain:
         ))
         assert len(events) >= 1
 
-        # Second: reconnect with last_seen=0 and request replay
-        # Server replays events with seq > last_seen when last_seen > 0
-        # Since we set last_seen=0, it won't replay (server only replays when last_seen > 0)
-        # So use last_seen=events[0]["seq"] - 1 to get replay
+        # Reconnect as a process with no persisted cursor. Zero means nothing
+        # has been processed, so every buffered event must be replayed.
         first_seq = events[0].get("seq", 1)
-        if first_seq > 1:
-            replayed = _drain_ws(base_url, dep_id, api_key, timeout=2, last_seen=first_seq - 1)
-            assert len(replayed) >= 1
+        replayed = _drain_ws(base_url, dep_id, api_key, timeout=2, last_seen=0)
+        assert any(event.get("seq") == first_seq for event in replayed)
+
+    @pytest.mark.local_only
+    def test_restart_replays_first_unacked_event_from_zero(
+        self, event_server, tmp_path
+    ):
+        """A fresh client must replay buffered seq=1 with last_seen=0.
+
+        This is the manager-restart half of #799. The Slack mention is
+        delivered live and left in the server buffer, while the cursor is
+        deliberately absent because the prior process never processed or ACKed
+        seq=1. A real EventServerClient restart therefore reconnects with
+        last_seen=0 and must receive that first event from the real local server.
+        """
+        from bobi.events.client import EventServerClient, _load_cursor
+
+        base_url, _port, _backend = event_server
+        workspace = "T_REPLAY_ZERO"
+        bootstrap = _register(
+            base_url, "replay-zero-bootstrap", ["_bootstrap"]
+        )
+        _seed_resource_grants(
+            base_url,
+            bootstrap["bubble_id"],
+            bootstrap["bubble_key"],
+            [{"service": "slack", "resource": workspace}],
+        )
+        deployment = _register(
+            base_url,
+            "replay-zero-manager",
+            [f"slack:{workspace}"],
+            bootstrap["bubble_id"],
+            bootstrap["bubble_key"],
+        )
+
+        cursor_path = tmp_path / "cursor.json"
+        assert _load_cursor(cursor_path) == 0
+        original_queue = queue.SimpleQueue()
+        original = EventServerClient(
+            server_url=base_url,
+            deployment_id=deployment["deployment_id"],
+            api_key=deployment["api_key"],
+            cursor_path=cursor_path,
+            queue=original_queue,
+            state_dir=tmp_path,
+        )
+
+        # Deliver live to the original process. This becomes the first event
+        # in its queue and the server buffer, exactly matching the incident
+        # (batch seq<=1 reached the inbox, but the hung session never processed
+        # the mention and therefore never invoked its ACK callback).
+        slack_payload = {
+            "type": "event_callback",
+            "team_id": workspace,
+            "event": {
+                "type": "app_mention",
+                "user": "U_HUMAN",
+                "channel": "C_ENG",
+                "channel_type": "channel",
+                "text": "<@U_BOT> replay me after restart",
+                "ts": "1700000099.000001",
+            },
+        }
+        slack_headers = {}
+        slack_secret = os.environ.get("SLACK_SIGNING_SECRET", "")
+        if slack_secret:
+            body = json.dumps(slack_payload).encode()
+            timestamp = str(int(time.time()))
+            signature = "v0=" + hmac.new(
+                slack_secret.encode(),
+                f"v0:{timestamp}:".encode() + body,
+                hashlib.sha256,
+            ).hexdigest()
+            slack_headers = {
+                "x-slack-request-timestamp": timestamp,
+                "x-slack-signature": signature,
+            }
+        original.start()
+        try:
+            assert original.wait_connected(timeout=2.0), (
+                "original client never completed its subscription"
+            )
+            _post_json(
+                f"{base_url}/webhooks/slack",
+                slack_payload,
+                headers=slack_headers,
+            )
+            delivered = original_queue.get(timeout=1.0)
+        finally:
+            original.stop()
+            if original._thread is not None:
+                original._thread.join(timeout=2.0)
+
+        assert delivered["seq"] == 1
+        assert delivered["type"] == "slack.mention"
+        # Merely enqueuing an event does not persist the processed cursor.
+        assert _load_cursor(cursor_path) == 0
+
+        # A new process starts with an empty in-memory enqueue floor and the
+        # same unadvanced cursor, so its wire request is last_seen=0.
+        replay_queue = queue.SimpleQueue()
+        client = EventServerClient(
+            server_url=base_url,
+            deployment_id=deployment["deployment_id"],
+            api_key=deployment["api_key"],
+            cursor_path=cursor_path,
+            queue=replay_queue,
+            state_dir=tmp_path,
+        )
+        client.start()
+        try:
+            assert client.wait_connected(timeout=2.0), (
+                "restarted client never completed its last_seen=0 subscription"
+            )
+            try:
+                replayed = replay_queue.get(timeout=0.5)
+            except queue.Empty:
+                pytest.fail(
+                    "local event server did not replay unacked seq=1 from "
+                    "last_seen=0"
+                )
+        finally:
+            client.stop()
+            if client._thread is not None:
+                client._thread.join(timeout=2.0)
+
+        assert replayed["seq"] == 1
+        assert replayed["type"] == "slack.mention"
+        assert "replay me after restart" in replayed["text"]
+        # Receipt alone is not an ACK. Until the manager completes the turn,
+        # the persisted cursor remains pinned so another restart can replay it.
+        assert _load_cursor(cursor_path) == 0
 
 
 class TestHeartbeatLiveness:

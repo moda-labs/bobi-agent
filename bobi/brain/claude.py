@@ -19,6 +19,7 @@ import json
 import logging
 import os
 from collections import deque
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -139,6 +140,29 @@ class _ClaudeSession:
 
     async def disconnect(self) -> None:
         await self._client.disconnect()
+
+    def abort(self) -> None:
+        """Force-kill a wedged Claude CLI transport without awaiting cleanup.
+
+        Normal teardown still uses ``disconnect()`` so the CLI can flush its
+        session. This is only the hard-timeout escape hatch: kill the child
+        synchronously, then the already-running async disconnect can reap it.
+        """
+        query = getattr(self._client, "_query", None)
+        if query is not None:
+            with suppress(Exception):
+                query.close_receive_stream()
+
+        transport = getattr(self._client, "_transport", None)
+        transport_abort = getattr(transport, "abort", None)
+        if callable(transport_abort):
+            with suppress(Exception):
+                transport_abort()
+
+        process = getattr(transport, "_process", None)
+        if process is not None and getattr(process, "returncode", None) is None:
+            with suppress(ProcessLookupError):
+                process.kill()
 
     async def get_mcp_status(self) -> dict:
         """Passthrough to the SDK's MCP status probe (preflight only).

@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import queue
 import time
 import threading
 from pathlib import Path
@@ -37,18 +38,19 @@ log = logging.getLogger(__name__)
 # Default rotation cap — absolute context-fill tokens, not a window fraction.
 DEFAULT_ROTATION_TOKEN_CAP = 275_000
 
-# Rotation reconnect bounds (#456, wedge mechanism #3). Rotation cycles the SDK
-# client: disconnect → rebuild prompt → connect → drain the connect turn. Both
-# the connect() and that first drain are network/subprocess work that can hang
-# indefinitely with no timeout — the actual 2026-06-23/24 director wedge. We
-# wrap the reconnect in a hard timeout, retry a bounded number of times, then
-# recover into an addressable connected client rather than a silent park. A
-# connect + single ack turn is lighter than the old flush turn, but this must
-# stay above the Claude initialize deadline so the SDK can surface retryable
-# initialize timeouts instead of being preempted by the outer rotation wrapper.
+# Rotation reconnect bounds (#456, wedge mechanism #3). Rotation builds a fresh
+# client with ``connect(None)`` and swaps it in between inbox turns. A promptless
+# connect opens the transport but does NOT create a model turn, so there is no
+# response stream to drain (#799). The connect itself remains bounded and
+# retryable, and failed candidates are discarded with bounded cleanup. Keep the
+# connect timeout above Claude's initialize deadline so the adapter can surface
+# retryable initialize timeouts instead of being preempted by this outer bound.
 ROTATION_RECONNECT_TIMEOUT = 240.0
 ROTATION_MAX_RECONNECT_ATTEMPTS = 3
 ROTATION_RECONNECT_BACKOFF = 2.0
+ROTATION_DISCONNECT_TIMEOUT = 10.0
+MESSAGE_ACK_TIMEOUT = 10.0
+ACK_WORKER_STOP_TIMEOUT = 0.1
 
 # Control sentinel for the named compact command (#433). Delivered as an inbox
 # message body; the run loop recognizes it, flags rotation, and never forwards
@@ -237,6 +239,62 @@ def _ack_message(msg: Message) -> None:
         log.warning("Message ack failed for %s", msg.id, exc_info=True)
 
 
+def _consume_task_result(task: asyncio.Task) -> None:
+    """Retrieve a detached cleanup task's result to avoid warning noise."""
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+
+
+def _track_detached_task(
+    task: asyncio.Task,
+    detached_tasks: set[asyncio.Task] | None,
+) -> None:
+    """Retain timed-out work until it exits after adapter cleanup."""
+    if detached_tasks is not None:
+        detached_tasks.add(task)
+        task.add_done_callback(detached_tasks.discard)
+    task.add_done_callback(_consume_task_result)
+
+
+def _complete_ack_future(done: asyncio.Future) -> None:
+    """Resolve an ACK wait if its event loop is still accepting callbacks."""
+    if not done.done():
+        done.set_result(None)
+
+
+async def _await_with_hard_timeout(
+    awaitable,
+    timeout: float,
+    name: str,
+    detached_tasks: set[asyncio.Task] | None = None,
+):
+    """Await work for at most ``timeout``, even if it suppresses cancellation."""
+    task = asyncio.create_task(awaitable, name=name)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except BaseException:
+        task.cancel()
+        asyncio.get_running_loop().call_soon(task.cancel)
+        _track_detached_task(task, detached_tasks)
+        raise
+
+    if done:
+        return task.result()
+
+    # asyncio.wait_for waits for cancellation cleanup and is therefore not a
+    # hard deadline when a buggy adapter suppresses CancelledError. Detach the
+    # task after two cancellation signals so lifecycle work can recover loudly
+    # within its advertised bound.
+    task.cancel()
+    asyncio.get_running_loop().call_soon(task.cancel)
+    _track_detached_task(task, detached_tasks)
+    raise asyncio.TimeoutError()
+
+
 class Session:
     """A Claude Code session with an inbox for receiving messages."""
 
@@ -294,6 +352,17 @@ class Session:
         self._rotate_pending = False
         self._rotate_reason = "context_cap"
         self._rotation_count = 0
+        # Rotation preparation runs beside the inbox loop so a slow/hung fresh
+        # connect cannot starve queued human messages. The worker only returns a
+        # candidate; the inbox coroutine owns the active-client pointer and
+        # commits the swap between complete turns.
+        self._rotation_task: asyncio.Task | None = None
+        self._retired_client_tasks: set[asyncio.Task] = set()
+        self._hard_timeout_tasks: set[asyncio.Task] = set()
+        self._ack_queue: queue.Queue[
+            tuple[Message, asyncio.AbstractEventLoop, asyncio.Future] | None
+        ] = queue.Queue()
+        self._ack_worker_thread: threading.Thread | None = None
 
     def detect_state(self) -> str:
         return self._state
@@ -362,67 +431,88 @@ class Session:
         return resolve_model_option(self._extra_options.get("model"))
 
     async def _safe_disconnect(self, client) -> None:
-        """Disconnect a client, swallowing errors — used to discard a hung or
-        partially-connected client so a stalled reconnect can't leak a `claude`
-        subprocess per retry."""
+        """Disconnect a brain client without letting cleanup wedge lifecycle."""
         try:
-            await client.disconnect()
+            await _await_with_hard_timeout(
+                client.disconnect(),
+                ROTATION_DISCONNECT_TIMEOUT,
+                f"disconnect-{self.name}",
+                self._hard_timeout_tasks,
+            )
+        except asyncio.TimeoutError:
+            self._force_abort_client(client, "disconnect timeout")
+            log.warning(
+                "Disconnect for '%s' timed out after %.0fs during cleanup; "
+                "discarding the client",
+                self.name,
+                ROTATION_DISCONNECT_TIMEOUT,
+            )
+        except asyncio.CancelledError:
+            self._force_abort_client(client, "cancelled disconnect")
+            raise
         except Exception:
-            log.debug("Disconnect raised for '%s' during rotation", self.name,
+            self._force_abort_client(client, "disconnect failure")
+            log.debug("Disconnect raised for '%s' during cleanup", self.name,
                       exc_info=True)
 
-    async def _attempt_reconnect(self) -> None:
-        """One bounded reconnect attempt: fresh client → connect → drain the
-        connect turn, all under ROTATION_RECONNECT_TIMEOUT.
+    def _force_abort_client(self, client, reason: str) -> None:
+        """Invoke the brain contract's synchronous last-resort cleanup path."""
+        abort = getattr(client, "abort", None)
+        if not callable(abort):
+            log.error(
+                "Brain client for '%s' has no force-abort hook after %s",
+                self.name,
+                reason,
+            )
+            return
+        try:
+            abort()
+        except Exception:
+            log.error(
+                "Brain client force-abort failed for '%s' after %s",
+                self.name,
+                reason,
+                exc_info=True,
+            )
 
-        Raises asyncio.TimeoutError (the hang the wedge was made of) or a connect
-        exception on failure; on either, the freshly-built client is discarded
-        before the exception propagates so the caller can retry cleanly.
+    async def _attempt_reconnect(self):
+        """Build and connect one fresh rotation candidate under a hard bound.
+
+        ``BrainSession.connect(None)`` opens a session without sending input, so
+        it creates no turn and there is deliberately no ``receive_response``
+        call here. The old code drained that nonexistent turn and made every
+        successful Claude reconnect look hung for 240 seconds (#799).
+
+        The candidate is not published through ``self._client``. The inbox loop
+        remains the single owner of that pointer and swaps only between turns.
         """
         client = self._make_brain_session(resume=None)
 
-        async def _connect_and_drain() -> None:
-            await client.connect()
-            # Publish the client only after connect() returns so a hung connect
-            # never leaves a half-live client addressable; _drain_turn reads it.
-            self._client = client
-            await self._drain_turn()
-
         try:
-            await asyncio.wait_for(
-                _connect_and_drain(), timeout=ROTATION_RECONNECT_TIMEOUT
+            await _await_with_hard_timeout(
+                client.connect(),
+                ROTATION_RECONNECT_TIMEOUT,
+                f"rotation-connect-attempt-{self.name}",
+                self._hard_timeout_tasks,
             )
         except BaseException:
-            # wait_for cancels the hung connect()/receive_response() await, but
-            # the partially-connected client + its subprocess must be dropped.
+            # Discard the partially-connected client before retrying so each
+            # attempt owns one subprocess.
+            self._force_abort_client(client, "rotation connect failure")
             await self._safe_disconnect(client)
-            if self._client is client:
-                self._client = None
             raise
+        return client
 
-    async def _rotate(self) -> None:
-        """Lightweight client cycle — keep inbox alive, only swap the SDK client.
+    async def _prepare_rotation(self):
+        """Connect a fresh candidate without disturbing the active client.
 
-        Does NOT call stop()/start() which would tear down the inbox and the
-        event subscription (WS client + drain thread). Only cycles self._client,
-        so the session stays addressable across a rotation.
-
-        The reconnect is bounded and recoverable (#456 mechanism #3): the
-        connect + connect-turn drain are wrapped in a timeout and retried a
-        bounded number of times; if every attempt fails the session recovers
-        into an addressable connected client rather than hanging forever or
-        dropping into the terminal "error" state that would deafen it (#443).
-        Raises only if even that final recovery fails — loudly, never silently.
+        Production starts this as a background task. The old client remains
+        usable while a slow candidate connects, so queued messages continue to
+        drain. This worker never assigns ``self._client``; the inbox coroutine
+        commits its returned candidate between complete turns.
         """
         log.info("Rotating session '%s' (rotation #%d)", self.name, self._rotation_count + 1)
-
-        # Clear saved session ID so the reconnect is fresh.
-        save_session_id(self.name, "")
-
-        # Disconnect old client.
-        if self._client:
-            await self._safe_disconnect(self._client)
-            self._client = None
+        reason = self._rotate_reason
 
         # Rebuild system prompt - reloads long-term memory (#456).
         self._system_prompt = self._rebuild_system_prompt()
@@ -430,11 +520,10 @@ class Session:
         # Bounded, recoverable reconnect.
         last_err: BaseException | None = None
         attempt_errors: list[dict] = []
-        reconnected = False
+        candidate = None
         for attempt in range(1, ROTATION_MAX_RECONNECT_ATTEMPTS + 1):
             try:
-                await self._attempt_reconnect()
-                reconnected = True
+                candidate = await self._attempt_reconnect()
                 break
             except asyncio.TimeoutError as e:
                 last_err = e
@@ -462,17 +551,42 @@ class Session:
             if attempt < ROTATION_MAX_RECONNECT_ATTEMPTS:
                 await asyncio.sleep(ROTATION_RECONNECT_BACKOFF * attempt)
 
-        if not reconnected:
+        if candidate is None:
             # Exhausted — recover into an addressable state (or surface
             # terminally if even that fails). Raises on terminal failure.
-            await self._recover_rotation_failure(last_err, attempt_errors)
+            candidate = await self._recover_rotation_failure(
+                last_err, attempt_errors
+            )
 
+        return candidate, reason
+
+    def _retire_client(self, client) -> None:
+        """Disconnect a replaced client in tracked, bounded background work."""
+        if client is None:
+            return
+        task = asyncio.create_task(
+            self._safe_disconnect(client),
+            name=f"rotation-retire-{self.name}",
+        )
+        self._retired_client_tasks.add(task)
+        task.add_done_callback(self._retired_client_tasks.discard)
+
+    async def _commit_rotation(self, candidate, reason: str) -> None:
+        """Swap a connected candidate in between inbox turns."""
+        old_client = self._client
+
+        # Clear resumability only once the replacement is ready. Clearing this
+        # before background preparation would make a failed rotation destroy a
+        # still-usable old session on process restart.
+        save_session_id(self.name, "")
+        self._client = candidate
+        self._set_state("waiting_input")
         self._rotate_pending = False
-        reason = self._rotate_reason
         self._rotate_reason = "context_cap"
         self._rotation_count += 1
+        self._retire_client(old_client)
 
-        # Step 6: Observability — log rotation event
+        # Step 6: Observability - log rotation event.
         log_activity(
             "rotation",
             {
@@ -503,20 +617,39 @@ class Session:
         registry.update(self.name, status="idle", rotation_count=self._rotation_count)
         log.info("Session '%s' rotated successfully (count=%d)", self.name, self._rotation_count)
 
+    async def _rotate(self) -> None:
+        """Prepare and commit a rotation inline (unit/back-compat helper).
+
+        The production inbox path uses ``_prepare_rotation`` as background work
+        and calls ``_commit_rotation`` itself. Keeping this wrapper preserves
+        direct callers and the bounded/loud rotation policy tests.
+        """
+        try:
+            candidate, reason = await self._prepare_rotation()
+        except Exception:
+            self._rotate_pending = False
+            self._set_state("error")
+            get_registry().update(self.name, status="error")
+            raise
+        try:
+            await self._commit_rotation(candidate, reason)
+        except BaseException:
+            if self._client is not candidate:
+                await self._safe_disconnect(candidate)
+            raise
+
     async def _recover_rotation_failure(
         self,
         err: BaseException | None,
         attempt_errors: list[dict] | None = None,
-    ) -> None:
+    ):
         """Recover after the bounded reconnect exhausted its attempts (#456 #3).
 
         Fails loudly (log.error + a session.rotation_failed activity/event) and
-        then re-establishes a connected client via a fresh connect so the
-        session is addressable again — NOT left in the disconnected state
-        _rotate() created (self._client is None) and NOT dropped into the
-        terminal "error" state that deafens the session (#443). Only if even
-        this final fresh connect fails does the session surface terminally —
-        loudly, never a silent hang.
+        then returns a fresh connected candidate. The active client is left
+        untouched until the inbox loop commits that candidate. Only if even
+        this final fresh connect fails does the session surface terminally,
+        loudly, never as a silent hang.
         """
         error_message = _rotation_error_message(err)
         attempt_errors = attempt_errors or [
@@ -555,15 +688,26 @@ class Session:
         except Exception:
             pass
 
-        # Final recovery: a fresh connected client (resume=None — the saved id
-        # was already cleared at the top of _rotate). No connect-prompt, so this
-        # connect cannot hang on receive_response; bound it anyway.
+        # Final recovery is still fresh and promptless. It is independently
+        # bounded, and it does not disturb the active client unless it succeeds
+        # and the inbox coroutine later commits it.
         client = self._make_brain_session(resume=None)
         try:
-            await asyncio.wait_for(
-                client.connect(), timeout=ROTATION_RECONNECT_TIMEOUT
+            await _await_with_hard_timeout(
+                client.connect(),
+                ROTATION_RECONNECT_TIMEOUT,
+                f"rotation-connect-recovery-{self.name}",
+                self._hard_timeout_tasks,
             )
+        except asyncio.CancelledError:
+            # Session shutdown cancels background preparation. It is not a
+            # terminal reconnect failure and must not emit false recovery
+            # alarms or temporarily mark the stopping session as errored.
+            self._force_abort_client(client, "cancelled recovery connect")
+            await self._safe_disconnect(client)
+            raise
         except BaseException as e2:
+            self._force_abort_client(client, "recovery connect failure")
             await self._safe_disconnect(client)
             final_error_message = _rotation_error_message(e2)
             try:
@@ -598,17 +742,12 @@ class Session:
                 "Final rotation recovery failed for '%s': %s — surfacing terminally",
                 self.name, final_error_message,
             )
-            self._client = None
-            self._set_state("error")
-            get_registry().update(self.name, status="error")
             raise
-        self._client = client
-        self._set_state("waiting_input")
-        get_registry().update(self.name, status="idle")
         log.warning(
             "Session '%s' recovered to a fresh connected client after a failed "
             "rotation — addressable, not wedged", self.name,
         )
+        return client
 
     def _rebuild_system_prompt(self) -> dict:
         """Rebuild the system prompt, reloading long-term memory (#456).
@@ -677,8 +816,9 @@ class Session:
                     self.name, exc_info=True,
                 )
 
-    async def _drain_turn(self) -> str:
+    async def _drain_turn(self) -> str | None:
         self._last_response = ""
+        turn_completed = False
         if self._input_ready:
             self._input_ready.clear()
         self._set_state("working")
@@ -717,6 +857,7 @@ class Session:
                             except Exception:
                                 pass
                 elif isinstance(msg, TurnResult):
+                    turn_completed = True
                     save_session_id(self.name, msg.session_id,
                                     model=self._session_model())
                     self._last_is_error = msg.is_error
@@ -850,18 +991,96 @@ class Session:
         # tick; this in-process sweep is what actually stops the loops.
         self._stop_status_indicators()
 
+        if not turn_completed:
+            # A response stream is not successfully processed until its
+            # terminal TurnResult arrives. In particular, a transport error can
+            # be caught above after query() succeeds; returning a normal string
+            # in that case made _process_message ACK and permanently discard
+            # the event. Keep the cursor pinned for replay instead (#799).
+            if self._state == "working":
+                log.error(
+                    "Drain ended without a terminal result for '%s'",
+                    self.name,
+                )
+                self._set_state("error")
+                registry.update(self.name, status="error")
+            return None
+
         return self._last_response
 
     async def _ack_processed(self, msg: Message) -> None:
-        """Run the message ack off the event loop.
+        """Run ordered message ACKs off the event loop under a hard bound.
 
         The ack ends in real I/O (cursor-file write + WS send in
         ``ack_through``); a blocked socket must never freeze this session's
-        event loop, so it runs on the executor like ``inbox.recv``.
+        event loop. A dedicated daemon worker preserves callback ordering while
+        letting this coroutine return loudly if the I/O exceeds its bound.
         """
         if msg.on_done is None:
             return
-        await asyncio.get_running_loop().run_in_executor(None, _ack_message, msg)
+        loop = asyncio.get_running_loop()
+        done = loop.create_future()
+        self._start_ack_worker()
+        self._ack_queue.put((msg, loop, done))
+        completed, _ = await asyncio.wait({done}, timeout=MESSAGE_ACK_TIMEOUT)
+        if not completed:
+            log.error(
+                "Message ACK for %s in session '%s' timed out after %.0fs; "
+                "surfacing terminally with the cursor pinned for replay",
+                msg.id,
+                self.name,
+                MESSAGE_ACK_TIMEOUT,
+            )
+            self._set_state("error")
+            try:
+                get_registry().update(self.name, status="error")
+            except Exception:
+                log.error(
+                    "Could not persist terminal ACK timeout state for '%s'",
+                    self.name,
+                    exc_info=True,
+                )
+
+    def _start_ack_worker(self) -> None:
+        """Start the session's ordered, daemonized cursor worker lazily."""
+        if self._ack_worker_thread is not None:
+            return
+
+        def _worker() -> None:
+            while True:
+                item = self._ack_queue.get()
+                if item is None:
+                    return
+                msg, loop, done = item
+                _ack_message(msg)
+                try:
+                    loop.call_soon_threadsafe(_complete_ack_future, done)
+                except RuntimeError:
+                    # The session loop already closed. The callback ran, so no
+                    # additional cleanup remains in this worker.
+                    pass
+
+        self._ack_worker_thread = threading.Thread(
+            target=_worker,
+            daemon=True,
+            name=f"message-ack-{self.name}",
+        )
+        self._ack_worker_thread.start()
+
+    def _stop_ack_work(self) -> None:
+        """Stop the ordered ACK worker without letting a stuck callback wedge."""
+        worker = self._ack_worker_thread
+        self._ack_worker_thread = None
+        if worker is None:
+            return
+        self._ack_queue.put(None)
+        worker.join(timeout=ACK_WORKER_STOP_TIMEOUT)
+        if worker.is_alive():
+            log.error(
+                "Message ACK worker for '%s' is still blocked during shutdown; "
+                "leaving the daemon worker detached",
+                self.name,
+            )
 
     async def _process_message(self, msg: Message) -> None:
         """Wait for ready state, inject a message, and optionally respond."""
@@ -967,6 +1186,41 @@ class Session:
                 await self._client.query(msg.text)
                 response = await self._drain_turn()
 
+            if response is None:
+                log.error(
+                    "Inbox message %s for '%s' did not reach a terminal result; "
+                    "leaving it unacknowledged for replay (state=%s)",
+                    msg.id,
+                    self.name,
+                    self._state,
+                )
+                if msg.wait:
+                    self.inbox.respond(
+                        msg,
+                        f"error: turn did not complete (session {self._state})",
+                    )
+                return
+
+            if self._last_is_error:
+                # A ResultMessage closes the SDK turn, but an error result is
+                # not successful handling of the inbound event. Bounded retry
+                # above has already been exhausted or ruled out. Keep the
+                # cursor pinned so a restart can redeliver it instead of
+                # silently converting the provider failure into message loss.
+                log.error(
+                    "Inbox message %s for '%s' ended in a terminal model "
+                    "error after %d retries; leaving it unacknowledged",
+                    msg.id,
+                    self.name,
+                    attempt,
+                )
+                if msg.wait:
+                    self.inbox.respond(
+                        msg,
+                        response or "error: model turn failed",
+                    )
+                return
+
             if msg.wait:
                 self.inbox.respond(msg, response)
             await self._ack_processed(msg)
@@ -977,32 +1231,165 @@ class Session:
                 self.inbox.respond(msg, f"error: {e}")
             self._set_state("error")
 
+    def _start_pending_rotation(self) -> None:
+        """Start one coalesced background candidate preparation."""
+        if self._rotation_task is not None:
+            return
+        self._rotation_task = asyncio.create_task(
+            self._prepare_rotation(),
+            name=f"rotation-connect-{self.name}",
+        )
+
+    async def _commit_ready_rotation(self, *, wait: bool = False) -> None:
+        """Commit a prepared candidate, optionally waiting for an unsafe old client.
+
+        Context-cap and manual rotations leave a healthy old client available,
+        so the inbox keeps serving while preparation runs. A decode-error
+        rotation has a spent response stream; in that case callers wait for the
+        bounded candidate instead of querying a client known to be unusable.
+        """
+        task = self._rotation_task
+        if task is None or (not wait and not task.done()):
+            return
+
+        try:
+            candidate, reason = await task
+        except Exception as e:
+            # _prepare_rotation only raises after the bounded final recovery
+            # has already emitted the terminal failure details.
+            log.error(
+                "Rotation failed terminally for '%s': %s",
+                self.name,
+                e,
+                exc_info=True,
+            )
+            self._rotate_pending = False
+            self._rotation_task = None
+            self._set_state("error")
+            get_registry().update(self.name, status="error")
+            return
+
+        try:
+            await self._commit_rotation(candidate, reason)
+        except asyncio.CancelledError:
+            # If commit failed before publishing the candidate, do not leak it.
+            if self._client is not candidate:
+                await self._safe_disconnect(candidate)
+            raise
+        except Exception as e:
+            if self._client is not candidate:
+                await self._safe_disconnect(candidate)
+            self._rotate_pending = False
+            self._set_state("error")
+            log.error(
+                "Rotation commit failed terminally for '%s': %s",
+                self.name,
+                e,
+                exc_info=True,
+            )
+            try:
+                get_registry().update(self.name, status="error")
+            except Exception:
+                log.error(
+                    "Could not persist terminal rotation state for '%s'",
+                    self.name,
+                    exc_info=True,
+                )
+        finally:
+            self._rotation_task = None
+
+    async def _stop_rotation_work(self) -> None:
+        """Cancel/collect candidate and retired-client work before loop close."""
+        task = self._rotation_task
+        self._rotation_task = None
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            try:
+                candidate, _ = await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            else:
+                if self._client is not candidate:
+                    await self._safe_disconnect(candidate)
+
+        retired = list(self._retired_client_tasks)
+        if retired:
+            await asyncio.gather(*retired, return_exceptions=True)
+
+        detached = list(self._hard_timeout_tasks)
+        if detached:
+            for timed_out_task in detached:
+                timed_out_task.cancel()
+                asyncio.get_running_loop().call_soon(timed_out_task.cancel)
+            _, pending = await asyncio.wait(
+                detached,
+                timeout=min(ROTATION_DISCONNECT_TIMEOUT, 0.1),
+            )
+            if pending:
+                log.error(
+                    "%d timed-out lifecycle task(s) for '%s' ignored adapter "
+                    "cleanup and remain detached",
+                    len(pending),
+                    self.name,
+                )
+
     async def _inbox_loop(self) -> None:
         loop = asyncio.get_running_loop()
 
         while True:
+            await self._commit_ready_rotation()
+            if self._state == "error":
+                return
             msg = await loop.run_in_executor(
                 None, lambda: self.inbox.recv(timeout=2.0)
             )
+            # A candidate may have completed while recv() was blocked. Commit
+            # it before starting the next turn so one turn always queries and
+            # drains the same active client.
+            await self._commit_ready_rotation()
+            if self._state == "error":
+                if msg is not None:
+                    # Preparation can fail while recv() is blocked. Preserve
+                    # the message in memory as well as leaving its cursor
+                    # unacknowledged for the supervisor-driven restart.
+                    self.inbox.push(msg, priority=True)
+                return
             if msg is None:
                 if self._keep_alive and self._keep_alive.is_set():
                     break
-                # Act at idle — rotate when pending and the queue is empty. The
-                # decision-log flush is gone (#456); rotation is now just the
-                # bounded, recoverable client cycle in _rotate().
+                # Act at idle - prepare a replacement when pending and the
+                # queue is empty. Preparation runs beside this loop so a slow
+                # connect cannot starve newly queued messages (#799).
                 if self._rotate_pending and self.inbox.empty():
-                    try:
-                        await self._rotate()
-                    except Exception as e:
-                        # _rotate only raises when even fresh-connect recovery
-                        # failed (it already surfaced the error + set state).
-                        # Clear the pending flag so the idle loop doesn't spin.
-                        log.error("Rotation failed terminally for '%s': %s",
-                                  self.name, e, exc_info=True)
-                        self._rotate_pending = False
+                    reason = self._rotate_reason
+                    self._start_pending_rotation()
+                    # Give a prompt, successful connect a chance to complete
+                    # without waiting for the next inbox timeout.
+                    await asyncio.sleep(0)
+                    await self._commit_ready_rotation(
+                        wait=(reason == "drain_decode_error")
+                    )
                 continue
 
             await self._process_message(msg)
+            if self._state == "error":
+                return
+            if self._rotate_pending:
+                reason = self._rotate_reason
+                self._start_pending_rotation()
+            else:
+                reason = ""
+            if reason == "drain_decode_error":
+                # The old response reader is spent. Replace it before touching
+                # another queued message, even under sustained inbox traffic.
+                # Candidate preparation and cleanup retain their hard bounds;
+                # terminal failure leaves following events unacknowledged.
+                await self._commit_ready_rotation(wait=True)
+                if self._state == "error":
+                    return
 
     async def _run(self, startup_prompt: str | None = None) -> None:
         saved_id = load_resumable_session_id(self.name, self._session_model())
@@ -1050,8 +1437,10 @@ class Session:
                 await inbox_task
             except asyncio.CancelledError:
                 pass
+            await self._stop_rotation_work()
+            self._stop_ack_work()
             if self._client:
-                await self._client.disconnect()
+                await self._safe_disconnect(self._client)
                 self._client = None
             self._set_state("stopped")
             registry.update(self.name, status="stopped")

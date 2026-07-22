@@ -35,6 +35,30 @@ async def _safe_disconnect(client):
 class TestManagerSDKDirect:
     """Test the manager's ClaudeSDKClient usage directly."""
 
+    async def test_promptless_connect_has_no_turn_to_drain(self):
+        """A real connect(None) emits nothing until a query creates a turn."""
+        from claude_agent_sdk import (
+            ClaudeAgentOptions,
+            ClaudeSDKClient,
+        )
+        from bobi.sdk import get_cli_path
+
+        options = ClaudeAgentOptions(
+            cwd="/tmp",
+            permission_mode="bypassPermissions",
+            cli_path=get_cli_path(),
+            system_prompt="You are a test assistant. Reply concisely.",
+        )
+
+        client = ClaudeSDKClient(options)
+        try:
+            await client.connect(None)
+            stream = client.receive_response()
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(anext(stream), timeout=0.25)
+        finally:
+            await _safe_disconnect(client)
+
     async def test_client_connects_and_responds(self):
         from claude_agent_sdk import (
             AssistantMessage,

@@ -343,12 +343,10 @@ def deliver(
         return False, f"could not publish message to '{to}'"
     try:
         deadline = time.monotonic() + timeout
-        # Subscribe BEFORE publish, and only publish once the subscription's WS
-        # is actually live. A fresh deployment connects with last_seen=0 and the
-        # server replays buffered events only when last_seen>0 — so a reply
-        # published during the connect window would be buffered but never
-        # replayed to us, and we'd hang to the timeout. Waiting for the
-        # connected frame makes the reply arrive via live delivery instead.
+        # Subscribe before publish, and only publish once the subscription's WS
+        # is actually live. This preserves the blocking-ask ordering contract
+        # across every event-server backend and avoids turning replay into the
+        # normal delivery path for a request that has not been published yet.
         if not channel.wait_connected(max(0.0, deadline - time.monotonic())):
             return False, f"no response within {timeout}s"
         ok = publish_inbox(to, {

@@ -244,6 +244,10 @@ class _CodexSession:
     async def disconnect(self) -> None:
         return None
 
+    def abort(self) -> None:
+        # There is no persistent process during connect/disconnect.
+        return None
+
     def _build_argv(self) -> list[str]:
         flags = list(_EXEC_FLAGS)
         if self._model:

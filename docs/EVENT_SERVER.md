@@ -88,8 +88,9 @@ derives `wss://` from the `https://` base, connects to
 `/deployments/<id>/subscribe?last_seen=<cursor>` with `Authorization: Bearer
 <api_key>`, and reconnects with capped exponential backoff. Received `event` /
 `replay` frames are pushed onto a queue; `bobi/events/drain.py` batches them, runs
-the auto-dispatch reactor, delivers formatted messages into the session inbox, and
-**only then** advances the cursor (`cursor.json`). A transport ping alone can't
+the auto-dispatch reactor, and delivers formatted messages into the session inbox.
+The inbox completion callback advances the cursor (`cursor.json`) only after the
+session finishes a successful model turn. A transport ping alone can't
 prove a hibernated Cloudflare socket is still being fed, so the client also runs an
 app-level heartbeat and force-reconnects + re-subscribes if it goes "deaf".
 
@@ -323,13 +324,15 @@ sessions must not share a cursor):
 - The server replays each buffered event with `seq > last_seen` (from KV on the
   Worker, the in-memory buffer locally) as `{type: "replay"}` frames, then a
   `{type: "connected", next_seq}` frame. Buffer TTL is 48h.
-- The cursor advances only after the drain delivers a batch to the inbox, so a
-  crash before delivery loses nothing - the server replays from the unchanged
-  cursor on reconnect.
-- Caveat: a brand-new deployment connecting with `last_seen = 0` gets **no** replay,
-  so an event published during its connect window can be missed. The blocking-ask
-  path avoids this by subscribing and waiting for the `connected` frame before the
-  publish.
+- The cursor advances only after the session successfully completes each
+  delivered inbox message. Queued messages, provider-error turns, and turns
+  interrupted before their terminal result remain unacknowledged and replay
+  after a process restart.
+- The local server treats `last_seen = 0` as a real cursor and replays every
+  buffered event with `seq > 0`. This preserves the first unacknowledged event
+  (`seq = 1`) across a manager restart.
+- The blocking-ask path still waits for the `connected` frame before publishing.
+  That ordering keeps live request/reply delivery deterministic across backends.
 
 ## Inter-agent messaging
 

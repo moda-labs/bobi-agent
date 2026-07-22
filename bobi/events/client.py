@@ -181,12 +181,10 @@ class EventServerClient:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         # Set when the server sends its "connected" frame, i.e. the subscription
-        # is live and future matching events will be pushed. A fresh deployment
-        # connects with last_seen=0 and the server only REPLAYS buffered events
-        # when last_seen>0, so a publisher that needs subscribe-before-publish
-        # (the reply channel in inbox.deliver) must wait on this before
-        # publishing — otherwise an event sent during the connect window is
-        # buffered but never replayed to this brand-new subscriber.
+        # is live and future matching events will be pushed. Publishers that
+        # require subscribe-before-publish ordering (the reply channel in
+        # inbox.deliver) still wait for this frame. Replay is recovery, not a
+        # substitute for establishing the requested live subscription first.
         self._connected = threading.Event()
         self._reconnect_delay = 1
         # Receive-side liveness (#425). The transport ping (run_forever's
@@ -317,11 +315,12 @@ class EventServerClient:
         return self._connected.wait(timeout)
 
     def ack_through(self, seq: int) -> None:
-        """Save cursor and ACK a seq number after delivery.
+        """Save cursor and ACK a seq number after successful processing.
 
-        Called by the drain loop AFTER an event batch has been delivered
-        to the session inbox, so a crash before delivery never loses the
-        event — the server will replay it on reconnect (#278 bug 2).
+        The drain attaches this as the inbox message's completion callback.
+        Session invokes it only after the model turn reaches a successful
+        terminal result, so queued, interrupted, and error events remain
+        replayable.
         """
         if seq <= 0:
             return

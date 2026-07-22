@@ -144,6 +144,9 @@ class BrainSession(Protocol):
     async def disconnect(self) -> None:
         """Tear the session down (idempotent-friendly)."""
 
+    def abort(self) -> None:
+        """Synchronously force-stop resources when async cleanup is wedged."""
+
 
 class BrainFactory(Protocol):
     """Builds :class:`BrainSession` instances for one brain kind."""
