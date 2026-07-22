@@ -21,6 +21,13 @@ import {
 	type GatewayResumeState,
 } from "@moda-labs/bobi-events-core/gateway/discord";
 import { discordApiUrl } from "@moda-labs/bobi-events-core/channels";
+import {
+	calculateBackoffDelay,
+	clearScheduledTimeout,
+	disposeWebSocket,
+	isCurrentGeneration,
+	scheduleUnrefTimeout,
+} from "./socket-driver-common";
 
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_MAX_MS = 60_000;
@@ -173,13 +180,13 @@ export class DiscordGatewayManager {
 			try {
 				info = await this.fetchGatewayInfo(conn.botToken);
 			} catch (err) {
-				if (conn.generation !== generation) return;
+				if (!isCurrentGeneration(conn, generation)) return;
 				console.error(`discord gateway: GET /gateway/bot failed for app `
 					+ `${conn.applicationId}: ${String(err)}`);
 				this.scheduleReconnect(conn, true);
 				return;
 			}
-			if (conn.generation !== generation) return; // stopped/restarted meanwhile
+			if (!isCurrentGeneration(conn, generation)) return; // stopped/restarted meanwhile
 			if (info && "fatal" in info) {
 				this.fatal(conn, info.fatal);
 				return;
@@ -225,20 +232,19 @@ export class DiscordGatewayManager {
 
 		// Handshake watchdog: cleared by the "connected" action (READY or
 		// RESUMED); firing means the socket is half-open or HELLO never came.
-		const watchdog = setTimeout(() => {
-			if (conn.generation !== generation) return;
+		const watchdog = scheduleUnrefTimeout(() => {
+			if (!isCurrentGeneration(conn, generation)) return;
 			console.error(`discord gateway: handshake timed out for app ${conn.applicationId}`);
 			this.scheduleReconnect(conn, true);
 		}, HANDSHAKE_TIMEOUT_MS);
-		watchdog.unref();
 		conn.watchdogTimer = watchdog;
 
 		ws.on("message", (data) => {
-			if (conn.generation !== generation) return;
+			if (!isCurrentGeneration(conn, generation)) return;
 			this.apply(conn, generation, session.onFrame(String(data)));
 		});
 		ws.on("close", (code) => {
-			if (conn.generation !== generation || conn.ws !== ws) return;
+			if (!isCurrentGeneration(conn, generation) || conn.ws !== ws) return;
 			this.clearHeartbeat(conn);
 			this.apply(conn, generation, session.onSocketClose(code || 1006));
 		});
@@ -251,7 +257,7 @@ export class DiscordGatewayManager {
 
 	private apply(conn: Connection, generation: number, actions: GatewayAction[]): void {
 		for (const action of actions) {
-			if (conn.generation !== generation) return;
+			if (!isCurrentGeneration(conn, generation)) return;
 			switch (action.kind) {
 				case "send":
 					try {
@@ -267,14 +273,12 @@ export class DiscordGatewayManager {
 					// interval * jitter, then the steady interval.
 					this.clearHeartbeat(conn);
 					const tick = () => {
-						if (conn.generation !== generation || !conn.session) return;
+						if (!isCurrentGeneration(conn, generation) || !conn.session) return;
 						this.apply(conn, generation, conn.session.onTimer("heartbeat"));
-						const next = setTimeout(tick, action.intervalMs);
-						next.unref();
+						const next = scheduleUnrefTimeout(tick, action.intervalMs);
 						conn.heartbeatTimer = next;
 					};
-					const first = setTimeout(tick, action.firstDelayMs);
-					first.unref();
+					const first = scheduleUnrefTimeout(tick, action.firstDelayMs);
 					conn.heartbeatTimer = first;
 					break;
 				}
@@ -322,14 +326,16 @@ export class DiscordGatewayManager {
 		conn.state = "backoff";
 		// Exponential backoff with jitter, capped. Resume-first keeps fresh
 		// IDENTIFYs (budgeted at 1000/day) to genuine session losses.
-		const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** conn.backoffAttempt)
-			* (0.5 + Math.random() * 0.5);
+		const delay = calculateBackoffDelay({
+			attempt: conn.backoffAttempt,
+			baseMs: BACKOFF_BASE_MS,
+			maxMs: BACKOFF_MAX_MS,
+		});
 		conn.backoffAttempt = Math.min(conn.backoffAttempt + 1, 10);
-		const timer = setTimeout(() => {
-			if (conn.generation !== generation) return;
+		const timer = scheduleUnrefTimeout(() => {
+			if (!isCurrentGeneration(conn, generation)) return;
 			void this.connect(conn);
 		}, delay);
-		timer.unref();
 		conn.reconnectTimer = timer;
 	}
 
@@ -352,39 +358,18 @@ export class DiscordGatewayManager {
 	private closeSocket(conn: Connection): void {
 		this.clearHeartbeat(conn);
 		this.clearWatchdog(conn);
-		if (conn.reconnectTimer) {
-			clearTimeout(conn.reconnectTimer);
-			conn.reconnectTimer = null;
-		}
+		conn.reconnectTimer = clearScheduledTimeout(conn.reconnectTimer);
 		const ws = conn.ws;
 		conn.ws = null;
-		if (ws) {
-			ws.removeAllListeners();
-			// close() on a still-CONNECTING socket aborts the handshake and
-			// emits 'error' on a later tick; with the listeners above removed
-			// that emission would be an uncaught exception killing the whole
-			// server, so a sink listener must stay attached.
-			ws.on("error", () => { /* sink - socket is being discarded */ });
-			try {
-				// Non-1000 close code keeps the session resumable server-side.
-				ws.close(4000, "reconnecting");
-			} catch {
-				try { ws.terminate(); } catch { /* already gone */ }
-			}
-		}
+		// Non-1000 close code keeps the session resumable server-side.
+		if (ws) disposeWebSocket(ws, 4000, "reconnecting");
 	}
 
 	private clearHeartbeat(conn: Connection): void {
-		if (conn.heartbeatTimer) {
-			clearTimeout(conn.heartbeatTimer);
-			conn.heartbeatTimer = null;
-		}
+		conn.heartbeatTimer = clearScheduledTimeout(conn.heartbeatTimer);
 	}
 
 	private clearWatchdog(conn: Connection): void {
-		if (conn.watchdogTimer) {
-			clearTimeout(conn.watchdogTimer);
-			conn.watchdogTimer = null;
-		}
+		conn.watchdogTimer = clearScheduledTimeout(conn.watchdogTimer);
 	}
 }
