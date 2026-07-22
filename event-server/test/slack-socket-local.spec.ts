@@ -350,10 +350,62 @@ describe("SlackSocketManager", () => {
 		}));
 
 		expect(sockets[0].readyState).toBe(WebSocket.OPEN);
-		expect(manager.health()).toEqual(expect.arrayContaining([
+		const health = manager.health();
+		expect(health).toEqual(expect.arrayContaining([
 			expect.objectContaining({ application_id: "A1", state: "connected" }),
-			expect.objectContaining({ state: "fatal" }),
+			expect.objectContaining({ application_id: "A_OTHER", state: "fatal" }),
 		]));
+		expect(health.filter((entry) => entry.application_id === "A1")).toHaveLength(1);
+		manager.stopAll();
+	});
+
+	it("keeps failed token rotation health separate from the connected app", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => undefined);
+		const sockets: FakeSocket[] = [];
+		let bootstrapCall = 0;
+		vi.stubGlobal("fetch", vi.fn(async () => {
+			bootstrapCall++;
+			if (bootstrapCall === 1) {
+				return new Response(JSON.stringify({
+					ok: true, url: "wss://socket.test/1",
+				}), { status: 200, headers: { "Content-Type": "application/json" } });
+			}
+			return new Response(JSON.stringify({ ok: false, error: "invalid_auth" }), {
+				status: 401,
+				headers: { "Content-Type": "application/json" },
+			});
+		}));
+		const manager = new SlackSocketManager({} as StorageAdapter, {
+			webSocketFactory: () => {
+				const socket = new FakeSocket();
+				sockets.push(socket);
+				return socket as unknown as WebSocket;
+			},
+		});
+		manager.start({
+			registrationId: "T1:B1", applicationId: "A1", appToken: "valid-token",
+		});
+		await vi.waitFor(() => expect(sockets).toHaveLength(1));
+		sockets[0].emit("message", JSON.stringify({
+			type: "hello", connection_info: { app_id: "A1" },
+		}));
+
+		manager.start({
+			registrationId: "T2:B2", applicationId: "A1", appToken: "invalid-token",
+		});
+		await vi.waitFor(() => expect(
+			manager.health().some((entry) => entry.state === "fatal"),
+		).toBe(true));
+
+		const health = manager.health();
+		expect(health.filter((entry) => entry.application_id === "A1")).toEqual([
+			expect.objectContaining({ application_id: "A1", state: "connected" }),
+		]);
+		expect(health).toEqual(expect.arrayContaining([
+			expect.objectContaining({ application_id: null, state: "fatal" }),
+		]));
+		expect(sockets).toHaveLength(1);
+		expect(sockets[0].readyState).toBe(WebSocket.OPEN);
 		manager.stopAll();
 	});
 
@@ -574,7 +626,7 @@ describe("SlackSocketManager", () => {
 		}));
 
 		expect(harness.manager.health()[0]).toMatchObject({
-			application_id: "A1",
+			application_id: "A_OTHER",
 			state: "fatal",
 		});
 		harness.manager.stopAll();

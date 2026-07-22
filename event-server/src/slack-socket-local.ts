@@ -516,6 +516,9 @@ export class SlackSocketManager {
 
 	private connected(conn: Connection, generation: number, applicationId: string): void {
 		if (conn.expectedApplicationId && conn.expectedApplicationId !== applicationId) {
+			// The hello identity is authoritative even when it disproves the
+			// registration hint. Keep health keyed by what Slack actually reported.
+			conn.applicationId = applicationId;
 			this.fatal(conn, "Socket Mode hello application id did not match registration");
 			return;
 		}
@@ -725,9 +728,20 @@ export class SlackSocketManager {
 
 	private publicApplicationId(conn: Connection): string | null {
 		const identifier = conn.applicationId ?? conn.expectedApplicationId;
-		return identifier && (!conn.appToken || !identifier.includes(conn.appToken))
-			? identifier
-			: null;
+		if (!identifier || (conn.appToken && identifier.includes(conn.appToken))) return null;
+
+		const owner = this.connections.get(`app:${identifier}`);
+		if (owner) return owner === conn ? identifier : null;
+
+		// Before hello establishes ownership, expose at most the newest claim for
+		// an app id. Failed rotation attempts must not overwrite a live app's
+		// health entry in map-by-app consumers.
+		const hasNewerClaim = [...this.connections.values()].some((candidate) =>
+			candidate !== conn
+			&& (candidate.applicationId ?? candidate.expectedApplicationId) === identifier
+			&& candidate.registrationOrder > conn.registrationOrder,
+		);
+		return hasNewerClaim ? null : identifier;
 	}
 
 	private logIdentifier(identifier: string, secret: string): string {
