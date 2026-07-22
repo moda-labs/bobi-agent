@@ -6,6 +6,7 @@ import {
 	classifySlackBootstrapResponse,
 	isLoopbackBind,
 	SlackSocketManager,
+	slackSocketConfigurationError,
 	validateSlackSocketUrl,
 } from "../src/slack-socket-local";
 
@@ -37,6 +38,25 @@ describe("Slack Socket Mode bootstrap policy", () => {
 		}
 	});
 
+	it("requires an API override to use a loopback HTTP endpoint", () => {
+		expect(slackSocketConfigurationError(
+			"127.0.0.1", "http://127.0.0.1:9000/",
+		)).toBeNull();
+		expect(slackSocketConfigurationError(
+			"::1", "https://[::1]:9000/",
+		)).toBeNull();
+		for (const override of [
+			"https://api.example.test/",
+			"ftp://127.0.0.1/api/",
+			"http://user:pass@127.0.0.1/api/",
+			"not a url",
+		]) {
+			expect(slackSocketConfigurationError("127.0.0.1", override)).toBe(
+				"Slack API override requires a loopback HTTP endpoint",
+			);
+		}
+	});
+
 	it("classifies successful bootstrap without retaining the one-use URL", () => {
 		expect(classifySlackBootstrapResponse(200, {
 			ok: true,
@@ -51,6 +71,9 @@ describe("Slack Socket Mode bootstrap policy", () => {
 		expect(classifySlackBootstrapResponse(200, {
 			ok: false, error: "rate_limited",
 		}, "3")).toEqual({ kind: "retry", retryAfterMs: 3_000 });
+		expect(classifySlackBootstrapResponse(200, {
+			ok: false, error: "ratelimited",
+		}, "4")).toEqual({ kind: "retry", retryAfterMs: 4_000 });
 	});
 
 	it("parks credential and scope failures but retries transient failures", () => {
@@ -60,6 +83,10 @@ describe("Slack Socket Mode bootstrap policy", () => {
 			[200, { ok: false, error: "invalid_auth" }],
 			[200, { ok: false, error: "token_revoked" }],
 			[200, { ok: false, error: "missing_scope" }],
+			[200, { ok: false, error: "access_denied" }],
+			[200, { ok: false, error: "forbidden_team" }],
+			[200, { ok: false, error: "no_permission" }],
+			[200, { ok: false, error: "team_access_not_granted" }],
 		] as const) {
 			expect(classifySlackBootstrapResponse(status, body, null).kind).toBe("fatal");
 		}
@@ -78,10 +105,19 @@ class FakeSocket extends EventEmitter {
 	readyState = WebSocket.OPEN;
 	readonly sent: string[] = [];
 	sendError: Error | undefined;
+	deferSendCallbacks = false;
+	readonly sendCallbacks: Array<(error?: Error) => void> = [];
 
 	send(frame: string, callback?: (error?: Error) => void): void {
 		this.sent.push(frame);
-		callback?.(this.sendError);
+		if (!callback) return;
+		if (this.deferSendCallbacks) this.sendCallbacks.push(callback);
+		else callback(this.sendError);
+	}
+
+	completeSend(index = 0, error = this.sendError): void {
+		const [callback] = this.sendCallbacks.splice(index, 1);
+		callback?.(error);
 	}
 
 	close(): void {
@@ -123,8 +159,10 @@ function managerHarness(
 	managerOptions: {
 		maxConcurrentDeliveries?: number;
 		maxQueuedDeliveries?: number;
+		maxPendingAcknowledgements?: number;
 		handshakeTimeoutMs?: number;
 		stalenessTimeoutMs?: number;
+		restTimeoutMs?: number;
 	} = {},
 ) {
 	const sockets: FakeSocket[] = [];
@@ -196,6 +234,129 @@ describe("SlackSocketManager", () => {
 		manager.stopAll();
 	});
 
+	it.each(["older hello first", "newer hello first"])(
+		"keeps the newest registration when provisional connections converge: %s",
+		async (helloOrder) => {
+			const sockets: FakeSocket[] = [];
+			const deliver = vi.fn(async () => ["dep-1"]);
+			vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+				ok: true, url: `wss://socket.test/${sockets.length + 1}`,
+			}), { status: 200, headers: { "Content-Type": "application/json" } })));
+			const storage = {
+				getSlackWorkspace: async () => ({
+					bots: { A1: { bot_token: "xoxb", bot_id: "B1", app_id: "A1" } },
+				}),
+				deliver,
+			} as unknown as StorageAdapter;
+			const manager = new SlackSocketManager(storage, {
+				webSocketFactory: () => {
+					const socket = new FakeSocket();
+					sockets.push(socket);
+					return socket as unknown as WebSocket;
+				},
+			});
+			manager.start({ registrationId: "T1:B1", appToken: "old-token" });
+			await vi.waitFor(() => expect(sockets).toHaveLength(1));
+			manager.start({ registrationId: "T2:B2", appToken: "new-token" });
+			await vi.waitFor(() => expect(sockets).toHaveLength(2));
+			const hello = JSON.stringify({ type: "hello", connection_info: { app_id: "A1" } });
+
+			if (helloOrder === "older hello first") {
+				sockets[0].emit("message", hello);
+				sockets[1].emit("message", hello);
+			} else {
+				sockets[1].emit("message", hello);
+				sockets[0].emit("message", hello);
+			}
+
+			expect(manager.health()).toEqual([expect.objectContaining({
+				application_id: "A1",
+				state: "connected",
+			})]);
+			expect(sockets[0].readyState).toBe(WebSocket.CLOSED);
+			sockets[1].emit("message", socketEnvelope(`winner-${helloOrder}`));
+			await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+			manager.stopAll();
+		},
+	);
+
+	it("retains acknowledged ids when a newer provisional connection wins", async () => {
+		const deliver = vi.fn(async () => ["dep-1"]);
+		const sockets: FakeSocket[] = [];
+		vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+			ok: true, url: `wss://socket.test/${sockets.length + 1}`,
+		}), { status: 200, headers: { "Content-Type": "application/json" } })));
+		const storage = {
+			getSlackWorkspace: async () => ({
+				bots: { A1: { bot_token: "xoxb", bot_id: "B1", app_id: "A1" } },
+			}),
+			deliver,
+		} as unknown as StorageAdapter;
+		const manager = new SlackSocketManager(storage, {
+			webSocketFactory: () => {
+				const socket = new FakeSocket();
+				sockets.push(socket);
+				return socket as unknown as WebSocket;
+			},
+		});
+		manager.start({ registrationId: "T1:B1", appToken: "old-token" });
+		await vi.waitFor(() => expect(sockets).toHaveLength(1));
+		sockets[0].emit("message", JSON.stringify({
+			type: "hello", connection_info: { app_id: "A1" },
+		}));
+		sockets[0].emit("message", socketEnvelope("retained-id"));
+		await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+
+		manager.start({ registrationId: "T2:B2", appToken: "new-token" });
+		await vi.waitFor(() => expect(sockets).toHaveLength(2));
+		sockets[1].emit("message", JSON.stringify({
+			type: "hello", connection_info: { app_id: "A1" },
+		}));
+		sockets[1].emit("message", socketEnvelope("retained-id"));
+		await new Promise((resolve) => setTimeout(resolve, 25));
+
+		expect(deliver).toHaveBeenCalledOnce();
+		expect(sockets[1].sent).toEqual(['{"envelope_id":"retained-id"}']);
+		manager.stopAll();
+	});
+
+	it("does not displace a connected app from an unverified app-id claim", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => undefined);
+		const sockets: FakeSocket[] = [];
+		vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+			ok: true, url: `wss://socket.test/${sockets.length + 1}`,
+		}), { status: 200, headers: { "Content-Type": "application/json" } })));
+		const manager = new SlackSocketManager({} as StorageAdapter, {
+			webSocketFactory: () => {
+				const socket = new FakeSocket();
+				sockets.push(socket);
+				return socket as unknown as WebSocket;
+			},
+		});
+		manager.start({
+			registrationId: "T1:B1", applicationId: "A1", appToken: "valid-token",
+		});
+		await vi.waitFor(() => expect(sockets).toHaveLength(1));
+		sockets[0].emit("message", JSON.stringify({
+			type: "hello", connection_info: { app_id: "A1" },
+		}));
+
+		manager.start({
+			registrationId: "T2:B2", applicationId: "A1", appToken: "other-token",
+		});
+		await vi.waitFor(() => expect(sockets).toHaveLength(2));
+		sockets[1].emit("message", JSON.stringify({
+			type: "hello", connection_info: { app_id: "A_OTHER" },
+		}));
+
+		expect(sockets[0].readyState).toBe(WebSocket.OPEN);
+		expect(manager.health()).toEqual(expect.arrayContaining([
+			expect.objectContaining({ application_id: "A1", state: "connected" }),
+			expect.objectContaining({ state: "fatal" }),
+		]));
+		manager.stopAll();
+	});
+
 	it("queues the wire acknowledgement before entering the existing delivery path", async () => {
 		const order: string[] = [];
 		const deliver = vi.fn(async () => {
@@ -204,6 +365,7 @@ describe("SlackSocketManager", () => {
 		});
 		const harness = managerHarness(deliver);
 		const socket = await connectHarness(harness);
+		socket.deferSendCallbacks = true;
 		const originalSend = socket.send.bind(socket);
 		socket.send = (frame, callback) => {
 			order.push("ack");
@@ -211,6 +373,10 @@ describe("SlackSocketManager", () => {
 		};
 
 		socket.emit("message", socketEnvelope("one"));
+		expect(order).toEqual(["ack"]);
+		expect(deliver).not.toHaveBeenCalled();
+		expect(socket.sendCallbacks).toHaveLength(1);
+		socket.completeSend();
 		await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
 
 		expect(order).toEqual(["ack", "deliver"]);
@@ -243,6 +409,119 @@ describe("SlackSocketManager", () => {
 		expect(errors.join(" ")).not.toContain("secret");
 		expect(JSON.stringify(harness.manager.health())).not.toContain("secret");
 		harness.manager.stopAll();
+	});
+
+	it("atomically claims delivery when duplicate ack callbacks overlap", async () => {
+		const deliver = vi.fn(async () => ["dep-1"]);
+		const harness = managerHarness(deliver);
+		const socket = await connectHarness(harness);
+		socket.deferSendCallbacks = true;
+
+		socket.emit("message", socketEnvelope("duplicate-in-flight"));
+		socket.emit("message", socketEnvelope("duplicate-in-flight"));
+
+		expect(socket.sendCallbacks).toHaveLength(2);
+		expect(deliver).not.toHaveBeenCalled();
+		// Complete the later send first to prove callback order is irrelevant.
+		socket.completeSend(1);
+		socket.completeSend(0);
+		await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+		expect(socket.sent).toEqual([
+			'{"envelope_id":"duplicate-in-flight"}',
+			'{"envelope_id":"duplicate-in-flight"}',
+		]);
+		harness.manager.stopAll();
+	});
+
+	it("rejects envelopes before hello and payloads for a different app", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => undefined);
+		const preHelloDeliver = vi.fn(async () => ["dep-1"]);
+		const preHello = managerHarness(preHelloDeliver);
+		await vi.waitFor(() => expect(preHello.sockets).toHaveLength(1));
+		preHello.sockets[0].emit("message", socketEnvelope("before-hello"));
+		expect(preHello.manager.health()[0].state).toBe("backoff");
+		expect(preHello.sockets[0].sent).toEqual([]);
+		expect(preHelloDeliver).not.toHaveBeenCalled();
+		preHello.manager.stopAll();
+
+		const wrongAppDeliver = vi.fn(async () => ["dep-1"]);
+		const wrongApp = managerHarness(wrongAppDeliver);
+		const socket = await connectHarness(wrongApp);
+		const payload = slackPayload("Ev-wrong-app");
+		payload.api_app_id = "A_OTHER";
+		socket.emit("message", JSON.stringify({
+			type: "events_api",
+			envelope_id: "wrong-app",
+			payload,
+		}));
+		expect(wrongApp.manager.health()[0].state).toBe("fatal");
+		expect(socket.sent).toEqual([]);
+		expect(wrongAppDeliver).not.toHaveBeenCalled();
+		wrongApp.manager.stopAll();
+	});
+
+	it("bounds pending acknowledgements even for unsupported envelopes", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => undefined);
+		const harness = managerHarness(undefined, { maxPendingAcknowledgements: 1 });
+		const socket = await connectHarness(harness);
+		socket.deferSendCallbacks = true;
+
+		socket.emit("message", JSON.stringify({
+			type: "interactive", envelope_id: "pending-one", payload: {},
+		}));
+		socket.emit("message", JSON.stringify({
+			type: "interactive", envelope_id: "pending-overflow", payload: {},
+		}));
+
+		expect(socket.sent).toEqual(['{"envelope_id":"pending-one"}']);
+		expect(harness.manager.health()[0].state).toBe("backoff");
+		harness.manager.stopAll();
+	});
+
+	it("aborts a stalled bootstrap and enters bounded backoff", async () => {
+		vi.useFakeTimers();
+		vi.spyOn(console, "error").mockImplementation(() => undefined);
+		const fetchStub = vi.fn((_url: string, init?: RequestInit) =>
+			new Promise<Response>((_resolve, reject) => {
+				init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+					once: true,
+				});
+			}));
+		vi.stubGlobal("fetch", fetchStub);
+		const manager = new SlackSocketManager({} as StorageAdapter, {
+			restTimeoutMs: 10,
+			random: () => 0,
+		});
+
+		manager.start({ registrationId: "T1:B1", appToken: "secret" });
+		await vi.advanceTimersByTimeAsync(10);
+
+		expect(fetchStub).toHaveBeenCalledOnce();
+		expect(manager.health()[0].state).toBe("backoff");
+		manager.stopAll();
+	});
+
+	it("parks an untrusted bootstrap URL without constructing a socket", async () => {
+		const errors: string[] = [];
+		vi.spyOn(console, "error").mockImplementation((...args) => {
+			errors.push(args.join(" "));
+		});
+		vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+			ok: true,
+			url: "https://socket.example.test/?ticket=secret-ticket",
+		}), { status: 200, headers: { "Content-Type": "application/json" } })));
+		const factory = vi.fn();
+		const manager = new SlackSocketManager({} as StorageAdapter, {
+			webSocketFactory: factory,
+		});
+
+		manager.start({ registrationId: "T1:B1", appToken: "secret" });
+		await vi.waitFor(() => expect(manager.health()[0].state).toBe("fatal"));
+
+		expect(factory).not.toHaveBeenCalled();
+		expect(errors.join(" ")).not.toContain("secret");
+		expect(errors.join(" ")).not.toContain("ticket");
+		manager.stopAll();
 	});
 
 	it("recovers when the handshake or connected stream goes stale", async () => {
@@ -309,7 +588,7 @@ describe("SlackSocketManager", () => {
 		const fetchStub = vi.fn();
 		vi.stubGlobal("fetch", fetchStub);
 		const manager = new SlackSocketManager({} as StorageAdapter, {
-			apiUrlIsOverride: true,
+			apiUrlOverride: "http://127.0.0.1:9000/",
 			bindAddress: "0.0.0.0",
 		});
 		manager.start({ registrationId: "secret", applicationId: "secret", appToken: "secret" });
@@ -318,6 +597,27 @@ describe("SlackSocketManager", () => {
 		expect(manager.health()[0]).toMatchObject({ state: "fatal" });
 		expect(JSON.stringify(manager.health())).not.toContain("secret");
 		expect(errors.join(" ")).not.toContain("secret");
+		manager.stopAll();
+	});
+
+	it("refuses a remote API override even when the server bind is loopback", () => {
+		const errors: string[] = [];
+		vi.spyOn(console, "error").mockImplementation((...args) => {
+			errors.push(args.join(" "));
+		});
+		const fetchStub = vi.fn();
+		vi.stubGlobal("fetch", fetchStub);
+		const manager = new SlackSocketManager({} as StorageAdapter, {
+			apiUrlOverride: "https://api.example.test/",
+			bindAddress: "127.0.0.1",
+		});
+		manager.start({ registrationId: "T1:B1", appToken: "secret" });
+
+		expect(fetchStub).not.toHaveBeenCalled();
+		expect(manager.health()[0]).toMatchObject({ state: "fatal" });
+		expect(JSON.stringify(manager.health())).not.toContain("secret");
+		expect(errors.join(" ")).not.toContain("secret");
+		expect(errors.join(" ")).not.toContain("example.test");
 		manager.stopAll();
 	});
 });

@@ -40,7 +40,10 @@ import {
 	getAuthRejectionCounters,
 } from "@moda-labs/bobi-events-core";
 import { DiscordGatewayManager } from "./discord-gateway-local";
-import { SlackSocketManager } from "./slack-socket-local";
+import {
+	SlackSocketManager,
+	slackSocketConfigurationError,
+} from "./slack-socket-local";
 import {
 	isExemptFromBreaker,
 	recordDelivery,
@@ -52,12 +55,14 @@ import { setSlackApiUrl, setWhatsAppApiUrl, setDiscordApiUrl } from "@moda-labs/
 
 // Integration-test seams: point the Slack Web API / Meta Graph API / Discord
 // API at local stubs. Unset in production, where the platform defaults apply.
-setSlackApiUrl(process.env.BOBI_ES_SLACK_API_URL);
+const slackApiUrlOverride = process.env.BOBI_ES_SLACK_API_URL || "";
+setSlackApiUrl(slackApiUrlOverride);
 setWhatsAppApiUrl(process.env.BOBI_ES_WHATSAPP_API_URL);
 setDiscordApiUrl(process.env.BOBI_ES_DISCORD_API_URL);
 
 const port = parseInt(process.env.BOBI_ES_PORT || "8080", 10);
 const bind = process.env.BOBI_ES_BIND || "127.0.0.1";
+const slackSocketConfigError = slackSocketConfigurationError(bind, slackApiUrlOverride);
 
 const MAX_BUFFER = 10_000;
 
@@ -379,7 +384,7 @@ const discordGateway = new DiscordGatewayManager(storage, {
 });
 const slackSocket = new SlackSocketManager(storage, {
 	bindAddress: bind,
-	apiUrlIsOverride: Boolean(process.env.BOBI_ES_SLACK_API_URL),
+	apiUrlOverride: slackApiUrlOverride,
 });
 
 async function seedEnvIngestTokens() {
@@ -602,6 +607,10 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		} else if (hasPartialBubbleSignature(ctx)) {
 			return json(res, { error: "forbidden" }, 403);
 		}
+		if (bubbleId && typeof data.app_token === "string"
+			&& data.app_token.trim().length > 0 && slackSocketConfigError) {
+			return json(res, { error: slackSocketConfigError }, 503);
+		}
 		const result = await handleSlackWorkspaceRegister(storage, data, bubbleId);
 		if (result.status === 200 && bubbleId && typeof data.app_token === "string") {
 			const response = result.body as Record<string, unknown>;
@@ -613,7 +622,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 				: "";
 			const botId = typeof response.bot_id === "string" ? response.bot_id : "";
 			slackSocket.start({
-				registrationId: `${workspaceId}:${applicationId || botId || "default"}`,
+				registrationId: `${workspaceId}:${botId || "default"}`,
 				appToken: data.app_token,
 				...(applicationId ? { applicationId } : {}),
 			});

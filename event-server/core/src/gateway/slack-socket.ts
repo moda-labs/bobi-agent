@@ -8,6 +8,7 @@
  */
 
 export const DEFAULT_ACKNOWLEDGED_ENVELOPE_CAPACITY = 10_000;
+export const MAX_SLACK_ENVELOPE_ID_LENGTH = 256;
 
 /** Process-local bounded LRU shared by reconnect-created protocol sessions. */
 export class AcknowledgedEnvelopeCache {
@@ -34,6 +35,14 @@ export class AcknowledgedEnvelopeCache {
 			const oldest = this.envelopeIds.keys().next().value as string | undefined;
 			if (oldest === undefined) break;
 			this.envelopeIds.delete(oldest);
+		}
+	}
+
+	/** Retain acknowledged IDs learned by another connection for the same app. */
+	mergeFrom(other: AcknowledgedEnvelopeCache): void {
+		if (other === this) return;
+		for (const envelopeId of other.envelopeIds.keys()) {
+			this.acknowledge(envelopeId);
 		}
 	}
 }
@@ -89,7 +98,8 @@ export class SlackSocketSession {
 		}
 
 		const envelopeId = frame.envelope_id;
-		if (typeof envelopeId !== "string" || envelopeId.length === 0) return [];
+		if (typeof envelopeId !== "string" || envelopeId.length === 0
+			|| envelopeId.length > MAX_SLACK_ENVELOPE_ID_LENGTH) return [];
 		const send: SlackSocketAction = {
 			kind: "send",
 			frame: JSON.stringify({ envelope_id: envelopeId }),

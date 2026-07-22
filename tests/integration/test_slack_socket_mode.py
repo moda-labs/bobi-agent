@@ -94,7 +94,7 @@ SOCKET_STUB_JS = r"""
 const fs = require("fs");
 const http = require("http");
 const https = require("https");
-const { WebSocketServer } = require("ws");
+const { WebSocket, WebSocketServer } = require("ws");
 
 const socketPort = Number(process.argv[2]);
 const controlPort = Number(process.argv[3]);
@@ -103,9 +103,11 @@ const keyPath = process.argv[5];
 const appId = process.argv[6];
 
 let activeSocket = null;
+let downstreamSocket = null;
 let nextConnection = 0;
 const connections = [];
 const acknowledgements = [];
+const observations = [];
 
 const tlsServer = https.createServer({
   cert: fs.readFileSync(certPath),
@@ -139,6 +141,7 @@ wss.on("connection", (ws, request) => {
         envelope_id: message.envelope_id,
         frame: String(raw),
       });
+      observations.push({ kind: "ack", envelope_id: message.envelope_id });
     }
   });
   ws.send(JSON.stringify({
@@ -165,9 +168,32 @@ const control = http.createServer((req, res) => {
     if (req.method === "GET" && req.url === "/state") {
       return respond(res, 200, {
         connected: Boolean(activeSocket && activeSocket.readyState === 1),
+        downstream_connected: Boolean(
+          downstreamSocket && downstreamSocket.readyState === 1
+        ),
         connections,
         acknowledgements,
+        observations,
       });
+    }
+    if (req.method === "POST" && req.url === "/observe-downstream") {
+      let config;
+      try { config = JSON.parse(body); } catch {
+        return respond(res, 400, { error: "invalid observer config" });
+      }
+      if (downstreamSocket) downstreamSocket.close();
+      downstreamSocket = new WebSocket(config.url, {
+        headers: { Authorization: `Bearer ${config.api_key}` },
+      });
+      downstreamSocket.on("message", (raw) => {
+        let message;
+        try { message = JSON.parse(String(raw)); } catch { return; }
+        if ((message.type === "event" || message.type === "replay") && message.data) {
+          observations.push({ kind: "delivery", event_id: message.data.id });
+        }
+      });
+      downstreamSocket.on("error", () => {});
+      return respond(res, 202, { ok: true });
     }
     if (req.method === "POST" && req.url === "/frame") {
       if (!activeSocket || activeSocket.readyState !== 1) {
@@ -278,6 +304,20 @@ class _SocketStub:
 
     def request_refresh(self):
         self.send_frame({"type": "disconnect", "reason": "refresh_requested"})
+
+    def observe_downstream(self, url: str, api_key: str):
+        response = httpx.post(
+            f"http://127.0.0.1:{self.control_port}/observe-downstream",
+            json={"url": url, "api_key": api_key},
+            timeout=5,
+        )
+        assert response.status_code == 202, response.text
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if self.state()["downstream_connected"]:
+                return
+            time.sleep(0.05)
+        raise AssertionError(f"downstream observer never connected: {self.state()}")
 
 
 class _SlackRestStub:
@@ -496,7 +536,7 @@ def slack_socket_env(tmp_path_factory):
         socket_stub.stop()
 
 
-def _subscribe(env, name: str):
+def _create_deployment(env, name: str) -> dict:
     response = signed_request(
         env.es_url,
         "POST",
@@ -507,19 +547,32 @@ def _subscribe(env, name: str):
         timeout=10,
     )
     assert response.status_code == 201, response.text
-    deployment = response.json()
+    return response.json()
+
+
+def _deployment_ws_url(env, deployment: dict) -> str:
+    return (
+        f"ws://{env.es_url.removeprefix('http://')}"
+        f"/deployments/{deployment['deployment_id']}/subscribe"
+    )
+
+
+def _connect_deployment(env, deployment: dict):
 
     import websocket
 
     ws = websocket.create_connection(
-        f"ws://{env.es_url.removeprefix('http://')}"
-        f"/deployments/{deployment['deployment_id']}/subscribe",
+        _deployment_ws_url(env, deployment),
         header=[f"Authorization: Bearer {deployment['api_key']}"],
         timeout=10,
     )
     hello = json.loads(ws.recv())
     assert hello["type"] == "connected"
     return ws
+
+
+def _subscribe(env, name: str):
+    return _connect_deployment(env, _create_deployment(env, name))
 
 
 def _recv_event(ws, timeout: float = 10) -> dict:
@@ -577,7 +630,13 @@ class TestSlackSocketConnection:
 class TestSlackSocketDelivery:
     def test_wire_ack_precedes_observed_mention_delivery(self, slack_socket_env):
         env = slack_socket_env
-        ws = _subscribe(env, "slack-socket-mention")
+        deployment = _create_deployment(env, "slack-socket-mention")
+        ws = _connect_deployment(env, deployment)
+        observer = _create_deployment(env, "slack-socket-order-observer")
+        env.socket.observe_downstream(
+            _deployment_ws_url(env, observer), observer["api_key"]
+        )
+        observation_start = len(env.socket.state()["observations"])
         try:
             ack = env.socket.send_envelope(_envelope(
                 "env-mention",
@@ -585,12 +644,31 @@ class TestSlackSocketDelivery:
                 _mention_event("<@U_SOCKET_BOT> deploy please", "1753200000.000100"),
             ))
             # send_envelope returns only after the WSS stub observes the wire
-            # ack. The downstream read therefore observes the required order.
+            # ack. A second subscriber in that same stub records both network
+            # observations on one event loop, proving their wire order.
             event = _recv_event(ws)
         finally:
             ws.close()
 
+        deadline = time.time() + 10
+        relevant = []
+        while time.time() < deadline:
+            relevant = [
+                observation
+                for observation in env.socket.state()["observations"][observation_start:]
+                if observation.get("envelope_id") == "env-mention"
+                or observation.get("event_id") == "Ev-mention"
+            ]
+            if {observation["kind"] for observation in relevant} == {
+                "ack", "delivery"
+            }:
+                break
+            time.sleep(0.05)
+
         assert ack["frame"] == '{"envelope_id":"env-mention"}'
+        assert [observation["kind"] for observation in relevant] == [
+            "ack", "delivery"
+        ]
         assert event["id"] == "Ev-mention"
         assert event["source"] == "slack"
         assert event["type"] == "slack.mention"
@@ -727,3 +805,55 @@ class TestUnsignedSlackSocketRegistration:
         }
         assert entries[APP_ID]["state"] == "connected"
         assert "A_UNSIGNED_OTHER" not in entries
+
+
+def test_nonloopback_override_rejects_before_transmitting_credentials(tmp_path):
+    project = tmp_path / "run"
+    (project / "package").mkdir(parents=True)
+    (project / "state").mkdir(parents=True)
+    rest_stub = _SlackRestStub(SimpleNamespace(
+        connection_url=lambda ticket: f"wss://127.0.0.1/socket/{ticket}"
+    ))
+    rest_stub.start()
+    port = _free_port()
+    es_url = f"http://localhost:{port}"
+    (project / "package" / "agent.yaml").write_text(
+        f"entry_point: manager\nevent_server: {es_url}\n"
+    )
+
+    try:
+        status = ensure_running(
+            port,
+            bind="0.0.0.0",
+            project_path=project,
+            extra_env={
+                "BOBI_ES_SLACK_API_URL": f"http://127.0.0.1:{rest_stub.port}/",
+            },
+        )
+        assert status in ("started", "connected")
+        minted = _post_register(es_url, "slack-socket-untrusted", ["_bootstrap"])
+        save_bubble_state(project, minted["bubble_id"], minted["bubble_key"])
+
+        response = signed_request(
+            es_url,
+            "POST",
+            "/slack/workspaces",
+            {
+                "workspace_id": TEAM_ID,
+                "bot_token": BOT_TOKEN,
+                "bot_id": BOT_ID,
+                "app_id": APP_ID,
+                "app_token": APP_TOKEN,
+            },
+            minted["bubble_id"],
+            minted["bubble_key"],
+            timeout=10,
+        )
+
+        assert response.status_code == 503
+        assert APP_TOKEN not in response.text
+        assert BOT_TOKEN not in response.text
+        assert rest_stub.calls == []
+    finally:
+        _stop_event_server(project)
+        rest_stub.stop()

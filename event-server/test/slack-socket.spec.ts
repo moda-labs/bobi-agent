@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	AcknowledgedEnvelopeCache,
+	MAX_SLACK_ENVELOPE_ID_LENGTH,
 	SlackSocketSession,
 	type SlackSocketAction,
 } from "@moda-labs/bobi-events-core/gateway/slack-socket";
@@ -141,6 +142,14 @@ describe("SlackSocketSession frames", () => {
 			payload: { command: "/deploy" },
 		}))).toEqual([]);
 	});
+
+	it("ignores oversized envelope ids before they can enter ack memory", () => {
+		const envelopeId = "x".repeat(MAX_SLACK_ENVELOPE_ID_LENGTH + 1);
+		expect(session().onFrame(eventsEnvelope(
+			envelopeId,
+			eventPayload("Ev-oversized-id"),
+		))).toEqual([]);
+	});
 });
 
 describe("SlackSocketSession reconnect policy", () => {
@@ -197,6 +206,22 @@ describe("SlackSocketSession acknowledged-envelope deduplication", () => {
 
 		const reconnected = session(acknowledgedEnvelopes);
 		expect(reconnected.onFrame(raw)).toEqual([ack("env-reconnect")]);
+	});
+
+	it("merges acknowledged ids when provisional connections converge", () => {
+		const winner = new AcknowledgedEnvelopeCache(3);
+		const loser = new AcknowledgedEnvelopeCache(3);
+		winner.acknowledge("winner-id");
+		loser.acknowledge("loser-id");
+
+		winner.mergeFrom(loser);
+
+		expect(session(winner).onFrame(eventsEnvelope(
+			"winner-id", eventPayload("Ev-winner"),
+		))).toEqual([ack("winner-id")]);
+		expect(session(winner).onFrame(eventsEnvelope(
+			"loser-id", eventPayload("Ev-loser"),
+		))).toEqual([ack("loser-id")]);
 	});
 
 	it("evicts the least recently acknowledged id at the configured bound", () => {

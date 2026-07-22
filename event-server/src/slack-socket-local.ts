@@ -20,17 +20,22 @@ const BACKOFF_BASE_MS = 5_000;
 const BACKOFF_MAX_MS = 60_000;
 const HANDSHAKE_TIMEOUT_MS = 30_000;
 const STALENESS_TIMEOUT_MS = 30_000;
-const REST_TIMEOUT_MS = 10_000;
+const REST_TIMEOUT_MS = 15_000;
 const MAX_PAYLOAD_BYTES = 1_048_576;
 const MAX_CONCURRENT_DELIVERIES = 16;
 const MAX_QUEUED_DELIVERIES = 256;
+const MAX_PENDING_ACKNOWLEDGEMENTS = 512;
 
 const FATAL_SLACK_ERRORS = new Set([
+	"access_denied",
 	"account_inactive",
+	"forbidden_team",
 	"invalid_auth",
 	"missing_scope",
+	"no_permission",
 	"not_allowed_token_type",
 	"not_authed",
+	"team_access_not_granted",
 	"token_expired",
 	"token_revoked",
 ]);
@@ -56,13 +61,14 @@ export interface SlackSocketRegistration {
 
 export interface SlackSocketManagerOptions {
 	bindAddress?: string;
-	apiUrlIsOverride?: boolean;
+	apiUrlOverride?: string;
 	random?: () => number;
 	handshakeTimeoutMs?: number;
 	stalenessTimeoutMs?: number;
 	restTimeoutMs?: number;
 	maxConcurrentDeliveries?: number;
 	maxQueuedDeliveries?: number;
+	maxPendingAcknowledgements?: number;
 	/** Test seam for deterministic driver tests; production uses `ws`. */
 	webSocketFactory?: (url: string, options: { maxPayload: number }) => WebSocket;
 }
@@ -79,6 +85,7 @@ interface PendingAcknowledgement {
 interface Connection {
 	key: string;
 	registrationId: string;
+	registrationOrder: number;
 	expectedApplicationId: string | null;
 	applicationId: string | null;
 	appToken: string;
@@ -128,7 +135,7 @@ export function classifySlackBootstrapResponse(
 	const data = record(body);
 	const error = typeof data?.error === "string" ? data.error : "";
 	const retryMs = retryAfterMs(retryAfter);
-	if (status === 429 || error === "rate_limited") {
+	if (status === 429 || error === "rate_limited" || error === "ratelimited") {
 		return { kind: "retry", retryAfterMs: retryMs };
 	}
 	if ((status >= 400 && status < 500) || FATAL_SLACK_ERRORS.has(error)) {
@@ -157,7 +164,7 @@ export function validateSlackSocketUrl(value: string): boolean {
 }
 
 export function isLoopbackBind(value: string): boolean {
-	const normalized = value.trim().toLowerCase();
+	const normalized = value.trim().toLowerCase().replace(/^\[|\]$/g, "");
 	if (normalized === "localhost" || normalized === "::1") return true;
 	const octets = normalized.split(".");
 	return octets.length === 4
@@ -165,26 +172,49 @@ export function isLoopbackBind(value: string): boolean {
 		&& octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
 }
 
+export function slackSocketConfigurationError(
+	bindAddress: string,
+	apiUrlOverride: string,
+): string | null {
+	if (!apiUrlOverride) return null;
+	if (!isLoopbackBind(bindAddress)) {
+		return "Slack API override requires a loopback event-server bind";
+	}
+	try {
+		const url = new URL(apiUrlOverride);
+		if ((url.protocol !== "http:" && url.protocol !== "https:")
+			|| url.username.length > 0 || url.password.length > 0
+			|| !isLoopbackBind(url.hostname)) {
+			return "Slack API override requires a loopback HTTP endpoint";
+		}
+	} catch {
+		return "Slack API override requires a loopback HTTP endpoint";
+	}
+	return null;
+}
+
 export class SlackSocketManager {
 	private readonly storage: StorageAdapter;
 	private readonly bindAddress: string;
-	private readonly apiUrlIsOverride: boolean;
+	private readonly apiUrlOverride: string;
 	private readonly random: () => number;
 	private readonly handshakeTimeoutMs: number;
 	private readonly stalenessTimeoutMs: number;
 	private readonly restTimeoutMs: number;
 	private readonly maxConcurrentDeliveries: number;
 	private readonly maxQueuedDeliveries: number;
+	private readonly maxPendingAcknowledgements: number;
 	private readonly webSocketFactory: (url: string, options: { maxPayload: number }) => WebSocket;
 	private readonly connections = new Map<string, Connection>();
 	private readonly deliveryQueue: AcceptedDelivery[] = [];
 	private activeDeliveries = 0;
 	private reservedDeliveries = 0;
+	private nextRegistrationOrder = 0;
 
 	constructor(storage: StorageAdapter, opts: SlackSocketManagerOptions = {}) {
 		this.storage = storage;
 		this.bindAddress = opts.bindAddress ?? "127.0.0.1";
-		this.apiUrlIsOverride = opts.apiUrlIsOverride ?? false;
+		this.apiUrlOverride = opts.apiUrlOverride ?? "";
 		this.random = opts.random ?? Math.random;
 		this.handshakeTimeoutMs = opts.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
 		this.stalenessTimeoutMs = opts.stalenessTimeoutMs ?? STALENESS_TIMEOUT_MS;
@@ -192,24 +222,29 @@ export class SlackSocketManager {
 		this.maxConcurrentDeliveries = opts.maxConcurrentDeliveries
 			?? MAX_CONCURRENT_DELIVERIES;
 		this.maxQueuedDeliveries = opts.maxQueuedDeliveries ?? MAX_QUEUED_DELIVERIES;
+		this.maxPendingAcknowledgements = opts.maxPendingAcknowledgements
+			?? MAX_PENDING_ACKNOWLEDGEMENTS;
 		this.webSocketFactory = opts.webSocketFactory
 			?? ((url, options) => new WebSocket(url, options));
 	}
 
 	start(registration: SlackSocketRegistration): void {
 		const expectedApplicationId = registration.applicationId?.trim() || null;
-		const preferredKey = expectedApplicationId
-			? `app:${expectedApplicationId}`
-			: `registration:${registration.registrationId}`;
-		let conn = this.connections.get(preferredKey);
-		if (!conn) {
-			conn = [...this.connections.values()].find((candidate) =>
-				candidate.registrationId === registration.registrationId
-				|| Boolean(expectedApplicationId && (
-					candidate.applicationId === expectedApplicationId
-					|| candidate.expectedApplicationId === expectedApplicationId
-				)),
-			);
+		const registrationKey = `registration:${registration.registrationId}`;
+		let conn = [...this.connections.values()].find((candidate) =>
+			candidate.registrationId === registration.registrationId,
+		);
+		const expectedOwner = expectedApplicationId
+			? this.connections.get(`app:${expectedApplicationId}`)
+			: undefined;
+
+		// A claimed app id is not authoritative until hello. A registration for
+		// another bot may share a real app, but it must not tear down that app's
+		// current connection before its own app token proves the identity.
+		if (!conn && expectedOwner
+			&& expectedOwner.appToken === registration.appToken
+			&& expectedOwner.state !== "fatal") {
+			return;
 		}
 
 		if (conn && conn.appToken === registration.appToken
@@ -219,14 +254,18 @@ export class SlackSocketManager {
 		}
 
 		if (conn) {
-			this.restartConnection(conn, preferredKey, registration, expectedApplicationId);
+			this.restartConnection(conn, registrationKey, registration, expectedApplicationId);
 		} else {
-			conn = this.createConnection(preferredKey, registration, expectedApplicationId);
-			this.connections.set(preferredKey, conn);
+			conn = this.createConnection(registrationKey, registration, expectedApplicationId);
+			this.connections.set(registrationKey, conn);
 		}
 
-		if (this.apiUrlIsOverride && !isLoopbackBind(this.bindAddress)) {
-			this.fatal(conn, "Slack API override requires a loopback event-server bind");
+		const configurationError = slackSocketConfigurationError(
+			this.bindAddress,
+			this.apiUrlOverride,
+		);
+		if (configurationError) {
+			this.fatal(conn, configurationError);
 			return;
 		}
 		void this.connect(conn);
@@ -270,6 +309,7 @@ export class SlackSocketManager {
 		return {
 			key,
 			registrationId: registration.registrationId,
+			registrationOrder: ++this.nextRegistrationOrder,
 			expectedApplicationId,
 			applicationId: null,
 			appToken: registration.appToken,
@@ -304,6 +344,7 @@ export class SlackSocketManager {
 			this.connections.set(preferredKey, conn);
 		}
 		conn.registrationId = registration.registrationId;
+		conn.registrationOrder = ++this.nextRegistrationOrder;
 		conn.expectedApplicationId = expectedApplicationId;
 		conn.applicationId = null;
 		conn.appToken = registration.appToken;
@@ -403,7 +444,14 @@ export class SlackSocketManager {
 		ws.on("message", (data) => {
 			if (!isCurrentGeneration(conn, generation) || conn.ws !== ws) return;
 			if (conn.state === "connected") this.resetStalenessWatchdog(conn, generation);
-			this.apply(conn, generation, session, session.onFrame(String(data)));
+			const actions = session.onFrame(String(data));
+			if (conn.state !== "connected"
+				&& actions.some((action) => action.kind === "send" || action.kind === "deliver")) {
+				console.error(`slack socket: envelope arrived before hello for ${this.label(conn)}`);
+				this.scheduleReconnect(conn);
+				return;
+			}
+			this.apply(conn, generation, session, actions);
 		});
 		ws.on("ping", () => {
 			if (!isCurrentGeneration(conn, generation) || conn.ws !== ws) return;
@@ -414,6 +462,7 @@ export class SlackSocketManager {
 			this.apply(conn, generation, session, session.onSocketClose());
 		});
 		ws.on("error", () => {
+			if (!isCurrentGeneration(conn, generation) || conn.ws !== ws) return;
 			// The close event drives recovery. Never stringify the error: `ws`
 			// errors may contain the credential-bearing one-use connection URL.
 			console.error(`slack socket: WebSocket error for ${this.label(conn)}`);
@@ -435,6 +484,11 @@ export class SlackSocketManager {
 					const delivery = next?.kind === "deliver"
 						&& next.envelopeId === action.ackEnvelopeId ? next : null;
 					if (delivery) index++;
+					if (delivery && (!conn.applicationId
+						|| delivery.payload.api_app_id !== conn.applicationId)) {
+						this.fatal(conn, "Socket Mode event application id did not match hello");
+						return;
+					}
 					this.acknowledge(conn, generation, session, action, delivery);
 					break;
 				}
@@ -468,8 +522,15 @@ export class SlackSocketManager {
 		const targetKey = `app:${applicationId}`;
 		const conflict = this.connections.get(targetKey);
 		if (conflict && conflict !== conn) {
-			this.fatal(conn, "another Socket Mode connection already owns this application id");
-			return;
+			if (conflict.registrationOrder > conn.registrationOrder) {
+				conflict.acknowledgedEnvelopes.mergeFrom(conn.acknowledgedEnvelopes);
+				this.teardown(conn);
+				this.connections.delete(conn.key);
+				return;
+			}
+			conn.acknowledgedEnvelopes.mergeFrom(conflict.acknowledgedEnvelopes);
+			this.teardown(conflict);
+			this.connections.delete(conflict.key);
 		}
 		if (conn.key !== targetKey) {
 			this.connections.delete(conn.key);
@@ -491,6 +552,11 @@ export class SlackSocketManager {
 		action: Extract<SlackSocketAction, { kind: "send" }>,
 		delivery: Extract<SlackSocketAction, { kind: "deliver" }> | null,
 	): void {
+		if (conn.pendingAcknowledgements.size >= this.maxPendingAcknowledgements) {
+			console.error(`slack socket: acknowledgement queue full for ${this.label(conn)}; reconnecting`);
+			this.scheduleReconnect(conn);
+			return;
+		}
 		if (delivery && !this.reserveDelivery()) {
 			console.error(`slack socket: delivery queue full for ${this.label(conn)}; reconnecting`);
 			this.scheduleReconnect(conn);
@@ -518,14 +584,23 @@ export class SlackSocketManager {
 				return;
 			}
 
+			// Wire ack callback -> atomic LRU claim -> accepted delivery FIFO.
+			// Two callbacks for one unacknowledged retransmission may race here;
+			// exactly one of them is allowed to claim delivery.
+			const shouldDeliver = Boolean(delivery
+				&& !conn.acknowledgedEnvelopes.has(action.ackEnvelopeId));
 			session.onAcknowledged(action.ackEnvelopeId);
 			if (delivery) {
-				this.acceptDelivery({
-					conn,
-					generation,
-					envelopeId: delivery.envelopeId,
-					payload: delivery.payload,
-				});
+				if (shouldDeliver) {
+					this.acceptDelivery({
+						conn,
+						generation,
+						envelopeId: delivery.envelopeId,
+						payload: delivery.payload,
+					});
+				} else {
+					this.releaseDeliveryReservation();
+				}
 			}
 		};
 		const pending: PendingAcknowledgement = {
