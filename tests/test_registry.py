@@ -1,12 +1,18 @@
 """Tests for session registry — file-per-worker model."""
 
+import builtins
 import json
 import os
+import subprocess
+import sys
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 
+import bobi.sdk as sdk
 from bobi import paths
 from bobi.sdk import SessionEntry, SessionRegistry
 
@@ -56,6 +62,235 @@ class TestSessionRegistry:
         tmp_registry.update("agent-1", status="running")
         got = tmp_registry.get("agent-1")
         assert got.status == "running"
+
+    def test_state_writes_never_expose_partial_json(
+            self, tmp_registry, tmp_path, monkeypatch):
+        """A published state file is always one complete JSON document."""
+        state_path = (
+            tmp_path / "state" / "sessions" / "agent-1" / "state.json"
+        )
+        original_builtin_open = builtins.open
+        original_open = Path.open
+        original_replace = os.replace
+        opened_for_write = []
+        observed = []
+
+        def observe_open(path, mode):
+            if "w" in mode and path.parent == state_path.parent:
+                published = (
+                    json.loads(state_path.read_text())
+                    if state_path.exists()
+                    else None
+                )
+                opened_for_write.append((path, published))
+
+        def builtin_open_and_observe(file, *args, **kwargs):
+            handle = original_builtin_open(file, *args, **kwargs)
+            mode = args[0] if args else kwargs.get("mode", "r")
+            observe_open(Path(file), mode)
+            return handle
+
+        def open_and_observe(path, *args, **kwargs):
+            handle = original_open(path, *args, **kwargs)
+            mode = args[0] if args else kwargs.get("mode", "r")
+            observe_open(path, mode)
+            return handle
+
+        def replace_and_observe(source, destination):
+            source_path = Path(source)
+            destination_path = Path(destination)
+            staged = json.loads(source_path.read_text())
+            published = (
+                json.loads(state_path.read_text())
+                if state_path.exists()
+                else None
+            )
+            observed.append((source_path, destination_path, staged, published))
+            original_replace(source, destination)
+
+        monkeypatch.setattr(builtins, "open", builtin_open_and_observe)
+        monkeypatch.setattr(Path, "open", open_and_observe)
+        monkeypatch.setattr(os, "replace", replace_and_observe)
+
+        def assert_complete_during(action):
+            before_open = len(opened_for_write)
+            before = len(observed)
+            action()
+            writes = opened_for_write[before_open:]
+            snapshots = observed[before:]
+            assert len(writes) == 1, (
+                "state writer bypassed single-file staging"
+            )
+            staged_path, published_at_open = writes[0]
+            assert staged_path.parent == state_path.parent
+            assert staged_path != state_path
+            if published_at_open is not None:
+                assert published_at_open["name"] == "agent-1"
+            assert len(snapshots) == 1, (
+                "state writer bypassed atomic publication"
+            )
+            source, destination, staged, published = snapshots[0]
+            assert source.parent == state_path.parent
+            assert source != state_path
+            assert destination == state_path
+            assert staged["name"] == "agent-1"
+            if published is not None:
+                assert published["name"] == "agent-1"
+
+            return json.loads(state_path.read_text())
+
+        state = assert_complete_during(
+            lambda: tmp_registry.register(
+                SessionEntry(name="agent-1", status="starting")
+            )
+        )
+        assert state["status"] == "starting"
+
+        state = assert_complete_during(
+            lambda: tmp_registry.update("agent-1", status="running")
+        )
+        assert state["status"] == "running"
+
+        state = assert_complete_during(
+            lambda: tmp_registry.record_cost("agent-1", 0.25)
+        )
+        assert state["total_cost_usd"] == 0.25
+
+    def test_state_writers_share_state_lock(
+            self, tmp_registry, tmp_path, monkeypatch):
+        """Every state writer joins one serialization domain."""
+        tmp_registry.register(
+            SessionEntry(name="agent-1", status="starting", pid=0)
+        )
+        state_path = (
+            tmp_path / "state" / "sessions" / "agent-1" / "state.json"
+        )
+
+        first_at_write = threading.Event()
+        cost_attempting_lock = threading.Event()
+        release_first = threading.Event()
+        serialization_lock = threading.Lock()
+        lock_holders = set()
+        lock_attempts = []
+        lock_paths = []
+        original_write = SessionRegistry._write_state
+        errors = []
+
+        @contextmanager
+        def coordinated_lock(path):
+            writer = threading.current_thread().name
+            lock_attempts.append(writer)
+            lock_paths.append(path)
+            if writer == "cost-writer":
+                cost_attempting_lock.set()
+            with serialization_lock:
+                lock_holders.add(writer)
+                try:
+                    yield
+                finally:
+                    lock_holders.remove(writer)
+
+        def controlled_write(path, data):
+            writer = threading.current_thread().name
+            assert writer in lock_holders, "state write escaped the shared lock"
+            if writer == "status-writer":
+                first_at_write.set()
+                if not release_first.wait(5):
+                    raise AssertionError("timed out releasing first state writer")
+            original_write(path, data)
+
+        monkeypatch.setattr(sdk, "_state_file_lock", coordinated_lock)
+        monkeypatch.setattr(
+            SessionRegistry, "_write_state", staticmethod(controlled_write)
+        )
+
+        tmp_registry.register(
+            SessionEntry(name="agent-1", status="starting", pid=0)
+        )
+
+        def write_status():
+            try:
+                tmp_registry.update("agent-1", status="running")
+            except Exception as exc:
+                errors.append(exc)
+
+        def write_cost():
+            try:
+                tmp_registry.record_cost("agent-1", 0.25)
+            except Exception as exc:
+                errors.append(exc)
+
+        first = threading.Thread(
+            target=write_status,
+            name="status-writer",
+            daemon=True,
+        )
+        second = threading.Thread(
+            target=write_cost,
+            name="cost-writer",
+            daemon=True,
+        )
+
+        first.start()
+        try:
+            assert first_at_write.wait(5), (
+                "status writer did not reach publication"
+            )
+            second.start()
+            assert cost_attempting_lock.wait(5), (
+                "record_cost did not attempt the shared state lock"
+            )
+        finally:
+            release_first.set()
+            first.join(5)
+            if second.ident is not None:
+                second.join(5)
+
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert errors == []
+        assert lock_attempts == [
+            "MainThread",
+            "status-writer",
+            "cost-writer",
+        ]
+        assert lock_paths == [state_path, state_path, state_path]
+
+        state = tmp_registry.get("agent-1")
+        assert state.status == "running"
+        assert state.total_cost_usd == 0.25
+
+    def test_state_lock_is_exclusive_across_processes(
+            self, tmp_registry, tmp_path):
+        """The serialization lock excludes an independent process."""
+        tmp_registry.register(SessionEntry(name="agent-1"))
+        state_path = (
+            tmp_path / "state" / "sessions" / "agent-1" / "state.json"
+        )
+        lock_path = state_path.with_suffix(".lock")
+        probe = """
+import fcntl
+import sys
+from pathlib import Path
+
+with Path(sys.argv[1]).open("a+") as lock_file:
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit(0)
+raise SystemExit(1)
+"""
+
+        with sdk._state_file_lock(state_path):
+            result = subprocess.run(
+                [sys.executable, "-c", probe, str(lock_path)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+
+        assert result.returncode == 0, result.stderr
 
     def test_update_nonexistent_is_noop(self, tmp_registry):
         tmp_registry.update("does-not-exist", status="running")

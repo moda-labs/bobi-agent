@@ -19,6 +19,8 @@ import os
 import platform
 import shutil
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, asdict, replace
 from pathlib import Path
 from typing import Any
@@ -147,6 +149,20 @@ def read_pid(pid_path: Path) -> int:
 def _pid_file_alive(pid_path: Path) -> bool:
     """Check whether a manager.pid file points to a running process."""
     return pid_alive(read_pid(pid_path))
+
+
+@contextmanager
+def _state_file_lock(path: Path) -> Iterator[None]:
+    """Serialize whole-document state changes across processes."""
+    lock_path = path.with_suffix(".lock")
+    with open(lock_path, "a+") as lock_file:
+        import fcntl
+
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def find_runtime_root(start: Path | None = None) -> Path | None:
@@ -285,31 +301,49 @@ class SessionRegistry:
     def _state_path(self, name: str) -> Path:
         return _sessions_dir(self._root) / name / "state.json"
 
+    @staticmethod
+    def _write_state(path: Path, data: dict) -> None:
+        """Publish one complete state document for concurrent readers."""
+        serialized = json.dumps(data, indent=2)
+        tmp = path.with_name(
+            f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        )
+        try:
+            tmp.write_text(serialized)
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
     def register(self, entry: SessionEntry) -> None:
         d = self.session_dir(entry.name)
         d.mkdir(parents=True, exist_ok=True)
-        (d / "state.json").write_text(json.dumps(asdict(entry), indent=2))
+        path = d / "state.json"
+        with _state_file_lock(path):
+            self._write_state(path, asdict(entry))
 
     def update(self, name: str, **kwargs) -> None:
         path = self._state_path(name)
         if not path.exists():
             return
-        try:
-            data = json.loads(path.read_text())
-        except (json.JSONDecodeError, TypeError):
-            return
-        # Normalize through the dataclass so fields added in a later schema
-        # version (e.g. emit_confirmed/terminal_at — MDS-65) are present and can
-        # be written. Without this, update() only touches keys already in the
-        # on-disk JSON, so an entry written by older code would silently DROP a
-        # set to a new field — and the reconciler, unable to persist
-        # emit_confirmed=True, would re-emit that completion on every wake.
-        data = asdict(SessionEntry.from_dict(data))
-        for k, v in kwargs.items():
-            if k in data:
-                data[k] = v
-        data["last_activity"] = time.time()
-        path.write_text(json.dumps(data, indent=2))
+        with _state_file_lock(path):
+            if not path.exists():
+                return
+            try:
+                data = json.loads(path.read_text())
+            except (json.JSONDecodeError, TypeError):
+                return
+            # Normalize through the dataclass so fields added in a later schema
+            # version (e.g. emit_confirmed/terminal_at — MDS-65) are present and can
+            # be written. Without this, update() only touches keys already in the
+            # on-disk JSON, so an entry written by older code would silently DROP a
+            # set to a new field — and the reconciler, unable to persist
+            # emit_confirmed=True, would re-emit that completion on every wake.
+            data = asdict(SessionEntry.from_dict(data))
+            for k, v in kwargs.items():
+                if k in data:
+                    data[k] = v
+            data["last_activity"] = time.time()
+            self._write_state(path, data)
 
     def record_cost(self, name: str, cost_usd: float,
                     model: str = "", provider: str = "",
@@ -330,32 +364,35 @@ class SessionRegistry:
         path = self._state_path(name)
         if not path.exists():
             return
-        try:
-            data = json.loads(path.read_text())
-        except (json.JSONDecodeError, TypeError):
-            return
-        data["total_cost_usd"] = data.get("total_cost_usd", 0.0) + cost_usd
-        if model:
-            usage = data.get("model_usage", {})
-            key = f"{provider}:{model}" if provider else model
-            if key:
-                entry = usage.get(key)
-                if entry is None:
-                    entry = {"cost_usd": 0.0, "input_tokens": 0,
-                             "output_tokens": 0, "cached_input_tokens": 0}
-                entry["cost_usd"] = entry.get("cost_usd", 0.0) + cost_usd
-                entry["input_tokens"] = entry.get("input_tokens", 0) + input_tokens
-                entry["output_tokens"] = entry.get("output_tokens", 0) + output_tokens
-                if "cached_input_tokens" in entry:
-                    entry["cached_input_tokens"] += cached_input_tokens
-                usage[key] = entry
-                data["model_usage"] = usage
-        if model and not data.get("model"):
-            data["model"] = model
-        if provider and not data.get("provider"):
-            data["provider"] = provider
-        data["last_activity"] = time.time()
-        path.write_text(json.dumps(data, indent=2))
+        with _state_file_lock(path):
+            if not path.exists():
+                return
+            try:
+                data = json.loads(path.read_text())
+            except (json.JSONDecodeError, TypeError):
+                return
+            data["total_cost_usd"] = data.get("total_cost_usd", 0.0) + cost_usd
+            if model:
+                usage = data.get("model_usage", {})
+                key = f"{provider}:{model}" if provider else model
+                if key:
+                    entry = usage.get(key)
+                    if entry is None:
+                        entry = {"cost_usd": 0.0, "input_tokens": 0,
+                                 "output_tokens": 0, "cached_input_tokens": 0}
+                    entry["cost_usd"] = entry.get("cost_usd", 0.0) + cost_usd
+                    entry["input_tokens"] = entry.get("input_tokens", 0) + input_tokens
+                    entry["output_tokens"] = entry.get("output_tokens", 0) + output_tokens
+                    if "cached_input_tokens" in entry:
+                        entry["cached_input_tokens"] += cached_input_tokens
+                    usage[key] = entry
+                    data["model_usage"] = usage
+            if model and not data.get("model"):
+                data["model"] = model
+            if provider and not data.get("provider"):
+                data["provider"] = provider
+            data["last_activity"] = time.time()
+            self._write_state(path, data)
 
     def mark_done(self, name: str) -> None:
         self.update(name, status="done", pid=0)
