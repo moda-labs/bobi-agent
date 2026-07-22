@@ -390,13 +390,13 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
 
 | Lane | Dispatch issue | Phases | One-line scope | Status |
 |---|---|---|---|---|
-| A | #TBD | 1–4 | Behavioral fixes in bobi/ (session honesty, workflow+pack routing, persistence atomicity, bug batch) | pending split |
-| B | #TBD | 5–6 | Behavior-preserving cleanup in bobi/ (dead-code purge, consolidations) — lands after A | pending split |
-| C | #TBD | 7 | event-server TS + web UI (bugs, security, duplication) — parallel with A | pending split |
-| D | #TBD | 8 | Documentation drift sweep — parallel with A | pending split |
-| E | #TBD | 9 | Test-suite cleanup — lands after A | pending split |
+| A | #818 | 1–4 | Behavioral fixes in bobi/ (session honesty, workflow+pack routing, persistence atomicity, bug batch) | open |
+| B | #821 | 5–6 | Behavior-preserving cleanup in bobi/ (dead-code purge, consolidations) — lands after A | open |
+| C | #819 | 7 | event-server TS + web UI (bugs, security, duplication) — parallel with A | open |
+| D | #820 | 8 | Documentation drift sweep — parallel with A | open |
+| E | #822 | 9 | Test-suite cleanup — lands after A | open |
 
-**Lanes:** A: Phases 1–4. C: Phase 7 (parallel with A, no shared files). D: Phase 8 (docs, parallel). B: Phases 5–6 (builds in parallel, *lands after* A — shares bobi/ files, not a build-blocking dependency). E: Phase 9 (builds in parallel, *lands after* A). Only "lands after" ordering here — nothing build-blocks except that B/E should rebase onto A's merge to avoid churn.
+**Lanes (filed 2026-07-22):** A=#818, B=#821, C=#819, D=#820, E=#822. A: Phases 1–4. C: Phase 7 (parallel with A, no shared files). D: Phase 8 (docs, parallel). B: Phases 5–6 (builds in parallel, *lands after* A — shares bobi/ files, not a build-blocking dependency). E: Phase 9 (builds in parallel, *lands after* A). Only "lands after" ordering here — nothing build-blocks except that B/E should rebase onto A's merge to avoid churn.
 
 - [ ] Convergence gate: full `pytest tests/ -q` + `cd event-server && npm test` green on main after the last lane merges, plus the in-repo dogfood run (isolated `BOBI_HOME`, dogfood-content-review pack: agent boots, event round-trips, the D015 fix-step route actually takes) — run by the session landing the last lane
 
@@ -404,6 +404,7 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
 
 *(append-only)*
 
+- **2026-07-22** (Split): filed lanes A–E as #818–822 (thin dispatch pointers). B/E land after A (#818); C/D parallel with A.
 - **2026-07-22** (Zach + planning session): Q1–Q5 decided (all recommended option — 5 lanes, plausible/unverified in scope with re-verification, remove `--resume`, delete expired compat now, restrict credential endpoint to declared vars). Status → Approved. Lane map filled (A–E).
 
 ## Notes
