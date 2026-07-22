@@ -23,6 +23,7 @@ def test_warns_when_external_events_use_default_local_ingress(bobi_install):
     assert "slack" in warning.detail
     assert "http://localhost:8080" in warning.detail
     assert "public tunnel" in warning.hint
+    assert "Socket Mode" in warning.hint
 
 
 def test_warns_for_scheme_less_localhost_ingress(bobi_install):
@@ -108,6 +109,108 @@ def test_warns_for_explicit_subscribe_without_event_services(bobi_install):
 
     assert warning is not None
     assert "github/issues" in warning.detail
+
+
+def test_warns_for_slack_prefixed_topic_without_app_token(bobi_install):
+    paths.agent_yaml_path(bobi_install.repo_path).write_text(
+        "agent: test-agent\n"
+        "entry_point: director\n"
+        "subscribe:\n"
+        "  - slack:T_TEAM\n"
+    )
+    from bobi.ingress import check_ingress_reachability
+
+    warning = check_ingress_reachability(bobi_install.repo_path)
+
+    assert warning is not None
+    assert "slack:T_TEAM" in warning.detail
+
+
+def test_whitespace_slack_app_token_keeps_webhook_warning(bobi_install):
+    paths.agent_yaml_path(bobi_install.repo_path).write_text(
+        "agent: test-agent\n"
+        "entry_point: director\n"
+        "services:\n"
+        "  - name: slack\n"
+        "    events: true\n"
+        "    credentials:\n"
+        "      app_token: '   '\n"
+    )
+    from bobi.ingress import check_ingress_reachability
+
+    warning = check_ingress_reachability(bobi_install.repo_path)
+
+    assert warning is not None
+    assert "slack" in warning.detail
+
+
+def test_ignores_outbound_slack_and_discord_services(bobi_install):
+    paths.agent_yaml_path(bobi_install.repo_path).write_text(
+        "agent: test-agent\n"
+        "entry_point: director\n"
+        "services:\n"
+        "  - name: slack\n"
+        "    events: true\n"
+        "    credentials:\n"
+        "      app_token: xapp-configured\n"
+        "  - name: discord\n"
+        "    events: true\n"
+    )
+    from bobi.ingress import check_ingress_reachability
+
+    assert check_ingress_reachability(bobi_install.repo_path) is None
+
+
+def test_ignores_outbound_slack_and_discord_prefixed_topics(bobi_install):
+    paths.agent_yaml_path(bobi_install.repo_path).write_text(
+        "agent: test-agent\n"
+        "entry_point: director\n"
+        "services:\n"
+        "  - name: slack\n"
+        "    credentials:\n"
+        "      app_token: xapp-configured\n"
+        "subscribe:\n"
+        "  - slack:T_TEAM\n"
+        "  - discord:A_APP\n"
+    )
+    from bobi.ingress import check_ingress_reachability
+
+    assert check_ingress_reachability(bobi_install.repo_path) is None
+
+
+def test_mixed_sources_warn_only_for_webhook_transports(bobi_install):
+    paths.agent_yaml_path(bobi_install.repo_path).write_text(
+        "agent: test-agent\n"
+        "entry_point: director\n"
+        "services:\n"
+        "  - name: slack\n"
+        "    events: true\n"
+        "    credentials:\n"
+        "      app_token: xapp-configured\n"
+        "  - name: discord\n"
+        "    events: true\n"
+        "  - name: github\n"
+        "    events: true\n"
+        "subscribe:\n"
+        "  - slack:T_TEAM\n"
+        "  - discord:A_APP\n"
+        "  - linear/issues\n"
+    )
+    from bobi.ingress import check_ingress_reachability
+
+    warning = check_ingress_reachability(
+        bobi_install.repo_path,
+        extra_subscriptions=[
+            "slack:T_OTHER", "discord:A_OTHER", "whatsapp:PNID",
+        ],
+    )
+
+    assert warning is not None
+    assert "github" in warning.detail
+    assert "linear/issues" in warning.detail
+    assert "whatsapp:PNID" in warning.detail
+    assert "slack" not in warning.detail
+    assert "discord" not in warning.detail
 
 
 def test_ignores_inbox_only_explicit_subscribe(bobi_install):

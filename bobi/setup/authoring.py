@@ -126,6 +126,8 @@ def build_service_records(state: SetupState, catalog=None) -> list[dict]:
             if conn.credential_var:
                 key = _CRED_KEY.get(conn.key, "token")
                 rec["credentials"] = {key: f"${{{conn.credential_var}}}"}
+                if conn.key == "slack":
+                    rec["credentials"]["app_token"] = "${SLACK_APP_TOKEN:-}"
             # Scope the Slack adapter to the team's dedicated channel when the
             # user saves one on the finalize screen (SLACK_CHANNELS in .env).
             # The `:-` optional form matters: a bare ${VAR} is a REQUIRED

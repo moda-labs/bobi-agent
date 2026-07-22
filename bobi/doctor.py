@@ -45,6 +45,9 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_workflows())
     results.append(_check_bubble_auth())
     results.append(_check_event_server())
+    slack_socket = _check_slack_socket_mode()
+    if slack_socket:
+        results.append(slack_socket)
     results.append(_check_ingress_reachability())
     results.append(_check_recent_events())
     results.append(_check_long_term_memory())
@@ -389,6 +392,123 @@ def _check_event_server() -> CheckResult:
     return CheckResult("Event server", ok=False,
                        detail="not running",
                        hint="`bobi agent <name> event-server start` or `bobi agent <name> start` will auto-launch")
+
+
+def _check_slack_socket_mode() -> CheckResult | None:
+    """Report the configured Slack app's local Socket Mode connection."""
+    root = bound_root()
+    if not root:
+        return None
+
+    from bobi.config import Config
+    from bobi.events.server import _slack_app_id, _slack_auth_info, health
+
+    try:
+        cfg = Config.load(root)
+    except FileNotFoundError:
+        return None
+
+    app_token = str(cfg.credential("slack", "app_token") or "").strip()
+    if not app_token:
+        return None
+
+    url = cfg.event_server_url or "http://localhost:8080"
+    bot_token = str(cfg.credential("slack", "bot_token") or "").strip()
+
+    def safe_health_text(value: object) -> str:
+        """Sanitize untrusted health fields before terminal output."""
+        text = str(value or "")
+        for secret in (app_token, bot_token):
+            if secret:
+                text = text.replace(secret, "[redacted]")
+        return "".join(char if char.isprintable() else "?" for char in text)
+
+    server_health = health(url)
+    if not server_health:
+        return CheckResult(
+            "Slack Socket Mode",
+            ok=False,
+            detail=f"event server health is unavailable at {url}",
+            hint="Start or reconnect the local event server, then run doctor again.",
+            required=False,
+        )
+    if server_health.get("mode") != "local":
+        mode = safe_health_text(server_health.get("mode") or "unknown")
+        return CheckResult(
+            "Slack Socket Mode",
+            ok=False,
+            detail=f"app token is ineffective on remote event server {url} (mode {mode})",
+            hint="Use the local Node event server for Socket Mode, or remove "
+                 "SLACK_APP_TOKEN and configure public webhook ingress.",
+            required=False,
+        )
+
+    entries = server_health.get("slack_socket")
+    if not isinstance(entries, list):
+        return CheckResult(
+            "Slack Socket Mode",
+            ok=False,
+            detail="local event server has no Slack Socket Mode health data",
+            hint="Socket Mode is unsupported or the app is not registered yet; "
+                 "restart the agent after configuring SLACK_APP_TOKEN.",
+            required=False,
+        )
+
+    _team_id, bot_id, _bot_user_id = _slack_auth_info(bot_token)
+    app_id = _slack_app_id(bot_token, bot_id)
+    if not app_id:
+        return CheckResult(
+            "Slack Socket Mode",
+            ok=False,
+            detail="configured Slack app identity is unavailable",
+            hint="Check SLACK_BOT_TOKEN, then restart the agent and run doctor again.",
+            required=False,
+        )
+
+    entry = next(
+        (
+            item for item in entries
+            if isinstance(item, dict)
+            and str(item.get("application_id") or "") == app_id
+        ),
+        None,
+    )
+    if entry is None:
+        return CheckResult(
+            "Slack Socket Mode",
+            ok=False,
+            detail=f"configured Slack app {app_id} is not registered",
+            hint="Restart the agent to register its app token with the local event server.",
+            required=False,
+        )
+
+    raw_state = str(entry.get("state") or "unknown")
+    state = safe_health_text(raw_state)
+    if raw_state == "connected":
+        return CheckResult(
+            "Slack Socket Mode",
+            ok=True,
+            detail=f"{app_id} connected",
+            required=False,
+        )
+
+    detail = f"{app_id} {state}"
+    fatal_reason = safe_health_text(entry.get("fatal_reason"))
+    if fatal_reason:
+        detail += f": {fatal_reason}"
+    if raw_state == "fatal":
+        hint = "Fix the Slack app token or Socket Mode settings, then restart the agent."
+    elif raw_state in {"connecting", "reconnecting", "backoff"}:
+        hint = "The socket is retrying; check network access and run doctor again."
+    else:
+        hint = "Restart the agent and run doctor again to verify the socket connection."
+    return CheckResult(
+        "Slack Socket Mode",
+        ok=False,
+        detail=detail,
+        hint=hint,
+        required=False,
+    )
 
 
 def _check_ingress_reachability() -> CheckResult:

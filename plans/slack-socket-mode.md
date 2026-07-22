@@ -47,7 +47,7 @@ Mirror the Discord Gateway architecture for Slack Socket Mode, reusing the exist
 3. Token plumbing through SIGNED registration only: the app-level token (`xapp-...`, scope `connections:write`) joins the `/slack/workspaces` record as a per-bot `SlackBotRecord` field with the same preserve-on-merge semantics as `signing_secret` (`core.ts:2407-2433`), and socket connections start/stop/repoint ONLY from signed registrations - the unsigned path stays inert for socket purposes, matching Discord's signed-only `/discord/apps` precedent.
    No env-token fallback (per Q2): registration runs at every session start (`bobi/subagent.py` -> `register_slack_workspaces`), which is also what cures the already-running-server case, and an env-only socket with no workspace record would silently disarm self-bot loop filtering (`workspaceBotIds(null)` returns an empty set, `core.ts:159-189`).
 4. Opt-in UX: `SLACK_APP_TOKEN` as an optional Slack secret, `bobi create-slack-bot --socket-mode`, a transport-aware ingress check (also fixing the existing false positive for Discord-only agents), and doctor surfacing of the socket connection state so a mis-toggled app is observable rather than silently green.
-5. Docs: Socket Mode section in `skills/slack-setup.md`, self-hosted topology note in `docs/SELF_HOSTED_EVENT_SERVER.md` and `docs/EVENT_SERVER.md`, including the webhook-to-socket migration note (a workspace briefly live on both transports can double-deliver the same `event_id`; `storage.deliver` has no id-level dedup).
+5. Docs: Socket Mode section in `skills/slack-setup.md`, self-hosted topology note in `docs/SELF_HOSTED_EVENT_SERVER.md` and `docs/EVENT_SERVER.md`, including the webhook-to-socket migration boundary (Slack switches one app exclusively between transports, so cutover has a possible loss gap before the socket connects and no same-app overlap).
 
 Alternatives considered:
 
@@ -144,20 +144,21 @@ Alternatives considered:
 
 ### Phase 3 - Opt-in UX, doctor, docs
 
-- [ ] `SLACK_APP_TOKEN` declared as an optional Slack secret (`bobi/setup/services.py`); `cfg.credential("slack", "app_token")` resolves it
-- [ ] `register_slack_workspaces` includes `app_token` in the signed registration record when configured AND the event server is the local one; omit it for remote/hosted servers (the hosted store has no driver - a token registered there is a silent no-op credential)
-- [ ] Doctor socket-state surfacing: when Slack is configured with an app token, doctor reads `/health`'s `slack_socket` block and reports connection state (registration is best-effort and swallows failures, `bobi/events/server.py:715-717`, so without this a mis-toggled app or dead socket is silently green); doctor also flags the `SLACK_APP_TOKEN` + remote `event_server_url` combination as ineffective
-- [ ] `bobi create-slack-bot --socket-mode`: implemented as post-processing of the rendered default (flip the `socket_mode_enabled` line, remove the `request_url` line, adjust the header comment that says "HTTP Events API, no Socket Mode") so the no-flag output stays byte-identical by construction, pinned by a test asserting the no-flag render equals the raw template substitution; socket output has `socket_mode_enabled: true` and NO `request_url`; `bot_events` unchanged; the printed next-steps text explains the app-token step (`xapp-...`, scope `connections:write`) instead of the request URL
-- [ ] Transport-aware ingress check per Q3 decision: `check_ingress_reachability` stops counting a source as webhook-inbound when its transport dials out (Slack with `app_token` configured, Discord always), covering both service names and prefixed topic strings; the warning still FIRES for webhook-only Slack config, with hint text updated to name Socket Mode as a remedy - the pinned assertions at `tests/test_ingress.py:25` and `tests/test_doctor.py:126` are updated alongside
-- [ ] Docs: `skills/slack-setup.md` gains the Socket Mode path (app-level token creation, `connections:write` scope, no request URL); `docs/SELF_HOSTED_EVENT_SERVER.md` and `docs/EVENT_SERVER.md` state the transport topology (webhooks = hosted/public, Socket Mode = self-hosted opt-in, local event server only), the migration double-delivery note (same `event_id` on both transports during a webhook-to-socket switch; no id-level dedup in `storage.deliver`), and the login-flow limitation (no Slack analog of the Discord paste-back readiness gate, `bobi/auth_bootstrap.py:312-343` - a login DM sent before the socket connects is lost)
-- [ ] Live smoke, env-gated: an integration leg following the `tests/integration/test_slack_live.py` pattern that runs only when `SLACK_APP_TOKEN`+`SLACK_BOT_TOKEN` are present in the environment - real `apps.connections.open`, one real mention delivered end-to-end; skipped in CI
+- [x] `SLACK_APP_TOKEN` declared as an optional Slack secret (`bobi/setup/services.py`); `cfg.credential("slack", "app_token")` resolves it
+- [x] `register_slack_workspaces` includes `app_token` in the signed registration record when configured AND the event server is the local one; omit it for remote/hosted servers (the hosted store has no driver - a token registered there is a silent no-op credential)
+- [x] Doctor socket-state surfacing: when Slack is configured with an app token, doctor reads `/health`'s `slack_socket` block and reports connection state (registration is best-effort and swallows failures, `bobi/events/server.py:715-717`, so without this a mis-toggled app or dead socket is silently green); doctor also flags the `SLACK_APP_TOKEN` + remote `event_server_url` combination as ineffective
+- [x] `bobi create-slack-bot --socket-mode`: implemented as post-processing of the rendered default (flip the `socket_mode_enabled` line, remove the `request_url` line, adjust the header comment that says "HTTP Events API, no Socket Mode") so the no-flag output stays byte-identical by construction, pinned by a test asserting the no-flag render equals the raw template substitution; socket output has `socket_mode_enabled: true` and NO `request_url`; `bot_events` unchanged; the printed next-steps text explains the app-token step (`xapp-...`, scope `connections:write`) instead of the request URL
+- [x] Transport-aware ingress check per Q3 decision: `check_ingress_reachability` stops counting a source as webhook-inbound when its transport dials out (Slack with `app_token` configured, Discord always), covering both service names and prefixed topic strings; the warning still FIRES for webhook-only Slack config, with hint text updated to name Socket Mode as a remedy - the pinned assertions at `tests/test_ingress.py:25` and `tests/test_doctor.py:126` are updated alongside
+- [x] Docs: `skills/slack-setup.md` gains the Socket Mode path (app-level token creation, `connections:write` scope, no request URL); `docs/SELF_HOSTED_EVENT_SERVER.md` and `docs/EVENT_SERVER.md` state the transport topology (webhooks = hosted/public, Socket Mode = self-hosted opt-in, local event server only), the exclusive-transport migration boundary (possible event loss between the toggle and socket connection; no same-app overlap), the restart-aware rollback sequence, and the login-flow limitation (no Slack analog of the Discord paste-back readiness gate, `bobi/auth_bootstrap.py:312-343` - a login DM sent before the socket connects is lost)
+- [x] Live smoke, env-gated: an integration leg following the `tests/integration/test_slack_live.py` pattern that runs only when `SLACK_APP_TOKEN`+`SLACK_BOT_TOKEN` are present in the environment - real `apps.connections.open`, one real mention delivered end-to-end; skipped in CI
 
 **Validation gate**
 
-- [ ] `pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q` green (covers `test_slack_manifest.py`, `test_ingress.py`, `test_doctor.py` extensions)
-- [ ] On an isolated `BOBI_HOME` with Slack configured for Socket Mode and `event_server_url` unset: `bobi agent <name> doctor` shows NO ingress warning and reports the socket connection state; with webhook-only Slack config the ingress warning still fires
-- [ ] Same isolated check for a Discord-only agent: no ingress warning (the false positive is gone)
-- [ ] `bobi create-slack-bot --socket-mode --format yaml` output inspected: `socket_mode_enabled: true`, no `request_url`; no-flag output diffed byte-identical against main
+- [x] `pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q` green (covers `test_slack_manifest.py`, `test_ingress.py`, `test_doctor.py` extensions)
+- [wip] On an isolated `BOBI_HOME` with Slack configured for Socket Mode and `event_server_url` unset: `bobi agent <name> doctor` shows NO ingress warning and reports the socket connection state; with webhook-only Slack config the ingress warning still fires
+  The Python-side states and transport classification are covered; connected-state proof against Lane A's real health producer remains in the post-merge convergence gate after #808 lands.
+- [x] Same isolated check for a Discord-only agent: no ingress warning (the false positive is gone)
+- [x] `bobi create-slack-bot --socket-mode --format yaml` output inspected: `socket_mode_enabled: true`, no `request_url`; no-flag output diffed byte-identical against main
 
 ## Proof of work
 
@@ -177,6 +178,8 @@ Filled by the split workflow after approval.
 |---|---|---|---|
 | 1-2 (Lane A) | #808 | Sans-IO Socket Mode session + local driver, proven by the stubbed-server integration test | [x] |
 | 3 (Lane B) | #809 | Opt-in surface: `SLACK_APP_TOKEN`, doctor socket-state surfacing, `create-slack-bot --socket-mode`, transport-aware ingress check, docs, live smoke | [ ] |
+| 1-2 (Lane A) | #808 | Sans-IO Socket Mode session + local driver, proven by the stubbed-server integration test | [ ] |
+| 3 (Lane B) | #809 | Opt-in surface: `SLACK_APP_TOKEN`, doctor socket-state surfacing, `create-slack-bot --socket-mode`, transport-aware ingress check, docs, live smoke | [wip] |
 
 Lane order: #809 builds in parallel with #808 (the `app_token` record contract
 is fixed above) and LANDS after it. No build-blocking edges.
@@ -208,6 +211,8 @@ A single builder executing both lanes in one session is acceptable; parallel dis
   #809 (Lane B, Phase 3) per the Lanes note; Ticket map filled, initiative
   convergence gate added; #749 retitled as the plan's tracking issue. Anchors
   re-verified unchanged at `1954c32` before dispatch.
+- **2026-07-22** (Lane B implementation review): corrected the migration and rollback runbooks against [Slack's documented exclusive transport switch](https://docs.slack.dev/apis/events-api/using-socket-mode/).
+  Enabling Socket Mode stops HTTP delivery immediately, so cutover has a possible loss gap rather than a duplicate-delivery overlap; rollback also restarts every agent pointed at the restarted local event server so registrations are restored.
 
 ## Notes
 

@@ -598,7 +598,28 @@ def test_credential_missing_key(tmp_path):
     """))
 
     cfg = Config.load(tmp_path)
+    assert cfg.credential("slack", "app_token") == ""
     assert cfg.credential("slack", "nonexistent") == ""
+
+
+def test_unset_optional_slack_app_token_interpolates_to_empty(
+    tmp_path, monkeypatch,
+):
+    config_dir = tmp_path / "package"
+    config_dir.mkdir()
+    (config_dir / "agent.yaml").write_text(dedent("""
+        services:
+          - name: slack
+            credentials:
+              bot_token: ${SLACK_BOT_TOKEN}
+              app_token: ${SLACK_APP_TOKEN:-}
+    """))
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-configured")
+    monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.credential("slack", "app_token") == ""
 
 
 def test_service_config_credentials_parsed(tmp_path):

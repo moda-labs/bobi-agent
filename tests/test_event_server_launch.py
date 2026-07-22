@@ -369,3 +369,147 @@ def test_slack_registration_unsigned_without_bubble_key(monkeypatch):
     assert "content" in captured["kwargs"]
     body = json.loads(captured["kwargs"]["content"])
     assert body["bot_user_id"] == "U_BOT"
+
+
+def test_slack_registration_includes_app_token_for_signed_local_server(
+    monkeypatch,
+):
+    """A server-reported local runtime may receive the app token even when
+    reached over a non-loopback URL. URL shape is not the capability check."""
+    captured = _capture_post(monkeypatch)
+    health_calls = []
+    monkeypatch.setattr(
+        es,
+        "health",
+        lambda url: health_calls.append(url) or {"status": "ok", "mode": "local"},
+    )
+    cfg = _StubCfg({
+        ("slack", "bot_token"): "xoxb-tok",
+        ("slack", "signing_secret"): "signing-secret",
+        ("slack", "app_token"): "xapp-socket-token",
+    })
+
+    es.register_slack_workspaces(
+        "https://event-server.tailnet.example", cfg,
+        bubble_id="bub_A", bubble_key="bkey_A",
+    )
+
+    assert health_calls == ["https://event-server.tailnet.example"]
+    body = json.loads(captured["kwargs"]["content"])
+    assert body["app_token"] == "xapp-socket-token"
+    assert body["signing_secret"] == "signing-secret"
+    assert captured["kwargs"]["headers"]["x-moda-signature"]
+
+
+def test_slack_registration_without_app_token_skips_health_probe(monkeypatch):
+    captured = _capture_post(monkeypatch)
+    monkeypatch.setattr(
+        es,
+        "health",
+        lambda url: (_ for _ in ()).throw(
+            AssertionError("webhook registration must not probe socket health")
+        ),
+    )
+    cfg = _StubCfg({
+        ("slack", "bot_token"): "xoxb-tok",
+        ("slack", "signing_secret"): "signing-secret",
+        ("slack", "app_token"): "",
+    })
+
+    es.register_slack_workspaces(
+        "http://localhost:8080", cfg,
+        bubble_id="bub_A", bubble_key="bkey_A",
+    )
+
+    body = json.loads(captured["kwargs"]["content"])
+    assert body["signing_secret"] == "signing-secret"
+    assert "app_token" not in body
+
+
+@pytest.mark.parametrize("health_payload", [
+    pytest.param({"status": "ok", "mode": "worker"}, id="remote-worker"),
+    pytest.param({"status": "ok"}, id="missing-mode"),
+    pytest.param(None, id="unavailable"),
+])
+def test_slack_registration_omits_app_token_without_local_health(
+    monkeypatch, health_payload,
+):
+    captured = _capture_post(monkeypatch)
+    monkeypatch.setattr(es, "health", lambda url: health_payload)
+    cfg = _StubCfg({
+        ("slack", "bot_token"): "xoxb-tok",
+        ("slack", "signing_secret"): "",
+        ("slack", "app_token"): "xapp-socket-token",
+    })
+
+    es.register_slack_workspaces(
+        "https://events.example.com", cfg,
+        bubble_id="bub_A", bubble_key="bkey_A",
+    )
+
+    body = json.loads(captured["kwargs"]["content"])
+    assert "app_token" not in body
+
+
+@pytest.mark.parametrize("bubble_id,bubble_key", [
+    pytest.param("", "bkey_A", id="missing-bubble-id"),
+    pytest.param("bub_A", "", id="missing-bubble-key"),
+])
+def test_slack_registration_never_sends_app_token_unsigned(
+    monkeypatch, bubble_id, bubble_key,
+):
+    captured = _capture_post(monkeypatch)
+    monkeypatch.setattr(
+        es,
+        "health",
+        lambda url: (_ for _ in ()).throw(
+            AssertionError("unsigned registration must not probe health")
+        ),
+    )
+    cfg = _StubCfg({
+        ("slack", "bot_token"): "xoxb-tok",
+        ("slack", "signing_secret"): "",
+        ("slack", "app_token"): "xapp-socket-token",
+    })
+
+    es.register_slack_workspaces(
+        "http://localhost:8080", cfg,
+        bubble_id=bubble_id, bubble_key=bubble_key,
+    )
+
+    body = json.loads(captured["kwargs"]["content"])
+    assert "app_token" not in body
+
+
+def test_slack_registration_never_logs_app_token_on_failure(
+    monkeypatch, caplog,
+):
+    app_token = "xapp-must-not-appear"
+    monkeypatch.setattr(
+        es, "health", lambda url: {"status": "ok", "mode": "local"},
+    )
+    monkeypatch.setattr(
+        es, "_slack_auth_info", lambda token: ("T_TEAM", "B_BOT", "U_BOT"),
+    )
+    monkeypatch.setattr(es, "_slack_app_id", lambda token, bot_id: "A_APP")
+    import bobi.http as pooled
+    monkeypatch.setattr(
+        pooled,
+        "request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError(f"request rejected with {app_token}")
+        ),
+    )
+    cfg = _StubCfg({
+        ("slack", "bot_token"): "xoxb-tok",
+        ("slack", "signing_secret"): "",
+        ("slack", "app_token"): app_token,
+    })
+
+    result = es.register_slack_workspaces(
+        "http://localhost:8080", cfg,
+        bubble_id="bub_A", bubble_key="bkey_A",
+    )
+
+    assert result == []
+    assert app_token not in caplog.text

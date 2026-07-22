@@ -33,7 +33,7 @@ from bobi.setup.state import SetupState, source_tree_hash
 
 # Token shapes that must never appear as literals in a generated pack.
 SECRET_SHAPES = re.compile(
-    r"xox[a-z]-|lin_api_|ghp_|github_pat_|sk-ant-|venn_[a-z0-9]{8,}"
+    r"xox[a-z]-|xapp-|lin_api_|ghp_|github_pat_|sk-ant-|venn_[a-z0-9]{8,}"
 )
 
 PACK_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
@@ -49,7 +49,8 @@ REDACTION_PLACEHOLDER = "[redacted]"
 _SECRET_TOKEN = re.compile(
     r"""(
         -----BEGIN[A-Z ]*PRIVATE\ KEY-----.*?-----END[A-Z ]*PRIVATE\ KEY-----
-      | xox[abprs]-[A-Za-z0-9-]{10,}        # slack
+      | xox[abprs]-[A-Za-z0-9-]{10,}        # slack bot/user tokens
+      | xapp-[A-Za-z0-9-]{10,}              # slack app-level tokens
       | lin_api_[A-Za-z0-9]{10,}            # linear
       | ghp_[A-Za-z0-9]{20,}                # github PAT
       | github_pat_[A-Za-z0-9_]{20,}

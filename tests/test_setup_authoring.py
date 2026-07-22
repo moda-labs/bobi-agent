@@ -71,6 +71,7 @@ class TestDeterministicBodies:
         assert names == {"github", "slack"}
         slack = next(s for s in cfg["services"] if s["name"] == "slack")
         assert slack["credentials"]["bot_token"] == "${SLACK_BOT_TOKEN}"
+        assert slack["credentials"]["app_token"] == "${SLACK_APP_TOKEN:-}"
         assert slack["events"] is True
 
     def test_monitor_role_defaults_to_cheap_model(self):

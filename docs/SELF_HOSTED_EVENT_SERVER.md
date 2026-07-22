@@ -1,11 +1,9 @@
 # Self-Hosted Event Server
 
-The event server is bobi's pub/sub bus: webhooks from Slack, GitHub, Linear,
-and WhatsApp land on it, and agents receive them over an outbound WebSocket
-(architecture, topics, and the security model live in
-[EVENT_SERVER.md](EVENT_SERVER.md)). Those providers deliver webhooks only to
-a public HTTPS URL, so to receive them you need public ingress in front of an
-event server you run. This guide is the setup path for that, in two shapes:
+The event server is bobi's pub/sub bus: provider events land on it, and agents receive them over an outbound WebSocket (architecture, topics, and the security model live in [EVENT_SERVER.md](EVENT_SERVER.md)).
+GitHub, Linear, WhatsApp, and Slack's default HTTP Events API deliver webhooks only to a public HTTPS URL, so those paths need public ingress in front of an event server you run.
+Slack Socket Mode is the exception: the local Node event server dials out to Slack and needs no public Request URL.
+This guide covers both transport choices and two self-hosted server shapes:
 
 - **Tunnel** - everything on one machine. The embedded local server that
   `bobi agent <name> start` launches automatically, plus a public tunnel
@@ -21,6 +19,51 @@ the same webhook verification as any production deployment. The trade against
 a managed/durable tier is operational: state is in memory, so a server
 restart drops registrations and buffered replay (see
 [What a restart means](#what-a-restart-means)).
+
+## Slack Socket Mode: no public ingress
+
+Socket Mode is an opt-in for the local Node runtime, whether that runtime is embedded beside one agent or runs standalone on another box.
+The Cloudflare Worker does not hold persistent Slack sockets.
+
+Generate the Socket Mode manifest, then create an app-level token with the `connections:write` scope:
+
+```bash
+bobi create-slack-bot --socket-mode --app-name "Agent Dispatch"
+```
+
+Save the bot and app tokens in the agent runtime:
+
+```dotenv
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+```
+
+The Slack service in `agent.yaml` must reference both values, with the app token optional so webhook mode stays the default:
+
+```yaml
+services:
+  - name: slack
+    events: true
+    credentials:
+      bot_token: ${SLACK_BOT_TOKEN}
+      app_token: ${SLACK_APP_TOKEN:-}
+```
+
+On startup, Python verifies that the target `/health` payload reports `mode: local`, then includes the app token only in the bubble-signed `POST /slack/workspaces` registration.
+There is no event-server environment fallback for this credential, and the hosted Worker never receives it.
+A standalone Node server reached over a tailnet, LAN, tunnel, or public TLS URL still reports `mode: local` and can run Socket Mode.
+
+After starting the agent, run `bobi agent <name> doctor` and require the `Slack Socket Mode` check to report `connected`.
+The check reports unsupported, not registered, retrying, and fatal states without printing the app token.
+
+Slack switches one app exclusively between HTTP and WebSocket delivery, so the same app cannot overlap both transports during migration.
+Prepare the app token and bobi configuration while HTTP remains active, keep the existing Request URL and signing secret, and schedule a quiet cutover window.
+Toggle Socket Mode on, immediately start or restart the agent, and wait for doctor to report `connected` before sending a test event.
+Events that arrive after the toggle but before the socket connects can be lost.
+Slack also has no Discord-style paste-back readiness gate, so a login DM sent before the socket connects can be lost.
+To roll back, toggle Socket Mode off first so Slack resumes the saved HTTP Request URL, then verify webhook delivery.
+Revoke the app-level token, remove `SLACK_APP_TOKEN`, restart the local event server, and immediately restart every agent pointed at it because the server restart clears registrations.
+Events arriving between the server restart and agent re-registration are dropped, so use a quiet window.
 
 ## Tunnel: expose the embedded server
 
@@ -151,7 +194,8 @@ the provider-side clicks and scopes:
 
 | Provider | Request URL | Server-side secret | Guide |
 |---|---|---|---|
-| Slack | `https://<host>/webhooks/slack` | `BOBI_ES_SLACK_SIGNING_SECRET` | `skills/slack-setup.md` |
+| Slack HTTP Events API | `https://<host>/webhooks/slack` | `BOBI_ES_SLACK_SIGNING_SECRET` | `skills/slack-setup.md` |
+| Slack Socket Mode | none; local Node server dials out | signed `SLACK_APP_TOKEN` registration | `skills/slack-setup.md` |
 | GitHub | `https://<host>/webhooks/github` | `BOBI_ES_WEBHOOK_SECRET` | repo webhook settings |
 | Linear | `https://<host>/webhooks/linear` | `BOBI_ES_LINEAR_WEBHOOK_SECRET` | `skills/linear-setup.md` |
 | WhatsApp | `https://<host>/webhooks/whatsapp` | `BOBI_ES_WHATSAPP_APP_SECRET` + verify token | `skills/whatsapp-setup.md` |
@@ -180,6 +224,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST \
 Then use each provider's own test delivery (GitHub webhook "Redeliver",
 Linear's webhook test button, a Slack mention) and watch it arrive in the
 agent's inbox.
+For Socket Mode, also confirm `bobi agent <name> doctor` reports the Slack app as connected before sending the mention.
 
 ## What a restart means
 

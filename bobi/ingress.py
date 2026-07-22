@@ -79,6 +79,18 @@ def explicit_subscriptions(project_path: Path) -> list[str]:
     ]
 
 
+def _uses_outbound_transport(source: str, *, slack_socket: bool) -> bool:
+    """Whether an event source reaches Bobi over an outbound connection."""
+    return (
+        source == "discord"
+        or source.startswith("discord:")
+        or (
+            slack_socket
+            and (source == "slack" or source.startswith("slack:"))
+        )
+    )
+
+
 def check_ingress_reachability(
     project_path: Path,
     *,
@@ -89,8 +101,17 @@ def check_ingress_reachability(
     Local/inbox-only traffic works with the built-in event server. External
     services such as Slack need a URL they can reach from the public internet.
     """
+    from bobi.config import Config
+
+    cfg = Config.load(project_path)
+    app_token = str(cfg.credential("slack", "app_token") or "").strip()
+    slack_socket = bool(app_token)
     sources = inbound_event_sources(project_path) + explicit_subscriptions(project_path)
-    sources = [source for source in sources if not source.startswith("inbox/")]
+    sources = [
+        source for source in sources
+        if not source.startswith("inbox/")
+        and not _uses_outbound_transport(source, slack_socket=slack_socket)
+    ]
     if not sources and not extra_subscriptions:
         return None
 
@@ -98,11 +119,21 @@ def check_ingress_reachability(
     if not is_unusable_ingress_url(url):
         return None
 
-    extras = [source for source in extra_subscriptions if not source.startswith("inbox/")]
+    extras = [
+        source for source in extra_subscriptions
+        if not source.startswith("inbox/")
+        and not _uses_outbound_transport(source, slack_socket=slack_socket)
+    ]
     names = sorted(set(sources + extras))
     if not names:
         return None
     label = ", ".join(names)
+    slack_hint = (
+        " For Slack, Socket Mode with SLACK_APP_TOKEN is an outbound "
+        "alternative on the local event server."
+        if any(name == "slack" or name.startswith("slack:") for name in names)
+        else ""
+    )
     return IngressWarning(
         detail=(
             f"inbound events ({label}) are configured but the event server URL "
@@ -111,5 +142,6 @@ def check_ingress_reachability(
         hint=(
             "Set event_server_url to the bobi cloud event server, a deployed "
             "Worker, or a public tunnel in front of localhost:8080."
+            f"{slack_hint}"
         ),
     )

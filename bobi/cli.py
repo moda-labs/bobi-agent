@@ -1332,6 +1332,8 @@ def read_conversation(conversation, limit, as_json):
 @click.option("--event-server", default="",
               help="Event server base URL (default: the configured server, "
                    "else prompted interactively, else the bobi cloud)")
+@click.option("--socket-mode", is_flag=True,
+              help="Generate a Socket Mode manifest for a local event server")
 @click.option("--format", "fmt", type=click.Choice(["yaml", "json"]),
               default="yaml", help="Manifest output format")
 @click.option("--output", "-o", "output", type=click.Path(), default="",
@@ -1342,13 +1344,15 @@ def read_conversation(conversation, limit, as_json):
               help="Open the one-click create link in your browser "
                    "(default: when run interactively; use --no-open for "
                    "headless/CI)")
-def create_slack_bot(app_name, event_server, fmt, output, show_url, open_browser):
-    """Create a Slack app (bot) for bobi — generates the manifest and a
+def create_slack_bot(
+    app_name, event_server, socket_mode, fmt, output, show_url, open_browser,
+):
+    """Create a Slack app (bot) for bobi - generates the manifest and a
     one-click create link, and opens it in your browser.
 
-    Every bobi Slack app needs the same scopes + events pointed at one
-    request URL; this stamps them out from a template so a working app is one
-    step away — click the link it opens, feed the file to the Slack CLI
+    Every bobi Slack app needs the same scopes and events.
+    This stamps them out for HTTP Events API or Socket Mode so a working app is
+    one step away: click the link it opens, feed the file to the Slack CLI
     (`slack create <name> --manifest manifest.json`), or POST it to the App
     Manifest API.
 
@@ -1356,6 +1360,7 @@ def create_slack_bot(app_name, event_server, fmt, output, show_url, open_browser
         bobi create-slack-bot
         bobi create-slack-bot --app-name "Eng Bot" --format json -o manifest.json
         bobi create-slack-bot --event-server https://my-worker.workers.dev
+        bobi create-slack-bot --socket-mode
         bobi create-slack-bot --no-open                # just print the link
     """
     from .config import DEFAULT_EVENT_SERVER
@@ -1380,7 +1385,7 @@ def create_slack_bot(app_name, event_server, fmt, output, show_url, open_browser
         if project_path:
             from .config import Config
             event_server = Config.load(project_path).event_server_url
-    if not event_server and interactive:
+    if not event_server and interactive and not socket_mode:
         # No configured server: let the user pick before the manifest is
         # rendered and the create page opens. Slack must be able to reach
         # this URL from the internet, so a laptop running the local event
@@ -1399,7 +1404,9 @@ def create_slack_bot(app_name, event_server, fmt, output, show_url, open_browser
         # Non-interactive with nothing configured: the bobi cloud.
         event_server = DEFAULT_EVENT_SERVER
 
-    manifest_yaml = render_manifest(app_name, event_server)
+    manifest_yaml = render_manifest(
+        app_name, event_server, socket_mode=socket_mode,
+    )
     rendered = manifest_to_json(manifest_yaml) if fmt == "json" else manifest_yaml
 
     if output:
@@ -1411,7 +1418,8 @@ def create_slack_bot(app_name, event_server, fmt, output, show_url, open_browser
     if show_url:
         create_url = create_app_url(manifest_yaml)
         click.echo("")
-        click.echo(f"Request URL:  {webhook_url(event_server)}")
+        if not socket_mode:
+            click.echo(f"Request URL:  {webhook_url(event_server)}")
         click.echo("Create the app in one click:")
         click.echo(f"  {create_url}")
         # Open the browser by default when interactive; --open/--no-open
@@ -1424,6 +1432,29 @@ def create_slack_bot(app_name, event_server, fmt, output, show_url, open_browser
             click.launch(create_url)
             click.echo("")
             click.echo("Opened the create page in your browser.")
+    if socket_mode:
+        click.echo("", err=True)
+        click.echo("Next steps:", err=True)
+        click.echo("  1. Create or import the app from this manifest.", err=True)
+        click.echo(
+            "  2. Generate an xapp- app-level token with connections:write.",
+            err=True,
+        )
+        click.echo(
+            "  3. For an existing pack, add credentials.app_token: "
+            "${SLACK_APP_TOKEN:-} to its Slack service and reinstall it.",
+            err=True,
+        )
+        click.echo(
+            "  4. Store the xapp- token as SLACK_APP_TOKEN alongside "
+            "SLACK_BOT_TOKEN.",
+            err=True,
+        )
+        click.echo(
+            "  5. Start the self-hosted agent and run doctor to confirm "
+            "the connection.",
+            err=True,
+        )
 
 
 @main.group()

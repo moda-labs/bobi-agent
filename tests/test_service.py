@@ -164,6 +164,63 @@ def test_startup_info_warns_for_explicit_start_subscription(bobi_install):
     assert "slack" in info.ingress_warning
 
 
+def test_startup_info_ignores_outbound_chat_transports(bobi_install):
+    from bobi import paths
+    from bobi.service import build_startup_info
+
+    paths.agent_yaml_path(bobi_install.repo_path).write_text(
+        "agent: test-agent\n"
+        "entry_point: director\n"
+        "services:\n"
+        "  - name: slack\n"
+        "    events: true\n"
+        "    credentials:\n"
+        "      app_token: xapp-configured\n"
+        "  - name: discord\n"
+        "    events: true\n"
+    )
+
+    info = build_startup_info(
+        bobi_install.repo_path,
+        pid=os.getpid(),
+        log_file=bobi_install.state_dir / "manager.log",
+        extra_subscriptions=["slack:T_TEAM", "discord:A_APP"],
+    )
+
+    assert info.ingress_warning == ""
+
+
+def test_startup_info_mixed_transports_warns_only_for_webhooks(bobi_install):
+    from bobi import paths
+    from bobi.service import build_startup_info
+
+    paths.agent_yaml_path(bobi_install.repo_path).write_text(
+        "agent: test-agent\n"
+        "entry_point: director\n"
+        "services:\n"
+        "  - name: slack\n"
+        "    events: true\n"
+        "    credentials:\n"
+        "      app_token: xapp-configured\n"
+        "  - name: discord\n"
+        "    events: true\n"
+        "  - name: github\n"
+        "    events: true\n"
+    )
+
+    info = build_startup_info(
+        bobi_install.repo_path,
+        pid=os.getpid(),
+        log_file=bobi_install.state_dir / "manager.log",
+        extra_subscriptions=["discord:A_APP", "linear/issues"],
+    )
+
+    assert "github" in info.ingress_warning
+    assert "linear/issues" in info.ingress_warning
+    assert "slack" not in info.ingress_warning
+    assert "discord" not in info.ingress_warning
+
+
 def test_team_status_returns_manager_and_active_agents(bobi_install):
     from bobi.sdk import SessionEntry, get_registry
     from bobi.service import team_status

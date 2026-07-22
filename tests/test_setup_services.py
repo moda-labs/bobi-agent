@@ -126,6 +126,20 @@ class TestConnectorModel:
         assert token.steps and any("api.slack.com" in s for s in token.steps)
         assert any(sec.var == "SLACK_BOT_TOKEN" for sec in token.secrets)
 
+    def test_slack_captures_optional_socket_mode_app_token(self):
+        token = next(
+            method for method in services.CATALOG["slack"].methods
+            if method.key == "token"
+        )
+        secrets = {secret.var: secret for secret in token.secrets}
+
+        assert secrets["SLACK_BOT_TOKEN"].optional is False
+        app_token = secrets["SLACK_APP_TOKEN"]
+        assert app_token.optional is True
+        assert app_token.placeholder.startswith("xapp-")
+        assert "Socket Mode" in app_token.help
+        assert "connections:write" in app_token.help
+
     def test_venn_connectors_share_the_venn_key(self):
         for key in ("email", "calendar", "crm"):
             conn = services.CATALOG[key]
@@ -255,7 +269,7 @@ class TestCardsForSpec:
             tmp_path)
         method = cards[0]["methods"][0]
         assert [s["var"] for s in method["secrets"]] == [
-            "MY_SLACK_BOT", "MY_SLACK_SIGNING"]
+            "MY_SLACK_BOT", "SLACK_APP_TOKEN", "MY_SLACK_SIGNING"]
 
     def test_declared_vars_map_linear_webhook_secret_by_key(self, tmp_path):
         cards = services.cards_for(

@@ -7,15 +7,18 @@ path and carries every event the adapter normalizes.
 """
 
 import json
+import string
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 import yaml
 from click.testing import CliRunner
 
+from bobi import slack_manifest
 from bobi.cli import main
 from bobi.config import DEFAULT_EVENT_SERVER
 from bobi.slack_manifest import (
+    TEMPLATE_PATH,
     WEBHOOK_PATH,
     create_app_url,
     manifest_to_dict,
@@ -54,6 +57,18 @@ def test_render_substitutes_name_and_request_url():
     )
 
 
+def test_default_render_is_byte_identical_to_raw_template_substitution():
+    expected = string.Template(TEMPLATE_PATH.read_text()).safe_substitute(
+        APP_NAME="Eng Bot",
+        EVENT_SERVER=EVENT_SERVER,
+    )
+
+    assert render_manifest("Eng Bot", EVENT_SERVER) == expected
+    assert render_manifest(
+        "Eng Bot", EVENT_SERVER, socket_mode=False,
+    ) == expected
+
+
 def test_render_strips_trailing_slash_on_event_server():
     data = manifest_to_dict(render_manifest("Bot", EVENT_SERVER + "/"))
     assert (
@@ -82,6 +97,51 @@ def test_manifest_carries_required_scopes():
 def test_manifest_uses_http_events_not_socket_mode():
     data = manifest_to_dict(render_manifest("Bot", EVENT_SERVER))
     assert data["settings"]["socket_mode_enabled"] is False
+
+
+def test_socket_mode_manifest_removes_webhook_without_changing_contract():
+    rendered = render_manifest("Bot", EVENT_SERVER, socket_mode=True)
+    data = manifest_to_dict(rendered)
+
+    assert data["settings"]["socket_mode_enabled"] is True
+    assert "request_url" not in data["settings"]["event_subscriptions"]
+    assert set(
+        data["settings"]["event_subscriptions"]["bot_events"]
+    ) == EXPECTED_BOT_EVENTS
+    assert set(data["oauth_config"]["scopes"]["bot"]) == EXPECTED_BOT_SCOPES
+    assert "Socket Mode" in rendered
+    assert "HTTP Events API, no Socket Mode" not in rendered
+
+
+@pytest.mark.parametrize("needle,replacement", [
+    pytest.param(
+        "# message with thread_ts -> slack.thread_reply. HTTP Events API, no Socket Mode.",
+        "# message with thread_ts -> slack.thread_reply.",
+        id="missing-header-anchor",
+    ),
+    pytest.param(
+        "    request_url: ${EVENT_SERVER}/webhooks/slack",
+        "    request_url: ${EVENT_SERVER}/webhooks/slack\n"
+        "    request_url: ${EVENT_SERVER}/webhooks/slack",
+        id="duplicate-request-url-anchor",
+    ),
+    pytest.param(
+        "  socket_mode_enabled: false",
+        "  socket_mode_enabled: inherited",
+        id="missing-socket-flag-anchor",
+    ),
+])
+def test_socket_mode_render_fails_loudly_on_template_anchor_drift(
+    tmp_path, monkeypatch, needle, replacement,
+):
+    template = TEMPLATE_PATH.read_text()
+    assert template.count(needle) == 1
+    drifted = tmp_path / "slack-app.manifest.yaml"
+    drifted.write_text(template.replace(needle, replacement))
+    monkeypatch.setattr(slack_manifest, "TEMPLATE_PATH", drifted)
+
+    with pytest.raises(ValueError):
+        slack_manifest.render_manifest("Bot", EVENT_SERVER, socket_mode=True)
 
 
 def test_manifest_to_json_roundtrips_to_same_dict():
@@ -129,6 +189,111 @@ def test_cli_writes_json_file(tmp_path):
         data["settings"]["event_subscriptions"]["request_url"]
         == f"{EVENT_SERVER}/webhooks/slack"
     )
+
+
+def test_cli_socket_mode_prints_manifest_and_app_token_next_steps(tmp_path):
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(main, [
+            "create-slack-bot", "--socket-mode", "--app-name", "Bot",
+            "--event-server", EVENT_SERVER, "--no-open",
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert "socket_mode_enabled: true" in result.output
+    assert "request_url" not in result.output
+    assert "Request URL:" not in result.output
+    assert EVENT_SERVER not in result.output
+    assert "xapp-" in result.output
+    assert "connections:write" in result.output
+    assert "SLACK_APP_TOKEN" in result.output
+    assert "credentials.app_token" in result.output
+    assert "${SLACK_APP_TOKEN:-}" in result.output
+    assert "doctor" in result.output
+
+
+def test_cli_socket_mode_keeps_next_steps_when_create_link_is_hidden(tmp_path):
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(main, [
+            "create-slack-bot", "--socket-mode", "--app-name", "Bot",
+            "--no-open", "--no-url",
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert "xapp-" in result.output
+    assert "connections:write" in result.output
+    assert "SLACK_APP_TOKEN" in result.output
+    assert "doctor" in result.output
+
+
+def test_cli_socket_mode_json_output_has_no_webhook(tmp_path):
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(main, [
+            "create-slack-bot", "--socket-mode", "--app-name", "Bot",
+            "--format", "json", "--no-open", "--no-url",
+        ])
+
+    assert result.exit_code == 0, result.output
+    manifest = json.loads(result.stdout)
+    assert manifest["settings"]["socket_mode_enabled"] is True
+    assert "request_url" not in manifest["settings"]["event_subscriptions"]
+    assert "Next steps" not in result.stdout
+    assert "SLACK_APP_TOKEN" in result.stderr
+
+
+def test_cli_socket_mode_writes_transformed_output_file(tmp_path):
+    runner = CliRunner()
+    out = tmp_path / "socket.yaml"
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(main, [
+            "create-slack-bot", "--socket-mode", "--app-name", "Bot",
+            "--output", str(out), "--no-open", "--no-url",
+        ])
+        manifest = yaml.safe_load(out.read_text())
+
+    assert result.exit_code == 0, result.output
+    assert manifest["settings"]["socket_mode_enabled"] is True
+    assert "request_url" not in manifest["settings"]["event_subscriptions"]
+
+
+def test_cli_socket_mode_skips_interactive_event_server_prompt(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr("bobi.cli._interactive_terminal", lambda: True)
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(
+            main,
+            ["create-slack-bot", "--socket-mode", "--no-open", "--no-url"],
+            input="My Bot\n",
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Slack app display name" in result.output
+    assert "Event server URL" not in result.output
+    assert "public tunnel" not in result.output
+    assert "name: My Bot" in result.output
+
+
+def test_cli_socket_mode_create_link_embeds_socket_manifest(
+    monkeypatch, tmp_path,
+):
+    launched = []
+    monkeypatch.setattr("click.launch", lambda url: launched.append(url))
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(main, [
+            "create-slack-bot", "--socket-mode", "--app-name", "Bot",
+            "--event-server", EVENT_SERVER, "--open",
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert len(launched) == 1
+    manifest = json.loads(parse_qs(urlparse(launched[0]).query)["manifest_json"][0])
+    assert manifest["settings"]["socket_mode_enabled"] is True
+    assert "request_url" not in manifest["settings"]["event_subscriptions"]
 
 
 def test_cli_open_launches_browser(monkeypatch, tmp_path):
