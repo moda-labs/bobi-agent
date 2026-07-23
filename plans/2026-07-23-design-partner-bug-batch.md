@@ -1,6 +1,6 @@
 # Design-partner bug batch: template scanner + auto_dispatch role
 
-> **Status:** Building
+> **Status:** Done
 > **Tracking issue:** moda-labs/bobi-agent#828 · **Created:** 2026-07-23 · **Last amended:** 2026-07-23 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
@@ -180,7 +180,7 @@ should imply the combined case works until both lanes have landed.
 - [x] Fix: `_ENV_VAR_RE = re.compile(r"\$\{(?!\{)([^}]+)\}")` in
   `bobi/config.py` with a comment stating why the lookahead exists (workflow
   template syntax must survive the scan and interpolation untouched).
-- [wip] Close #797 via the PR ("Fixes #797").
+- [x] Close #797 via the PR ("Fixes #797").
 
 **Validation gate**
 
@@ -209,7 +209,7 @@ should imply the combined case works until both lanes have landed.
   semantics AND the dial-gap caveat; rule parsing normalizes absent/""/null
   to `""`; `_dispatch` passes `role=rule.role` instead of the hardcode — the
   hardcoded `role="engineer"` at reactor.py:264 is removed entirely.
-- [wip] Close #796 via the PR ("Fixes #796"), with the closure comment scoping
+- [x] Close #796 via the PR ("Fixes #796"), with the closure comment scoping
   the fix per the Problem section's caveat: parity with `subagents launch`;
   identical-dial agent switching is a pre-existing orchestrator gap this fix
   does not close.
@@ -222,14 +222,14 @@ should imply the combined case works until both lanes have landed.
 
 ### Convergence gate (deferred — after both lanes merge)
 
-- [ ] Full unit run green on merged main:
+- [x] Full unit run green on merged main:
   `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q`
-- [ ] #797 repro re-run against merged main: call
+- [x] #797 repro re-run against merged main: call
   `bobi.config.find_env_var_refs(project_path)` (the exact entry point
   `bobi agents install` uses, `bobi/cli.py:720`) on a dir containing
   `package/agent.yaml` with the issue's repro yaml; assert no `{input.*`
   names appear.
-- [ ] Combined-lane check (the seam where the two fixes meet — this is the
+- [x] Combined-lane check (the seam where the two fixes meet — this is the
   partner's actual use case): `Config.load` on an agent.yaml whose
   `auto_dispatch` rule carries BOTH `role: ""` and a
   `task: "… ${{input.title}} …"` template; assert the parsed rule's task
@@ -286,6 +286,19 @@ disjoint test modules, no landing-order constraint.
   the old behavior write `role: engineer` explicitly. Solution §2, Q1, and
   Phase 2 updated to match; delivered in #830 head `e35e68d` with four-case
   failing-first regression coverage.
+
+- **2026-07-23** (Stage 4 closeout, orchestrating session on Zach's
+  instruction): **Status -> Done.** All three queue PRs merged and verified
+  on main (#831 `9d45de2e`, #830 `519bcac1`, #832 `a9739573`; post-merge CI
+  green on each; #797/#796 auto-closed). Convergence gate run on merged
+  main `4732f06`: unit suite `3353 passed, 1 skipped`; `find_env_var_refs`
+  repro clean (only real `${VAR}` refs); combined seam green (task template
+  byte-identical through interpolation, reactor role `""` for both omitted
+  and explicit-empty per the amended Q1). File renamed
+  `plans/design-partner-bug-batch.md` -> `plans/2026-07-23-design-partner-bug-batch.md`
+  per the dated-filename convention (moda-skills#18). Run findings filed:
+  bobi-deploy#39/#40, moda-skills#20; hosted run crash + recovery detailed
+  on tracking #828.
 
 ## Notes
 
