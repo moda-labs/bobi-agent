@@ -4,7 +4,6 @@ validation, route evaluation, step sequencing, and event emission."""
 import asyncio
 import json
 import os
-import subprocess
 import textwrap
 import time
 from pathlib import Path
@@ -1811,23 +1810,20 @@ class TestResumeRegistryRefresh:
         reconciler judges the resumed run on its own budget instead of
         killing it for the launch process's dead pid or expired deadline."""
         from bobi.reconcile import reconcile_sessions
-        from bobi.sdk import SessionEntry, get_registry
+        from bobi.sdk import SessionEntry, SessionRegistry
 
         root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
         paths.sessions_dir(root)
         (paths.state_path(root) / "workflow" / "runs").mkdir(
             parents=True, exist_ok=True,
         )
-        monkeypatch.setattr("bobi.sdk._registry", None)
-        registry = get_registry()
+        registry = SessionRegistry()
 
         # Launch-time entry as the reconciler would find it after a long
         # suspension: the launch pid is dead and the launch deadline is past.
-        proc = subprocess.Popen(["true"])
-        proc.wait()
         registry.register(SessionEntry(
             name="wf-t-r-1", run_key="1", phase="t", project="r", cwd="/tmp",
-            status="waiting", pid=proc.pid,
+            status="waiting", pid=999999,
             started_at=time.time() - 90_000, timeout=3600,
         ))
 
@@ -1843,7 +1839,7 @@ class TestResumeRegistryRefresh:
         run.save()
 
         # Snapshot the entry and sweep the reconciler MID-RUN (at brain-session
-        # creation) — after resume_workflow returns, the entry is terminal and
+        # creation) - after resume_workflow returns, the entry is terminal and
         # cases 2/3 no longer apply.
         mid_run = {}
 
@@ -1864,7 +1860,8 @@ class TestResumeRegistryRefresh:
         ])
 
         before = time.time()
-        with patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+        with patch("bobi.workflow.orchestrator.get_registry", return_value=registry), \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"):
