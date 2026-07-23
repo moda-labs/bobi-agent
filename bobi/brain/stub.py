@@ -32,6 +32,10 @@ Directives:
   ``__stub__:error``         complete with ``TurnResult(is_error=True)``.
   ``__stub__:exit[:<code>]`` hard-exit the process (default 0) mid-turn, to
                              exercise supervisor crash-restart.
+  ``__stub__:raise[:<msg>]`` raise ``RuntimeError(<msg>)`` from
+                             ``receive_response`` mid-turn - the dead-transport
+                             double (killed CLI subprocess, broken pipe) for
+                             the drain's terminal-honesty path.
 
 The brain is registered but GATED: :meth:`StubBrain.make_session` raises unless
 ``BOBI_STUB_BRAIN`` is set, so an accidental ``BOBI_BRAIN=stub`` in production
@@ -113,6 +117,12 @@ class _StubSession:
             # so any captured log shows the trigger before the process vanishes.
             code = _int_arg(arg, 0)
             os._exit(code)
+
+        if verb == "raise":
+            # A dead-transport double: receive_response blowing up mid-turn is
+            # exactly what a killed CLI subprocess (broken pipe) looks like to
+            # the session's drain loop.
+            raise RuntimeError(arg or "stub dead transport")
 
         if verb == "hang":
             await asyncio.sleep(_float_arg(arg, _DEFAULT_HANG_SECONDS))

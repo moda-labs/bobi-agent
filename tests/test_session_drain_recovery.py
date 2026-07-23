@@ -33,6 +33,9 @@ class _FakeClient:
         self._drain_error = drain_error
         self.provider = "anthropic"
 
+    async def connect(self, prompt=None):
+        pass
+
     async def query(self, text):
         pass
 
@@ -41,6 +44,9 @@ class _FakeClient:
             err, self._drain_error = self._drain_error, None
             raise err
         yield TurnResult(session_id="sess", is_error=False)
+
+    async def disconnect(self):
+        pass
 
 
 def _session(bobi_install, client):
@@ -342,3 +348,70 @@ async def test_rotation_commit_failure_surfaces_terminally(
     assert session._rotation_task is None
     assert session._client is active
     assert candidate.is_disconnected is True
+
+
+# --- honesty of the dead-transport terminal (D001/D002) ---------------------
+#
+# A turn that dies mid-drain must read as a FAILED turn to its consumers,
+# never as a clean one:
+#
+# - D001: the triggering message must NOT be acked — an acked cursor advances
+#   past a message that was never processed, so a restart loses it instead of
+#   replaying it (the #688 invariant ``_ack_message`` documents; the no-ack is
+#   owned by ``_drain_turn``'s ``None`` return, #799).
+# - D002: ``run_phase_blocking`` builds ``success=not _last_is_error``, so the
+#   dead-transport branch must set the flag — without it a crashed phase
+#   persists TERMINAL_COMPLETED and announces ``agent/session.completed``, the
+#   exact signal a headless orchestrator trusts to decide a lane is done.
+
+
+def _dead_transport() -> RuntimeError:
+    return RuntimeError("transport gone: broken pipe")
+
+
+def test_dead_transport_does_not_ack_the_triggering_message(bobi_install):
+    """D001: a message whose turn died mid-drain was NOT processed, so its ack
+    must be skipped — the event server replays it after a restart (#688)."""
+    s = _session(bobi_install, _FakeClient(drain_error=_dead_transport()))
+    s._set_state("waiting_input")
+    acked = []
+    msg = Message(id="m1", sender="events", text="please handle this",
+                  on_done=lambda: acked.append(True))
+
+    asyncio.run(s._process_message(msg))
+
+    assert s._state == "error"
+    assert acked == []
+
+
+def test_dead_transport_phase_persists_failed_terminal(bobi_install, monkeypatch):
+    """D002: a phase whose brain died mid-drain must come back as a failure —
+    success=False, TERMINAL_FAILED, ``agent/session.failed`` — never as the
+    clean completion an orchestrator would advance on."""
+    from bobi.sdk import TERMINAL_COMPLETED, TERMINAL_FAILED, get_registry
+    from bobi.subagent import run_phase_blocking
+
+    class DeadTransportSession(Session):
+        def _make_brain_session(self, resume=None):
+            return _FakeClient(drain_error=_dead_transport())
+
+        def _start_subscription(self):
+            pass  # no event server in this test
+
+    events = []
+    monkeypatch.setattr("bobi.session.Session", DeadTransportSession)
+    monkeypatch.setattr(
+        "bobi.subagent._emit_lifecycle_event",
+        lambda event_type, data, **kw: events.append(event_type),
+    )
+
+    result = run_phase_blocking(run_key="X-1", phase="implement",
+                                cwd=str(bobi_install.repo_path), timeout=15)
+
+    assert result.success is False
+    entry = get_registry().get("agent-x-1-implement")
+    assert entry is not None
+    assert entry.status == TERMINAL_FAILED
+    assert entry.status != TERMINAL_COMPLETED
+    assert "agent/session.failed" in events
+    assert "agent/session.completed" not in events

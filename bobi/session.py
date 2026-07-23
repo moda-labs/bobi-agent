@@ -967,7 +967,16 @@ class Session:
                 # terminal, as before — a fresh process start recovers it, which
                 # the supervisor owns. Recovering it inline would block this
                 # session's loop on repeated connect timeouts.
+                #
+                # The turn did NOT complete, so it must read as a failed turn:
+                # run_phase_blocking builds AgentResult.success from
+                # _last_is_error — without this a crashed phase records a clean
+                # TERMINAL_COMPLETED (#818 D002). The triggering message's
+                # no-ack/replay is owned by the None return below (#799/#688).
                 log.error(f"Drain failed for '{self.name}': {e}")
+                self._last_is_error = True
+                if not self._last_response:
+                    self._last_response = f"drain failed: {e}"
                 self._set_state("error")
                 registry.update(self.name, status="error")
         finally:
