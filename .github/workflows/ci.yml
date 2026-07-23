@@ -10,8 +10,65 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  # Cheap gate that decides whether the heavy suite needs to run. On a
+  # pull_request whose changed files are confined to docs/ and plans/, the
+  # test jobs below skip. Branch protection treats a *skipped* required check
+  # as passing, so a docs-only PR stays mergeable in seconds instead of
+  # waiting out the full matrix. Every other event (push to main, schedule,
+  # manual dispatch) forces the full suite, so dev-channel promotion and the
+  # nightly run are unaffected.
+  #
+  # The heavy jobs gate on `if: !cancelled() && ...code != 'false'`, i.e. they
+  # run unless this job EXPLICITLY reported docs-only. That is deliberately
+  # fail-safe: if this job itself errors, `code` is empty, the guard is true,
+  # and the full suite still runs — a broken gate never silently skips every
+  # required check (which branch protection would misread as passing).
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Need the PR base commit present locally to diff HEAD against it.
+          fetch-depth: 0
+
+      - name: Determine whether anything outside docs/ or plans/ changed
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "non-PR event ($EVENT_NAME): running full CI"
+            exit 0
+          fi
+          # --no-renames so a rename is reported as its literal add + delete
+          # paths. Otherwise `git diff` (rename detection on by default) would
+          # collapse `bobi/x.py -> docs/x.py` to just `docs/x.py` and the gate
+          # would skip tests on what is really a code deletion.
+          # core.quotePath=false keeps non-ASCII paths unquoted so a doc named
+          # e.g. docs/café.md still matches ^docs/ (else it over-runs the suite).
+          changed="$(git -c core.quotePath=false diff --name-only --no-renames "$BASE_SHA" HEAD)"
+          echo "changed files:"
+          echo "$changed"
+          # code=true unless every changed path is under docs/ or plans/.
+          # An empty diff (nothing to test) also skips the heavy jobs.
+          if [ -z "$changed" ] || ! echo "$changed" | grep -qvE '^(docs/|plans/)'; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "docs/plans-only change: skipping the heavy CI jobs"
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "code present outside docs/plans: running full CI"
+          fi
+
   unit-tests:
     name: Unit tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -36,6 +93,8 @@ jobs:
 
   lint:
     name: Lint (workflows)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -57,6 +116,8 @@ jobs:
 
   event-server:
     name: Event server (events-core + local)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -92,6 +153,8 @@ jobs:
 
   e2e:
     name: E2E (Playwright)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     # Browsers + all system deps are baked into the image, so there is no apt
     # step and no Chromium download. Keep the tag in sync with the pinned
@@ -130,6 +193,8 @@ jobs:
 
   integration-fast:
     name: Integration tests (no Claude)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     env:
       # hf-xet can hang indefinitely on unauthenticated GitHub runners.
@@ -214,8 +279,10 @@ jobs:
   promote-dev:
     name: Advance the dev channel
     # Every other job in this workflow gates the channel: a commit only
-    # becomes `dev` when the whole CI matrix proved it.
-    needs: [unit-tests, lint, event-server, integration-fast, e2e]
+    # becomes `dev` when the whole CI matrix proved it. `changes` is included
+    # so a gate-job error on a push to main blocks promotion too (on push it
+    # always reports code=true, so it never suppresses the heavy jobs here).
+    needs: [changes, unit-tests, lint, event-server, integration-fast, e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # Serialize promotions; the ancestor check below handles runs that
     # complete out of order.
