@@ -1,7 +1,7 @@
 # Design-partner bug batch: template scanner + auto_dispatch role
 
 > **Status:** Draft
-> **Tracking issue:** moda-labs/bobi-agent#TBD · **Created:** 2026-07-23 · **Last amended:** — (see Amendments)
+> **Tracking issue:** moda-labs/bobi-agent#828 · **Created:** 2026-07-23 · **Last amended:** — (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
