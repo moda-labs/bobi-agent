@@ -79,11 +79,14 @@ conventions that hold regardless of how the stages are tooled:
 - **Verification**: exercising the real flow end-to-end (isolated
   `BOBI_HOME`, real agent sessions), not just the test suite. Update the
   affected docs in the same PR as the change, never as a follow-up.
-- **Landing**: merging is a deliberate step, separately authorized per
-  PR. Merge only when checks are green, watch the merge commit's
-  post-merge CI, then clean up the branch, worktree, and ticket. Landing
-  never touches versions or changelogs - release work follows Release
-  Rules below.
+- **Landing**: a PR is authorized to land once a human maintainer has
+  approved it — the approval is PR-bound (it survives amendments and
+  mechanical rebases; decision 2026-07-23) — and its CURRENT head
+  carries a LANDABLE house verdict with green required checks. This
+  authorization form applies to human and bot landers alike. Merge only
+  when checks are green, watch the merge commit's post-merge CI, then
+  clean up the branch, worktree, and ticket. Landing never touches
+  versions or changelogs - release work follows Release Rules below.
 - **Continuity**: at a session boundary with unfinished work, write a
   handoff file capturing verified state so a fresh session can resume;
   handoff files stay local and uncommitted.

@@ -15,7 +15,9 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
+# `${{...}}` is workflow template syntax, not an env reference. Excluding
+# `${{` keeps templates intact during both scanning and interpolation.
+_ENV_VAR_RE = re.compile(r"\$\{(?!\{)([^}]+)\}")
 _DOTENV_LOADED: dict[str, str] = {}
 
 # The shared moda-hosted event server. Mirrors provision-instance.sh's default
