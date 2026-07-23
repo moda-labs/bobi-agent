@@ -469,7 +469,13 @@ Create or update the PR, then move the ticket to In Review.
    Comment on the issue with the PR link.
 4. Update handoff: `phase: pr_ready`, `pr_url: <PR URL>`. Then **STOP**.
 
-**Rules**: Always target `main`. NEVER merge PRs. NEVER deploy.
+**Rules**: Always target `main`. NEVER deploy. Merging is gated, not
+forbidden: merge a PR ONLY through the house land contract with its
+Stage 0 authorization satisfied — an approving review on the PR by a
+human maintainer (PR-bound: it survives amendments and mechanical
+rebases) plus a LANDABLE house verdict on the CURRENT head and green
+required checks (recorded decision, Zach 2026-07-23). No artifact, no
+merge — refuse observably, never guess.
 
 ### QA Phase
 
