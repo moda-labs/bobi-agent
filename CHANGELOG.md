@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.48.0 - 2026-07-22
+
+Minor release: Slack gains an opt-in Socket Mode transport for local
+deployments (no public request URL required), workflow resume survives the
+dead-man reconciler after long suspensions, dead-transport turns become
+honest failures that replay instead of silently completing, session rotation
+stays responsive under load with unacked-event replay, and session state
+publishes atomically.
+
+### Added
+- **Slack Socket Mode transport, opt-in (#808/#809, PRs #811/#812).** The
+  local event server can now receive Slack events over Socket Mode instead
+  of a public webhook URL. Lane A adds the sans-I/O Socket Mode session core
+  (exact acknowledgement frames, bounded cross-connection deduplication,
+  event normalization, explicit reconnect/fatal policy) and the local driver
+  (signed-only `app_token` activation on `POST /slack/workspaces`, REST
+  bootstrap timeouts, fresh reconnect URLs, hello/staleness watchdogs,
+  bounded delivery concurrency, secret-safe `slack_socket` health entries),
+  reusing the existing Slack delivery and bot-filtering pipeline. Lane B adds
+  the operator surface: an optional `SLACK_APP_TOKEN` in setup/config
+  (forwarded only in bubble-signed registrations after the target reports
+  local runtime mode), `bobi create-slack-bot --socket-mode` (no-flag
+  rendering unchanged), app-specific Socket Mode doctor diagnostics with
+  transport-aware ingress checks, `xapp-` secret redaction, and setup docs.
+
+### Fixed
+- **Workflow resume no longer killed by the dead-man reconciler (#826, PR
+  #827).** `resume_workflow` only flipped registry `status`/`phase`, leaving
+  the dead launch process's `pid`, `started_at`, and `timeout` in place - so
+  after a long `await:` suspension the reconciler judged the healthy resumed
+  run against the dead pid (phantom TERMINAL_CRASHED + `agent/session.failed`)
+  or the expired launch deadline (cancelled + TERMINAL_FAILED). Resume now
+  re-stamps `pid`/`started_at`/`timeout` in the same atomic registry update
+  that flips the status to `running`. Operator note: the resumed leg runs
+  under the resume `--timeout` (CLI default 3600) - the launch value is not
+  persisted, so long converge legs need it passed again explicitly.
+- **Dead-transport turns are honest failures (review-remediation D001+D002,
+  PR #825).** A turn whose brain transport died mid-drain (subprocess killed,
+  broken pipe) set the session to `error` but still read as a clean turn:
+  the triggering message was acked (lost on restart instead of replayed,
+  violating the #688 invariant) and a crashed phase persisted
+  TERMINAL_COMPLETED and announced `agent/session.completed` - the exact
+  signal a headless orchestrator reads as lane-done. The dead-transport
+  branch now marks the turn failed, skips the ack so the event server
+  replays the message after supervisor restart, and a crashed phase comes
+  back `success=False` + TERMINAL_FAILED + `agent/session.failed`.
+- **Session rotation stays responsive and unacked events replay (#799, PR
+  #800).** Rotation called `receive_response()` on Claude's promptless SDK
+  connect (which emits no model turn), wedging the sole inbox coroutine for
+  the 240-second reconnect bound and queueing mentions behind it; rotation
+  preparation is now blue-green (the old healthy client serves inbox work
+  while the candidate connects in the background). The local event server
+  now replays buffered events from `last_seen=0`, so an unacknowledged first
+  event survives restart; the event cursor advances only after a successful
+  terminal model result; disconnect gets a 10-second hard bound plus a
+  synchronous `abort()` escape hatch on the brain contract; a cursor ACK
+  exceeding its bound marks the session terminally errored for supervisor
+  recovery instead of wedging the inbox.
+- **Session state publishes atomically (PR #810).** Each session
+  `state.json` now writes through a complete sibling temp file and atomic
+  `os.replace`, and `register`/`update`/`record_cost` serialize through one
+  persistent per-session file lock - closing the truncation window that made
+  readers see a zero-byte file mid-write (CI `JSONDecodeError`) and a
+  pre-existing lost-update race between status and cost writers.
+
+### Changed
+- **eng-team spec phase exempts plan-born specs from the scope lens
+  (eng-team 1.3.0 -> 1.4.0, #815, PR #824).** Plan-born work's scope is
+  settled by the plan's approval merge; the engineer's spec-phase scope lens
+  ("too narrow? too wide?") no longer re-litigates it. Append-only edits at
+  the two scope-lens sites in the engineer ROLE.md; standalone-ticket
+  behavior unchanged.
+
+
 ## 0.47.0 - 2026-07-21
 
 Minor release: the eng-team package's spec phase becomes plan-artifact-aware,
