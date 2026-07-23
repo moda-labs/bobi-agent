@@ -487,6 +487,51 @@ def test_find_env_var_refs_required_vs_optional(tmp_path):
     assert find_required_env_vars(tmp_path) == ["SLACK_BOT_TOKEN"]
 
 
+def test_auto_dispatch_templates_are_not_env_refs(tmp_path):
+    _write_agent_yaml(tmp_path, """
+        auto_dispatch:
+          - workflow: bug-triage
+            task: "Triage ${{input.title}} at ${{input.severity}} with ${REAL_SECRET}"
+    """)
+
+    refs = find_env_var_refs(tmp_path)
+
+    assert [ref.name for ref in refs] == ["REAL_SECRET"]
+    assert find_required_env_vars(tmp_path) == ["REAL_SECRET"]
+
+
+def test_config_load_preserves_auto_dispatch_template_while_interpolating_env(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("REAL_SECRET", "resolved-secret")
+    _write_agent_yaml(tmp_path, """
+        auto_dispatch:
+          - workflow: bug-triage
+            task: "Triage ${{input.title}} with ${REAL_SECRET}"
+    """)
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.auto_dispatch[0]["task"] == (
+        "Triage ${{input.title}} with resolved-secret"
+    )
+
+
+def test_config_load_interpolates_env_nested_in_workflow_template(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("REAL_SECRET", "resolved-secret")
+    _write_agent_yaml(tmp_path, """
+        auto_dispatch:
+          - workflow: bug-triage
+            task: "${{ ${REAL_SECRET} }}"
+    """)
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.auto_dispatch[0]["task"] == "${{ resolved-secret }}"
+
+
 def test_dotenv_resolves_in_config(tmp_path, monkeypatch):
     """Full integration: .env values resolve through ${VAR} in agent.yaml."""
     config_dir = tmp_path / "package"
