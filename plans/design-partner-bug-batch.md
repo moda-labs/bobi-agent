@@ -156,7 +156,7 @@ should imply the combined case works until both lanes have landed.
 
 ### Phase 1 — #797 env scanner vs `${{…}}` templates (Lane A)
 
-- [ ] Failing tests first in `tests/test_config.py`: (1) an `agent.yaml`
+- [x] Failing tests first in `tests/test_config.py`: (1) an `agent.yaml`
   containing `auto_dispatch` `task: "… ${{input.title}} … ${{input.severity}} …"`
   yields NO env refs for the template fields from the scan entry points
   (`find_env_var_refs` — the one `bobi agents install` calls — and
@@ -169,16 +169,16 @@ should imply the combined case works until both lanes have landed.
   `cfg.auto_dispatch[0]["task"]` survives untouched (this pins the runtime
   path, not just the scan); (3) per the Q2 decision: one test pinning the
   nested-ref behavior (`${{ ${VAR} }}`).
-- [ ] Fix: `_ENV_VAR_RE = re.compile(r"\$\{(?!\{)([^}]+)\}")` in
+- [x] Fix: `_ENV_VAR_RE = re.compile(r"\$\{(?!\{)([^}]+)\}")` in
   `bobi/config.py` with a comment stating why the lookahead exists (workflow
   template syntax must survive the scan and interpolation untouched).
-- [ ] Close #797 via the PR ("Fixes #797").
+- [x] Close #797 via the PR ("Fixes #797").
 
 **Validation gate**
 
-- [ ] New tests fail before the fix, pass after (both states shown in the PR).
-- [ ] `pytest tests/test_config.py -q`
-- [ ] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q`
+- [x] New tests fail before the fix, pass after (both states shown in the PR).
+- [x] `pytest tests/test_config.py -q`
+- [x] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q`
 
 ### Phase 2 — #796 auto_dispatch per-rule `role:` (Lane B)
 
