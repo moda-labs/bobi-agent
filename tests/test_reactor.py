@@ -303,6 +303,37 @@ class TestEventReactor:
         assert call_kwargs[1]["workflow_name"] == "pr-feedback"
         assert "PR #42" in call_kwargs[1]["task"]
 
+    @pytest.mark.parametrize(
+        ("role_config", "expected_role"),
+        [
+            ({}, ""),
+            ({"role": ""}, ""),
+            ({"role": None}, ""),
+            ({"role": "director"}, "director"),
+        ],
+        ids=["omitted", "empty", "yaml-null", "director"],
+    )
+    @patch("bobi.subagent.launch_agent")
+    def test_dispatches_with_role(self, mock_launch, role_config, expected_role):
+        mock_launch.return_value = "wf-pr-feedback-test-42"
+        reactor = EventReactor.from_config(
+            [
+                {
+                    "event": "github.pull_request_review",
+                    "workflow": "pr-feedback",
+                    **role_config,
+                },
+            ],
+            cwd="/tmp/project",
+        )
+        assert reactor.rules[0].role == expected_role
+
+        result = reactor.process(self._make_review_event())
+
+        assert result == "dispatched"
+        _wait_calls(mock_launch, 1)
+        assert mock_launch.call_args[1]["role"] == expected_role
+
     @patch("bobi.subagent.launch_agent")
     def test_no_dispatch_on_non_matching_event(self, mock_launch):
         reactor = self._make_reactor()
