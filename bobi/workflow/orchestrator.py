@@ -273,7 +273,14 @@ def resume_workflow(
     started_at = time.time()
 
     registry = get_registry()
-    registry.update(session_name, status="running", phase=f"resuming")
+    # Re-stamp the launch-time pid/started_at/timeout with this process's own:
+    # the entry still carries the (long-dead) launch pid and the launch
+    # deadline, and the dead-man reconciler would otherwise close the resumed
+    # run as crashed or timed out while it is healthily working (#826).
+    registry.update(
+        session_name, status="running", phase="resuming",
+        pid=os.getpid(), started_at=started_at, timeout=timeout,
+    )
 
     ctx = VariableContext()
     ctx.scopes = run.variable_scopes

@@ -3,7 +3,10 @@ validation, route evaluation, step sequencing, and event emission."""
 
 import asyncio
 import json
+import os
+import subprocess
 import textwrap
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, AsyncMock, patch, call
 from dataclasses import dataclass
@@ -1799,6 +1802,81 @@ class TestResumeWorkflowTimestamps:
         reloaded = WorkflowRun.load(run.run_id)
         assert reloaded.resumed_at != ""
         assert reloaded.resumed_at != "2026-01-01T00:00:00"
+
+
+class TestResumeRegistryRefresh:
+    def test_resume_refreshes_pid_started_at_timeout(self, tmp_path, monkeypatch):
+        """#826: resume must re-stamp the registry entry with the resuming
+        process's pid and a fresh started_at/timeout, so the dead-man
+        reconciler judges the resumed run on its own budget instead of
+        killing it for the launch process's dead pid or expired deadline."""
+        from bobi.reconcile import reconcile_sessions
+        from bobi.sdk import SessionEntry, get_registry
+
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(
+            parents=True, exist_ok=True,
+        )
+        monkeypatch.setattr("bobi.sdk._registry", None)
+        registry = get_registry()
+
+        # Launch-time entry as the reconciler would find it after a long
+        # suspension: the launch pid is dead and the launch deadline is past.
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        registry.register(SessionEntry(
+            name="wf-t-r-1", run_key="1", phase="t", project="r", cwd="/tmp",
+            status="waiting", pid=proc.pid,
+            started_at=time.time() - 90_000, timeout=3600,
+        ))
+
+        run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {"input": {"task": "t", "repo": "r", "run_key": "1"}}
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.run_key = "1"
+        run.save()
+
+        # Snapshot the entry and sweep the reconciler MID-RUN (at brain-session
+        # creation) — after resume_workflow returns, the entry is terminal and
+        # cases 2/3 no longer apply.
+        mid_run = {}
+
+        class FakeBrain:
+            def make_session(self, **_kwargs):
+                mid_run["entry"] = registry.get("wf-t-r-1")
+                mid_run["actions"] = reconcile_sessions(
+                    registry, emit=lambda *a, **k: True,
+                    cancel=lambda name: None,
+                )
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+
+        before = time.time()
+        with patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            success = resume_workflow(run, wf, timeout=1234)
+
+        assert success is True
+        entry = mid_run["entry"]
+        assert entry.pid == os.getpid()
+        assert entry.started_at >= before
+        assert entry.timeout == 1234
+        # The resumed run survives a reconcile pass untouched.
+        assert mid_run["actions"] == []
 
 
 # ---------------------------------------------------------------------------
