@@ -1,6 +1,6 @@
 # Design-partner bug batch: template scanner + auto_dispatch role
 
-> **Status:** Draft
+> **Status:** Approved
 > **Tracking issue:** moda-labs/bobi-agent#828 · **Created:** 2026-07-23 · **Last amended:** — (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
@@ -128,6 +128,8 @@ None. Both fixes land in existing files and existing test modules.
   orchestrator's existing truthiness semantics with zero new concepts, and
   matches the patch the partner has run live since 2026-07-15; (b) adds a
   concept to teach for no added expressive power.
+  **Decision (2026-07-23, Zach):** (a) — falsy defers, both spellings
+  normalized to `""` at parse; tests assert the stored value.
 
 - **Q2:** The lookahead uncovers `${VAR}` refs *nested inside* `${{…}}`
   regions that the old bogus match swallowed whole: `${{ ${SECRET} }}` now
@@ -138,6 +140,8 @@ None. Both fixes land in existing files and existing test modules.
   pattern. Recommendation: (a) — the value is pack-author-controlled (an
   event author cannot inject agent.yaml text), the semantics are simpler to
   state, and (b) buys safety nobody has asked for at real complexity cost.
+  **Decision (2026-07-23, Zach):** (a) — pin as intended; env interpolation
+  applies everywhere, one test documents the nested-ref behavior.
 
 ## Phases
 
