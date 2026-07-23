@@ -1,7 +1,7 @@
 # Design-partner bug batch: template scanner + auto_dispatch role
 
-> **Status:** Approved
-> **Tracking issue:** moda-labs/bobi-agent#828 · **Created:** 2026-07-23 · **Last amended:** — (see Amendments)
+> **Status:** Building
+> **Tracking issue:** moda-labs/bobi-agent#828 · **Created:** 2026-07-23 · **Last amended:** 2026-07-23 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -182,7 +182,7 @@ should imply the combined case works until both lanes have landed.
 
 ### Phase 2 — #796 auto_dispatch per-rule `role:` (Lane B)
 
-- [ ] Failing tests first in `tests/test_reactor.py`: (1) a rule with no
+- [x] Failing tests first in `tests/test_reactor.py`: (1) a rule with no
   `role:` key dispatches with `role="engineer"` (today's behavior, pinned);
   (2) a rule with `role: ""` AND one with YAML null both dispatch with role
   exactly `== ""` (assert the stored/passed value, not just falsiness — this
@@ -195,21 +195,21 @@ should imply the combined case works until both lanes have landed.
   the truthy-blocks / falsy-switches semantics are already pinned by
   `test_model_change_preserves_explicit_role` (tests/test_orchestrator.py:856)
   and `test_agent_change_at_model_switch_starts_fresh` (:961).
-- [ ] Fix per the Q1 decision: `role: str = "engineer"` field on
+- [x] Fix per the Q1 decision: `role: str = "engineer"` field on
   `AutoDispatchRule` with a comment on the falsy-defers semantics AND the
   dial-gap caveat; rule parsing reads `entry.get("role", "engineer") or ""`;
   `_dispatch` passes `role=rule.role` instead of the hardcode (reactor.py:264
   is the only `role="engineer"` site in `bobi/` — no other sites to touch).
-- [ ] Close #796 via the PR ("Fixes #796"), with the closure comment scoping
+- [wip] Close #796 via the PR ("Fixes #796"), with the closure comment scoping
   the fix per the Problem section's caveat: parity with `subagents launch`;
   identical-dial agent switching is a pre-existing orchestrator gap this fix
   does not close.
 
 **Validation gate**
 
-- [ ] New tests fail before the fix, pass after (both states shown in the PR).
-- [ ] `pytest tests/test_reactor.py -q`
-- [ ] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q`
+- [x] New tests fail before the fix, pass after (both states shown in the PR).
+- [x] `pytest tests/test_reactor.py -q`
+- [x] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q`
 
 ### Convergence gate (deferred — after both lanes merge)
 
@@ -256,14 +256,14 @@ without retitling the reporter's issues.
 | Phase | Ticket | One-line scope | Status |
 |---|---|---|---|
 | 1 | #797 | env-scanner negative lookahead + failing-first tests | open |
-| 2 | #796 | per-rule `role:` on AutoDispatchRule + failing-first tests | open |
+| 2 | #796 | per-rule `role:` on AutoDispatchRule + failing-first tests | review: #830 |
 
 **Lanes:** Lane A: #797. Lane B: #796. Fully parallel — disjoint files,
 disjoint test modules, no landing-order constraint.
 
 ## Amendments
 
-*(append-only)*
+- 2026-07-23: Lane B passed its validation gates and opened PR #830; Phase 2 markers and ticket status updated.
 
 ## Notes
 
