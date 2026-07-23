@@ -66,8 +66,8 @@ Every task line: builder re-verifies the appendix entry against the tree, fixes 
 
 Fix shape: `_drain_turn`'s dead-transport path must make the failure observable to callers (set `_last_is_error`/raise per the design the docstrings already claim), so ACK, terminal status, and retry decisions become honest. D001/D002 likely fall out of one mechanism — fix the mechanism, not four symptoms.
 
-- [ ] **D001** `bobi/session.py:972` — `_process_message` ACKs a message whose turn died on a dead transport; the message is lost on restart instead of replayed (violates `_ack_message`'s own #688 invariant). No-ack on dead-transport turns.
-- [ ] **D002/Q011** `bobi/subagent.py:601` — `run_phase_blocking` (and `spawn_adhoc`, line ~784) report `success=True` and persist `TERMINAL_COMPLETED` when the startup turn's transport died mid-drain; `spawn_adhoc`'s persistent path hardcodes `success=True`. Terminal status must reflect the error state.
+- [x] **D001** `bobi/session.py:972` — `_process_message` ACKs a message whose turn died on a dead transport; the message is lost on restart instead of replayed (violates `_ack_message`'s own #688 invariant). No-ack on dead-transport turns. *(shipped early via PR #825 + bot PR #800 to unblock headless execute — see 2026-07-22 amendment)*
+- [x] **D002/Q011** `bobi/subagent.py:601` — `run_phase_blocking` (and `spawn_adhoc`, line ~784) report `success=True` and persist `TERMINAL_COMPLETED` when the startup turn's transport died mid-drain; `spawn_adhoc`'s persistent path hardcodes `success=True`. Terminal status must reflect the error state. *(shipped early via PR #825 — see 2026-07-22 amendment)*
 - [ ] **D003** `bobi/session.py:1214` — `stop()` no-ops when `_keep_alive` doesn't exist yet (startup turn in flight); the session thread + brain subprocess survive forever. Make stop interrupt the startup phase too.
 - [ ] **D021** `bobi/session.py:1205` — `start()` waits the full timeout on `_ready` even after the session thread has already died; also watch thread liveness and return early.
 - [ ] **D067** `bobi/subagent.py:511` — `_run_agent_supervised`'s `except asyncio.TimeoutError` is unreachable (timeout never enforced in the coroutine); enforce it or remove the dead handler honestly.
@@ -406,6 +406,7 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
 
 - **2026-07-22** (Split): filed lanes A–E as #818–822 (thin dispatch pointers). B/E land after A (#818); C/D parallel with A.
 - **2026-07-22** (Zach + planning session): Q1–Q5 decided (all recommended option — 5 lanes, plausible/unverified in scope with re-verification, remove `--resume`, delete expired compat now, restrict credential endpoint to declared vars). Status → Approved. Lane map filled (A–E).
+- **2026-07-22** (build session, authorized by Zach): **D001+D002 shipped early** (ahead of Lane A dispatch) to unblock headless execute — PR **#825** (`_drain_turn` dead-transport branch sets `_last_is_error`; two behavioral regressions + a two-brain e2e with a new `__stub__:raise` directive and a claude leg that SIGKILLs the live CLI mid-turn). Bot PR **#800** (issue #799) landed the same day and independently fixed the D001 ack-loss via `_drain_turn`'s `None`-return; #825 was rebased on top and carries the D002 phase-honesty half #800 didn't cover. Bot PR #810 (atomic registry state.json publish) landed in the same batch. Lane A's remaining Phase 1–4 items are unchanged.
 
 ## Notes
 
