@@ -1,6 +1,6 @@
 # Read-only-safe local event server artifact
 
-> **Status:** In review
+> **Status:** Approved
 > **Tracking issue:** moda-labs/bobi-agent#798 · **Created:** 2026-07-23 · **Last amended:** 2026-07-23 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
@@ -335,13 +335,14 @@ Generated but not committed:
 
 ## Questionables
 
-Gate 1 approval resolves each Questionable to its recommended option unless Zach explicitly selects another.
-Implementation remains blocked until that approval.
+Gate 1 is approved and every Questionable is resolved to its recommended option.
 
 The reviewed issue design selected a self-contained build-time bundle over full `node_modules` vendoring, runtime caches, write-guard exceptions, repair commands, or Node replacement.
 Gate 1 approval accepts that architecture, the recommended resolutions below, and the one-lane scope.
 
 ### Q1 - How should a carried bundle prove that it matches its inputs?
+
+**Decision (2026-07-23, Zach via Slack):** chose A, the content-addressed input manifest, so a source archive cannot silently reuse stale executable code.
 
 **A. Content-addressed input manifest - recommended.**
 Generate a deterministic manifest of SHA-256 hashes for every declared bundle input plus the relevant build-tool versions.
@@ -353,6 +354,8 @@ This keeps the hook smaller, but an exported or patched source archive can silen
 
 ### Q2 - What reproducibility guarantee should the artifact make?
 
+**Decision (2026-07-23, Zach via Slack):** chose A, same-clean-environment byte identity, to prove the release paths agree without expanding this bug fix into universal cross-platform reproducibility.
+
 **A. Same clean build environment - recommended.**
 Require byte-identical bundles for direct-wheel and sdist paths built in the same clean CI job with the same Node, npm, lockfile, esbuild, OS, locale, and environment.
 Record the exact tool versions in diagnostics and treat cross-platform byte identity as out of scope.
@@ -362,6 +365,8 @@ Pin and normalize the full Node/npm/esbuild toolchain and every environment inpu
 This is substantially broader than proving that the release pipeline cannot drift between its two artifact paths.
 
 ### Q3 - How should bundled third-party license obligations be handled?
+
+**Decision (2026-07-23, Zach via Slack):** chose A, making the bundled-license audit and required notices a ship gate.
 
 **A. Make the audit and required notices a ship gate - recommended.**
 Inventory every third-party package actually included in the esbuild metafile, verify its redistribution terms, preserve required legal comments, and ship any required notice text in both sdist and wheel.
@@ -458,7 +463,7 @@ The fresh reviews also established these non-optional sequencing and proof const
 - [ ] Update `docs/EVENT_SERVER.md` to distinguish prebuilt installed startup from writable source-checkout rebuilds.
 - [ ] Update `docs/SELF_HOSTED_EVENT_SERVER.md` to use `npm ci` for a cloned standalone server and state that Python wheels already contain the runnable bundle.
 - [ ] Preserve Node 20, environment-variable, loopback, tunnel, TLS, Socket Mode, Discord Gateway, and restart guidance.
-- [ ] Attach the required before-and-after transcript and archive-size result to the unified pull request.
+- [ ] Attach the required before-and-after transcript and archive-size result to the implementation pull request.
 
 **Validation gate**
 
@@ -488,7 +493,7 @@ The test must cross the real distribution boundary instead of importing the sour
 13. Compare installed file path, mode, size, and hash snapshots before and after startup.
 14. Terminate the Node process in every terminal path and preserve its log on failure.
 
-The pull request must show a concise before-and-after transcript from that same harness.
+The implementation pull request must show a concise before-and-after transcript from that same harness.
 
 Before-fix evidence:
 
@@ -547,17 +552,20 @@ No screenshot or frontend capture is required because there is no UI surface.
 
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
-| A | #798 | 1-4 | Immutable packaged local event-server artifact, launcher split, and release proof | solo | awaiting Gate 1 |
+| A | #798 | 1-4 | Immutable packaged local event-server artifact, launcher split, and release proof | solo | approved; dispatch after plan landing |
 
 **Lanes:** one lane is the null topology and the default.
 All phases converge on the same package artifact, launcher, and production-shaped regression harness, so parallel PRs would add coordination without an independent landing seam.
 Issue #798 remains both the task source and the one-lane dispatch record.
-The same unified draft PR carries this reviewed spec and, only after Gate 1 approval, its implementation.
+This dedicated plan PR lands first.
+Implementation then starts from current `main` in a new branch and pull request.
 
 ## Amendments
 
 - **2026-07-23** (issue-lifecycle run `adhoc-c500673e`): converted the reviewed issue-body design into the checked-in plan source of truth, reverified all current-code claims at `50ff18c`, and added the v0.48.0 Slack Socket Mode and Discord Gateway bundle inputs to the artifact and verification contract.
 - **2026-07-23** (fresh review): added Gate 1 Questionables for content-addressed provenance, environment-scoped reproducibility, and bundled-license notices; tightened Hatch finalization, module isolation, socket-driver, Homebrew, and npm-shim proof.
+- **2026-07-23** (Gate 1 approval): Zach selected the recommended A option for Q1-Q3 and approved the plan.
+- **2026-07-23** (lifecycle clarification): Zach confirmed that this dedicated plan PR lands before implementation starts in a new pull request.
 
 ## Notes
 
@@ -792,7 +800,7 @@ No planned failure is silent and untested.
 - The wheel-from-sdist test mirrors the current Homebrew formula installation boundary without requiring Node during formula installation.
 - The runtime guard remains unchanged and effective.
 - Documentation accurately distinguishes installed, source, and cloned standalone startup.
-- The pull request includes concrete failing and passing proof.
+- The implementation pull request includes concrete failing and passing proof.
 - No frontend, public API, event payload, version, or changelog change is included.
 
 ### Review history
@@ -811,16 +819,16 @@ The fresh design-applicability review exited as not applicable because the chang
 The fresh independent Codex pass raised artifact provenance, toolchain reproducibility, module isolation, lazy socket-driver coverage, Homebrew-path, licensing, hook-lifecycle, error-propagation, and npm-shim concerns.
 Repository verification rejected its `RECORD` and swallowed-launcher-error claims, confirmed the Homebrew sdist boundary, and captured the remaining findings in Q1-Q3 plus the proof constraints above.
 
-Gate 1 remains human approval by Zach.
-No implementation may start before that approval.
+Gate 1 was approved by Zach on 2026-07-23 with the recommended A option selected for Q1-Q3.
+Implementation starts in a new pull request after this dedicated plan PR lands.
 
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |---|---|---|---:|---|---|
 | CEO Review | `/gstack-plan-ceo-review` | Scope and strategy | 1 | CLEAR | HOLD_SCOPE, one coherent lane, 0 critical gaps |
-| Codex Review | `codex exec` | Independent second opinion | 1 | NEEDS GATE 1 | 14 concerns triaged into Q1-Q3, proof constraints, or evidence-backed rejections |
-| Eng Review | `/gstack-plan-eng-review` | Architecture and tests | 1 | NEEDS GATE 1 | 3 unresolved decisions, 0 critical gaps, full branch and failure coverage planned |
+| Codex Review | `codex exec` | Independent second opinion | 1 | CLEAR AFTER GATE 1 | 14 concerns triaged into resolved Q1-Q3, proof constraints, or evidence-backed rejections |
+| Eng Review | `/gstack-plan-eng-review` | Architecture and tests | 1 | CLEAR AFTER GATE 1 | 3 decisions resolved, 0 critical gaps, full branch and failure coverage planned |
 | Design Review | `/gstack-plan-design-review` | UI and UX gaps | 1 | NOT APPLICABLE | No UI, interaction, frontend, or design-system scope |
 | DX Review | `/gstack-plan-devex-review` | Developer experience gaps | 0 | NOT APPLICABLE | No separate review required for this production packaging bug |
 
@@ -829,11 +837,10 @@ No implementation may start before that approval.
 **CROSS-MODEL:** Both reviews support the self-contained bundle and immutable installed-runtime boundary.
 The only remaining tension is how strongly to attest inputs, define reproducibility, and package notices.
 
-**VERDICT:** Scope and design applicability are cleared.
-Engineering approval awaits Zach's Gate 1 resolution of Q1-Q3.
-Implementation is blocked.
+**VERDICT:** Scope, design applicability, and engineering approval are cleared.
+The plan is approved and review-ready.
 
-**UNRESOLVED DECISIONS:**
+**RESOLVED DECISIONS:**
 
 - Q1: content-addressed input manifest and digest-based freshness, recommended A.
 - Q2: byte identity within one clean build environment, recommended A.
