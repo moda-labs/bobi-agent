@@ -301,7 +301,39 @@ class TestEventReactor:
         mock_launch.assert_called_once()
         call_kwargs = mock_launch.call_args
         assert call_kwargs[1]["workflow_name"] == "pr-feedback"
+        assert call_kwargs[1]["role"] == "engineer"
         assert "PR #42" in call_kwargs[1]["task"]
+
+    @pytest.mark.parametrize(
+        ("role_config", "expected_role"),
+        [
+            ({"role": ""}, ""),
+            ({"role": None}, ""),
+            ({"role": "director"}, "director"),
+        ],
+        ids=["empty", "yaml-null", "director"],
+    )
+    @patch("bobi.subagent.launch_agent")
+    def test_dispatches_with_explicit_role(
+        self, mock_launch, role_config, expected_role
+    ):
+        mock_launch.return_value = "wf-pr-feedback-test-42"
+        reactor = EventReactor.from_config(
+            [
+                {
+                    "event": "github.pull_request_review",
+                    "workflow": "pr-feedback",
+                    **role_config,
+                },
+            ],
+            cwd="/tmp/project",
+        )
+
+        result = reactor.process(self._make_review_event())
+
+        assert result == "dispatched"
+        _wait_calls(mock_launch, 1)
+        assert mock_launch.call_args[1]["role"] == expected_role
 
     @patch("bobi.subagent.launch_agent")
     def test_no_dispatch_on_non_matching_event(self, mock_launch):
@@ -636,6 +668,29 @@ class TestEventReactorFromConfig:
         ]
         reactor = EventReactor.from_config(config, cwd="/tmp/project")
         assert reactor.rules[0].cooldown == 1800  # default 30 min
+
+    @pytest.mark.parametrize(
+        ("role_config", "expected_role"),
+        [
+            ({}, "engineer"),
+            ({"role": ""}, ""),
+            ({"role": None}, ""),
+            ({"role": "director"}, "director"),
+        ],
+        ids=["omitted", "empty", "yaml-null", "director"],
+    )
+    def test_from_config_normalizes_role(self, role_config, expected_role):
+        config = [
+            {
+                "event": "github.pull_request_review",
+                "workflow": "pr-feedback",
+                **role_config,
+            },
+        ]
+
+        reactor = EventReactor.from_config(config, cwd="/tmp/project")
+
+        assert reactor.rules[0].role == expected_role
 
     def test_from_config_parses_task_template(self):
         config = [

@@ -42,6 +42,9 @@ class AutoDispatchRule:
     # the director; redeliveries are dropped by the drain loop.
     dedup_only: bool = False
     task: str | None = None
+    # A truthy role forces the whole workflow to use it. Use an empty role to
+    # defer to per-step agents, which still switch only when model/effort changes.
+    role: str = "engineer"
 
     def matches(self, event: dict) -> bool:
         """Return True if the event matches this rule's type and field conditions."""
@@ -162,6 +165,7 @@ class EventReactor:
                 allow_self_authored=entry.get("allow_self_authored", False),
                 dedup_only=entry.get("dedup_only", False),
                 task=task,
+                role=entry.get("role", "engineer") or "",
             ))
         return cls(rules=rules, cwd=cwd, self_login=self_login)
 
@@ -261,7 +265,7 @@ class EventReactor:
                     task=task,
                     cwd=self.cwd,
                     workflow_name=rule.workflow,
-                    role="engineer",
+                    role=rule.role,
                     run_key=run_key,
                     input_fields=input_fields,
                 )
