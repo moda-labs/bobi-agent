@@ -72,6 +72,15 @@ def try_resume_for_event(event_type: str, run_key: str = "", event: dict | None 
 
     *repo* scopes the lookup to a specific repository so that identical
     run_keys in different repos do not collide.
+
+    No production caller today; the CLI ``workflows resume`` is the only live
+    resume path. Before wiring one up: resume_workflow re-stamps the registry
+    entry with os.getpid() and the resume timeout (#826), which assumes a
+    dedicated per-run process. Resuming in a thread of a long-lived manager
+    would stamp the MANAGER's pid - a reconciler timeout or ``subagents
+    cancel`` would then SIGTERM the whole manager, and a dead resume thread
+    would never be reaped as crashed. Spawn a process (as launch does), and
+    pass an explicit timeout, before making this the manager's resume path.
     """
     from bobi.workflow.triggers import WorkflowDispatcher
 
@@ -273,7 +282,14 @@ def resume_workflow(
     started_at = time.time()
 
     registry = get_registry()
-    registry.update(session_name, status="running", phase=f"resuming")
+    # Re-stamp the launch-time pid/started_at/timeout with this process's own:
+    # the entry still carries the (long-dead) launch pid and the launch
+    # deadline, and the dead-man reconciler would otherwise close the resumed
+    # run as crashed or timed out while it is healthily working (#826).
+    registry.update(
+        session_name, status="running", phase="resuming",
+        pid=os.getpid(), started_at=started_at, timeout=timeout,
+    )
 
     ctx = VariableContext()
     ctx.scopes = run.variable_scopes

@@ -304,8 +304,11 @@ event, repo)` when an event arrives. It looks up a waiting run matching the even
 type, run key, and repo (`WorkflowRun.find_waiting`). To avoid two processes
 resuming the same run, the caller must first `claim()` it: an atomic rename of
 `<run_id>.json` to `<run_id>.resuming.json`. Exactly one caller wins; the others
-get `FileNotFoundError` and back off. The winner restores the variable context,
-injects the triggering event under the `event` scope, and re-enters
+get `FileNotFoundError` and back off. The winner re-stamps the run's registry
+entry with its own pid and a fresh `started_at`/`timeout` (the resume
+`--timeout`), so the dead-man reconciler judges the resumed process on its own
+budget rather than the long-dead launch process's. It then restores the variable
+context, injects the triggering event under the `event` scope, and re-enters
 `_run_workflow_async` at `suspended_at_step`. Execution continues as if the await
 never paused.
 
