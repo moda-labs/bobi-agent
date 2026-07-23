@@ -1,7 +1,7 @@
 # Design-partner bug batch: template scanner + auto_dispatch role
 
-> **Status:** Approved
-> **Tracking issue:** moda-labs/bobi-agent#828 · **Created:** 2026-07-23 · **Last amended:** — (see Amendments)
+> **Status:** Building
+> **Tracking issue:** moda-labs/bobi-agent#828 · **Created:** 2026-07-23 · **Last amended:** 2026-07-23 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -83,19 +83,21 @@ Two independent, minimal fixes — no new modules, no seam changes:
    Alternative rejected: escaping/pre-masking templates before scanning —
    more code, two passes, same result.
 
-2. **#796**: optional per-rule `role:` field on `AutoDispatchRule`, default
-   `"engineer"` (today's behavior, zero back-compat risk). A falsy value
-   (`role: ""` or YAML `role:` → null) defers to each workflow step's
-   `agent:` resolution — exactly the semantics the orchestrator's existing
-   truthiness check already implements; the reactor just stops hardcoding.
-   The parser normalizes: `entry.get("role", "engineer") or ""` — absent →
-   `"engineer"`, and both falsy spellings collapse to `""` so `None` never
-   leaks into the `str`-typed field, the spawn JSON, `SessionEntry.role`, or
-   the spend rollup key (`costs.py` folds `data.get("role", ...)` — an
-   unnormalized YAML null would surface as literal `None`/`null` in
-   `bobi spend` by-role output).
-   Alternative rejected: flipping the default to defer — silently changes
-   behavior for every existing rule.
+2. **#796**: optional per-rule `role:` field on `AutoDispatchRule`,
+   **roleless by default** (2026-07-23 amendment): omitted, empty (`role: ""`),
+   and YAML-null all normalize to `""` at parse and launch roleless, deferring
+   to each workflow step's `agent:` resolution — exactly the semantics the
+   orchestrator's existing truthiness check already implements. Only an
+   explicitly configured non-empty `role:` forces one role for the run. The
+   normalization keeps `None` out of the `str`-typed field, the spawn JSON,
+   `SessionEntry.role`, and the spend rollup key (`costs.py` folds
+   `data.get("role", ...)` — an unnormalized YAML null would surface as
+   literal `None`/`null` in `bobi spend` by-role output).
+   Original approved shape (superseded, see Amendments): default
+   `"engineer"` to preserve the historical reactor hardcode — rejected at PR
+   review because that hardcode was an eng-team leak (#207) into generic
+   framework code (#179/#199 deliberately removed default role names), not
+   framework behavior worth preserving.
 
 ## Relevant files
 
@@ -130,6 +132,12 @@ None. Both fixes land in existing files and existing test modules.
   concept to teach for no added expressive power.
   **Decision (2026-07-23, Zach):** (a) — falsy defers, both spellings
   normalized to `""` at parse; tests assert the stored value.
+  **Decision (2026-07-23, Zach — superseding, via PR #830 review):** omitted
+  `role:` ALSO launches roleless (`""`), not `"engineer"`: the reactor's
+  hardcoded default was an eng-team-specific leak (#207) into generic
+  framework code, not behavior to preserve. Absent, `""`, and YAML-null all
+  normalize to `""`; only an explicit non-empty `role:` forces a role.
+  Delivered in #830 head `e35e68d`.
 
 - **Q2:** The lookahead uncovers `${VAR}` refs *nested inside* `${{…}}`
   regions that the old bogus match swallowed whole: `${{ ${SECRET} }}` now
@@ -156,7 +164,7 @@ should imply the combined case works until both lanes have landed.
 
 ### Phase 1 — #797 env scanner vs `${{…}}` templates (Lane A)
 
-- [ ] Failing tests first in `tests/test_config.py`: (1) an `agent.yaml`
+- [x] Failing tests first in `tests/test_config.py`: (1) an `agent.yaml`
   containing `auto_dispatch` `task: "… ${{input.title}} … ${{input.severity}} …"`
   yields NO env refs for the template fields from the scan entry points
   (`find_env_var_refs` — the one `bobi agents install` calls — and
@@ -169,21 +177,22 @@ should imply the combined case works until both lanes have landed.
   `cfg.auto_dispatch[0]["task"]` survives untouched (this pins the runtime
   path, not just the scan); (3) per the Q2 decision: one test pinning the
   nested-ref behavior (`${{ ${VAR} }}`).
-- [ ] Fix: `_ENV_VAR_RE = re.compile(r"\$\{(?!\{)([^}]+)\}")` in
+- [x] Fix: `_ENV_VAR_RE = re.compile(r"\$\{(?!\{)([^}]+)\}")` in
   `bobi/config.py` with a comment stating why the lookahead exists (workflow
   template syntax must survive the scan and interpolation untouched).
-- [ ] Close #797 via the PR ("Fixes #797").
+- [wip] Close #797 via the PR ("Fixes #797").
 
 **Validation gate**
 
-- [ ] New tests fail before the fix, pass after (both states shown in the PR).
-- [ ] `pytest tests/test_config.py -q`
-- [ ] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q`
+- [x] New tests fail before the fix, pass after (both states shown in the PR).
+- [x] `pytest tests/test_config.py -q`
+- [x] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q`
 
 ### Phase 2 — #796 auto_dispatch per-rule `role:` (Lane B)
 
-- [ ] Failing tests first in `tests/test_reactor.py`: (1) a rule with no
-  `role:` key dispatches with `role="engineer"` (today's behavior, pinned);
+- [x] Failing tests first in `tests/test_reactor.py` (amended 2026-07-23 to
+  the roleless-default decision): (1) a rule with no `role:` key dispatches
+  with role exactly `== ""` (roleless — step `agent:` stays authoritative);
   (2) a rule with `role: ""` AND one with YAML null both dispatch with role
   exactly `== ""` (assert the stored/passed value, not just falsiness — this
   pins the normalization); (3) an explicit `role: director` dispatches with
@@ -195,21 +204,21 @@ should imply the combined case works until both lanes have landed.
   the truthy-blocks / falsy-switches semantics are already pinned by
   `test_model_change_preserves_explicit_role` (tests/test_orchestrator.py:856)
   and `test_agent_change_at_model_switch_starts_fresh` (:961).
-- [ ] Fix per the Q1 decision: `role: str = "engineer"` field on
-  `AutoDispatchRule` with a comment on the falsy-defers semantics AND the
-  dial-gap caveat; rule parsing reads `entry.get("role", "engineer") or ""`;
-  `_dispatch` passes `role=rule.role` instead of the hardcode (reactor.py:264
-  is the only `role="engineer"` site in `bobi/` — no other sites to touch).
-- [ ] Close #796 via the PR ("Fixes #796"), with the closure comment scoping
+- [x] Fix per the amended Q1 decision: `role: str = ""` field on
+  `AutoDispatchRule` (roleless default) with a comment on the falsy-defers
+  semantics AND the dial-gap caveat; rule parsing normalizes absent/""/null
+  to `""`; `_dispatch` passes `role=rule.role` instead of the hardcode — the
+  hardcoded `role="engineer"` at reactor.py:264 is removed entirely.
+- [wip] Close #796 via the PR ("Fixes #796"), with the closure comment scoping
   the fix per the Problem section's caveat: parity with `subagents launch`;
   identical-dial agent switching is a pre-existing orchestrator gap this fix
   does not close.
 
 **Validation gate**
 
-- [ ] New tests fail before the fix, pass after (both states shown in the PR).
-- [ ] `pytest tests/test_reactor.py -q`
-- [ ] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q`
+- [x] New tests fail before the fix, pass after (both states shown in the PR).
+- [x] `pytest tests/test_reactor.py -q`
+- [x] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q`
 
 ### Convergence gate (deferred — after both lanes merge)
 
@@ -255,15 +264,28 @@ without retitling the reporter's issues.
 
 | Phase | Ticket | One-line scope | Status |
 |---|---|---|---|
-| 1 | #797 | env-scanner negative lookahead + failing-first tests | open |
-| 2 | #796 | per-rule `role:` on AutoDispatchRule + failing-first tests | open |
+| 1 | #797 | env-scanner negative lookahead + failing-first tests | review: #831 |
+| 2 | #796 | per-rule `role:` on AutoDispatchRule + failing-first tests | review: #830 |
 
 **Lanes:** Lane A: #797. Lane B: #796. Fully parallel — disjoint files,
 disjoint test modules, no landing-order constraint.
 
 ## Amendments
 
-*(append-only)*
+- 2026-07-23: Lane B passed its validation gates and opened PR #830; Phase 2 markers and ticket status updated.
+- 2026-07-23: Lane A passed its validation gates and opened PR #831; Phase 1 markers and ticket status updated.
+- **2026-07-23** (Zach via PR #830 review; plan refreshed by the
+  orchestrating session): **Q1 superseded — omitted `role:` now launches
+  roleless.** Zach's review of #830 caught that the reactor's hardcoded
+  `engineer` default is an eng-team leak (#207) into generic framework code
+  (First Principles: no Moda assumptions in `bobi/`; #179/#199 removed
+  default role names). New semantics: absent/`""`/YAML-null all normalize to
+  `""` (step `agent:` resolution authoritative); explicit non-empty `role:`
+  passes through. This IS a behavior change for existing rules that relied
+  on the implicit engineer default — accepted deliberately; packs wanting
+  the old behavior write `role: engineer` explicitly. Solution §2, Q1, and
+  Phase 2 updated to match; delivered in #830 head `e35e68d` with four-case
+  failing-first regression coverage.
 
 ## Notes
 
