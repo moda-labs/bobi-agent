@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.49.0 - 2026-07-24
+
+Minor release: the local event server now ships as a prebuilt immutable
+bundle so installed startup no longer tries to `npm install`/build inside
+read-only `site-packages` (fixing the EACCES crash loop), plus two
+config/dispatch bug fixes and a CI velocity change.
+
+### Added
+- **Immutable prebuilt local event-server artifact (#798, PR #841).** Frozen
+  wheels previously shipped event-server source without `dist/local.js` or
+  runtime modules, so installed startup attempted an `npm install` and a
+  TypeScript build inside read-only `site-packages` — the reported EACCES
+  crash loop. The build now compiles and audits a single immutable local
+  event-server bundle in external staging and ships it (with its input
+  manifest and third-party license notices) in both sdists and wheels.
+  Installed startup validates and executes the bundle with no npm and no
+  writes; writable source checkouts still rebuild as before. Running the
+  local event server now requires **Node.js 20+**, with actionable CLI,
+  `bobi doctor`, installer, and documentation diagnostics; remote-server
+  operation needs no local Node. Direct and sdist-derived wheels are
+  byte-identical, and CI/release now cover the exact wheel boundary, hostile
+  inherited Node environments, WebSocket delivery, archive purity, and
+  frozen-package immutability.
+
+### Fixed
+- **Per-rule auto-dispatch roles (#796, PR #830).** `AutoDispatchRule` gains
+  an optional per-rule `role`. Omitted, empty, and YAML-null roles normalize
+  to `""` (a roleless launch, so workflow `step.agent` resolution stays
+  authoritative); an explicit non-empty role passes through unchanged. This
+  restores parity with `subagents launch` and removes the reactor's
+  team-specific `engineer` fallback.
+- **Workflow templates preserved during env interpolation (#797, PR #831).**
+  The shared `${VAR}` environment-reference matcher treated the `${` prefix
+  of a `${{...}}` workflow placeholder as an environment reference, so
+  install-time scanning reported bogus required secrets and runtime
+  interpolation reduced the template to `}` before the workflow engine saw
+  it. A negative lookahead now excludes `${{...}}` placeholders from the
+  matcher while still resolving real env references (including nested
+  `${{ ${VAR} }}`).
+
+### Changed
+- **CI skips the heavy test matrix on docs/plans-only PRs (#838, PR #839).** A
+  cheap `changes` gate job diffs the PR base against HEAD; PRs whose changed
+  files are confined to `docs/`/`plans/` skip the five heavy jobs (a *skipped*
+  required check counts as passing) and stay mergeable in seconds, while any
+  PR touching a file outside those trees runs the full suite unchanged.
+  push/schedule/dispatch always run the full suite, so the dev channel and
+  nightly runs are unaffected.
+
 ## 0.48.0 - 2026-07-22
 
 Minor release: Slack gains an opt-in Socket Mode transport for local
