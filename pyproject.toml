@@ -54,6 +54,8 @@ dev = [
     # the baked-in browser binary always matches the installed client.
     "playwright==1.60.0",
     "pytest-rerunfailures>=14.0",
+    "build",
+    "hatchling",
 ]
 
 [project.scripts]
@@ -62,15 +64,10 @@ bobi = "bobi.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["bobi"]
 
-# Bundle the event server source so standalone (PyPI) installs can run a
-# local event server — it is npm-installed and built on first use.
+# The build hook force-includes each declared event-server input file beside
+# the immutable generated artifact. Avoid directory force-includes because
+# Hatch recurses through ignored npm install state inside forced directories.
 [tool.hatch.build.targets.wheel.force-include]
-"event-server/src" = "bobi/event-server/src"
-"event-server/core/src" = "bobi/event-server/core/src"
-"event-server/core/package.json" = "bobi/event-server/core/package.json"
-"event-server/package.json" = "bobi/event-server/package.json"
-"event-server/package-lock.json" = "bobi/event-server/package-lock.json"
-"event-server/tsconfig.json" = "bobi/event-server/tsconfig.json"
 # Author skill guides once at repo-root skills/. Wheels receive those
 # exact files under bobi/skills/ so `bobi skill ...` works without a checkout.
 "skills" = "bobi/skills"
@@ -87,10 +84,14 @@ packages = ["bobi"]
 # Agent teams are deliberately NOT shipped in the distribution (wheel or sdist) —
 # they're fetched from the registry as versioned packages (see the wheel
 # force-include note above).
-include = ["bobi", "event-server", "skills", "README.md", "CHANGELOG.md"]
-exclude = ["event-server/node_modules", "event-server/core/node_modules",
+include = ["bobi", "event-server", "skills", "README.md", "CHANGELOG.md",
+           "hatch_build.py"]
+exclude = ["**/node_modules", "**/.npm-cache",
            "event-server/dist", "event-server/core/dist",
            "event-server/core/*.tgz", "**/__pycache__"]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

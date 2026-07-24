@@ -11,12 +11,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import httpx
+
+from bobi.events import artifact as event_server_artifact
 
 log = logging.getLogger(__name__)
 
@@ -28,13 +31,25 @@ log = logging.getLogger(__name__)
 # tripping a retry. Connect stays short — a dead host should fail fast.
 REGISTER_READ_TIMEOUT = 30.0
 REGISTER_TIMEOUT = httpx.Timeout(REGISTER_READ_TIMEOUT, connect=5.0)
+DEPENDENCY_STAMP_NAME = ".bobi-lock-digest"
+
+
+class PackagedEventServerArtifactError(RuntimeError):
+    """An installed Bobi distribution lacks its immutable server artifact."""
+
+
+class NodeRuntimePrerequisiteError(RuntimeError):
+    """The supported Node.js runtime needed by the embedded server is absent."""
+
+
+def _installed_event_server_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "event-server"
 
 
 def _find_event_server_dir() -> Path:
-    pkg_dir = Path(__file__).resolve().parent.parent
     candidates = [
-        pkg_dir / "event-server",         # bundled in the installed package
-        pkg_dir.parent / "event-server",  # repo checkout
+        _installed_event_server_dir(),
+        Path(__file__).resolve().parent.parent.parent / "event-server",
     ]
     for es_dir in candidates:
         if (es_dir / "package.json").exists():
@@ -45,67 +60,193 @@ def _find_event_server_dir() -> Path:
     )
 
 
-def _needs_build(es_dir: Path) -> bool:
-    dist = es_dir / "dist" / "local.js"
-    if not dist.exists():
-        return True
-    # local.ts (src/) plus the events-core workspace package (core/src/) both
-    # feed the bundle.
-    sources = [
-        f for pattern in ("src/**/*.ts", "core/src/**/*.ts")
-        for f in es_dir.glob(pattern)
-    ]
-    if not sources:
-        return True
-    src_mtime = max(f.stat().st_mtime for f in sources)
-    return dist.stat().st_mtime < src_mtime
+def _is_installed_event_server_dir(es_dir: Path) -> bool:
+    try:
+        return es_dir.resolve() == _installed_event_server_dir().resolve()
+    except OSError:
+        return False
 
 
-def _needs_install(es_dir: Path) -> bool:
-    """Whether local event-server runtime dependencies are missing.
+def resolve_node_runtime() -> tuple[str, str]:
+    """Return the supported Node executable and version, or fail actionably."""
+    node = shutil.which("node")
+    remediation = (
+        "Install or upgrade Node.js 20+ and ensure `node` is on PATH, then "
+        "restart Bobi."
+    )
+    if node is None:
+        raise NodeRuntimePrerequisiteError(
+            f"The local event server requires Node.js 20+, but `node` was not "
+            f"found on PATH. {remediation}"
+        )
+    try:
+        result = subprocess.run(
+            [node, "--version"],
+            capture_output=True,
+            env=event_server_artifact.sanitized_node_environment(),
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise NodeRuntimePrerequisiteError(
+            f"Could not run `{node} --version`: {exc}. {remediation}"
+        ) from exc
+    version = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0:
+        raise NodeRuntimePrerequisiteError(
+            f"`{node} --version` failed (exit {result.returncode}): "
+            f"{version or 'no output'}. {remediation}"
+        )
+    try:
+        major = int(version.removeprefix("v").split(".", 1)[0])
+    except (ValueError, IndexError) as exc:
+        raise NodeRuntimePrerequisiteError(
+            f"Could not parse the Node.js version reported by {node}: "
+            f"{version!r}. {remediation}"
+        ) from exc
+    if major < 20:
+        raise NodeRuntimePrerequisiteError(
+            f"The local event server requires Node.js 20+; {node} reports "
+            f"{version!r}. {remediation}"
+        )
+    return node, version
 
-    A bare node_modules check is not enough: installs that predate the
-    events-core workspace split lack the node_modules/@moda-labs/
-    bobi-events-core link, and the local bundle cannot resolve its imports
-    without it. node_modules survives both pip upgrades (it is not in the
-    wheel RECORD) and git pulls, so upgraded installs hit exactly that state.
-    """
+
+def _validate_packaged_artifact(es_dir: Path) -> None:
+    try:
+        event_server_artifact.validate_artifact(es_dir, verify_inputs=False)
+    except event_server_artifact.ArtifactValidationError as exc:
+        raise PackagedEventServerArtifactError(
+            "The installed Bobi distribution has an incomplete or corrupt "
+            f"local event-server artifact ({exc}). Reinstall or upgrade Bobi; "
+            "installed package files are immutable and cannot be repaired in place."
+        ) from exc
+
+
+def _dependency_stamp_path(es_dir: Path) -> Path:
+    return es_dir / "node_modules" / DEPENDENCY_STAMP_NAME
+
+
+def _read_dependency_stamp(es_dir: Path) -> dict | None:
+    try:
+        value = json.loads(_dependency_stamp_path(es_dir).read_text())
+    except (
+        FileNotFoundError,
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _dependency_tree(es_dir: Path) -> dict:
+    result = _run_npm(["npm", "ls", "--all", "--json", "--offline"], es_dir)
+    try:
+        tree = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"npm ls returned malformed JSON in {es_dir}: {exc}"
+        ) from exc
+    if not isinstance(tree, dict):
+        raise RuntimeError(f"npm ls returned a non-object dependency tree in {es_dir}")
+    problems = tree.get("problems")
+    if problems:
+        raise RuntimeError(f"npm dependency tree is invalid in {es_dir}: {problems}")
+    return tree
+
+
+def _source_dependencies_valid(es_dir: Path) -> bool:
     node_modules = es_dir / "node_modules"
-    return not (
-        node_modules.exists()
-        and (node_modules / "@moda-labs" / "bobi-events-core").exists()
+    workspace = node_modules / "@moda-labs" / "bobi-events-core"
+    esbuild = node_modules / ".bin" / "esbuild"
+    if not workspace.exists() or not esbuild.is_file() or not os.access(esbuild, os.X_OK):
+        return False
+    stamp = _read_dependency_stamp(es_dir)
+    if (
+        stamp is None
+        or type(stamp.get("schema_version")) is not int
+        or stamp["schema_version"] != 1
+    ):
+        return False
+    try:
+        lock_digest = event_server_artifact.file_sha256(es_dir / "package-lock.json")
+    except event_server_artifact.ArtifactValidationError:
+        return False
+    if stamp.get("lockfile_sha256") != lock_digest:
+        return False
+    try:
+        tree_digest = event_server_artifact.canonical_json_digest(
+            _dependency_tree(es_dir)
+        )
+    except RuntimeError:
+        return False
+    return stamp.get("installed_tree_sha256") == tree_digest
+
+
+def _refresh_dependency_stamp(es_dir: Path) -> None:
+    stamp = {
+        "installed_tree_sha256": event_server_artifact.canonical_json_digest(
+            _dependency_tree(es_dir)
+        ),
+        "lockfile_sha256": event_server_artifact.file_sha256(
+            es_dir / "package-lock.json"
+        ),
+        "schema_version": 1,
+    }
+    _dependency_stamp_path(es_dir).write_text(
+        json.dumps(stamp, indent=2, sort_keys=True) + "\n"
     )
 
 
-def _esbuild_package(es_dir: Path) -> str:
+def _install_source_dependencies(es_dir: Path) -> None:
+    _run_npm(["npm", "ci", "--no-audit", "--no-fund"], es_dir)
+    _refresh_dependency_stamp(es_dir)
+
+
+def _build_local(es_dir: Path, node_version: str) -> None:
+    _run_npm(["npm", "run", "build:local"], es_dir)
+    npm_version = _run_npm(["npm", "--version"], es_dir).stdout.strip()
+    if not npm_version:
+        raise RuntimeError("npm returned an empty version after building the event server")
     try:
-        package = json.loads((es_dir / "package.json").read_text())
-    except (json.JSONDecodeError, OSError):
-        return "esbuild"
-    version = package.get("devDependencies", {}).get("esbuild", "")
-    return f"esbuild@{version}" if version else "esbuild"
+        event_server_artifact.generate_artifact_metadata(
+            es_dir,
+            node_version=node_version,
+            npm_version=npm_version,
+        )
+    except event_server_artifact.ArtifactValidationError as exc:
+        raise RuntimeError(f"local event-server artifact audit failed: {exc}") from exc
 
 
-def _build_local(es_dir: Path) -> None:
-    esbuild_bin = es_dir / "node_modules" / ".bin" / "esbuild"
-    if esbuild_bin.exists():
-        _run_npm(["npm", "run", "build:local"], es_dir)
+def _ensure_source_artifact(es_dir: Path, node_version: str) -> None:
+    if event_server_artifact.is_artifact_current(es_dir):
         return
-    _run_npm([
-        "npm", "exec", "--yes",
-        "--cache", str(es_dir / ".npm-cache"),
-        "--package", _esbuild_package(es_dir),
-        "--",
-        "esbuild", "src/local.ts",
-        "--bundle",
-        "--platform=node",
-        "--target=node20",
-        "--outfile=dist/local.js",
-        # Bundle everything except ws: the Chat SDK packages are ESM-only,
-        # which a CJS bundle cannot require() at runtime. ws stays external
-        # for its optional native addons (bufferutil, utf-8-validate).
-        "--external:ws",
-    ], es_dir)
+
+    dependencies_were_valid = _source_dependencies_valid(es_dir)
+    if not dependencies_were_valid:
+        log.info("Installing exact event-server build dependencies...")
+        _install_source_dependencies(es_dir)
+
+    log.info("Building local event server...")
+    try:
+        _build_local(es_dir, node_version)
+    except RuntimeError as first_error:
+        if not dependencies_were_valid:
+            raise
+        log.warning(
+            "Event-server build failed with a validated dependency tree; "
+            "running one exact reinstall before retrying: %s",
+            first_error,
+        )
+        _install_source_dependencies(es_dir)
+        try:
+            _build_local(es_dir, node_version)
+        except RuntimeError as retry_error:
+            raise RuntimeError(
+                "event-server build failed before and after one exact dependency "
+                f"reinstall; first failure: {first_error}; retry failure: {retry_error}"
+            ) from retry_error
 
 
 def health(base_url: str, timeout: float = 2) -> dict | None:
@@ -138,16 +279,33 @@ def _is_local_url(url: str) -> bool:
     return host in ("localhost", "127.0.0.1", "::1")
 
 
-def _run_npm(args: list[str], es_dir: Path) -> None:
+def _run_npm(
+    args: list[str],
+    es_dir: Path,
+) -> subprocess.CompletedProcess[str]:
     """Run an npm command, surfacing its output on failure.
 
     npm failures here used to raise a bare CalledProcessError with the
     output captured but never shown — the real cause (e.g. ENOSPC)
     was invisible in manager.log.
     """
-    result = subprocess.run(
-        args, cwd=str(es_dir), capture_output=True, text=True,
-    )
+    try:
+        result = subprocess.run(
+            args,
+            cwd=str(es_dir),
+            capture_output=True,
+            env=event_server_artifact.sanitized_node_environment(),
+            text=True,
+            timeout=300,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"{args[0]} was not found while running {' '.join(args)} in {es_dir}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"{' '.join(args)} timed out after 300s in {es_dir}"
+        ) from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()[-2000:]
         log.error(f"{' '.join(args)} failed (exit {result.returncode}):\n{detail}")
@@ -155,6 +313,7 @@ def _run_npm(args: list[str], es_dir: Path) -> None:
             f"{' '.join(args)} failed (exit {result.returncode}): "
             f"{detail or 'no output'}"
         )
+    return result
 
 
 def ensure_running(port: int, webhook_secret: str | None = None,
@@ -199,14 +358,13 @@ def ensure_running(port: int, webhook_secret: str | None = None,
         return "connected"
 
     es_dir = _find_event_server_dir()
+    is_installed = _is_installed_event_server_dir(es_dir)
+    if is_installed:
+        _validate_packaged_artifact(es_dir)
 
-    if _needs_install(es_dir):
-        log.info("Installing event server dependencies...")
-        _run_npm(["npm", "install", "--omit=dev", "--no-audit", "--no-fund"], es_dir)
-
-    if _needs_build(es_dir):
-        log.info("Building local event server...")
-        _build_local(es_dir)
+    node, node_version = resolve_node_runtime()
+    if not is_installed:
+        _ensure_source_artifact(es_dir, node_version)
 
     from bobi import paths
     state = paths.state_dir(project_path)
@@ -250,10 +408,14 @@ def ensure_running(port: int, webhook_secret: str | None = None,
         env["BOBI_ES_BIND"] = bind
     if extra_env:
         env.update(extra_env)
+    env.pop("NODE_OPTIONS", None)
+    env.pop("NODE_PATH", None)
+    env["WS_NO_BUFFER_UTIL"] = "1"
+    env["WS_NO_UTF_8_VALIDATE"] = "1"
 
     with open(log_file, "a") as lf:
         proc = subprocess.Popen(
-            ["node", str(es_dir / "dist" / "local.js")],
+            [node, str(es_dir / "dist" / "local.js")],
             stdout=lf, stderr=lf,
             env=env, start_new_session=True,
         )

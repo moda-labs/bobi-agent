@@ -401,6 +401,73 @@ def test_run_doctor_surfaces_slack_socket_mode_check(monkeypatch):
     assert socket_check in doctor.run_doctor()
 
 
+def test_event_server_check_surfaces_node_prerequisite(monkeypatch):
+    from bobi import doctor
+    from bobi.events.server import NodeRuntimePrerequisiteError
+
+    monkeypatch.setattr(doctor, "bound_root", lambda: None)
+    monkeypatch.setattr("bobi.events.server.health", lambda url: None)
+    monkeypatch.setattr(
+        "bobi.events.server.resolve_node_runtime",
+        lambda: (_ for _ in ()).throw(
+            NodeRuntimePrerequisiteError(
+                "The local event server requires Node.js 20+, but node is missing."
+            )
+        ),
+    )
+
+    result = doctor._check_event_server()
+
+    assert result.ok is False
+    assert "Node.js 20+" in result.detail
+    assert "Install Node.js 20+" in result.hint
+
+
+def test_event_server_check_skips_local_node_for_unregistered_remote(
+    tmp_path, monkeypatch,
+):
+    from bobi import doctor
+
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text(
+        "agent: test\n"
+        "event_server_url: https://events.example.com\n"
+    )
+    monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+    monkeypatch.setattr("bobi.events.server.health", lambda url: None)
+    monkeypatch.setattr(
+        "bobi.events.server.resolve_node_runtime",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("remote configuration must not require local Node")
+        ),
+    )
+
+    result = doctor._check_event_server()
+
+    assert result.ok is False
+    assert result.detail == "not running"
+    assert "Node.js" not in result.hint
+
+
+def test_event_server_check_keeps_normal_not_running_hint_when_node_is_ready(
+    monkeypatch,
+):
+    from bobi import doctor
+
+    monkeypatch.setattr(doctor, "bound_root", lambda: None)
+    monkeypatch.setattr("bobi.events.server.health", lambda url: None)
+    monkeypatch.setattr(
+        "bobi.events.server.resolve_node_runtime",
+        lambda: ("/usr/bin/node", "v20.19.2"),
+    )
+
+    result = doctor._check_event_server()
+
+    assert result.ok is False
+    assert result.detail == "not running"
+    assert "auto-launch" in result.hint
+
+
 # --- Host capabilities (#428 Stage 3) ---
 
 

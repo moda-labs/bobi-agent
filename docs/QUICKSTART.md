@@ -32,6 +32,10 @@ have it troubleshoot with you.
   curl -LsSf https://astral.sh/uv/install.sh | sh
   ```
 
+- **Node.js 20 or newer** for Bobi's embedded local event server.
+  For current releases, install Node separately and verify `node --version` reports 20 or newer, including when installing Bobi with Homebrew.
+  A companion Homebrew formula update will automate this prerequisite once it ships.
+
 - **Optional, for cloud deployment**: a [Fly.io](https://fly.io) account
   (Step 5, Option B).
 
@@ -79,7 +83,14 @@ With Homebrew:
 brew install moda-labs/bobi-agent/bobi
 ```
 
-Or with uv:
+Until the companion Homebrew formula update ships, Homebrew users must install Node.js 20 or newer separately.
+For every install method, verify the supported runtime first:
+
+```bash
+node --version
+```
+
+Then install with uv:
 
 ```bash
 uv tool install bobi

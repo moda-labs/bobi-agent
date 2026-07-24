@@ -60,3 +60,47 @@ def test_no_job_calls_private_bound_workflows():
         "release.yml reaches for workflow files that moved to the private "
         f"deploy repo: {offenders}"
     )
+
+
+def test_release_build_provisions_node_and_smokes_the_exact_wheel():
+    steps = _release_jobs()["build-wheel"]["steps"]
+    node_index = next(
+        index
+        for index, step in enumerate(steps)
+        if "actions/setup-node" in step.get("uses", "")
+    )
+    build_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Build wheel + sdist"
+    )
+    test_dependencies_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Install event-server test dependencies"
+    )
+    assert node_index < build_index
+    assert node_index < test_dependencies_index < build_index
+    assert steps[node_index]["with"]["node-version"] == "20"
+    assert steps[test_dependencies_index]["working-directory"] == "event-server"
+    assert (
+        steps[test_dependencies_index]["run"]
+        == "npm ci --no-audit --no-fund"
+    )
+
+    build = steps[build_index]["run"]
+    assert 'pip install -e ".[dev]"' in build
+    assert "python -m build" in build
+
+    smoke = next(
+        step
+        for step in steps
+        if step.get("name") == "Smoke the exact immutable wheel"
+    )["run"]
+    assert 'wheel="$(realpath dist/*.whl)"' in smoke
+    assert 'BOBI_TEST_WHEEL="$wheel"' in smoke
+    assert (
+        "tests/integration/test_packaged_event_server.py::"
+        "test_installed_wheel_starts_without_mutating_frozen_event_server"
+    ) in smoke
+    assert "/tmp/whl/bin/bobi --version" in smoke

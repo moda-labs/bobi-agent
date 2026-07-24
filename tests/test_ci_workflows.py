@@ -1,4 +1,10 @@
+from pathlib import Path
+
 from tests.workflow_utils import load_workflow
+
+PACKAGED_EVENT_SERVER_TEST = (
+    Path(__file__).parent / "integration" / "test_packaged_event_server.py"
+)
 
 
 def _ci_workflow() -> dict:
@@ -11,7 +17,11 @@ def test_integration_fast_model_download_is_bounded_without_hf_xet():
     steps = job["steps"]
     cache = next(step for step in steps if step.get("name") == "Cache embedding model")
     predownload = next(step for step in steps if step.get("name") == "Pre-download embedding model")
-    pytest_step = next(step for step in steps if step.get("name") == "Run all non-Claude integration tests")
+    pytest_step = next(
+        step
+        for step in steps
+        if step.get("name") == "Run all other non-Claude integration tests"
+    )
 
     env = job["env"]
     assert env["HF_HUB_DISABLE_XET"] == "1"
@@ -28,6 +38,41 @@ def test_integration_fast_model_download_is_bounded_without_hf_xet():
     assert "embedding model download failed after 3 attempts" in run
     assert "embedding model cache is empty after warmup" in run
     assert "FASTEMBED_CACHE_PATH" not in pytest_step.get("env", {})
+
+
+def test_ci_builds_and_runs_the_packaged_event_server_contract():
+    workflow = _ci_workflow()
+    event_steps = workflow["jobs"]["event-server"]["steps"]
+    install = next(
+        step for step in event_steps if step.get("name") == "Install dependencies"
+    )
+    bundle = next(
+        step
+        for step in event_steps
+        if step.get("name") == "Build embedded local-server artifact"
+    )
+    assert install["run"] == "npm ci --no-audit --no-fund"
+    assert bundle["working-directory"] == "event-server"
+    assert bundle["run"] == "npm run build:local"
+
+    integration_steps = workflow["jobs"]["integration-fast"]["steps"]
+    packaged = next(
+        step
+        for step in integration_steps
+        if step.get("name") == "Run packaged event-server regression"
+    )
+    remaining = next(
+        step
+        for step in integration_steps
+        if step.get("name") == "Run all other non-Claude integration tests"
+    )
+    assert "tests/integration/test_packaged_event_server.py" in packaged["run"]
+    assert '--timeout=180' in packaged["run"]
+    assert "pytestmark = pytest.mark.timeout" not in (
+        PACKAGED_EVENT_SERVER_TEST.read_text()
+    )
+    assert "--ignore=tests/integration/test_packaged_event_server.py" in remaining["run"]
+    assert '--timeout=180' in remaining["run"]
 
 
 def test_promote_dev_advances_only_on_fully_green_main_push():
@@ -61,5 +106,3 @@ def test_promote_dev_advances_only_on_fully_green_main_push():
     # The ancestor check needs history; a shallow checkout would break it.
     checkout = next(s for s in job["steps"] if "checkout" in s.get("uses", ""))
     assert checkout["with"]["fetch-depth"] == 0
-
-
