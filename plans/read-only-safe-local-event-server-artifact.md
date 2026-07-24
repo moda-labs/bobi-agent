@@ -1,7 +1,7 @@
 # Read-only-safe local event server artifact
 
-> **Status:** Approved
-> **Tracking issue:** moda-labs/bobi-agent#798 · **Created:** 2026-07-23 · **Last amended:** 2026-07-23 (see Amendments)
+> **Status:** Done
+> **Tracking issue:** moda-labs/bobi-agent#798 · **Created:** 2026-07-23 · **Last amended:** 2026-07-24 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -426,101 +426,101 @@ The fresh reviews also established these non-optional sequencing and proof const
 
 ### Phase 1 - Pin the production boundary and bundle contract
 
-- [ ] Add `tests/integration/test_packaged_event_server.py` first and prove it fails on `main` because the real wheel lacks `bobi/event-server/dist/local.js` and installed startup invokes npm against the frozen package.
-- [ ] Capture the pre-fix wheel contents, installed modes, npm invocation, `EACCES`, unavailable health endpoint, and unchanged absence of a runnable server.
-- [ ] Change only `event-server/package.json`'s `build:local` command so `ws` and all required JavaScript are in the bundle, legal comments are preserved, and an esbuild metafile is emitted.
-- [ ] Remove the duplicate Python esbuild command and `npm exec` fallback so the npm script is the single build definition.
-- [ ] Audit the metafile and fail on every external import except Node built-ins and explicitly allowlisted optional `ws` native-addon probes.
-- [ ] Prove a copy of the output starts under Node 20 from an external isolated directory with no ancestor module tree and inherited Node preload/module paths neutralized.
-- [ ] Exercise HTTP health plus a real WebSocket round trip.
-- [ ] Exercise packaged Discord Gateway and Slack Socket Mode setup far enough to trigger lazy dependency loading and connection setup without contacting production services.
+- [x] Add `tests/integration/test_packaged_event_server.py` first and prove it fails on `main` because the real wheel lacks `bobi/event-server/dist/local.js` and installed startup invokes npm against the frozen package.
+- [x] Capture the pre-fix wheel contents, installed modes, npm invocation, `EACCES`, unavailable health endpoint, and unchanged absence of a runnable server.
+- [x] Change only `event-server/package.json`'s `build:local` command so `ws` and all required JavaScript are in the bundle, legal comments are preserved, and an esbuild metafile is emitted.
+- [x] Remove the duplicate Python esbuild command and `npm exec` fallback so the npm script is the single build definition.
+- [x] Audit the metafile and fail on every external import except Node built-ins and explicitly allowlisted optional `ws` native-addon probes.
+- [x] Prove a copy of the output starts under Node 20 from an external isolated directory with no ancestor module tree and inherited Node preload/module paths neutralized.
+- [x] Exercise HTTP health plus a real WebSocket round trip.
+- [x] Exercise packaged Discord Gateway and Slack Socket Mode setup far enough to trigger lazy dependency loading and connection setup without contacting production services.
 
 **Validation gate**
 
-- [ ] `cd event-server && npm ci --no-audit --no-fund && npx tsc --noEmit && npx vitest run && npm run build:local`
-- [ ] Copy `dist/local.js` into a fresh external temporary tree whose complete parent chain has no `node_modules`, launch that copy with `NODE_PATH` and `NODE_OPTIONS` removed, and assert `/health` returns `{"status":"ok","mode":"local"}`.
-- [ ] Put hostile preload, `bufferutil`, and `utf-8-validate` sentinels on inherited lookup paths and assert none executes while the pure-JavaScript WebSocket round trip succeeds.
-- [ ] Register a deployment, open a WebSocket subscription, post a representative GitHub issue webhook, and assert the normalized event is delivered.
-- [ ] Assert the metafile has no unexpected external imports and both packaged socket-driver setup paths execute against controlled local fakes.
-- [ ] Confirm the failing packaged integration test fails for the expected missing-artifact/runtime-npm reason before implementation changes make it green.
+- [x] `cd event-server && npm ci --no-audit --no-fund && npx tsc --noEmit && npx vitest run && npm run build:local`
+- [x] Copy `dist/local.js` into a fresh external temporary tree whose complete parent chain has no `node_modules`, launch that copy with `NODE_PATH` and `NODE_OPTIONS` removed, and assert `/health` returns `{"status":"ok","mode":"local"}`.
+- [x] Put hostile preload, `bufferutil`, and `utf-8-validate` sentinels on inherited lookup paths and assert none executes while the pure-JavaScript WebSocket round trip succeeds.
+- [x] Register a deployment, open a WebSocket subscription, post a representative GitHub issue webhook, and assert the normalized event is delivered.
+- [x] Assert the metafile has no unexpected external imports and both packaged socket-driver setup paths execute against controlled local fakes.
+- [x] Confirm the failing packaged integration test fails for the expected missing-artifact/runtime-npm reason before implementation changes make it green.
 
 ### Phase 2 - Build and publish the immutable artifact
 
-- [ ] Add `hatch_build.py` with one isolated staging implementation for sdist and standard VCS wheel builds.
-- [ ] Enable the custom build hook in `pyproject.toml` and include the hook plus generated bundle, manifest, and fixed notice artifact in the correct sdist and wheel paths.
-- [ ] Validate Node 20, run lockfile-exact npm installation in staging, run the one build script, require non-empty output, generate the deterministic notice artifact and sorted input/output/audit manifest, and force-include all three shipped files through `build_data["force_include"]`.
-- [ ] Keep staging alive until Hatch calls hook finalization.
+- [x] Add `hatch_build.py` with one isolated staging implementation for sdist and standard VCS wheel builds.
+- [x] Enable the custom build hook in `pyproject.toml` and include the hook plus generated bundle, manifest, and fixed notice artifact in the correct sdist and wheel paths.
+- [x] Validate Node 20, run lockfile-exact npm installation in staging, run the one build script, require non-empty output, generate the deterministic notice artifact and sorted input/output/audit manifest, and force-include all three shipped files through `build_data["force_include"]`.
+- [x] Keep staging alive until Hatch calls hook finalization.
   Clean initialize failures directly, clean successful builds in `finalize()`, and register an idempotent process-exit fallback before publishing staged paths.
-- [ ] Force target construction to fail in a PEP 517 subprocess and prove the process-exit fallback removes staging despite Hatchling not calling `finalize()`.
-- [ ] Verify the carried sdist inputs, bundle digest, audited dependency inventory, notice digest, and manifest before wheel-from-sdist reuse without invoking npm.
-- [ ] Rebuild a patched source archive when the supported Node toolchain is available or fail explicitly.
-- [ ] Skip artifact work for editable wheels.
-- [ ] Make VCS, source-archive, missing-artifact, and target-path decisions explicit and tested.
-- [ ] Keep the checkout unchanged across every success and failure.
-- [ ] Surface actionable command, exit, path, and bounded-output diagnostics for every build failure.
+- [x] Force target construction to fail in a PEP 517 subprocess and prove the process-exit fallback removes staging despite Hatchling not calling `finalize()`.
+- [x] Verify the carried sdist inputs, bundle digest, audited dependency inventory, notice digest, and manifest before wheel-from-sdist reuse without invoking npm.
+- [x] Rebuild a patched source archive when the supported Node toolchain is available or fail explicitly.
+- [x] Skip artifact work for editable wheels.
+- [x] Make VCS, source-archive, missing-artifact, and target-path decisions explicit and tested.
+- [x] Keep the checkout unchanged across every success and failure.
+- [x] Surface actionable command, exit, path, and bounded-output diagnostics for every build failure.
 
 **Validation gate**
 
-- [ ] `python -m build`
-- [ ] `python -m build --wheel`
-- [ ] Inspect both build paths and assert the sdist carries `hatch_build.py` plus the bundle, manifest, and notice artifact, and both wheels carry those three files under `bobi/event-server/dist/`.
-- [ ] Assert direct and sdist-derived wheels built in the same clean job contain byte-identical bundle bytes.
-- [ ] Assert neither archive contains `node_modules`, `.npm-cache`, or staging paths.
-- [ ] Assert wheel-from-sdist invokes neither npm nor Node and needs no network.
-- [ ] Install that wheel separately, provision Node 20 as the runtime prerequisite, and prove startup needs no runtime npm modules.
-- [ ] Modify one hashed source-archive input and assert stale bundle reuse is rejected.
-- [ ] Modify only the carried `local.js` bytes and assert artifact-digest validation rejects reuse.
-- [ ] Remove or modify only `THIRD_PARTY_NOTICES.txt` and assert no-Node reuse rejects the archive.
-- [ ] Assert `THIRD_PARTY_NOTICES.txt` is complete for the packages in the esbuild metafile and inventory or byte drift fails CI.
-- [ ] Assert `git status --short` and ignored bundle/install paths are unchanged after source builds.
+- [x] `python -m build`
+- [x] `python -m build --wheel`
+- [x] Inspect both build paths and assert the sdist carries `hatch_build.py` plus the bundle, manifest, and notice artifact, and both wheels carry those three files under `bobi/event-server/dist/`.
+- [x] Assert direct and sdist-derived wheels built in the same clean job contain byte-identical bundle bytes.
+- [x] Assert neither archive contains `node_modules`, `.npm-cache`, or staging paths.
+- [x] Assert wheel-from-sdist invokes neither npm nor Node and needs no network.
+- [x] Install that wheel separately, provision Node 20 as the runtime prerequisite, and prove startup needs no runtime npm modules.
+- [x] Modify one hashed source-archive input and assert stale bundle reuse is rejected.
+- [x] Modify only the carried `local.js` bytes and assert artifact-digest validation rejects reuse.
+- [x] Remove or modify only `THIRD_PARTY_NOTICES.txt` and assert no-Node reuse rejects the archive.
+- [x] Assert `THIRD_PARTY_NOTICES.txt` is complete for the packages in the esbuild metafile and inventory or byte drift fails CI.
+- [x] Assert `git status --short` and ignored bundle/install paths are unchanged after source builds.
 
 ### Phase 3 - Separate installed startup from source development
 
-- [ ] Preserve remote-server and healthy-server early returns.
-- [ ] Classify the existing installed and repository candidates after directory discovery.
-- [ ] Make installed startup require a non-empty bundle, parseable manifest, and non-empty notice artifact whose recorded output digests both match before executing the bundle directly.
-- [ ] Raise `PackagedEventServerArtifactError` with reinstall or upgrade guidance when any installed artifact file is missing or empty, the manifest is malformed, or either output digest differs.
-- [ ] Resolve and validate Node 20+ before process spawn, raise a separate actionable runtime-prerequisite error when it is unavailable, and surface the same remediation through `doctor`.
-- [ ] Remove inherited `NODE_OPTIONS` and `NODE_PATH` from both installed and source child environments and set the `ws` pure-JavaScript opt-out variables.
-- [ ] Prove the installed branch never calls npm, a builder, a timestamp freshness check, or a write-producing command.
-- [ ] Hash source freshness inputs across both manifests, lockfile, TypeScript configuration, and all root/workspace TypeScript sources.
-- [ ] Make the source dependency check require the workspace link, local esbuild binary, matching lockfile and installed-tree digests, and a fresh offline `npm ls --all --json` validation.
-- [ ] Use `npm ci --no-audit --no-fund` for missing, partial, invalid, or lock-drifted source dependencies, then the single `npm run build:local` command.
-- [ ] If that first build fails despite a valid structural tree, run one exact `npm ci`, retry once, and surface both failures if the retry also fails.
-- [ ] Update the existing bind-address integration helper so no test helper preserves the removed installed-runtime npm behavior.
-- [ ] Apply the real runtime guard in the packaged integration test and compare package file path, mode, size, and hash snapshots before and after startup.
-- [ ] Prove `PackagedEventServerArtifactError` reaches direct CLI and manager logs with reinstall guidance before registration retries.
+- [x] Preserve remote-server and healthy-server early returns.
+- [x] Classify the existing installed and repository candidates after directory discovery.
+- [x] Make installed startup require a non-empty bundle, parseable manifest, and non-empty notice artifact whose recorded output digests both match before executing the bundle directly.
+- [x] Raise `PackagedEventServerArtifactError` with reinstall or upgrade guidance when any installed artifact file is missing or empty, the manifest is malformed, or either output digest differs.
+- [x] Resolve and validate Node 20+ before process spawn, raise a separate actionable runtime-prerequisite error when it is unavailable, and surface the same remediation through `doctor`.
+- [x] Remove inherited `NODE_OPTIONS` and `NODE_PATH` from both installed and source child environments and set the `ws` pure-JavaScript opt-out variables.
+- [x] Prove the installed branch never calls npm, a builder, a timestamp freshness check, or a write-producing command.
+- [x] Hash source freshness inputs across both manifests, lockfile, TypeScript configuration, and all root/workspace TypeScript sources.
+- [x] Make the source dependency check require the workspace link, local esbuild binary, matching lockfile and installed-tree digests, and a fresh offline `npm ls --all --json` validation.
+- [x] Use `npm ci --no-audit --no-fund` for missing, partial, invalid, or lock-drifted source dependencies, then the single `npm run build:local` command.
+- [x] If that first build fails despite a valid structural tree, run one exact `npm ci`, retry once, and surface both failures if the retry also fails.
+- [x] Update the existing bind-address integration helper so no test helper preserves the removed installed-runtime npm behavior.
+- [x] Apply the real runtime guard in the packaged integration test and compare package file path, mode, size, and hash snapshots before and after startup.
+- [x] Prove `PackagedEventServerArtifactError` reaches direct CLI and manager logs with reinstall guidance before registration retries.
 
 **Validation gate**
 
-- [ ] `pytest tests/test_event_server_launch.py tests/test_packaging.py tests/test_runtime_guard.py --timeout=60 -q`
-- [ ] `pytest tests/integration/test_packaged_event_server.py -m "not claude and not docker" --timeout=180 -v`
-- [ ] `pytest tests/integration/test_event_server.py -m "not claude and not docker" --timeout=60 -v`
-- [ ] Assert installed complete, installed bundle/manifest/notice missing or malformed or mismatched, Node missing/unsupported, source fresh, source stale, source dependency-incomplete, npm failure, remote, and already-healthy branches all have named tests.
-- [ ] Assert hostile inherited Node preload/module variables cannot execute code in the embedded process and the pure-JavaScript WebSocket path remains functional.
-- [ ] Assert the frozen installed package snapshot is identical before and after successful health, registration, webhook, and WebSocket delivery.
+- [x] `pytest tests/test_event_server_launch.py tests/test_packaging.py tests/test_runtime_guard.py --timeout=60 -q`
+- [x] `pytest tests/integration/test_packaged_event_server.py -m "not claude and not docker" --timeout=180 -v`
+- [x] `pytest tests/integration/test_event_server.py -m "not claude and not docker" --timeout=60 -v`
+- [x] Assert installed complete, installed bundle/manifest/notice missing or malformed or mismatched, Node missing/unsupported, source fresh, source stale, source dependency-incomplete, npm failure, remote, and already-healthy branches all have named tests.
+- [x] Assert hostile inherited Node preload/module variables cannot execute code in the embedded process and the pure-JavaScript WebSocket path remains functional.
+- [x] Assert the frozen installed package snapshot is identical before and after successful health, registration, webhook, and WebSocket delivery.
 
 ### Phase 4 - Close CI, release, documentation, and proof gaps
 
-- [ ] Run the packaged regression in a main CI job with Python, Node 20, and npm.
-- [ ] Keep the production-shaped packaged-server harness as the single definition used by CI and the release smoke.
-- [ ] Add Node 20 setup to the release `build-wheel` job before `python -m build`.
-- [ ] Expand the exact-wheel release smoke from `bobi --version` to immutable installed startup with runtime npm made unusable.
-- [ ] Require health success, no npm call, no runtime dependency/cache creation, no package-tree mutation, and reliable child-process cleanup on failure.
-- [ ] Mirror the current Homebrew formula's PyPI-sdist-to-virtualenv path with the verified wheel-from-sdist no-Node test.
-- [ ] Update README, Quickstart, and `scripts/install.sh` so `uv`, `pipx`, and direct-wheel users see and preflight the Node 20+ prerequisite.
-- [ ] Update `docs/EVENT_SERVER.md` to distinguish prebuilt installed startup from writable source-checkout rebuilds.
-- [ ] Update `docs/SELF_HOSTED_EVENT_SERVER.md` to use `npm ci` for a cloned standalone server and state that Python wheels already contain the runnable bundle.
-- [ ] Preserve Node 20, environment-variable, loopback, tunnel, TLS, Socket Mode, Discord Gateway, and restart guidance.
-- [ ] Attach the required before-and-after transcript and archive-size result to the implementation pull request.
+- [x] Run the packaged regression in a main CI job with Python, Node 20, and npm.
+- [x] Keep the production-shaped packaged-server harness as the single definition used by CI and the release smoke.
+- [x] Add Node 20 setup to the release `build-wheel` job before `python -m build`.
+- [x] Expand the exact-wheel release smoke from `bobi --version` to immutable installed startup with runtime npm made unusable.
+- [x] Require health success, no npm call, no runtime dependency/cache creation, no package-tree mutation, and reliable child-process cleanup on failure.
+- [x] Mirror the current Homebrew formula's PyPI-sdist-to-virtualenv path with the verified wheel-from-sdist no-Node test.
+- [x] Update README, Quickstart, and `scripts/install.sh` so `uv`, `pipx`, and direct-wheel users see and preflight the Node 20+ prerequisite.
+- [x] Update `docs/EVENT_SERVER.md` to distinguish prebuilt installed startup from writable source-checkout rebuilds.
+- [x] Update `docs/SELF_HOSTED_EVENT_SERVER.md` to use `npm ci` for a cloned standalone server and state that Python wheels already contain the runnable bundle.
+- [x] Preserve Node 20, environment-variable, loopback, tunnel, TLS, Socket Mode, Discord Gateway, and restart guidance.
+- [x] Attach the required before-and-after transcript and archive-size result to the implementation pull request.
 
 **Validation gate**
 
-- [ ] `pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q`
-- [ ] `pytest tests/integration/ -m "not claude and not docker" --timeout=180 -q`
-- [ ] `cd event-server && npx tsc --noEmit && npx vitest run && npm run build:local`
-- [ ] Run the exact release wheel smoke locally against the built artifact with Node 20 and preserve the Node log on any failure.
-- [ ] Verify documentation describes installed and source behavior accurately and no feature commit changes `VERSION`, `pyproject.toml`'s project version, or `CHANGELOG.md`.
+- [x] `pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q`
+- [x] `pytest tests/integration/ -m "not claude and not docker" --timeout=180 -q`
+- [x] `cd event-server && npx tsc --noEmit && npx vitest run && npm run build:local`
+- [x] Run the exact release wheel smoke locally against the built artifact with Node 20 and preserve the Node log on any failure.
+- [x] Verify documentation describes installed and source behavior accurately and no feature commit changes `VERSION`, `pyproject.toml`'s project version, or `CHANGELOG.md`.
 
 ### Phase 5 - Deliver and prove the Homebrew runtime prerequisite
 
@@ -531,7 +531,7 @@ The fresh reviews also established these non-optional sequencing and proof const
   Its known-incomplete public sdist cannot pass the new health test; the normal release automation regenerates and commits the formula only after the fixed sdist reaches PyPI.
 - [x] Add deterministic generator coverage for the dependency and functional-test body.
 - [x] Update `.github/workflows/tests.yml` so both macOS bottle jobs run `brew test` after installation and preserve the event-server log on failure.
-- [wip] Build concurrently after this plan lands, but land after the Lane A bobi-agent implementation so the functional test targets the immutable packaged artifact rather than the affected release.
+- [x] Build concurrently after this plan lands, but land after the Lane A bobi-agent implementation so the functional test targets the immutable packaged artifact rather than the affected release.
 
 **Validation gate**
 
@@ -637,8 +637,8 @@ No screenshot or frontend capture is required because there is no UI surface.
 
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
-| A | #798 | 1-4 | bobi-agent immutable artifact, launcher split, non-Homebrew Node prerequisite, CI/release harness, and documentation | concurrent; status-only marker commits to plan-repo `main` | approved; dispatch after plan landing |
-| B | [homebrew-bobi-agent#7](https://github.com/moda-labs/homebrew-bobi-agent/issues/7) | 5 | Generated formula Node dependency, functional `brew test`, macOS bottle proof, and cross-repo convergence | concurrent; status-only marker commits to plan-repo `main` | [PR #8](https://github.com/moda-labs/homebrew-bobi-agent/pull/8) ready; fuse passed; lands after Lane A [PR #841](https://github.com/moda-labs/bobi-agent/pull/841) |
+| A | #798 | 1-4 | bobi-agent immutable artifact, launcher split, non-Homebrew Node prerequisite, CI/release harness, and documentation | concurrent; status-only marker commits to plan-repo `main` | [PR #841](https://github.com/moda-labs/bobi-agent/pull/841) merged as `effb4678d95cdfcf96570935848ec1e7ba718406`; post-merge CI green |
+| B | [homebrew-bobi-agent#7](https://github.com/moda-labs/homebrew-bobi-agent/issues/7) | 5 | Generated formula Node dependency, functional `brew test`, macOS bottle proof, and cross-repo convergence | concurrent; status-only marker commits to plan-repo `main` | [PR #8](https://github.com/moda-labs/homebrew-bobi-agent/pull/8) merged as `436e1a23854199373a115805377544983e324204` after Lane A; issue #7 closed; exact-artifact macOS convergence green |
 
 **Lanes:** two repository-local implementation units are required because one branch and pull request cannot land changes in both `bobi-agent` and `homebrew-bobi-agent`.
 The lanes build concurrently after this plan lands.
@@ -659,6 +659,10 @@ Phase 5's fuse-runnable convergence gate must pass against the two candidate hea
 - **2026-07-23** (house review repair): bound the manifest to the generated bundle bytes; made missing, malformed, and mismatched installed manifests explicit; separated build-time no-Node reuse from the Node 20+ runtime prerequisite; added the coupled Homebrew dependency and non-Homebrew diagnostics; corrected Hatch target-failure cleanup to process-exit semantics; and required hostile module/preload isolation proof.
 - **2026-07-23** (cross-repo split): split the Homebrew work into concurrent Lane B at `moda-labs/homebrew-bobi-agent#7`, ordered its landing after Lane A, and added fuse-runnable plus deferred convergence gates.
 - **2026-07-23** (final review repair): added offline locked-tree validation for partially deleted source dependencies; made a deterministic notice artifact and its audited inventory part of the carried manifest; and changed Lane B to test a temporary candidate formula while leaving the known-broken current-release formula unchanged until normal post-publication regeneration.
+- **2026-07-24** (ordered lane closeout): **Status -> Done.** Lane A [PR #841](https://github.com/moda-labs/bobi-agent/pull/841) merged as `effb4678d95cdfcf96570935848ec1e7ba718406` with green post-merge CI.
+  Lane B [PR #8](https://github.com/moda-labs/homebrew-bobi-agent/pull/8) then merged as `436e1a23854199373a115805377544983e324204`, and issue #7 closed.
+  Merged-main convergence was reverified by exact landed-file identity against both reviewed lane heads, the Lane B generator contracts on `main`, and the existing exact-artifact macOS 14/15 run.
+  The explicitly deferred normal-release public-artifact verification remains open and does not block implementation closeout.
 
 ## Notes
 
