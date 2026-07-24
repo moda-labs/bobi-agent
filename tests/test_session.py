@@ -14,6 +14,9 @@ import pytest
 from bobi.brain import BrainCost, TurnResult
 from bobi.inbox import Message
 from bobi.session import Session
+from bobi.subagent import (
+    _start_event_subscription as real_start_event_subscription,
+)
 
 
 @pytest.fixture
@@ -676,7 +679,7 @@ class TestSubscriptionResilience:
         # Must not raise and must not flip the session into error state.
         session._start_subscription()
         assert session.detect_state() != "error"
-        assert session._subscription is None  # first attempt failed → not wired
+        assert calls["n"] >= 1
 
         # The background thread retries and wires the subscription in.
         deadline = time.time() + 5
@@ -715,6 +718,61 @@ class TestSubscriptionResilience:
         session._sub_retry_stop.set()
         session._sub_retry_thread.join(timeout=2)
         assert not session._sub_retry_thread.is_alive()
+
+    def test_packaged_artifact_error_reaches_manager_log_before_retry(
+        self, session, monkeypatch, caplog,
+    ):
+        from bobi.events.server import PackagedEventServerArtifactError
+
+        ensure_running = MagicMock(
+            side_effect=PackagedEventServerArtifactError(
+                "The installed local event-server artifact is corrupt. "
+                "Reinstall or upgrade Bobi."
+            )
+        )
+        ensure_bubble = MagicMock(
+            side_effect=AssertionError(
+                "artifact validation must fail before bubble setup"
+            )
+        )
+        register = MagicMock(
+            side_effect=AssertionError(
+                "artifact validation must fail before registration retries"
+            )
+        )
+        queued_retries = []
+        monkeypatch.setattr(
+            "bobi.subagent._start_event_subscription",
+            real_start_event_subscription,
+        )
+        monkeypatch.setattr(
+            "bobi.events.server.ensure_running",
+            ensure_running,
+        )
+        monkeypatch.setattr(
+            "bobi.events.server.ensure_bubble",
+            ensure_bubble,
+        )
+        monkeypatch.setattr(
+            "bobi.events.server.register",
+            register,
+        )
+        monkeypatch.setattr(
+            session,
+            "_retry_subscription_in_background",
+            lambda keys: queued_retries.append(keys),
+        )
+        session._subscribe = ["github:o/r"]
+
+        with caplog.at_level("WARNING", logger="bobi.session"):
+            session._start_subscription()
+
+        ensure_running.assert_called_once()
+        ensure_bubble.assert_not_called()
+        register.assert_not_called()
+        assert queued_retries == [["inbox/test-wake", "github:o/r"]]
+        assert "PackagedEventServerArtifactError" in caplog.text
+        assert "Reinstall or upgrade Bobi" in caplog.text
 
     def test_stop_tears_down_background_wired_subscription(
         self, session, monkeypatch

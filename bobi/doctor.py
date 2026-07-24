@@ -368,9 +368,15 @@ def _check_bubble_auth() -> CheckResult:
 def _check_event_server() -> CheckResult:
     """Probe the event server /health endpoint."""
     from bobi.config import Config
-    from bobi.events.server import health
+    from bobi.events.server import (
+        NodeRuntimePrerequisiteError,
+        _is_local_url,
+        health,
+        resolve_node_runtime,
+    )
 
     root = bound_root()
+    needs_local_node = True
     if root:
         try:
             cfg = Config.load(root)
@@ -383,12 +389,24 @@ def _check_event_server() -> CheckResult:
             if cfg.event_server_url and registered:
                 return CheckResult("Event server", ok=True,
                                    detail=f"remote ({cfg.event_server_url})")
+            if cfg.event_server_url and not _is_local_url(cfg.event_server_url):
+                needs_local_node = False
         except FileNotFoundError:
             pass
 
     url = "http://localhost:8080"
     if health(url):
         return CheckResult("Event server", ok=True, detail=url)
+    if needs_local_node:
+        try:
+            resolve_node_runtime()
+        except NodeRuntimePrerequisiteError as exc:
+            return CheckResult(
+                "Event server",
+                ok=False,
+                detail=str(exc),
+                hint="Install Node.js 20+ and ensure `node` is on PATH, then run doctor again.",
+            )
     return CheckResult("Event server", ok=False,
                        detail="not running",
                        hint="`bobi agent <name> event-server start` or `bobi agent <name> start` will auto-launch")

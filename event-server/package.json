@@ -6,7 +6,7 @@
 		"core"
 	],
 	"scripts": {
-		"build:local": "esbuild src/local.ts --bundle --platform=node --target=node20 --outfile=dist/local.js --external:ws",
+		"build:local": "esbuild src/local.ts --bundle --platform=node --target=node20 --outfile=dist/local.js --metafile=dist/local.meta.json --legal-comments=eof",
 		"start:local": "node dist/local.js",
 		"test": "vitest"
 	},

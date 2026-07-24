@@ -119,21 +119,38 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
 
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
-      - name: Build wheel + sdist
-        run: pip install build && python -m build
+      # The packaged runtime itself is dependency-free. The release smoke's
+      # local Discord and Slack protocol drivers use `ws` from the source test
+      # tree, so provision those test-only dependencies explicitly.
+      - name: Install event-server test dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: event-server
 
-      - name: Fail-fast sanity — the wheel at least imports + runs
+      - name: Build wheel + sdist
+        run: |
+          pip install -e ".[dev]"
+          python -m build
+
+      - name: Smoke the exact immutable wheel
         # Post repo-split this plus the subscription-login smoke IS the whole
         # public gate before PyPI - the fleet canary runs in the private
         # deploy repo's release train, after publish. Do not weaken this step
         # on the assumption a downstream canary still guards the artifact.
         run: |
           set -euo pipefail
-          python -m venv /tmp/whl && /tmp/whl/bin/pip install --quiet dist/*.whl
+          wheel="$(realpath dist/*.whl)"
+          BOBI_TEST_WHEEL="$wheel" python -m pytest \
+            tests/integration/test_packaged_event_server.py::test_installed_wheel_starts_without_mutating_frozen_event_server \
+            --timeout=600 -v
+          python -m venv /tmp/whl && /tmp/whl/bin/pip install --quiet "$wheel"
           /tmp/whl/bin/bobi --version
 
       - name: Upload the release artifact

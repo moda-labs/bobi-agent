@@ -65,12 +65,16 @@ admission/routing logic, then `ws.send()`s directly - no DO hop. It binds
 **Implicit startup.** You never start the local server by hand in normal use. When
 a session starts (`bobi/subagent.py`), if `event_server_url` is empty - or set to a
 loopback address - it calls `ensure_running()` (`bobi/events/server.py`), which
-health-checks `http://localhost:<port>/health`, and if nothing is up, locates the
-bundled `event-server/`, builds `dist/local.js` if stale
-(`npm run build:local`, an esbuild bundle), and spawns `node dist/local.js`. A
-genuinely remote `https://` event server skips all of this - the container never
-needs Node. (`bobi agent <name> event-server start` calls the same path as a
-convenience.)
+health-checks `http://localhost:<port>/health`.
+A standard wheel already contains a self-contained `dist/local.js`, its input and output manifest, and fixed third-party notices.
+Installed startup validates those files, requires Node.js 20 or newer, removes inherited Node preload and module-search variables, and spawns the bundle directly.
+It never invokes npm, installs dependencies, builds JavaScript, or writes inside the installed package.
+
+A writable source checkout uses the same bundle contract with content hashes across manifests, lockfile, TypeScript configuration, root sources, and workspace sources.
+A fresh source bundle starts directly.
+A stale source bundle validates the ignored installed dependency stamp, uses exact `npm ci --no-audit --no-fund` only when the locked tree needs repair, and runs the single `npm run build:local` command.
+A genuinely remote `https://` event server skips all local Node and npm work.
+`bobi agent <name> event-server start` calls the same path as a convenience.
 
 The same local server also runs standalone - behind a tunnel on the agent's
 machine, or on its own box behind TLS - to receive provider webhooks on
