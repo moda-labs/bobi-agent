@@ -524,26 +524,26 @@ The fresh reviews also established these non-optional sequencing and proof const
 
 ### Phase 5 - Deliver and prove the Homebrew runtime prerequisite
 
-- [ ] In `moda-labs/homebrew-bobi-agent#7`, update `scripts/update-formula.py` so every generated formula declares a supported Node 20+ runtime dependency.
-- [ ] Replace the generated `bobi --help`-only formula test with an embedded event-server health smoke that makes npm unusable and snapshots the installed Bobi package before and after startup.
-- [ ] Add explicit candidate-sdist URL and SHA-256 inputs to the generator so convergence can render a temporary formula from Lane A's unmerged artifact without publishing it.
-- [ ] Keep the committed `Formula/bobi.rb` on the current v0.48.0 release unchanged.
+- [x] In `moda-labs/homebrew-bobi-agent#7`, update `scripts/update-formula.py` so every generated formula declares a supported Node 20+ runtime dependency.
+- [x] Replace the generated `bobi --help`-only formula test with an embedded event-server health smoke that makes npm unusable and snapshots the installed Bobi package before and after startup.
+- [x] Add explicit candidate-sdist URL and SHA-256 inputs to the generator so convergence can render a temporary formula from Lane A's unmerged artifact without publishing it.
+- [x] Keep the committed `Formula/bobi.rb` on the current v0.48.0 release unchanged.
   Its known-incomplete public sdist cannot pass the new health test; the normal release automation regenerates and commits the formula only after the fixed sdist reaches PyPI.
-- [ ] Add deterministic generator coverage for the dependency and functional-test body.
-- [ ] Update `.github/workflows/tests.yml` so both macOS bottle jobs run `brew test` after installation and preserve the event-server log on failure.
-- [ ] Build concurrently after this plan lands, but land after the Lane A bobi-agent implementation so the functional test targets the immutable packaged artifact rather than the affected release.
+- [x] Add deterministic generator coverage for the dependency and functional-test body.
+- [x] Update `.github/workflows/tests.yml` so both macOS bottle jobs run `brew test` after installation and preserve the event-server log on failure.
+- [wip] Build concurrently after this plan lands, but land after the Lane A bobi-agent implementation so the functional test targets the immutable packaged artifact rather than the affected release.
 
 **Validation gate**
 
-- [ ] Run the Homebrew repository's generator tests.
-- [ ] Generate a temporary formula from Lane A's candidate sdist URL and SHA-256 and assert its source, dependency, and functional-test contract.
-- [ ] Assert `Formula/bobi.rb` is unchanged in the implementation diff and still represents the currently published release.
-- [ ] On both supported macOS runners, install the temporary candidate formula, run `brew test`, and prove the declared dependency supplies a supported `node` executable.
-- [ ] Prove the temporary formula health smoke invokes no npm command and leaves the installed Bobi package byte-for-byte unchanged.
+- [x] Run the Homebrew repository's generator tests.
+- [x] Generate a temporary formula from Lane A's candidate sdist URL and SHA-256 and assert its source, dependency, and functional-test contract.
+- [x] Assert `Formula/bobi.rb` is unchanged in the implementation diff and still represents the currently published release.
+- [x] On both supported macOS runners, install the temporary candidate formula, run `brew test`, and prove the declared dependency supplies a supported `node` executable.
+- [x] Prove the temporary formula health smoke invokes no npm command and leaves the installed Bobi package byte-for-byte unchanged.
 
 **Initiative convergence gate**
 
-- [ ] **Fuse-runnable:** combine local merged previews of both lane heads on macOS, build Lane A's candidate sdist, render a temporary Lane B formula from its URL and real SHA-256, install it through Homebrew, run `brew test`, and prove health, zero npm invocation, and package immutability without changing the committed current-release formula or publishing either lane.
+- [x] **Fuse-runnable:** combine local merged previews of both lane heads on macOS, build Lane A's candidate sdist, render a temporary Lane B formula from its URL and real SHA-256, install it through Homebrew, run `brew test`, and prove health, zero npm invocation, and package immutability without changing the committed current-release formula or publishing either lane.
 - [ ] **Deferred until the normal release:** let `update-formula.yml` regenerate and commit `Formula/bobi.rb` from the fixed public sdist, then install the published Homebrew bottle and `uv tool` artifact on their supported Node runtime and repeat the health and no-runtime-npm smoke against the exact public bytes.
 
 ## Proof of work
@@ -638,7 +638,7 @@ No screenshot or frontend capture is required because there is no UI surface.
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
 | A | #798 | 1-4 | bobi-agent immutable artifact, launcher split, non-Homebrew Node prerequisite, CI/release harness, and documentation | concurrent; status-only marker commits to plan-repo `main` | approved; dispatch after plan landing |
-| B | [homebrew-bobi-agent#7](https://github.com/moda-labs/homebrew-bobi-agent/issues/7) | 5 | Generated formula Node dependency, functional `brew test`, macOS bottle proof, and cross-repo convergence | concurrent; status-only marker commits to plan-repo `main` | approved; builds after plan landing, lands after Lane A |
+| B | [homebrew-bobi-agent#7](https://github.com/moda-labs/homebrew-bobi-agent/issues/7) | 5 | Generated formula Node dependency, functional `brew test`, macOS bottle proof, and cross-repo convergence | concurrent; status-only marker commits to plan-repo `main` | [PR #8](https://github.com/moda-labs/homebrew-bobi-agent/pull/8) ready; fuse passed; lands after Lane A [PR #841](https://github.com/moda-labs/bobi-agent/pull/841) |
 
 **Lanes:** two repository-local implementation units are required because one branch and pull request cannot land changes in both `bobi-agent` and `homebrew-bobi-agent`.
 The lanes build concurrently after this plan lands.
