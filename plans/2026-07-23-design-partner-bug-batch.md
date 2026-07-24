@@ -17,7 +17,7 @@ disjoint single-file lanes — because it is the first real run of the hosted
 `plan-execute` workflow (moda-agents `plan-execute.yaml`, the headless host of
 the house execute skill). It verifies that machinery end-to-end (gate →
 parallel lane dispatch → landing queue → suspend → resume → converge) at low
-stakes before the large `plans/review-remediation.md` run is dispatched
+stakes before the large `plans/2026-07-22-review-remediation.md` run is dispatched
 through it.
 
 ## Problem

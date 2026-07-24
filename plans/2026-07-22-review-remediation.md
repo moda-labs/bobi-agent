@@ -1,7 +1,7 @@
 # Full-repo review remediation (defects + mechanical quality)
 
 > **Status:** Approved
-> **Tracking issue:** moda-labs/bobi-agent#817 · **Created:** 2026-07-22 · **Last amended:** 2026-07-22 (see Amendments)
+> **Tracking issue:** moda-labs/bobi-agent#817 · **Created:** 2026-07-22 · **Last amended:** 2026-07-24 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -11,7 +11,7 @@ Clear the entire actionable backlog from the July 2026 two-pass full-repo review
 
 ## Problem
 
-Two adversarially-verified review passes (281 agents; every finding re-verified by an independent agent, top items re-traced by hand) established the current state. Full per-item detail — failure scenario, evidence, verifier's trace — lives in the companion appendix **`plans/review-remediation-findings.md`** (committed alongside this plan; IDs `D###` = defect pass, `Q###` = quality pass). The checklist lines below reference those IDs; the appendix is part of this plan's spec. Claims were verified against the working tree at `58aba2c` (review) and spot-re-verified at plan time; each builder re-verifies the cited lines before fixing (line numbers drift).
+Two adversarially-verified review passes (281 agents; every finding re-verified by an independent agent, top items re-traced by hand) established the current state. Full per-item detail — failure scenario, evidence, verifier's trace — lives in the companion appendix **`plans/2026-07-22-review-remediation-findings.md`** (committed alongside this plan; IDs `D###` = defect pass, `Q###` = quality pass). The checklist lines below reference those IDs; the appendix is part of this plan's spec. Claims were verified against the working tree at `58aba2c` (review) and spot-re-verified at plan time; each builder re-verifies the cited lines before fixing (line numbers drift).
 
 The highest-consequence clusters:
 
@@ -43,7 +43,7 @@ The authoritative per-item file inventory is the checklist below + appendix. Hot
 ### New
 
 - `bobi/fsutil.py` (name at builder's discretion, or an existing home like `bobi/paths.py`) — the single atomic-write helper (tmp sibling + `os.replace`, optional fsync) that Phase 3 introduces and all durable-state writers adopt. Must not become a second copy of an existing helper: survey the five existing implementations (D092) and hoist the best one.
-- `plans/review-remediation-findings.md` — the committed findings appendix (part of this plan).
+- `plans/2026-07-22-review-remediation-findings.md` — the committed findings appendix (part of this plan).
 
 ## Questionables
 
@@ -406,6 +406,7 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
 
 - **2026-07-22** (Split): filed lanes A–E as #818–822 (thin dispatch pointers). B/E land after A (#818); C/D parallel with A.
 - **2026-07-22** (Zach + planning session): Q1–Q5 decided (all recommended option — 5 lanes, plausible/unverified in scope with re-verification, remove `--resume`, delete expired compat now, restrict credential endpoint to declared vars). Status → Approved. Lane map filled (A–E).
+- **2026-07-24** (plan-file hygiene): renamed this plan and its findings appendix to date-prefixed filenames — `plans/review-remediation.md` → `plans/2026-07-22-review-remediation.md`, `plans/review-remediation-findings.md` → `plans/2026-07-22-review-remediation-findings.md` (dates = first-commit date; `git mv` preserved history). In-repo cross-references updated; GitHub issue bodies (#817–822) still cite the old paths and are left as historical record (this amendment is the pointer).
 - **2026-07-22** (build session, authorized by Zach): **D001+D002 shipped early** (ahead of Lane A dispatch) to unblock headless execute — PR **#825** (`_drain_turn` dead-transport branch sets `_last_is_error`; two behavioral regressions + a two-brain e2e with a new `__stub__:raise` directive and a claude leg that SIGKILLs the live CLI mid-turn). Bot PR **#800** (issue #799) landed the same day and independently fixed the D001 ack-loss via `_drain_turn`'s `None`-return; #825 was rebased on top and carries the D002 phase-honesty half #800 didn't cover. Bot PR #810 (atomic registry state.json publish) landed in the same batch. Lane A's remaining Phase 1–4 items are unchanged.
 
 ## Notes

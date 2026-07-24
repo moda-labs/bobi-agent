@@ -377,5 +377,5 @@ then this phase does not dispatch.
   **separate** durable fix (plan bump / throttling), tracked apart.
 - **References:** #425 (receive-side heartbeat, commit `3fe35cc`); #800 (rotation
   responsiveness / replay unacked); #826/#827 (registry refresh on resume);
-  `plans/review-remediation.md` dead-transport family (session/ack layer — a
+  `plans/2026-07-22-review-remediation.md` dead-transport family (session/ack layer — a
   different seam from this transport/health layer).
