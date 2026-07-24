@@ -130,11 +130,11 @@ jobs:
 
       - name: Install dependencies
         working-directory: event-server
-        run: npm ci
+        run: npm ci --no-audit --no-fund
 
-      # vitest never imports local.ts and the local bundle is built lazily at
-      # runtime, so without this a dangling import (e.g. across the events-core
-      # package boundary) would reach main unnoticed.
+      # vitest never imports local.ts, so typecheck the complete workspace
+      # before producing the embedded artifact. Otherwise a dangling import
+      # across the events-core package boundary could reach main unnoticed.
       - name: Typecheck (all workspace sources)
         working-directory: event-server
         run: npx tsc --noEmit
@@ -142,6 +142,10 @@ jobs:
       - name: Run event-server tests
         working-directory: event-server
         run: npx vitest run
+
+      - name: Build embedded local-server artifact
+        working-directory: event-server
+        run: npm run build:local
 
       # The private worker adapter consumes events-core as a pinned published
       # npm package after the repo split; this proves the publishable tarball
@@ -228,6 +232,11 @@ jobs:
         # fastembed uses ONNX (no torch needed).
         run: pip install -e ".[dev,kb]"
 
+      - name: Run packaged event-server regression
+        run: >-
+          pytest tests/integration/test_packaged_event_server.py
+          -m "not claude and not docker" --timeout=180 -v
+
       - name: Cache embedding model
         uses: actions/cache@v4
         with:
@@ -255,14 +264,15 @@ jobs:
           echo "::error::embedding model download failed after 3 attempts"
           exit 1
 
-      - name: Run all non-Claude integration tests
+      - name: Run all other non-Claude integration tests
         # Tests that need the claude CLI skip via requires_claude.
         # `docker`-marked tests build the container image (minutes + network) —
         # they run in the dedicated container-image job, not here.
-        # New test files are auto-discovered — no explicit file list to rot.
+        # The packaged distribution boundary runs in the named step above.
         run: >-
           pytest tests/integration/ -m "not claude and not docker"
-          --timeout=60 -v
+          --ignore=tests/integration/test_packaged_event_server.py
+          --timeout=180 -v
 
   # NOTE: the wrangler-dev integration job (Worker adapter under a real
   # `wrangler dev`) lives in the private deploy repo (repo split), which runs

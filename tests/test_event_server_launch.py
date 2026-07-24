@@ -1,36 +1,63 @@
-"""Event-server launch: npm-failure surfacing and remote-URL guard.
+"""Event-server artifact launch, source rebuild, and remote-URL coverage."""
 
-The v0.14.1 release gate failed inside `npm install` with
-capture_output=True — the CalledProcessError carried no output, so the
-manager.log showed a bare traceback and diagnosing the real cause
-(ENOSPC) required SSHing to the runner and re-running npm by hand.
-
-Containerized instances (#336) must never start Node when
-``event_server_url`` points to a remote server.
-"""
-
+import hashlib
 import json
 import os
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 from bobi import paths
+from bobi.events import artifact
 from bobi.events import server as es
 
 
-def _mkdir_installed_node_modules(es_dir: Path) -> None:
-    """A node_modules that _needs_install accepts: the events-core workspace
-    link must exist, not just the directory."""
-    (es_dir / "node_modules" / "@moda-labs" / "bobi-events-core").mkdir(parents=True)
+def _output_entry(data: bytes) -> dict[str, int | str]:
+    return {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+
+
+def _write_valid_artifact(es_dir: Path) -> None:
+    es_dir.mkdir(parents=True, exist_ok=True)
+    (es_dir / "package.json").write_text("{}")
+    dist = es_dir / "dist"
+    dist.mkdir()
+    bundle = b"console.log('packaged')\n"
+    notice = artifact.notice_bytes()
+    (dist / artifact.BUNDLE_NAME).write_bytes(bundle)
+    (dist / artifact.NOTICE_NAME).write_bytes(notice)
+    manifest = {
+        "bundled_dependencies": [
+            dependency.manifest_entry()
+            for dependency in artifact.AUDITED_DEPENDENCIES
+        ],
+        "inputs": {},
+        "outputs": {
+            artifact.BUNDLE_NAME: _output_entry(bundle),
+            artifact.NOTICE_NAME: _output_entry(notice),
+        },
+        "schema_version": artifact.SCHEMA_VERSION,
+        "tools": {"esbuild": "0.25.12", "node": "v20.19.2", "npm": "9.2.0"},
+    }
+    (dist / artifact.MANIFEST_NAME).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def _started_health():
+    calls = {"count": 0}
+
+    def fake_health(*args, **kwargs):
+        calls["count"] += 1
+        return None if calls["count"] == 1 else {"status": "ok"}
+
+    return fake_health
 
 
 def test_npm_failure_surfaces_stderr(tmp_path, monkeypatch, caplog):
     es_dir = tmp_path / "event-server"
     es_dir.mkdir()
-    (es_dir / "package.json").write_text("{}")
 
     def fake_run(args, **kwargs):
         return subprocess.CompletedProcess(
@@ -39,109 +66,129 @@ def test_npm_failure_surfaces_stderr(tmp_path, monkeypatch, caplog):
         )
 
     monkeypatch.setattr(es.subprocess, "run", fake_run)
-    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
-    monkeypatch.setattr(es, "health", lambda *a, **k: None)
 
     with pytest.raises(RuntimeError, match="ENOSPC"):
+        es._run_npm(["npm", "ci"], es_dir)
+
+
+def test_installed_artifact_spawns_directly_with_sanitized_environment(
+    tmp_path, monkeypatch,
+):
+    es_dir = tmp_path / "event-server"
+    _write_valid_artifact(es_dir)
+    paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+    captured: dict = {}
+
+    class FakePopen:
+        pid = 12345
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        return FakePopen()
+
+    monkeypatch.setenv("NODE_OPTIONS", "--require=/tmp/hostile.js")
+    monkeypatch.setenv("NODE_PATH", "/tmp/hostile-modules")
+    monkeypatch.setattr(es, "_is_installed_event_server_dir", lambda path: True)
+    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
+    monkeypatch.setattr(es, "resolve_node_runtime", lambda: ("/node20", "v20.19.2"))
+    monkeypatch.setattr(
+        es,
+        "_run_npm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("installed startup must not invoke npm")
+        ),
+    )
+    monkeypatch.setattr(es.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(es, "health", _started_health())
+
+    result = es.ensure_running(
+        8080,
+        project_path=tmp_path,
+        extra_env={"NODE_OPTIONS": "--require=extra.js", "NODE_PATH": "/extra"},
+    )
+
+    assert result == "started"
+    assert captured["args"] == ["/node20", str(es_dir / "dist" / "local.js")]
+    env = captured["env"]
+    assert "NODE_OPTIONS" not in env
+    assert "NODE_PATH" not in env
+    assert env["WS_NO_BUFFER_UTIL"] == "1"
+    assert env["WS_NO_UTF_8_VALIDATE"] == "1"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing-bundle",
+        "empty-bundle",
+        "missing-manifest",
+        "empty-manifest",
+        "malformed-manifest",
+        "non-utf8-manifest",
+        "missing-notice",
+        "empty-notice",
+        "bundle-mismatch",
+        "notice-mismatch",
+    ],
+)
+def test_installed_artifact_failure_is_actionable_and_never_repairs(
+    tmp_path, monkeypatch, mutation,
+):
+    es_dir = tmp_path / "event-server"
+    _write_valid_artifact(es_dir)
+    dist = es_dir / "dist"
+    if mutation == "missing-bundle":
+        (dist / artifact.BUNDLE_NAME).unlink()
+    elif mutation == "empty-bundle":
+        (dist / artifact.BUNDLE_NAME).write_bytes(b"")
+    elif mutation == "missing-manifest":
+        (dist / artifact.MANIFEST_NAME).unlink()
+    elif mutation == "empty-manifest":
+        (dist / artifact.MANIFEST_NAME).write_bytes(b"")
+    elif mutation == "empty-notice":
+        (dist / artifact.NOTICE_NAME).write_bytes(b"")
+    elif mutation == "malformed-manifest":
+        (dist / artifact.MANIFEST_NAME).write_text("{")
+    elif mutation == "non-utf8-manifest":
+        (dist / artifact.MANIFEST_NAME).write_bytes(b"\x80")
+    elif mutation == "missing-notice":
+        (dist / artifact.NOTICE_NAME).unlink()
+    elif mutation == "bundle-mismatch":
+        (dist / artifact.BUNDLE_NAME).write_bytes(b"tampered")
+    else:
+        (dist / artifact.NOTICE_NAME).write_bytes(b"tampered")
+
+    monkeypatch.setattr(es, "_is_installed_event_server_dir", lambda path: True)
+    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
+    monkeypatch.setattr(es, "health", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        es,
+        "resolve_node_runtime",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("artifact validation must precede Node")
+        ),
+    )
+    monkeypatch.setattr(
+        es,
+        "_run_npm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("installed startup must not invoke npm")
+        ),
+    )
+
+    with pytest.raises(
+        es.PackagedEventServerArtifactError,
+        match=r"incomplete or corrupt.*Reinstall or upgrade",
+    ):
         es.ensure_running(8080, project_path=tmp_path)
-
-
-def test_existing_node_modules_without_esbuild_uses_npm_exec(tmp_path, monkeypatch):
-    es_dir = tmp_path / "event-server"
-    _mkdir_installed_node_modules(es_dir)
-    (es_dir / "src").mkdir()
-    (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
-    (es_dir / "package.json").write_text("{}")
-    paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
-
-    calls = []
-
-    def fake_run(args, **kwargs):
-        calls.append(args)
-        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
-
-    health_calls = {"count": 0}
-
-    def fake_health(*args, **kwargs):
-        health_calls["count"] += 1
-        if health_calls["count"] == 1:
-            return None
-        return {"status": "ok"}
-
-    class FakePopen:
-        pid = 12345
-
-    monkeypatch.setattr(es.subprocess, "run", fake_run)
-    monkeypatch.setattr(es.subprocess, "Popen", lambda *a, **k: FakePopen())
-    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
-    monkeypatch.setattr(es, "health", fake_health)
-
-    result = es.ensure_running(8080, project_path=tmp_path)
-
-    assert result == "started"
-    assert calls[0][:6] == [
-        "npm", "exec", "--yes", "--cache", str(es_dir / ".npm-cache"), "--package"
-    ]
-
-
-def test_pre_workspace_node_modules_triggers_reinstall(tmp_path, monkeypatch):
-    """A node_modules from before the events-core workspace split (present,
-    but no @moda-labs/bobi-events-core link) must trigger npm install: it
-    survives pip upgrades and git pulls, and without the link the local
-    bundle cannot resolve its imports."""
-    es_dir = tmp_path / "event-server"
-    (es_dir / "node_modules").mkdir(parents=True)  # pre-workspace install
-    (es_dir / "src").mkdir()
-    (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
-    (es_dir / "package.json").write_text("{}")
-    paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
-
-    calls = []
-
-    def fake_run(args, **kwargs):
-        calls.append(args)
-        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
-
-    health_calls = {"count": 0}
-
-    def fake_health(*args, **kwargs):
-        health_calls["count"] += 1
-        return None if health_calls["count"] == 1 else {"status": "ok"}
-
-    class FakePopen:
-        pid = 12345
-
-    monkeypatch.setattr(es.subprocess, "run", fake_run)
-    monkeypatch.setattr(es.subprocess, "Popen", lambda *a, **k: FakePopen())
-    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
-    monkeypatch.setattr(es, "health", fake_health)
-
-    result = es.ensure_running(8080, project_path=tmp_path)
-
-    assert result == "started"
-    assert calls[0][:2] == ["npm", "install"]
 
 
 def test_setup_webhook_secrets_are_forwarded_to_local_server(tmp_path, monkeypatch):
     es_dir = tmp_path / "event-server"
-    (es_dir / "dist").mkdir(parents=True)
-    dist = es_dir / "dist" / "local.js"
-    dist.write_text("console.log('ok')\n")
-    (es_dir / "src").mkdir()
-    (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
-    os.utime(dist, (dist.stat().st_atime, dist.stat().st_mtime + 1))
-    _mkdir_installed_node_modules(es_dir)
-    (es_dir / "package.json").write_text("{}")
+    _write_valid_artifact(es_dir)
     paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
-
     captured: dict = {}
-    health_calls = {"count": 0}
-
-    def fake_health(*args, **kwargs):
-        health_calls["count"] += 1
-        if health_calls["count"] == 1:
-            return None
-        return {"status": "ok"}
 
     class FakePopen:
         pid = 12345
@@ -152,9 +199,11 @@ def test_setup_webhook_secrets_are_forwarded_to_local_server(tmp_path, monkeypat
 
     monkeypatch.setenv("SLACK_SIGNING_SECRET", "slack-secret")
     monkeypatch.setenv("LINEAR_WEBHOOK_SECRET", "linear-secret")
+    monkeypatch.setattr(es, "_is_installed_event_server_dir", lambda path: True)
     monkeypatch.setattr(es.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
-    monkeypatch.setattr(es, "health", fake_health)
+    monkeypatch.setattr(es, "health", _started_health())
+    monkeypatch.setattr(es, "resolve_node_runtime", lambda: ("/node20", "v20.19.2"))
 
     result = es.ensure_running(8080, project_path=tmp_path)
 
@@ -165,26 +214,13 @@ def test_setup_webhook_secrets_are_forwarded_to_local_server(tmp_path, monkeypat
     assert env["BOBI_ES_LINEAR_WEBHOOK_SECRET"] == "linear-secret"
 
 
-def test_explicit_webhook_secrets_override_setup_env(tmp_path, monkeypatch):
+def test_explicit_webhook_secrets_override_setup_environment(
+    tmp_path, monkeypatch,
+):
     es_dir = tmp_path / "event-server"
-    (es_dir / "dist").mkdir(parents=True)
-    dist = es_dir / "dist" / "local.js"
-    dist.write_text("console.log('ok')\n")
-    (es_dir / "src").mkdir()
-    (es_dir / "src" / "local.ts").write_text("console.log('ok')\n")
-    os.utime(dist, (dist.stat().st_atime, dist.stat().st_mtime + 1))
-    _mkdir_installed_node_modules(es_dir)
-    (es_dir / "package.json").write_text("{}")
+    _write_valid_artifact(es_dir)
     paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
-
     captured: dict = {}
-    health_calls = {"count": 0}
-
-    def fake_health(*args, **kwargs):
-        health_calls["count"] += 1
-        if health_calls["count"] == 1:
-            return None
-        return {"status": "ok"}
 
     class FakePopen:
         pid = 12345
@@ -195,9 +231,11 @@ def test_explicit_webhook_secrets_override_setup_env(tmp_path, monkeypatch):
 
     monkeypatch.setenv("SLACK_SIGNING_SECRET", "ambient-slack")
     monkeypatch.setenv("LINEAR_WEBHOOK_SECRET", "ambient-linear")
+    monkeypatch.setattr(es, "_is_installed_event_server_dir", lambda path: True)
     monkeypatch.setattr(es.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
-    monkeypatch.setattr(es, "health", fake_health)
+    monkeypatch.setattr(es, "health", _started_health())
+    monkeypatch.setattr(es, "resolve_node_runtime", lambda: ("/node20", "v20.19.2"))
 
     result = es.ensure_running(
         8080,
@@ -208,10 +246,314 @@ def test_explicit_webhook_secrets_override_setup_env(tmp_path, monkeypatch):
     )
 
     assert result == "started"
-    env = captured["env"]
-    assert env["BOBI_ES_WEBHOOK_SECRET"] == "explicit-github"
-    assert "BOBI_ES_SLACK_SIGNING_SECRET" not in env
-    assert env["BOBI_ES_LINEAR_WEBHOOK_SECRET"] == "explicit-linear"
+    environment = captured["env"]
+    assert environment["BOBI_ES_WEBHOOK_SECRET"] == "explicit-github"
+    assert "BOBI_ES_SLACK_SIGNING_SECRET" not in environment
+    assert environment["BOBI_ES_LINEAR_WEBHOOK_SECRET"] == "explicit-linear"
+
+
+def test_node_and_npm_probes_receive_only_sanitized_environment(
+    tmp_path, monkeypatch,
+):
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs["env"]))
+        output = "v20.19.2\n" if args[-1] == "--version" and "node" in args[0] else ""
+        if args[:2] == ["npm", "ls"]:
+            output = "{}"
+        elif args == ["npm", "--version"]:
+            output = "9.2.0\n"
+        return subprocess.CompletedProcess(args, returncode=0, stdout=output, stderr="")
+
+    monkeypatch.setenv("NODE_OPTIONS", "--require=/tmp/hostile.cjs")
+    monkeypatch.setenv("NODE_PATH", "/tmp/hostile-modules")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "provider-secret")
+    monkeypatch.setenv("npm_config_node_options", "--require=/tmp/other.cjs")
+    monkeypatch.setenv("npm_config_script_shell", "/tmp/hostile-shell")
+    monkeypatch.setattr(es.shutil, "which", lambda name: f"/safe/{name}")
+    monkeypatch.setattr(es.subprocess, "run", fake_run)
+
+    es.resolve_node_runtime()
+    for command in (
+        ["npm", "ls", "--all", "--json", "--offline"],
+        ["npm", "ci", "--no-audit", "--no-fund"],
+        ["npm", "run", "build:local"],
+        ["npm", "--version"],
+    ):
+        es._run_npm(command, tmp_path)
+
+    assert [args for args, _ in calls] == [
+        ["/safe/node", "--version"],
+        ["npm", "ls", "--all", "--json", "--offline"],
+        ["npm", "ci", "--no-audit", "--no-fund"],
+        ["npm", "run", "build:local"],
+        ["npm", "--version"],
+    ]
+    for _, environment in calls:
+        assert environment["PATH"]
+        assert "NODE_OPTIONS" not in environment
+        assert "NODE_PATH" not in environment
+        assert "SLACK_BOT_TOKEN" not in environment
+        assert "npm_config_node_options" not in environment
+        assert "npm_config_script_shell" not in environment
+
+
+@pytest.mark.parametrize(
+    ("which_result", "version", "match"),
+    [
+        (None, "", r"not found on PATH.*Node\.js 20\+"),
+        ("/node", "v18.20.0", r"requires Node\.js 20\+.*v18\.20\.0"),
+    ],
+)
+def test_node_runtime_prerequisite_is_actionable(
+    monkeypatch, which_result, version, match,
+):
+    monkeypatch.setattr(
+        es.shutil,
+        "which",
+        lambda name: which_result if name == "node" else None,
+    )
+    monkeypatch.setattr(
+        es.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], returncode=0, stdout=version, stderr=""
+        ),
+    )
+
+    with pytest.raises(es.NodeRuntimePrerequisiteError, match=match):
+        es.resolve_node_runtime()
+
+
+def _write_source_dependency_state(
+    es_dir: Path, tree: dict,
+) -> None:
+    (es_dir / "node_modules" / "@moda-labs" / "bobi-events-core").mkdir(
+        parents=True
+    )
+    esbuild = es_dir / "node_modules" / ".bin" / "esbuild"
+    esbuild.parent.mkdir(parents=True, exist_ok=True)
+    esbuild.write_text("#!/bin/sh\n")
+    esbuild.chmod(0o755)
+    (es_dir / "package-lock.json").write_text('{"lockfileVersion": 3}\n')
+    stamp = {
+        "installed_tree_sha256": artifact.canonical_json_digest(tree),
+        "lockfile_sha256": artifact.file_sha256(es_dir / "package-lock.json"),
+        "schema_version": 1,
+    }
+    (es_dir / "node_modules" / es.DEPENDENCY_STAMP_NAME).write_text(
+        json.dumps(stamp)
+    )
+
+
+def test_source_dependency_stamp_requires_exact_lock_and_offline_tree(
+    tmp_path, monkeypatch,
+):
+    tree = {
+        "dependencies": {
+            "@moda-labs/bobi-events-core": {"version": "0.1.0"},
+            "esbuild": {"version": "0.25.12"},
+        },
+        "name": "bobi-event-server",
+    }
+    _write_source_dependency_state(tmp_path, tree)
+    calls = []
+
+    def run_npm(args, path):
+        calls.append(args)
+        return subprocess.CompletedProcess(
+            args, returncode=0, stdout=json.dumps(tree), stderr=""
+        )
+
+    monkeypatch.setattr(es, "_run_npm", run_npm)
+
+    assert es._source_dependencies_valid(tmp_path)
+    assert calls == [["npm", "ls", "--all", "--json", "--offline"]]
+
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 2}\n')
+    assert not es._source_dependencies_valid(tmp_path)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("schema_version", [True, 1.0, "1"])
+def test_source_dependency_stamp_schema_requires_an_exact_integer(
+    tmp_path, monkeypatch, schema_version,
+):
+    tree = {"name": "bobi-event-server"}
+    _write_source_dependency_state(tmp_path, tree)
+    stamp_path = tmp_path / "node_modules" / es.DEPENDENCY_STAMP_NAME
+    stamp = json.loads(stamp_path.read_text())
+    stamp["schema_version"] = schema_version
+    stamp_path.write_text(json.dumps(stamp))
+    monkeypatch.setattr(
+        es,
+        "_run_npm",
+        lambda *args: (_ for _ in ()).throw(
+            AssertionError("invalid stamp schema must fail before npm inspection")
+        ),
+    )
+
+    assert es._source_dependencies_valid(tmp_path) is False
+
+
+def test_deleted_transitive_dependency_triggers_exact_reinstall_and_build(
+    tmp_path, monkeypatch,
+):
+    tree = {"name": "bobi-event-server"}
+    _write_source_dependency_state(tmp_path, tree)
+    monkeypatch.setattr(artifact, "is_artifact_current", lambda path: False)
+    monkeypatch.setattr(
+        es,
+        "_run_npm",
+        lambda args, path: (_ for _ in ()).throw(
+            RuntimeError("npm dependency tree is invalid: missing transitive payload")
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        es, "_install_source_dependencies", lambda path: calls.append("install")
+    )
+    monkeypatch.setattr(
+        es, "_build_local", lambda path, version: calls.append("build")
+    )
+
+    es._ensure_source_artifact(tmp_path, "v20.19.2")
+
+    assert calls == ["install", "build"]
+
+
+def test_source_install_and_build_use_single_exact_commands(
+    tmp_path, monkeypatch,
+):
+    calls = []
+
+    def run_npm(args, path):
+        calls.append(args)
+        output = "9.2.0\n" if args == ["npm", "--version"] else ""
+        return subprocess.CompletedProcess(
+            args, returncode=0, stdout=output, stderr=""
+        )
+
+    generated = []
+    monkeypatch.setattr(es, "_run_npm", run_npm)
+    monkeypatch.setattr(
+        es, "_refresh_dependency_stamp", lambda path: calls.append(["refresh-stamp"])
+    )
+    monkeypatch.setattr(
+        artifact,
+        "generate_artifact_metadata",
+        lambda path, **kwargs: generated.append((path, kwargs)),
+    )
+
+    es._install_source_dependencies(tmp_path)
+    es._build_local(tmp_path, "v20.19.2")
+
+    assert calls == [
+        ["npm", "ci", "--no-audit", "--no-fund"],
+        ["refresh-stamp"],
+        ["npm", "run", "build:local"],
+        ["npm", "--version"],
+    ]
+    assert generated == [
+        (
+            tmp_path,
+            {"node_version": "v20.19.2", "npm_version": "9.2.0"},
+        )
+    ]
+
+
+def test_fresh_source_artifact_skips_npm(monkeypatch, tmp_path):
+    monkeypatch.setattr(artifact, "is_artifact_current", lambda path: True)
+    monkeypatch.setattr(
+        es,
+        "_source_dependencies_valid",
+        lambda path: (_ for _ in ()).throw(
+            AssertionError("fresh artifact must not inspect dependencies")
+        ),
+    )
+    monkeypatch.setattr(
+        es,
+        "_build_local",
+        lambda *args: (_ for _ in ()).throw(
+            AssertionError("fresh artifact must not build")
+        ),
+    )
+
+    es._ensure_source_artifact(tmp_path, "v20.19.2")
+
+
+def test_stale_source_with_valid_dependencies_runs_only_build(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(artifact, "is_artifact_current", lambda path: False)
+    monkeypatch.setattr(es, "_source_dependencies_valid", lambda path: True)
+    monkeypatch.setattr(
+        es, "_install_source_dependencies", lambda path: calls.append("install")
+    )
+    monkeypatch.setattr(
+        es, "_build_local", lambda path, version: calls.append(("build", version))
+    )
+
+    es._ensure_source_artifact(tmp_path, "v20.19.2")
+
+    assert calls == [("build", "v20.19.2")]
+
+
+def test_incomplete_source_dependencies_use_exact_install_then_build(
+    monkeypatch, tmp_path,
+):
+    calls = []
+    monkeypatch.setattr(artifact, "is_artifact_current", lambda path: False)
+    monkeypatch.setattr(es, "_source_dependencies_valid", lambda path: False)
+    monkeypatch.setattr(
+        es, "_install_source_dependencies", lambda path: calls.append("install")
+    )
+    monkeypatch.setattr(
+        es, "_build_local", lambda path, version: calls.append("build")
+    )
+
+    es._ensure_source_artifact(tmp_path, "v20.19.2")
+
+    assert calls == ["install", "build"]
+
+
+def test_valid_tree_build_failure_gets_one_exact_repair_and_retry(
+    monkeypatch, tmp_path,
+):
+    calls = []
+    builds = iter([RuntimeError("missing payload"), None])
+    monkeypatch.setattr(artifact, "is_artifact_current", lambda path: False)
+    monkeypatch.setattr(es, "_source_dependencies_valid", lambda path: True)
+    monkeypatch.setattr(
+        es, "_install_source_dependencies", lambda path: calls.append("install")
+    )
+
+    def build(path, version):
+        calls.append("build")
+        error = next(builds)
+        if error:
+            raise error
+
+    monkeypatch.setattr(es, "_build_local", build)
+
+    es._ensure_source_artifact(tmp_path, "v20.19.2")
+
+    assert calls == ["build", "install", "build"]
+
+
+def test_valid_tree_second_build_failure_surfaces_both_attempts(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(artifact, "is_artifact_current", lambda path: False)
+    monkeypatch.setattr(es, "_source_dependencies_valid", lambda path: True)
+    monkeypatch.setattr(es, "_install_source_dependencies", Mock())
+    errors = iter([RuntimeError("first-build"), RuntimeError("retry-build")])
+    monkeypatch.setattr(
+        es, "_build_local", lambda *args: (_ for _ in ()).throw(next(errors))
+    )
+
+    with pytest.raises(RuntimeError, match=r"first-build.*retry-build"):
+        es._ensure_source_artifact(tmp_path, "v20.19.2")
 
 
 # ── Remote-URL guard (containerized-6) ──────────────────────────────

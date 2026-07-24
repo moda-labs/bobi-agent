@@ -1441,18 +1441,19 @@ class TestBindAddress:
     def _start_server(bobi_env, port: int, extra_env: dict | None = None):
         """Start an event server with explicit env control, return (proc, log_path)."""
         from bobi.events.server import (
-            _build_local,
+            _ensure_source_artifact,
             _find_event_server_dir,
-            _needs_build,
-            _needs_install,
-            _run_npm,
+            _is_installed_event_server_dir,
+            _validate_packaged_artifact,
+            resolve_node_runtime,
         )
 
         es_dir = _find_event_server_dir()
-        if _needs_install(es_dir):
-            _run_npm(["npm", "install", "--omit=dev", "--no-audit", "--no-fund"], es_dir)
-        if _needs_build(es_dir):
-            _build_local(es_dir)
+        if _is_installed_event_server_dir(es_dir):
+            _validate_packaged_artifact(es_dir)
+        node, node_version = resolve_node_runtime()
+        if not _is_installed_event_server_dir(es_dir):
+            _ensure_source_artifact(es_dir, node_version)
 
         log_path = bobi_env.state_dir / f"event-server-bind-{port}.log"
 
@@ -1461,10 +1462,14 @@ class TestBindAddress:
         env["BOBI_ES_PORT"] = str(port)
         if extra_env:
             env.update(extra_env)
+        env.pop("NODE_OPTIONS", None)
+        env.pop("NODE_PATH", None)
+        env["WS_NO_BUFFER_UTIL"] = "1"
+        env["WS_NO_UTF_8_VALIDATE"] = "1"
 
         lf = open(log_path, "w")
         proc = subprocess.Popen(
-            ["node", str(es_dir / "dist" / "local.js")],
+            [node, str(es_dir / "dist" / "local.js")],
             stdout=lf, stderr=lf,
             env=env, start_new_session=True,
         )
