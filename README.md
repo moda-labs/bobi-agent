@@ -49,6 +49,9 @@ agents you can build:
 - The `bobi` CLI - installed from [Homebrew](https://brew.sh/) or any Python
   package manager such as [`uv`](https://astral.sh/uv/) or
   [`pipx`](https://pipx.pypa.io/).
+- Node.js 20 or newer for the embedded local event server.
+  For current releases, install Node separately and ensure `node` is on `PATH`, including when installing Bobi with Homebrew.
+  A companion Homebrew formula update will automate this prerequisite once it ships.
 - For cloud deployment (optional): a [Fly.io](https://fly.io) account and a Fly
   API token. Only needed if you run `bobi deploy` - see [Cloud Deployment](#cloud-deployment).
 
@@ -90,7 +93,14 @@ With [Homebrew](https://brew.sh/):
 brew install moda-labs/bobi-agent/bobi
 ```
 
-Or with [uv](https://docs.astral.sh/uv/):
+Until the companion Homebrew formula update ships, Homebrew users must install Node.js 20 or newer separately.
+For every install method, verify that the supported runtime is available:
+
+```bash
+node --version
+```
+
+Then install with uv:
 
 ```bash
 uv tool install bobi

@@ -103,7 +103,7 @@ Python and no bobi install needed - the server is plain Node.
 ```bash
 git clone https://github.com/moda-labs/bobi-agent.git
 cd bobi-agent/event-server
-npm install
+npm ci --no-audit --no-fund
 npm run build:local          # esbuild bundle -> dist/local.js
 BOBI_ES_SLACK_SIGNING_SECRET=... \
 BOBI_ES_LINEAR_WEBHOOK_SECRET=... \
@@ -111,8 +111,9 @@ BOBI_ES_WEBHOOK_SECRET=... \
 node dist/local.js
 ```
 
-(A pip install of bobi bundles the same sources under
-`site-packages/bobi/event-server/` if you prefer not to clone.)
+A Python wheel already contains the audited runnable bundle under
+`site-packages/bobi/event-server/dist/`.
+Normal Bobi startup validates and executes that bundle directly with Node.js 20 or newer, without a runtime npm install or build.
 
 ### Configuration
 

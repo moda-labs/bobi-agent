@@ -635,6 +635,29 @@ class TestEventServerCommand:
         assert called == {"port": 17777, "project_path": bobi_install.repo_path}
         assert "port 17777" in result.output
 
+    def test_start_surfaces_packaged_artifact_reinstall_guidance(
+        self, bobi_install, monkeypatch,
+    ):
+        from bobi.events.server import PackagedEventServerArtifactError
+
+        monkeypatch.setattr(
+            "bobi.events.server.ensure_running",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                PackagedEventServerArtifactError(
+                    "The installed local event-server artifact is corrupt. "
+                    "Reinstall or upgrade Bobi."
+                )
+            ),
+        )
+
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "event-server", "start"]
+        )
+
+        assert result.exit_code != 0
+        assert "Reinstall or upgrade Bobi" in result.output
+        assert "event-server artifact is corrupt" in result.output
+
     def test_stop_warning_uses_selected_runtime_port(self, bobi_install, monkeypatch):
         (bobi_install.state_dir / "event-server.port").write_text("58405")
 

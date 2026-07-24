@@ -2702,8 +2702,18 @@ def event_server_start(foreground, port):
     project_path = _detect_project_root()
     es_port = _selected_local_event_server_port(project_path, port)
 
-    from bobi.events.server import ensure_running
-    result = ensure_running(es_port, project_path=project_path)
+    from bobi.events.server import (
+        NodeRuntimePrerequisiteError,
+        PackagedEventServerArtifactError,
+        ensure_running,
+    )
+    try:
+        result = ensure_running(es_port, project_path=project_path)
+    except (
+        NodeRuntimePrerequisiteError,
+        PackagedEventServerArtifactError,
+    ) as exc:
+        raise click.ClickException(str(exc)) from exc
     if result == "skipped":
         click.echo("Remote event_server_url configured — local server not needed.", err=True)
         return
