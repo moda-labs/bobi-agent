@@ -1,6 +1,6 @@
 # Review-remediation findings appendix
 
-Companion to `plans/review-remediation.md`. One entry per finding from the July 2026 two-pass full-repo review (281 agents; every finding adversarially verified). IDs: `D###` = defect pass, `Q###` = quality pass. Status: confirmed = verifier independently traced it; plausible = survived verification but not fully traced (builder re-verifies before fixing); unverified = past the verification cap (builder verifies the evidence first).
+Companion to `plans/2026-07-22-review-remediation.md`. One entry per finding from the July 2026 two-pass full-repo review (281 agents; every finding adversarially verified). IDs: `D###` = defect pass, `Q###` = quality pass. Status: confirmed = verifier independently traced it; plausible = survived verification but not fully traced (builder re-verifies before fixing); unverified = past the verification cap (builder verifies the evidence first).
 
 
 ## Q001 — `bobi/cli.py:3361` (structure, high, confirmed, phase deferred)
