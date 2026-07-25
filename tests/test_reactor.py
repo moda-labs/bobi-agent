@@ -481,6 +481,47 @@ class TestEventReactor:
         assert "moda-labs/test" in task
 
     @patch("bobi.subagent.launch_agent")
+    def test_assigned_issue_task_carries_the_title(self, mock_launch):
+        """The issue-assigned task text must survive the D017 event-type fix.
+
+        `_build_task` branched on `github.issues.assigned`, a type no adapter
+        ever emits - the adapter sends `github.issues` with the action in
+        fields. While the dispatch rule was keyed on the same phantom type the
+        branch was simply unreachable; now that the rule matches reality, an
+        unfixed branch silently drops the issue title and falls through to the
+        generic fallback.
+        """
+        mock_launch.return_value = "wf-issue-lifecycle-test-818"
+        reactor = self._make_reactor(rules=[
+            AutoDispatchRule(
+                event="github.issues",
+                workflow="issue-lifecycle",
+                match={"action": "assigned"},
+                allow_self_authored=True,
+            ),
+        ])
+        event = {
+            "id": "evt-818",
+            "type": "github.issues",
+            "topics": ["github:moda-labs/test"],
+            "fields": {
+                "action": "assigned",
+                "number": 818,
+                "repo": "moda-labs/test",
+                "title": "Lane A - behavioral fixes",
+            },
+        }
+
+        assert reactor.process(event) == "dispatched"
+
+        _wait_calls(mock_launch, 1)
+        task = mock_launch.call_args[1]["task"]
+        assert "Lane A - behavioral fixes" in task, (
+            f"assigned-issue task lost the title: {task!r}"
+        )
+        assert "#818" in task
+
+    @patch("bobi.subagent.launch_agent")
     def test_rule_task_template_overrides_default_task(self, mock_launch):
         mock_launch.return_value = "wf-alert-triage-test"
         rules = [

@@ -404,6 +404,93 @@ class TestCheckMonitorRelevance:
         assert results == []
 
 
+class TestCheckAutoDispatchEvents:
+    """An auto_dispatch rule keyed on an event type no adapter emits is dead
+    config: the deterministic dispatch it promises silently degrades to LLM
+    discretion (D017). validate must surface it."""
+
+    def _check(self, rules):
+        from bobi.validate import _check_auto_dispatch_events
+        return _check_auto_dispatch_events(Config(auto_dispatch=rules))
+
+    def test_github_action_in_type_is_flagged(self):
+        results = self._check([
+            {"event": "github.issues.assigned", "workflow": "issue-lifecycle"},
+        ])
+        assert len(results) == 1
+        assert not results[0].ok
+        assert not results[0].required  # warning, not blocking
+        assert "github.issues.assigned" in results[0].name
+        assert "match:" in results[0].hint
+
+    def test_github_type_with_match_passes(self):
+        assert self._check([
+            {"event": "github.issues", "match": {"action": "assigned"},
+             "workflow": "issue-lifecycle"},
+        ]) == []
+
+    def test_github_multiword_header_passes(self):
+        assert self._check([
+            {"event": "github.pull_request_review_comment", "workflow": "x"},
+        ]) == []
+
+    def test_linear_three_segment_type_passes(self):
+        """Linear's adapter DOES encode the action in the type."""
+        assert self._check([{"event": "linear.Issue.create", "workflow": "x"}]) == []
+
+    def test_unknown_slack_type_is_flagged(self):
+        results = self._check([{"event": "slack.channel_message", "workflow": "x"}])
+        assert len(results) == 1
+        assert "slack.dm" in results[0].hint
+
+    def test_known_slack_type_passes(self):
+        assert self._check([{"event": "slack.dm", "workflow": "x"}]) == []
+
+    def test_unknown_source_is_left_alone(self):
+        """Monitor-injected and self-hosted sources have no known grammar."""
+        assert self._check([
+            {"event": "email/received", "workflow": "triage"},
+            {"event": "alert.firing", "workflow": "triage"},
+        ]) == []
+
+    def test_missing_event_key_is_flagged(self):
+        results = self._check([{"workflow": "issue-lifecycle"}])
+        assert len(results) == 1
+        assert not results[0].ok
+
+    def test_no_auto_dispatch_no_checks(self):
+        assert self._check([]) == []
+
+    def test_unmatchable_rule_does_not_block_startup(self, tmp_path):
+        config_dir = tmp_path / "package"
+        config_dir.mkdir()
+        (config_dir / "agent.yaml").write_text(dedent("""\
+            entry_point: manager
+            services:
+              - name: github
+            auto_dispatch:
+              - event: github.issues.assigned
+                workflow: issue-lifecycle
+        """))
+        result = validate_config(tmp_path)
+        assert result.ok, "a dead rule is a warning, not a startup blocker"
+        flagged = [c for c in result.checks if not c.ok]
+        assert any("github.issues.assigned" in c.name for c in flagged)
+
+    def test_shipped_packs_have_no_unmatchable_rules(self):
+        from bobi.validate import _check_auto_dispatch_events
+        agents_dir = Path(__file__).resolve().parent.parent / "agents"
+        packs = sorted(p for p in agents_dir.iterdir() if (p / "agent.yaml").is_file())
+        assert packs, "expected shipped agent packs under agents/"
+        for pack in packs:
+            cfg = Config._parse(pack / "agent.yaml")
+            failures = [c for c in _check_auto_dispatch_events(cfg) if not c.ok]
+            assert failures == [], (
+                f"{pack.name} auto_dispatch names unmatchable event types: "
+                f"{[(c.name, c.detail) for c in failures]}"
+            )
+
+
 class TestCheckServiceCredentials:
 
     def test_slack_with_token(self):

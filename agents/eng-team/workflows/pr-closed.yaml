@@ -11,7 +11,9 @@ steps:
     timeout: 120
 
   - name: route-merged
-    if: "merged == true"
+    # `merged` arrives as an auto_dispatch input field, so it lives in the
+    # `input` scope — only step outputs are flattened into bare names.
+    if: "${{ input.merged }} == true"
     goto: close-issue
     else: done
 

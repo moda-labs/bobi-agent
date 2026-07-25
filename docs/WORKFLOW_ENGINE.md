@@ -237,12 +237,19 @@ to a missing scope or key resolves to an empty string and logs a warning rather
 than failing the run.
 
 **Conditions** in route steps use bare names (resolved from a flat namespace of
-all step outputs) and support `==`, `!=`, `in`, `not in`, `and`, `or`, `not`,
-quoted string literals, list literals, and `true` / `false`:
+all step outputs) and support `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `not in`,
+`and`, `or`, `not`, quoted string literals, list literals, and `true` / `false`:
 
 ```yaml
     if: "complexity == 'large' and needs_spec != false"
+    if: "issues_count > 0"
 ```
+
+The flat namespace holds **step outputs only**. Anything else - the launch
+input fields, the worktree path - is reachable only through its scope, so
+write `${{ input.merged }} == true`, never a bare `merged`. A bare name with no
+step output behind it stays a literal word, and a numeric comparison against a
+non-numeric operand is `false` (with a warning) rather than a lexical compare.
 
 ## The handoff contract
 

@@ -115,6 +115,7 @@ def validate_config(project_path: Path) -> ValidationResult:
     checks.extend(_check_effort(cfg))
     checks.extend(_check_workflow_effort(cfg, project_path))
     checks.extend(_check_monitor_relevance(project_path))
+    checks.extend(_check_auto_dispatch_events(cfg))
     checks.extend(_check_service_credentials(cfg))
     checks.extend(_check_venn_services(cfg))
     checks.extend(_check_mcp_servers(cfg, project_path))
@@ -391,6 +392,70 @@ def _check_monitor_relevance(project_path: Path) -> list[CheckResult]:
             detail="relevance: is ignored on this flavor",
             hint="the relevance gate needs a mechanical detector "
                  "(command: or check:, e.g. tool_poll/venn_poll)",
+        ))
+    return checks
+
+
+# The normalized event types the shipped ingestion adapters emit
+# (event-server/core/src/adapters/*.ts). A `*` matches exactly one dotted
+# segment. GitHub passes the webhook event header straight through and carries
+# the action in `fields.action`; Linear is the one source that encodes the
+# action in the type itself.
+_EVENT_TYPE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "github": ("github.*",),
+    "linear": ("linear.*.*",),
+    "slack": ("slack.mention", "slack.dm", "slack.thread_reply"),
+    "discord": ("discord.dm", "discord.reply", "discord.mention"),
+    "whatsapp": ("whatsapp.message",),
+}
+
+
+def _event_type_matches(pattern: str, event_type: str) -> bool:
+    """True if a dotted event type matches a pattern, `*` = one segment."""
+    expected = pattern.split(".")
+    actual = event_type.split(".")
+    if len(expected) != len(actual):
+        return False
+    return all(e == "*" or e == a for e, a in zip(expected, actual))
+
+
+def _check_auto_dispatch_events(cfg) -> list[CheckResult]:
+    """Warn on `auto_dispatch` rules keyed on an event type nothing emits.
+
+    ``AutoDispatchRule.matches`` compares the event type for exact equality,
+    so a rule naming a type outside its source's grammar (the classic being
+    `github.issues.assigned` — GitHub's action rides in `fields.action`) never
+    fires. Nothing errors: the deterministic dispatch the rule promises just
+    silently degrades to whatever the director LLM decides.
+
+    A warning, not a blocker: the table models the adapters this repo ships,
+    and a self-hosted ingress may legitimately emit its own types. Sources
+    with no known grammar (monitor-injected events like `email/received`,
+    custom webhooks) are left alone.
+    """
+    checks: list[CheckResult] = []
+    for entry in cfg.auto_dispatch:
+        if not isinstance(entry, dict):
+            continue
+        event = entry.get("event")
+        if not isinstance(event, str) or not event:
+            checks.append(CheckResult(
+                "auto_dispatch", ok=False, required=False,
+                detail="rule has no event: type, so it can never match",
+                hint="give every auto_dispatch rule an event: type",
+            ))
+            continue
+        patterns = _EVENT_TYPE_PATTERNS.get(event.split(".")[0])
+        if not patterns:
+            continue  # unknown source — no grammar to check against
+        if any(_event_type_matches(p, event) for p in patterns):
+            continue
+        checks.append(CheckResult(
+            f"auto_dispatch.{event}", ok=False, required=False,
+            detail="no adapter emits this event type, so the rule never fires",
+            hint=f"emitted types: {', '.join(patterns)} — put the action in "
+                 f"match: (e.g. match: {{action: assigned}}) rather than the "
+                 f"event type",
         ))
     return checks
 

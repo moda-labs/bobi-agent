@@ -322,3 +322,102 @@ class TestAdversarialReviewStep:
         assert "codex_exec" not in agent_cfg, (
             "agent.yaml must not reference the retired codex_exec MCP shim (#403)"
         )
+
+
+PR_CLOSED = ENG_TEAM / "workflows" / "pr-closed.yaml"
+
+
+class TestPrClosedRouting:
+    """pr-closed must actually route a merged PR to the close-issue step.
+
+    The route condition is evaluated against the same VariableContext the
+    orchestrator builds: `input` holds the auto_dispatch input_fields, and only
+    step outputs are flattened into bare names. A condition on a bare `merged`
+    therefore never resolves (D016).
+    """
+
+    def _route_target(self, merged: bool) -> str:
+        from bobi.workflow.schema import load_workflow
+        from bobi.workflow.variables import VariableContext
+
+        workflow = load_workflow(PR_CLOSED)
+        step = workflow.step_by_name("route-merged")
+        assert step is not None and step.condition, (
+            "pr-closed must keep a route-merged step with a condition"
+        )
+
+        ctx = VariableContext()
+        # Mirrors orchestrator.run_workflow: input_fields land in `input`.
+        ctx.set_scope("input", {
+            "task": "PR #42 closed", "repo": "moda-labs/bobi", "run_key": "42",
+            "pr_number": 42, "merged": merged, "head_branch": "feat/x",
+        })
+        # cleanup_worktree's result is the only thing flattened before the route.
+        for key, value in {
+            "status": "ok", "paths_removed": 2, "branch": "feat/x",
+        }.items():
+            ctx.set_flat(key, value)
+
+        return step.goto if ctx.evaluate_condition(step.condition) else step.else_goto
+
+    def test_merged_pr_routes_to_close_issue(self):
+        assert self._route_target(merged=True) == "close-issue", (
+            "a merged PR must reach the close-issue step"
+        )
+
+    def test_unmerged_pr_routes_to_done(self):
+        assert self._route_target(merged=False) == "done", (
+            "an abandoned PR must skip close-issue"
+        )
+
+
+class TestAutoDispatchRules:
+    """Every auto_dispatch rule must name an event type the ingress emits.
+
+    The GitHub adapter emits `github.<webhook-header>` and carries the action
+    in `fields.action`, so a rule keyed on `github.issues.assigned` is dead
+    config: the deterministic dispatch silently degrades to LLM discretion
+    (D017).
+    """
+
+    def _auto_dispatch(self) -> list[dict]:
+        return yaml.safe_load(AGENT_YAML.read_text())["auto_dispatch"]
+
+    def test_issue_assignment_dispatches_issue_lifecycle(self):
+        """A real `issues`/assigned webhook event must launch issue-lifecycle."""
+        import time
+        from unittest.mock import patch
+
+        from bobi.events.reactor import EventReactor
+
+        event = {
+            "type": "github.issues",
+            "source": "github",
+            "topics": ["github:moda-labs/bobi"],
+            "fields": {
+                "action": "assigned",
+                "number": 818,
+                "title": "Fix the parser",
+                "sender": "bobi-agent",
+                "assignee": "bobi-agent",
+            },
+        }
+        reactor = EventReactor.from_config(self._auto_dispatch(), cwd="/tmp/project")
+        with patch("bobi.subagent.launch_agent") as mock_launch:
+            mock_launch.return_value = "wf-issue-lifecycle-818"
+            assert reactor.process(event) == "dispatched"
+            deadline = time.time() + 2.0
+            while time.time() < deadline and not mock_launch.call_count:
+                time.sleep(0.005)
+            assert mock_launch.call_args[1]["workflow_name"] == "issue-lifecycle"
+
+    def test_no_rule_names_an_unmatchable_event_type(self):
+        from bobi.config import Config
+        from bobi.validate import _check_auto_dispatch_events
+
+        cfg = Config._parse(AGENT_YAML)
+        failures = [c for c in _check_auto_dispatch_events(cfg) if not c.ok]
+        assert failures == [], (
+            f"eng-team auto_dispatch names unmatchable event types: "
+            f"{[(c.name, c.detail) for c in failures]}"
+        )

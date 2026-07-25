@@ -312,8 +312,10 @@ class EventReactor:
             parts.append("Address the reviewer's comments.")
             return " ".join(parts)
 
-        # Issue assigned
-        if event_type == "github.issues.assigned":
+        # Issue assigned. The adapter emits `github.issues` and carries the
+        # action in fields - there is no `github.issues.assigned` type, so
+        # matching on one made this branch unreachable (D017).
+        if event_type == "github.issues" and action == "assigned":
             title = fields.get("title", "")
             return f"Issue #{number} in {repo} assigned: {title}. Begin work."
 

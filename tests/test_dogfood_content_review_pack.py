@@ -172,6 +172,121 @@ class TestContentDirs:
             assert (tmp_path / d).is_dir(), f"{d} should exist after install"
 
 
+class TestManagerRoutingTable:
+    """Every route the manager is told to take must exist in the pack.
+
+    The routing table is the manager's dispatch contract. A row naming a
+    workflow the pack does not ship (D060) sends the manager at a `-w` target
+    that cannot resolve; a row naming an event surface the pack never
+    subscribes to (D119) can never fire at all.
+    """
+
+    ROLE_MD = PACK_DIR / "roles" / "manager" / "ROLE.md"
+
+    def _rows(self) -> list[tuple[str, str]]:
+        rows = []
+        for line in self.ROLE_MD.read_text().splitlines():
+            line = line.strip()
+            if not line.startswith("|"):
+                continue
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) != 2 or set(cells[0]) <= {"-", ":"}:
+                continue
+            if cells[0].lower().startswith("event"):
+                continue  # header
+            rows.append((cells[0], cells[1]))
+        return rows
+
+    def test_routing_table_is_parsed(self):
+        assert len(self._rows()) >= 4, "manager ROLE.md must ship a routing table"
+
+    def test_every_referenced_target_exists(self):
+        import re
+
+        workflows = {p.stem for p in (PACK_DIR / "workflows").glob("*.yaml")}
+        roles = {d.name for d in (PACK_DIR / "roles").iterdir() if d.is_dir()}
+        for event, action in self._rows():
+            for token in re.findall(r"`([^`]+)`", action):
+                assert token in workflows or token in roles, (
+                    f"routing row {event!r} points at {token!r}, which is "
+                    f"neither a workflow ({sorted(workflows)}) nor a role "
+                    f"({sorted(roles)})"
+                )
+
+    def test_every_routed_event_source_is_declared(self, tmp_path):
+        """No row may route an event source the pack never subscribes to."""
+        _install_pack(PACK_DIR, tmp_path)
+        cfg = Config.load(tmp_path)
+        declared = {s.name for s in cfg.event_services}
+        known_sources = {
+            "slack", "discord", "whatsapp", "linear", "email", "github",
+        }
+        for event, _action in self._rows():
+            for source in known_sources:
+                if source in event.lower():
+                    assert source in declared, (
+                        f"routing row {event!r} routes {source} events, but the "
+                        f"pack declares no {source} event service "
+                        f"(declared: {sorted(declared)})"
+                    )
+
+    def test_chat_surface_matches_a_declared_service(self, tmp_path):
+        """`chat:` must name a declared event service (or `cli` for none)."""
+        _install_pack(PACK_DIR, tmp_path)
+        cfg = Config.load(tmp_path)
+        if not cfg.chat or cfg.chat == "cli":
+            return
+        assert cfg.chat in {s.name for s in cfg.event_services}, (
+            f"chat: {cfg.chat} but no {cfg.chat} service with events: true is "
+            f"declared, so the chat surface can never deliver a message"
+        )
+
+
+class TestReviewWorkflowRouting:
+    """dogfood-content-review must route to `fix` when the audit finds issues.
+
+    The route condition is evaluated against the same VariableContext the
+    orchestrator builds: the audit step's handoff values are flattened into
+    bare names (D015).
+    """
+
+    WORKFLOW = PACK_DIR / "workflows" / "dogfood-content-review.yaml"
+
+    def _route_target(self, issues_count) -> str:
+        from bobi.workflow.schema import load_workflow
+        from bobi.workflow.variables import VariableContext
+
+        workflow = load_workflow(self.WORKFLOW)
+        step = workflow.step_by_name("route_fixes")
+        assert step is not None and step.condition
+
+        ctx = VariableContext()
+        ctx.set_scope("input", {"task": "review the guide", "repo": "x/y"})
+        # Mirrors orchestrator: the audit handoff is set_flat'ed key by key.
+        outputs = {"verdict": "needs work", "issues_count": issues_count}
+        ctx.set_scope("audit", outputs)
+        for key, value in outputs.items():
+            ctx.set_flat(key, value)
+
+        return step.goto if ctx.evaluate_condition(step.condition) else step.else_goto
+
+    def test_multiple_issues_route_to_fix(self):
+        assert self._route_target(3) == "fix", (
+            "an audit reporting 3 issues must reach the fix step"
+        )
+
+    def test_single_issue_routes_to_fix(self):
+        assert self._route_target(1) == "fix"
+
+    def test_no_issues_routes_to_done(self):
+        assert self._route_target(0) == "done"
+
+    def test_string_valued_count_routes_the_same(self):
+        """Handoff values arrive as strings from the brain."""
+        assert self._route_target("2") == "fix"
+        assert self._route_target("0") == "done"
+
+
 class TestRegistryEntry:
     """The dogfood-content-review pack has an entry in agents/registry.yaml."""
 

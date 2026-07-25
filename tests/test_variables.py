@@ -261,6 +261,133 @@ class TestConditionContainment:
 
 
 # ---------------------------------------------------------------------------
+# Condition evaluation — numeric comparison
+# ---------------------------------------------------------------------------
+
+class TestConditionNumeric:
+    def test_greater_than_true(self):
+        ctx = VariableContext()
+        ctx.set_flat("issues_count", 3)
+        assert ctx.evaluate_condition("issues_count > 0") is True
+
+    def test_greater_than_false_when_equal(self):
+        ctx = VariableContext()
+        ctx.set_flat("issues_count", 0)
+        assert ctx.evaluate_condition("issues_count > 0") is False
+
+    def test_greater_than_one_is_true(self):
+        ctx = VariableContext()
+        ctx.set_flat("issues_count", 1)
+        assert ctx.evaluate_condition("issues_count > 0") is True
+
+    def test_greater_or_equal(self):
+        ctx = VariableContext()
+        ctx.set_flat("n", 2)
+        assert ctx.evaluate_condition("n >= 2") is True
+        assert ctx.evaluate_condition("n >= 3") is False
+
+    def test_less_than(self):
+        ctx = VariableContext()
+        ctx.set_flat("n", 2)
+        assert ctx.evaluate_condition("n < 3") is True
+        assert ctx.evaluate_condition("n < 2") is False
+
+    def test_less_or_equal(self):
+        ctx = VariableContext()
+        ctx.set_flat("n", 2)
+        assert ctx.evaluate_condition("n <= 2") is True
+        assert ctx.evaluate_condition("n <= 1") is False
+
+    def test_float_values_compare(self):
+        ctx = VariableContext()
+        ctx.set_flat("ratio", "0.75")
+        assert ctx.evaluate_condition("ratio > 0.5") is True
+
+    def test_scoped_variable_numeric_comparison(self):
+        ctx = VariableContext()
+        ctx.set_scope("audit", {"issues_count": 4})
+        assert ctx.evaluate_condition("${{audit.issues_count}} > 0") is True
+
+    def test_non_numeric_operand_is_false(self):
+        """An unresolvable / non-numeric operand must not route by accident."""
+        ctx = VariableContext()
+        assert ctx.evaluate_condition("issues_count > 0") is False
+
+    def test_numeric_comparison_combines_with_and(self):
+        ctx = VariableContext()
+        ctx.set_flat("n", 5)
+        ctx.set_flat("ok", "true")
+        assert ctx.evaluate_condition("n > 0 and ok") is True
+        assert ctx.evaluate_condition("n > 9 and ok") is False
+
+
+# ---------------------------------------------------------------------------
+# Condition evaluation — values are resolved by the parser, not by textual
+# substitution into the expression (D026/Q017). A multi-word or backslash
+# bearing value used to corrupt the token stream before parsing.
+# ---------------------------------------------------------------------------
+
+class TestFlatResolutionIsNotTextualSubstitution:
+    def test_multi_word_value_equality(self):
+        ctx = VariableContext()
+        ctx.set_flat("complexity", "medium or large")
+        assert ctx.evaluate_condition("complexity == 'medium or large'") is True
+
+    def test_multi_word_value_inequality(self):
+        ctx = VariableContext()
+        ctx.set_flat("complexity", "medium or large")
+        assert ctx.evaluate_condition("complexity != 'small'") is True
+
+    def test_multi_word_value_in_list(self):
+        ctx = VariableContext()
+        ctx.set_flat("verdict", "needs work")
+        assert ctx.evaluate_condition(
+            "verdict in ['needs work', 'approved']"
+        ) is True
+
+    def test_value_containing_and_does_not_split_the_expression(self):
+        ctx = VariableContext()
+        ctx.set_flat("summary", "docs and tests")
+        assert ctx.evaluate_condition("summary == 'docs and tests'") is True
+
+    def test_quoted_literal_is_not_rewritten_by_a_flat_key(self):
+        ctx = VariableContext()
+        ctx.set_flat("status", "failed")
+        assert ctx.evaluate_condition("'status' != 'failed'") is True
+
+    def test_backslash_in_value_is_not_an_escape(self):
+        ctx = VariableContext()
+        ctx.set_flat("path", r"C:\temp\build")
+        assert ctx.evaluate_condition(r"path == 'C:\temp\build'") is True
+
+    def test_invalid_regex_escape_in_value_does_not_raise(self):
+        ctx = VariableContext()
+        ctx.set_flat("pattern", r"a\qb")
+        assert ctx.evaluate_condition(r"pattern == 'a\qb'") is True
+
+    def test_flat_key_with_regex_metacharacters(self):
+        ctx = VariableContext()
+        ctx.set_flat("count.total", "5")
+        # Not a bare name the grammar can reference; it must not corrupt
+        # anything either.
+        assert ctx.evaluate_condition("'ok' == 'ok'") is True
+
+    def test_greedy_rhs_resolves_a_bare_name(self):
+        ctx = VariableContext()
+        ctx.set_flat("text", "hello world")
+        assert ctx.evaluate_condition("'hello' in text") is True
+
+    def test_unresolved_bare_name_stays_literal(self):
+        ctx = VariableContext()
+        assert ctx.evaluate_condition("missing == missing") is True
+
+    def test_none_value_resolves_to_empty(self):
+        ctx = VariableContext()
+        ctx.set_flat("maybe", None)
+        assert ctx.evaluate_condition("maybe == ''") is True
+
+
+# ---------------------------------------------------------------------------
 # Condition evaluation — bare truthy
 # ---------------------------------------------------------------------------
 

@@ -6,6 +6,9 @@ guides, playbooks, and research summaries.
 
 ## Decision framework
 
+This team receives GitHub events and email, polled by the `new-emails` monitor.
+It has no chat surface, so nothing arrives by DM.
+
 When an event arrives, match it to the right workflow:
 
 | Event type | Workflow |
@@ -13,10 +16,11 @@ When an event arrives, match it to the right workflow:
 | Issue with `content` or `agent` label | `content-lifecycle` |
 | Issue with `research` label | `research-task` |
 | Issue requesting review of existing content | `dogfood-content-review` |
-| PR review with changes requested | `pr-feedback` |
-| PR merged | `pr-merged` |
-| Slack DM requesting content work | pick the workflow that fits |
-| Slack DM asking a question | Answer it directly |
+| Issue labeled `smoke-test` | `smoke-test` |
+| PR review with changes requested | Dispatch an `editor` to address the comments on the existing PR branch |
+| PR merged | Note it, no action needed |
+| Email requesting content work | Pick the workflow that fits the request |
+| Email asking a question | Answer it directly by replying |
 | Informational event | Note it, no action needed |
 
 ## Agent roles
