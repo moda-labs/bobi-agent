@@ -5,6 +5,7 @@ an injected fake LLM source: no network, no CLI."""
 import json
 import os
 import re
+from pathlib import Path
 
 import pytest
 import yaml
@@ -254,6 +255,28 @@ class TestIngressEndpoint:
         })
         assert r.status_code == 400
         assert "https" in r.json()["error"]
+
+    @pytest.mark.parametrize("url", [
+        pytest.param("https://x #staging", id="space-in-host"),
+        pytest.param("https://ok.example.com\nfeatures:\n  bot_user: 1",
+                     id="newline-in-host"),
+    ])
+    def test_ingress_refuses_a_url_the_manifest_would_reject(self, project, url):
+        """Setup and the manifest renderer must agree on "usable event server".
+
+        They didn't: urlsplit parses a space or a newline straight into netloc,
+        so setup ACCEPTED and persisted these, and `bobi create-slack-bot` then
+        refused the value setup had already stored - a dead end reachable only
+        by hand-editing .env. Both now call `event_server_error`.
+        """
+        from bobi.slack_manifest import event_server_error
+        assert event_server_error(url) is not None      # the manifest refuses it
+        c = _client(SetupState(), project)
+        r = c.post("/api/ingress/verify",
+                   json={"mode": "custom_worker", "url": url})
+        assert r.status_code == 400, r.text
+        env = project / ".env"
+        assert not env.exists() or "BOBI_EVENT_SERVER" not in env.read_text()
 
     def test_failed_probe_keeps_previous_verified_ingress(self, project,
                                                           monkeypatch):
@@ -609,11 +632,24 @@ class TestConnect:
 
         If this ever fails at the FIRST assert, install got cheaper and the
         allow-list rationale no longer holds - narrow the set, don't re-baseline.
+
+        NOTE: this drives `/api/start` rather than hardcoding `team_name`.
+        Setting the name directly forces `team_source_dir` down its default
+        `agents/<name>/src` branch - the one branch whose source tree cannot
+        contain `run/package/` - so the cheap route below was unreachable and
+        the tripwire could not fire. `test_start_refuses_a_location_containing_
+        the_run_root` covers that route head-on.
         """
         monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI-not-yours")
+        c0 = _client(SetupState(), project)
+        started = c0.post("/api/start", json={
+            "mode": "create", "name": "pwn-team",
+            "location": "agents/pwn-team/src"})
+        assert started.status_code == 200, started.text
         s = SetupState()
         s.team_name = "pwn-team"
-        src = paths.agent_source_dir("pwn-team")
+        s.source_dir = started.json()["source_dir"]
+        src = Path(s.source_dir)
         src.mkdir(parents=True, exist_ok=True)
         c = _client(s, project)
 
@@ -646,6 +682,50 @@ class TestConnect:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-yours")
         assert c.get(
             "/api/credential/value?var=ANTHROPIC_API_KEY").status_code == 404
+
+    def test_start_refuses_a_location_containing_the_run_root(
+            self, project, monkeypatch, home):
+        """The cheap route into the installed agent.yaml, closed.
+
+        `/api/start` refused a location INSIDE run/ but not the PARENT of it.
+        `_pack_dir()` is the pack root that POST /api/file writes under, so
+        `location: agents/<name>` made `run/package/agent.yaml` writable in one
+        request - and that file is what `_setup_managed_vars` trusts. Three
+        requests, no authoring, no validate, no install:
+
+            /api/start  {location: agents/setup-test}
+            /api/file   {path: run/package/agent.yaml, content: ${AWS_...}}
+            /api/credential/value?var=AWS_SECRET_ACCESS_KEY  -> 200 + the secret
+        """
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI-not-yours")
+        c = _client(SetupState(), project)
+        started = c.post("/api/start", json={
+            "mode": "create", "name": "pwn",
+            "location": str(project.parent.relative_to(paths.home_dir()))})
+        assert started.status_code == 400, started.text
+        assert "outside run/" in started.json()["error"]
+
+        c.post("/api/file", json={
+            "path": "run/package/agent.yaml",
+            "content": "agent: pwn\nenv:\n  X: ${AWS_SECRET_ACCESS_KEY}\n"})
+        assert not paths.agent_yaml_path(project).is_file()
+        r = c.get("/api/credential/value?var=AWS_SECRET_ACCESS_KEY")
+        assert r.status_code == 404, r.text
+        assert "not-yours" not in r.text
+
+    @pytest.mark.parametrize("location", ["/", "/etc", "../../../.."])
+    def test_start_confines_the_location_to_the_home_directory(
+            self, project, home, location):
+        """`location` set the pack root with no containment check at all, while
+        every other path-taking endpoint goes through `_within_home`. Since
+        POST /api/file writes anywhere under the pack root, `location: /` was
+        an arbitrary file write as the invoking user (~/.ssh/authorized_keys,
+        ~/.bashrc, the installed pack)."""
+        c = _client(SetupState(), project)
+        r = c.post("/api/start", json={"mode": "create", "name": "x",
+                                       "location": location})
+        assert r.status_code == 400, r.text
+        assert "home directory" in r.json()["error"] or "run/" in r.json()["error"]
 
 
 # --- Venn setup flow: discover account MCPs, apply picks -----------------

@@ -24,7 +24,6 @@ import os
 from pathlib import Path
 from typing import AsyncIterator
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
 from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
 
@@ -127,10 +126,12 @@ def _same_connection(a: dict, b: dict) -> bool:
 
 
 def _validate_public_event_server_url(url: str) -> str | None:
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.netloc:
-        return "use a public https:// event server URL"
-    return None
+    # One definition of a usable event server, shared with the manifest
+    # renderer. Validating it here with a laxer rule let setup accept and
+    # PERSIST a URL that render_manifest then refused - `https://x #staging`
+    # parses a space straight into netloc.
+    from bobi.slack_manifest import event_server_error
+    return event_server_error(url, require_https=True)
 
 
 def _probe_event_server(url: str) -> tuple[bool, str]:
@@ -471,8 +472,15 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             return JSONResponse({"error": "pick a team to download"},
                                 status_code=400)
         if location:
-            loc = Path(location).expanduser()
-            abs_loc = (loc if loc.is_absolute() else home / loc).resolve()
+            # Confined to the picker roots like every other path-taking
+            # endpoint. Unconfined, `location` set the pack root to anywhere
+            # on disk - `/` included - and POST /api/file writes anywhere under
+            # the pack root, so this was an arbitrary file write as the user.
+            abs_loc, ok = _within_home(location, project)
+            if not ok:
+                return JSONResponse(
+                    {"error": "pick a location inside your home directory"},
+                    status_code=400)
         elif mode == "registry":
             # A template defaults into its own library slot - the same
             # agents/<name>/src shape the home scan reads, so the finished
@@ -488,7 +496,13 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             return JSONResponse({"error": "choose a location for the team"},
                                 status_code=400)
         run_root = project.resolve()
-        if abs_loc == run_root or run_root in abs_loc.parents:
+        # Outside run/ in BOTH directions. Blocking only "inside run/" left the
+        # PARENT of run/ acceptable, and the pack root is what POST /api/file
+        # writes under - so `location: agents/<name>` made
+        # `run/package/agent.yaml` caller-writable in one request, which is the
+        # file `_setup_managed_vars` trusts to name readable credentials.
+        if (abs_loc == run_root or run_root in abs_loc.parents
+                or abs_loc in run_root.parents):
             return JSONResponse({"error": "pick a source location outside run/"},
                                 status_code=400)
         # Validate and materialize the source first; session state is mutated
