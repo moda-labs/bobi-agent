@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import deque
 
 from bobi import http as pooled
 
@@ -88,17 +89,29 @@ def _convert_markdown_line(line: str) -> str:
 
 
 def _map_lines_outside_code_blocks(text: str, convert) -> str:
-    """Apply `convert` to every line that is not inside a ``` fence."""
+    """Apply `convert` to every line that is not inside a ``` fence.
+
+    Fence detection needs real newlines, but a shell-escaped message carries
+    literal ``\\n`` and is therefore a single physical line - one that may
+    itself open with a fence. So a conversion that *produces* real newlines
+    (the escape expansion) re-enters the loop and its new lines are
+    fence-classified like any other. Content already inside a real fence is
+    never converted, which is what keeps quoted ``\\n``/``\\t`` verbatim.
+    """
     converted: list[str] = []
+    pending = deque(text.split("\n"))
     in_code_block = False
-    for line in text.split("\n"):
+    while pending:
+        line = pending.popleft()
+        if not in_code_block:
+            expanded = convert(line)
+            if "\n" in expanded:
+                pending.extendleft(reversed(expanded.split("\n")))
+                continue
+            line = expanded
+        converted.append(line)
         if line.strip().startswith("```"):
             in_code_block = not in_code_block
-            converted.append(line)
-        elif in_code_block:
-            converted.append(line)
-        else:
-            converted.append(convert(line))
     return "\n".join(converted)
 
 
@@ -175,9 +188,11 @@ def _truncate_slack_message(text: str) -> str:
 
 def format_slack_message(text: str) -> str:
     """Convert markdown to Slack mrkdwn and truncate if needed."""
-    # Escaped newlines from shell invocations — outside code fences only: a
+    # Escaped newlines from shell invocations - outside code fences only: a
     # fenced block quotes JSON/source the reader must see verbatim, and its
-    # literal \n / \t are content, not layout.
+    # literal \n / \t are content, not layout. A wholly-escaped message is one
+    # physical line, so the expansion is what reveals its fences (see
+    # _map_lines_outside_code_blocks).
     text = _map_lines_outside_code_blocks(text, _expand_escapes)
     text = _wrap_markdown_tables(text)
     text = _convert_markdown_outside_code_blocks(text)

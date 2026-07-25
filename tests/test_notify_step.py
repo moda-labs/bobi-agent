@@ -101,6 +101,14 @@ class TestFormatSlackMessage:
         source = '```\n{"msg": "a\\nb", "sep": "\\t"}\n```'
         assert format_slack_message(source) == source
 
+    def test_wholly_escaped_message_opening_with_a_fence_expands(self):
+        """A shell-escaped notification arrives as ONE physical line, so a body
+        that opens with a fence must still have its escapes expanded: fence
+        detection has to run on the expanded text, not on the escaped blob."""
+        assert format_slack_message('```\\nprint("hi")\\n```') == (
+            '```\nprint("hi")\n```'
+        )
+
     def test_escaped_newlines_outside_code_block_still_expand(self):
         """The shell-invocation escape expansion still applies to the prose
         around a fenced block."""
