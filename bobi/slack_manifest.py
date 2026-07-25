@@ -39,8 +39,8 @@ def webhook_url(event_server: str) -> str:
     """The Slack event-subscriptions request URL for an event server host.
 
     Slack has to reach this host from the internet, so ``event_server`` must be
-    an absolute http(s) URL. Anything else — a bare host, a typo'd scheme, a
-    value carrying whitespace or a control character — can only produce a
+    an absolute http(s) URL. Anything else - a bare host, a typo'd scheme, a
+    value carrying whitespace or a control character - can only produce a
     request URL that quietly doesn't work, so it is refused here, at the one
     place the request URL is built.
 
@@ -56,7 +56,7 @@ def webhook_url(event_server: str) -> str:
             or any(c.isspace() or ord(c) < 0x20 for c in url)):
         raise ValueError(
             "event server URL must be an absolute http(s) URL with no spaces "
-            f"(e.g. https://my-worker.workers.dev) — got {event_server!r}")
+            f"(e.g. https://my-worker.workers.dev) - got {event_server!r}")
     return f"{url}{WEBHOOK_PATH}"
 
 
@@ -111,7 +111,7 @@ def render_manifest(
     ``app_name`` becomes the display name and ``event_server`` the request URL.
     Both are validated and escaped as whole YAML scalars, so a value carrying
     YAML syntax renders as data instead of breaking (or silently changing) the
-    manifest. The full request URL is substituted in one piece — the template
+    manifest. The full request URL is substituted in one piece - the template
     must not concatenate a path onto it, or the escaping would end mid-scalar.
     ``event_server`` is still checked when ``socket_mode`` removes that URL: a
     URL Slack could never reach is a mistake worth reporting either way.

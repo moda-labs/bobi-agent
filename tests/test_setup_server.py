@@ -582,7 +582,7 @@ class TestConnect:
     def test_credential_value_still_reads_env_file_for_any_var(
             self, project, monkeypatch):
         # Narrowing the os.environ fallback must not narrow .env: that file is
-        # setup's own, so anything saved through setup stays copyable — even a
+        # setup's own, so anything saved through setup stays copyable - even a
         # var no pack declares (e.g. one captured for a user-added MCP).
         monkeypatch.delenv("ACME_TOKEN", raising=False)
         c = _client(SetupState(), project)
@@ -595,7 +595,7 @@ class TestConnect:
 
     def test_installing_a_declaring_team_is_the_only_route_in(
             self, project, monkeypatch, home):
-        """The installed agent.yaml IS reachable from the page — but only
+        """The installed agent.yaml IS reachable from the page - but only
         through a full authored + validated install.
 
         `_setup_managed_vars` trusts the installed agent.yaml. That file is not
@@ -604,11 +604,11 @@ class TestConnect:
         declaration alone must not be enough (the source is excluded, and
         install refuses a team that does not validate); only a structurally
         valid team that a passing `/api/validate` then installs may widen the
-        set — at which point the caller could already run code as the user on
+        set - at which point the caller could already run code as the user on
         the next launch, so the env read grants nothing new.
 
         If this ever fails at the FIRST assert, install got cheaper and the
-        allow-list rationale no longer holds — narrow the set, don't re-baseline.
+        allow-list rationale no longer holds - narrow the set, don't re-baseline.
         """
         monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI-not-yours")
         s = SetupState()
@@ -639,7 +639,7 @@ class TestConnect:
         assert c.post("/api/validate").json()["passed"] is True
         assert c.post("/api/install").status_code == 200
 
-        # Now — and only now — the var is one the INSTALLED pack declares.
+        # Now - and only now - the var is one the INSTALLED pack declares.
         r = c.get("/api/credential/value?var=AWS_SECRET_ACCESS_KEY")
         assert r.status_code == 200 and r.json()["value"] == "wJalrXUtnFEMI-not-yours"
         # A var it does NOT declare stays refused even post-install.

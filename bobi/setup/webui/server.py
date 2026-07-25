@@ -1324,7 +1324,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
 
     def _setup_managed_vars() -> set[str]:
         """The credential var names /api/credential/value may read out of the
-        PROCESS ENVIRONMENT — only names the caller cannot mint.
+        PROCESS ENVIRONMENT - only names the caller cannot mint.
 
         The endpoint is loopback- and nonce-guarded, but the page's own requests
         author setup state: `/api/mcp/add` records env var names verbatim from
@@ -1333,19 +1333,19 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         from those is mintable in one extra request, which would turn this into
         a reader for arbitrary shell secrets. So the set is built only from:
 
-        - the secret vars of the connector CATALOG and the hosted-MCP registry —
+        - the secret vars of the connector CATALOG and the hosted-MCP registry -
           fixed sets compiled into bobi, and what the Connect panel renders (with
           a Copy affordance on anything it reports satisfied); and
         - every ``${VAR}`` the INSTALLED package's agent.yaml references.
 
-        The installed agent.yaml is *reachable* from the page — `/api/file`
-        writes the team source and `/api/install` composes it here — so it is
+        The installed agent.yaml is *reachable* from the page - `/api/file`
+        writes the team source and `/api/install` composes it here - so it is
         not literally unmintable. It is included anyway because minting through
         it costs a fully authored, structurally valid team plus a passing
         `/api/validate`, and install is already an arbitrary-code-execution
         boundary: a caller who can drive one runs code as the user on the next
         launch, which strictly dominates reading an env var. The cheap paths are
-        what mattered, and those are the ones excluded below. Keep it that way —
+        what mattered, and those are the ones excluded below. Keep it that way -
         if install ever gets cheaper, or the SOURCE agent.yaml becomes scannable
         here, this stops holding (``test_installing_a_declaring_team_is_the_only
         _route_in`` pins the boundary).
@@ -1355,7 +1355,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
 
         Deliberately absent: `spec.mcp_servers` vars, custom connectors resolved
         from a caller-supplied service name, and the team source agent.yaml.
-        Those stay readable from .env (setup's own file) — just not from the
+        Those stay readable from .env (setup's own file) - just not from the
         environment the shell handed us.
         """
         from bobi.config import scan_declared_vars

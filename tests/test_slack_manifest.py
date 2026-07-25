@@ -58,7 +58,7 @@ def test_render_substitutes_name_and_request_url():
 
 
 def test_default_render_is_byte_identical_to_raw_template_substitution():
-    """An ordinary name and URL are substituted verbatim — the escaping adds no
+    """An ordinary name and URL are substituted verbatim - the escaping adds no
     quoting noise to the manifest a user reads."""
     expected = string.Template(TEMPLATE_PATH.read_text()).safe_substitute(
         APP_NAME="Eng Bot",
@@ -141,7 +141,7 @@ HOSTILE_EVENT_SERVERS = [
 def test_hostile_event_server_never_reaches_the_manifest(event_server):
     """An event server URL is data, not YAML.
 
-    ``https://x #staging`` rendered ``request_url: https://x`` — YAML ate
+    ``https://x #staging`` rendered ``request_url: https://x`` - YAML ate
     ``/webhooks/slack`` as a comment, so the Slack app pointed somewhere else
     and the bot silently received nothing, with no error anywhere. An embedded
     newline spliced in a second top-level ``features:`` key, which PyYAML
@@ -161,7 +161,7 @@ def test_request_url_substitution_site_escapes_the_whole_url(event_server):
     The URL check refuses both of these outright, but the substitution site has
     to be safe on its own: the template takes the WHOLE request URL as one
     escaped scalar, so even a value that got past the check renders as data.
-    Quoting only the event-server half could never do this — the ``request_url``
+    Quoting only the event-server half could never do this - the ``request_url``
     scalar continued past the closing quote into ``/webhooks/slack``.
     """
     hostile = f"{event_server}{WEBHOOK_PATH}"
