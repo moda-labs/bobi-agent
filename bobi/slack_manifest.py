@@ -18,7 +18,8 @@ import yaml
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "slack-app.manifest.yaml"
 
 # The single webhook path the event server exposes for Slack (see
-# event-server/src/index.ts). The request URL is always <event_server> + this.
+# event-server/core/src/adapters/chat-sdk-slack.ts). The request URL is always
+# <event_server> + this.
 WEBHOOK_PATH = "/webhooks/slack"
 SOCKET_MODE_HEADER = (
     "# message with thread_ts -> slack.thread_reply. "
@@ -30,34 +31,59 @@ SOCKET_MODE_HEADER_REPLACEMENT = (
 )
 SOCKET_MODE_FLAG = "  socket_mode_enabled: false"
 
+# Stands in for the request URL while rendering a socket-mode manifest, whose
+# request_url line is then removed. Never reaches the output.
+_SOCKET_MODE_URL_PLACEHOLDER = "socket-mode-no-request-url"
+
 # Wide enough that the YAML emitter never line-wraps a scalar (Slack caps the
 # display name at 35 characters; the substitution positions are single-line).
 _YAML_WIDTH = 1 << 20
 
 
-def webhook_url(event_server: str) -> str:
-    """The Slack event-subscriptions request URL for an event server host.
+def event_server_error(event_server: str, *, require_https: bool = False
+                       ) -> str | None:
+    """Why `event_server` is unusable as an event server host, else ``None``.
 
-    Slack has to reach this host from the internet, so ``event_server`` must be
-    an absolute http(s) URL. Anything else - a bare host, a typo'd scheme, a
-    value carrying whitespace or a control character - can only produce a
-    request URL that quietly doesn't work, so it is refused here, at the one
-    place the request URL is built.
+    Slack has to reach the host from the internet, so it must be an absolute
+    http(s) URL. Anything else - a bare host, a typo'd scheme, a value carrying
+    whitespace or a control character - can only produce a request URL that
+    quietly doesn't work.
 
-    Raises ``ValueError`` for a URL that isn't usable as an event server.
+    This is the ONE definition of a usable event server. The setup UI validates
+    the URL the user types here (with ``require_https``, because the field is
+    specifically a *public* server), and the manifest renderer builds the
+    request URL from it. They disagreed before: setup accepted and persisted
+    ``https://x #staging`` - urlsplit parses the space into netloc - and the
+    manifest renderer then refused the value setup had already stored.
     """
     url = event_server.strip().rstrip("/")
     try:
         parts = urlsplit(url)
     except ValueError as e:
-        raise ValueError(f"not a usable event server URL: {event_server!r} "
-                         f"({e})") from e
-    if (parts.scheme not in ("http", "https") or not parts.netloc
-            or any(c.isspace() or ord(c) < 0x20 for c in url)):
-        raise ValueError(
-            "event server URL must be an absolute http(s) URL with no spaces "
-            f"(e.g. https://my-worker.workers.dev) - got {event_server!r}")
-    return f"{url}{WEBHOOK_PATH}"
+        return f"not a usable event server URL ({e})"
+    if any(c.isspace() or ord(c) < 0x20 for c in url):
+        return ("event server URL cannot contain spaces or control characters "
+                f"- got {event_server!r}")
+    if not parts.netloc:
+        return f"event server URL needs a host - got {event_server!r}"
+    if require_https:
+        if parts.scheme != "https":
+            return "use a public https:// event server URL"
+    elif parts.scheme not in ("http", "https"):
+        return ("event server URL must be an absolute http(s) URL "
+                f"(e.g. https://my-worker.workers.dev) - got {event_server!r}")
+    return None
+
+
+def webhook_url(event_server: str) -> str:
+    """The Slack event-subscriptions request URL for an event server host.
+
+    Raises ``ValueError`` for a URL that isn't usable as an event server.
+    """
+    problem = event_server_error(event_server)
+    if problem:
+        raise ValueError(problem)
+    return f"{event_server.strip().rstrip('/')}{WEBHOOK_PATH}"
 
 
 def _dump_scalar(value: str, style: str | None) -> str:
@@ -113,14 +139,20 @@ def render_manifest(
     YAML syntax renders as data instead of breaking (or silently changing) the
     manifest. The full request URL is substituted in one piece - the template
     must not concatenate a path onto it, or the escaping would end mid-scalar.
-    ``event_server`` is still checked when ``socket_mode`` removes that URL: a
-    URL Slack could never reach is a mistake worth reporting either way.
+
+    ``socket_mode`` strips the request URL out entirely, so ``event_server`` is
+    NOT validated on that path: it is never typed by the user there (it comes
+    from the installed team config), and refusing a value that does not reach
+    the output would block a socket-mode manifest on an unrelated stale config.
 
     Raises ``ValueError`` for an unusable event server URL, or for an app name
     that cannot be a single-line scalar.
     """
-    request_url = _single_line_scalar(webhook_url(event_server),
-                                      "event server URL")
+    # A socket-mode manifest drops this line; the placeholder only has to be a
+    # unique anchor to remove, so it never sees the caller's value.
+    request_url = (_SOCKET_MODE_URL_PLACEHOLDER if socket_mode
+                   else _single_line_scalar(webhook_url(event_server),
+                                            "event server URL"))
     template = string.Template(TEMPLATE_PATH.read_text())
     rendered = template.safe_substitute(
         APP_NAME=_single_line_scalar(app_name, "Slack app name"),

@@ -147,11 +147,20 @@ def test_hostile_event_server_never_reaches_the_manifest(event_server):
     newline spliced in a second top-level ``features:`` key, which PyYAML
     resolves last-wins, replacing the real bot-user config. Neither is a URL
     Slack could reach, so both are refused where the request URL is built.
+
+    Socket mode strips the request URL out, so it does not validate the value -
+    what matters there is the weaker but sufficient property that the hostile
+    string cannot reach the output at all.
     """
     with pytest.raises(ValueError):
         render_manifest("Bot", event_server)
-    with pytest.raises(ValueError):
-        render_manifest("Bot", event_server, socket_mode=True)
+
+    rendered = render_manifest("Bot", event_server, socket_mode=True)
+    assert event_server not in rendered
+    assert "request_url" not in rendered
+    data = manifest_to_dict(rendered)
+    assert data["features"]["bot_user"]["display_name"] == "Bot"
+    assert data["settings"]["socket_mode_enabled"] is True
 
 
 @pytest.mark.parametrize("event_server", HOSTILE_EVENT_SERVERS)
@@ -190,8 +199,23 @@ def test_invalid_event_server_url_is_rejected(event_server):
     work, so it's refused where it enters."""
     with pytest.raises(ValueError):
         render_manifest("Bot", event_server)
-    with pytest.raises(ValueError):
-        render_manifest("Bot", event_server, socket_mode=True)
+
+
+@pytest.mark.parametrize("event_server", [
+    pytest.param("my-worker.workers.dev", id="no-scheme"),
+    pytest.param("", id="empty"),
+    pytest.param("https://ok.example.com\tstaging", id="control-character"),
+])
+def test_socket_mode_ignores_an_unusable_event_server(event_server):
+    """Socket mode emits no request URL, so the event server is not its input.
+
+    It comes from the installed team config rather than the user, so refusing
+    it here would block a manifest that never contains it - on a value the
+    operator did not type and cannot see is being used.
+    """
+    rendered = render_manifest("Bot", event_server, socket_mode=True)
+    assert "request_url" not in rendered
+    assert manifest_to_dict(rendered)["settings"]["socket_mode_enabled"] is True
 
 
 @pytest.mark.parametrize("event_server", [
@@ -314,6 +338,31 @@ def test_cli_works_without_an_install_and_falls_back_to_cloud(tmp_path):
     assert result.exit_code == 0, result.output
     assert f"{DEFAULT_EVENT_SERVER}/webhooks/slack" in result.output
     assert "api.slack.com/apps?new_app=1" in result.output
+
+
+@pytest.mark.parametrize("event_server", [
+    pytest.param("my-worker.workers.dev", id="no-scheme"),
+    pytest.param("https://x #staging", id="space-in-host"),
+])
+def test_cli_reports_an_unusable_event_server_as_a_usage_error(
+        tmp_path, event_server):
+    """The renderer's ValueError has exactly one consumer - this command.
+
+    A bare host is the natural typo on every path that supplies this value
+    (--event-server, the interactive prompt, a project `event_server:`), so it
+    has to read like every other bad input to the command rather than a Python
+    traceback out of the CLI.
+    """
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(main, [
+            "create-slack-bot", "--app-name", "Bot",
+            "--event-server", event_server, "--no-open", "--no-url",
+        ])
+    assert result.exit_code == 2, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "Traceback" not in result.output
+    assert "event server URL" in result.output
 
 
 def test_cli_writes_json_file(tmp_path):

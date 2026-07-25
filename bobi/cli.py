@@ -1404,9 +1404,17 @@ def create_slack_bot(
         # Non-interactive with nothing configured: the bobi cloud.
         event_server = DEFAULT_EVENT_SERVER
 
-    manifest_yaml = render_manifest(
-        app_name, event_server, socket_mode=socket_mode,
-    )
+    try:
+        manifest_yaml = render_manifest(
+            app_name, event_server, socket_mode=socket_mode,
+        )
+    except ValueError as e:
+        # render_manifest refuses an event server URL Slack could never reach.
+        # It reaches here three ways - --event-server, the free-text prompt
+        # above, and a project config's `event_server:` - and a bare host is
+        # the natural typo on all three, so report it the way every other bad
+        # input to this command is reported instead of raising a traceback.
+        raise click.UsageError(str(e)) from e
     rendered = manifest_to_json(manifest_yaml) if fmt == "json" else manifest_yaml
 
     if output:
