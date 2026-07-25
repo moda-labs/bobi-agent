@@ -513,16 +513,139 @@ class TestConnect:
         assert r.status_code == 200
         assert r.json()["value"] == "ghp_exported_in_the_shell"
 
-    def test_credential_value_serves_a_user_mcp_env_var(self, project,
-                                                        monkeypatch):
-        # A var declared on a user-added MCP connection is setup-managed too.
+    def test_credential_value_serves_a_var_the_installed_pack_declares(
+            self, project, monkeypatch):
+        # The other half of the fallback: a ${VAR} the INSTALLED package
+        # references. That file is written by install, not by the page.
         monkeypatch.setenv("ACME_TOKEN", "acme-exported")
-        s = SetupState()
-        s.spec.mcp_servers = {"acme": {"type": "stdio", "command": "acme-mcp",
-                                       "env_vars": ["ACME_TOKEN"]}}
-        c = _client(s, project)
+        agent_yaml = paths.agent_yaml_path(project)
+        agent_yaml.parent.mkdir(parents=True, exist_ok=True)
+        agent_yaml.write_text(
+            "agent: acme\nmcp_servers:\n  acme:\n"
+            "    env:\n      ACME_TOKEN: ${ACME_TOKEN}\n")
+        c = _client(SetupState(), project)
         r = c.get("/api/credential/value?var=ACME_TOKEN")
         assert r.status_code == 200 and r.json()["value"] == "acme-exported"
+
+    def test_credential_value_refuses_a_var_minted_through_mcp_add(
+            self, project, monkeypatch):
+        # The allow-list must not be mintable by the caller. /api/mcp/add
+        # writes `env_vars` verbatim from the request body, so a page (or
+        # anything that reached the nonce) could name a shell secret and then
+        # read it back out of os.environ.
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI-not-yours")
+        c = _client(SetupState(), project)
+        added = c.post("/api/mcp/add", json={
+            "name": "pwn", "transport": "stdio", "command": "true",
+            "env": [{"name": "AWS_SECRET_ACCESS_KEY"}]})
+        assert added.status_code == 200, added.text
+        r = c.get("/api/credential/value?var=AWS_SECRET_ACCESS_KEY")
+        assert r.status_code == 404, r.text
+        assert "not-yours" not in r.text
+
+    def test_credential_value_refuses_a_var_derived_from_an_mcp_name(
+            self, project, monkeypatch):
+        # Same bypass through the other door: the remote-MCP branch derives
+        # `secret_var` as <NAME>_API_KEY from the caller-supplied connection
+        # name, so naming the connection "anthropic" would mint
+        # ANTHROPIC_API_KEY into the allow-list.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-yours")
+        c = _client(SetupState(), project)
+        added = c.post("/api/mcp/add", json={
+            "name": "anthropic", "url": "https://example.invalid/mcp"})
+        assert added.status_code == 200, added.text
+        assert (added.json()["state"]["spec"]["mcp_servers"]["anthropic"]
+                ["secret_var"] == "ANTHROPIC_API_KEY")
+        r = c.get("/api/credential/value?var=ANTHROPIC_API_KEY")
+        assert r.status_code == 404, r.text
+        assert "not-yours" not in r.text
+
+    def test_credential_value_refuses_a_var_written_into_the_team_source(
+            self, project, monkeypatch, home):
+        # The team SOURCE agent.yaml is caller-writable through POST /api/file,
+        # so scanning it for ${VAR} refs is another way to mint the allow-list.
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI-not-yours")
+        s = SetupState()
+        s.team_name = "pwn-team"
+        src = paths.agent_source_dir("pwn-team")
+        src.mkdir(parents=True, exist_ok=True)
+        c = _client(s, project)
+        wrote = c.post("/api/file", json={
+            "path": "agent.yaml",
+            "content": "agent: pwn\nenv:\n  X: ${AWS_SECRET_ACCESS_KEY}\n"})
+        assert wrote.status_code == 200, wrote.text
+        assert (src / "agent.yaml").exists()
+        r = c.get("/api/credential/value?var=AWS_SECRET_ACCESS_KEY")
+        assert r.status_code == 404, r.text
+        assert "not-yours" not in r.text
+
+    def test_credential_value_still_reads_env_file_for_any_var(
+            self, project, monkeypatch):
+        # Narrowing the os.environ fallback must not narrow .env: that file is
+        # setup's own, so anything saved through setup stays copyable — even a
+        # var no pack declares (e.g. one captured for a user-added MCP).
+        monkeypatch.delenv("ACME_TOKEN", raising=False)
+        c = _client(SetupState(), project)
+        c.post("/api/mcp/add", json={
+            "name": "acme", "transport": "stdio", "command": "acme-mcp",
+            "env": [{"name": "ACME_TOKEN", "value": "saved-through-setup"}]})
+        r = c.get("/api/credential/value?var=ACME_TOKEN")
+        assert r.status_code == 200
+        assert r.json()["value"] == "saved-through-setup"
+
+    def test_installing_a_declaring_team_is_the_only_route_in(
+            self, project, monkeypatch, home):
+        """The installed agent.yaml IS reachable from the page — but only
+        through a full authored + validated install.
+
+        `_setup_managed_vars` trusts the installed agent.yaml. That file is not
+        literally unmintable: `/api/file` writes the team source and
+        `/api/install` composes it here. This pins the price. Writing the
+        declaration alone must not be enough (the source is excluded, and
+        install refuses a team that does not validate); only a structurally
+        valid team that a passing `/api/validate` then installs may widen the
+        set — at which point the caller could already run code as the user on
+        the next launch, so the env read grants nothing new.
+
+        If this ever fails at the FIRST assert, install got cheaper and the
+        allow-list rationale no longer holds — narrow the set, don't re-baseline.
+        """
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI-not-yours")
+        s = SetupState()
+        s.team_name = "pwn-team"
+        src = paths.agent_source_dir("pwn-team")
+        src.mkdir(parents=True, exist_ok=True)
+        c = _client(s, project)
+
+        declaring = ("agent: pwn\nentry_point: worker\n"
+                     "env:\n  X: ${AWS_SECRET_ACCESS_KEY}\n")
+        assert c.post("/api/file", json={"path": "agent.yaml",
+                                         "content": declaring}).status_code == 200
+        # Declared in the SOURCE and nothing else: still refused.
+        r = c.get("/api/credential/value?var=AWS_SECRET_ACCESS_KEY")
+        assert r.status_code == 404, f"source alone opened the allow-list: {r.text}"
+
+        # An invalid team cannot install, so it cannot widen the set either.
+        assert c.post("/api/install").status_code == 409
+
+        for rel, content in (("agent.md", "You are pwn.\n"),
+                             ("roles/worker/ROLE.md", "You are the worker.\n"),
+                             ("workflows/adhoc.yaml",
+                              "name: adhoc\nsteps:\n  - name: do\n"
+                              "    type: agent\n    prompt: do it\n")):
+            (src / rel).parent.mkdir(parents=True, exist_ok=True)
+            assert c.post("/api/file", json={"path": rel,
+                                             "content": content}).status_code == 200
+        assert c.post("/api/validate").json()["passed"] is True
+        assert c.post("/api/install").status_code == 200
+
+        # Now — and only now — the var is one the INSTALLED pack declares.
+        r = c.get("/api/credential/value?var=AWS_SECRET_ACCESS_KEY")
+        assert r.status_code == 200 and r.json()["value"] == "wJalrXUtnFEMI-not-yours"
+        # A var it does NOT declare stays refused even post-install.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-yours")
+        assert c.get(
+            "/api/credential/value?var=ANTHROPIC_API_KEY").status_code == 404
 
 
 # --- Venn setup flow: discover account MCPs, apply picks -----------------

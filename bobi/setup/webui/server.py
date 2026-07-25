@@ -1323,31 +1323,50 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         return {"ok": True}
 
     def _setup_managed_vars() -> set[str]:
-        """Every credential var name setup itself declares — the only names
-        /api/credential/value will answer for out of the process environment.
+        """The credential var names /api/credential/value may read out of the
+        PROCESS ENVIRONMENT — only names the caller cannot mint.
 
-        Union of: what the user saved through setup, the connector secrets of
-        the team's services AND of the on-demand connector catalog (the Connect
-        panel renders both, with a Copy affordance on any it reports satisfied),
-        the vars of user-added MCP connections, and every ${VAR} the team source
-        or the installed package references."""
+        The endpoint is loopback- and nonce-guarded, but the page's own requests
+        author setup state: `/api/mcp/add` records env var names verbatim from
+        its body and derives `<NAME>_API_KEY` from the connection name, and
+        `/api/file` rewrites the team SOURCE agent.yaml. Any allow-list derived
+        from those is mintable in one extra request, which would turn this into
+        a reader for arbitrary shell secrets. So the set is built only from:
+
+        - the secret vars of the connector CATALOG and the hosted-MCP registry —
+          fixed sets compiled into bobi, and what the Connect panel renders (with
+          a Copy affordance on anything it reports satisfied); and
+        - every ``${VAR}`` the INSTALLED package's agent.yaml references.
+
+        The installed agent.yaml is *reachable* from the page — `/api/file`
+        writes the team source and `/api/install` composes it here — so it is
+        not literally unmintable. It is included anyway because minting through
+        it costs a fully authored, structurally valid team plus a passing
+        `/api/validate`, and install is already an arbitrary-code-execution
+        boundary: a caller who can drive one runs code as the user on the next
+        launch, which strictly dominates reading an env var. The cheap paths are
+        what mattered, and those are the ones excluded below. Keep it that way —
+        if install ever gets cheaper, or the SOURCE agent.yaml becomes scannable
+        here, this stops holding (``test_installing_a_declaring_team_is_the_only
+        _route_in`` pins the boundary).
+
+        `credentials_saved` rides along, but only ever names a var setup wrote
+        into .env itself, which the .env read already answers for.
+
+        Deliberately absent: `spec.mcp_servers` vars, custom connectors resolved
+        from a caller-supplied service name, and the team source agent.yaml.
+        Those stay readable from .env (setup's own file) — just not from the
+        environment the shell handed us.
+        """
         from bobi.config import scan_declared_vars
-        from bobi.setup import services
-        from bobi.setup.actions import team_source_dir
+        from bobi.setup import mcp_registry, services
         names = set(state.credentials_saved or [])
-        cards = services.cards_for(
-            [*(state.spec.services or []), *services.CATALOG.keys()], project)
-        for card in cards:
-            for method in card.get("methods") or []:
-                names.update(s["var"] for s in method.get("secrets") or [])
-        for cfg in (state.spec.mcp_servers or {}).values():
-            if isinstance(cfg, dict):
-                if cfg.get("secret_var"):
-                    names.add(cfg["secret_var"])
-                names.update(cfg.get("env_vars") or [])
-        for agent_yaml in (paths.agent_yaml_path(project),
-                           team_source_dir(project, state) / "agent.yaml"):
-            names.update(scan_declared_vars(agent_yaml))
+        for connector in services.CATALOG.values():
+            for method in connector.methods:
+                names.update(s.var for s in method.secrets)
+        names.update(spec.secret_var for spec in mcp_registry.REGISTRY.values()
+                     if spec.secret_var)
+        names.update(scan_declared_vars(paths.agent_yaml_path(project)))
         return names
 
     @app.get("/api/credential/value")
@@ -1358,9 +1377,11 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # The .env is setup's own file, so any var in it is answerable; the
         # process environment is NOT — it carries unrelated secrets from the
         # shell that launched setup (AWS keys, ANTHROPIC_API_KEY), so fall back
-        # to it only for the credential names setup actually manages. That keeps
-        # the "already satisfied by the environment" case working without
-        # turning the endpoint into a reader for arbitrary process env.
+        # to it only for the names in _setup_managed_vars(): the credential vars
+        # the connector catalog and the INSTALLED pack declare, none of which a
+        # caller can mint. That keeps the "already satisfied by the environment"
+        # case working without turning the endpoint into a reader for arbitrary
+        # process env.
         import os
         from bobi.setup import actions
         var = request.query_params.get("var", "")
