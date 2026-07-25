@@ -188,6 +188,33 @@ def _as_bool(value: object) -> bool:
     return bool(value)
 
 
+def _as_number(value: object, name: str, default, cast):
+    """A number from a config value, falling back to *default*.
+
+    A key left in agent.yaml with its value commented out parses as YAML null,
+    and a ``${VAR:-}`` that never resolved interpolates to "". Both mean
+    "unset". Config parsing backs every start/status/dispatch path, so it must
+    degrade to the default with a warning rather than raise over a blank line.
+    """
+    if value is None or value == "":
+        return default
+    if not isinstance(value, bool):      # `spend_cap: true` is a typo, not 1
+        try:
+            return cast(value)
+        except (TypeError, ValueError):
+            pass
+    log.warning("%s: expected a number, got %r — using %r", name, value, default)
+    return default
+
+
+def _as_int(value: object, name: str, default: int = 0) -> int:
+    return _as_number(value, name, default, int)
+
+
+def _as_float(value: object, name: str, default: float) -> float:
+    return _as_number(value, name, default, float)
+
+
 def _project_config_path(project_path: Path) -> Path:
     from bobi import paths
     return paths.agent_yaml_path(project_path)
@@ -449,14 +476,17 @@ class Config:
     @classmethod
     def _parse(cls, path: Path, env: dict[str, str] | None = None) -> "Config":
         raw_uninterpolated = _load_yaml(path)
+        # `or` (not a get default) throughout: a key left in agent.yaml with
+        # its value commented out is present-but-null, and null means "unset"
+        # for every field here.
         # Preserve monitor commands and requires check/fix commands
         # verbatim — they may contain ${VAR} or ~ intended for shell
         # expansion, not config interpolation.
-        monitors_raw = raw_uninterpolated.get("monitors", [])
-        requires_raw = raw_uninterpolated.get("requires", [])
+        monitors_raw = raw_uninterpolated.get("monitors") or []
+        requires_raw = raw_uninterpolated.get("requires") or []
         # host: entries carry a sysctl `key=value` verbatim — no config
         # interpolation (mirrors requires/build).
-        host_raw = raw_uninterpolated.get("host", [])
+        host_raw = raw_uninterpolated.get("host") or []
         # build steps are shell commands run at image-build time; preserve them
         # verbatim (they may carry ~ or literal $VAR for the build shell).
         build_raw = raw_uninterpolated.get("build", None)
@@ -464,7 +494,7 @@ class Config:
         raw["monitors"] = monitors_raw
 
         services = []
-        for s in raw.get("services", []):
+        for s in raw.get("services") or []:
             if isinstance(s, str):
                 services.append(ServiceConfig(name=s))
             elif isinstance(s, dict):
@@ -495,31 +525,36 @@ class Config:
 
         build = cls._parse_build(build_raw, path)
 
-        event_server = raw.get("event_server", {})
+        event_server = raw.get("event_server") or {}
         if isinstance(event_server, str):
             event_server_url = event_server
+        elif isinstance(event_server, dict):
+            event_server_url = event_server.get("url") or ""
         else:
-            event_server_url = event_server.get("url", "")
+            event_server_url = ""
+
+        defaults = raw.get("defaults") if isinstance(raw.get("defaults"), dict) else {}
 
         return cls(
-            agent=raw.get("agent", ""),
-            version=str(raw.get("version", "")),
-            entry_point=raw.get("entry_point", ""),
-            chat=raw.get("chat", ""),
+            agent=raw.get("agent") or "",
+            version=str(raw.get("version") or ""),
+            entry_point=raw.get("entry_point") or "",
+            chat=raw.get("chat") or "",
             services=services,
-            event_server_url=raw.get("event_server_url", event_server_url),
-            registries=raw.get("registries", []),
-            default_role=raw.get("defaults", {}).get("role", "") if isinstance(raw.get("defaults"), dict) else "",
-            venn_api_key=raw.get("venn_api_key", ""),
-            mcp_servers=raw.get("mcp_servers", {}),
-            monitors=raw.get("monitors", []),
-            auto_dispatch=raw.get("auto_dispatch", []),
+            event_server_url=raw.get("event_server_url") or event_server_url,
+            registries=raw.get("registries") or [],
+            default_role=defaults.get("role") or "",
+            venn_api_key=raw.get("venn_api_key") or "",
+            mcp_servers=raw.get("mcp_servers") or {},
+            monitors=raw.get("monitors") or [],
+            auto_dispatch=raw.get("auto_dispatch") or [],
             requires=requires,
             host=host_raw if isinstance(host_raw, list) else [],
             build=build,
-            spend_cap=int(raw.get("spend_cap", 0)),
-            max_concurrent_agents=int(raw.get("max_concurrent_agents", 0)),
-            launch_admission=cls._parse_launch_admission(raw.get("launch_admission", {})),
+            spend_cap=_as_int(raw.get("spend_cap"), "spend_cap"),
+            max_concurrent_agents=_as_int(raw.get("max_concurrent_agents"),
+                                          "max_concurrent_agents"),
+            launch_admission=cls._parse_launch_admission(raw.get("launch_admission")),
             brain=raw.get("brain", {}) if isinstance(raw.get("brain"), dict) else {},
             roles=raw.get("roles", {}) if isinstance(raw.get("roles"), dict) else {},
         )
@@ -538,16 +573,21 @@ class Config:
         if not isinstance(raw, dict):
             return defaults
         cfg = {**defaults, **raw}
-        soft = max(0.1, float(cfg.get("load_per_cpu_soft_limit", 1.5)))
-        hard = max(soft, float(cfg.get("load_per_cpu_hard_limit", 2.0)))
+
+        def num(key, cast):
+            return cast(cfg.get(key), f"launch_admission.{key}", defaults[key])
+
+        soft = max(0.1, num("load_per_cpu_soft_limit", _as_float))
+        hard = max(soft, num("load_per_cpu_hard_limit", _as_float))
         return {
             "enabled": _as_bool(cfg.get("enabled", False)),
-            "max_starting_agents": max(1, int(cfg.get("max_starting_agents", 1))),
+            "max_starting_agents": max(1, num("max_starting_agents", _as_int)),
             "load_per_cpu_soft_limit": soft,
             "load_per_cpu_hard_limit": hard,
-            "min_memory_available_mb": max(0, int(cfg.get("min_memory_available_mb", 512))),
-            "init_failure_window_seconds": max(1, int(cfg.get("init_failure_window_seconds", 600))),
-            "init_failure_backoff_threshold": max(1, int(cfg.get("init_failure_backoff_threshold", 2))),
+            "min_memory_available_mb": max(0, num("min_memory_available_mb", _as_int)),
+            "init_failure_window_seconds": max(1, num("init_failure_window_seconds", _as_int)),
+            "init_failure_backoff_threshold": max(
+                1, num("init_failure_backoff_threshold", _as_int)),
         }
 
     @staticmethod

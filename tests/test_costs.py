@@ -183,6 +183,39 @@ class TestCostRollup:
         assert summary.total_cost_usd == 0.5
         assert summary.by_model["anthropic:opus"] == 0.5
 
+    def test_string_cost_is_skipped_not_fatal(self, tmp_path):
+        # Same invariant as the token guard: one hand-edited state.json
+        # carrying a string dollar amount must not take down the whole fold
+        # (it backs a web endpoint that must not 500 on one bad session).
+        sessions_dir = self._make_sessions(tmp_path, {
+            "broken": {"name": "broken", "role": "eng",
+                       "total_cost_usd": "0.5",
+                       "model_usage": {"anthropic:opus": {"cost_usd": "0.5"}}},
+            "good": {"name": "good", "role": "eng", "total_cost_usd": 0.5,
+                     "model_usage": {"anthropic:opus": {"cost_usd": 0.5}}},
+        })
+        summary = rollup_costs(sessions_dir)
+        assert summary.total_cost_usd == 0.5
+        assert summary.by_model["anthropic:opus"] == 0.5
+        assert summary.by_session["good"] == 0.5
+
+    def test_malformed_session_shapes_are_skipped_not_fatal(self, tmp_path):
+        # A state.json that is not an object, or whose model_usage entries are
+        # not objects, is corrupt — skip it, keep the rest of the fold.
+        sessions_dir = self._make_sessions(tmp_path, {
+            "not-an-object": ["totally", "wrong"],
+            "bad-usage": {"name": "bad-usage", "role": "eng",
+                          "total_cost_usd": 0.25, "model_usage": "nope"},
+            "bad-entry": {"name": "bad-entry", "role": "eng",
+                          "total_cost_usd": 0.25,
+                          "model_usage": {"anthropic:opus": "nope"}},
+            "good": {"name": "good", "role": "eng", "total_cost_usd": 0.5,
+                     "model_usage": {"anthropic:opus": {"cost_usd": 0.5}}},
+        })
+        summary = rollup_costs(sessions_dir)
+        assert summary.by_session["good"] == 0.5
+        assert summary.total_cost_usd == 1.0  # the two readable ones + good
+
     def test_skips_zero_cost_sessions(self, tmp_path):
         sessions_dir = self._make_sessions(tmp_path, {
             "no-cost": {

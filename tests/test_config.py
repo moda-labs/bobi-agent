@@ -196,6 +196,73 @@ def test_agent_yaml_optional_env_var_prefers_environment(tmp_path, monkeypatch):
     assert cfg.event_server_url == "wss://events.example.com"
 
 
+def test_null_valued_keys_fall_back_to_defaults(tmp_path):
+    """A key left in agent.yaml with its value commented out parses as YAML
+    null. Every such key must fall back to its default — Config.load backs
+    every start/status/dispatch path, so a traceback here bricks the runtime
+    over a blank line."""
+    _write_agent_yaml(tmp_path, """
+        agent: demo
+        event_server:
+        spend_cap:
+        max_concurrent_agents:
+        services:
+        requires:
+        monitors:
+        auto_dispatch:
+        registries:
+        mcp_servers:
+        brain:
+        roles:
+        launch_admission:
+    """)
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.agent == "demo"
+    assert cfg.event_server_url == ""
+    assert cfg.spend_cap == 0
+    assert cfg.max_concurrent_agents == 0
+    assert cfg.services == []
+    assert cfg.requires == []
+    assert cfg.monitors == []
+    assert cfg.auto_dispatch == []
+    assert cfg.registries == []
+    assert cfg.mcp_servers == {}
+    assert cfg.brain == {}
+    assert cfg.roles == {}
+    assert cfg.launch_admission["enabled"] is False
+
+
+def test_non_numeric_spend_cap_falls_back_to_default(tmp_path):
+    _write_agent_yaml(tmp_path, """
+        agent: demo
+        spend_cap: "not-a-number"
+        max_concurrent_agents: ${UNSET_CONCURRENCY_12345:-}
+    """)
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.spend_cap == 0
+    assert cfg.max_concurrent_agents == 0
+
+
+def test_null_launch_admission_fields_fall_back_to_defaults(tmp_path):
+    _write_agent_yaml(tmp_path, """
+        agent: demo
+        launch_admission:
+          enabled: true
+          max_starting_agents:
+          load_per_cpu_soft_limit:
+    """)
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.launch_admission["enabled"] is True
+    assert cfg.launch_admission["max_starting_agents"] == 1
+    assert cfg.launch_admission["load_per_cpu_soft_limit"] == 1.5
+
+
 def test_launch_admission_config_defaults_disabled(tmp_path):
     _write_agent_yaml(tmp_path, """
         entry_point: manager

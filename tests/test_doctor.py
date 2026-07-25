@@ -25,14 +25,120 @@ class TestCheckResult:
         assert r.hint == "fix it"
 
 
-# --- Claude CLI ---
+# --- Brain CLI + auth (follows the team's configured brain) ---
 
-class TestCheckCLI:
-    def test_found(self):
-        with patch("shutil.which", return_value="/usr/local/bin/claude"):
-            from bobi.doctor import _check_claude_cli
-            r = _check_claude_cli()
-        assert r.ok
+
+def _install_team(tmp_path, agent_yaml: str) -> None:
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text(agent_yaml)
+
+
+def _on_path(*binaries: str):
+    """A shutil.which stub where only *binaries* are installed."""
+    return lambda binary: f"/usr/local/bin/{binary}" if binary in binaries else None
+
+
+def _never_shells_out(*args, **kwargs):
+    """A subprocess.run stub for teams whose brain must not be probed."""
+    raise AssertionError(f"doctor must not run {args and args[0]}")
+
+
+class TestCheckBrain:
+    """doctor probes the brain the team actually runs (#485 brains).
+
+    It used to run the Claude CLI + Claude auth checks unconditionally, so a
+    codex or gateway team on a host with no claude binary reported a broken
+    runtime (exit 1) for a CLI it never invokes.
+    """
+
+    def test_claude_team_checks_cli_and_auth(self, tmp_path, monkeypatch):
+        import bobi.doctor as doctor
+
+        _install_team(tmp_path, "agent: t\n")
+        monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+        monkeypatch.setattr(doctor.shutil, "which", _on_path("claude"))
+        monkeypatch.setattr(
+            "subprocess.run", lambda *a, **k: Mock(returncode=0, stderr=""))
+
+        results = doctor._check_brain()
+
+        assert [(r.name, r.ok) for r in results] == [
+            ("Claude CLI", True), ("Claude auth", True)]
+
+    def test_codex_team_does_not_require_the_claude_cli(self, tmp_path,
+                                                        monkeypatch):
+        import bobi.doctor as doctor
+
+        _install_team(tmp_path, "agent: t\nbrain:\n  kind: codex\n")
+        monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+        monkeypatch.setattr(doctor.shutil, "which", _on_path("codex"))
+        monkeypatch.setattr("subprocess.run", _never_shells_out)
+
+        results = doctor._check_brain()
+
+        assert [r.name for r in results if not r.ok and r.required] == []
+        assert [(r.name, r.ok) for r in results] == [("Codex CLI", True)]
+
+    def test_codex_team_requires_its_own_cli(self, tmp_path, monkeypatch):
+        import bobi.doctor as doctor
+
+        _install_team(tmp_path, "agent: t\nbrain:\n  kind: codex\n")
+        monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+        monkeypatch.setattr(doctor.shutil, "which", _on_path())
+        monkeypatch.setattr("subprocess.run", _never_shells_out)
+
+        results = doctor._check_brain()
+
+        assert [(r.name, r.ok, r.required) for r in results] == [
+            ("Codex CLI", False, True)]
+        assert "codex" in results[0].hint
+
+    def test_gateway_team_skips_the_vendor_auth_probe(self, tmp_path,
+                                                      monkeypatch):
+        # A gateway team authenticates to its own endpoint at session launch;
+        # probing vendor auth on this host fails for the wrong reason.
+        import bobi.doctor as doctor
+
+        _install_team(tmp_path, "agent: t\nbrain:\n"
+                                "  kind: claude\n  base_url: http://gw.test\n")
+        monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+        monkeypatch.setattr(doctor.shutil, "which", _on_path("claude"))
+        monkeypatch.setattr("subprocess.run", _never_shells_out)
+
+        results = doctor._check_brain()
+
+        assert [(r.name, r.ok) for r in results] == [("Claude CLI", True)]
+
+    def test_unknown_brain_kind_is_reported_not_assumed_healthy(
+        self, tmp_path, monkeypatch,
+    ):
+        import bobi.doctor as doctor
+
+        _install_team(tmp_path, "agent: t\nbrain:\n  kind: gemini\n")
+        monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+        monkeypatch.setattr(doctor.shutil, "which", _on_path("claude", "codex"))
+        monkeypatch.setattr("subprocess.run", _never_shells_out)
+
+        results = doctor._check_brain()
+
+        assert [(r.name, r.ok, r.required) for r in results] == [
+            ("Brain", False, True)]
+        assert "gemini" in results[0].detail
+
+    def test_run_doctor_reports_the_configured_brain(self, tmp_path,
+                                                     monkeypatch):
+        import bobi.doctor as doctor
+
+        _install_team(tmp_path, "agent: t\nbrain:\n  kind: codex\n")
+        _stub_non_brain_checks(monkeypatch)
+        monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+        monkeypatch.setattr(doctor.shutil, "which", _on_path("codex"))
+        monkeypatch.setattr("subprocess.run", _never_shells_out)
+
+        results = doctor.run_doctor()
+
+        assert [r.name for r in results if not r.ok and r.required] == []
+        assert any(r.name == "Codex CLI" and r.ok for r in results)
 
 
 # --- Project ---
@@ -365,31 +471,43 @@ class TestCheckSlackSocketMode:
             assert _check_slack_socket_mode() is None
 
 
-def test_run_doctor_surfaces_slack_socket_mode_check(monkeypatch):
+# Every check run_doctor runs except the brain ones, so a test can exercise the
+# real run_doctor without touching the host or the network. The list checks
+# return a list; the rest return one CheckResult.
+_NON_BRAIN_CHECKS = (
+    "_check_local_config",
+    "_check_runtime_layout",
+    "_check_runtime_write_policy",
+    "_check_install_integrity",
+    "_check_bobi_install_integrity",
+    "_check_package_requires",
+    "_check_host_caps",
+    "_check_services",
+    "_check_workflows",
+    "_check_bubble_auth",
+    "_check_event_server",
+    "_check_ingress_reachability",
+    "_check_recent_events",
+    "_check_long_term_memory",
+)
+_LIST_CHECKS = {"_check_package_requires", "_check_host_caps", "_check_services"}
+
+
+def _stub_non_brain_checks(monkeypatch):
     import bobi.doctor as doctor
 
     ordinary = CheckResult("ordinary", ok=True)
-    list_checks = {"_check_package_requires", "_check_host_caps", "_check_services"}
-    for name in (
-        "_check_claude_cli",
-        "_check_claude_auth",
-        "_check_local_config",
-        "_check_runtime_layout",
-        "_check_runtime_write_policy",
-        "_check_install_integrity",
-        "_check_bobi_install_integrity",
-        "_check_package_requires",
-        "_check_host_caps",
-        "_check_services",
-        "_check_workflows",
-        "_check_bubble_auth",
-        "_check_event_server",
-        "_check_ingress_reachability",
-        "_check_recent_events",
-        "_check_long_term_memory",
-    ):
-        result = [] if name in list_checks else ordinary
+    for name in _NON_BRAIN_CHECKS:
+        result = [] if name in _LIST_CHECKS else ordinary
         monkeypatch.setattr(doctor, name, lambda result=result: result)
+    monkeypatch.setattr(doctor, "_check_slack_socket_mode", lambda: None)
+
+
+def test_run_doctor_surfaces_slack_socket_mode_check(monkeypatch):
+    import bobi.doctor as doctor
+
+    _stub_non_brain_checks(monkeypatch)
+    monkeypatch.setattr(doctor, "_check_brain", lambda: [])
 
     socket_check = CheckResult(
         "Slack Socket Mode", ok=True, detail="A_APP connected", required=False,
@@ -423,18 +541,46 @@ def test_event_server_check_surfaces_node_prerequisite(monkeypatch):
     assert "Install Node.js 20+" in result.hint
 
 
-def test_event_server_check_skips_local_node_for_unregistered_remote(
+def test_event_server_check_reports_healthy_remote_before_registration(
     tmp_path, monkeypatch,
 ):
+    """A remote event_server_url is remote whether or not this runtime has
+    registered a deployment yet. doctor used to probe localhost:8080 for it and
+    report a REQUIRED 'not running' failure with a start-the-local-server hint.
+    """
     from bobi import doctor
 
-    paths.package_dir(tmp_path).mkdir(parents=True)
-    paths.agent_yaml_path(tmp_path).write_text(
-        "agent: test\n"
-        "event_server_url: https://events.example.com\n"
-    )
+    _install_team(tmp_path, "agent: test\n"
+                            "event_server_url: https://events.example.com\n")
     monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
-    monkeypatch.setattr("bobi.events.server.health", lambda url: None)
+    monkeypatch.setattr(
+        "bobi.events.server.health",
+        lambda url, **kw: {"status": "ok"}
+        if url == "https://events.example.com" else None,
+    )
+    monkeypatch.setattr(
+        "bobi.events.server.resolve_node_runtime",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("remote configuration must not require local Node")
+        ),
+    )
+
+    result = doctor._check_event_server()
+
+    assert result.ok is True
+    assert "https://events.example.com" in result.detail
+
+
+def test_event_server_check_warns_for_unreachable_remote(tmp_path, monkeypatch):
+    # An unreachable remote is worth reporting, but it is not this host's
+    # local server failing to start — never a required failure with a
+    # `event-server start` hint.
+    from bobi import doctor
+
+    _install_team(tmp_path, "agent: test\n"
+                            "event_server_url: https://events.example.com\n")
+    monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+    monkeypatch.setattr("bobi.events.server.health", lambda url, **kw: None)
     monkeypatch.setattr(
         "bobi.events.server.resolve_node_runtime",
         lambda: (_ for _ in ()).throw(
@@ -445,8 +591,49 @@ def test_event_server_check_skips_local_node_for_unregistered_remote(
     result = doctor._check_event_server()
 
     assert result.ok is False
-    assert result.detail == "not running"
+    assert result.required is False
+    assert "https://events.example.com" in result.detail
     assert "Node.js" not in result.hint
+
+
+def test_event_server_check_probes_the_configured_local_port(
+    tmp_path, monkeypatch,
+):
+    """A local server on a configured non-default port is running, and doctor
+    must find it there — `bobi agent <n> event-server status` already does."""
+    from bobi import doctor
+
+    _install_team(tmp_path, "agent: test\n"
+                            "event_server_url: http://localhost:9123\n")
+    monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        "bobi.events.server.health",
+        lambda url, **kw: {"status": "ok"}
+        if url == "http://localhost:9123" else None,
+    )
+
+    result = doctor._check_event_server()
+
+    assert result.ok is True
+    assert "9123" in result.detail
+
+
+def test_event_server_check_names_the_local_port_it_probed(tmp_path, monkeypatch):
+    # The failure has to say WHERE it looked, or a non-default port reads as
+    # "doctor is wrong" rather than "the server is down".
+    from bobi import doctor
+
+    _install_team(tmp_path, "agent: test\n"
+                            "event_server_url: http://localhost:9123\n")
+    monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+    monkeypatch.setattr("bobi.events.server.health", lambda url, **kw: None)
+    monkeypatch.setattr("bobi.events.server.resolve_node_runtime",
+                        lambda: ("/usr/bin/node", "v20.19.2"))
+
+    result = doctor._check_event_server()
+
+    assert result.ok is False
+    assert result.detail == "not running (http://localhost:9123)"
 
 
 def test_event_server_check_keeps_normal_not_running_hint_when_node_is_ready(
@@ -464,7 +651,7 @@ def test_event_server_check_keeps_normal_not_running_hint_when_node_is_ready(
     result = doctor._check_event_server()
 
     assert result.ok is False
-    assert result.detail == "not running"
+    assert result.detail == "not running (http://localhost:8080)"
     assert "auto-launch" in result.hint
 
 

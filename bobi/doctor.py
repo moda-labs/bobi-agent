@@ -32,8 +32,7 @@ def run_doctor() -> list[CheckResult]:
 
     results = []
 
-    results.append(_check_claude_cli())
-    results.append(_check_claude_auth())
+    results.extend(_check_brain())
     results.append(_check_local_config())
     results.append(_check_runtime_layout())
     results.append(_check_runtime_write_policy())
@@ -55,12 +54,73 @@ def run_doctor() -> list[CheckResult]:
     return results
 
 
-def _check_claude_cli() -> CheckResult:
-    if shutil.which("claude"):
-        return CheckResult("Claude CLI", ok=True, detail="found")
-    return CheckResult("Claude CLI", ok=False,
-                       detail="not found in PATH",
-                       hint="Install Claude Code: https://docs.anthropic.com/en/docs/claude-code")
+# The CLI each brain ENGINE drives: (check name, binary, install hint). An
+# engine absent from the map (``stub``) runs in-process with no CLI to probe.
+_BRAIN_CLIS: dict[str, tuple[str, str, str]] = {
+    "claude": (
+        "Claude CLI", "claude",
+        "Install Claude Code: https://docs.anthropic.com/en/docs/claude-code",
+    ),
+    "codex": (
+        "Codex CLI", "codex",
+        "Install the Codex CLI: npm install -g @openai/codex",
+    ),
+}
+
+
+def _configured_brain() -> tuple[str, bool]:
+    """The selected runtime's brain ENGINE and whether it dials a gateway.
+
+    Falls back to the framework default outside an installation or when the
+    config cannot be read — doctor stays useful on a half-installed host.
+    """
+    from bobi.brain import DEFAULT_BRAIN, normalize_brain_kind
+
+    root = bound_root()
+    if not root:
+        return DEFAULT_BRAIN, False
+    try:
+        from bobi.config import Config
+
+        cfg = Config.load(root)
+    except Exception:
+        return DEFAULT_BRAIN, False
+    return normalize_brain_kind(cfg.brain_kind) or DEFAULT_BRAIN, cfg.brain_is_gateway
+
+
+def _check_brain() -> list[CheckResult]:
+    """Health of the brain this team actually runs (#485/#789).
+
+    doctor probed the Claude CLI and Claude auth unconditionally, so a team on
+    `brain: {kind: codex}` reported two REQUIRED failures (exit 1) on a host
+    with no claude binary — for a CLI that team never invokes. The checks
+    follow the config instead, like every other brain-aware site: the
+    configured engine's CLI must be on PATH, and the vendor auth probe runs
+    only for a DIRECT claude team. A gateway team authenticates to its own
+    endpoint at session launch, so probing vendor credentials on this host
+    would fail for the wrong reason.
+    """
+    from bobi.brain import known_brain_kinds
+
+    engine, gateway = _configured_brain()
+    if engine not in known_brain_kinds():
+        # Fails loud at session construction; say so here rather than let the
+        # CLI gate below report a typo'd kind as healthy.
+        return [CheckResult("Brain", ok=False,
+                            detail=f"unknown brain kind {engine!r}",
+                            hint="Set brain.kind in agent.yaml to one of: "
+                                 + ", ".join(known_brain_kinds()))]
+    spec = _BRAIN_CLIS.get(engine)
+    if not spec:                     # in-process brain (stub): nothing to probe
+        return [CheckResult(f"{engine} brain", ok=True, detail="no CLI required")]
+    name, binary, hint = spec
+    if not shutil.which(binary):
+        # No CLI means no auth either: one actionable failure, not two.
+        return [CheckResult(name, ok=False, detail="not found in PATH", hint=hint)]
+    results = [CheckResult(name, ok=True, detail="found")]
+    if engine == "claude" and not gateway:
+        results.append(_check_claude_auth())
+    return results
 
 
 def _check_claude_auth() -> CheckResult:
@@ -366,7 +426,17 @@ def _check_bubble_auth() -> CheckResult:
 
 
 def _check_event_server() -> CheckResult:
-    """Probe the event server /health endpoint."""
+    """Probe the event server /health endpoint.
+
+    WHICH server is this team's event server follows the config, exactly like
+    `bobi agent <name> event-server status`: a remote `event_server_url` is
+    remote whether or not this runtime has registered a deployment yet, and a
+    local one lives on its configured (or remembered) port, not always 8080.
+    doctor used to probe localhost:8080 unconditionally once registration was
+    missing, so a remote-configured instance that hadn't started yet — and any
+    local server on a non-default port — failed a REQUIRED check and was told
+    to start the local server it does not use.
+    """
     from bobi.config import Config
     from bobi.events.server import (
         NodeRuntimePrerequisiteError,
@@ -374,41 +444,49 @@ def _check_event_server() -> CheckResult:
         health,
         resolve_node_runtime,
     )
+    from bobi.service import _selected_local_event_server_port
 
     root = bound_root()
-    needs_local_node = True
+    url = "http://localhost:8080"
     if root:
         try:
             cfg = Config.load(root)
-            # Deployment state is per-session (state/deployments/<session>.json);
-            # any registered session means the remote server is in use.
-            from bobi import paths
-            deployments_dir = paths.state_path(root) / "deployments"
-            registered = (deployments_dir.is_dir()
-                          and any(deployments_dir.glob("*.json")))
-            if cfg.event_server_url and registered:
-                return CheckResult("Event server", ok=True,
-                                   detail=f"remote ({cfg.event_server_url})")
             if cfg.event_server_url and not _is_local_url(cfg.event_server_url):
-                needs_local_node = False
+                # Deployment state is per-session
+                # (state/deployments/<session>.json); any registered session
+                # proves the remote server is in use, otherwise probe it.
+                from bobi import paths
+                deployments_dir = paths.state_path(root) / "deployments"
+                registered = (deployments_dir.is_dir()
+                              and any(deployments_dir.glob("*.json")))
+                if registered or health(cfg.event_server_url):
+                    return CheckResult("Event server", ok=True,
+                                       detail=f"remote ({cfg.event_server_url})")
+                # Not this host's server to start: a warning, not a failure.
+                return CheckResult(
+                    "Event server", ok=False, required=False,
+                    detail=f"remote ({cfg.event_server_url}) not reachable",
+                    hint="Check the URL and network; the agent registers with "
+                         "it on `bobi agent <name> start`")
+            url = f"http://localhost:{_selected_local_event_server_port(root)}"
         except FileNotFoundError:
             pass
 
-    url = "http://localhost:8080"
     if health(url):
         return CheckResult("Event server", ok=True, detail=url)
-    if needs_local_node:
-        try:
-            resolve_node_runtime()
-        except NodeRuntimePrerequisiteError as exc:
-            return CheckResult(
-                "Event server",
-                ok=False,
-                detail=str(exc),
-                hint="Install Node.js 20+ and ensure `node` is on PATH, then run doctor again.",
-            )
+    # Only a LOCAL server reaches here (the remote branch returns above), so
+    # the Node runtime it needs is genuinely this host's problem.
+    try:
+        resolve_node_runtime()
+    except NodeRuntimePrerequisiteError as exc:
+        return CheckResult(
+            "Event server",
+            ok=False,
+            detail=str(exc),
+            hint="Install Node.js 20+ and ensure `node` is on PATH, then run doctor again.",
+        )
     return CheckResult("Event server", ok=False,
-                       detail="not running",
+                       detail=f"not running ({url})",
                        hint="`bobi agent <name> event-server start` or `bobi agent <name> start` will auto-launch")
 
 

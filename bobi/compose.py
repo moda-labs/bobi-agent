@@ -643,7 +643,13 @@ def _merge_keyed_list(base: list | None, overlay: list | None,
                       key: str) -> list:
     """Merge two lists of dicts keyed by `key`: same key → deep-merge fields;
     new key → append; `remove: true` on an overlay entry → drop the inherited
-    one (and itself)."""
+    one (and itself).
+
+    A removal also drops the key from the index, so an overlay that removes and
+    re-adds the same key in one list — the idiom for replacing an inherited
+    entry wholesale rather than field-merging onto it — appends a fresh entry
+    instead of deep-merging onto the tombstone (which raised a raw TypeError).
+    """
     result: list[dict] = [dict(e) for e in (base or [])]
     index = {e.get(key): i for i, e in enumerate(result) if isinstance(e, dict)}
     for entry in overlay or []:
@@ -653,7 +659,7 @@ def _merge_keyed_list(base: list | None, overlay: list | None,
         name = entry.get(key)
         if entry.get("remove") is True:
             if name in index:
-                result[index[name]] = None  # tombstone; compacted below
+                result[index.pop(name)] = None  # tombstone; compacted below
             continue
         if name in index:
             result[index[name]] = _deep_merge_dict(result[index[name]], entry)
@@ -748,6 +754,37 @@ def _apply_prune(chain: list[ResolvedLayer], dest: Path, merged_yaml: dict,
                     prov.warn(f"{label}: prune {surface}:{name} matched nothing")
 
 
+def _prune_target(dest: Path, surface: str, name: str) -> Path:
+    """Resolve prune entry *name* inside `dest/<surface>`, or raise.
+
+    A prune name addresses content INSIDE the image being frozen, so it must
+    resolve inside it. Unvalidated it does not: `dest / "roles" / "/etc"` is
+    `Path("/etc")` (pathlib drops the base on an absolute join) and `../..`
+    walks out the same way, so the unlink/rmtree in `_prune_one` would delete
+    host paths during `bobi agents install`. Team packs are trusted code
+    (docs/SECURITY.md), but nothing in that trust extends to deleting outside
+    the image — and a typo must not cost a user their home directory. Symlinks
+    are resolved, so an in-image link pointing out is an escape too.
+
+    An escape is rejected loudly rather than skipped: a prune entry that cannot
+    mean what it says is a broken pack, not a no-op.
+    """
+    base = dest / surface
+    target = base / str(name)
+    try:
+        base_real, target_real = base.resolve(), target.resolve()
+    except OSError:                      # unreadable / looping path
+        base_real, target_real = base, target
+    if base_real not in target_real.parents:
+        raise ComposeError(
+            f"prune {surface}:{name} points outside the composed team package. "
+            "A prune entry names content inside the package (e.g. `codex` or "
+            "`methodology/old.md`), so an absolute path or a `..` segment is "
+            "never valid — fix the `prune:` block in the layer that declares it."
+        )
+    return target
+
+
 def _prune_one(dest: Path, merged_yaml: dict, surface: str, name: str) -> bool:
     """Remove one named item from a frozen surface. Returns True if something
     was removed."""
@@ -764,19 +801,20 @@ def _prune_one(dest: Path, merged_yaml: dict, surface: str, name: str) -> bool:
                 return True
         return False
     if surface == "roles":
-        rdir = dest / "roles" / name
+        rdir = _prune_target(dest, "roles", name)
         if rdir.is_dir():
             shutil.rmtree(rdir)
             return True
         return False
     if surface in _PRUNE_DIR_SURFACES:
-        base = dest / surface
         # Allow either a bare stem (`codex`) or a relative path
         # (`methodology/old.md`). Try common extensions for a bare stem.
-        candidates = [base / name]
-        if "." not in Path(name).name:
-            candidates += [base / f"{name}.md", base / f"{name}.yaml",
-                           base / f"{name}.yml"]
+        target = _prune_target(dest, surface, name)
+        candidates = [target]
+        if "." not in target.name:
+            candidates += [target.with_name(f"{target.name}.md"),
+                           target.with_name(f"{target.name}.yaml"),
+                           target.with_name(f"{target.name}.yml")]
         removed = False
         for c in candidates:
             if c.is_file():

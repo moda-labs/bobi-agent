@@ -153,6 +153,15 @@ def _tok(v) -> int:
     return v if isinstance(v, int) else 0
 
 
+def _usd(v) -> float:
+    """A dollar amount usable in arithmetic — :func:`_tok` for money.
+
+    Same invariant, same reason: ``or 0.0`` passes a truthy string straight
+    into the running totals, where ``+=`` raises and takes the whole fold
+    (every session, every team) down with one bad record."""
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+
+
 def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
     """Aggregate costs across all session state files.
 
@@ -175,13 +184,17 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
             data = json.loads(state_file.read_text())
         except (json.JSONDecodeError, OSError):
             continue
+        if not isinstance(data, dict):
+            continue
 
-        # `or 0.0` (not a get default) so a present-but-null cost - a
-        # hand-edited or partially-written state.json - coerces to 0.0
-        # instead of crashing the arithmetic below (these fold now backs a
-        # web endpoint that must not 500 on one malformed session).
-        cost = data.get("total_cost_usd") or 0.0
-        model_usage = data.get("model_usage") or {}
+        # Every untrusted number goes through _usd/_tok: a hand-edited or
+        # partially-written state.json can carry a null or a string where
+        # dollars belong, and this fold backs a web endpoint that must not 500
+        # on one malformed session.
+        cost = _usd(data.get("total_cost_usd"))
+        model_usage = data.get("model_usage")
+        if not isinstance(model_usage, dict):
+            model_usage = {}
         if not cost and not model_usage:
             continue
 
@@ -195,8 +208,8 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
 
         attributed_cost = 0.0
         for key, usage in model_usage.items():
-            usage = usage or {}
-            usage_cost = usage.get("cost_usd") or 0.0
+            usage = usage if isinstance(usage, dict) else {}
+            usage_cost = _usd(usage.get("cost_usd"))
             attributed_cost += usage_cost
             # key format is "provider:model"
             parts = key.split(":", 1)

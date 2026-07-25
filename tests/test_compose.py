@@ -9,6 +9,7 @@ Covers the acceptance criteria of both:
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -306,6 +307,23 @@ def test_services_merge_by_name_and_remove(project):
     assert svcs["github"]["credentials"] == {"token": "X"}  # overlay field added
 
 
+def test_services_remove_then_readd_replaces_wholesale(project):
+    """Removing and re-declaring the same service in one overlay replaces it
+    wholesale — the natural idiom for "forget the inherited entry, here is
+    mine". The removal leaves a tombstone in the merged list, and merging the
+    re-added entry onto that tombstone used to raise a raw TypeError."""
+    _team(project, "core", 'version: "1.0.0"\nservices:\n'
+          '  - {name: github, required: true, credentials: {token: BASE}}\n')
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\nservices:\n'
+                 '  - {name: github, remove: true}\n'
+                 '  - {name: github, required: false}\n')
+    dest, _ = _compose(project, leaf)
+    cfg = yaml.safe_load((dest / "agent.yaml").read_text())
+    svcs = [s for s in cfg["services"] if s["name"] == "github"]
+    assert len(svcs) == 1                              # not duplicated
+    assert svcs[0] == {"name": "github", "required": False}  # base fields gone
+
+
 def test_build_lists_accrete_scalars_override(project):
     _team(project, "core", 'version: "1.0.0"\nbuild:\n'
           '  apt: [nodejs, jq]\n  verify: requires\n')
@@ -386,6 +404,60 @@ def test_prune_nothing_warns(project):
     chain = compose.resolve_chain(leaf, project)
     prov = compose.compose(chain, paths.package_dir(project))
     assert any("does-not-exist" in w for w in prov.warnings)
+
+
+def _compose_error(project, leaf) -> Exception | None:
+    """Compose, returning the ComposeError instead of raising it.
+
+    Lets a containment test assert the HOST is intact first: a vulnerable
+    compose deletes the path and then returns normally, and that deletion —
+    not the missing exception — is the failure worth reading."""
+    try:
+        _compose(project, leaf)
+    except compose.ComposeError as e:
+        return e
+    return None
+
+
+def test_prune_relative_subpath_inside_surface_still_works(project):
+    # The containment guard must not break the documented relative-path form.
+    _team(project, "core", 'version: "1.0.0"\n',
+          tools={"methodology/old.md": "x", "github.md": "gh"})
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
+                 'prune:\n  tools: ["methodology/old.md"]\n')
+    dest, prov = _compose(project, leaf)
+    assert not (dest / "tools" / "methodology" / "old.md").exists()
+    assert (dest / "tools" / "github.md").exists()
+    assert not prov.warnings
+
+
+def test_prune_absolute_path_rejected_and_host_untouched(project, tmp_path):
+    # A prune name is content INSIDE the frozen image. `dest / "roles" / "/x"`
+    # is Path("/x") — pathlib drops the base on an absolute join — so an
+    # unvalidated name rmtree'd host paths during `bobi agents install`.
+    victim = tmp_path / "victim"
+    (victim / "keep").mkdir(parents=True)
+    (victim / "keep" / "data.txt").write_text("precious")
+    _team(project, "core", 'version: "1.0.0"\n', roles={"spare": "# Spare"})
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
+                 f'prune:\n  roles: ["{victim}"]\n')
+    error = _compose_error(project, leaf)
+    assert (victim / "keep" / "data.txt").is_file(), \
+        "prune escaped the compose destination and deleted a host path"
+    assert error is not None and "prune" in str(error)
+
+
+def test_prune_parent_traversal_rejected_and_host_untouched(project, tmp_path):
+    victim = tmp_path / "victim.md"
+    victim.write_text("precious")
+    rel = os.path.relpath(victim, paths.package_dir(project) / "tools")
+    _team(project, "core", 'version: "1.0.0"\n', tools={"github.md": "gh"})
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
+                 f'prune:\n  tools: ["{rel}"]\n')
+    error = _compose_error(project, leaf)
+    assert victim.is_file(), \
+        "prune escaped the compose destination and deleted a host path"
+    assert error is not None and "prune" in str(error)
 
 
 # --- framework-default monitors (#471) ---------------------------------------
