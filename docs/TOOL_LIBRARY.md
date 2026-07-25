@@ -39,7 +39,8 @@ tool_library:
 
 `tool_library:` is consumed at compose time - it never appears in the frozen
 `agent.yaml`. It merges across the `from:` chain, so a base team's dependency is
-inherited by everything built on it (de-duped by name, first occurrence wins).
+inherited by everything built on it (de-duped by name; an overlay re-declaring a
+name replaces the inherited entry - the leaf wins).
 
 ## Two ways to declare a tool
 
@@ -116,7 +117,10 @@ inline (an explicit team `requires:` / `build:` / `host:` wins).
   already declares that name), so the runtime dispatch gate and `bobi agent
   <name> doctor` verify it.
 - **`build:`** - `install` steps accreted + de-duped via the one build merge.
-- **`tools/<name>.md`** - the guide, unless the team already ships that file.
+- **`tools/<name>.md`** - the guide, unless the team already ships that file. A
+  guide compose generated is tracked in `tool-library-guides.json`, so a
+  reinstall refreshes it from the catalog and drops it when the dependency goes
+  away, while a team-shipped file is still never touched.
 - **`host:`** - emitted as a top-level list so deploy surfaces it and doctor
   checks it (see `bobi/host_caps.py`); never materialized into the image.
 - **`mcp_servers:`** - each dependency's `mcp:` spec merged into a top-level
@@ -289,6 +293,20 @@ inherited; the build de-dupe collapses a pin declared in several layers to one:
 # leaf/agent.yaml       ->  from: base
 #                            tool_library: [venn]
 # composed leaf: venn baked once (one build recipe, one requires entry).
+```
+
+An overlay that re-declares an inherited dependency by name **replaces** it
+wholesale - the idiom for re-pinning a base team's tool:
+
+```yaml
+# base/agent.yaml   ->  tool_library: [codex]          # the catalog pin
+# leaf/agent.yaml   ->  from: base
+#                        tool_library:
+#                          - name: codex               # same name = an override
+#                            success: "codex --version"
+#                            install: { npm: ["@openai/codex@0.150.0"] }
+# composed leaf: the leaf's pin, and only it. Fields the leaf omits are NOT
+# inherited from the base's entry, so restate the `guide:` you want kept.
 ```
 
 Any surface the framework would emit can be **overridden** by declaring it

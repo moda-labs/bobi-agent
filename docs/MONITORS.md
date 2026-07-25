@@ -240,6 +240,14 @@ tick
 A self-heal tick is never wasted: the agent both produces this tick's result and
 emits the script for next time.
 
+Self-heal runs **off the scheduler thread**. The scheduler evaluates every
+monitor from one thread and an agent generation can take minutes, so the tick
+hands the generation to a worker and reports "indeterminate" rather than
+blocking every other monitor behind it. The worker still pins its script and
+records its state when it lands; its items are collected on that monitor's next
+tick (a fast generation - under the 2 s handoff grace - still returns in the
+same tick). At most one generation per monitor is ever in flight.
+
 ## What it caches: an LLM wrote this script
 
 The load-bearing fact is that a cron now runs **machine-generated code
