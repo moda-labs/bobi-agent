@@ -773,8 +773,18 @@ def _prune_target(dest: Path, surface: str, name: str) -> Path:
     target = base / str(name)
     try:
         base_real, target_real = base.resolve(), target.resolve()
-    except OSError:                      # unreadable / looping path
-        base_real, target_real = base, target
+    except (OSError, RuntimeError) as e:
+        # Resolution failed: unreadable, or a symlink loop - which raises
+        # RuntimeError, not OSError, so the old handler never caught the case
+        # its own comment named. Falling back to the UNRESOLVED paths made this
+        # a lexical check, and `base in (base/"../../x").parents` is True, so
+        # the fallback silently accepted the very escape this function exists to
+        # stop. A path we cannot resolve is one we cannot vouch for: reject it.
+        raise ComposeError(
+            f"prune {surface}:{name} could not be resolved ({e}), so it cannot "
+            "be confirmed to point inside the composed team package — fix the "
+            "`prune:` block in the layer that declares it."
+        ) from e
     if base_real not in target_real.parents:
         raise ComposeError(
             f"prune {surface}:{name} points outside the composed team package. "

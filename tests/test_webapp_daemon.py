@@ -153,3 +153,26 @@ class TestStopIdentity:
         monkeypatch.setattr(daemon, "_proc_argv", lambda pid: [])
         monkeypatch.setattr(daemon, "_ps_argv", lambda pid: [])
         assert daemon._is_app_process(os.getpid()) is False
+
+    def test_unidentifiable_pid_keeps_its_state_files(self, tmp_path,
+                                                      monkeypatch):
+        """Failing closed on the signal must not fail OPEN on the bookkeeping.
+
+        Where argv is unreadable (no /proc, no ps) a live daemon reads as
+        unidentifiable. Deleting app.pid/app.port there orphans a process that
+        is very likely still serving and throws away the only record of its
+        port - nothing can find it, and the next start() can never bind.
+        """
+        monkeypatch.setattr(daemon.paths, "state_dir", lambda *a, **k: tmp_path)
+        pid_path, port_path = daemon._pid_path(), daemon._port_path()
+        pid_path.write_text(str(os.getpid()))   # a pid that IS alive
+        port_path.write_text("8899")
+        # Alive, but unidentifiable: neither argv source answers.
+        monkeypatch.setattr(daemon, "_proc_argv", lambda pid: [])
+        monkeypatch.setattr(daemon, "_ps_argv", lambda pid: [])
+
+        st = daemon.stop()
+
+        assert st.running is False
+        assert pid_path.exists(), "app.pid deleted for a live, unidentified pid"
+        assert port_path.exists(), "app.port deleted - the daemon is unfindable"

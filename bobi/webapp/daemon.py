@@ -20,6 +20,7 @@ defense-in-depth, same trust model as the other local UIs.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import subprocess
@@ -31,6 +32,8 @@ from pathlib import Path
 
 from bobi import paths
 from bobi.webui_common.security import WEBUI_TOKEN_HEADER
+
+log = logging.getLogger(__name__)
 
 DEFAULT_PORT = 8642
 START_TIMEOUT = 20.0
@@ -237,6 +240,19 @@ def stop() -> AppStatus:
 
     pid = _read_int(_pid_path())
     if not _app_alive(pid):
+        if pid and _pid_alive(pid) and not _process_argv(pid):
+            # Alive, but argv is unreadable (no /proc and no ps), so we cannot
+            # tell our own daemon from a stranger. Signalling is out - but so is
+            # clearing the state files: that would orphan a daemon which is very
+            # likely still serving AND destroy the only record of its port, so
+            # nothing could find it and the next start() would fail to bind for
+            # good. Keep the record and say what happened.
+            log.warning(
+                "Cannot identify pid %s (no readable argv); leaving it running "
+                "and keeping app.pid/app.port. Stop it by hand if it is stale.",
+                pid,
+            )
+            return AppStatus(running=False, pid=pid)
         _pid_path().unlink(missing_ok=True)
         _port_path().unlink(missing_ok=True)
         return AppStatus(running=False)
