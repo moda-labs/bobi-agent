@@ -51,6 +51,10 @@ ROTATION_RECONNECT_BACKOFF = 2.0
 ROTATION_DISCONNECT_TIMEOUT = 10.0
 MESSAGE_ACK_TIMEOUT = 10.0
 ACK_WORKER_STOP_TIMEOUT = 0.1
+# How often start() re-checks session-thread liveness while waiting on _ready.
+# Short enough that a dead thread is noticed immediately, long enough that a
+# healthy start costs no measurable extra wakeups.
+_READY_POLL_INTERVAL = 0.1
 
 # Control sentinel for the named compact command (#433). Delivered as an inbox
 # message body; the run loop recognizes it, flags rotation, and never forwards
@@ -337,6 +341,11 @@ class Session:
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._keep_alive: asyncio.Event | None = None
+        # Carries a stop() that lands before _keep_alive exists - i.e. while the
+        # startup turn is still in flight. Without it the shutdown signal had
+        # nowhere to go and was silently dropped (D003).
+        self._stop_requested = threading.Event()
+        self._task: asyncio.Task | None = None
         self._input_ready: asyncio.Event | None = None
         self._state = "stopped"
         self._last_response = ""
@@ -1401,6 +1410,8 @@ class Session:
                     return
 
     async def _run(self, startup_prompt: str | None = None) -> None:
+        # Held so stop() can cancel a turn that would otherwise never end (D003).
+        self._task = asyncio.current_task()
         saved_id = load_resumable_session_id(self.name, self._session_model())
         resume_id = saved_id or None
 
@@ -1423,29 +1434,39 @@ class Session:
         registry = get_registry()
         registry.update(self.name, status="running")
 
-        if startup_prompt and not resume_id:
-            await self._drain_turn()
-        elif startup_prompt and resume_id:
-            await self._client.query(startup_prompt)
-            await self._drain_turn()
-        else:
-            self._set_state("waiting_input")
-            registry.update(self.name, status="idle")
-
-        self._ready.set()
-        log.info(f"Session '{self.name}' ready")
-
-        inbox_task = asyncio.create_task(self._inbox_loop())
-
-        self._keep_alive = asyncio.Event()
+        # The teardown below must cover the startup turn too, not just the
+        # keep-alive wait: a stop() during that turn cancels this task, and the
+        # brain subprocess has to be disconnected on the way out (D003).
+        inbox_task: asyncio.Task | None = None
         try:
+            if startup_prompt and not resume_id:
+                await self._drain_turn()
+            elif startup_prompt and resume_id:
+                await self._client.query(startup_prompt)
+                await self._drain_turn()
+            else:
+                self._set_state("waiting_input")
+                registry.update(self.name, status="idle")
+
+            self._ready.set()
+            log.info(f"Session '{self.name}' ready")
+
+            inbox_task = asyncio.create_task(self._inbox_loop())
+
+            self._keep_alive = asyncio.Event()
+            # A stop() that arrived while the startup turn was still running
+            # found no _keep_alive to signal; honour it now rather than parking
+            # here forever with a live client.
+            if self._stop_requested.is_set():
+                self._keep_alive.set()
             await self._keep_alive.wait()
         finally:
-            inbox_task.cancel()
-            try:
-                await inbox_task
-            except asyncio.CancelledError:
-                pass
+            if inbox_task is not None:
+                inbox_task.cancel()
+                try:
+                    await inbox_task
+                except asyncio.CancelledError:
+                    pass
             await self._stop_rotation_work()
             self._stop_ack_work()
             if self._client:
@@ -1462,6 +1483,12 @@ class Session:
         except (KeyboardInterrupt, SystemExit) as e:
             log.info(f"Session '{self.name}' exiting: {type(e).__name__}")
             raise
+        except asyncio.CancelledError:
+            # stop() cancelled a turn that would not end on its own. That is a
+            # clean shutdown, not a crash - _run's finally already tore the
+            # brain session down (D003). CancelledError is a BaseException, so
+            # it needs its own clause to stay out of the crash path below.
+            log.info(f"Session '{self.name}' stopped mid-turn")
         except Exception as e:
             log.error(f"Session '{self.name}' crashed: {e}", exc_info=True)
             self._set_state("error")
@@ -1592,6 +1619,12 @@ class Session:
         )
 
         self._ready.clear()
+        # Reset the shutdown latches: a Session can be started again after a
+        # stop(), and a leftover request (or a stale _keep_alive from the last
+        # run) would tear the new one down the moment it became ready.
+        self._stop_requested.clear()
+        self._keep_alive = None
+        self._task = None
         self._thread = threading.Thread(
             target=self._thread_target,
             args=(startup_prompt,),
@@ -1600,17 +1633,70 @@ class Session:
         )
         self._thread.start()
 
-        if self._ready.wait(timeout=timeout):
+        if self._await_ready(timeout):
             return True
-        log.error(f"Session '{self.name}' failed to start within {timeout}s")
+        if self._thread and not self._thread.is_alive():
+            log.error(f"Session '{self.name}' thread exited before becoming ready")
+        else:
+            log.error(f"Session '{self.name}' failed to start within {timeout}s")
         return False
+
+    def _await_ready(self, timeout: int) -> bool:
+        """Wait for readiness, giving up early once the session thread is gone.
+
+        ``_ready`` is only set on the happy path, so a thread that dies during
+        connect (missing brain CLI, instant crash) would otherwise hold the
+        caller for the entire timeout - up to an hour on the spawn paths (D021).
+        Polling in slices lets us watch thread liveness as well as the event.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return self._ready.is_set()
+            if self._ready.wait(timeout=min(_READY_POLL_INTERVAL, remaining)):
+                return True
+            if not (self._thread and self._thread.is_alive()):
+                # Re-read the event: the thread may have set it and exited
+                # between our wait() timing out and this liveness check.
+                return self._ready.is_set()
 
     def get_session_id(self) -> str:
         return load_session_id(self.name)
 
+    def _signal_keep_alive(self) -> None:
+        """Release the keep-alive wait from this (non-loop) thread."""
+        keep_alive, loop = self._keep_alive, self._loop
+        if keep_alive is None or loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(keep_alive.set)
+        except RuntimeError:
+            pass  # loop already torn down - nothing left to release
+
+    def _cancel_run_task(self) -> None:
+        """Cancel the session coroutine so an unending turn cannot outlive stop()."""
+        task, loop = self._task, self._loop
+        if task is None or loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            pass  # loop already torn down
+
     def stop(self) -> None:
-        if self._keep_alive:
-            self._keep_alive.set()
+        # Record the request first: a stop that lands while the startup turn is
+        # still in flight has no _keep_alive to signal yet, and used to be
+        # dropped on the floor - leaking the thread and its brain subprocess
+        # for the life of the process (D003).
+        self._stop_requested.set()
+        if self._keep_alive is not None:
+            self._signal_keep_alive()
+        else:
+            # Still inside the startup turn. There is no event to set, so
+            # interrupt the turn directly rather than waiting out a join that
+            # nothing will ever satisfy.
+            self._cancel_run_task()
         # Tell any background registration retry to give up before we tear the
         # subscription down, so it can't wire in a fresh client mid-shutdown.
         self._sub_retry_stop.set()
@@ -1619,6 +1705,11 @@ class Session:
             self._sub_retry_thread = None
         if self._thread:
             self._thread.join(timeout=15)
+            if self._thread.is_alive():
+                # The turn is wedged past the grace period: cancel it so the
+                # brain subprocess cannot outlive stop() (D003).
+                self._cancel_run_task()
+                self._thread.join(timeout=5)
         # Tear down the event subscription (WS client + drain thread) BEFORE
         # unregistering the inbox, so the drain can't push into — or warn about —
         # a closed inbox on its way out. Swap under the lock: a background retry

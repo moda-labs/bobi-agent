@@ -867,6 +867,97 @@ class TestRunAgentSupervisedTracking:
             session_id=None, phase="implement",
         )
 
+    @staticmethod
+    def _hanging_sdk_module():
+        """An SDK double whose turn never produces a message."""
+        mock_module = MagicMock()
+        mock_module.AssistantMessage = FakeAssistantMessage
+        mock_module.ClaudeAgentOptions = MagicMock()
+        mock_module.ResultMessage = FakeResultMessage
+        mock_module.TextBlock = FakeTextBlock
+
+        async def _hang():
+            await asyncio.sleep(3600)
+            yield None  # pragma: no cover - the turn never gets here
+
+        client = MagicMock()
+        client.connect = AsyncMock()
+        client.query = AsyncMock()
+        client.disconnect = AsyncMock()
+        client.receive_response = _hang
+        mock_module.ClaudeSDKClient = MagicMock(return_value=client)
+        return mock_module
+
+    @pytest.mark.asyncio
+    async def test_external_cancellation_records_terminal_failure(self):
+        """A caller-side wait_for timeout must still persist 'failed' (D067).
+
+        The sole caller wraps this coroutine in asyncio.wait_for, whose expiry
+        cancels the task from the outside. Cancellation arrives as
+        CancelledError - a BaseException since 3.8 - so it slipped past both
+        `except asyncio.TimeoutError` and `except Exception`: the terminal
+        bookkeeping never ran, state.json kept a non-terminal entry, and the
+        reconciler had nothing to re-emit.
+        """
+        mock_registry = MagicMock()
+
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules",
+                        {"claude_agent_sdk": self._hanging_sdk_module()}):
+
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    _run_agent_supervised(
+                        prompt="Hang", cwd="/tmp", run_key="TMO-EXT",
+                        phase="implement", timeout=30,
+                    ),
+                    timeout=0.2,
+                )
+
+        mock_registry.mark_terminal.assert_any_call(
+            "agent-tmo-ext-implement", "failed",
+            error="subprocess timeout after 30s", session_id=None,
+            phase="implement",
+        )
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_enforced_inside_the_coroutine(self):
+        """The declared timeout must actually bound the run (D067).
+
+        `except asyncio.TimeoutError` claimed to handle this, but nothing in
+        the coroutine ever enforced the deadline, so unwrapped callers hung
+        indefinitely and the handler was dead code.
+        """
+        mock_registry = MagicMock()
+
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules",
+                        {"claude_agent_sdk": self._hanging_sdk_module()}):
+
+            result = await asyncio.wait_for(
+                _run_agent_supervised(
+                    prompt="Hang", cwd="/tmp", run_key="TMO-INT",
+                    phase="implement", timeout=1,
+                ),
+                timeout=20,  # generous: the coroutine must stop itself first
+            )
+
+        assert result.success is False
+        assert result.error == "subprocess timeout after 1s"
+        mock_registry.mark_terminal.assert_any_call(
+            "agent-tmo-int-implement", "failed",
+            error="subprocess timeout after 1s", session_id=None,
+            phase="implement",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests: run_phase_blocking — the sync wrapper

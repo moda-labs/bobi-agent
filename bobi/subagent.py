@@ -414,104 +414,118 @@ async def _run_agent_supervised(
     )
 
     try:
-        try:
-            connect_prompt = prompt if not saved_id else None
-            await client.connect(connect_prompt)
-            if saved_id:
-                await client.query(prompt)
-        except Exception as e:
-            if not saved_id:
-                raise
-            # Stale/unresumable saved session: clear it and retry fresh once,
-            # matching Session._run and the workflow orchestrator. Without
-            # this, a bad token fails every subsequent monitor interval.
-            log.warning(
-                "Resume failed for '%s' (stale session?), retrying fresh: %s",
-                name, e,
-            )
-            save_session_id(name, "")
-            saved_id = ""
+        # Enforce the declared deadline here instead of trusting callers to
+        # wrap us: nothing bounded the receive_response loop, so the
+        # TimeoutError handler below was unreachable and an unwrapped caller
+        # hung indefinitely (D067).
+        async with asyncio.timeout(timeout):
             try:
-                await client.disconnect()
-            except Exception:
-                pass
-            client = _build_client("")
-            await client.connect(prompt)
+                connect_prompt = prompt if not saved_id else None
+                await client.connect(connect_prompt)
+                if saved_id:
+                    await client.query(prompt)
+            except Exception as e:
+                if not saved_id:
+                    raise
+                # Stale/unresumable saved session: clear it and retry fresh once,
+                # matching Session._run and the workflow orchestrator. Without
+                # this, a bad token fails every subsequent monitor interval.
+                log.warning(
+                    "Resume failed for '%s' (stale session?), retrying fresh: %s",
+                    name, e,
+                )
+                save_session_id(name, "")
+                saved_id = ""
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                client = _build_client("")
+                await client.connect(prompt)
 
-        while True:
-            result_msg = None
-            async for msg in client.receive_response():
-                if isinstance(msg, AssistantText):
-                    if msg.text:
-                        result.final_text = msg.text
-                        log_activity("response", {
-                            "text": msg.text[:500],
-                        }, session=name)
-                elif isinstance(msg, TurnResult):
-                    result_msg = msg
+            while True:
+                result_msg = None
+                async for msg in client.receive_response():
+                    if isinstance(msg, AssistantText):
+                        if msg.text:
+                            result.final_text = msg.text
+                            log_activity("response", {
+                                "text": msg.text[:500],
+                            }, session=name)
+                    elif isinstance(msg, TurnResult):
+                        result_msg = msg
 
-            if result_msg is None:
-                result.error = _network_drop_error("no ResultMessage")
-                _persist_terminal(registry, name, TERMINAL_FAILED,
-                                  error=result.error, phase=phase)
+                if result_msg is None:
+                    result.error = _network_drop_error("no ResultMessage")
+                    _persist_terminal(registry, name, TERMINAL_FAILED,
+                                      error=result.error, phase=phase)
+                    return result
+
+                save_session_id(name, result_msg.session_id, model=model)
+                result.session_id = result_msg.session_id
+                result.duration_ms += result_msg.duration_ms
+                result.total_cost_usd += result_msg.total_cost_usd or 0.0
+                result.num_turns += result_msg.num_turns
+                for _c in result_msg.costs:
+                    if _c.model:
+                        result.model = _c.model
+
+                if result_msg.deferred_tool and on_input_needed:
+                    deferred = result_msg.deferred_tool
+                    log.info(f"Agent {run_key}/{phase} deferred {deferred.name}")
+                    loop = asyncio.get_running_loop()
+                    answer = await loop.run_in_executor(
+                        None, on_input_needed, deferred.name, deferred.input,
+                    )
+                    await client.query(answer)
+                    continue
+
+                result.success = not (result_msg.is_error or result_msg.error_kind)
+                if not result.success:
+                    result.error_kind = result_msg.error_kind
+                    if result_msg.error_message and result_msg.result_text:
+                        result.error = (
+                            f"{result_msg.error_message}: {result_msg.result_text}"
+                        )
+                    else:
+                        result.error = (
+                            result_msg.error_message
+                            or result_msg.result_text
+                            or "unknown error"
+                        )
+                    # Single-sourced transient classification (§4.3): a 529/rate-limit
+                    # /5xx is tagged transient so the launcher can re-dispatch. We do
+                    # NOT retry here — survival/retry is owned by #444.
+                    result.transient = is_transient_api_error(
+                        result_msg.api_error_status,
+                        result.error,
+                    )
+                # RC#2: honest terminal status — never record `done` on an error
+                # result. A transient 529 surfaces as an error ResultMessage (not an
+                # exception), so the old unconditional `done` wrote a success over a
+                # real failure. We record it honestly as `failed` and let it be
+                # delivered (RC#1); transient survival/retry is owned by the
+                # persistent session (#444), so the spawn path adds no retry (§4.3).
+                terminal = TERMINAL_COMPLETED if result.success else TERMINAL_FAILED
+                _persist_terminal(registry, name, terminal, error=result.error,
+                                  session_id=result_msg.session_id, phase=phase)
+                log_activity("stop", {"session_id": result_msg.session_id,
+                                      "status": terminal}, session=name)
                 return result
-
-            save_session_id(name, result_msg.session_id, model=model)
-            result.session_id = result_msg.session_id
-            result.duration_ms += result_msg.duration_ms
-            result.total_cost_usd += result_msg.total_cost_usd or 0.0
-            result.num_turns += result_msg.num_turns
-            for _c in result_msg.costs:
-                if _c.model:
-                    result.model = _c.model
-
-            if result_msg.deferred_tool and on_input_needed:
-                deferred = result_msg.deferred_tool
-                log.info(f"Agent {run_key}/{phase} deferred {deferred.name}")
-                loop = asyncio.get_running_loop()
-                answer = await loop.run_in_executor(
-                    None, on_input_needed, deferred.name, deferred.input,
-                )
-                await client.query(answer)
-                continue
-
-            result.success = not (result_msg.is_error or result_msg.error_kind)
-            if not result.success:
-                result.error_kind = result_msg.error_kind
-                if result_msg.error_message and result_msg.result_text:
-                    result.error = (
-                        f"{result_msg.error_message}: {result_msg.result_text}"
-                    )
-                else:
-                    result.error = (
-                        result_msg.error_message
-                        or result_msg.result_text
-                        or "unknown error"
-                    )
-                # Single-sourced transient classification (§4.3): a 529/rate-limit
-                # /5xx is tagged transient so the launcher can re-dispatch. We do
-                # NOT retry here — survival/retry is owned by #444.
-                result.transient = is_transient_api_error(
-                    result_msg.api_error_status,
-                    result.error,
-                )
-            # RC#2: honest terminal status — never record `done` on an error
-            # result. A transient 529 surfaces as an error ResultMessage (not an
-            # exception), so the old unconditional `done` wrote a success over a
-            # real failure. We record it honestly as `failed` and let it be
-            # delivered (RC#1); transient survival/retry is owned by the
-            # persistent session (#444), so the spawn path adds no retry (§4.3).
-            terminal = TERMINAL_COMPLETED if result.success else TERMINAL_FAILED
-            _persist_terminal(registry, name, terminal, error=result.error,
-                              session_id=result_msg.session_id, phase=phase)
-            log_activity("stop", {"session_id": result_msg.session_id,
-                                  "status": terminal}, session=name)
-            return result
 
     except asyncio.TimeoutError:
         result.error = _timeout_error(timeout)
         _persist_terminal(registry, name, TERMINAL_FAILED, error=result.error,
                           phase=phase)
+    except asyncio.CancelledError:
+        # A caller-side wait_for expiry cancels this task from the outside, and
+        # CancelledError is a BaseException - it reached neither handler, so the
+        # terminal record was silently skipped (D067). Record it, then re-raise:
+        # cancellation is not ours to swallow.
+        result.error = _timeout_error(timeout)
+        _persist_terminal(registry, name, TERMINAL_FAILED, error=result.error,
+                          phase=phase)
+        raise
     except Exception as e:
         result.error = _tool_crash_error(e)
         # An unhandled executor exception is a crash, not a clean failure.
