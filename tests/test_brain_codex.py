@@ -399,22 +399,20 @@ def test_make_session_clears_stale_managed_block(tmp_path, monkeypatch):
     assert "mcp_servers" not in data
 
 
-def test_make_session_without_mcp_option_and_no_team_leaves_config_alone(
-        tmp_path, monkeypatch):
-    """No options key AND no installed team to read: nothing to say about MCP.
+def test_make_session_without_mcp_option_keeps_rendered_servers(tmp_path, monkeypatch):
+    """A call site that OMITS `mcp_servers` must leave config.toml alone.
 
     ``$CODEX_HOME/config.toml`` is machine-global and every ``codex exec`` turn
-    re-reads it, so treating "nobody told me" as "this team has no MCP" strips
-    the servers out from under every live codex session, the manager's included
-    (D009). With no bound runtime root there is no team set to reconcile
-    against, so the file must be left exactly as found.
+    re-reads it, so treating an omitted key as "this team has no MCP" strips the
+    servers out from under every live codex session — including the manager's.
+    The omitting sites are real: a monitor check/gate (``subagent._run_agent_supervised``)
+    and a workflow step (``orchestrator._make_session``) both build options with
+    only ``max_turns``/``skills``.
     """
     import tomllib
     from bobi.brain import codex_config
-    from bobi import paths
 
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-    paths.bind_root(None)
     # Manager boot rendered the team's effective set.
     codex_config.write_codex_config(
         {"weather": {"command": "/opt/weather"}}, home=tmp_path)
@@ -427,72 +425,53 @@ def test_make_session_without_mcp_option_and_no_team_leaves_config_alone(
     assert data["mcp_servers"]["weather"]["command"] == "/opt/weather"
 
 
-def _install_team(root, mcp_servers: dict) -> None:
-    """Install a minimal composed team package at *root* and bind it, the way a
-    real runtime does (``bobi agent <name> ...`` binds ``run/``)."""
-    import yaml
-    from bobi import paths
-
-    pkg = root / "package"
-    pkg.mkdir(parents=True, exist_ok=True)
-    (pkg / "agent.yaml").write_text(yaml.dump({
-        "version": "0.0.1",
-        "agent": "codex-team",
-        "entry_point": "director",
-        "mcp_servers": mcp_servers,
-    }))
-    paths.bind_root(None)
-    paths.bind_root(root)
-
-
-def test_make_session_without_mcp_option_keeps_the_teams_declared_servers(
+def test_omitted_mcp_option_is_not_resolved_from_the_installed_team(
         tmp_path, monkeypatch):
-    """A team that DOES declare MCP keeps its managed block when a call site
-    omits the key (D009): the omitting sites are real (a monitor check/gate via
-    ``subagent._run_agent_supervised``, a workflow step via
-    ``orchestrator._make_session``), and they must never wipe live servers."""
+    """The tempting fix for the residual stale-block gap, pinned as UNSAFE.
+
+    A team that DROPS its `mcp_servers` never passes the key again, so its own
+    stale managed block is never cleaned up (see the D009 note in
+    plans/2026-07-22-review-remediation.md). The obvious repair - when the key
+    is absent, read the set from the INSTALLED team config and render that - is
+    worse than the gap:
+
+    - `$CODEX_HOME` is machine-global (nothing in bobi sets it per agent; it
+      defaults to ~/.codex), but the resolved team config is bound-root-local.
+      On a box with two installed teams, the one declaring NO servers would
+      wipe the other's live block on every make_session.
+    - `package/agent.yaml` is written non-atomically (compose.py, install.py),
+      so a make_session landing in that window reads an empty file as "declares
+      none" and wipes a correct block for a SINGLE team too.
+
+    Both are the exact "strip the servers out from under every live session"
+    failure the code above exists to prevent. Closing the gap needs per-agent
+    CODEX_HOME scoping or an ownership-stamped managed block - a design change,
+    not a patch. Until then an omitted key means "nothing stated", full stop.
+    """
     import tomllib
     from bobi.brain import codex_config
 
-    codex = tmp_path / "codex"
-    codex.mkdir()
-    monkeypatch.setenv("CODEX_HOME", str(codex))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     codex_config.write_codex_config(
-        {"weather": {"command": "/opt/weather"}}, home=codex)
-    _install_team(tmp_path / "run",
-                  {"weather": {"type": "stdio", "command": "/opt/weather"}})
+        {"weather": {"command": "/opt/weather"}}, home=tmp_path)
+
+    # A bound root whose installed team declares no MCP at all - the shape that
+    # would make a team-config lookup return {} and clear the block. The
+    # binding is process-global (paths._root), not the env var, so bind it for
+    # real: setting BOBI_ROOT alone leaves bobi_root() raising, which any
+    # broad `except` would swallow into a false pass.
+    from bobi import paths
+    root = tmp_path / "other-team" / "run"
+    (root / "package").mkdir(parents=True)
+    (root / "package" / "agent.yaml").write_text("agent: other\n")
+    paths.bind_root(root)
+    assert paths.bobi_root() == root.resolve()
 
     CodexBrain().make_session(
         cwd="/w", system_prompt={"append": "S"},
         options={"max_turns": 200, "skills": "all"})
 
-    data = tomllib.loads((codex / "config.toml").read_text())
-    assert data["mcp_servers"]["weather"]["command"] == "/opt/weather"
-
-
-def test_make_session_clears_stale_block_when_team_declares_no_mcp(
-        tmp_path, monkeypatch):
-    """A codex team that DROPPED its MCP deps must lose the stale managed block.
-
-    This is the real production shape: no production option-builder ever passes
-    an empty ``mcp_servers`` (``subagent.py`` splats
-    ``**({"mcp_servers": _mcp} if _mcp else {})`` at :602/:761, ``service.py``
-    passes ``cfg.mcp_servers or None``, ``orchestrator.py`` never sets it), so
-    the key is simply absent - and the previously rendered ``[mcp_servers.*]``
-    table stays in ``~/.codex/config.toml``, loaded by every later
-    ``codex exec``, with no code path that clears it.
-    """
-    from bobi.brain import codex_config
-
-    codex = tmp_path / "codex"
-    codex.mkdir()
-    monkeypatch.setenv("CODEX_HOME", str(codex))
-    codex_config.write_codex_config({"old": {"command": "/old"}}, home=codex)
-    assert codex_config.config_has_managed_block(codex)
-    _install_team(tmp_path / "run", {})
-
-    CodexBrain().make_session(
-        cwd="/w", system_prompt={"append": "S"},
-        options={"max_turns": 200, "skills": "all"})
-
-    assert not codex_config.config_has_managed_block(codex)
+    data = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert data["mcp_servers"]["weather"]["command"] == "/opt/weather", (
+        "an omitted mcp_servers key was resolved from the installed team and "
+        "wiped another agent's live managed block")

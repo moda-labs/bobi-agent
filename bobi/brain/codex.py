@@ -20,10 +20,8 @@ to the first turn of a fresh thread rather than written as ``AGENTS.md``.
 
 MCP servers (#428 Stage 4): Codex reads them from ``~/.codex/config.toml`` at
 process start (nothing rides the CLI invocation), so :meth:`CodexBrain.make_session`
-renders the team's effective ``mcp_servers`` to that file before the first
-``codex exec`` runs - taken from ``options`` when a caller states a set, else
-from the installed team config (:func:`_team_mcp_servers`), because that file
-is machine-global and no call site is guaranteed to pass one. See
+renders the team's effective ``mcp_servers`` (splatted into ``options`` by
+``subagent.py``) to that file before the first ``codex exec`` runs. See
 ``bobi.brain.codex_config``.
 """
 
@@ -72,32 +70,6 @@ def _instructions(system_prompt: Any) -> str:
     if isinstance(system_prompt, str):
         return system_prompt
     return ""
-
-
-def _team_mcp_servers() -> dict | None:
-    """The installed team's declared ``mcp_servers``, or ``None`` when there is
-    no team config to read.
-
-    ``$CODEX_HOME/config.toml`` is machine-global and re-read by every ``codex
-    exec`` turn, so it has to mirror the team's declared MCP set. A call site
-    that simply didn't splat the key (a monitor check, a workflow step) says
-    nothing about that set - and neither does an empty one, since every
-    option-builder drops the key when the set is empty. The composed
-    ``agent.yaml`` is the authoritative statement: present means it declares
-    the set (no ``mcp_servers:`` means the team has none), absent (or no bound
-    runtime root at all) means nothing is known and the file must not be
-    touched.
-    """
-    try:
-        from bobi import paths
-        from bobi.config import Config
-
-        root = paths.bobi_root()
-        if not paths.agent_yaml_path(root).is_file():
-            return None
-        return Config.load(root).mcp_servers or {}
-    except Exception:
-        return None
 
 
 def _costs(u: dict, model: str) -> list[BrainCost]:
@@ -396,22 +368,18 @@ class CodexBrain(GatewayAwareEngine):
         # can't render config would silently run MCP-less, so surface it rather
         # than pass preflight and fail at runtime.
         #
-        # The set is stated by the options dict when it carries one (a caller
-        # override, e.g. validate's probe), else by the installed team config.
-        # Never inferred from the *absence* of the key: a call site that doesn't
-        # splat it has nothing to say about MCP (a monitor check, a workflow
-        # step), and config.toml is machine-global and re-read by every `codex
-        # exec` turn, so rendering an assumed-empty set there would strip the
-        # servers out from under every live session, manager included, once per
-        # monitor interval.
+        # Only an options dict that CARRIES the key declares the team's set. An
+        # absent key means the call site has nothing to say about MCP (a monitor
+        # check, a workflow step), NOT that the team has none: config.toml is
+        # machine-global and re-read by every `codex exec` turn, so rendering an
+        # assumed-empty set there would strip the servers out from under every
+        # live session, manager included, once per monitor interval.
         from bobi.brain.codex_config import (
             codex_home, config_has_managed_block, write_codex_config,
         )
-        mcp_servers = opts.get("mcp_servers")
-        if not isinstance(mcp_servers, dict):
-            mcp_servers = _team_mcp_servers()
+        mcp_servers = opts.get("mcp_servers") or {}
         home = codex_home()
-        if mcp_servers is not None and (
+        if "mcp_servers" in opts and (
             mcp_servers or config_has_managed_block(home)
         ):
             write_codex_config(mcp_servers, home)
