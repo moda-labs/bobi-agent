@@ -43,6 +43,14 @@ log = logging.getLogger(__name__)
 
 MAX_HANDOFF_RETRIES = 2
 
+# Outcomes of one ``_run_workflow_async`` pass. ``SUSPENDED`` is dormant, not
+# terminal: the run is parked on an await step, so the callers must not emit a
+# terminal workflow event for it (docs/WORKFLOW_ENGINE.md: workflow.completed /
+# workflow.failed mean "run reaches a terminal outcome").
+OUTCOME_COMPLETED = "completed"
+OUTCOME_FAILED = "failed"
+OUTCOME_SUSPENDED = "suspended"
+
 
 @dataclass(frozen=True)
 class _NotifyOutcome:
@@ -67,8 +75,8 @@ def try_resume_for_event(event_type: str, run_key: str = "", event: dict | None 
                          repo: str = "") -> bool:
     """Check if any suspended workflow is waiting for this event type and resume it.
 
-    Called by the manager when it receives an event that might unblock a workflow.
-    Returns True if a workflow was resumed.
+    Intended as the manager's hook for an event that might unblock a workflow
+    (see the wiring caveat below). Returns True if a workflow was resumed.
 
     *repo* scopes the lookup to a specific repository so that identical
     run_keys in different repos do not collide.
@@ -88,15 +96,20 @@ def try_resume_for_event(event_type: str, run_key: str = "", event: dict | None 
     if not run:
         return False
 
-    if not run.claim():
-        log.info(f"Run {run.run_id} already claimed by another process")
-        return False
-
+    # Resolve the workflow BEFORE claiming. ``claim()`` renames
+    # ``<id>.json`` to ``<id>.resuming.json`` and nothing renames it back, so
+    # claiming a run whose workflow is no longer in the installed pack would
+    # orphan it: ``find_waiting`` skips it and the CLI's ``WorkflowRun.load``
+    # raises FileNotFoundError.
     dispatcher = WorkflowDispatcher()
     dispatcher.load_all_workflows()
     wf = dispatcher.find_workflow(run.workflow_name)
     if not wf:
         log.error(f"Cannot resume run {run.run_id}: workflow '{run.workflow_name}' not found")
+        return False
+
+    if not run.claim():
+        log.info(f"Run {run.run_id} already claimed by another process")
         return False
 
     log.info(f"Resuming workflow {run.workflow_name} for {run.run_key} "
@@ -182,6 +195,9 @@ def run_workflow(
 
     ``model`` and ``effort`` are explicit launch overrides: like ``--role``,
     each wins over every step-level and config-level value for the whole run.
+
+    Returns True when the run completed *or* suspended on an await step (a
+    suspend is dormant, not a failure), False when it failed.
     """
     run_key = run_key or "adhoc"
     requested_by = requested_by or {}
@@ -227,7 +243,7 @@ def run_workflow(
     if needs_worktree:
         ctx.set_scope("worktree", {"path": work_cwd})
 
-    success = asyncio.run(
+    outcome = asyncio.run(
         _run_workflow_async(
             workflow, task, repo, work_cwd, run_key, session_name,
             registry, ctx, requested_by, timeout, interactive, role=role,
@@ -236,6 +252,14 @@ def run_workflow(
     )
 
     duration = time.time() - started_at
+    if outcome == OUTCOME_SUSPENDED:
+        # Dormant, not finished: agent/workflow.suspended already fired and the
+        # entry stays "waiting" for the resume. Emitting a terminal event here
+        # would tell every bus consumer the run is over while it waits.
+        log.info(f"Workflow {workflow.name} suspended after {duration:.0f}s")
+        return True
+
+    success = outcome == OUTCOME_COMPLETED
     if success:
         _emit_lifecycle_event("agent/workflow.completed", {
             "run_key": run_key,
@@ -252,9 +276,9 @@ def run_workflow(
             "text": f"Workflow {workflow.name} failed for {run_key}",
         }, blocking=True)
 
-    # _run_workflow_async already persisted the honest terminal status (or left
-    # the entry "waiting" on suspend). Only fall back to mark_done if it somehow
-    # didn't — never clobber a completed/failed/waiting status with "done".
+    # _run_workflow_async already persisted the honest terminal status. Only
+    # fall back to mark_done if it somehow didn't — never clobber a
+    # completed/failed status with "done".
     _close_if_still_active(registry, session_name)
 
     log.info(f"Workflow {workflow.name} {'completed' if success else 'failed'} "
@@ -271,8 +295,11 @@ def resume_workflow(
 ) -> bool:
     """Resume a suspended workflow from its await step.
 
-    Restores the variable context and session, then continues execution
-    from the step after the one that suspended.
+    Restores the variable context, launch overrides, and session, then
+    continues execution from the step after the one that suspended.
+
+    Returns True when the resumed run completed *or* suspended again on a
+    later await step, False when it failed.
     """
     session_name = run.session_name
     run_key = run.run_key
@@ -316,27 +343,40 @@ def resume_workflow(
         "text": f"Workflow {workflow.name} resumed for {run_key}",
     })
 
-    # A launch-time --model/--effort override survives suspension via the
-    # _runtime scope; without it the resume would re-resolve to the config
+    # A launch-time --model/--effort/--role override survives suspension via
+    # the _runtime scope; without it the resume would re-resolve to the config
     # default - for the model that would trip the mismatch guard, discard the
     # saved session, and silently change the run's model; for the effort it
-    # would silently change the run's dial.
+    # would silently change the run's dial; for the role the rest of the run
+    # would silently switch to the step-declared agent's identity and model.
     runtime_scope = run.variable_scopes.get("_runtime", {})
     if not isinstance(runtime_scope, dict):
         runtime_scope = {}
     launch_model = str(runtime_scope.get("launch_model", "") or "")
     launch_effort = str(runtime_scope.get("launch_effort", "") or "")
+    launch_role = str(runtime_scope.get("launch_role", "") or "")
 
-    success = asyncio.run(
+    outcome = asyncio.run(
         _run_workflow_async(
             workflow, f"Resuming workflow from step {step_idx}", repo, cwd,
             run_key, session_name, registry, ctx, requested_by, timeout,
-            interactive, start_step=step_idx, launch_model=launch_model,
-            launch_effort=launch_effort,
+            interactive, start_step=step_idx, role=launch_role,
+            launch_model=launch_model, launch_effort=launch_effort,
         )
     )
 
     duration = time.time() - started_at
+    if outcome == OUTCOME_SUSPENDED:
+        # The resumed run parked on another await step and a fresh waiting
+        # record now owns it. This record's execution is over but the run did
+        # not reach a terminal outcome - never stamp it "completed".
+        run.status = "superseded"
+        run.save()
+        log.info(f"Resumed workflow {workflow.name} suspended again after "
+                 f"{duration:.0f}s")
+        return True
+
+    success = outcome == OUTCOME_COMPLETED
     if success:
         run.status = "completed"
         run.completed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -377,8 +417,13 @@ async def _run_workflow_async(
     role: str = "",
     launch_model: str = "",
     launch_effort: str = "",
-) -> bool:
-    """Async core: one brain session for all steps."""
+) -> str:
+    """Async core: one brain session for all steps.
+
+    Returns one of ``OUTCOME_COMPLETED`` / ``OUTCOME_FAILED`` /
+    ``OUTCOME_SUSPENDED`` - a suspend is not a success, and the callers must
+    tell them apart before emitting a terminal workflow event.
+    """
     from bobi.brain import (
         continuation_token, get_brain, get_process_brain_model,
         resolve_effort, resolve_model,
@@ -485,13 +530,21 @@ async def _run_workflow_async(
         "text": f"{role or 'Agent'} started working on {run_key}",
     })
 
-    # CLI --role always wins; fall back to workflow step's agent field
+    runtime_scope = ctx.scopes.get("_runtime", {})
+    if not isinstance(runtime_scope, dict):
+        runtime_scope = {}
+
+    # CLI --role always wins; then the workflow step's agent field; then, on a
+    # resume, the agent the suspended session was built under - the restored
+    # transcript must keep running under the system prompt that produced it.
     first_agent = role or ""
     if not first_agent:
         for s in workflow.steps[start_step:]:
             if s.agent:
                 first_agent = s.agent
                 break
+    if not first_agent:
+        first_agent = str(runtime_scope.get("agent", "") or "")
     current_agent = first_agent
     first_prompt_step = _first_prompt_step()
     first_prompt_model = _effective_step_model(first_prompt_step)
@@ -499,15 +552,8 @@ async def _run_workflow_async(
     # effort on a resumed session, so the effective dial is simply recomputed
     # for the next step - no saved-effort record, no continue-vs-fresh check.
     current_effort = _effective_step_effort(first_prompt_step)
-    runtime_scope = ctx.scopes.get("_runtime", {})
-    saved_session_model = (
-        str(runtime_scope.get("model", "") or "")
-        if isinstance(runtime_scope, dict) else ""
-    )
-    visit_counts = (
-        dict(runtime_scope.get("visits", {}) or {})
-        if isinstance(runtime_scope, dict) else {}
-    )
+    saved_session_model = str(runtime_scope.get("model", "") or "")
+    visit_counts = dict(runtime_scope.get("visits", {}) or {})
     # A fresh session always runs the next step's model; only a genuinely
     # resumable session stays on the one it was suspended under.
     current_model = (
@@ -557,12 +603,23 @@ async def _run_workflow_async(
     suspended = False
 
     # Try resume, fall back to fresh session
+    client = None
     for attempt in range(2):
         resume_id = (saved_id or None) if attempt == 0 else None
-        client = _make_session(
-            resume_id, agent_name=current_agent, model=current_model,
-            effort=current_effort,
-        )
+        try:
+            client = _make_session(
+                resume_id, agent_name=current_agent, model=current_model,
+                effort=current_effort,
+            )
+        except Exception as e:
+            # Building the session (runtime guard, agent prompt resolution)
+            # failing is not a stale-session symptom, so it gets no fresh
+            # retry — but it must not escape the terminal-emit `finally`
+            # either, or the run dies with the entry stuck "running" and no
+            # session.failed/workflow.failed ever emitted.
+            log.error(f"Session setup failed: {e}")
+            run_failed, failure_error = True, str(e)
+            break
         try:
             if resume_id:
                 initial_prompt = None
@@ -597,7 +654,7 @@ async def _run_workflow_async(
 
     try:
         if run_failed:
-            return False
+            return OUTCOME_FAILED
 
         # save_session_id inside the drain already recorded the session id
         # the run actually got (resume mints a fresh id; a retry-fresh start
@@ -644,7 +701,7 @@ async def _run_workflow_async(
                 failed_step = step.name
                 run_failed, failure_error = True, error
                 _emit_step_failed(run_key, workflow.name, step.name, error)
-                return False
+                return OUTCOME_FAILED
 
             # Route step — deterministic, no LLM
             if step.condition:
@@ -668,7 +725,7 @@ async def _run_workflow_async(
                             _emit_step_failed(
                                 run_key, workflow.name, step.name, error,
                             )
-                            return False
+                            return OUTCOME_FAILED
                         step_idx = jump
                         continue
                 step_idx += 1
@@ -713,7 +770,7 @@ async def _run_workflow_async(
                     )
                     run_failed, failure_error = True, error
                     _emit_step_failed(run_key, workflow.name, step.name, error)
-                    return False
+                    return OUTCOME_FAILED
                 step_idx += 1
                 continue
 
@@ -731,6 +788,8 @@ async def _run_workflow_async(
                     "model": current_model,
                     "launch_model": launch_model,
                     "launch_effort": launch_effort,
+                    "launch_role": role,
+                    "agent": current_agent,
                     "visits": visit_counts,
                 })
                 run.variable_scopes = ctx.scopes
@@ -753,7 +812,7 @@ async def _run_workflow_async(
                     await client.disconnect()
                 except Exception:
                     pass
-                return True
+                return OUTCOME_SUSPENDED
 
             # Prompt step — inject into the persistent session
             step_start = time.time()
@@ -835,7 +894,7 @@ async def _run_workflow_async(
                         _emit_step_failed(
                             run_key, workflow.name, step.name, drain_error,
                         )
-                        return False
+                        return OUTCOME_FAILED
 
             _emit_lifecycle_event("agent/step.started", {
                 "run_key": run_key,
@@ -848,6 +907,13 @@ async def _run_workflow_async(
             prompt = _build_step_prompt(step, ctx, session_name, step.name)
             log.info(f"Step {step.name}: injecting prompt ({len(prompt)} chars)")
 
+            # Clear any handoff left by a previous visit to this step (a route
+            # loop) or a previous run under the same deterministic session
+            # name. Without this the validation below reads a stale file, the
+            # step "passes" instantly, and routing repeats the old decision on
+            # outputs this turn never produced.
+            session_handoff_path(session_name, step.name).unlink(missing_ok=True)
+
             await client.query(prompt)
             final_text, drain_error = await _drain_response(
                 client, session_name, run_key, model=current_model,
@@ -858,7 +924,7 @@ async def _run_workflow_async(
                 run_failed, failure_error = True, drain_error
                 _emit_step_failed(run_key, workflow.name, step.name,
                                   drain_error)
-                return False
+                return OUTCOME_FAILED
 
             # Validate handoff
             handoff = _read_handoff(session_name, step.name)
@@ -883,7 +949,7 @@ async def _run_workflow_async(
                 error = f"Handoff missing required fields after retries: {missing}"
                 run_failed, failure_error = True, error
                 _emit_step_failed(run_key, workflow.name, step.name, error)
-                return False
+                return OUTCOME_FAILED
 
             # Capture outputs for routing
             outputs = {k: handoff.get(k, "") for k in
@@ -906,7 +972,7 @@ async def _run_workflow_async(
 
             step_idx += 1
 
-        return True
+        return OUTCOME_COMPLETED
 
     except Exception as e:
         log.error(f"Workflow error: {e}")
@@ -917,7 +983,7 @@ async def _run_workflow_async(
             "error": str(e),
             "text": f"Workflow error: {e}",
         }, blocking=True)
-        return False
+        return OUTCOME_FAILED
     finally:
         # A suspended run is not terminal — skip the terminal emit + status
         # write entirely (the agent/workflow.suspended event already fired and
@@ -952,10 +1018,11 @@ async def _run_workflow_async(
                 error=failure_error if run_failed else "",
                 emit_confirmed=bool(landed),
             )
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
 
 async def _drain_response(
@@ -1197,15 +1264,22 @@ def _build_step_prompt(step: StepDef, ctx: VariableContext, session_name: str = 
 
 
 def _read_handoff(session_name: str, step_name: str) -> dict:
-    """Read the handoff YAML for a step."""
+    """Read the handoff YAML for a step.
+
+    Anything that is not a mapping — prose the agent wrote instead of the
+    contract, a bare list — is treated as no handoff at all, so the caller
+    lands in the designed re-prompt path. Returning it would make
+    ``_validate_handoff``'s ``in`` a substring/element test that wrongly
+    passes, and the outputs capture would then crash on ``handoff.get()``.
+    """
     path = session_handoff_path(session_name, step_name)
     if not path.exists():
         return {}
     try:
-        content = path.read_text()
-        return yaml.safe_load(content) or {}
+        data = yaml.safe_load(path.read_text())
     except yaml.YAMLError:
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _validate_handoff(step: StepDef, handoff: dict) -> list[str]:

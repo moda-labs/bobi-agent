@@ -455,6 +455,25 @@ class DefaultFakeBrain:
         return FakeBrainClient()
 
 
+def _write_handoffs_on_turn(monkeypatch, session_dir: Path, *turns: dict) -> None:
+    """Make the fake agent write its handoff files DURING a turn, as a real
+    agent does: one ``{filename: content}`` mapping per turn, the last
+    repeating.  The engine clears a step's stale handoff before injecting the
+    prompt, so a file planted at client construction never reaches the read."""
+    original_query = FakeClient.query
+    state = {"turn": 0}
+
+    async def _query(self_client, text):
+        await original_query(self_client, text)
+        files = turns[min(state["turn"], len(turns) - 1)]
+        state["turn"] += 1
+        session_dir.mkdir(parents=True, exist_ok=True)
+        for name, content in files.items():
+            (session_dir / name).write_text(content)
+
+    monkeypatch.setattr(FakeClient, "query", _query)
+
+
 class TestRunWorkflow:
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
@@ -490,16 +509,11 @@ class TestRunWorkflow:
         root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
         sessions = paths.sessions_dir(root)
 
-        # Write handoff during the fake agent's response (simulating the
-        # agent writing it after the triage step runs, not before)
-        original_init = FakeClient.__init__
-        def _patched_init(self_client):
-            original_init(self_client)
-            # Write to the session dir handoff path
-            d = sessions / "wf-t-r-1"
-            d.mkdir(parents=True, exist_ok=True)
-            (d / "handoff-triage.yaml").write_text("needs_spec: true\n")
-        monkeypatch.setattr(FakeClient, "__init__", _patched_init)
+        # The agent writes its handoff during the triage turn, not before it.
+        _write_handoffs_on_turn(
+            monkeypatch, sessions / "wf-t-r-1",
+            {"handoff-triage.yaml": "needs_spec: true\n"},
+        )
 
         wf = Workflow(name="t", steps=[
             StepDef(name="triage", prompt="triage",
@@ -1229,6 +1243,65 @@ class TestHonestTerminalEmit:
         assert "agent/session.completed" not in types
         assert "agent/session.failed" not in types
 
+    def test_session_setup_failure_terminates_honestly(self, tmp_path, monkeypatch):
+        """A failure while BUILDING the session (runtime guard, agent prompt
+        resolution) must go down the same honest terminal path as any other
+        failure. It used to escape both the retry try and the terminal-emit
+        finally, so the run raised out of run_workflow leaving the registry
+        entry 'running' with no session.failed and no workflow.failed."""
+        _bind_runtime_root(tmp_path / "_r", monkeypatch)
+        monkeypatch.setattr(
+            "bobi.runtime_guard.prepare_brain_runtime",
+            MagicMock(side_effect=PermissionError("EPERM: read-only runtime")),
+        )
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: DefaultFakeBrain())
+
+        emits = []
+        registry = MagicMock()
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        with patch("bobi.workflow.orchestrator.get_registry", return_value=registry), \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event",
+                   side_effect=lambda etype, data, **kw: emits.append((etype, data))), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            result = run_workflow(wf, task="t", repo="r", cwd="/tmp", run_key="1")
+
+        assert result is False
+        types = [e[0] for e in emits]
+        assert "agent/session.failed" in types
+        assert "agent/session.completed" not in types
+        assert "agent/workflow.failed" in types
+        failed = next(d for t, d in emits if t == "agent/session.failed")
+        assert "EPERM: read-only runtime" in failed["error"]
+        # The durable record is terminal, not a stale "running" the dead-man
+        # reconciler would later mis-report as a crash.
+        assert registry.mark_terminal.call_args[0][1] == "failed"
+
+    def test_suspend_does_not_emit_workflow_completed(self, tmp_path, monkeypatch):
+        """A suspended run is dormant, not terminal: workflow.completed means
+        "run reaches a terminal outcome" (docs/WORKFLOW_ENGINE.md), so a run
+        parked on an await step must not emit it - bus consumers would read a
+        run still waiting for its event as terminally finished."""
+        root = _bind_runtime_root(tmp_path / "_r", monkeypatch)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+        paths.sessions_dir(root)
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="spec", prompt="write spec"),
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+        result, emits = self._run_capture(
+            wf, FakeClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is True
+        types = [e[0] for e in emits]
+        assert "agent/workflow.suspended" in types
+        assert "agent/workflow.completed" not in types
+        assert "agent/workflow.failed" not in types
+
 
 # ---------------------------------------------------------------------------
 # Await / resume
@@ -1315,6 +1388,159 @@ class TestAwaitStep:
         assert success is True
         reloaded = WorkflowRun.load(run.run_id)
         assert reloaded.status == "completed"
+
+    def test_resume_into_second_await_does_not_complete(self, tmp_path, monkeypatch):
+        """A resumed run that reaches a second await step is dormant again: no
+        workflow.completed event, and the resumed record must not be stamped
+        'completed' - the run has not reached a terminal outcome."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+
+        run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {"input": {"task": "t", "repo": "r", "run_key": "1"}}
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.run_key = "1"
+        run.save()
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="wait_ci", await_event="ci.finished"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+
+        emits = []
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event",
+                   side_effect=lambda etype, data, **kw: emits.append((etype, data))), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            monkeypatch.setattr("bobi.brain.get_brain", lambda: DefaultFakeBrain())
+            success = resume_workflow(run, wf)
+
+        assert success is True
+        types = [e[0] for e in emits]
+        assert "agent/workflow.suspended" in types
+        assert "agent/workflow.completed" not in types
+        assert "agent/workflow.failed" not in types
+        # The resumed record is superseded by the new waiting one, never
+        # stamped with a terminal success it did not reach.
+        assert WorkflowRun.load(run.run_id).status == "superseded"
+        assert WorkflowRun.find_waiting("ci.finished") is not None
+
+    def test_launch_role_survives_suspend_and_resume(self, tmp_path, monkeypatch):
+        """A launch-time --role override wins for the whole run, suspension
+        included: without it the resumed run silently switches to the
+        step-declared agent's identity and its configured model."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
+        paths.agent_yaml_path(root).write_text(
+            "agent: test\nentry_point: manager\n"
+            "roles:\n  reviewer:\n    model: opus\n  engineer:\n    model: haiku\n"
+        )
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+
+        calls = []
+        prompt_roles = []
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs)
+                return FakeBrainClient()
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        monkeypatch.setattr(
+            "bobi.prompts.resolver.resolve_agent_prompt",
+            lambda role, project_path, agent_name=None, interactive=True: (
+                prompt_roles.append(role) or ""
+            ),
+        )
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it", agent="engineer"),
+        ])
+
+        def _mocked(fn):
+            with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+                 patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+                 patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+                 patch("bobi.workflow.orchestrator.save_session_id"), \
+                 patch("bobi.workflow.orchestrator.log_activity"):
+                mock_reg.return_value = MagicMock()
+                return fn()
+
+        _mocked(lambda: run_workflow(wf, task="t", repo="r", cwd="/tmp",
+                                     run_key="1", role="reviewer"))
+
+        # Launched under --role reviewer: reviewer's prompt and model.
+        assert prompt_roles == ["reviewer"]
+        assert calls[0]["options"]["model"] == "opus"
+
+        run = WorkflowRun.find_waiting("approval")
+        assert run is not None
+
+        success = _mocked(lambda: resume_workflow(run, wf))
+
+        assert success is True
+        # Same identity and model after the resume - not the step's engineer.
+        assert prompt_roles[-1] == "reviewer"
+        assert calls[-1]["options"]["model"] == "opus"
+
+    def test_resume_keeps_the_suspended_sessions_agent(self, tmp_path, monkeypatch):
+        """With no --role and no agent declared on the remaining steps, the
+        resumed session keeps the identity its transcript was built under
+        instead of silently reconnecting under the default prompt."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(parents=True, exist_ok=True)
+
+        run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.session_name = "wf-t-r-1"
+        run.variable_scopes = {
+            "input": {"task": "t", "repo": "r", "run_key": "1"},
+            "_runtime": {"agent": "engineer"},
+        }
+        run.repo = "r"
+        run.cwd = "/tmp"
+        run.run_key = "1"
+        run.save()
+
+        prompt_roles = []
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: DefaultFakeBrain())
+        monkeypatch.setattr(
+            "bobi.prompts.resolver.resolve_agent_prompt",
+            lambda role, project_path, agent_name=None, interactive=True: (
+                prompt_roles.append(role) or ""
+            ),
+        )
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="wait", await_event="approval"),
+            StepDef(name="implement", prompt="build it"),
+        ])
+
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            mock_reg.return_value = MagicMock()
+            success = resume_workflow(run, wf)
+
+        assert success is True
+        assert prompt_roles == ["engineer"]
 
     def test_resume_model_change_starts_fresh_session(self, tmp_path, monkeypatch):
         root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
@@ -1593,20 +1819,13 @@ class TestQAPhase:
         root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
         sessions = paths.sessions_dir(root)
 
-        original_init = FakeClient.__init__
-
-        def _patched_init(self_client):
-            original_init(self_client)
-            d = sessions / "wf-t-r-1"
-            d.mkdir(parents=True, exist_ok=True)
-            (d / "handoff-pickup.yaml").write_text(
-                "complexity: medium\nneeds_spec: false\nhas_frontend: true\n"
-            )
-            (d / "handoff-implement.yaml").write_text("status: done\n")
-            (d / "handoff-pr.yaml").write_text("pr_url: https://github.com/test/pr/1\n")
-            (d / "handoff-qa.yaml").write_text("qa_status: pass\n")
-
-        monkeypatch.setattr(FakeClient, "__init__", _patched_init)
+        _write_handoffs_on_turn(monkeypatch, sessions / "wf-t-r-1", {
+            "handoff-pickup.yaml":
+                "complexity: medium\nneeds_spec: false\nhas_frontend: true\n",
+            "handoff-implement.yaml": "status: done\n",
+            "handoff-pr.yaml": "pr_url: https://github.com/test/pr/1\n",
+            "handoff-qa.yaml": "qa_status: pass\n",
+        })
 
         wf = Workflow(name="t", steps=[
             StepDef(name="pickup", prompt="triage",
@@ -1631,20 +1850,13 @@ class TestQAPhase:
         root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
         sessions = paths.sessions_dir(root)
 
-        original_init = FakeClient.__init__
-
-        def _patched_init(self_client):
-            original_init(self_client)
-            d = sessions / "wf-t-r-1"
-            d.mkdir(parents=True, exist_ok=True)
-            (d / "handoff-pickup.yaml").write_text(
-                "complexity: small\nneeds_spec: false\nhas_frontend: false\n"
-            )
-            (d / "handoff-implement.yaml").write_text("status: done\n")
-            (d / "handoff-pr.yaml").write_text("pr_url: https://github.com/test/pr/2\n")
-            (d / "handoff-qa.yaml").write_text("qa_status: not_applicable\n")
-
-        monkeypatch.setattr(FakeClient, "__init__", _patched_init)
+        _write_handoffs_on_turn(monkeypatch, sessions / "wf-t-r-1", {
+            "handoff-pickup.yaml":
+                "complexity: small\nneeds_spec: false\nhas_frontend: false\n",
+            "handoff-implement.yaml": "status: done\n",
+            "handoff-pr.yaml": "pr_url: https://github.com/test/pr/2\n",
+            "handoff-qa.yaml": "qa_status: not_applicable\n",
+        })
 
         wf = Workflow(name="t", steps=[
             StepDef(name="pickup", prompt="triage",
@@ -1712,6 +1924,34 @@ class TestTryResumeForEvent:
             result = try_resume_for_event("approval", "1")
 
         assert result is False
+
+    def test_missing_workflow_leaves_run_resumable(self, tmp_path, monkeypatch):
+        """A run whose workflow vanished from the installed pack must stay
+        exactly as it was. Claiming before the existence check renamed
+        ``<id>.json`` to ``<id>.resuming.json`` and never renamed it back, so
+        ``find_waiting`` skipped it and the CLI's ``WorkflowRun.load`` raised
+        FileNotFoundError - the run was orphaned with no recovery path."""
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir(parents=True)
+        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda: runs_dir)
+
+        run = WorkflowRun.create("vanished-wf", {"data": {"run_key": "1"}})
+        run.status = "waiting"
+        run.await_event = "approval"
+        run.run_key = "1"
+        run.save()
+
+        with patch("bobi.workflow.triggers.WorkflowDispatcher") as mock_cls:
+            dispatcher = MagicMock()
+            dispatcher.find_workflow.return_value = None
+            mock_cls.return_value = dispatcher
+            assert try_resume_for_event("approval", "1") is False
+
+        assert (runs_dir / f"{run.run_id}.json").exists()
+        assert not (runs_dir / f"{run.run_id}.resuming.json").exists()
+        # Still listed as waiting, still loadable by `workflows resume`.
+        assert WorkflowRun.load(run.run_id).status == "waiting"
+        assert WorkflowRun.find_waiting("approval", "1") is not None
 
     def test_resumes_waiting_workflow(self, tmp_path, monkeypatch):
         runs_dir = tmp_path / "runs"
@@ -1898,6 +2138,125 @@ class TestHandoffEdgeCases:
         (session_dir / "handoff-setup.yaml").write_text("")
         result = _read_handoff("wf-test-empty", "setup")
         assert result == {}
+
+    def test_prose_handoff_returns_empty(self, tmp_path, monkeypatch):
+        """Valid YAML that is not a mapping is not a handoff. Returning the
+        str made `field not in handoff` a substring test that wrongly passed,
+        and the outputs capture then exploded on `handoff.get()`."""
+        _bind_runtime_root(tmp_path, monkeypatch)
+        session_dir = paths.sessions_dir(tmp_path) / "wf-test-prose"
+        session_dir.mkdir()
+        (session_dir / "handoff-setup.yaml").write_text("the complexity is low\n")
+        assert _read_handoff("wf-test-prose", "setup") == {}
+
+    def test_list_handoff_returns_empty(self, tmp_path, monkeypatch):
+        _bind_runtime_root(tmp_path, monkeypatch)
+        session_dir = paths.sessions_dir(tmp_path) / "wf-test-list"
+        session_dir.mkdir()
+        (session_dir / "handoff-setup.yaml").write_text("- complexity\n- status\n")
+        assert _read_handoff("wf-test-list", "setup") == {}
+
+
+# ---------------------------------------------------------------------------
+# Handoff freshness — a step's handoff must describe THIS turn
+# ---------------------------------------------------------------------------
+
+class TestHandoffFreshness:
+    def _run_capture(self, workflow, client_cls, **kwargs):
+        emits = []
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event",
+                   side_effect=lambda etype, data, **kw: emits.append((etype, data))), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+                 ClaudeSDKClient=lambda opts: client_cls(),
+                 ClaudeAgentOptions=MagicMock,
+                 AssistantMessage=FakeAssistantMessage,
+                 ResultMessage=FakeResultMessage,
+                 TextBlock=FakeTextBlock,
+             )}):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(workflow, **kwargs)
+        return result, emits
+
+    def test_stale_handoff_from_a_previous_run_is_not_reused(self, tmp_path, monkeypatch):
+        """The session dir is reused verbatim by a relaunch under the same
+        run_key, so a previous run's handoff used to satisfy this run's
+        contract instantly - the step "passed" on outputs no agent produced."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        session_dir = paths.sessions_dir(root) / "wf-t-r-1"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "handoff-implement.yaml").write_text("status: done\n")
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="implement", prompt="build it",
+                    handoff=HandoffContract(required=["status"])),
+        ])
+        # This run's agent never writes a handoff.
+        result, emits = self._run_capture(
+            wf, FakeClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is False
+        assert not (session_dir / "handoff-implement.yaml").exists()
+        assert "agent/step.completed" not in [t for t, _ in emits]
+        step_failed = next(d for t, d in emits if t == "agent/step.failed")
+        assert "missing required fields" in step_failed["error"]
+
+    def test_route_loop_reads_each_visits_own_handoff(self, tmp_path, monkeypatch):
+        """A step revisited by a route loop routes on the value it wrote this
+        visit, not the previous visit's."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        session_dir = paths.sessions_dir(root) / "wf-t-r-1"
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="implement", prompt="build it",
+                    handoff=HandoffContract(required=["status"])),
+            StepDef(name="gate", condition="status == done", goto="finish",
+                    else_goto="implement", max_iterations=3),
+            StepDef(name="finish", prompt="wrap up"),
+        ])
+        _write_handoffs_on_turn(
+            monkeypatch, session_dir,
+            {"handoff-implement.yaml": "status: retry\n"},
+            {"handoff-implement.yaml": "status: done\n"},
+        )
+        result, emits = self._run_capture(
+            wf, FakeClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is True
+        outputs = [d["outputs"] for t, d in emits
+                   if t == "agent/step.completed" and d["step"] == "implement"]
+        assert outputs == [{"status": "retry"}, {"status": "done"}]
+
+    def test_prose_handoff_reprompts_instead_of_crashing(self, tmp_path, monkeypatch):
+        """An agent that writes prose containing the field names must land in
+        the designed re-prompt path, not crash the run with
+        `'str' object has no attribute 'get'`."""
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        session_dir = paths.sessions_dir(root) / "wf-t-r-1"
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="triage", prompt="triage it",
+                    handoff=HandoffContract(required=["complexity"])),
+        ])
+        _write_handoffs_on_turn(
+            monkeypatch, session_dir,
+            {"handoff-triage.yaml": "the complexity is low\n"},
+        )
+        result, emits = self._run_capture(
+            wf, FakeClient, task="t", repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is False
+        step_failed = next(d for t, d in emits if t == "agent/step.failed")
+        assert "missing required fields" in step_failed["error"]
+        assert not any("has no attribute" in str(d.get("error", ""))
+                       for _, d in emits)
 
 
 # ---------------------------------------------------------------------------
