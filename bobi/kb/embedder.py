@@ -14,6 +14,8 @@ import sys
 import time
 from pathlib import Path
 
+import httpx
+
 log = logging.getLogger(__name__)
 
 
@@ -123,8 +125,10 @@ def embed(texts: list[str]) -> list[list[float]]:
     port = _verified_port or ensure_running()
     try:
         embeddings = _post_embed(port, texts)
-    except OSError:
-        # Sidecar died since the last call — restart once and retry.
+    except (OSError, httpx.RequestError):
+        # Sidecar died since the last call — restart once and retry. The
+        # pooled httpx client raises ConnectError, which is NOT an OSError,
+        # so catching OSError alone would leave the dead port cached forever.
         _verified_port = None
         port = ensure_running()
         embeddings = _post_embed(port, texts)

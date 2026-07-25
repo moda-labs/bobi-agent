@@ -877,10 +877,17 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
         # bubble-scoped record outbound channel sends require. Unsigned
         # otherwise (still writes the global self-reply record).
         from bobi.events.signing import signed_request
-        signed_request(
+        resp = signed_request(
             base_url, "POST", "/slack/workspaces", record,
             bubble_id, bubble_key, timeout=10.0,
         )
+        # signed_request never raises on status, so a rejected registration
+        # would otherwise be logged as success: neither the bubble-scoped
+        # outbound record (#487) nor the resource grant was written.
+        if resp.status_code != 200:
+            log.warning("Slack workspace registration rejected for %s: HTTP %d",
+                        team_id, resp.status_code)
+            return []
         log.info(
             "Registered Slack workspace %s (app %s) with event server "
             "(self-reply loop prevention)", team_id, app_id or "?",

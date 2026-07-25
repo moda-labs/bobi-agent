@@ -123,8 +123,13 @@ def _chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS,
 # ---------------------------------------------------------------------------
 
 def _fts_query(query: str) -> str:
-    tokens = query.split()
-    quoted = [f'"{t}"' for t in tokens if t]
+    """OR the query's tokens as FTS5 phrases.
+
+    FTS5 escapes a double quote inside a phrase by doubling it; wrapping a
+    raw token instead ('5"' -> '"5""') is an unterminated string and the
+    MATCH raises. Empty for a blank query — callers must skip the MATCH.
+    """
+    quoted = ['"' + t.replace('"', '""') + '"' for t in query.split() if t]
     return " OR ".join(quoted)
 
 
@@ -517,6 +522,10 @@ class KBStore:
     def _fts_search(self, conn: apsw.Connection, query: str,
                     limit: int) -> list[dict]:
         fts = _fts_query(query)
+        if not fts:
+            # An empty MATCH expression is an FTS5 syntax error, and a blank
+            # query has no results by definition.
+            return []
         rows = _fetchall(
             conn,
             """SELECT e.id, e.content, e.source, e.source_hash, e.chunk_index,

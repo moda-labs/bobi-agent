@@ -184,6 +184,66 @@ def test_agents_list_shows_installed_agent(bobi_install):
     assert str(bobi_install.repo_path) in result.output
 
 
+class TestAgentsRegistryCommands:
+    """`agents update` / `agents browse` against a registry that misbehaves."""
+
+    def test_update_all_exits_nonzero_when_every_pack_fails(self, tmp_path, monkeypatch):
+        """The update-all path must report failure like the named-pack path
+        does — scripts and CI read the exit code, and `Failed:` on stderr with
+        exit 0 makes an outage look like a successful no-op update."""
+        from bobi import registry
+
+        monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(registry, "list_cached", lambda pp: [
+            {"name": "eng-team", "version": "1.0.0"},
+            {"name": "ops-team", "version": "2.0.0"},
+        ])
+        monkeypatch.setattr(registry, "check_update", lambda pp, name: (
+            _ for _ in ()).throw(RuntimeError("registry unreachable")))
+
+        result = CliRunner().invoke(main, ["agents", "update"])
+
+        assert "eng-team — failed: registry unreachable" in result.output
+        assert "ops-team — failed: registry unreachable" in result.output
+        assert result.exit_code == 1
+
+    def test_update_all_stays_zero_when_packs_succeed(self, tmp_path, monkeypatch):
+        from bobi import registry
+
+        monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(registry, "list_cached", lambda pp: [
+            {"name": "eng-team", "version": "1.0.0"}])
+        monkeypatch.setattr(registry, "check_update",
+                            lambda pp, name: ("1.0.0", "1.0.0"))
+
+        result = CliRunner().invoke(main, ["agents", "update"])
+
+        assert result.exit_code == 0, result.output
+        assert "up to date" in result.output
+
+    def test_browse_renders_unquoted_numeric_version(self, tmp_path, monkeypatch):
+        """A third-party `registry.yaml` with `version: 1.0` yields a float from
+        yaml.safe_load. Browse must still list the pack (the `:8s` format spec
+        raised 'Unknown format code s') and still recognize it as installed
+        (the str-vs-float comparison silently mismatched)."""
+        from bobi import registry
+
+        monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(registry, "list_remote", lambda pp: [{
+            "name": "eng-team", "registry": "acme/agents",
+            "version": 1.0, "description": "Engineering team",
+        }])
+        monkeypatch.setattr(registry, "list_cached", lambda pp: [
+            {"name": "eng-team", "version": "1.0"}])
+
+        result = CliRunner().invoke(main, ["agents", "browse"])
+
+        assert result.exit_code == 0, result.output
+        assert "eng-team" in result.output
+        assert "v1.0" in result.output
+        assert "[installed]" in result.output
+
+
 def test_workflow_list_shows_installed_workflows(bobi_install):
     result = CliRunner().invoke(
         main, ["agent", TEST_AGENT_NAME, "workflows", "list"])
@@ -657,6 +717,41 @@ class TestEventServerCommand:
         assert result.exit_code != 0
         assert "Reinstall or upgrade Bobi" in result.output
         assert "event-server artifact is corrupt" in result.output
+
+    def test_stop_with_corrupt_pid_file_cleans_up(self, bobi_install):
+        """A partially-written pid file (crash mid-write) must not raise a raw
+        traceback — otherwise every later `stop` hits the same crash and the
+        stale pid/port files are never cleared."""
+        (bobi_install.state_dir / "event-server.pid").write_text("not-a-pid\n")
+        (bobi_install.state_dir / "event-server.port").write_text("58405")
+
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "event-server", "stop"])
+
+        assert result.exit_code == 0, result.output
+        assert "Invalid PID file" in result.output
+        assert not (bobi_install.state_dir / "event-server.pid").exists()
+        assert not (bobi_install.state_dir / "event-server.port").exists()
+
+    def test_stop_with_unsignalable_pid_reports_instead_of_crashing(
+        self, bobi_install, monkeypatch,
+    ):
+        """A pid owned by another user raises PermissionError from os.kill. The
+        server is alive and not ours, so report it and keep the pid file rather
+        than crashing (or lying about having stopped it)."""
+        import os as _os
+
+        (bobi_install.state_dir / "event-server.pid").write_text("4242")
+        (bobi_install.state_dir / "event-server.port").write_text("58405")
+        monkeypatch.setattr(_os, "kill", lambda pid, sig: (_ for _ in ()).throw(
+            PermissionError(1, "Operation not permitted")))
+
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "event-server", "stop"])
+
+        assert result.exit_code != 0
+        assert "No permission to signal process 4242" in result.output
+        assert (bobi_install.state_dir / "event-server.pid").exists()
 
     def test_stop_warning_uses_selected_runtime_port(self, bobi_install, monkeypatch):
         (bobi_install.state_dir / "event-server.port").write_text("58405")

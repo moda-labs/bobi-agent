@@ -23,6 +23,12 @@ def state_dir(tmp_path, monkeypatch):
     return sd
 
 
+@pytest.fixture(autouse=True)
+def reset_verified_port(monkeypatch):
+    """embed() caches the last good sidecar port in a module global."""
+    monkeypatch.setattr(embedder, "_verified_port", None)
+
+
 @pytest.fixture
 def mock_project_root(tmp_path, monkeypatch):
     monkeypatch.setattr(
@@ -160,6 +166,33 @@ class TestEmbed:
              patch.object(pooled, '_client', mock_client):
             result = embedder.embed(["hello", "world"])
             assert result == fake_embeddings
+
+    def test_restarts_sidecar_when_cached_port_is_dead(self, state_dir):
+        """The sidecar died since the last embed. The pooled httpx client
+        raises ConnectError (NOT an OSError), so a recovery clause that only
+        catches OSError never fires: the dead port stays cached and every
+        later embed — cold-memory sync, KB indexing — fails forever."""
+        ports: list[int] = []
+
+        def handler(request):
+            port = request.url.port
+            ports.append(port)
+            if port == 8000:
+                raise httpx.ConnectError("[Errno 111] Connection refused")
+            return httpx.Response(200, json={"embeddings": [[0.5, 0.6]]})
+
+        mock_client = httpx.Client(transport=httpx.MockTransport(handler))
+
+        embedder._verified_port = 8000
+        with patch.object(embedder, "ensure_running", return_value=8001) as ensure, \
+             patch.object(pooled, '_client', mock_client):
+            result = embedder.embed(["hello"])
+
+        assert result == [[0.5, 0.6]]
+        assert ports == [8000, 8001]
+        ensure.assert_called_once_with()
+        # The dead port must not stay cached, or the retry never happens again.
+        assert embedder._verified_port == 8001
 
 
 # ---------------------------------------------------------------------------

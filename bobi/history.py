@@ -184,8 +184,18 @@ def _sleep_cycle_echo_session_sql() -> str:
     """
 
 
-def _project_from_path(file_path: Path) -> str:
-    return file_path.parent.name.replace("-", "/", 1).replace("-", "/")
+def _project_from_path(file_path: Path, cwd: str = "") -> str:
+    """Project path for a transcript file.
+
+    Claude encodes the session cwd as the project directory name by replacing
+    every '/' with '-', which is lossy for any segment that itself contains a
+    '-' ('bobi-agent' decodes back to 'bobi/agent', so `--project bobi-agent`
+    matches none of its own sessions). The transcript's own ``cwd`` field is
+    authoritative; the decode is only the fallback for entries carrying none.
+    """
+    if cwd:
+        return cwd
+    return file_path.parent.name.replace("-", "/")
 
 
 def _index_file(conn: sqlite3.Connection, file_path: Path) -> int:
@@ -196,7 +206,14 @@ def _index_file(conn: sqlite3.Connection, file_path: Path) -> int:
     ).fetchone()
     skip = state[0] if state else 0
 
-    lines = file_path.read_text().splitlines()
+    raw = file_path.read_text()
+    lines = raw.splitlines()
+    # Transcripts are read while Claude is mid-append: a trailing line with no
+    # newline yet is still being written. Counting it as read would skip it
+    # forever (len(lines) <= skip on every later pass), silently dropping that
+    # message from the index and from the sleep-cycle transcript delta.
+    if lines and not raw.endswith("\n"):
+        lines.pop()
     if _is_sleep_cycle_session(session_id, lines):
         conn.execute("""
             INSERT OR REPLACE INTO index_state (file_path, lines_read, last_indexed)
@@ -208,7 +225,6 @@ def _index_file(conn: sqlite3.Connection, file_path: Path) -> int:
         return 0
 
     new_lines = lines[skip:]
-    project = _project_from_path(file_path)
     inserted = 0
 
     conv_exists = conn.execute(
@@ -231,6 +247,7 @@ def _index_file(conn: sqlite3.Connection, file_path: Path) -> int:
         if msg_type == "user" and not conv_exists:
             git_branch = msg.get("gitBranch", "")
             cwd = msg.get("cwd", "")
+            project = _project_from_path(file_path, cwd)
             conn.execute("""
                 INSERT OR REPLACE INTO conversations (session_id, project, cwd, git_branch, started_at)
                 VALUES (?, ?, ?, ?, ?)
@@ -313,9 +330,13 @@ def index(project_filter: str | None = None) -> dict:
 
 
 def _fts_query(query: str) -> str:
-    """Convert natural language query to FTS5 syntax. Quotes each token."""
-    tokens = query.split()
-    quoted = [f'"{t}"' for t in tokens if t]
+    """Convert natural language query to FTS5 syntax. Quotes each token.
+
+    FTS5 escapes a double quote inside a phrase by doubling it; wrapping a
+    raw token instead ('5"' -> '"5""') is an unterminated string and the
+    MATCH raises. Empty for a blank query — callers must skip the MATCH.
+    """
+    quoted = ['"' + t.replace('"', '""') + '"' for t in query.split() if t]
     return " OR ".join(quoted)
 
 
@@ -324,10 +345,14 @@ def search(query: str, limit: int = 20, project: str | None = None) -> list[dict
     if not _db_path().exists():
         return []
 
+    fts_query = _fts_query(query)
+    if not fts_query:
+        # An empty MATCH expression is an FTS5 syntax error, and a blank query
+        # has no results by definition.
+        return []
+
     conn = sqlite3.connect(str(_db_path()))
     conn.row_factory = sqlite3.Row
-
-    fts_query = _fts_query(query)
 
     sql = """
         SELECT

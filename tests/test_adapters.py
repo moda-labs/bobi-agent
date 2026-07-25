@@ -54,6 +54,21 @@ class TestGithubDetector:
     def test_parse_non_github_url(self):
         assert _parse_github_url("https://gitlab.com/foo/bar") == ""
 
+    def test_parse_enterprise_host_is_not_github_com(self):
+        """A GitHub Enterprise host is a different host entirely. A substring
+        test would slice the hostname itself into the slug ('pany.com/acme')
+        and the agent would subscribe to a topic no event can ever match."""
+        assert _parse_github_url("https://github.company.com/acme/widget.git") == ""
+        assert _parse_github_url("git@github.company.com:acme/widget.git") == ""
+
+    def test_parse_lookalike_host_rejected(self):
+        assert _parse_github_url("https://mygithub.com/acme/widget") == ""
+
+    def test_parse_github_alias_hosts(self):
+        """www./ssh. are GitHub's own hostnames and still yield org/repo."""
+        assert _parse_github_url("https://www.github.com/acme/widget") == "acme/widget"
+        assert _parse_github_url("ssh://git@ssh.github.com:443/acme/widget.git") == "acme/widget"
+
     def test_detect_from_git_remote(self, tmp_path):
         """Auto-detect github:org/repo when project is a git repo."""
         import subprocess

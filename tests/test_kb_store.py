@@ -242,6 +242,17 @@ class TestSearchFTS:
         results = store.search("anything")
         assert results == []
 
+    def test_quoted_query_does_not_raise(self, store):
+        """`bobi recall-memory 'the 5" display bug'` must return results, not
+        crash the recall with an FTS5 'unterminated string'."""
+        store.add_text("The 5 inch display bug is fixed")
+        results = store.search('the 5" display bug')
+        assert len(results) >= 1
+
+    def test_whitespace_only_query_returns_empty(self, store):
+        store.add_text("Hello world")
+        assert store.search("   ") == []
+
     def test_limit_respected(self, store):
         for i in range(20):
             store.add_text(f"Document number {i} about testing")
@@ -517,6 +528,14 @@ class TestFTSQuery:
 
     def test_empty(self):
         assert _fts_query("") == ""
+
+    def test_whitespace_only_is_empty(self):
+        assert _fts_query("   ") == ""
+
+    def test_escapes_embedded_quote(self):
+        """FTS5 escapes a quote inside a phrase by doubling it; wrapping the
+        raw token yields '"5""' — an unterminated string."""
+        assert _fts_query('the 5" display') == '"the" OR "5""" OR "display"'
 
 
 # ---------------------------------------------------------------------------

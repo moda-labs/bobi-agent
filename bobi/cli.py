@@ -2748,12 +2748,26 @@ def event_server_stop():
         click.echo("Event server is not running")
         port_file.unlink(missing_ok=True)
         return
-    pid = int(pid_file.read_text().strip())
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (ValueError, OSError):
+        # A crash mid-write leaves an empty/garbage pid file; without this the
+        # traceback repeats on every later `stop` and the stale files persist.
+        click.echo("Invalid PID file — cleaning up.")
+        pid_file.unlink(missing_ok=True)
+        port_file.unlink(missing_ok=True)
+        return
     try:
         os.kill(pid, signal.SIGTERM)
         click.echo(f"Event server stopped (pid {pid})")
     except ProcessLookupError:
         click.echo("Event server was not running (stale PID file)")
+    except PermissionError:
+        # Another user owns the process: it is still running, so keep the pid
+        # file and report the failure rather than claiming a stop that never
+        # happened.
+        click.echo(f"No permission to signal process {pid}.", err=True)
+        raise SystemExit(1)
     pid_file.unlink(missing_ok=True)
     port_file.unlink(missing_ok=True)
 
@@ -3047,6 +3061,7 @@ def agents_update(name):
         if not cached:
             click.echo("No cached agent teams to update.")
             return
+        failed = 0
         for pack in cached:
             try:
                 local_v, remote_v = check_update(project_path, pack["name"])
@@ -3059,6 +3074,11 @@ def agents_update(name):
                     click.echo(f"  {pack['name']} v{local_v} — could not check remote")
             except Exception as e:
                 click.echo(f"  {pack['name']} — failed: {e}", err=True)
+                failed += 1
+        # Same exit contract as the named-pack branch above: a failed update is
+        # a failed command, or scripts/CI read an outage as a clean no-op.
+        if failed:
+            raise SystemExit(1)
 
 
 @agents.command("add-registry")
@@ -3132,12 +3152,16 @@ def agents_browse():
         raise SystemExit(1)
 
     cached_packs = list_cached(project_path) if project_path else []
-    cached = {p["name"]: p["version"] for p in cached_packs}
+    # Versions come straight from yaml.safe_load, so an unquoted `version: 1.0`
+    # in someone's registry.yaml arrives as a float. Coerce on the way in: the
+    # `:8s` format spec below raises on a non-str, and a float never compares
+    # equal to the local str version.
+    cached = {p["name"]: str(p["version"]) for p in cached_packs}
 
     click.echo("Available agent teams:\n")
     for pack in remote:
         name = pack["name"]
-        version = pack.get("version", "?")
+        version = str(pack.get("version", "?"))
         desc = pack.get("description", "")
         registry = pack.get("registry", DEFAULT_REPO)
         local_v = cached.get(name)

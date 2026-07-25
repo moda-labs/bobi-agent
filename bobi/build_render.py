@@ -231,10 +231,16 @@ def render_team_deps_script(cfg: Config, *, extra_recipes: list[dict] | None = N
 
     if spec.verify_requires and cfg.requires:
         lines.append("echo '== verify requires =='")
+        # BOBI_VERIFY_PHASE must be EXPORTED, not left as a bare shell variable:
+        # a check is routinely a script, and a subprocess reads the phase from
+        # the ENVIRONMENT. Unexported, such a check silently takes its
+        # runtime-tier branch during the image build — disagreeing with
+        # dep_bootstrap.preflight, the other surface of the same `success`
+        # contract, which sets the phase in the child env.
         for entry in cfg.requires:
             lines += [
                 f"echo {shlex.quote('verify ' + entry.name)}",
-                f"{as_user} {shlex.quote('BOBI_VERIFY_PHASE=build; ' + entry.check)}",
+                f"{as_user} {shlex.quote('export BOBI_VERIFY_PHASE=build; ' + entry.check)}",
             ]
         lines.append("")
 

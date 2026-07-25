@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -632,7 +633,7 @@ class _StubCfg:
             raise RuntimeError(f"no credential {service}.{key}") from exc
 
 
-def _capture_post(monkeypatch):
+def _capture_post(monkeypatch, status: int = 200):
     """Patch pooled.request + Slack lookups; return a dict the call records into."""
     import bobi.http as pooled
 
@@ -644,10 +645,10 @@ def _capture_post(monkeypatch):
         captured["kwargs"] = kwargs
 
         class _Resp:
-            status_code = 200
+            status_code = status
 
             def json(self):
-                return {"ok": True}
+                return {"ok": status == 200}
 
         return _Resp()
 
@@ -821,6 +822,30 @@ def test_slack_registration_never_sends_app_token_unsigned(
 
     body = json.loads(captured["kwargs"]["content"])
     assert "app_token" not in body
+
+
+@pytest.mark.parametrize("status", [403, 500])
+def test_slack_registration_reports_failure_on_rejected_status(
+    monkeypatch, caplog, status,
+):
+    """signed_request does not raise on a non-2xx status, so the status must be
+    checked: a rejected registration wrote neither the bubble-scoped outbound
+    record (#487) nor the resource grant, and reporting it as registered leaves
+    self-reply loop prevention and outbound sends silently broken."""
+    captured = _capture_post(monkeypatch, status=status)
+    cfg = _StubCfg({("slack", "bot_token"): "xoxb-tok",
+                    ("slack", "signing_secret"): "sek"})
+
+    with caplog.at_level(logging.WARNING):
+        result = es.register_slack_workspaces(
+            "http://localhost:8080", cfg,
+            bubble_id="bub_A", bubble_key="bkey_A",
+        )
+
+    assert captured["url"].endswith("/slack/workspaces")
+    assert result == []
+    assert "Registered Slack workspace" not in caplog.text
+    assert str(status) in caplog.text
 
 
 def test_slack_registration_never_logs_app_token_on_failure(

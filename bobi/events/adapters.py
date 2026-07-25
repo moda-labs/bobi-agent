@@ -16,6 +16,7 @@ import logging
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from bobi.config import Config
@@ -98,15 +99,31 @@ def _github_remote_key(repo_path: Path) -> list[str]:
     return []
 
 
+# GitHub's own hostnames. Enterprise instances (github.company.com) host
+# different repos and are deliberately excluded.
+_GITHUB_HOSTS = frozenset({"github.com", "www.github.com", "ssh.github.com"})
+
+
 def _parse_github_url(url: str) -> str:
-    """Extract org/repo from a GitHub remote URL."""
+    """Extract ``org/repo`` from a GitHub remote URL, "" for any other host.
+
+    The host is matched exactly. A substring test would also accept an
+    Enterprise remote such as ``github.company.com``, slicing the hostname
+    itself into the slug ('pany.com/acme') so the agent subscribes to a
+    ``github:`` topic no event can ever match.
+    """
     url = url.rstrip("/")
     if url.endswith(".git"):
         url = url[:-4]
-    if "github.com" in url:
-        parts = url.split("github.com")[-1].lstrip(":/").split("/")
-        if len(parts) >= 2:
-            return f"{parts[0]}/{parts[1]}"
+    if "://" not in url:
+        # scp-style SSH remote ([user@]host:org/repo) — give urlsplit a scheme.
+        url = "ssh://" + url.replace(":", "/", 1)
+    parsed = urlsplit(url)
+    if (parsed.hostname or "") not in _GITHUB_HOSTS:
+        return ""
+    parts = parsed.path.lstrip("/").split("/")
+    if len(parts) >= 2 and parts[0] and parts[1]:
+        return f"{parts[0]}/{parts[1]}"
     return ""
 
 

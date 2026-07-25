@@ -171,6 +171,13 @@ class TestProjectFromPath:
         p = Path("/a/b/simple/file.jsonl")
         assert _project_from_path(p) == "simple"
 
+    def test_transcript_cwd_wins_over_lossy_dir_name(self):
+        """Claude encodes the cwd by replacing '/' with '-', so a repo whose
+        name contains a hyphen cannot be decoded back ('bobi-agent' would
+        become 'bobi/agent'). The transcript's own cwd is authoritative."""
+        p = Path("/home/user/.claude/projects/-Users-z-dev-bobi-agent/session.jsonl")
+        assert _project_from_path(p, "/Users/z/dev/bobi-agent") == "/Users/z/dev/bobi-agent"
+
 
 # ---------------------------------------------------------------------------
 # _fts_query
@@ -191,6 +198,15 @@ class TestFtsQuery:
         result = _fts_query("  a   b  ")
         assert '"a"' in result
         assert '"b"' in result
+
+    def test_escapes_embedded_quote(self):
+        """FTS5 escapes a quote inside a phrase by doubling it; wrapping the
+        raw token yields '"5""' — an unterminated string."""
+        assert _fts_query('the 5" display') == '"the" OR "5""" OR "display"'
+        assert _fts_query('fix "auth" bug') == '"fix" OR """auth""" OR "bug"'
+
+    def test_whitespace_only_is_empty(self):
+        assert _fts_query("   ") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +301,27 @@ class TestIndexFile:
 
         count = _index_file(db, f)
         assert count == 1
+
+    def test_reindexes_line_completed_after_a_partial_read(self, db, tmp_path):
+        """The indexer reads transcripts while Claude is mid-append. A line
+        with no terminating newline is still being written: counting it as read
+        would drop that message from the index (and from the sleep-cycle
+        delta) forever, because len(lines) <= skip on every later pass."""
+        f = tmp_path / "proj" / "sess_partial.jsonl"
+        f.parent.mkdir(parents=True)
+        first = json.dumps(_user_msg("first", timestamp="2024-01-01T00:00:00"))
+        second = json.dumps(_assistant_msg("second", timestamp="2024-01-01T00:00:01"))
+
+        f.write_text(first + "\n" + second[:20])
+        assert _index_file(db, f) == 1
+
+        f.write_text(first + "\n" + second + "\n")
+        assert _index_file(db, f) == 1
+
+        texts = [r[0] for r in db.execute(
+            "SELECT content FROM messages ORDER BY id"
+        ).fetchall()]
+        assert texts == ["first", "second"]
 
     def test_skips_non_message_types(self, db, tmp_path):
         f = tmp_path / "proj" / "sess6.jsonl"
@@ -650,6 +687,33 @@ class TestSearch:
     def test_returns_empty_when_no_db(self, tmp_path, monkeypatch):
         monkeypatch.setattr(history, "_db_path", lambda: tmp_path / "nonexistent.db")
         assert search("anything") == []
+
+    def test_project_filter_matches_hyphenated_repo_name(self, projects_dir):
+        """`transcript search --project bobi-agent` must find the sessions of a
+        repo whose own name contains a hyphen — the encoded directory name
+        alone decodes it to 'bobi/agent' and the filter matches nothing."""
+        proj = projects_dir / "-Users-z-dev-bobi-agent"
+        proj.mkdir()
+        _write_jsonl(proj / "s1.jsonl", [
+            _user_msg("hyphen_target_word", timestamp="2024-01-01T00:00:00",
+                      cwd="/Users/z/dev/bobi-agent", gitBranch="main"),
+        ])
+        index()
+
+        assert len(search("hyphen_target_word", project="bobi-agent")) == 1
+
+    def test_quoted_query_does_not_raise(self, projects_dir):
+        """A quote in the query must not reach FTS5 unescaped (it would raise
+        sqlite3.OperationalError 'unterminated string' at the CLI)."""
+        proj = projects_dir / "-Users-alice-dev"
+        proj.mkdir()
+        _write_jsonl(proj / "s1.jsonl", [
+            _user_msg('the 5 inch display bug', timestamp="2024-01-01T00:00:00"),
+        ])
+        index()
+
+        assert len(search('the 5" display bug')) >= 1
+        assert search('   ') == []
 
     def test_project_filter(self, projects_dir):
         p1 = projects_dir / "-Users-alice-dev-proj-a"

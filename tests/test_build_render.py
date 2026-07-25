@@ -6,6 +6,7 @@ import pytest
 
 from bobi import build_render
 from bobi.build_render import (
+    APP_USER,
     BAKED_SKILLS,
     TEAM_HOME,
     load_team_config,
@@ -158,6 +159,47 @@ def test_verify_uses_same_home_as_run(tmp_path):
                        if "test -e ~/.claude/skills/browse" in ln)
     assert run_line.startswith(prefix)
     assert verify_line.startswith(prefix)
+
+
+def test_verify_exports_build_phase_to_subprocesses(tmp_path):
+    """`verify: requires` must EXPORT BOBI_VERIFY_PHASE, not set it as a bare
+    shell variable.
+
+    The two-tier `success` contract (tool_library.py) lets a check branch on the
+    phase, and a check is routinely a *script* — a subprocess, which sees only
+    the ENVIRONMENT. `BOBI_VERIFY_PHASE=build; <check>` leaves it unexported, so
+    the script takes the runtime-tier branch during the image build (e.g. a
+    credentialed probe in the credential-less builder). dep_bootstrap.preflight,
+    the other surface of the same contract, puts it in the child env — the two
+    must agree. Executes the rendered command so the env var is observed by a
+    real subprocess, not just asserted textually.
+    """
+    import subprocess
+
+    probe = tmp_path / "probe.sh"
+    probe.write_text('#!/bin/sh\ntest "$BOBI_VERIFY_PHASE" = build\n')
+    probe.chmod(0o755)
+    script = render_team_deps_script(_team(tmp_path, f"""
+        agent: t
+        build:
+          apt: [curl]
+          verify: requires
+        requires:
+          - name: phase-probe
+            check: "{probe}"
+    """))
+
+    line = next(ln for ln in script.splitlines()
+                if str(probe) in ln and ln.startswith("gosu"))
+    # Drop the `gosu bobi ` privilege drop (no root here); the rest — the env
+    # pinning and the `bash -lc <check>` — runs verbatim as the image build runs it.
+    runnable = line[len(f"gosu {APP_USER} "):]
+    proc = subprocess.run(runnable, shell=True, capture_output=True, text=True)
+
+    assert proc.returncode == 0, (
+        f"check subprocess did not see BOBI_VERIFY_PHASE=build\n"
+        f"{runnable}\n{proc.stdout}{proc.stderr}"
+    )
 
 
 def test_hash_is_stable_and_input_sensitive(tmp_path):

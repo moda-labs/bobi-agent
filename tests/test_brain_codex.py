@@ -384,7 +384,7 @@ def test_make_session_render_failure_propagates(tmp_path, monkeypatch):
 
 def test_make_session_clears_stale_managed_block(tmp_path, monkeypatch):
     """A codex team that dropped its MCP deps clears a previously-rendered block
-    (no options.mcp_servers, but a bobi-managed block on disk)."""
+    (an explicitly EMPTY options.mcp_servers, plus a managed block on disk)."""
     import tomllib
     from bobi.brain import codex_config
 
@@ -393,6 +393,33 @@ def test_make_session_clears_stale_managed_block(tmp_path, monkeypatch):
     codex_config.write_codex_config({"old": {"command": "/old"}}, home=tmp_path)
     assert codex_config.MANAGED_BEGIN in (tmp_path / "config.toml").read_text()
 
-    CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"}, options={})
+    CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"},
+                              options={"mcp_servers": {}})
     data = tomllib.loads((tmp_path / "config.toml").read_text())
     assert "mcp_servers" not in data
+
+
+def test_make_session_without_mcp_option_keeps_rendered_servers(tmp_path, monkeypatch):
+    """A call site that OMITS `mcp_servers` must leave config.toml alone.
+
+    ``$CODEX_HOME/config.toml`` is machine-global and every ``codex exec`` turn
+    re-reads it, so treating an omitted key as "this team has no MCP" strips the
+    servers out from under every live codex session — including the manager's.
+    The omitting sites are real: a monitor check/gate (``subagent._run_agent_supervised``)
+    and a workflow step (``orchestrator._make_session``) both build options with
+    only ``max_turns``/``skills``.
+    """
+    import tomllib
+    from bobi.brain import codex_config
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    # Manager boot rendered the team's effective set.
+    codex_config.write_codex_config(
+        {"weather": {"command": "/opt/weather"}}, home=tmp_path)
+
+    CodexBrain().make_session(
+        cwd="/w", system_prompt={"append": "S"},
+        options={"max_turns": 200, "skills": "all"})
+
+    data = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert data["mcp_servers"]["weather"]["command"] == "/opt/weather"

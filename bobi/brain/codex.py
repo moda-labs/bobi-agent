@@ -367,12 +367,21 @@ class CodexBrain(GatewayAwareEngine):
         # unchanged) but errors PROPAGATE: a codex team that declares MCP and
         # can't render config would silently run MCP-less, so surface it rather
         # than pass preflight and fail at runtime.
+        #
+        # Only an options dict that CARRIES the key declares the team's set. An
+        # absent key means the call site has nothing to say about MCP (a monitor
+        # check, a workflow step), NOT that the team has none: config.toml is
+        # machine-global and re-read by every `codex exec` turn, so rendering an
+        # assumed-empty set there would strip the servers out from under every
+        # live session, manager included, once per monitor interval.
         from bobi.brain.codex_config import (
             codex_home, config_has_managed_block, write_codex_config,
         )
         mcp_servers = opts.get("mcp_servers") or {}
         home = codex_home()
-        if mcp_servers or config_has_managed_block(home):
+        if "mcp_servers" in opts and (
+            mcp_servers or config_has_managed_block(home)
+        ):
             write_codex_config(mcp_servers, home)
         config_overrides: list[str] = []
         if gateway_base_url():
