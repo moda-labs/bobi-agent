@@ -2282,12 +2282,18 @@ def workflow_resume(run_id, timeout):
 
     click.echo(f"Resuming {run.workflow_name} for {run.run_key} "
                f"from step {run.suspended_at_step}...")
-    success = resume_workflow(run, wf, timeout=timeout)
-    if success:
-        click.echo("Workflow completed.")
-    else:
+    if not resume_workflow(run, wf, timeout=timeout):
         click.echo("Workflow failed.", err=True)
         sys.exit(1)
+    # resume_workflow returns True for two different endings: the run finished,
+    # or it parked on a LATER await step. The second is dormant, not done - the
+    # orchestrator stamps this record "superseded" and a fresh waiting record
+    # owns the run - so report it as such instead of claiming completion.
+    if run.status == "superseded":
+        click.echo("Workflow suspended again on a later await step. "
+                   "Run `workflows status` for the waiting run.")
+    else:
+        click.echo("Workflow completed.")
 
 
 @workflows.command("validate")

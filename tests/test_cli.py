@@ -263,6 +263,74 @@ def test_workflow_validate_is_agent_scoped(bobi_install, tmp_path):
     assert "Valid" in result.output
 
 
+class TestWorkflowResume:
+    """`workflows resume` must report the run's real outcome.
+
+    ``resume_workflow`` returns True for two different endings - the run
+    completed, or it parked on a LATER await step (record stamped
+    ``superseded``) - so a bare truthiness check reports a suspended run as
+    "Workflow completed."
+    """
+
+    def _waiting_run(self):
+        from bobi.workflow.state import WorkflowRun
+        run = WorkflowRun.create("adhoc", {"data": {"run_key": "42"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "github/pr.merged"
+        run.run_key = "42"
+        run.save()
+        return run
+
+    def _resume(self, run_id, fake_resume):
+        with patch("bobi.workflow.orchestrator.resume_workflow", fake_resume):
+            return CliRunner().invoke(
+                main,
+                ["agent", TEST_AGENT_NAME, "workflows", "resume", run_id],
+            )
+
+    def test_suspended_again_is_not_reported_as_completed(self, bobi_install):
+        run = self._waiting_run()
+
+        def fake_resume(run, wf, **kwargs):
+            # What the orchestrator does when a later await step parks the run.
+            run.status = "superseded"
+            run.save()
+            return True
+
+        result = self._resume(run.run_id, fake_resume)
+
+        assert result.exit_code == 0, result.output
+        assert "Workflow completed." not in result.output
+        assert "suspended" in result.output.lower()
+
+    def test_completed_run_is_reported_as_completed(self, bobi_install):
+        run = self._waiting_run()
+
+        def fake_resume(run, wf, **kwargs):
+            run.status = "completed"
+            run.save()
+            return True
+
+        result = self._resume(run.run_id, fake_resume)
+
+        assert result.exit_code == 0, result.output
+        assert "Workflow completed." in result.output
+
+    def test_failed_run_exits_nonzero(self, bobi_install):
+        run = self._waiting_run()
+
+        def fake_resume(run, wf, **kwargs):
+            run.status = "failed"
+            run.save()
+            return False
+
+        result = self._resume(run.run_id, fake_resume)
+
+        assert result.exit_code == 1
+        assert "Workflow failed." in result.output
+
+
 class TestSubagents:
     def test_launch_adhoc_workflow(self, bobi_install):
         with patch("bobi.subagent.launch_agent", return_value="wf-adhoc-42") as mock:
