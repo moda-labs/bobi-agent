@@ -219,7 +219,6 @@ def test_socket_mode_ignores_an_unusable_event_server(event_server):
 
 
 @pytest.mark.parametrize("event_server", [
-    pytest.param("https://x.example.com#staging", id="fragment"),
     pytest.param("https://user:pw@x.example.com", id="colon-in-authority"),
     pytest.param("https://x.example.com/a,b{c}", id="flow-indicators"),
     pytest.param("https://x.example.com/'quoted'", id="quotes"),
@@ -232,6 +231,29 @@ def test_url_shaped_event_server_round_trips_verbatim(event_server):
     assert (data["settings"]["event_subscriptions"]["request_url"]
             == f"{event_server}{WEBHOOK_PATH}")
     assert data["features"]["bot_user"]["display_name"] == "Bot"
+
+
+@pytest.mark.parametrize("event_server", [
+    pytest.param("https://x.example.com#staging", id="fragment"),
+    pytest.param("https://x.example.com?env=prod", id="query"),
+])
+def test_event_server_carrying_a_query_or_fragment_is_refused(event_server):
+    """The request URL is `event_server` + /webhooks/slack, and appending a
+    path to a URL that already has a query or fragment buries the path inside
+    it - a client asks for the HOST ROOT:
+
+        https://x.example.com#staging + /webhooks/slack
+            -> urlsplit(...).path == ''
+
+    So Slack posts somewhere the adapter never sees and nothing errors, which
+    is the silent failure this whole check exists to prevent. A previous
+    version of this test asserted the broken concatenation was correct.
+    """
+    # Why it has to be refused rather than escaped: the naive concatenation
+    # produces a URL whose path is empty.
+    assert urlparse(f"{event_server}{WEBHOOK_PATH}").path == ""
+    with pytest.raises(ValueError, match="query or fragment"):
+        render_manifest("Bot", event_server)
 
 
 def test_render_strips_trailing_slash_on_event_server():

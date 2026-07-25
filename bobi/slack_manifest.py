@@ -66,6 +66,14 @@ def event_server_error(event_server: str, *, require_https: bool = False
                 f"- got {event_server!r}")
     if not parts.netloc:
         return f"event server URL needs a host - got {event_server!r}"
+    if parts.query or parts.fragment:
+        # The request URL is this value + /webhooks/slack, and appending a path
+        # to a URL that already carries a query or fragment puts the path
+        # INSIDE it: `https://x#staging` + `/webhooks/slack` requests the host
+        # root. Slack would post somewhere the adapter never sees, with no
+        # error anywhere - the same silent failure a swallowed path caused.
+        return ("event server URL cannot carry a query or fragment - the "
+                f"webhook path is appended to it - got {event_server!r}")
     if require_https:
         if parts.scheme != "https":
             return "use a public https:// event server URL"
