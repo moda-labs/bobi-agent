@@ -318,6 +318,7 @@ class TestScriptCacheRunnerIntegration:
         Real scheduler, real tick, real tool_poll subprocess for the second
         monitor — only the agent runtime is stubbed (with a slow one).
         """
+        import threading
         import time
         from datetime import datetime, timezone
         from bobi.monitors.scheduler import MonitorScheduler
@@ -347,8 +348,10 @@ class TestScriptCacheRunnerIntegration:
         candidate = ("#!/usr/bin/env bash\nset -euo pipefail\n"
                      "echo '[{\"id\": \"slow-1\"}]'\n")
 
+        release = threading.Event()
+
         def slow_gen(mon, cwd, policy):
-            time.sleep(4)  # a real generation takes minutes
+            release.wait(30)  # a real generation takes minutes
             return GenResult(True, items=[{"id": "slow-1"}], script=candidate,
                              cost_usd=0.01)
 
@@ -357,10 +360,11 @@ class TestScriptCacheRunnerIntegration:
             t0 = time.monotonic()
             sched.tick()
             elapsed = time.monotonic() - t0
-            assert elapsed < 3.0, f"tick blocked for {elapsed:.1f}s"
+            assert elapsed < 5.0, f"tick blocked for {elapsed:.1f}s"
             assert "monitor/fast" in fired, "the other monitor never ran"
 
             # The generation lands out-of-band; the next tick publishes it.
+            release.set()
             assert sc._generations["slow-scriptcache"].done.wait(20)
             sched.run_monitor(slow, FakeRegistry(), sched._now())
 

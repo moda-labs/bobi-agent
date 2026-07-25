@@ -48,8 +48,8 @@ def _dump_scalar(value: str, style: str | None) -> str:
     return dumped.removesuffix("\n").removesuffix("\n...")
 
 
-def _yaml_scalar(value: str, *, field: str) -> str:
-    """Render `value` as a single-line YAML scalar for template substitution.
+def _app_name_scalar(value: str) -> str:
+    """Render the app name as a single-line YAML scalar for substitution.
 
     The template places the app name in bare scalar positions (``name:``,
     ``display_name:``), so a user-typed name is otherwise read as YAML: ``Bobi:
@@ -65,8 +65,7 @@ def _yaml_scalar(value: str, *, field: str) -> str:
     if "\n" in scalar:
         scalar = _dump_scalar(value, '"')
     if "\n" in scalar or yaml.safe_load(scalar) != value:  # unreachable guard
-        raise ValueError(
-            f"Slack app {field} cannot be rendered as YAML: {value!r}")
+        raise ValueError(f"Slack app name cannot be rendered as YAML: {value!r}")
     return scalar
 
 
@@ -98,7 +97,7 @@ def render_manifest(
     """
     template = string.Template(TEMPLATE_PATH.read_text())
     rendered = template.safe_substitute(
-        APP_NAME=_yaml_scalar(app_name, field="name"),
+        APP_NAME=_app_name_scalar(app_name),
         EVENT_SERVER=event_server.rstrip("/"),
     )
     if not socket_mode:

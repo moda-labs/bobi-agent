@@ -398,10 +398,13 @@ class TestSchedulerThreadNotBlocked:
     def test_slow_generation_does_not_hold_the_tick(self, scripts_dir):
         m = _monitor()
         started = threading.Event()
+        release = threading.Event()
 
         def slow_gen(monitor, cwd, policy):
+            # A real generation runs for minutes; this one runs until the test
+            # says stop, so an inline call cannot sneak under the assertion.
             started.set()
-            time.sleep(4)
+            release.wait(30)
             return GenResult(success=True, items=[{"id": "item-1"}],
                              script=GOOD_SCRIPT, cost_usd=0.02)
 
@@ -409,11 +412,12 @@ class TestSchedulerThreadNotBlocked:
             t0 = time.monotonic()
             first = script_cache(m, [Path("/repo")])
             elapsed = time.monotonic() - t0
-            assert elapsed < 3.0, f"tick held the caller for {elapsed:.1f}s"
+            assert elapsed < 5.0, f"tick held the caller for {elapsed:.1f}s"
             assert started.is_set()
             assert first is None  # indeterminate: detection is in flight
 
             # It finishes out-of-band; the next tick collects its items.
+            release.set()
             gen = sc._generations[m.name]
             assert gen.done.wait(20)
             second = script_cache(m, [Path("/repo")])
