@@ -58,9 +58,11 @@ def test_render_substitutes_name_and_request_url():
 
 
 def test_default_render_is_byte_identical_to_raw_template_substitution():
+    """An ordinary name and URL are substituted verbatim — the escaping adds no
+    quoting noise to the manifest a user reads."""
     expected = string.Template(TEMPLATE_PATH.read_text()).safe_substitute(
         APP_NAME="Eng Bot",
-        EVENT_SERVER=EVENT_SERVER,
+        REQUEST_URL=f"{EVENT_SERVER}{WEBHOOK_PATH}",
     )
 
     assert render_manifest("Eng Bot", EVENT_SERVER) == expected
@@ -114,6 +116,100 @@ def test_multiline_app_name_stays_one_scalar():
     assert data["display_information"]["description"].startswith("bobi agent")
 
 
+# The two proven ways a hostile event server URL rewrote the manifest: the
+# template puts it in a bare scalar position, so YAML read it as syntax.
+HOSTILE_EVENT_SERVERS = [
+    pytest.param(
+        "https://x #staging",
+        id="comment-swallows-the-webhook-path",
+    ),
+    pytest.param(
+        "https://ok.example.com\n"
+        "features:\n"
+        "  bot_user:\n"
+        "    display_name: EVIL\n"
+        "    always_online: false\n"
+        "settings:\n"
+        "  event_subscriptions:\n"
+        "    request_url: https://attacker.example.com",
+        id="newline-injects-a-second-features-key",
+    ),
+]
+
+
+@pytest.mark.parametrize("event_server", HOSTILE_EVENT_SERVERS)
+def test_hostile_event_server_never_reaches_the_manifest(event_server):
+    """An event server URL is data, not YAML.
+
+    ``https://x #staging`` rendered ``request_url: https://x`` — YAML ate
+    ``/webhooks/slack`` as a comment, so the Slack app pointed somewhere else
+    and the bot silently received nothing, with no error anywhere. An embedded
+    newline spliced in a second top-level ``features:`` key, which PyYAML
+    resolves last-wins, replacing the real bot-user config. Neither is a URL
+    Slack could reach, so both are refused where the request URL is built.
+    """
+    with pytest.raises(ValueError):
+        render_manifest("Bot", event_server)
+    with pytest.raises(ValueError):
+        render_manifest("Bot", event_server, socket_mode=True)
+
+
+@pytest.mark.parametrize("event_server", HOSTILE_EVENT_SERVERS)
+def test_request_url_substitution_site_escapes_the_whole_url(event_server):
+    """Defence in depth, and the reason the template stopped concatenating.
+
+    The URL check refuses both of these outright, but the substitution site has
+    to be safe on its own: the template takes the WHOLE request URL as one
+    escaped scalar, so even a value that got past the check renders as data.
+    Quoting only the event-server half could never do this — the ``request_url``
+    scalar continued past the closing quote into ``/webhooks/slack``.
+    """
+    hostile = f"{event_server}{WEBHOOK_PATH}"
+    rendered = string.Template(TEMPLATE_PATH.read_text()).safe_substitute(
+        APP_NAME="Bot",
+        REQUEST_URL=slack_manifest._single_line_scalar(hostile, "request URL"),
+    )
+    data = manifest_to_dict(rendered)
+    assert data["settings"]["event_subscriptions"]["request_url"] == hostile
+    assert data["features"]["bot_user"]["display_name"] == "Bot"
+    assert data["features"]["app_home"]["messages_tab_enabled"] is True
+    assert set(data["settings"]["event_subscriptions"]["bot_events"]) == (
+        EXPECTED_BOT_EVENTS)
+
+
+@pytest.mark.parametrize("event_server", [
+    pytest.param("my-worker.workers.dev", id="no-scheme"),
+    pytest.param("ftp://my-worker.workers.dev", id="not-http"),
+    pytest.param("https://", id="no-host"),
+    pytest.param("", id="empty"),
+    pytest.param("https://ok.example.com\tstaging", id="control-character"),
+])
+def test_invalid_event_server_url_is_rejected(event_server):
+    """Slack has to reach this host from the internet. A value that isn't an
+    absolute http(s) URL can only produce a request URL that quietly doesn't
+    work, so it's refused where it enters."""
+    with pytest.raises(ValueError):
+        render_manifest("Bot", event_server)
+    with pytest.raises(ValueError):
+        render_manifest("Bot", event_server, socket_mode=True)
+
+
+@pytest.mark.parametrize("event_server", [
+    pytest.param("https://x.example.com#staging", id="fragment"),
+    pytest.param("https://user:pw@x.example.com", id="colon-in-authority"),
+    pytest.param("https://x.example.com/a,b{c}", id="flow-indicators"),
+    pytest.param("https://x.example.com/'quoted'", id="quotes"),
+])
+def test_url_shaped_event_server_round_trips_verbatim(event_server):
+    """Independently of the URL check: whatever reaches the substitution site
+    is escaped, so a valid URL carrying YAML-significant characters lands in
+    the manifest byte-for-byte."""
+    data = manifest_to_dict(render_manifest("Bot", event_server))
+    assert (data["settings"]["event_subscriptions"]["request_url"]
+            == f"{event_server}{WEBHOOK_PATH}")
+    assert data["features"]["bot_user"]["display_name"] == "Bot"
+
+
 def test_render_strips_trailing_slash_on_event_server():
     data = manifest_to_dict(render_manifest("Bot", EVENT_SERVER + "/"))
     assert (
@@ -165,9 +261,9 @@ def test_socket_mode_manifest_removes_webhook_without_changing_contract():
         id="missing-header-anchor",
     ),
     pytest.param(
-        "    request_url: ${EVENT_SERVER}/webhooks/slack",
-        "    request_url: ${EVENT_SERVER}/webhooks/slack\n"
-        "    request_url: ${EVENT_SERVER}/webhooks/slack",
+        "    request_url: ${REQUEST_URL}",
+        "    request_url: ${REQUEST_URL}\n"
+        "    request_url: ${REQUEST_URL}",
         id="duplicate-request-url-anchor",
     ),
     pytest.param(

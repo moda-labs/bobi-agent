@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import string
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import yaml
 
@@ -36,8 +36,28 @@ _YAML_WIDTH = 1 << 20
 
 
 def webhook_url(event_server: str) -> str:
-    """The Slack event-subscriptions request URL for an event server host."""
-    return f"{event_server.rstrip('/')}{WEBHOOK_PATH}"
+    """The Slack event-subscriptions request URL for an event server host.
+
+    Slack has to reach this host from the internet, so ``event_server`` must be
+    an absolute http(s) URL. Anything else — a bare host, a typo'd scheme, a
+    value carrying whitespace or a control character — can only produce a
+    request URL that quietly doesn't work, so it is refused here, at the one
+    place the request URL is built.
+
+    Raises ``ValueError`` for a URL that isn't usable as an event server.
+    """
+    url = event_server.strip().rstrip("/")
+    try:
+        parts = urlsplit(url)
+    except ValueError as e:
+        raise ValueError(f"not a usable event server URL: {event_server!r} "
+                         f"({e})") from e
+    if (parts.scheme not in ("http", "https") or not parts.netloc
+            or any(c.isspace() or ord(c) < 0x20 for c in url)):
+        raise ValueError(
+            "event server URL must be an absolute http(s) URL with no spaces "
+            f"(e.g. https://my-worker.workers.dev) — got {event_server!r}")
+    return f"{url}{WEBHOOK_PATH}"
 
 
 def _dump_scalar(value: str, style: str | None) -> str:
@@ -48,24 +68,24 @@ def _dump_scalar(value: str, style: str | None) -> str:
     return dumped.removesuffix("\n").removesuffix("\n...")
 
 
-def _app_name_scalar(value: str) -> str:
-    """Render the app name as a single-line YAML scalar for substitution.
+def _single_line_scalar(value: str, what: str) -> str:
+    """Render `value` as a single-line YAML scalar for substitution.
 
-    The template places the app name in bare scalar positions (``name:``,
-    ``display_name:``), so a user-typed name is otherwise read as YAML: ``Bobi:
-    Staging`` breaks the parse, ``Bobi #1`` truncates at a comment, ``yes`` /
-    ``2026-07-25`` load as a bool / date, and a newline splices in new manifest
-    keys. PyYAML's minimal quoting keeps a plain name unquoted (so a simple
-    manifest stays byte-identical to the raw template); anything it would spread
-    over several lines is re-emitted double-quoted, which escapes the breaks
-    inline. The round-trip assertion is the contract: what Slack reads back is
-    exactly what the user typed.
+    Every substitution site in the template is a bare scalar position
+    (``name:``, ``display_name:``, ``request_url:``), so a user-supplied value
+    is otherwise read as YAML: ``Bobi: Staging`` breaks the parse, ``Bobi #1``
+    truncates at a comment, ``yes`` / ``2026-07-25`` load as a bool / date, and
+    a newline splices in new manifest keys. PyYAML's minimal quoting keeps a
+    plain value unquoted (so a simple manifest stays byte-identical to the raw
+    template); anything it would spread over several lines is re-emitted
+    double-quoted, which escapes the breaks inline. The round-trip assertion is
+    the contract: what Slack reads back is exactly what went in.
     """
     scalar = _dump_scalar(value, None)
     if "\n" in scalar:
         scalar = _dump_scalar(value, '"')
     if "\n" in scalar or yaml.safe_load(scalar) != value:  # unreachable guard
-        raise ValueError(f"Slack app name cannot be rendered as YAML: {value!r}")
+        raise ValueError(f"{what} cannot be rendered as YAML: {value!r}")
     return scalar
 
 
@@ -88,27 +108,32 @@ def render_manifest(
 ) -> str:
     """Render the bundled manifest template as YAML text.
 
-    ``app_name`` becomes the display name; it is escaped as a YAML scalar, so a
-    name carrying YAML syntax renders as data instead of breaking (or silently
-    changing) the manifest. ``event_server`` supplies the HTTP request URL and is
-    an inert substitution input when ``socket_mode`` removes that URL.
+    ``app_name`` becomes the display name and ``event_server`` the request URL.
+    Both are validated and escaped as whole YAML scalars, so a value carrying
+    YAML syntax renders as data instead of breaking (or silently changing) the
+    manifest. The full request URL is substituted in one piece — the template
+    must not concatenate a path onto it, or the escaping would end mid-scalar.
+    ``event_server`` is still checked when ``socket_mode`` removes that URL: a
+    URL Slack could never reach is a mistake worth reporting either way.
 
-    Raises ``ValueError`` for an app name that cannot be a single-line scalar.
+    Raises ``ValueError`` for an unusable event server URL, or for an app name
+    that cannot be a single-line scalar.
     """
+    request_url = _single_line_scalar(webhook_url(event_server),
+                                      "event server URL")
     template = string.Template(TEMPLATE_PATH.read_text())
     rendered = template.safe_substitute(
-        APP_NAME=_app_name_scalar(app_name),
-        EVENT_SERVER=event_server.rstrip("/"),
+        APP_NAME=_single_line_scalar(app_name, "Slack app name"),
+        REQUEST_URL=request_url,
     )
     if not socket_mode:
         return rendered
 
-    request_url_line = f"    request_url: {webhook_url(event_server)}"
     rendered = _replace_manifest_anchor(
         rendered, SOCKET_MODE_HEADER, SOCKET_MODE_HEADER_REPLACEMENT,
     )
     rendered = _replace_manifest_anchor(
-        rendered, request_url_line + "\n", "",
+        rendered, f"    request_url: {request_url}\n", "",
     )
     return _replace_manifest_anchor(
         rendered, SOCKET_MODE_FLAG, "  socket_mode_enabled: true",
