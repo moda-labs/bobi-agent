@@ -947,3 +947,32 @@ class TestMonitorAdd:
         result = self._add(bobi_install, ["x", "--at", "21:00", "--days", "funday"])
         assert result.exit_code != 0
         assert "weekday" in result.output.lower()
+
+
+class TestChannelsReplyEscapes:
+    """`bobi channels reply` is the live agent reply path (#190 Phase 2)."""
+
+    def test_real_fenced_content_keeps_its_literal_escapes(self):
+        """A reply quoting JSON must reach the gateway byte-for-byte.
+
+        _unescape_shell_literals re-spelled bobi.slack's replace chain but not
+        the fence guard that goes with it, so escapes INSIDE a fence - the
+        content a fence exists to show verbatim - were rewritten into real
+        newlines. Only the prose around it is layout.
+
+        "Inside a fence" means a PHYSICALLY-opened one, as here. A fence that
+        only appears after expansion is shell layout and expansion continues
+        through it; see bobi.slack.expand_shell_escapes for why that asymmetry
+        is deliberate.
+        """
+        from bobi.cli import _unescape_shell_literals
+
+        source = 'Payload:\\nsee below\n```\n{"a": "line1\\nline2", "s": "\\t"}\n```'
+        assert _unescape_shell_literals(source) == (
+            'Payload:\nsee below\n```\n{"a": "line1\\nline2", "s": "\\t"}\n```'
+        )
+
+    def test_prose_escapes_still_expand(self):
+        from bobi.cli import _unescape_shell_literals
+
+        assert _unescape_shell_literals("line1\\nline2") == "line1\nline2"

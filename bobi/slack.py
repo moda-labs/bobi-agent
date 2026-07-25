@@ -112,7 +112,7 @@ def _expand_escapes(line: str) -> str:
     return line.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
 
 
-def _expand_escapes_outside_code_blocks(text: str) -> str:
+def expand_shell_escapes(text: str) -> str:
     r"""Expand shell escapes, leaving the content of a REAL fence verbatim.
 
     Two authoring modes collide here and the same bytes mean different things
@@ -233,8 +233,8 @@ def format_slack_message(text: str) -> str:
     # fence only: such a fence quotes JSON/source the reader must see verbatim,
     # and its literal \n / \t are content, not layout. A fence that appears
     # only after expansion is shell layout, so expansion continues through it
-    # (see _expand_escapes_outside_code_blocks).
-    text = _expand_escapes_outside_code_blocks(text)
+    # (see expand_shell_escapes).
+    text = expand_shell_escapes(text)
     text = _wrap_markdown_tables(text)
     text = _convert_markdown_outside_code_blocks(text)
     text = _truncate_slack_message(text)

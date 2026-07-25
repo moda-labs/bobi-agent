@@ -1208,8 +1208,15 @@ def _unescape_shell_literals(text):
     only as two-character escapes; rendering them literally mangles
     multi-line messages. (Previously done by bobi.slack.format_slack_message
     on the old direct-send path.)
+
+    Delegates to that same helper rather than re-spelling the replace chain.
+    This path inherited the expansion but not the fence guard that goes with
+    it, so a reply quoting JSON or source in a ``` block had its literal \\n
+    rewritten into real newlines - corrupting the exact content a fence exists
+    to show verbatim.
     """
-    return text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+    from .slack import expand_shell_escapes
+    return expand_shell_escapes(text)
 
 
 def _channels_reply_send(conversation, text, edit_ref, files=None):
