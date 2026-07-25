@@ -6,6 +6,10 @@ a deterministic script; subsequent runs execute the cached script via a sandboxe
 subprocess at ~$0; on failure the runner falls back to the agent runtime to fix
 and re-cache (self-healing).
 
+The agent runtime step runs on its own thread (``_dispatch_self_heal``): the
+scheduler evaluates every monitor from ONE thread, so generating inline would
+stall every other monitor for minutes. The cheap cached path stays inline.
+
 This caches a script an LLM *wrote*, so a cron now runs machine-generated code
 unattended with the manager's secret env. The security model is the load-bearing
 part of this module - see ``docs/MONITORS.md``. Defense in depth:
@@ -59,6 +63,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1015,6 +1020,86 @@ def _self_heal(monitor, state: dict, policy: dict, fp: str, env: dict,
     return conditions
 
 
+# ---------------------------------------------------------------------------
+# Off-thread generation — the scheduler runs every monitor on ONE thread
+# ---------------------------------------------------------------------------
+
+# How long a tick waits for a just-dispatched generation before detaching it.
+# Generation drives the agent runtime (``run_check_blocking``: 2 attempts x
+# 600s), while the scheduler evaluates every monitor from a single thread — so
+# doing it inline stalls every other monitor for up to ~20 minutes: intervals
+# drift and an `at:` slot passing during the block is skipped as a
+# missed-while-down catch-up. This is exactly what the description-only check
+# flavor spawns out-of-band to avoid. Generation therefore runs on its own
+# thread and the tick hands off, returning None — the scheduler's existing
+# "detection in flight / indeterminate" value — with the items collected on the
+# next tick. The short grace keeps a fast generation in the same tick.
+GEN_HANDOFF_GRACE = 2.0
+
+
+@dataclass
+class _Generation:
+    """A background self-heal for one monitor. At most one is in flight."""
+    done: threading.Event = field(default_factory=threading.Event)
+    conditions: list[Condition] | None = None
+
+
+_generations: dict[str, _Generation] = {}
+_generations_lock = threading.Lock()
+
+
+def _collect_generation(name: str) -> tuple[bool, list[Condition] | None]:
+    """``(has_generation, conditions)`` for a monitor's background generation.
+
+    A finished generation is popped and its items returned (never a wasted
+    tick). A still-running one reports ``(True, None)``: the tick is
+    indeterminate, so the scheduler leaves the monitor's state untouched and
+    retries — and the monitor's trusted state stays owned by the worker.
+    """
+    with _generations_lock:
+        gen = _generations.get(name)
+        if gen is None:
+            return False, None
+        if not gen.done.is_set():
+            return True, None
+        _generations.pop(name, None)
+        return True, gen.conditions
+
+
+def _dispatch_self_heal(monitor, state: dict, policy: dict, fp: str, env: dict,
+                        id_field: str, cwd: str | None) -> list[Condition] | None:
+    """Run ``_self_heal`` off the calling thread, waiting only for the grace.
+
+    The worker owns ``state`` from here on — it is the only writer left, and it
+    persists the pin, breaker counters and tick stats when it finishes, so a
+    detached generation records everything an inline one did.
+    """
+    gen = _Generation()
+
+    def _work() -> None:
+        try:
+            gen.conditions = _self_heal(monitor, state, policy, fp, env,
+                                        id_field, cwd)
+        except Exception:
+            log.exception("script_cache %s: background generation failed",
+                          monitor.name)
+            gen.conditions = None
+        finally:
+            _save_trusted_state(monitor.name, state)
+            gen.done.set()
+
+    with _generations_lock:
+        _generations[monitor.name] = gen
+    threading.Thread(target=_work, daemon=True,
+                     name=f"script-gen-{_safe_name(monitor.name)}").start()
+
+    if gen.done.wait(GEN_HANDOFF_GRACE):
+        return _collect_generation(monitor.name)[1]
+    log.info("script_cache %s: generation running out-of-band — this tick is "
+             "indeterminate, its items land on the next one", monitor.name)
+    return None
+
+
 def _should_pin(state: dict, envelope: CapabilityEnvelope, approval: str) -> bool:
     """auto → always pin. review → pin only when it stays inside the previously
     approved capability envelope (a mechanical self-heal); otherwise queue for a
@@ -1107,6 +1192,13 @@ def script_cache(monitor, projects: list[Path]) -> list[Condition] | None:
     env = dict(os.environ)
     cwd = str(projects[0]) if projects else None
 
+    # A generation dispatched by an earlier tick owns this monitor's trusted
+    # state: collect its items (or report the tick indeterminate) and write
+    # nothing here.
+    in_flight, conditions = _collect_generation(monitor.name)
+    if in_flight:
+        return conditions
+
     try:
         if state.get("paused"):
             log.warning("script_cache %s: paused after persistent failure — "
@@ -1128,10 +1220,12 @@ def script_cache(monitor, projects: list[Path]) -> list[Condition] | None:
             log.info("script_cache %s: in regen backoff — skipping regen this tick",
                      monitor.name)
             return None
-
-        return _self_heal(monitor, state, policy, fp, env, id_field, cwd)
     finally:
         _save_trusted_state(monitor.name, state)
+
+    # Regeneration needed. Dispatch runs AFTER the save above so `state` has a
+    # single writer at any moment: from here the generation worker owns it.
+    return _dispatch_self_heal(monitor, state, policy, fp, env, id_field, cwd)
 
 
 # Native check runners, keyed by the monitor's `check` field. Auto-loaded by the

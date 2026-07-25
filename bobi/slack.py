@@ -87,19 +87,28 @@ def _convert_markdown_line(line: str) -> str:
     return re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', line)
 
 
-def _convert_markdown_outside_code_blocks(text: str) -> str:
-    lines = text.split("\n")
+def _map_lines_outside_code_blocks(text: str, convert) -> str:
+    """Apply `convert` to every line that is not inside a ``` fence."""
     converted: list[str] = []
     in_code_block = False
-    for line in lines:
+    for line in text.split("\n"):
         if line.strip().startswith("```"):
             in_code_block = not in_code_block
             converted.append(line)
         elif in_code_block:
             converted.append(line)
         else:
-            converted.append(_convert_markdown_line(line))
+            converted.append(convert(line))
     return "\n".join(converted)
+
+
+def _expand_escapes(line: str) -> str:
+    """Turn a shell invocation's literal \\n / \\t into real whitespace."""
+    return line.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+
+
+def _convert_markdown_outside_code_blocks(text: str) -> str:
+    return _map_lines_outside_code_blocks(text, _convert_markdown_line)
 
 
 def _has_open_code_fence(text: str) -> bool:
@@ -166,8 +175,10 @@ def _truncate_slack_message(text: str) -> str:
 
 def format_slack_message(text: str) -> str:
     """Convert markdown to Slack mrkdwn and truncate if needed."""
-    # Escaped newlines from shell invocations
-    text = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+    # Escaped newlines from shell invocations — outside code fences only: a
+    # fenced block quotes JSON/source the reader must see verbatim, and its
+    # literal \n / \t are content, not layout.
+    text = _map_lines_outside_code_blocks(text, _expand_escapes)
     text = _wrap_markdown_tables(text)
     text = _convert_markdown_outside_code_blocks(text)
     text = _truncate_slack_message(text)

@@ -377,6 +377,28 @@ class TestNonLossyMerges:
         assert gh["credentials"] == {"token": "${GH}"}  # rich entry untouched
         assert merged["entry_point"] == "triage-lead"   # recomputed from spec
 
+    def test_merge_agent_yaml_switching_chat_to_cli_drops_the_chat_key(self):
+        # `chat` is a setup-managed overlay key: opening a slack-chat team and
+        # telling setup "I'll talk to it from the command line" must actually
+        # remove `chat: slack`, else the team keeps running the Slack adapter.
+        existing = ("agent: legacy\nversion: 0.1.0\nentry_point: lead\n"
+                    "chat: slack\n")
+        s = _spec_state()
+        s.team_name, s.chat = "legacy", "cli"
+        merged = yaml.safe_load(authoring.merge_agent_yaml(existing, s))
+        assert "chat" not in merged
+
+    def test_merge_agent_yaml_keeps_chat_when_setup_has_no_opinion(self):
+        # An unset state.chat (the user never touched the chat surface) must
+        # leave the pack's own declaration alone — the overlay only writes
+        # what setup actually decided.
+        existing = ("agent: legacy\nversion: 0.1.0\nentry_point: lead\n"
+                    "chat: slack\n")
+        s = _spec_state()
+        s.team_name, s.chat = "legacy", ""
+        merged = yaml.safe_load(authoring.merge_agent_yaml(existing, s))
+        assert merged["chat"] == "slack"
+
     def test_merge_agent_yaml_updates_name_on_rename(self):
         # `agent` is the team name (setup-managed) — a rename must take, even
         # though the existing file already declares the old name.

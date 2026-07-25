@@ -6,9 +6,13 @@ scheduler's _reconcile path. Works with any CLI tool (Venn, custom
 scripts, MCP servers via CLI wrappers, etc.).
 
 Script caching: on first successful poll the resolved command is saved
-as a shell script.  Subsequent runs try the cached script first.  If it
-fails, the runner falls back to direct execution and regenerates the
-cache — self-healing with zero agent involvement for mechanical repairs.
+as a shell script, stamped with that command's fingerprint.  Subsequent
+runs try the cached script first, and only when the fingerprint still
+matches the monitor's current config — editing the monitor's command (or
+a venn_poll service/tool/query) retires the old script.  If the cached
+script fails, the runner falls back to direct execution and regenerates
+the cache — self-healing with zero agent involvement for mechanical
+repairs.
 
 Check runners:
     tool_poll  — general-purpose: runs monitor.extra['command'], parses JSON
@@ -69,19 +73,56 @@ def _script_path(monitor_name: str) -> Path:
     return _scripts_dir() / f"{safe_name}.sh"
 
 
+# Stamped into every cached script so the cache is keyed on the monitor's
+# resolved command, not just its name. Editing a monitor's `command:` (or a
+# venn_poll `service`/`tool`/`query`) changes the fingerprint, which retires the
+# old script — otherwise a still-working stale script kept polling the old
+# target forever, since the cache only ever self-healed on a non-zero exit.
+_FINGERPRINT_MARKER = "# bobi-command-fingerprint: "
+
+
+def _command_fingerprint(cmd_parts: list[str]) -> str:
+    return hashlib.sha256("\0".join(cmd_parts).encode()).hexdigest()[:16]
+
+
 def _cache_script(monitor_name: str, cmd_parts: list[str]) -> None:
     """Save the resolved command as a shell script for future runs."""
     path = _script_path(monitor_name)
     # Quote each part for safe shell execution
     quoted = " ".join(shlex.quote(p) for p in cmd_parts)
-    path.write_text(f"#!/usr/bin/env bash\nset -euo pipefail\n{quoted}\n")
+    path.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        f"{_FINGERPRINT_MARKER}{_command_fingerprint(cmd_parts)}\n"
+        f"{quoted}\n"
+    )
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-def _run_cached_script(monitor_name: str, timeout: int, env: dict) -> subprocess.CompletedProcess | None:
-    """Try running the cached script.  Returns None if no script exists."""
+def _cached_fingerprint(path: Path) -> str | None:
+    """The command fingerprint stamped in a cached script, if any."""
+    try:
+        for line in path.read_text().splitlines():
+            if line.startswith(_FINGERPRINT_MARKER):
+                return line[len(_FINGERPRINT_MARKER):].strip()
+    except OSError:
+        return None
+    return None
+
+
+def _run_cached_script(monitor_name: str, fingerprint: str, timeout: int,
+                       env: dict) -> subprocess.CompletedProcess | None:
+    """Try running the cached script.
+
+    Returns None when there is no script or it was cached for a different
+    command — a stale script is deleted so the caller re-runs and re-caches.
+    """
     path = _script_path(monitor_name)
     if not path.exists():
+        return None
+    if _cached_fingerprint(path) != fingerprint:
+        log.info(f"tool_poll monitor {monitor_name}: command changed — "
+                 "discarding cached script")
+        path.unlink(missing_ok=True)
         return None
     try:
         return subprocess.run(
@@ -146,9 +187,10 @@ def _run_command(cmd: list[str], env: dict, timeout: int,
     With cache_scripts=True (default), the resolved command is cached as a
     script on success and the cached script is tried first on the next run.
     """
-    # Try cached script first
+    # Try cached script first — but only when it was cached for THIS command.
     if cache_scripts:
-        cached = _run_cached_script(monitor_name, timeout, env)
+        cached = _run_cached_script(monitor_name, _command_fingerprint(cmd),
+                                    timeout, env)
         if cached is not None and cached.returncode == 0:
             items = _parse_items(cached.stdout, monitor_name)
             if items is not None:

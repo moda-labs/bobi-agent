@@ -6,6 +6,7 @@ These exercise the full check runner with the agent generation step injected
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -30,6 +31,18 @@ GOOD_SCRIPT = (
 
 PUBLISHED: list = []
 
+# D004 moved generation onto a worker thread, and a tick now waits only
+# GEN_HANDOFF_GRACE for it before detaching. Every test below that predates
+# D004 uses a fake generator that returns in microseconds and asserts on the
+# COMPLETED outcome, so racing a 2s wall-clock grace makes them fail purely
+# under CPU load (observed: 12 failures while other builds shared the box).
+# Give those tests a grace they cannot lose, so they stay assertions about
+# script-cache behavior rather than about how busy the machine is.
+# TestSchedulerThreadNotBlocked - the class that actually exercises the
+# handoff - restores the real value.
+REAL_GEN_HANDOFF_GRACE = sc.GEN_HANDOFF_GRACE
+_SETTLED_GRACE = 60.0
+
 
 @pytest.fixture()
 def scripts_dir(tmp_path):
@@ -47,8 +60,13 @@ def scripts_dir(tmp_path):
 
     with patch("bobi.monitors.script_cache_checks._scripts_dir", return_value=d), \
          patch("bobi.monitors.script_cache_checks.publish", side_effect=fake_publish), \
-         patch("bobi.monitors.script_cache_checks._install_policy", return_value={}):
+         patch("bobi.monitors.script_cache_checks._install_policy", return_value={}), \
+         patch.object(sc, "GEN_HANDOFF_GRACE", _SETTLED_GRACE):
         yield d
+    # Generation is dispatched to a worker thread and its result is held until
+    # a later tick collects it — an uncollected one must not leak into the next
+    # test (same monitor names are reused).
+    sc._generations.clear()
 
 
 def _events():
@@ -65,6 +83,19 @@ def _monitor(name="email-watch", **extra):
 def _gen(items, script=GOOD_SCRIPT, success=True, cost=0.02):
     return lambda monitor, cwd, policy: GenResult(
         success=success, items=items, script=script, cost_usd=cost)
+
+
+def _recording_gen(calls: list):
+    """A generation stub for paths that must never reach the agent.
+
+    It records instead of calling ``pytest.fail``: generation runs on a worker
+    thread, where a failure raised inside the stub would never reach the test.
+    Callers assert on ``calls`` from the main thread.
+    """
+    def _fn(monitor, cwd, policy):
+        calls.append(monitor.name)
+        return GenResult(success=False, error="agent must not have been called")
+    return _fn
 
 
 def _state(scripts_dir, name="email-watch"):
@@ -137,9 +168,10 @@ class TestFirstGenAndCache:
         with patch.object(sc, "generate_candidate", _gen([{"id": "item-1"}])):
             script_cache(m, [Path("/repo")])
         # second run must NOT call the agent
-        boom = lambda *a, **k: pytest.fail("agent called on cached path")
-        with patch.object(sc, "generate_candidate", boom):
+        calls: list = []
+        with patch.object(sc, "generate_candidate", _recording_gen(calls)):
             result = script_cache(m, [Path("/repo")])
+        assert not calls, "agent called on the cached path"
         assert result is not None and result[0].key == "item-1"
         st = _state(scripts_dir)
         assert st["last_mode"] == "cached"
@@ -342,6 +374,92 @@ class TestApprovalModes:
 
 
 # ---------------------------------------------------------------------------
+# Scheduler-thread budget
+# ---------------------------------------------------------------------------
+
+class TestSchedulerThreadNotBlocked:
+    """Generation never runs on the caller's thread for long (D004).
+
+    The scheduler evaluates every monitor from ONE thread, so a self-heal that
+    blocks on the agent runtime (``run_check_blocking``: 2 attempts x 600s)
+    stalls every other monitor for up to ~20 minutes — interval monitors drift
+    and a weekday-gated ``at:`` slot that passes during the block is skipped as
+    a missed-while-down catch-up. Detection goes out-of-band instead, exactly
+    like the description-only check flavor.
+    """
+
+    @pytest.fixture(autouse=True)
+    def real_grace(self, scripts_dir):
+        """This class is about the handoff itself, so it needs the production
+        grace - not the generous one the other tests run under."""
+        with patch.object(sc, "GEN_HANDOFF_GRACE", REAL_GEN_HANDOFF_GRACE):
+            yield
+
+    def test_slow_generation_does_not_hold_the_tick(self, scripts_dir):
+        m = _monitor()
+        started = threading.Event()
+
+        def slow_gen(monitor, cwd, policy):
+            started.set()
+            time.sleep(4)
+            return GenResult(success=True, items=[{"id": "item-1"}],
+                             script=GOOD_SCRIPT, cost_usd=0.02)
+
+        with patch.object(sc, "generate_candidate", slow_gen):
+            t0 = time.monotonic()
+            first = script_cache(m, [Path("/repo")])
+            elapsed = time.monotonic() - t0
+            assert elapsed < 3.0, f"tick held the caller for {elapsed:.1f}s"
+            assert started.is_set()
+            assert first is None  # indeterminate: detection is in flight
+
+            # It finishes out-of-band; the next tick collects its items.
+            gen = sc._generations[m.name]
+            assert gen.done.wait(20)
+            second = script_cache(m, [Path("/repo")])
+
+        assert [c.key for c in second] == ["item-1"]
+        assert (scripts_dir / "email-watch.sc.sh").exists()  # pinned by the worker
+        st = _state(scripts_dir)
+        assert st["last_mode"] == "first_gen"
+        assert st["sha256"] and st["fingerprint"]
+
+    def test_in_flight_generation_is_not_restarted_by_later_ticks(self, scripts_dir):
+        m = _monitor()
+        release = threading.Event()
+        calls = []
+
+        def blocking_gen(monitor, cwd, policy):
+            calls.append(1)
+            release.wait(20)
+            return GenResult(success=True, items=[{"id": "x"}],
+                             script=GOOD_SCRIPT, cost_usd=0.02)
+
+        with patch.object(sc, "generate_candidate", blocking_gen):
+            assert script_cache(m, [Path("/repo")]) is None
+            assert script_cache(m, [Path("/repo")]) is None
+            assert len(calls) == 1, "a second agent run was started"
+            release.set()
+            assert sc._generations[m.name].done.wait(20)
+            collected = script_cache(m, [Path("/repo")])
+
+        assert [c.key for c in collected] == ["x"]
+        assert m.name not in sc._generations  # collected once, then dropped
+
+    def test_failed_generation_is_indeterminate_and_retries_next_tick(self,
+                                                                      scripts_dir):
+        m = _monitor()
+        with patch.object(sc, "generate_candidate",
+                          _gen(None, success=False)):
+            assert script_cache(m, [Path("/repo")]) is None
+        assert _state(scripts_dir)["script_regen_fails"] == 1
+        # the failure is not sticky: the next tick generates again
+        with patch.object(sc, "generate_candidate", _gen([{"id": "later"}])):
+            result = script_cache(m, [Path("/repo")])
+        assert [c.key for c in result] == ["later"]
+
+
+# ---------------------------------------------------------------------------
 # Circuit breaker + backoff
 # ---------------------------------------------------------------------------
 
@@ -362,9 +480,10 @@ class TestCircuitBreaker:
         m = _monitor()
         st0 = {"backoff_until": (sc._now().replace(year=sc._now().year + 1)).isoformat()}
         (scripts_dir / "email-watch.state.json").write_text(json.dumps(st0))
-        boom = lambda *a, **k: pytest.fail("agent called during backoff")
-        with patch.object(sc, "generate_candidate", boom):
+        calls: list = []
+        with patch.object(sc, "generate_candidate", _recording_gen(calls)):
             assert script_cache(m, [Path("/repo")]) is None
+        assert not calls, "agent called during backoff"
 
     def test_counter_resets_on_success(self, scripts_dir):
         m = _monitor()
@@ -382,9 +501,10 @@ class TestCircuitBreaker:
                 script_cache(m, [Path("/repo")])
         assert _state(scripts_dir).get("paused") is True
         # paused → subsequent ticks are indeterminate and skip the agent
-        boom = lambda *a, **k: pytest.fail("agent called while paused")
-        with patch.object(sc, "generate_candidate", boom):
+        calls: list = []
+        with patch.object(sc, "generate_candidate", _recording_gen(calls)):
             assert script_cache(m, [Path("/repo")]) is None
+        assert not calls, "agent called while paused"
 
 
 # ---------------------------------------------------------------------------

@@ -379,6 +379,82 @@ class TestScriptCaching:
         cache_fn.assert_not_called()
 
 
+class TestCacheConfigFingerprint:
+    """Editing a monitor's config must invalidate its cached script (D023).
+
+    Real subprocesses, real cached scripts on disk — the cache only ever
+    self-healed on a non-zero exit, so a config edit whose old script still
+    exits 0 kept polling the old target forever.
+    """
+
+    @pytest.fixture()
+    def scripts_dir(self, tmp_path):
+        d = tmp_path / "scripts"
+        d.mkdir()
+        with patch("bobi.monitors.tool_checks._scripts_dir", return_value=d):
+            yield d
+
+    def _tool(self, tmp_path, name="fake-tool"):
+        """A CLI whose JSON output echoes its last argument."""
+        p = tmp_path / name
+        p.write_text('#!/usr/bin/env bash\n'
+                     'printf \'[{"id": "%s"}]\\n\' "${@: -1}"\n')
+        p.chmod(0o755)
+        return p
+
+    def _poll(self, monitor):
+        from bobi.monitors.tool_checks import CHECKS
+        return CHECKS[monitor.check](monitor, [Path(".")])
+
+    def test_edited_command_is_not_served_from_stale_cache(self, tmp_path,
+                                                           scripts_dir):
+        tool = self._tool(tmp_path)
+
+        def monitor(arg):
+            return Monitor(name="inbox", check="tool_poll", event="monitor/x",
+                           extra={"command": f"{tool} {arg}", "id_field": "id"})
+
+        first = self._poll(monitor("unread"))
+        assert [c.key for c in first] == ["unread"]
+        assert (scripts_dir / "inbox.sh").exists()  # cached
+
+        # The user edits the monitor's command in monitors.yaml.
+        second = self._poll(monitor("starred"))
+        assert [c.key for c in second] == ["starred"], (
+            "stale cached script kept polling the old command")
+
+    def test_edited_venn_query_is_not_served_from_stale_cache(self, tmp_path,
+                                                              scripts_dir):
+        tool = self._tool(tmp_path, "fake-venn")
+
+        def monitor(query):
+            return Monitor(name="email-watch", check="venn_poll",
+                           event="monitor/email",
+                           extra={"service": "work-gmail", "tool": "list_messages",
+                                  "query": query, "id_field": "id"})
+
+        with patch("bobi.monitors.tool_checks._venn_binary", return_value=str(tool)):
+            first = self._poll(monitor("is:unread"))
+            assert [c.key for c in first] == ["is:unread"]
+
+            second = self._poll(monitor("is:starred"))
+        assert [c.key for c in second] == ["is:starred"], (
+            "stale cached script kept polling the old query")
+
+    def test_unchanged_command_still_uses_the_cache(self, tmp_path, scripts_dir):
+        """The $0 fast path survives: an unedited monitor never re-runs direct."""
+        tool = self._tool(tmp_path)
+        m = Monitor(name="inbox", check="tool_poll", event="monitor/x",
+                    extra={"command": f"{tool} unread", "id_field": "id"})
+
+        assert [c.key for c in self._poll(m)] == ["unread"]
+        with patch("subprocess.run", wraps=subprocess.run) as spy:
+            assert [c.key for c in self._poll(m)] == ["unread"]
+        # Exactly one subprocess: the cached script, no direct fallback.
+        assert spy.call_count == 1
+        assert spy.call_args[0][0] == [str(scripts_dir / "inbox.sh")]
+
+
 # ---------------------------------------------------------------------------
 # Reconcile integration (unchanged — validates the plumbing still works)
 # ---------------------------------------------------------------------------

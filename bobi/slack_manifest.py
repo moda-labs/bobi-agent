@@ -30,10 +30,44 @@ SOCKET_MODE_HEADER_REPLACEMENT = (
 )
 SOCKET_MODE_FLAG = "  socket_mode_enabled: false"
 
+# Wide enough that the YAML emitter never line-wraps a scalar (Slack caps the
+# display name at 35 characters; the substitution positions are single-line).
+_YAML_WIDTH = 1 << 20
+
 
 def webhook_url(event_server: str) -> str:
     """The Slack event-subscriptions request URL for an event server host."""
     return f"{event_server.rstrip('/')}{WEBHOOK_PATH}"
+
+
+def _dump_scalar(value: str, style: str | None) -> str:
+    """`value` as a bare YAML scalar in `style` (None = minimal quoting)."""
+    dumped = yaml.safe_dump(value, default_flow_style=True, width=_YAML_WIDTH,
+                            default_style=style)
+    # A plain scalar document ends with an explicit `...` marker; drop it.
+    return dumped.removesuffix("\n").removesuffix("\n...")
+
+
+def _yaml_scalar(value: str, *, field: str) -> str:
+    """Render `value` as a single-line YAML scalar for template substitution.
+
+    The template places the app name in bare scalar positions (``name:``,
+    ``display_name:``), so a user-typed name is otherwise read as YAML: ``Bobi:
+    Staging`` breaks the parse, ``Bobi #1`` truncates at a comment, ``yes`` /
+    ``2026-07-25`` load as a bool / date, and a newline splices in new manifest
+    keys. PyYAML's minimal quoting keeps a plain name unquoted (so a simple
+    manifest stays byte-identical to the raw template); anything it would spread
+    over several lines is re-emitted double-quoted, which escapes the breaks
+    inline. The round-trip assertion is the contract: what Slack reads back is
+    exactly what the user typed.
+    """
+    scalar = _dump_scalar(value, None)
+    if "\n" in scalar:
+        scalar = _dump_scalar(value, '"')
+    if "\n" in scalar or yaml.safe_load(scalar) != value:  # unreachable guard
+        raise ValueError(
+            f"Slack app {field} cannot be rendered as YAML: {value!r}")
+    return scalar
 
 
 def _replace_manifest_anchor(text: str, anchor: str, replacement: str) -> str:
@@ -55,13 +89,16 @@ def render_manifest(
 ) -> str:
     """Render the bundled manifest template as YAML text.
 
-    ``app_name`` becomes the display name.
-    ``event_server`` supplies the HTTP request URL and is an inert substitution
-    input when ``socket_mode`` removes that URL.
+    ``app_name`` becomes the display name; it is escaped as a YAML scalar, so a
+    name carrying YAML syntax renders as data instead of breaking (or silently
+    changing) the manifest. ``event_server`` supplies the HTTP request URL and is
+    an inert substitution input when ``socket_mode`` removes that URL.
+
+    Raises ``ValueError`` for an app name that cannot be a single-line scalar.
     """
     template = string.Template(TEMPLATE_PATH.read_text())
     rendered = template.safe_substitute(
-        APP_NAME=app_name,
+        APP_NAME=_yaml_scalar(app_name, field="name"),
         EVENT_SERVER=event_server.rstrip("/"),
     )
     if not socket_mode:

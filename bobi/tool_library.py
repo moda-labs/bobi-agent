@@ -59,6 +59,12 @@ from bobi.compose import ComposeError, _merge_build
 # Catalog root — one directory per entry, the directory name IS the entry id.
 CATALOG_DIR = Path(__file__).parent / "tool_library"
 
+# Written into a composed image: the `tools/<name>.md` guides THIS module
+# generated there, by digest. It is what lets a re-compose into a reused dest
+# tell its own previous output from a team-shipped file (see
+# `_materialize_guides`); absent (a fresh dest), every guide is written.
+GUIDE_RECORD = "tool-library-guides.json"
+
 
 @dataclass
 class Dependency:
@@ -144,12 +150,18 @@ def resolve_dependencies(merged_yaml: dict) -> list[Dependency]:
     """Resolve `merged_yaml`'s declared dependencies into Dependency objects.
 
     Each `tool_library:` item is a string (catalog ref) or an inline mapping.
-    De-duped by name, first occurrence wins — so a repeat across `from:` layers
-    collapses. NB: `brain: codex` no longer implies a codex dependency — the Codex
-    CLI ships in the base image (#428), so a codex-brained team bakes nothing
-    extra."""
-    deps: list[Dependency] = []
-    seen: set[str] = set()
+    De-duped by name, LAST occurrence wins: compose unions `tool_library:` with
+    the overlaying layer's entries appended after the base's, so the last one is
+    the leaf's — keeping the first would invert compose's leaf-always-wins rule
+    and silently bake a base layer's pin over the overlay's. A repeat across
+    `from:` layers still collapses to one; an override replaces the inherited
+    dependency wholesale (never field-merged, like the `requires:`/`mcp:` escape
+    hatches), so an overlay that re-pins a tool restates the `guide:` it wants.
+    Position follows the first occurrence, so an override does not reshuffle the
+    accreted build/requires order. NB: `brain: codex` no longer implies a codex
+    dependency — the Codex CLI ships in the base image (#428), so a codex-brained
+    team bakes nothing extra."""
+    resolved: dict[str, Dependency] = {}
     for item in (merged_yaml.get("tool_library") or []):
         if isinstance(item, str):
             dep = load_entry(item)
@@ -165,11 +177,8 @@ def resolve_dependencies(merged_yaml: dict) -> list[Dependency]:
             raise ComposeError(
                 f"tool_library entry must be a name or mapping, "
                 f"got {type(item).__name__}")
-        if dep.name in seen:
-            continue
-        seen.add(dep.name)
-        deps.append(dep)
-    return deps
+        resolved[dep.name] = dep  # last (leaf) wins, first position kept
+    return list(resolved.values())
 
 
 def resolve_team_dependencies(team_dir: Path, project_path: Path) -> list[Dependency]:
@@ -191,12 +200,73 @@ def resolve_team_dependencies(team_dir: Path, project_path: Path) -> list[Depend
     return resolve_dependencies(merged_yaml)
 
 
+def _guide_digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _read_guide_record(dest: Path) -> dict[str, str]:
+    """The `tools/<file> → digest` map a previous expansion into `dest` wrote."""
+    try:
+        data = json.loads((dest / GUIDE_RECORD).read_text())
+    except (OSError, ValueError):
+        return {}
+    guides = data.get("guides") if isinstance(data, dict) else None
+    if not isinstance(guides, dict):
+        return {}
+    return {str(k): str(v) for k, v in guides.items()}
+
+
+def _write_guide_record(dest: Path, record: dict[str, str]) -> None:
+    path = dest / GUIDE_RECORD
+    if not record:
+        path.unlink(missing_ok=True)
+        return
+    path.write_text(
+        json.dumps({"guides": dict(sorted(record.items()))}, indent=2) + "\n")
+
+
+def _materialize_guides(deps: list[Dependency], dest: Path) -> None:
+    """Write each dependency's `tools/<name>.md` and reconcile the last run's.
+
+    A team-shipped guide always wins (the leaf-wins file rule, applied after the
+    structured tools/ merge), so only a file this module generated is refreshed
+    or removed — identified by the digest recorded in `GUIDE_RECORD`, since mere
+    existence cannot tell a team file from our own leftover. `dest` is REUSED
+    across installs and install.py clears only the surfaces some layer
+    contributes, so without that record a team shipping no `tools/` dir would
+    freeze the first install's guide forever and orphan the guide of a dependency
+    it later drops.
+    """
+    owned = _read_guide_record(dest)
+    written: dict[str, str] = {}
+    for dep in deps:
+        if not dep.guide:
+            continue
+        guide_path = dest / "tools" / f"{dep.name}.md"
+        if guide_path.exists() and _guide_digest(
+                guide_path.read_bytes()) != owned.get(guide_path.name):
+            continue  # team-shipped (or locally edited) — never clobbered
+        guide_path.parent.mkdir(parents=True, exist_ok=True)
+        body = dep.guide.encode()
+        guide_path.write_bytes(body)
+        written[guide_path.name] = _guide_digest(body)
+
+    for name, digest in owned.items():
+        if name in written:
+            continue
+        stale = dest / "tools" / name
+        if stale.is_file() and _guide_digest(stale.read_bytes()) == digest:
+            stale.unlink()  # ours, and no longer declared
+    _write_guide_record(dest, written)
+
+
 def _expand_dependency(dep: Dependency, merged_yaml: dict, dest: Path) -> None:
-    """Splice one dependency's surfaces into the merged agent.yaml + tools/.
+    """Splice one dependency's agent.yaml surfaces into the merged config.
 
     Reuses compose's own merge rules so a dependency behaves exactly like the
     inline surfaces it replaces (the #452 regression bar). Each surface honours an
-    escape hatch: an explicit team declaration wins.
+    escape hatch: an explicit team declaration wins. The `tools/<name>.md` guide
+    is materialized separately by `_materialize_guides`.
     """
     # requires: add a {name, why, check, fix} entry only if the team hasn't
     # already declared this name. An explicit team `requires:` (already merged as
@@ -217,14 +287,6 @@ def _expand_dependency(dep: Dependency, merged_yaml: dict, dest: Path) -> None:
     # pins across dependencies/layers collapse to one string. This is the core fix.
     if dep.install:
         merged_yaml["build"] = _merge_build(merged_yaml.get("build"), dep.install)
-
-    # guide: write tools/<name>.md only if the team didn't already ship one
-    # (consistent with the leaf-wins file rule after the structured tools/ merge).
-    if dep.guide:
-        guide_path = dest / "tools" / f"{dep.name}.md"
-        if not guide_path.exists():
-            guide_path.parent.mkdir(parents=True, exist_ok=True)
-            guide_path.write_text(dep.guide)
 
     # host: runtime wiring surfaced to deploy/doctor (#428 Stage 3). Emitted into
     # the composed agent.yaml as a top-level `host:` list — accreted, de-duped by
@@ -280,11 +342,14 @@ def expand(merged_yaml: dict, dest: Path) -> None:
 
     Resolves each entry (catalog ref or inline mapping) to a Dependency and
     splices its surfaces in. Idempotent and pure over inputs: an empty/absent
-    `tool_library` is a no-op. `tool_library` is consumed at compose, never
-    emitted (like `from`/`prune`).
+    `tool_library` is a no-op, and re-expanding into a dest a previous run wrote
+    converges on the same tools/ (see `_materialize_guides`). `tool_library` is
+    consumed at compose, never emitted (like `from`/`prune`).
     """
-    for dep in resolve_dependencies(merged_yaml):
+    deps = resolve_dependencies(merged_yaml)
+    for dep in deps:
         _expand_dependency(dep, merged_yaml, dest)
+    _materialize_guides(deps, dest)
     merged_yaml.pop("tool_library", None)
 
 

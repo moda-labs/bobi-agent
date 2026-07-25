@@ -69,6 +69,51 @@ def test_default_render_is_byte_identical_to_raw_template_substitution():
     ) == expected
 
 
+@pytest.mark.parametrize("app_name", [
+    pytest.param("Bobi: Staging", id="colon-breaks-the-mapping"),
+    pytest.param("Bobi #1", id="hash-starts-a-comment"),
+    pytest.param("yes", id="parses-as-a-boolean"),
+    pytest.param("null", id="parses-as-none"),
+    pytest.param("- Bobi", id="parses-as-a-sequence"),
+    pytest.param("{Bobi}", id="parses-as-a-flow-mapping"),
+    pytest.param("*Bobi", id="parses-as-an-alias"),
+    pytest.param("'Bobi'", id="already-quoted"),
+    pytest.param('"Bobi"', id="already-double-quoted"),
+    pytest.param("2026-07-25", id="parses-as-a-date"),
+])
+def test_app_name_with_yaml_special_characters_round_trips(app_name):
+    """A user-typed display name is data, not YAML: it must survive rendering
+    verbatim instead of breaking the parse or silently changing the app name."""
+    data = manifest_to_dict(render_manifest(app_name, EVENT_SERVER))
+    assert data["display_information"]["name"] == app_name
+    assert data["features"]["bot_user"]["display_name"] == app_name
+    # The rest of the manifest is unharmed by the substitution.
+    assert set(data["oauth_config"]["scopes"]["bot"]) == EXPECTED_BOT_SCOPES
+    assert (
+        data["settings"]["event_subscriptions"]["request_url"]
+        == f"{EVENT_SERVER}/webhooks/slack"
+    )
+
+
+def test_app_name_cannot_inject_manifest_keys():
+    """A name carrying YAML structure renders as data, never as new keys."""
+    app_name = "Bobi\n  is_admin: true"
+    data = manifest_to_dict(render_manifest(app_name, EVENT_SERVER))
+    assert data["display_information"]["name"] == app_name
+    assert "is_admin" not in data["display_information"]
+    assert "is_admin" not in data["features"]["bot_user"]
+
+
+def test_multiline_app_name_stays_one_scalar():
+    """A name PyYAML would otherwise spread over several lines is escaped
+    inline, so the surrounding manifest keys keep their meaning."""
+    app_name = "Bobi\nStaging"
+    rendered = render_manifest(app_name, EVENT_SERVER)
+    data = manifest_to_dict(rendered)
+    assert data["display_information"]["name"] == app_name
+    assert data["display_information"]["description"].startswith("bobi agent")
+
+
 def test_render_strips_trailing_slash_on_event_server():
     data = manifest_to_dict(render_manifest("Bot", EVENT_SERVER + "/"))
     assert (

@@ -238,9 +238,12 @@ def check_runtime_write_policy(runtime_root: Path | None) -> PolicyCheck:
 @contextlib.contextmanager
 def with_mutable_runtime_package(runtime_root: Path) -> Iterator[None]:
     package = paths.package_dir(runtime_root)
-    if package.exists():
-        _chmod_tree(package, _mutable_mode, strict=True)
+    # The unlock sweep runs INSIDE the try: it chmods entry by entry and stays
+    # strict, so a mid-sweep EPERM (a file owned by another uid) would otherwise
+    # escape with the already-chmodded files left writable and no re-lock.
     try:
+        if package.exists():
+            _chmod_tree(package, _mutable_mode, strict=True)
         yield
     finally:
         if package.exists():

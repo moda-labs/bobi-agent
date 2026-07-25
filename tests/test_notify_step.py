@@ -95,6 +95,20 @@ class TestFormatSlackMessage:
     def test_escaped_newlines(self):
         assert format_slack_message("a\\nb") == "a\nb"
 
+    def test_escaped_newlines_inside_code_block_are_left_verbatim(self):
+        """A fenced block quotes content the human must read as-is: expanding
+        its literal \\n / \\t silently rewrites the quoted JSON/source."""
+        source = '```\n{"msg": "a\\nb", "sep": "\\t"}\n```'
+        assert format_slack_message(source) == source
+
+    def test_escaped_newlines_outside_code_block_still_expand(self):
+        """The shell-invocation escape expansion still applies to the prose
+        around a fenced block."""
+        source = 'run:\\nthen\n```\nprintf("\\n")\n```'
+        assert format_slack_message(source) == (
+            'run:\nthen\n```\nprintf("\\n")\n```'
+        )
+
     def test_heading_to_bold(self):
         assert format_slack_message("# Hello") == "*Hello*"
 
@@ -491,15 +505,18 @@ class TestNotifyStepInWorkflow:
         paths.bind_root(root)
         sessions = paths.sessions_dir(root)
 
-        original_init = FakeClient.__init__
+        # The agent writes its handoff during the turn: the engine clears a
+        # step's stale handoff before injecting the prompt, so a file planted
+        # at client construction never reaches the read.
+        original_query = FakeClient.query
 
-        def _patched_init(self_client):
-            original_init(self_client)
+        async def _query(self_client, text):
+            await original_query(self_client, text)
             d = sessions / "wf-t-r-1"
             d.mkdir(parents=True, exist_ok=True)
             (d / "handoff-work.yaml").write_text("status: done\n")
 
-        monkeypatch.setattr(FakeClient, "__init__", _patched_init)
+        monkeypatch.setattr(FakeClient, "query", _query)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="notify_start", notify="slack",

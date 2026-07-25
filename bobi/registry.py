@@ -140,15 +140,32 @@ def _write_meta(project_path: Path, name: str, version: str, source: str) -> Non
     _meta_path(project_path, name).write_text(json.dumps(meta, indent=2))
 
 
-def _read_remote_version(name: str, repo: str = DEFAULT_REPO) -> str | None:
-    """Fetch just agent.yaml from GitHub to read the remote version."""
+def _read_remote_version(name: str, repo: str = DEFAULT_REPO, *,
+                         strict: bool = False) -> str | None:
+    """Fetch just agent.yaml from GitHub to read the remote version.
+
+    None means "no version published there" — either the team is version-less
+    (D-5) or agent.yaml 404s, both definitive answers from the server.
+
+    With ``strict=True`` an *indeterminate* read (timeout, rate limit, 5xx,
+    unparseable YAML) re-raises instead of masquerading as "version-less", so a
+    caller that resolves "latest" cannot silently downgrade to the rolling
+    main-push asset when the registry is merely unreachable.
+    """
     url = f"{GITHUB_RAW}/{repo}/main/agents/{name}/agent.yaml"
     try:
         resp = _urlopen(url, timeout=5)
         data = yaml.safe_load(resp.content)
         return data.get("version") if data else None
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return None
+        if strict:
+            raise
     except Exception:
-        return None
+        if strict:
+            raise
+    return None
 
 
 def _read_local_version(project_path: Path, name: str) -> str | None:
@@ -217,8 +234,19 @@ def fetch(project_path: Path, name: str, *, version: str | None = None,
 
     # The concrete version to fetch. For an explicit pin it's `version`; for
     # "latest" it's the registry's published version (None → version-less →
-    # rolling asset).
-    target = version if pinned else _read_remote_version(name, repo)
+    # rolling asset). A failed read is NOT version-less: falling through would
+    # install the rolling main-push tarball under the name of the latest
+    # release, so it's a hard error the user can retry or pin around.
+    if pinned:
+        target = version
+    else:
+        try:
+            target = _read_remote_version(name, repo, strict=True)
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not read the latest published version of '{name}' from "
+                f"{repo} ({e}). Retry, or pin an explicit version: '{name}@<version>'."
+            ) from e
     asset_url = _asset_url(repo, name, target)
     try:
         return _fetch_asset(project_path, repo, name, target, asset_url)

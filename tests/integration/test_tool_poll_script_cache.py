@@ -8,6 +8,7 @@ Does NOT require Claude/LLM — tool_poll is a $0 native check runner.
 
 import json
 import os
+import shlex
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,26 @@ from bobi.monitors.scheduler import MonitorScheduler
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _write_cached_script(script_path: Path, cmd: list[str], body: str) -> None:
+    """Write a cached script for `cmd` whose command line is `body`.
+
+    The header stamp is what ties a cached script to the monitor's resolved
+    command; an unstamped script is (correctly) retired as stale, which is a
+    different code path than these tests exercise — see
+    tests/test_tool_poll.py::TestCacheConfigFingerprint.
+    """
+    from bobi.monitors.tool_checks import (
+        _FINGERPRINT_MARKER,
+        _command_fingerprint,
+    )
+
+    script_path.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        f"{_FINGERPRINT_MARKER}{_command_fingerprint(cmd)}\n{body}\n"
+    )
+    script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC)
+
 
 def _make_scheduler(tmp_path, monitors):
     """Build a scheduler with real tool_poll checks wired up."""
@@ -93,11 +114,8 @@ class TestToolPollScriptCacheIntegration:
 
         # --- Step 2: Mutate cached script to return different data ---
         new_items = [{"id": "cached-999", "val": "from-cache"}]
-        script_path.write_text(
-            f"#!/usr/bin/env bash\nset -euo pipefail\n"
-            f"echo '{json.dumps(new_items)}'\n"
-        )
-        script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC)
+        _write_cached_script(script_path, shlex.split(cmd_str),
+                             f"echo '{json.dumps(new_items)}'")
 
         result2 = sched._check_conditions(monitor, sched._registry_loader())
         assert result2 is not None
@@ -105,8 +123,7 @@ class TestToolPollScriptCacheIntegration:
         assert result2[0].key == "cached-999", "Should use cached script output"
 
         # --- Step 3: Break the cached script → fallback + self-heal ---
-        script_path.write_text("#!/usr/bin/env bash\nexit 1\n")
-        script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC)
+        _write_cached_script(script_path, shlex.split(cmd_str), "exit 1")
 
         result3 = sched._check_conditions(monitor, sched._registry_loader())
         assert result3 is not None
@@ -131,11 +148,12 @@ class TestToolPollScriptCacheIntegration:
         )
 
         items = [{"id": "msg-1"}, {"id": "msg-2"}]
+        cmd_str = f"echo '{json.dumps(items)}'"
         monitor = Monitor(
             name="reconcile-cache-test",
             check="tool_poll",
             event="monitor/reconcile",
-            extra={"command": f"echo '{json.dumps(items)}'", "id_field": "id"},
+            extra={"command": cmd_str, "id_field": "id"},
         )
 
         sched, published = _make_scheduler(tmp_path, [monitor])
@@ -155,11 +173,8 @@ class TestToolPollScriptCacheIntegration:
         # Mutate cached script to add a new item
         new_items = [{"id": "msg-1"}, {"id": "msg-2"}, {"id": "msg-3"}]
         script_path = scripts_dir / "reconcile-cache-test.sh"
-        script_path.write_text(
-            f"#!/usr/bin/env bash\nset -euo pipefail\n"
-            f"echo '{json.dumps(new_items)}'\n"
-        )
-        script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC)
+        _write_cached_script(script_path, shlex.split(cmd_str),
+                             f"echo '{json.dumps(new_items)}'")
 
         conds3 = sched._check_conditions(monitor, sched._registry_loader())
         assert conds3 is not None

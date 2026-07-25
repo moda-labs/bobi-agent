@@ -98,6 +98,34 @@ def _sse(event: str, data) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+def _picker_roots(bobi_home: Path) -> list[Path]:
+    """The folder-picker / scan confinement roots.
+
+    The boundary is the user's HOME DIRECTORY, not the Bobi home: the folders
+    setup points at — an MCP server checkout, a team source tree — live in
+    ~/dev, ~/src, …, while ~/.bobi only holds the agent library. Confining to
+    the Bobi home would reject every real project. The Bobi home is added only
+    when it sits outside the home directory (a relocated BOBI_HOME), so the
+    library stays reachable either way.
+    """
+    roots: list[Path] = []
+    try:
+        roots.append(Path.home().resolve())
+    except (RuntimeError, OSError):     # no resolvable home on this machine
+        pass
+    if not any(bobi_home == r or r in bobi_home.parents for r in roots):
+        roots.append(bobi_home)
+    return roots
+
+
+def _same_connection(a: dict, b: dict) -> bool:
+    """Whether two MCP entries describe the same connection, ignoring the
+    `last_test` verdict stamped onto them (that's about a run, not settings)."""
+    def settings(entry: dict) -> dict:
+        return {k: v for k, v in entry.items() if k != "last_test"}
+    return settings(a) == settings(b)
+
+
 def _validate_public_event_server_url(url: str) -> str | None:
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.netloc:
@@ -150,7 +178,9 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
               home_root: Path | None = None, base_path: str = "",
               on_finish=None):
     """Construct the FastAPI app. `stream_fn` overrides the LLM source
-    (tests inject a fake). `home_root` overrides the Bobi home for tests.
+    (tests inject a fake). `home_root` overrides the Bobi home for tests, and
+    seals the folder-picker boundary to that tree (production derives it from
+    the user's home directory — see _picker_roots).
     `base_path` is the mount prefix when hosted as a sub-app of the unified
     web app (e.g. "/setup") — the SPA prefixes its /api and /static URLs
     with it. Empty (the standalone `bobi setup` server) changes nothing.
@@ -166,20 +196,24 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     # <home>/agents/<name>/src; setup scans this root.
     home = (home_root or paths.home_dir()).resolve()
     library = home / "agents"
+    # Where the picker/scan endpoints may reach: the user's home directory
+    # (see _picker_roots). An injected home_root is a sealed test tree.
+    picker_roots = [home] if home_root else _picker_roots(home)
 
     def _within_home(raw: str, default: Path) -> tuple[Path, bool]:
-        """Resolve a user-supplied path and confine it to the home tree — the
-        single source of truth for the folder-picker / scan security boundary.
-        Relative paths re-base under home (consistent across endpoints). Returns
-        (path, ok); ok is False when the resolved path escaped home, so each
-        caller picks its own policy (reject vs. fall back)."""
+        """Resolve a user-supplied path and confine it to the home directory —
+        the single source of truth for the folder-picker / scan security
+        boundary. Relative paths re-base under the Bobi home (consistent across
+        endpoints). Returns (path, ok); ok is False when the resolved path
+        escaped every picker root, so each caller picks its own policy (reject
+        vs. fall back)."""
         if not raw:
             return default, True
         p = Path(raw).expanduser()
         if not p.is_absolute():
             p = home / p
         p = p.resolve()
-        return p, (p == home or home in p.parents)
+        return p, any(p == r or r in p.parents for r in picker_roots)
 
     def _load_machine_config() -> dict:
         cfg_path = paths.ensure_global_config()
@@ -332,10 +366,11 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     def browse(request: Request) -> JSONResponse:
         # A home-scoped directory lister for the location picker: a native OS
         # folder dialog isn't reachable from a localhost page, so we walk the
-        # tree server-side. Rooted at the user's home (the library and most dev
-        # repos live there); confined to it so the localhost page can't list
-        # the whole filesystem. Paths are absolute. Anything outside home can
-        # still be typed into the location field directly.
+        # tree server-side. Starts at the library and walks the user's home
+        # directory (where most dev repos and team sources live); confined to
+        # it so the localhost page can't list the whole filesystem. Paths are
+        # absolute. Anything outside home can still be typed into the location
+        # field directly.
         # Best-effort create so the library is navigable on day one; never let
         # a read-only home or a file already named `agents` turn a GET
         # into a 500 — just fall back to listing home.
@@ -354,7 +389,9 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                           if d.is_dir() and not d.name.startswith("."))
         except OSError:
             dirs = []
-        parent = str(here.parent) if here != home else None
+        # No "up" out of a root — that's the ceiling the picker can't cross.
+        at_root = any(here == r for r in picker_roots)
+        parent = None if at_root else str(here.parent)
         return JSONResponse({"path": str(here), "parent": parent, "dirs": dirs})
 
     @app.post("/api/rename")
@@ -629,12 +666,19 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             label = entry.get("label") or key
             yield f"Calling {tool} on {label}…\n\n"
             result = await mcp_probe.probe(entry, project, call_name=tool)
-            # Persist ONLY coarse status — never raw error/stderr text, which can
-            # carry secrets and is served to the browser via /api/state.
-            entry["last_test"] = {"ok": bool(result.get("ok")),
-                                  "live_ok": result.get("live_ok"),
-                                  "called": tool}
-            state.spec.mcp_servers[key] = entry
+            # The probe can take a minute, and /api/mcp/add can replace this
+            # connection while it runs. Re-read the entry and stamp the verdict
+            # only when it's still the one that was tested: writing `entry` back
+            # would silently revert the user's edit, and a verdict from the old
+            # settings would mislabel the new ones.
+            live = (state.spec.mcp_servers or {}).get(key)
+            recorded = isinstance(live, dict) and _same_connection(live, entry)
+            if recorded:
+                # Persist ONLY coarse status — never raw error/stderr text, which
+                # can carry secrets and is served to the browser via /api/state.
+                live["last_test"] = {"ok": bool(result.get("ok")),
+                                     "live_ok": result.get("live_ok"),
+                                     "called": tool}
             if not result.get("ok"):
                 reply = f"✗ Couldn’t start {label}: {result.get('error')}"
                 if result.get("stderr"):
@@ -649,6 +693,11 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                          f"{result.get('live_error')}\n\nThat usually means "
                          f"credentials aren’t set or aren’t valid yet — add them "
                          f"with “edit” on the connection, then re-test.")
+            if not recorded:
+                reply += ("\n\nHeads up: this connection changed (or was removed) "
+                          "while the test was running, so the result above is for "
+                          "the previous settings and I didn’t record it — ask me "
+                          "to test it again.")
             yield reply
             _record(user_text, reply)
 
@@ -1273,15 +1322,51 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             server.should_exit = True
         return {"ok": True}
 
+    def _setup_managed_vars() -> set[str]:
+        """Every credential var name setup itself declares — the only names
+        /api/credential/value will answer for out of the process environment.
+
+        Union of: what the user saved through setup, the connector secrets of
+        the team's services AND of the on-demand connector catalog (the Connect
+        panel renders both, with a Copy affordance on any it reports satisfied),
+        the vars of user-added MCP connections, and every ${VAR} the team source
+        or the installed package references."""
+        from bobi.config import scan_declared_vars
+        from bobi.setup import services
+        from bobi.setup.actions import team_source_dir
+        names = set(state.credentials_saved or [])
+        cards = services.cards_for(
+            [*(state.spec.services or []), *services.CATALOG.keys()], project)
+        for card in cards:
+            for method in card.get("methods") or []:
+                names.update(s["var"] for s in method.get("secrets") or [])
+        for cfg in (state.spec.mcp_servers or {}).values():
+            if isinstance(cfg, dict):
+                if cfg.get("secret_var"):
+                    names.add(cfg["secret_var"])
+                names.update(cfg.get("env_vars") or [])
+        for agent_yaml in (paths.agent_yaml_path(project),
+                           team_source_dir(project, state) / "agent.yaml"):
+            names.update(scan_declared_vars(agent_yaml))
+        return names
+
     @app.get("/api/credential/value")
     def credential_value(request: Request) -> JSONResponse:
         # Copy-to-clipboard support: returns a saved credential value to the
         # local page so it can be copied without being shown. Loopback + nonce
         # only; the value already lives in plaintext in .env on this machine.
+        # The .env is setup's own file, so any var in it is answerable; the
+        # process environment is NOT — it carries unrelated secrets from the
+        # shell that launched setup (AWS keys, ANTHROPIC_API_KEY), so fall back
+        # to it only for the credential names setup actually manages. That keeps
+        # the "already satisfied by the environment" case working without
+        # turning the endpoint into a reader for arbitrary process env.
         import os
         from bobi.setup import actions
         var = request.query_params.get("var", "")
-        val = actions.read_env(project).get(var) or os.environ.get(var, "")
+        val = actions.read_env(project).get(var)
+        if not val and var and var in _setup_managed_vars():
+            val = os.environ.get(var, "")
         if not val:
             return JSONResponse({"error": "not set"}, status_code=404)
         return JSONResponse({"value": val})
@@ -1370,7 +1455,16 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         target = _safe_target(path)
         if target is None or not target.is_file():
             return JSONResponse({"error": "not found"}, status_code=404)
-        return JSONResponse({"path": path, "content": target.read_text()})
+        try:
+            content = target.read_text()
+        except (UnicodeDecodeError, OSError):
+            # /api/files lists everything in the pack, and an opened pack can
+            # carry a binary (a logo, a latin-1 doc). The viewer can't show it —
+            # say so instead of raising a 500 out of the endpoint.
+            return JSONResponse({"error": "this isn't a text file — open it "
+                                          "from your file manager instead"},
+                                status_code=415)
+        return JSONResponse({"path": path, "content": content})
 
     @app.post("/api/file")
     def write_file(payload: dict) -> JSONResponse:

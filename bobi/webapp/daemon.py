@@ -99,6 +99,52 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _proc_argv(pid: int) -> list[str]:
+    """argv of `pid` from /proc (Linux); empty when it cannot be read."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [arg for arg in raw.decode(errors="replace").split("\0") if arg]
+
+
+def _ps_argv(pid: int) -> list[str]:
+    """argv of `pid` from `ps` — the macOS/BSD path, where /proc does not exist."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return proc.stdout.split()
+
+
+def _process_argv(pid: int) -> list[str]:
+    return _proc_argv(pid) or _ps_argv(pid)
+
+
+def _is_app_process(pid: int) -> bool:
+    """True when `pid` really is this machine's app daemon.
+
+    A crash skips `run_foreground`'s pidfile cleanup and the OS reuses pids, so
+    an app.pid naming a live process proves nothing on its own. Identity is the
+    daemon's own argv — `… -m bobi.cli app run` (what `start()` spawns) or the
+    `bobi app run` console script. argv we cannot read (no /proc, no ps) is not
+    a match: a process we cannot identify is never one we may signal.
+    """
+    argv = _process_argv(pid)
+    return (
+        argv[-2:] == ["app", "run"]
+        and any(a == "bobi.cli" or Path(a).name == "bobi" for a in argv[:-2])
+    )
+
+
+def _app_alive(pid: int) -> bool:
+    """Liveness AND identity — the only thing that may be signalled."""
+    return _pid_alive(pid) and _is_app_process(pid)
+
+
 def _ping(port: int, token: str, timeout: float = 1.0) -> bool:
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/api/ping",
@@ -180,17 +226,25 @@ def start(*, open_browser: bool = True) -> AppStatus:
 
 
 def stop() -> AppStatus:
-    """Stop the daemon; returns the pre-stop status."""
+    """Stop the daemon; returns the pre-stop status.
+
+    Only ever signals a pid confirmed to BE the app: a stale pidfile left by a
+    crashed daemon points at a pid the OS has since handed to someone else, and
+    SIGTERM/SIGKILL there would kill an unrelated process. A pid that is not the
+    app is treated as not running, and its stale state files are cleared.
+    """
     import signal
 
     pid = _read_int(_pid_path())
-    if not _pid_alive(pid):
+    if not _app_alive(pid):
         _pid_path().unlink(missing_ok=True)
         _port_path().unlink(missing_ok=True)
         return AppStatus(running=False)
     os.kill(pid, signal.SIGTERM)
     for _ in range(50):
-        if not _pid_alive(pid):
+        # Re-checked, not just liveness: were the pid recycled while we wait,
+        # escalating to SIGKILL would hit the new owner.
+        if not _app_alive(pid):
             break
         time.sleep(0.1)
     else:

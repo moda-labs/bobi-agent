@@ -295,7 +295,13 @@ def merge_agent_yaml(existing_text: str, state: SetupState, catalog=None) -> str
         for k, v in managed_mcps.items():
             merged_mcps.setdefault(k, v)
         cfg["mcp_servers"] = merged_mcps
-    if state.chat and state.chat != "cli":
+    # `chat` is setup-managed, so setup's decision OVERWRITES the pack's — and
+    # "cli" is a decision: it must REMOVE an existing `chat:` key, else a
+    # slack→cli switch silently keeps running the Slack chat adapter. An unset
+    # state.chat means setup has no opinion — leave the pack's own value alone.
+    if state.chat == "cli":
+        cfg.pop("chat", None)
+    elif state.chat:
         cfg["chat"] = state.chat
     return yaml.dump(cfg, sort_keys=False)
 

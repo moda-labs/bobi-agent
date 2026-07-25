@@ -89,6 +89,37 @@ class TestRuntimeWritePolicy:
 
         assert not entered
 
+    def test_failed_unlock_relocks_already_chmodded_files(self, tmp_path,
+                                                          monkeypatch):
+        """An EPERM partway through the +w sweep must not leave the package
+        writable: the readonly re-lock runs even when __enter__ raises (D044).
+
+        Mirrors the container case #774 handled for the readonly direction — one
+        file in the package image is owned by another uid. `agent.yaml` sits
+        shallower than `roles/ROLE.md`, and the sweep walks deepest-first, so
+        ROLE.md is already +w when agent.yaml raises.
+        """
+        package = _write_runtime(tmp_path)
+        apply_runtime_write_policy(tmp_path)  # the real at-rest state: locked
+        denied = paths.agent_yaml_path(tmp_path)
+        real_chmod = os.chmod
+
+        def chmod(path, mode, **kwargs):
+            if Path(path) == denied:
+                raise PermissionError(1, "Operation not permitted", str(path))
+            return real_chmod(path, mode, **kwargs)
+
+        monkeypatch.setattr(os, "chmod", chmod)
+
+        with pytest.raises(PermissionError):
+            with with_mutable_runtime_package(tmp_path):
+                pass
+
+        role = package / "roles" / "ROLE.md"
+        assert not (role.stat().st_mode & 0o222), (
+            "file chmodded +w before the EPERM was left writable — no re-lock")
+        assert check_runtime_write_policy(tmp_path).ok
+
     def test_check_fails_for_symlink_escaping_package(self, tmp_path):
         package = _write_runtime(tmp_path)
         target = tmp_path / "outside.txt"

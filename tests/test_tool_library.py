@@ -166,6 +166,59 @@ def test_local_tool_guide_wins(project):
     assert (dest / "tools" / "codex.md").read_text() == "TEAM OWN CODEX GUIDE"
 
 
+@pytest.fixture
+def gizmo_catalog(tmp_path, monkeypatch):
+    """A one-entry catalog whose guide the test can rewrite (a framework
+    upgrade), standing in for `bobi/tool_library/<name>/`."""
+    cat = tmp_path / "cat"
+    _write(cat / "gizmo" / "tool.yaml", 'success: "command -v gizmo"\n')
+    _write(cat / "gizmo" / "guide.md", "GUIDE v1")
+    monkeypatch.setattr(tool_library, "CATALOG_DIR", cat)
+    return cat
+
+
+_GIZMO_TEAM = 'version: "1.0.0"\nentry_point: director\ntool_library: [gizmo]\n'
+
+
+def test_generated_guide_refreshes_when_the_catalog_updates(project, gizmo_catalog):
+    """A reinstall reuses dest, and install.py only clears surfaces a layer
+    contributes — so a team shipping no tools/ keeps the previous install's
+    guide. It must still pick up a catalog guide update, not freeze forever."""
+    leaf = _team(project, "solo", _GIZMO_TEAM)
+    dest = _compose(project, leaf)[0]
+    assert (dest / "tools" / "gizmo.md").read_text() == "GUIDE v1"
+
+    _write(gizmo_catalog / "gizmo" / "guide.md", "GUIDE v2")  # framework upgrade
+    _compose(project, leaf, dest=dest)                        # reinstall, same dest
+
+    assert (dest / "tools" / "gizmo.md").read_text() == "GUIDE v2"
+
+
+def test_generated_guide_is_dropped_when_the_dependency_goes_away(
+        project, gizmo_catalog):
+    """Removing the dependency removes its guide — an orphaned tools/<name>.md
+    would keep telling the runtime agent about a tool it no longer has."""
+    leaf = _team(project, "solo", _GIZMO_TEAM)
+    dest = _compose(project, leaf)[0]
+    assert (dest / "tools" / "gizmo.md").is_file()
+
+    _write(leaf / "agent.yaml", 'version: "1.0.0"\nentry_point: director\n')
+    _compose(project, leaf, dest=dest)
+
+    assert not (dest / "tools" / "gizmo.md").exists()
+
+
+def test_team_shipped_guide_survives_a_reinstall(project, gizmo_catalog):
+    """The leaf-wins escape hatch holds across reinstalls into a reused dest:
+    a team's own tools/<name>.md is never refreshed away."""
+    leaf = _team(project, "solo", _GIZMO_TEAM, tools={"gizmo.md": "TEAM OWN"})
+    dest = _compose(project, leaf)[0]
+    _write(gizmo_catalog / "gizmo" / "guide.md", "GUIDE v2")
+    _compose(project, leaf, dest=dest)
+
+    assert (dest / "tools" / "gizmo.md").read_text() == "TEAM OWN"
+
+
 def test_explicit_requires_wins(project):
     """An explicit team `requires: [{name: codex, ...}]` is neither duplicated nor
     clobbered by the catalog entry (leaf field wins / escape hatch)."""
@@ -195,6 +248,43 @@ def test_tool_library_unions_across_layers(project):
     cfg = _agent_yaml(_compose(project, leaf)[0])
     names = {r["name"] for r in cfg["requires"]}
     assert {"codex", "venn"} <= names
+
+
+def test_leaf_layer_overrides_an_inherited_dependency(project):
+    """The leaf always wins (compose §3.1): an overlay re-declaring an inherited
+    dependency by name replaces it — the union appends the overlay's entry after
+    the base's, so keeping the base's would invert compose's precedence and
+    silently bake the base's pin."""
+    _team(project, "core",
+          'version: "1.0.0"\nentry_point: director\ntool_library: [codex]\n')
+    leaf = _team(project, "moda",
+                 'from: core\nversion: "2.0.0"\n'
+                 'tool_library:\n'
+                 '  - name: codex\n'
+                 '    success: "codex --version"\n'
+                 '    install:\n'
+                 '      npm: ["@openai/codex@0.150.0"]\n')
+    cfg = _agent_yaml(_compose(project, leaf)[0])
+
+    assert "@openai/codex@0.150.0" in cfg["build"]["npm"]
+    assert CODEX_PIN not in cfg["build"]["npm"]
+    codex_reqs = [r for r in cfg["requires"] if r["name"] == "codex"]
+    assert len(codex_reqs) == 1
+    assert codex_reqs[0]["check"] == "codex --version"
+
+
+def test_overriding_a_dependency_keeps_the_declaration_order(project):
+    """An override replaces in place: the dependency list order (and so the
+    accreted build/requires order) stays the base's, not the overlay's."""
+    _team(project, "core",
+          'version: "1.0.0"\nentry_point: director\ntool_library: [codex, venn]\n')
+    leaf = _team(project, "moda",
+                 'from: core\nversion: "2.0.0"\n'
+                 'tool_library:\n'
+                 '  - name: codex\n'
+                 '    success: "codex --version"\n')
+    cfg = _agent_yaml(_compose(project, leaf)[0])
+    assert [r["name"] for r in cfg["requires"]] == ["codex", "venn"]
 
 
 # --- error paths -------------------------------------------------------------

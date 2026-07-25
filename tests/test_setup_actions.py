@@ -299,6 +299,29 @@ class TestInstallTeam:
         assert "changed since" in str(exc.value)
         assert build_state.validated is False
 
+    def test_stale_validation_raises_in_open_mode_too(self, project, build_state):
+        # The freshness gate is not a create-mode nicety: INSTALL requires a
+        # passing validation in EVERY mode (state._hard_floor), so an opened
+        # team edited after validate_team must refuse to install just the same.
+        _write_minimal_pack(project / "agents" / "my-team")
+        build_state.mode = "open"
+        build_state.validated = True
+        build_state.validated_hash = "old-hash"
+        with pytest.raises(ActionError) as exc:
+            actions.install_team(build_state, project)
+        assert "changed since" in str(exc.value)
+        assert build_state.validated is False
+        assert not paths.agent_yaml_path(project).exists()
+
+    def test_never_validated_open_mode_source_raises(self, project, build_state):
+        # Never validated at all (validated=False, no hash) — the same refusal.
+        _write_minimal_pack(project / "agents" / "my-team")
+        build_state.mode = "open"
+        with pytest.raises(ActionError) as exc:
+            actions.install_team(build_state, project)
+        assert "validate" in str(exc.value)
+        assert not paths.agent_yaml_path(project).exists()
+
     def test_missing_source_raises(self, project, build_state):
         with pytest.raises(ActionError) as exc:
             actions.install_team(build_state, project)

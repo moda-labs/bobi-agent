@@ -54,6 +54,10 @@ def _repo_tarball(name: str = "eng-team", version: str = "1.1.0") -> bytes:
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
+    # The install cache hangs off BOBI_HOME, not the runtime root — without this
+    # every fetch here would install its fixture tarball into the developer's
+    # real ~/.bobi/cache/agents (same isolation test_registry_url.py uses).
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     monkeypatch.setattr("bobi.paths._root", tmp_path)
     # A stable fake token so the asset download carries the auth header.
     monkeypatch.setattr(registry, "_github_token", lambda: "tok-abc")
@@ -205,6 +209,59 @@ def test_versionless_team_fetches_the_rolling_asset(project, monkeypatch):
     urls = [u for u, _ in calls]
     # rolling asset, NOT a versioned one
     assert any(u.endswith("teams-latest/smoke-team.tar.gz") for u in urls)
+
+
+def test_unpinned_fetch_fails_loudly_when_the_version_read_fails(project, monkeypatch):
+    """A transient version read failure must NOT silently downgrade 'latest' to
+    the rolling main-push asset (D032).
+
+    `bobi install eng-team` while raw.githubusercontent is timing out (or rate
+    limiting) used to install unreleased main content in place of the latest
+    published release, with no warning.
+    """
+    calls = []
+
+    def fake_get(url, headers=None, timeout=None, **kw):
+        calls.append(url)
+        request = httpx.Request("GET", url)
+        if "agents/registry.yaml" in url:
+            return httpx.Response(200, request=request, content=yaml.dump(
+                {"agents": {"eng-team": {"version": "1.1.0"}}}).encode())
+        if "agents/eng-team/agent.yaml" in url:
+            raise httpx.ConnectTimeout("read timed out", request=request)
+        # Every asset URL resolves, so nothing but the version read can fail.
+        return httpx.Response(200, request=request, content=_asset_tarball())
+
+    monkeypatch.setattr("bobi.http.get", fake_get)
+
+    with pytest.raises(RuntimeError) as exc:
+        registry.fetch(project, "eng-team")
+
+    msg = str(exc.value)
+    assert "eng-team" in msg and "version" in msg.lower()
+    assert "eng-team@" in msg, "error should point at pinning an explicit version"
+    assert not any(u.endswith("teams-latest/eng-team.tar.gz") for u in calls), (
+        "silently downgraded to the rolling main-push asset")
+    assert not registry.is_cached(project, "eng-team")
+
+
+def test_absent_remote_agent_yaml_still_resolves_to_the_rolling_asset(project,
+                                                                     monkeypatch):
+    """A 404 is a definitive 'nothing published there', not a failed read — it
+    stays version-less → rolling asset (D-5). Only indeterminate reads raise."""
+    calls = []
+    _router(monkeypatch, {
+        "agents/registry.yaml": (200, yaml.dump(
+            {"agents": {"smoke-team": {}}}).encode()),
+        # no agents/smoke-team/agent.yaml route → 404
+        "teams-latest/smoke-team.tar.gz": (200,
+            _asset_tarball("smoke-team", version=None)),
+    }, capture=calls)
+
+    dest = registry.fetch(project, "smoke-team")
+
+    assert (dest / "agent.yaml").is_file()
+    assert any(u.endswith("teams-latest/smoke-team.tar.gz") for u, _ in calls)
 
 
 def test_existing_signature_unpinned_still_installs(project, monkeypatch):

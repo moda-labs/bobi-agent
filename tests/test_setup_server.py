@@ -487,6 +487,43 @@ class TestConnect:
         assert r.json()["value"] == "lin_api_copyme"
         assert c.get("/api/credential/value?var=NOPE_TOKEN").status_code == 404
 
+    def test_credential_value_refuses_an_undeclared_env_var(self, project,
+                                                            monkeypatch):
+        # The endpoint serves credentials SETUP manages. It must never hand the
+        # page an arbitrary variable out of the process environment: the shell
+        # that launched `bobi setup` exports plenty of unrelated secrets.
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI-not-yours")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-yours")
+        c = _client(SetupState(), project)
+        for var in ("AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY"):
+            r = c.get(f"/api/credential/value?var={var}")
+            assert r.status_code == 404, var
+            assert "not-yours" not in r.text
+
+    def test_credential_value_serves_a_declared_var_from_the_environment(
+            self, project, monkeypatch):
+        # The case the environment fallback exists for: a credential the team
+        # declares that the user already exported, so Connect shows it as
+        # satisfied and Copy has something to copy.
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_exported_in_the_shell")
+        s = SetupState()
+        s.spec.services = [{"name": "github"}]
+        c = _client(s, project)
+        r = c.get("/api/credential/value?var=GITHUB_TOKEN")
+        assert r.status_code == 200
+        assert r.json()["value"] == "ghp_exported_in_the_shell"
+
+    def test_credential_value_serves_a_user_mcp_env_var(self, project,
+                                                        monkeypatch):
+        # A var declared on a user-added MCP connection is setup-managed too.
+        monkeypatch.setenv("ACME_TOKEN", "acme-exported")
+        s = SetupState()
+        s.spec.mcp_servers = {"acme": {"type": "stdio", "command": "acme-mcp",
+                                       "env_vars": ["ACME_TOKEN"]}}
+        c = _client(s, project)
+        r = c.get("/api/credential/value?var=ACME_TOKEN")
+        assert r.status_code == 200 and r.json()["value"] == "acme-exported"
+
 
 # --- Venn setup flow: discover account MCPs, apply picks -----------------
 
@@ -621,6 +658,32 @@ class TestBuildInstall:
         r = c.post("/api/install")
         assert r.status_code == 409
         assert "validate" in r.json()["error"]
+
+    def test_install_blocked_after_a_review_edit_in_open_mode(self, project, home):
+        # Open/modify mode is NOT exempt from the freshness gate: validate,
+        # then break agent.yaml through the review editor (which clears the
+        # freeze), and Install must refuse instead of copying the broken pack
+        # into run/package/.
+        state = self._ready_state()
+        c = _client(state, project, stream_fn=_fake_author())
+        c.post("/api/build")
+        assert c.post("/api/validate").json()["passed"] is True
+
+        src = home / "agents" / "triage-bot" / "src"
+        r = c.post("/api/start", json={"mode": "open", "team_path": str(src),
+                                       "location": str(src)})
+        assert r.status_code == 200 and state.mode == "open"
+
+        # The user edits the pack in the review editor and breaks the YAML.
+        c.post("/api/file", json={"path": "agent.yaml",
+                                  "content": "agent: [broken\n"})
+        assert state.validated is False
+
+        r = c.post("/api/install")
+        assert r.status_code == 409
+        assert "validate" in r.json()["error"]
+        assert not (project / "package" / "agent.yaml").exists()
+        assert state.installed is False
 
 
 # --- automate ------------------------------------------------------------
@@ -1037,6 +1100,53 @@ class TestPanelEdits:
                     if x["key"] == "substack_mcp")
         assert card["status"] == "error"
 
+    def test_edit_while_the_probe_runs_is_not_reverted(self, project, monkeypatch):
+        # The probe awaits for up to 60s. If the user fixes the connection and
+        # saves it in that window (/api/mcp/add), the finishing test must not
+        # write its PRE-PROBE snapshot back over the correction.
+        import asyncio
+        import shutil
+
+        import bobi.setup.mcp_probe as mcp_probe
+        monkeypatch.setattr(shutil, "which", lambda name: "/bin/claude")
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        monkeypatch.setattr(services, "live_venn_catalog", lambda *a, **k: set())
+        s = SetupState()
+        c = _client(s, project)
+        self._added_substack(s, c)          # command "uv", args ["run", "x"]
+
+        def _user_fixes_the_connection():
+            """A real concurrent save through the same app, from another
+            connection — exactly what the browser does mid-test."""
+            other = _testclient(c.app)
+            other.headers.update({server.NONCE_HEADER: NONCE})
+            r = other.post("/api/mcp/add", json={
+                "name": "substack-mcp", "transport": "stdio",
+                "command": "uvx", "args": "substack-mcp",
+                "replaces": "substack_mcp"})
+            assert r.status_code == 200
+
+        async def fake_probe(entry, proj, *, call_name=None, **kw):
+            if call_name is None:
+                return {"ok": True, "count": 1,
+                        "suggested": "substack_get_profile",
+                        "tools": ["substack_get_profile"]}
+            await asyncio.to_thread(_user_fixes_the_connection)
+            return {"ok": True, "live_ok": True, "output": "", "live_error": None}
+        monkeypatch.setattr(mcp_probe, "probe", fake_probe)
+
+        c.post("/api/message", json={"text": "test the substack connection"})
+        body = c.post("/api/message", json={"text": "yes"}).text
+        entry = s.spec.mcp_servers["substack_mcp"]
+        assert entry["command"] == "uvx"          # the correction survives
+        assert entry["args"] == ["substack-mcp"]
+        # The verdict is about the settings that were tested, not the new ones,
+        # so it isn't stamped on the edited connection — and the reply says so.
+        assert entry.get("last_test") is None
+        assert "changed" in body
+        assert SetupState.load(project).spec.mcp_servers[
+            "substack_mcp"]["command"] == "uvx"
+
     def test_chat_test_decline_clears_pending(self, project, monkeypatch):
         self._stub_probe(monkeypatch, run_result={"ok": True, "live_ok": True})
         s = SetupState()
@@ -1102,6 +1212,33 @@ class TestPanelEdits:
         r = c.post("/api/mcp/detect", json={"path": "/etc"})
         assert r.status_code == 400 and "home" in r.json()["error"]
 
+    def test_mcp_detect_accepts_a_folder_in_the_home_directory(
+            self, project, tmp_path, monkeypatch):
+        # A default install: BOBI_HOME is ~/.bobi, and the MCP server the user
+        # points detect at is a normal checkout elsewhere under their home
+        # (~/dev/…). The boundary the picker copy promises is the HOME
+        # DIRECTORY — confining to ~/.bobi rejects every real MCP project.
+        monkeypatch.setenv("HOME", str(tmp_path))   # the user's home directory
+        assert paths.home_dir() == (tmp_path / ".bobi").resolve()   # ~/.bobi
+        srv = tmp_path / "dev" / "acme"
+        (srv / "src" / "acme_mcp").mkdir(parents=True)
+        (srv / "pyproject.toml").write_text(
+            '[project]\nname = "acme-mcp"\nversion = "0.1.0"\n\n'
+            '[project.scripts]\nacme-mcp = "acme_mcp.server:main"\n')
+        (srv / "src" / "acme_mcp" / "__init__.py").write_text("")
+        c = _client(SetupState(), project)          # no home_root: real boundary
+        r = c.post("/api/mcp/detect", json={"path": "~/dev/acme"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+
+    def test_mcp_detect_still_rejects_outside_the_home_directory(
+            self, project, tmp_path, monkeypatch):
+        # …and the boundary still holds: the localhost page can't scan the
+        # whole filesystem.
+        monkeypatch.setenv("HOME", str(tmp_path))   # the user's home directory
+        c = _client(SetupState(), project)
+        r = c.post("/api/mcp/detect", json={"path": "/etc"})
+        assert r.status_code == 400 and "home" in r.json()["error"]
+
     def test_connect_surfaces_stdio_card(self, project, monkeypatch):
         monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
         monkeypatch.delenv("SUBSTACK_API_KEY", raising=False)
@@ -1144,6 +1281,18 @@ class TestReviewFiles:
         _, c = self._built(project)
         r = c.get("/api/file", params={"path": "../../../etc/passwd"})
         assert r.status_code == 404
+
+    def test_read_non_utf8_file_is_a_clean_error(self, project):
+        # /api/files lists every file in the pack, binaries included (an opened
+        # pack can carry a logo.png), so the viewer can be pointed at one. It
+        # must answer, not blow up decoding it.
+        s, c = self._built(project)
+        (paths.agent_source_dir(s.team_name) / "logo.png").write_bytes(
+            b"\x89PNG\r\n\x1a\n\xff\xfe\x00binary")
+        assert "logo.png" in c.get("/api/files").json()["files"]
+        r = c.get("/api/file", params={"path": "logo.png"})
+        assert r.status_code == 415
+        assert "text" in r.json()["error"]
 
     def test_reveal_opens_the_source_folder(self, project, monkeypatch):
         import subprocess
@@ -1690,6 +1839,30 @@ class TestIntro:
         d = c.get("/api/browse", params={"path": "/etc"}).json()
         assert d["path"] == str(home.resolve())
         assert d["parent"] is None
+
+    def test_browse_reaches_the_home_directory_outside_bobi_home(
+            self, project, tmp_path, monkeypatch):
+        # The picker's promise is "a folder inside your home directory" — the
+        # team sources and dev repos it exists to find live in ~/dev, ~/src, …,
+        # not inside ~/.bobi. Walking up out of the Bobi home must work.
+        monkeypatch.setenv("HOME", str(tmp_path))   # the user's home directory
+        (tmp_path / "dev" / "acme").mkdir(parents=True)
+        c = _client(SetupState(), project)          # no home_root: real boundary
+        d = c.get("/api/browse", params={"path": str(tmp_path / "dev")}).json()
+        assert d["path"] == str((tmp_path / "dev").resolve())
+        assert "acme" in d["dirs"]
+        assert d["parent"] == str(tmp_path.resolve())
+
+    def test_browse_still_confined_to_the_home_directory(
+            self, project, tmp_path, monkeypatch):
+        # …and no further: an escape attempt still collapses back inside.
+        monkeypatch.setenv("HOME", str(tmp_path))   # the user's home directory
+        c = _client(SetupState(), project)
+        d = c.get("/api/browse", params={"path": "/etc"}).json()
+        assert d["path"].startswith(str(tmp_path.resolve()))
+        # the home directory itself is the ceiling
+        top = c.get("/api/browse", params={"path": str(tmp_path)}).json()
+        assert top["parent"] is None
 
     def test_browse_404_on_a_file(self, project, home):
         (home / "notes.txt").write_text("x")

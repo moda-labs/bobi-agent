@@ -17,18 +17,38 @@ import logging
 import os
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-_server: HTTPServer | None = None
+# Per-connection socket timeout. A client that connects but never completes a
+# request (port scanner, stalled proxy, half-open connection through a dead
+# NAT) is dropped instead of parking a handler forever.
+HANDLER_TIMEOUT = 10.0
+
+_server: ThreadingHTTPServer | None = None
 _thread: threading.Thread | None = None
 _port_file: Path | None = None
 
 
-class _HealthServer(HTTPServer):
+class _HealthServer(ThreadingHTTPServer):
+    """Threaded so one slow/stalled client can never take liveness down.
+
+    This endpoint is what an orchestrator's probe and the self-heal supervisor
+    read; serving connections serially meant a single half-open socket queued
+    every later probe behind it and a healthy manager got diagnosed as wedged.
+    Handlers are daemon threads, so a stuck one also can't block ``stop()``.
+    """
+
     allow_reuse_address = True
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # A probe that hangs up mid-response (its own timeout, an orchestrator
+        # abort, a half-open socket) is routine on a liveness endpoint;
+        # socketserver's default dumps a traceback to stderr for every one.
+        log.debug("Health request from %s failed", client_address, exc_info=True)
 
 
 def _make_handler(manager_pid: int, project_name: str,
@@ -36,6 +56,8 @@ def _make_handler(manager_pid: int, project_name: str,
     """Build the request handler class with closed-over manager state."""
 
     class HealthHandler(BaseHTTPRequestHandler):
+
+        timeout = HANDLER_TIMEOUT
 
         def do_GET(self):
             if self.path == "/health":

@@ -359,14 +359,17 @@ def install_team(state: SetupState, project: Path) -> dict:
     if not pack_dir:
         raise ActionError(f"team source for '{state.team_name}' not found")
 
-    if state.mode == "create":
-        current = source_tree_hash(pack_dir)
-        if not state.validated or current != state.validated_hash:
-            state.validated = False
-            state.save(project)
-            raise ActionError("the team source changed since validate_team "
-                              "last passed — run validate_team again before "
-                              "installing")
+    # The INSTALL hard floor (state._hard_floor) requires a passing validation
+    # in EVERY mode, so the freshness check is mode-independent too: an opened
+    # or template-derived pack edited after validate_team must refuse just like
+    # a generated one, or a broken source gets frozen into run/package/.
+    current = source_tree_hash(pack_dir)
+    if not state.validated or current != state.validated_hash:
+        state.validated = False
+        state.save(project)
+        raise ActionError("the team source changed since validate_team "
+                          "last passed — run validate_team again before "
+                          "installing")
 
     package = paths.package_dir(project)
     local_source = not pack_dir.is_relative_to(paths.agent_cache_dir())

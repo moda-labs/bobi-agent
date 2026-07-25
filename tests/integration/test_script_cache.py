@@ -30,6 +30,26 @@ def scripts_dir(tmp_path):
         yield d
 
 
+def _write_cached_script(script: Path, cmd: list[str], body: str) -> None:
+    """Write a cached script for `cmd` whose command line is `body`.
+
+    The header stamp is what ties a cached script to the monitor's resolved
+    command; an unstamped script is (correctly) retired as stale, which is a
+    different code path than these tests exercise — see
+    tests/test_tool_poll.py::TestCacheConfigFingerprint.
+    """
+    from bobi.monitors.tool_checks import (
+        _FINGERPRINT_MARKER,
+        _command_fingerprint,
+    )
+
+    script.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        f"{_FINGERPRINT_MARKER}{_command_fingerprint(cmd)}\n{body}\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+
+
 class TestScriptCacheIntegration:
     """End-to-end script caching with real subprocess calls."""
 
@@ -69,11 +89,7 @@ class TestScriptCacheIntegration:
         assert script.exists()
 
         # Mutate the cached script to return different data
-        script.write_text(
-            '#!/usr/bin/env bash\nset -euo pipefail\n'
-            'echo \'[{"id": "mutated"}]\'\n'
-        )
-        script.chmod(script.stat().st_mode | stat.S_IEXEC)
+        _write_cached_script(script, cmd, 'echo \'[{"id": "mutated"}]\'')
 
         # Second run — uses mutated cached script
         result = _run_command(cmd, env, 10, "mutate-test", "id")
@@ -92,8 +108,7 @@ class TestScriptCacheIntegration:
         assert script.exists()
 
         # Break the cached script
-        script.write_text("#!/usr/bin/env bash\nexit 1\n")
-        script.chmod(script.stat().st_mode | stat.S_IEXEC)
+        _write_cached_script(script, cmd, "exit 1")
 
         # Run again — cached script fails (exit 1), falls back to direct,
         # and re-caches the working command
@@ -131,10 +146,9 @@ class TestScriptCacheIntegration:
         """When the direct command also fails, the stale cache is removed."""
         env = dict(os.environ)
 
-        # Seed a cached script manually
+        # Seed a cached script for this command that fails at runtime
         script = scripts_dir / "fail-test.sh"
-        script.write_text("#!/usr/bin/env bash\nexit 1\n")
-        script.chmod(script.stat().st_mode | stat.S_IEXEC)
+        _write_cached_script(script, ["false"], "exit 1")
 
         # Run with a command that will also fail
         result = _run_command(["false"], env, 10, "fail-test", "id")
@@ -154,6 +168,15 @@ from bobi.monitors.script_cache_checks import GenResult, script_cache
 
 _SC_PUBLISHED: list = []
 
+# Generation runs on a worker thread and a tick waits only GEN_HANDOFF_GRACE
+# (2s) before detaching it. These lifecycle tests use a fake generator that
+# returns in microseconds and assert on the COMPLETED outcome, so racing the
+# real wall-clock grace would make them fail purely under CPU load. Give them a
+# grace they cannot lose; the one test that exercises the handoff itself
+# restores the production value.
+REAL_GEN_HANDOFF_GRACE = sc.GEN_HANDOFF_GRACE
+_SETTLED_GRACE = 60.0
+
 
 @pytest.fixture()
 def sc_scripts_dir(tmp_path):
@@ -169,8 +192,11 @@ def sc_scripts_dir(tmp_path):
 
     with patch("bobi.monitors.script_cache_checks._scripts_dir", return_value=d), \
          patch("bobi.monitors.script_cache_checks.publish", side_effect=fake_publish), \
-         patch("bobi.monitors.script_cache_checks._install_policy", return_value={}):
+         patch("bobi.monitors.script_cache_checks._install_policy", return_value={}), \
+         patch.object(sc, "GEN_HANDOFF_GRACE", _SETTLED_GRACE):
         yield d
+    # An uncollected background generation must not leak into the next test.
+    sc._generations.clear()
 
 
 def _sc_monitor(name="unread-emails", **extra):
@@ -282,6 +308,64 @@ class TestScriptCacheRunnerIntegration:
             sc.recache(monitor)
             sched.run_monitor(monitor, FakeRegistry(), sched._now())
             assert [k for _, k in fired] == ["y"]
+
+    def test_slow_generation_does_not_stall_other_monitors(self, tmp_path,
+                                                           scripts_dir,
+                                                           sc_scripts_dir):
+        """A script_cache generation runs out-of-band, so the single scheduler
+        thread keeps evaluating every other monitor in the same tick (D004).
+
+        Real scheduler, real tick, real tool_poll subprocess for the second
+        monitor — only the agent runtime is stubbed (with a slow one).
+        """
+        import time
+        from datetime import datetime, timezone
+        from bobi.monitors.scheduler import MonitorScheduler
+
+        slow = _sc_monitor(name="slow-scriptcache")
+        fast = Monitor(name="fast-poll", check="tool_poll",
+                       event="monitor/fast",
+                       extra={"command": 'echo \'[{"id": "fast-1"}]\'',
+                              "id_field": "id"})
+        fired: list = []
+
+        class FakeRegistry:
+            def effective_monitors(self):
+                return [slow, fast]  # the blocker is evaluated first
+
+            def projects_for(self, _m):
+                return []
+
+        sched = MonitorScheduler(
+            publish=lambda event, data: (fired.append(event) or True),
+            state_path=tmp_path / "monitor_state.json",
+            now=lambda: datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc),
+            registry_loader=lambda **kw: FakeRegistry(),
+            spawn_check=lambda _m, _c, _cb: None,
+        )
+
+        candidate = ("#!/usr/bin/env bash\nset -euo pipefail\n"
+                     "echo '[{\"id\": \"slow-1\"}]'\n")
+
+        def slow_gen(mon, cwd, policy):
+            time.sleep(4)  # a real generation takes minutes
+            return GenResult(True, items=[{"id": "slow-1"}], script=candidate,
+                             cost_usd=0.01)
+
+        with patch.object(sc, "GEN_HANDOFF_GRACE", REAL_GEN_HANDOFF_GRACE), \
+             patch.object(sc, "generate_candidate", slow_gen):
+            t0 = time.monotonic()
+            sched.tick()
+            elapsed = time.monotonic() - t0
+            assert elapsed < 3.0, f"tick blocked for {elapsed:.1f}s"
+            assert "monitor/fast" in fired, "the other monitor never ran"
+
+            # The generation lands out-of-band; the next tick publishes it.
+            assert sc._generations["slow-scriptcache"].done.wait(20)
+            sched.run_monitor(slow, FakeRegistry(), sched._now())
+
+        assert "monitor/email.received" in fired
+        assert (sc_scripts_dir / "slow-scriptcache.sc.sh").exists()
 
 
 @pytest.mark.skipif(

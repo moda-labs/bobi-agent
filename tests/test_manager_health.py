@@ -2,6 +2,7 @@
 
 import json
 import socket
+import time
 import urllib.request
 
 import pytest
@@ -201,6 +202,59 @@ class TestHealthServer:
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             urllib.request.urlopen(url, timeout=2)
         assert exc_info.value.code == 503
+
+
+class TestConcurrentProbes:
+    """One stalled client must never take the liveness endpoint down (D045).
+
+    The manager binds this endpoint for orchestrator probes; a half-open
+    connection (port scanner, stalled proxy, dead checker) that never finishes
+    its request used to park the only serving thread forever, so every later
+    probe queued behind it and the supervisor diagnosed a healthy manager as
+    wedged.
+    """
+
+    def _stalled_client(self, port):
+        """A client that connects, sends a partial request, and never finishes."""
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        sock.sendall(b"GET /health HTTP/1.1\r\nHost: localhost\r\n")
+        # No terminating blank line: the server is left reading headers.
+        time.sleep(0.3)  # let the server accept + block on this connection
+        return sock
+
+    def test_stalled_client_does_not_block_other_probes(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        port = manager_health.start(state_dir, "test-project",
+                                    session_status_fn=lambda: [])
+
+        sock = self._stalled_client(port)
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health",
+                                        timeout=3) as resp:
+                data = json.loads(resp.read())
+        finally:
+            sock.close()
+
+        assert data["status"] == "ok"
+
+    def test_stalled_connection_is_reaped_by_handler_timeout(self, tmp_path,
+                                                             monkeypatch):
+        """A client that never speaks is dropped, so handlers can't pile up."""
+        monkeypatch.setattr(manager_health, "HANDLER_TIMEOUT", 0.5)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        port = manager_health.start(state_dir, "test-project",
+                                    session_status_fn=lambda: [])
+
+        sock = self._stalled_client(port)
+        try:
+            sock.settimeout(5)
+            # The server closes the idle connection: recv returns EOF (or the
+            # peer resets) rather than hanging until the client gives up.
+            assert sock.recv(1024) == b""
+        finally:
+            sock.close()
 
 
 class TestManagerBlock:
