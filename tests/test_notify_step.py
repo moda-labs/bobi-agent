@@ -109,6 +109,22 @@ class TestFormatSlackMessage:
             '```\nprint("hi")\n```'
         )
 
+    def test_expansion_opened_fence_still_closes_when_content_has_real_lines(
+            self):
+        """The shape `bobi notify "Status:\\n```\\n$(cat log)\\n```"` produces:
+        escaped newlines around the fences, REAL newlines inside from the
+        command substitution.
+
+        The closing fence arrives on a physical line that is inside the block,
+        so an expansion that stops at the opening fence never turns its
+        `\\n```` into a terminator - the block stays open and swallows the rest
+        of the message, with a visible \\n where the fence should be.
+        """
+        source = 'Status:\\n```\\nLOG1\nLOG2\nLOG3\\n```'
+        assert format_slack_message(source) == (
+            'Status:\n```\nLOG1\nLOG2\nLOG3\n```'
+        )
+
     def test_escaped_newlines_outside_code_block_still_expand(self):
         """The shell-invocation escape expansion still applies to the prose
         around a fenced block."""

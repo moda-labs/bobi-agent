@@ -91,33 +91,74 @@ def _convert_markdown_line(line: str) -> str:
 def _map_lines_outside_code_blocks(text: str, convert) -> str:
     """Apply `convert` to every line that is not inside a ``` fence.
 
-    Fence detection needs real newlines, but a shell-escaped message carries
-    literal ``\\n`` and is therefore a single physical line - one that may
-    itself open with a fence. So a conversion that *produces* real newlines
-    (the escape expansion) re-enters the loop and its new lines are
-    fence-classified like any other. Content already inside a real fence is
-    never converted, which is what keeps quoted ``\\n``/``\\t`` verbatim.
+    `convert` must not introduce newlines; the escape expansion does, and has
+    its own walker below.
     """
     converted: list[str] = []
-    pending = deque(text.split("\n"))
     in_code_block = False
-    while pending:
-        line = pending.popleft()
-        if not in_code_block:
-            expanded = convert(line)
-            if "\n" in expanded:
-                pending.extendleft(reversed(expanded.split("\n")))
-                continue
-            line = expanded
-        converted.append(line)
+    for line in text.split("\n"):
         if line.strip().startswith("```"):
             in_code_block = not in_code_block
+            converted.append(line)
+        elif in_code_block:
+            converted.append(line)
+        else:
+            converted.append(convert(line))
     return "\n".join(converted)
 
 
 def _expand_escapes(line: str) -> str:
     """Turn a shell invocation's literal \\n / \\t into real whitespace."""
     return line.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+
+
+def _expand_escapes_outside_code_blocks(text: str) -> str:
+    r"""Expand shell escapes, leaving the content of a REAL fence verbatim.
+
+    Two authoring modes collide here and the same bytes mean different things
+    in each, so the rule is about where the fence came from:
+
+    - A fence whose ``` marker is a PHYSICAL line was typed as a fence by a
+      human composing a multi-line message. What it quotes is content: its
+      literal ``\n``/``\t`` are part of the JSON or source being shown and
+      must survive untouched.
+    - A fence that only appears once escapes are expanded came from a shell
+      one-liner (``bobi notify "...\n```\n..."``), where every escape in the
+      string is layout the shell couldn't send literally. Expansion has to
+      continue THROUGH such a block, or its closing ``\n``` `` never becomes
+      a real fence terminator - leaving an unterminated code block that
+      swallows the rest of the message and shows a visible \n.
+
+    So expansion stops only inside a physically-opened fence. Tracking that
+    needs the expanded lines fed back through fence classification, hence the
+    queue rather than a plain loop.
+    """
+    out: list[str] = []
+    # (line, produced_by_expansion)
+    pending = deque((line, False) for line in text.split("\n"))
+    in_code_block = False
+    fence_opened_by_expansion = False
+    while pending:
+        line, from_expansion = pending.popleft()
+        if not in_code_block or fence_opened_by_expansion:
+            expanded = _expand_escapes(line)
+            if "\n" in expanded:
+                # Re-queue the pieces so each is fence-classified on its own.
+                # _expand_escapes leaves no residual escape, so a piece can
+                # never split again and the queue always drains.
+                pending.extendleft((piece, True)
+                                   for piece in reversed(expanded.split("\n")))
+                continue
+            line = expanded
+        out.append(line)
+        if line.strip().startswith("```"):
+            if in_code_block:
+                in_code_block = False
+                fence_opened_by_expansion = False
+            else:
+                in_code_block = True
+                fence_opened_by_expansion = from_expansion
+    return "\n".join(out)
 
 
 def _convert_markdown_outside_code_blocks(text: str) -> str:
@@ -188,12 +229,12 @@ def _truncate_slack_message(text: str) -> str:
 
 def format_slack_message(text: str) -> str:
     """Convert markdown to Slack mrkdwn and truncate if needed."""
-    # Escaped newlines from shell invocations - outside code fences only: a
-    # fenced block quotes JSON/source the reader must see verbatim, and its
-    # literal \n / \t are content, not layout. A wholly-escaped message is one
-    # physical line, so the expansion is what reveals its fences (see
-    # _map_lines_outside_code_blocks).
-    text = _map_lines_outside_code_blocks(text, _expand_escapes)
+    # Escaped newlines from shell invocations - outside a physically-typed
+    # fence only: such a fence quotes JSON/source the reader must see verbatim,
+    # and its literal \n / \t are content, not layout. A fence that appears
+    # only after expansion is shell layout, so expansion continues through it
+    # (see _expand_escapes_outside_code_blocks).
+    text = _expand_escapes_outside_code_blocks(text)
     text = _wrap_markdown_tables(text)
     text = _convert_markdown_outside_code_blocks(text)
     text = _truncate_slack_message(text)
