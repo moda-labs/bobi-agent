@@ -41,6 +41,21 @@ be served over TLS.
   Claude OAuth credentials on the volume and **requires `ANTHROPIC_API_KEY` to be
   absent** (it silently outranks subscription auth and bills the API). The image
   refuses to start with both set.
+- **The setup UI never reads arbitrary process env.** `GET /api/credential/value`
+  backs the Connect panel's Copy affordance. It answers from setup's own `run/.env`
+  for any name, but falls back to the process environment only for names the caller
+  cannot mint: the connector catalog and hosted-MCP registry (fixed sets compiled
+  into bobi) and the `${VAR}` refs of the **installed** `package/agent.yaml`. Vars
+  named through `POST /api/mcp/add`, a caller-supplied connector name, or the team
+  SOURCE `agent.yaml` are deliberately excluded - otherwise one extra request would
+  turn the endpoint into a reader for the shell's `AWS_*` / `ANTHROPIC_*` secrets.
+- **Setup's file writes are confined to the picker roots.** `POST /api/start` takes
+  a source `location` and `POST /api/file` writes under it, so `location` is
+  confined to the user's home directory (the same boundary the folder picker
+  reaches) and must lie outside the runtime `run/` tree in **both** directions -
+  neither inside it nor containing it. The second rule is what keeps
+  `run/package/agent.yaml`, which the credential allow-list above trusts, out of
+  caller reach.
 
 ## Event-bus trust: bubbles and proof-of-access
 

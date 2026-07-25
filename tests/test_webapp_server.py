@@ -611,7 +611,11 @@ class TestSetupHosting:
 
         c = _client()
         self._open(c, monkeypatch, name="new-agent")
-        custom_src = tmp_path / "field-ops-src"
+        # Inside the Bobi home: /api/start confines `location` to the picker
+        # roots (the user's home directory in production, the sealed tree
+        # here). The slot-merge behavior under test is unrelated to where the
+        # custom source lives.
+        custom_src = paths.home_dir() / "field-ops-src"
         existing_src = paths.agent_source_dir("field-ops")
         existing_src.mkdir(parents=True)
         (existing_src / "agent.yaml").write_text("agent: field-ops\n")
