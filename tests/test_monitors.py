@@ -12,6 +12,7 @@ from bobi.monitors import registry as registry_mod
 from bobi.monitors.registry import MonitorRegistry
 from bobi.monitors.schema import Condition
 from bobi.monitors.scheduler import MonitorScheduler
+from tests.test_fsutil import kill_mid_write
 
 
 # === Interval parsing ===
@@ -568,6 +569,29 @@ class TestSchedulerReconcile:
         sched2, injected2 = _scheduler(tmp_path, [m])
         sched2._reconcile(m, [Condition(key="r#1", data={})])
         assert injected2 == []  # already known from persisted state
+
+    def test_state_survives_a_kill_mid_save(self, tmp_path):
+        """A kill mid-save must not corrupt monitor state.
+
+        _load_state treats corrupt JSON as 'resetting', so a torn write
+        silently drops every last_run/last_spawn and the whole monitor set
+        re-fires on the next boot.
+        """
+        m = Monitor(name="x", event="monitor/x")
+        sched, _ = _scheduler(tmp_path, [m])
+        sched._reconcile(m, [Condition(key="r#1", data={})])
+        sched._save_state()
+
+        sched.state["x"]["last_run"] = "2026-01-01T00:00:00+00:00"
+        with pytest.MonkeyPatch.context() as mp:
+            kill_mid_write(mp)
+            with pytest.raises(KeyboardInterrupt):
+                sched._save_state()
+
+        sched2, injected2 = _scheduler(tmp_path, [m])
+        assert sched2.state != {}, "monitor state was reset by an interrupted save"
+        sched2._reconcile(m, [Condition(key="r#1", data={})])
+        assert injected2 == []  # still deduplicated against persisted state
 
 
 class TestSchedulerRun:

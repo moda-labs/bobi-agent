@@ -1,12 +1,15 @@
 """Unit tests for WorkflowRun — persistence and querying."""
 
 import json
+import os
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from bobi.workflow.state import WorkflowRun
+from tests.test_fsutil import kill_mid_write as _patch_kill_mid_write
 
 
 @pytest.fixture
@@ -72,11 +75,20 @@ class TestSaveLoad:
         assert loaded.status == "running"
 
     def test_save_is_atomic(self, runs_dir):
-        run = _make_run(runs_dir, run_id="atomic")
-        path = runs_dir / "atomic.json"
-        tmp_path = runs_dir / ".atomic.json.tmp"
-        assert path.exists()
-        assert not tmp_path.exists()
+        _make_run(runs_dir, run_id="atomic")
+        assert (runs_dir / "atomic.json").exists()
+        assert [p.name for p in runs_dir.iterdir()] == ["atomic.json"]
+
+    def test_save_survives_a_kill_mid_write(self, runs_dir):
+        """A process killed mid-save keeps the previously saved run intact."""
+        run = _make_run(runs_dir, run_id="killed", status="waiting")
+        run.status = "running"
+        with pytest.MonkeyPatch.context() as mp:
+            _patch_kill_mid_write(mp)
+            with pytest.raises(KeyboardInterrupt):
+                run.save()
+
+        assert WorkflowRun.load("killed").status == "waiting"
 
     def test_load_tolerates_missing_optional_fields(self, runs_dir):
         path = runs_dir / "minimal.json"
@@ -223,6 +235,55 @@ class TestClaim:
         result_b = run_b.claim()
         assert result_a != result_b  # exactly one wins
         assert (result_a and not result_b) or (not result_a and result_b)
+
+    def test_claim_race_inside_the_rename_window_still_yields_a_winner(
+            self, runs_dir, monkeypatch):
+        """A second claimant arriving mid-claim must not void the winner.
+
+        Deterministic interleave: B runs its whole claim() in the window
+        between A's claim rename and A's status update. Exactly one of them
+        must own the run — if both come back False the run is claimed on
+        disk with nobody resuming it, i.e. permanently stuck.
+        """
+        _make_run(runs_dir, run_id="cl6", status="waiting",
+                  await_event="approval")
+        run_a = WorkflowRun.load("cl6")
+        run_b = WorkflowRun.load("cl6")
+
+        real_replace = os.replace
+        window = {"entered": False, "b_result": None}
+
+        def hooked(src, dst):
+            if not window["entered"]:
+                window["entered"] = True
+                real_replace(src, dst)                  # A's claim lands
+                window["b_result"] = run_b.claim()      # B runs in the window
+                return None
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", hooked)
+        result_a = run_a.claim()
+        monkeypatch.undo()
+
+        assert window["entered"] is True
+        assert [result_a, window["b_result"]].count(True) == 1
+        claimed = json.loads((runs_dir / "cl6.resuming.json").read_text())
+        assert claimed["status"] == "resuming"
+        assert not list(runs_dir.glob("*.tmp"))
+
+    def test_losing_claimant_writes_nothing(self, runs_dir, monkeypatch):
+        """The loser of a claim race must not touch the filesystem at all."""
+        _make_run(runs_dir, run_id="cl7", status="waiting",
+                  await_event="approval")
+        run_a = WorkflowRun.load("cl7")
+        run_b = WorkflowRun.load("cl7")
+        assert run_a.claim() is True
+
+        def forbidden(self, *a, **kw):
+            raise AssertionError("losing claimant wrote to disk")
+
+        monkeypatch.setattr(Path, "write_text", forbidden)
+        assert run_b.claim() is False
 
     def test_save_after_claim_cleans_up_resuming_file(self, runs_dir):
         """save() after claim() removes the orphaned .resuming.json file."""

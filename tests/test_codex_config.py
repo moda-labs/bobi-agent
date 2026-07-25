@@ -15,6 +15,7 @@ import tomllib
 import pytest
 
 from bobi.brain import codex_config
+from tests.test_fsutil import kill_mid_write
 
 
 # --- pure render -------------------------------------------------------------
@@ -180,6 +181,32 @@ def test_write_codex_config_writes_and_is_no_op_when_unchanged(tmp_path):
     codex_config.write_codex_config(servers, home=tmp_path)
     assert path.read_text() == first
     assert path.stat().st_mtime_ns == mtime
+
+
+def test_write_codex_config_survives_a_kill_mid_write(tmp_path):
+    """A kill mid-rewrite must not truncate config.toml.
+
+    config.toml carries foreign settings (model config, profiles, anything
+    `codex mcp add` or the operator wrote) that bobi promises to preserve;
+    a truncated file loses them for good and the next `codex exec` reads
+    torn TOML.
+    """
+    path = tmp_path / "config.toml"
+    path.write_text('model = "gpt-5-codex"\n\n[history]\npersistence = "none"\n')
+    codex_config.write_codex_config({"old": {"command": "/old"}}, home=tmp_path)
+    before = path.read_text()
+
+    with pytest.MonkeyPatch.context() as mp:
+        kill_mid_write(mp)
+        with pytest.raises(KeyboardInterrupt):
+            codex_config.write_codex_config({"new": {"command": "/new"}},
+                                            home=tmp_path)
+
+    assert path.read_text() == before
+    parsed = tomllib.loads(path.read_text())          # still valid TOML
+    assert parsed["model"] == "gpt-5-codex"           # foreign keys intact
+    assert parsed["history"]["persistence"] == "none"
+    assert "old" in parsed["mcp_servers"]
 
 
 def test_write_codex_config_honors_codex_home_env(tmp_path, monkeypatch):

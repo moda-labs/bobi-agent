@@ -1,6 +1,10 @@
 """Tests for the setup state machine — the 8-stage create spine, soft
 readiness, gating, the accumulating Spec, and persistence."""
 
+import threading
+import time
+from pathlib import Path
+
 import pytest
 
 from bobi.setup.state import (
@@ -12,6 +16,7 @@ from bobi.setup.state import (
     Stage,
     source_tree_hash,
 )
+from tests.test_fsutil import kill_mid_write
 
 
 def _goaled(**overrides) -> SetupState:
@@ -233,6 +238,62 @@ class TestPersistence:
         SetupState().save(tmp_path)
         SetupState.clear(tmp_path)
         assert SetupState.load(tmp_path) is None
+
+    def test_save_survives_a_kill_mid_write(self, tmp_path):
+        """Ctrl-C on the foreground server mid-save keeps setup resumable.
+
+        A truncated setup.json makes load() return None, which serve()
+        reports as 'No setup in progress to resume' — the whole in-progress
+        setup silently discarded.
+        """
+        _goaled(stage=Stage.AUTOMATE, session_id="abc-123").save(tmp_path)
+
+        later = _goaled(stage=Stage.CONNECT, session_id="abc-123")
+        later.messages = [{"role": "user", "content": "x" * 200}]
+        with pytest.MonkeyPatch.context() as mp:
+            kill_mid_write(mp)
+            with pytest.raises(KeyboardInterrupt):
+                later.save(tmp_path)
+
+        resumed = SetupState.load(tmp_path)
+        assert resumed is not None, "setup state was lost by an interrupted save"
+        assert resumed.stage == Stage.AUTOMATE
+        assert resumed.session_id == "abc-123"
+
+    def test_concurrent_saves_do_not_interleave(self, tmp_path):
+        """Threadpooled web handlers saving at once must serialize.
+
+        Every sync route runs in FastAPI's threadpool and saves the shared
+        SetupState, so two saves can otherwise be in flight at once.
+        """
+        events: list[tuple[str, int]] = []
+        real_write_text = Path.write_text
+
+        def slow_write(self, data, *a, **kw):
+            ident = threading.get_ident()
+            events.append(("enter", ident))
+            time.sleep(0.05)
+            out = real_write_text(self, data, *a, **kw)
+            events.append(("exit", ident))
+            return out
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(Path, "write_text", slow_write)
+            threads = [
+                threading.Thread(target=_goaled(team_name=f"t{i}").save,
+                                 args=(tmp_path,))
+                for i in range(4)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        assert len(events) == 8
+        for i in range(0, 8, 2):
+            assert events[i][0] == "enter" and events[i + 1][0] == "exit"
+            assert events[i][1] == events[i + 1][1], "saves interleaved"
+        assert SetupState.load(tmp_path) is not None
 
     def test_ignores_unknown_fields(self, tmp_path):
         SetupState().save(tmp_path)

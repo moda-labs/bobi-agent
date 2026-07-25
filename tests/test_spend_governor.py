@@ -1,6 +1,7 @@
 """Tests for the spend governor — rolling-hour invocation cap."""
 
 import json
+import multiprocessing
 import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -19,6 +20,7 @@ from bobi.spend_governor import (
     emit_spend_cap_alert,
     record_invocation,
 )
+from tests.test_fsutil import kill_mid_write
 
 
 @pytest.fixture
@@ -56,6 +58,53 @@ class TestStateIO:
         path = tmp_path / "nested" / "dir" / "state.json"
         _save_state(path, [1.0])
         assert _load_state(path) == [1.0]
+
+
+def _hammer(project_path: Path, count: int) -> None:
+    """Record *count* invocations — the body of a concurrent recorder process."""
+    for _ in range(count):
+        record_invocation(project_path)
+
+
+class TestConcurrentRecording:
+    """D087: record_invocation is a read-modify-write on a file two dispatch
+    threads (and separate CLI-spawned processes) hit at the same time."""
+
+    def test_concurrent_processes_do_not_lose_invocations(self, tmp_path):
+        """Real concurrent processes: every invocation must land.
+
+        A lost timestamp means the runaway-loop backstop undercounts, which
+        is exactly the failure the cap exists to prevent.
+        """
+        procs = [multiprocessing.Process(target=_hammer, args=(tmp_path, 60))
+                 for _ in range(4)]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=60)
+        assert all(p.exitcode == 0 for p in procs)
+
+        recorded = _load_state(_state_path(tmp_path))
+        assert len(recorded) == 240
+
+    def test_record_survives_a_kill_mid_write(self, tmp_path):
+        """A kill mid-write must not zero the rolling window.
+
+        Torn JSON reads back as [], so a crash would silently reset the cap
+        and let a runaway loop start over from zero.
+        """
+        state_file = _state_path(tmp_path)
+        now = time.time()
+        _save_state(state_file, [now - i for i in range(20)])
+        before = state_file.read_text()
+
+        with pytest.MonkeyPatch.context() as mp:
+            kill_mid_write(mp)
+            with pytest.raises(KeyboardInterrupt):
+                record_invocation(tmp_path)
+
+        assert state_file.read_text() == before
+        assert len(_load_state(state_file)) == 20
 
 
 class TestPrune:

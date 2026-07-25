@@ -16,6 +16,8 @@ import logging
 import time
 from pathlib import Path
 
+from bobi import fsutil
+
 log = logging.getLogger(__name__)
 
 # Default: 50 agent invocations per rolling hour. Override in agent.yaml
@@ -46,10 +48,14 @@ def _load_state(state_file: Path) -> list[float]:
 
 
 def _save_state(state_file: Path, timestamps: list[float]) -> None:
-    """Persist invocation timestamps to disk. Best-effort, never raises."""
+    """Persist invocation timestamps to disk. Best-effort, never raises.
+
+    Atomic: torn JSON reads back as an empty window, which would silently
+    reset the cap and let a runaway loop start counting from zero.
+    """
     try:
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        state_file.write_text(json.dumps({"invocations": timestamps}))
+        fsutil.atomic_write_json(state_file, {"invocations": timestamps},
+                                 indent=None)
     except OSError:
         log.debug("Failed to persist spend governor state", exc_info=True)
 
@@ -68,25 +74,33 @@ def check_spend_cap(project_path: Path, cap: int) -> tuple[bool, int]:
     """
     state_file = _state_path(project_path)
     now = time.time()
-    timestamps = _prune(_load_state(state_file), now)
-    count = len(timestamps)
+    with fsutil.file_lock(state_file):
+        timestamps = _prune(_load_state(state_file), now)
+        count = len(timestamps)
 
-    if count >= cap:
-        # Persist the pruned state (removes expired entries) but do NOT
-        # record a new timestamp — the launch is being blocked.
-        _save_state(state_file, timestamps)
-        return False, count
+        if count >= cap:
+            # Persist the pruned state (removes expired entries) but do NOT
+            # record a new timestamp — the launch is being blocked.
+            _save_state(state_file, timestamps)
+            return False, count
 
     return True, count
 
 
 def record_invocation(project_path: Path) -> None:
-    """Record a new agent invocation timestamp."""
+    """Record a new agent invocation timestamp.
+
+    Locked: this is a read-modify-write, and dispatch threads plus separate
+    CLI-spawned processes record concurrently. Without the lock the last
+    writer wins and the other's invocation vanishes from the window, so the
+    runaway-loop backstop undercounts.
+    """
     state_file = _state_path(project_path)
     now = time.time()
-    timestamps = _prune(_load_state(state_file), now)
-    timestamps.append(now)
-    _save_state(state_file, timestamps)
+    with fsutil.file_lock(state_file):
+        timestamps = _prune(_load_state(state_file), now)
+        timestamps.append(now)
+        _save_state(state_file, timestamps)
 
 
 def emit_spend_cap_alert(project_path: Path, count: int, cap: int) -> None:

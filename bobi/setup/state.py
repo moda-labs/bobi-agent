@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from bobi import paths
+from bobi import fsutil, paths
 
 STATE_FILENAME = "setup.json"
 
@@ -225,10 +225,19 @@ class SetupState:
     # --- persistence ----------------------------------------------------
 
     def save(self, project_path: Path) -> None:
-        data = asdict(self)            # recurses into Spec → dict
-        data["stage"] = self.stage.value
-        path = paths.state_dir(project_path) / STATE_FILENAME
-        path.write_text(json.dumps(data, indent=1))
+        """Checkpoint this state to disk, atomically and one save at a time.
+
+        Web handlers run in FastAPI's threadpool and nearly all of them save
+        the shared state, so saves overlap; the lock serializes them and the
+        atomic write keeps an interrupted one (Ctrl-C on the foreground
+        server) from truncating setup.json — which load() would read as
+        'no setup in progress', discarding the whole in-progress setup.
+        """
+        path = paths.state_path(project_path) / STATE_FILENAME
+        with fsutil.file_lock(path):
+            data = asdict(self)            # recurses into Spec → dict
+            data["stage"] = self.stage.value
+            fsutil.atomic_write_json(path, data, indent=1)
 
     @classmethod
     def load(cls, project_path: Path) -> "SetupState | None":

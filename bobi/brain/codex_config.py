@@ -35,6 +35,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from bobi import fsutil
+
 # Sentinels bracketing the bobi-owned region of config.toml. Everything outside
 # them is foreign content preserved untouched; everything between them is
 # regenerated on each render (idempotent).
@@ -202,6 +204,11 @@ def write_codex_config(mcp_servers: dict, home: Path | None = None) -> Path:
 
     Idempotent: re-rendering the same set reproduces the same file. Returns the
     config path. ``home`` defaults to :func:`codex_home`.
+
+    The rewrite is atomic: config.toml carries foreign content bobi must never
+    lose, and a process killed mid-write would otherwise truncate it — taking
+    the operator's model settings and profiles with it, and leaving the next
+    ``codex exec`` reading torn TOML.
     """
     home = home or codex_home()
     path = home / _CONFIG_FILENAME
@@ -210,6 +217,5 @@ def write_codex_config(mcp_servers: dict, home: Path | None = None) -> Path:
     # Only touch disk when the content actually changes (avoids churning the
     # durable volume + mtime on every session spawn).
     if rendered != existing:
-        home.mkdir(parents=True, exist_ok=True)
-        path.write_text(rendered)
+        fsutil.atomic_write_text(path, rendered)
     return path

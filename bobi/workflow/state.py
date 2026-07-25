@@ -9,6 +9,9 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from bobi import fsutil
+
+
 def _runs_dir() -> Path:
     from bobi import paths
     d = paths.state_dir() / "workflow" / "runs"
@@ -35,19 +38,11 @@ class WorkflowRun:
 
     def save(self):
         path = _runs_dir() / f"{self.run_id}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Write atomically: serialize first, write to a temp file, then
-        # rename over the target. A process killed mid-write (e.g. a
-        # systemctl restart during self-update) can no longer leave behind
-        # a truncated 0-byte run file.
-        data = json.dumps(asdict(self), indent=2)
-        tmp = path.with_name(f".{self.run_id}.json.tmp")
-        tmp.write_text(data)
-        tmp.replace(path)
+        # Atomic: a process killed mid-write (e.g. a systemctl restart
+        # during self-update) can't leave a truncated run file behind.
+        fsutil.atomic_write_json(path, asdict(self))
         # Clean up the .resuming.json left by claim() if it exists.
-        resuming = path.with_name(f"{self.run_id}.resuming.json")
-        if resuming.exists():
-            resuming.unlink()
+        path.with_name(f"{self.run_id}.resuming.json").unlink(missing_ok=True)
 
     @classmethod
     def from_dict(cls, data: dict) -> WorkflowRun:
@@ -80,28 +75,25 @@ class WorkflowRun:
         ``os.replace``.  On POSIX this is atomic — exactly one process
         wins when multiple try concurrently.  Returns True if claimed,
         False if another process already claimed it.
+
+        The claim comes first and the status update second: a loser does
+        no writes at all, so it can never disturb the winner's in-flight
+        state file (the previous order had both racers writing one shared
+        temp path, where the loser's cleanup could delete the winner's
+        temp and make *both* claims fail).
         """
         src = _runs_dir() / f"{self.run_id}.json"
         dst = _runs_dir() / f"{self.run_id}.resuming.json"
-        self.status = "resuming"
-        self.resumed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-        data = json.dumps(asdict(self), indent=2)
         try:
-            # Write updated state to a temp, then atomically rename the
-            # source to the .resuming path.  If the source is gone (race
-            # lost), FileNotFoundError is raised by os.replace.
-            tmp = src.with_name(f".{self.run_id}.claim.tmp")
-            tmp.write_text(data)
             os.replace(str(src), str(dst))
-            # Source is now gone; move the tmp content into the .resuming file.
-            os.replace(str(tmp), str(dst))
-            return True
         except FileNotFoundError:
             # Another process already renamed (claimed) the source file.
-            tmp = src.with_name(f".{self.run_id}.claim.tmp")
-            if tmp.exists():
-                tmp.unlink()
             return False
+        # Claim won — record the resume on the claimed file, atomically.
+        self.status = "resuming"
+        self.resumed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        fsutil.atomic_write_json(dst, asdict(self))
+        return True
 
     @classmethod
     def find_waiting(cls, await_event: str, run_key: str = "",
