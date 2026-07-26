@@ -404,7 +404,7 @@ def test_make_session_without_mcp_option_keeps_rendered_servers(tmp_path, monkey
 
     ``$CODEX_HOME/config.toml`` is machine-global and every ``codex exec`` turn
     re-reads it, so treating an omitted key as "this team has no MCP" strips the
-    servers out from under every live codex session — including the manager's.
+    servers out from under every live codex session - including the manager's.
     The omitting sites are real: a monitor check/gate (``subagent._run_agent_supervised``)
     and a workflow step (``orchestrator._make_session``) both build options with
     only ``max_turns``/``skills``.

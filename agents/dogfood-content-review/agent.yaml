@@ -1,7 +1,7 @@
 version: "1.2.1"
 
 entry_point: manager
-# No chat service is declared below — the pack stays credential-free for the
+# No chat service is declared below - the pack stays credential-free for the
 # release smoke (github + email only), so it has no chat surface to deliver a
 # message on. `chat: slack` claimed one that could never subscribe.
 chat: cli

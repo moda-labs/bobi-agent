@@ -287,9 +287,9 @@ the step's output scope and feed downstream routing and templating.
    `agent/session.completed` on success or `agent/session.failed` (carrying the
    error) on any failure path, and durably records the matching terminal status
    in the registry. A suspended run is *not* terminal: it skips this entirely
-   and stays `waiting`. A resumed run that suspends AGAIN on a later
-   await step stamps the old record `superseded` and writes a fresh
-   `waiting` one — it is never recorded as `completed`.
+   and stays `waiting`. A resumed run that suspends AGAIN on a later await step
+   stamps the old record `superseded` and writes a fresh `waiting` one - it is
+   never recorded as `completed`.
 
 The session is created once and reused across all prompt steps, so the agent
 keeps full context. The engine drains exactly one turn per prompt
@@ -308,30 +308,30 @@ captures everything needed to continue: `workflow_name`, `suspended_at_step`
 `variable_scopes`, `repo`, `cwd`, and `run_key`. Writes are atomic (temp file
 then rename) so a process killed mid-write cannot leave a truncated record.
 
-> **Not wired today.** `try_resume_for_event` has **no production caller** — the
+> **Not wired today.** `try_resume_for_event` has **no production caller** - the
 > only live resume path is `bobi agent <name> workflows resume <run_id>`, so a
 > suspended run does not wake by itself when its event arrives; someone must
 > resume it. Wiring it needs a decision rather than a patch: there is no
 > code-level event-arrival hook (trigger matching is prose the manager reads in
 > its prompt), `await_event` is compared `==` against a raw event type so the
 > event vocabulary and scoping are undefined, and resuming in-process would
-> stamp the *manager's* pid onto the run record — a reconciler timeout would
+> stamp the *manager's* pid onto the run record - a reconciler timeout would
 > then SIGTERM the whole manager. Tracked as D027(b) in
 > `plans/2026-07-22-review-remediation.md`. The paragraph below is the
 > function's contract, not a flow that runs today.
 
 **On resume**, `try_resume_for_event(event_type, run_key, event, repo)` looks up
-a waiting run matching the event
-type, run key, and repo (`WorkflowRun.find_waiting`). To avoid two processes
-resuming the same run, the caller must first `claim()` it: an atomic rename of
-`<run_id>.json` to `<run_id>.resuming.json`. Exactly one caller wins; the others
-get `FileNotFoundError` and back off. The winner re-stamps the run's registry
-entry with its own pid and a fresh `started_at`/`timeout` (the resume
-`--timeout`), so the dead-man reconciler judges the resumed process on its own
-budget rather than the long-dead launch process's. It then restores the variable
-context, injects the triggering event under the `event` scope, and re-enters
-`_run_workflow_async` at `suspended_at_step`. Execution continues as if the await
-never paused.
+a waiting run matching the event type, run key, and repo
+(`WorkflowRun.find_waiting`). To avoid two processes resuming the same run, the
+caller must first `claim()` it: an atomic rename of `<run_id>.json` to
+`<run_id>.resuming.json`. Exactly one caller wins; the others get
+`FileNotFoundError` and back off. The winner re-stamps the run's registry entry
+with its own pid and a fresh `started_at`/`timeout` (the resume `--timeout`), so
+the dead-man reconciler judges the resumed process on its own budget rather than
+the long-dead launch process's. It then restores the variable context, injects
+the triggering event under the `event` scope, and re-enters
+`_run_workflow_async` at `suspended_at_step`. Execution continues as if the
+await never paused.
 
 ## Lifecycle events
 
