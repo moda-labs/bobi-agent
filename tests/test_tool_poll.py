@@ -441,6 +441,32 @@ class TestCacheConfigFingerprint:
         assert [c.key for c in second] == ["is:starred"], (
             "stale cached script kept polling the old query")
 
+    def test_a_cache_written_before_the_stamp_existed_is_retired(self, tmp_path,
+                                                                 scripts_dir):
+        """Every install that upgrades into D023 starts from an unstamped cache.
+
+        The stamp shipped long after the cache did, so the first tick on the
+        new release meets a cached script with no fingerprint line at all.
+        Nothing ties it to the monitor's current command, so it must be retired
+        and re-cached rather than trusted - otherwise the very upgrade that
+        fixed the stale-cache bug keeps serving the stale script forever.
+        """
+        from bobi.monitors.tool_checks import _FINGERPRINT_MARKER
+
+        tool = self._tool(tmp_path)
+        m = Monitor(name="inbox", check="tool_poll", event="monitor/x",
+                    extra={"command": f"{tool} unread", "id_field": "id"})
+
+        legacy = scripts_dir / "inbox.sh"
+        legacy.write_text("#!/usr/bin/env bash\nset -euo pipefail\n"
+                          f"{tool} pre-upgrade\n")
+        legacy.chmod(0o755)
+
+        assert [c.key for c in self._poll(m)] == ["unread"], (
+            "an unstamped pre-upgrade script was served instead of retired")
+        assert _FINGERPRINT_MARKER in legacy.read_text(), (
+            "the retired script was not re-cached with a fingerprint")
+
     def test_unchanged_command_still_uses_the_cache(self, tmp_path, scripts_dir):
         """The $0 fast path survives: an unedited monitor never re-runs direct."""
         tool = self._tool(tmp_path)

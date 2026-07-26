@@ -64,6 +64,42 @@ class _HangingClient:
         self.disconnected = True
 
 
+class _CancelSwallowingClient(_HangingClient):
+    """A brain whose startup turn eats the first cancellation it is sent.
+
+    Adapters that swallow ``CancelledError`` are a known failure mode - the
+    session's own hard-timeout helper deliberately sends two cancel signals for
+    exactly that reason. So the cancel stop() fires into a live startup turn is
+    not a guarantee that the turn ends, which is what the two stop() backstops
+    exercised below exist for.
+
+    ``finish_after_cancel`` picks which one is under test: True lets the turn
+    run to completion once it has eaten the cancel (the session then reaches
+    its keep-alive with a stop already on record); False leaves the turn wedged
+    until a second cancel arrives.
+    """
+
+    def __init__(self, finish_after_cancel: bool):
+        super().__init__()
+        self._finish = finish_after_cancel
+        self.cancels = 0
+        self.cancelled = threading.Event()
+
+    async def receive_response(self):
+        self.turn_started.set()
+        while True:
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                self.cancels += 1
+                self.cancelled.set()
+                if self._finish:
+                    break
+                if self.cancels >= 2:
+                    raise
+        yield _result()
+
+
 class _DeadOnConnectClient:
     """A brain that cannot connect - the missing-CLI / instant-crash double."""
 
@@ -120,6 +156,86 @@ def test_stop_tears_down_a_session_still_in_its_startup_turn(bobi_install, monke
     )
     assert client.disconnected, "brain session was never disconnected"
     assert session.detect_state() == "stopped"
+
+
+def test_stop_is_still_honoured_when_the_startup_turn_finishes_anyway(
+        bobi_install, monkeypatch):
+    """A stop() the turn ignored must be honoured at the keep-alive (D003).
+
+    stop() records the request and cancels the turn, but a brain that swallows
+    the cancellation runs its startup turn to completion regardless. The
+    session then builds its keep-alive event with a stop already on record. If
+    it parked on that fresh event, the shutdown the caller already asked for
+    would stall behind the 15s join backstop with the brain subprocess alive
+    the whole time - the leak D003 is about, just slower.
+    """
+    monkeypatch.setattr("bobi.session.save_session_id", lambda *a, **k: None)
+    client = _CancelSwallowingClient(finish_after_cancel=True)
+    session = _session("stop-then-ready", str(bobi_install.repo_path), client)
+
+    # The turn is still in flight when start() gives up, so there is no
+    # keep-alive for stop() to signal.
+    assert session.start("go", timeout=2) is False
+    assert client.turn_started.wait(5), "startup turn never began"
+    assert session._keep_alive is None
+
+    began = time.monotonic()
+    session.stop()
+    elapsed = time.monotonic() - began
+
+    assert client.cancels == 1, "stop() never reached the running turn"
+    assert session._ready.is_set(), (
+        "the startup turn did not complete - this is the immediate-cancel "
+        "path, not the one under test"
+    )
+    assert not session._thread.is_alive()
+    assert elapsed < 10, (
+        f"stop() took {elapsed:.1f}s - the session parked on a keep-alive it "
+        "had already been told to release, and only the join backstop freed it"
+    )
+
+
+def test_stop_cancels_a_turn_still_wedged_when_the_join_expires(
+        bobi_install, monkeypatch):
+    """stop() must not return leaving a wedged turn running (D003).
+
+    One cancel is not a guarantee: a brain that swallows it keeps the turn -
+    and the subprocess behind it - alive straight through stop()'s join grace
+    period. Without the second cancel once that join expires, stop() returns to
+    a caller that believes the session is gone while it is still burning
+    tokens for the life of the process.
+    """
+    monkeypatch.setattr("bobi.session.save_session_id", lambda *a, **k: None)
+    client = _CancelSwallowingClient(finish_after_cancel=False)
+    session = _session("wedged-past-grace", str(bobi_install.repo_path), client)
+
+    assert session.start("go", timeout=2) is False
+    assert client.turn_started.wait(5), "startup turn never began"
+
+    joins: list = []
+    real_join = session._thread.join
+
+    def _expired_grace_join(timeout=None):
+        # stop()'s 15s grace period, compressed. By the time this returns the
+        # turn has provably eaten stop()'s cancel and gone back to sleep, so
+        # the thread is wedged exactly as it would be 15s later - waiting the
+        # real grace out would only make the suite slower. Later joins are real.
+        joins.append(timeout)
+        if len(joins) == 1:
+            assert client.cancelled.wait(10), "stop() never reached the turn"
+            return
+        real_join(timeout)
+
+    session._thread.join = _expired_grace_join
+
+    session.stop()
+
+    assert joins == [15, 5], "stop() did not take the join-backstop path"
+    assert not session._thread.is_alive(), (
+        "session thread outlived stop() - the brain subprocess leaks"
+    )
+    assert client.disconnected, "the wedged brain session was never torn down"
+    assert client.cancels == 2, "the wedged turn was never re-cancelled"
 
 
 def test_start_returns_promptly_when_the_session_thread_dies(bobi_install, monkeypatch):
