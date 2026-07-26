@@ -83,57 +83,83 @@ class VariableContext:
         self.scopes["_flat"][key] = value
 
     def evaluate_condition(self, expr: str) -> bool:
-        """Evaluate a when: expression. Safe — no eval().
+        """Evaluate a when: expression. Safe - no eval().
 
         Supports: ==, !=, >, >=, <, <=, in, not in, and, or, true, false,
-        'string literals'. ``${{scope.key}}`` references are substituted
-        first; bare names are resolved by the parser itself from the _flat
-        scope, so a value carrying spaces, quotes or backslashes can never
-        corrupt the token stream (D026).
+        'string literals'. Both ``${{scope.key}}`` references and bare names
+        are resolved by the parser itself, once the operand around them has
+        been delimited, and the result is handed back as a finished value
+        that is never re-read as expression text. So a value carrying
+        spaces, quotes or backslashes can never corrupt the token stream
+        (D026) - the expression's own operators are the only operators.
         """
-        return _eval_expr(self.resolve(expr).strip(), self.scopes.get("_flat", {}))
+        return _eval_expr(expr.strip(), self)
 
 
-_Flat = dict[str, Any] | None
+# The parser consults the context for both bare names and ${{scope.key}}
+# references. None means "no bindings": every operand stays literal.
+_Ctx = VariableContext | None
 
 
-def _resolve_name(name: str, flat: _Flat) -> str:
-    """Resolve a bare name from the flat scope, else return it verbatim.
+def _resolve_refs(text: str, ctx: _Ctx) -> str:
+    """Substitute ``${{scope.key}}`` references in already-delimited text.
 
-    Values are stringified here — the one place a flat value enters the
-    grammar — so every operand the parser compares is a plain string,
-    exactly like a ``${{scope.key}}`` reference.
+    Every caller has finished reading the operand out of the expression
+    (consumed its quotes, its list commas, its word boundary) before
+    calling this, so what comes back is a complete value. It is returned to
+    the caller, never fed back to the tokenizer.
     """
-    if not flat or name not in flat:
+    return ctx.resolve(text) if ctx else text
+
+
+def _resolve_name(name: str, ctx: _Ctx) -> str:
+    """Resolve a bare name from the flat scope, else return it verbatim."""
+    flat: dict[str, Any] = ctx.scopes.get("_flat", {}) if ctx else {}
+    if name not in flat:
         return name
     val = flat[name]
-    text = str(val) if val is not None else ""
+    return str(val) if val is not None else ""
+
+
+def _resolve_operand(text: str, ctx: _Ctx) -> str:
+    """Resolve a parsed operand to the value the grammar compares.
+
+    A ``${{scope.key}}`` reference resolves through the context; anything
+    else is a bare name looked up in the flat scope. A resolved reference
+    is not then looked up as a name, so untrusted text cannot alias a flat
+    binding.
+    """
+    if VAR_PATTERN.search(text):
+        value = _resolve_refs(text, ctx)
+    else:
+        value = _resolve_name(text, ctx)
     # A bool-ish value IS the boolean literal. The textual substitution this
     # replaced fed "True" through _parse_value's case-insensitive literal
     # branch, so `flag == true` matched a Python True (and a brain handoff
     # spelling it "True"); keep that.
-    return text.lower() if text.lower() in ("true", "false") else text
+    lowered = value.strip().lower()
+    return lowered if lowered in ("true", "false") else value
 
 
-def _eval_expr(expr: str, flat: _Flat = None) -> bool:
+def _eval_expr(expr: str, ctx: _Ctx = None) -> bool:
     """Recursive-descent parser for simple boolean expressions."""
-    return _parse_or(expr.strip(), flat)[0]
+    return _parse_or(expr.strip(), ctx)[0]
 
 
-def _parse_or(expr: str, flat: _Flat = None) -> tuple[bool, str]:
-    left, rest = _parse_and(expr, flat)
+def _parse_or(expr: str, ctx: _Ctx = None) -> tuple[bool, str]:
+    left, rest = _parse_and(expr, ctx)
     while rest.lstrip().startswith("or "):
         rest = rest.lstrip()[3:]
-        right, rest = _parse_and(rest, flat)
+        right, rest = _parse_and(rest, ctx)
         left = left or right
     return left, rest
 
 
-def _parse_and(expr: str, flat: _Flat = None) -> tuple[bool, str]:
-    left, rest = _parse_comparison(expr, flat)
+def _parse_and(expr: str, ctx: _Ctx = None) -> tuple[bool, str]:
+    left, rest = _parse_comparison(expr, ctx)
     while rest.lstrip().startswith("and "):
         rest = rest.lstrip()[4:]
-        right, rest = _parse_comparison(rest, flat)
+        right, rest = _parse_comparison(rest, ctx)
         left = left and right
     return left, rest
 
@@ -147,32 +173,32 @@ _NUMERIC_OPS: dict[str, Callable[[float, float], bool]] = {
 }
 
 
-def _parse_comparison(expr: str, flat: _Flat = None) -> tuple[bool, str]:
+def _parse_comparison(expr: str, ctx: _Ctx = None) -> tuple[bool, str]:
     expr = expr.strip()
 
     if expr.startswith("not "):
-        val, rest = _parse_comparison(expr[4:], flat)
+        val, rest = _parse_comparison(expr[4:], ctx)
         return not val, rest
 
-    left, rest = _parse_value(expr, flat)
+    left, rest = _parse_value(expr, ctx)
     rest = rest.strip()
 
     if rest.startswith("=="):
-        right, rest = _parse_value(rest[2:], flat)
+        right, rest = _parse_value(rest[2:], ctx)
         return str(left).strip() == str(right).strip(), rest
     elif rest.startswith("!="):
-        right, rest = _parse_value(rest[2:], flat)
+        right, rest = _parse_value(rest[2:], ctx)
         return str(left).strip() != str(right).strip(), rest
     elif rest.startswith("not in "):
-        right, rest = _parse_value_greedy(rest[7:], flat)
+        right, rest = _parse_value_greedy(rest[7:], ctx)
         return str(left).strip() not in str(right), rest
     elif rest.startswith("in "):
-        right, rest = _parse_value_greedy(rest[3:], flat)
+        right, rest = _parse_value_greedy(rest[3:], ctx)
         return str(left).strip() in str(right), rest
 
     for symbol, apply in _NUMERIC_OPS.items():
         if rest.startswith(symbol):
-            right, rest = _parse_value(rest[len(symbol):], flat)
+            right, rest = _parse_value(rest[len(symbol):], ctx)
             return _compare_numeric(left, symbol, apply, right), rest
 
     # Bare truthy check
@@ -200,35 +226,47 @@ def _compare_numeric(
         return False
 
 
-def _parse_value_greedy(expr: str, flat: _Flat = None) -> tuple[Any, str]:
+def _parse_value_greedy(expr: str, ctx: _Ctx = None) -> tuple[Any, str]:
     """Parse a value that may be multi-word (for `in` operator RHS).
     Consumes up to `and`/`or` boundaries or end of string.
     Delegates to _parse_value for quoted strings and list literals."""
     expr = expr.strip()
     if expr and expr[0] in ('"', "'", "["):
-        return _parse_value(expr, flat)
-    # Consume everything up to ` and ` or ` or ` or end
+        return _parse_value(expr, ctx)
+    # Consume everything up to ` and ` or ` or ` or end. The scan reads the
+    # expression as written, so an `and` inside a resolved value is text.
     for boundary in (" and ", " or "):
         idx = expr.find(boundary)
         if idx != -1:
-            return _resolve_name(expr[:idx].strip(), flat), expr[idx:]
-    return _resolve_name(expr.strip(), flat), ""
+            return _resolve_operand(expr[:idx].strip(), ctx), expr[idx:]
+    return _resolve_operand(expr.strip(), ctx), ""
 
 
-def _parse_value(expr: str, flat: _Flat = None) -> tuple[Any, str]:
+# One operand's worth of bare text. A whole ``${{scope.key}}`` reference is
+# atomic, so the spaces and operators a reference may carry inside its braces
+# (`${{event.action | lower}}`, `${{ input.merged }}`) stay part of it.
+_BARE_WORD = re.compile(r'(?:\$\{\{.+?\}\}|[^\s=!<>])+')
+
+
+def _parse_value(expr: str, ctx: _Ctx = None) -> tuple[Any, str]:
     expr = expr.strip()
 
-    # String literal (single or double quotes) — never name resolution
+    # String literal (single or double quotes) - never name resolution.
+    # The quotes belong to the expression and are consumed before anything
+    # between them resolves, so a value carrying a quote cannot end the
+    # literal early.
     if expr and expr[0] in ('"', "'"):
         quote = expr[0]
         end = expr.index(quote, 1)
-        return expr[1:end], expr[end + 1:]
+        return _resolve_refs(expr[1:end], ctx), expr[end + 1:]
 
-    # List literal ['a', 'b']
+    # List literal ['a', 'b']. Items are split before they are resolved, so
+    # a comma inside a value cannot add an item.
     if expr.startswith("["):
         end = expr.index("]")
         inner = expr[1:end]
-        items = [s.strip().strip("'\"") for s in inner.split(",")]
+        items = [_resolve_refs(s.strip().strip("'\""), ctx)
+                 for s in inner.split(",")]
         return items, expr[end + 1:]
 
     # Boolean literals
@@ -237,9 +275,9 @@ def _parse_value(expr: str, flat: _Flat = None) -> tuple[Any, str]:
         value = bool_match.group(1).lower()
         return value, expr[bool_match.end():]
 
-    # Bare word (until whitespace or operator), resolved from the flat scope
-    match = re.match(r'([^\s=!<>]+)', expr)
+    # Bare word (until whitespace or operator), resolved to its value
+    match = _BARE_WORD.match(expr)
     if match:
-        return _resolve_name(match.group(1), flat), expr[match.end():]
+        return _resolve_operand(match.group(0), ctx), expr[match.end():]
 
     return "", expr

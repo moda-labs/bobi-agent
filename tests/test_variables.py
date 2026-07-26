@@ -1,5 +1,7 @@
 """Unit tests for workflow variable resolution and safe condition evaluation."""
 
+import logging
+
 import pytest
 
 from bobi.workflow.variables import (
@@ -446,6 +448,149 @@ class TestConditionWithVariables:
         ctx = VariableContext()
         ctx.set_scope("handoff", {"complexity": "trivial"})
         assert ctx.evaluate_condition("${{handoff.complexity}} != medium") is True
+
+
+# ---------------------------------------------------------------------------
+# Condition evaluation - a ${{scope.key}} reference resolves to a VALUE inside
+# the parser, exactly like a bare name. Its content is never spliced into the
+# expression text, so untrusted data (a GitHub issue title in the `event`
+# scope) cannot inject operators and steer the branch.
+# ---------------------------------------------------------------------------
+
+class TestScopedReferenceResolvesToAValue:
+    def test_reference_as_operand(self):
+        ctx = VariableContext()
+        ctx.set_scope("event", {"action": "opened"})
+        assert ctx.evaluate_condition("${{event.action}} == 'opened'") is True
+        assert ctx.evaluate_condition("${{event.action}} == 'closed'") is False
+
+    def test_reference_inside_quoted_literal(self):
+        """A ref inside quotes still resolves: the quotes delimit the source
+        text, and the resolved value is returned whole, never re-tokenized."""
+        ctx = VariableContext()
+        ctx.set_scope("event", {"title": "Deploy"})
+        assert ctx.evaluate_condition("'${{event.title}}' == 'Deploy'") is True
+        assert ctx.evaluate_condition("'${{event.title}}' == 'Ship'") is False
+
+    def test_reference_with_pipe_filter(self):
+        """Spaces inside the braces must not truncate the reference."""
+        ctx = VariableContext()
+        ctx.set_scope("event", {"action": "OPENED"})
+        assert ctx.evaluate_condition(
+            "${{event.action | lower}} == 'opened'"
+        ) is True
+
+    def test_reference_with_whitespace_inside_braces(self):
+        ctx = VariableContext()
+        ctx.set_scope("input", {"merged": True})
+        assert ctx.evaluate_condition("${{ input.merged }} == true") is True
+
+    def test_reference_as_greedy_rhs_of_in(self):
+        ctx = VariableContext()
+        ctx.set_scope("event", {"title": "fix the flaky test"})
+        assert ctx.evaluate_condition("'flaky' in ${{event.title}}") is True
+        assert ctx.evaluate_condition("'green' not in ${{event.title}}") is True
+
+    def test_reference_in_list_literal(self):
+        ctx = VariableContext()
+        ctx.set_scope("event", {"action": "opened"})
+        assert ctx.evaluate_condition(
+            "'opened' in ['${{event.action}}', 'closed']"
+        ) is True
+
+    def test_missing_scope_resolves_to_empty_with_warning(self, caplog):
+        ctx = VariableContext()
+        with caplog.at_level(logging.WARNING, logger="bobi.workflow.variables"):
+            assert ctx.evaluate_condition("${{missing.key}} == ''") is True
+        assert "unknown scope" in caplog.text
+
+    def test_missing_key_resolves_to_empty_with_warning(self, caplog):
+        ctx = VariableContext()
+        ctx.set_scope("event", {})
+        with caplog.at_level(logging.WARNING, logger="bobi.workflow.variables"):
+            assert ctx.evaluate_condition("${{event.title}} == ''") is True
+        assert "not found in scope" in caplog.text
+
+    @pytest.mark.parametrize("payload,matches", [
+        ("x' or 'a' == 'a", False),
+        ("x' or 'a' == 'a' or 'x", False),
+        ("x or true or x", False),
+        ("expected", True),  # only the literal value may take the branch
+    ])
+    def test_quote_injection_cannot_take_the_branch(self, payload, matches):
+        """The security case: an untrusted value that adds its own operators.
+
+        Textual substitution spliced the value into the expression text, so
+        `x' or 'a' == 'a' or 'x` became a real `or` clause and the route
+        fired unconditionally.
+        """
+        ctx = VariableContext()
+        ctx.set_scope("event", {"title": payload})
+        assert ctx.evaluate_condition(
+            "${{event.title}} == 'expected'"
+        ) is matches
+
+    def test_quote_injection_inside_a_quoted_literal_cannot_take_the_branch(self):
+        """The classic quote-breaking shape: `'${{ref}}' == 'expected'`."""
+        ctx = VariableContext()
+        ctx.set_scope("event", {"title": "x' or 'a' == 'a"})
+        assert ctx.evaluate_condition("'${{event.title}}' == 'expected'") is False
+
+    def test_operator_injection_cannot_take_the_branch(self):
+        """A value that is itself a whole expression stays a plain value."""
+        ctx = VariableContext()
+        ctx.set_scope("event", {"title": "'a' == 'a' or 'b' == 'b'"})
+        assert ctx.evaluate_condition("${{event.title}}") is False
+
+    def test_and_injection_cannot_split_the_expression(self):
+        ctx = VariableContext()
+        ctx.set_scope("event", {"title": "nope' and 'x"})
+        ctx.set_flat("ok", "true")
+        assert ctx.evaluate_condition(
+            "${{event.title}} == 'expected' or ok"
+        ) is True
+        assert ctx.evaluate_condition(
+            "${{event.title}} == 'expected'"
+        ) is False
+
+    def test_bracketed_issue_title_does_not_take_the_branch(self):
+        """No payload needed: a normal issue title was enough.
+
+        `[bug] crash on save` spliced in as `[bug] crash on save ==
+        'expected'` parsed as a list literal, and a non-empty list is
+        truthy, so the route fired on every bracketed title.
+        """
+        ctx = VariableContext()
+        ctx.set_scope("event", {"title": "[bug] crash on save"})
+        assert ctx.evaluate_condition("${{event.title}} == 'expected'") is False
+
+    @pytest.mark.parametrize("payload", [
+        "[unclosed bracket",
+        "it's broken",
+        'unbalanced " quote',
+        "] or true or [",
+    ])
+    def test_unbalanced_delimiter_in_a_value_does_not_raise(self, payload):
+        """An unbalanced quote or bracket used to reach index() and raise
+        ValueError out of the parser, failing the run."""
+        ctx = VariableContext()
+        ctx.set_scope("event", {"title": payload})
+        assert ctx.evaluate_condition("${{event.title}} == 'expected'") is False
+        assert ctx.evaluate_condition("'${{event.title}}' == 'expected'") is False
+
+    def test_resolved_reference_is_not_re_read_as_a_bare_name(self):
+        """Untrusted text must not alias a flat binding."""
+        ctx = VariableContext()
+        ctx.set_flat("secret", "1234")
+        ctx.set_scope("event", {"title": "secret"})
+        assert ctx.evaluate_condition("${{event.title}} == 'secret'") is True
+        assert ctx.evaluate_condition("${{event.title}} == '1234'") is False
+
+    def test_value_carrying_spaces_compares_whole(self):
+        ctx = VariableContext()
+        ctx.set_scope("event", {"title": "needs work"})
+        assert ctx.evaluate_condition("${{event.title}} != 'approved'") is True
+        assert ctx.evaluate_condition("${{event.title}} == 'needs work'") is True
 
 
 # ---------------------------------------------------------------------------
