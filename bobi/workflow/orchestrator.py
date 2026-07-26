@@ -841,11 +841,24 @@ async def _run_workflow_async(
 
             step_model = _effective_step_model(step)
             step_effort = _effective_step_effort(step)
-            # The cap is a construction-time option with no conversational
-            # consequence, so a change on its own never rebuilds the session -
-            # it just applies to whatever session this step next constructs.
-            current_max_turns = _effective_step_max_turns(step)
-            if step_model != current_model or step_effort != current_effort:
+            # The cap is a construction-time CLI flag, so it can only change by
+            # rebuilding the session - exactly like effort (#845 review). An
+            # earlier cut of this change recomputed it here WITHOUT joining the
+            # condition below, on the theory that a construction-time option
+            # with no conversational consequence need not force a rebuild. That
+            # silently dropped every step-level override after the first,
+            # because one session spans every step whose agent/model/effort
+            # match (issue-lifecycle.yaml, and the documented example in
+            # docs/WORKFLOW_ENGINE.md). Rebuilding costs nothing here: the cap
+            # never changes the MODEL, so continuation_token returns the saved
+            # session id and the transcript is resumed natively - the same
+            # exemption an effort-only change already relies on.
+            step_max_turns = _effective_step_max_turns(step)
+            if (
+                step_model != current_model
+                or step_effort != current_effort
+                or step_max_turns != current_max_turns
+            ):
                 # Continue the live session natively on the new model when
                 # the brain supports it (#642); otherwise fresh + re-inject
                 # the workflow scopes as YAML (lossy fallback). An agent
@@ -854,11 +867,11 @@ async def _run_workflow_async(
                 # system prompt (e.g. a reviewer step contaminated by the
                 # builder's reasoning; an agent change with identical dials
                 # never enters the branch - a pre-existing gap in that
-                # isolation, not one this condition can close). An
-                # effort-only change is exempt from the resume guard (#778):
-                # continuation_token sees the same model on both sides, so
-                # whenever a resumable session id exists the session just
-                # reconnects natively under the new dial.
+                # isolation, not one this condition can close). An effort-only
+                # or cap-only change is exempt from the resume guard
+                # (#778/#845): continuation_token sees the same model on both
+                # sides, so whenever a resumable session id exists the session
+                # just reconnects natively under the new dial.
                 next_agent = (
                     current_agent if role else (step.agent or current_agent)
                 )
@@ -870,11 +883,12 @@ async def _run_workflow_async(
                     )
                 log.info(
                     "Step %s: switching session options (model %r -> %r, "
-                    "effort %r -> %r): %s",
+                    "effort %r -> %r, max_turns %d -> %d): %s",
                     step.name, current_model or "<default>",
                     step_model or "<default>",
                     current_effort or "<default>",
                     step_effort or "<default>",
+                    current_max_turns, step_max_turns,
                     "native resume" if token else "fresh session",
                 )
                 try:
@@ -883,6 +897,7 @@ async def _run_workflow_async(
                     pass
                 current_model = step_model
                 current_effort = step_effort
+                current_max_turns = step_max_turns
                 current_agent = next_agent
                 if token:
                     client = _make_session(
