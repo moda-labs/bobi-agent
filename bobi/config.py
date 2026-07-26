@@ -188,6 +188,19 @@ def _as_bool(value: object) -> bool:
     return bool(value)
 
 
+def _positive_int(value: object) -> int:
+    """*value* as a positive int, or 0 for absent/blank/unparseable input.
+
+    Config values arrive as YAML scalars OR as ``${VAR}`` interpolations that
+    resolved to a string (or to nothing), so a plain ``int()`` is not enough.
+    """
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
+
+
 def _project_config_path(project_path: Path) -> Path:
     from bobi import paths
     return paths.agent_yaml_path(project_path)
@@ -346,18 +359,21 @@ class Config:
     })
     # Which agent "brain" (ENGINE) drives this team's agents (#485). `{kind:
     # claude|codex, model: <optional override>, effort: <optional reasoning
-    # effort>}`. Setting `base_url` points the engine at a gateway endpoint
+    # effort>, max_turns: <optional per-session turn cap>}`. Setting
+    # `base_url` points the engine at a gateway endpoint
     # (#655/#777/#789): a claude engine additionally takes `small_model`, a
     # codex engine `wire_api` (responses by default; chat remains a pass-through
     # escape hatch for pinned older Codex builds). The deprecated
     # kinds `gateway`/`gateway-openai` remain accepted aliases for
     # claude/codex-with-base_url. Empty = the framework default (claude).
     brain: dict = field(default_factory=dict)
-    # Per-role settings (#617, #778). `roles: {<role>: {model: <override>,
-    # effort: <override>}}`. A role's model and reasoning effort are
-    # provider-native strings for the team's brain (Claude aliases like
-    # `haiku`, full Claude IDs, Codex IDs; efforts like `low`..`xhigh`) -
-    # never translated.
+    # Per-role settings (#617, #778, #845). `roles: {<role>: {model:
+    # <override>, effort: <override>, max_turns: <override>}}`. A role's model
+    # and reasoning effort are provider-native strings for the team's brain
+    # (Claude aliases like `haiku`, full Claude IDs, Codex IDs; efforts like
+    # `low`..`xhigh`) - never translated. `max_turns` is the role's per-session
+    # turn cap: a long-running builder needs a far higher one than a
+    # single-verdict monitor.
     roles: dict = field(default_factory=dict)
 
     @property
@@ -417,6 +433,16 @@ class Config:
         """The OpenAI-compatible gateway wire API (#777), defaulting to responses."""
         return str((self.brain or {}).get("wire_api", "") or "responses")
 
+    @property
+    def brain_max_turns(self) -> int:
+        """The team's default per-session turn cap (#845), or 0 when unset.
+
+        0 means "unconfigured" and falls through to the framework default in
+        ``bobi.brain.resolve_max_turns`` - the cap is a positive integer, so
+        there is no valid 0 to confuse it with.
+        """
+        return _positive_int((self.brain or {}).get("max_turns"))
+
     def role_model(self, role: str) -> str:
         """The model configured for *role*, or "" when unconfigured."""
         entry = (self.roles or {}).get(role)
@@ -430,6 +456,13 @@ class Config:
         if isinstance(entry, dict):
             return str(entry.get("effort", "") or "")
         return ""
+
+    def role_max_turns(self, role: str) -> int:
+        """The per-session turn cap configured for *role*, or 0 when unset."""
+        entry = (self.roles or {}).get(role)
+        if isinstance(entry, dict):
+            return _positive_int(entry.get("max_turns"))
+        return 0
 
     def credential(self, service: str, key: str) -> str:
         """Look up a credential value for a named service."""
