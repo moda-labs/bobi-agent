@@ -1,6 +1,6 @@
 # Checklist-driven execution: retire the workflow step machine
 
-> **Status:** Draft
+> **Status:** Approved
 > **Tracking issue:** moda-labs/bobi-agent#852 · **Created:** 2026-07-26 · **Last amended:** 2026-07-26 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
@@ -221,8 +221,11 @@ relaxing the human-act rule).
 - `bobi/session.py:1171,1195` — per-inbox-message `client.query()`; `:1404`
   `load_resumable_session_id` (a re-dispatch reusing a session name resumes the
   dead transcript — the monitor's dispatch must not).
-- `bobi/registry.py` + `bobi/manager_health.py` — the liveness signal the
-  in-progress monitor reads instead of inventing a lease.
+- `bobi/sdk.py` — `SessionEntry:230-258` (`cwd`, `run_key`, `status`, `pid`; **no
+  `branch` field**), `SessionRegistry:282`, `get_registry:500`, and
+  `list_active()` (used at `bobi/launch_admission.py:207`): the liveness signal
+  the in-progress monitor reads instead of inventing a lease. Note
+  `bobi/registry.py` is the *pack* registry, unrelated.
 - `bobi/monitors/scheduler.py` (1472) — `_spawn_monitor_agent:256`,
   `_load_framework_checks:84`; `start():617` is a `daemon=True` thread inside the
   manager (`bobi/service.py:613-617`).
@@ -300,17 +303,30 @@ relaxing the human-act rule).
   stays readable. Recommendation: **(a)** — the trace is already durable on the PR
   and in branch lineage, and an unpruned appendix grows without bound in a file
   whose front half must stay reviewable.
+  **Decision (2026-07-26, Zach):** (a) — the closeout step prunes the appendix's
+  round log to a short summary before the PR merges. The full trace stays on the
+  PR and in branch lineage; `main` carries the summary. "Reusable artifact" means
+  reusable across worker lives *within* a run.
 - **Q3 — What is the unit of ownership for the in-progress monitor?** The monitor
   must not dispatch a second agent onto a unit whose agent is alive. The session
   registry knows liveness per *session*, but the mapping from "plan artifact" to
   "the session working it" is not recorded anywhere today. Options: (a) derive it
-  from the branch (one artifact ↔ one branch ↔ one session), reading the existing
-  registry with no new state; (b) record the owning session name in the artifact's
-  appendix; (c) a real lease file. Recommendation: **(a)** — it adds no state and
-  the branch is already the unit of work, but it needs verifying that the registry
-  carries enough to resolve it (and note `session.py:1404` will resume a dead
-  transcript if a dispatch reuses a session name, so the dispatch path must vary
-  the name deliberately).
+  from what the registry already carries, adding no new state; (b) record the
+  owning session name in the artifact's appendix; (c) a real lease file.
+  Recommendation: **(a)**.
+  **Decision (2026-07-26, Zach):** (a), with the mechanism corrected after
+  verification. `SessionEntry` (`bobi/sdk.py:230-258`) carries `cwd`, `run_key`,
+  `status`, and `pid` but **no `branch` field**, so ownership is resolved by
+  **`cwd` containment**: an artifact is owned when a live entry's `cwd` contains
+  it — which holds because `build` Stage 1 works inside
+  `worktrees/<stem>-<slug>/` and the artifact lives in that worktree.
+  `run_key` carrying the plan stem is the **cross-repo fallback**, where the
+  artifact is not under the worker's `cwd` and containment cannot resolve.
+  Two constraints ride this decision: the monitor reads liveness via
+  `get_registry().list_active()` (`bobi/sdk.py:500`), and the dispatch path must
+  **vary the session name deliberately** — `session.py:1404`
+  (`load_resumable_session_id`) resumes a dead transcript if a re-dispatch reuses
+  a name, which would silently defeat the fresh-budget property.
 
 ## Phases
 
@@ -378,9 +394,14 @@ Phase 2 depends on Q1's `fsutil` helper for its atomic writes.
       guard sites (`cli.py:2799`, `_dispatch_agent:2853-2855`); update
       `tests/test_cli.py:221` (`test_workflow_required`).
 - [ ] A framework-default `in-progress-work` monitor: enumerate units with
-      unchecked items and no live owning session (Q3's ownership rule), publish a
-      finding. It **notifies**; it never decides. Its check runs through the
-      `script_cache` runner so the tick costs no tokens.
+      unchecked items and no live owning session, publish a finding. It
+      **notifies**; it never decides. Its check runs through the `script_cache`
+      runner so the tick costs no tokens. Ownership per Q3: `cwd` containment
+      against `get_registry().list_active()` (`bobi/sdk.py:500`), with `run_key`
+      carrying the plan stem as the cross-repo fallback.
+- [ ] The dispatch path **varies the session name per dispatch** — reusing a name
+      makes `session.py:1404` resume the dead transcript and silently defeats the
+      fresh-budget property.
 - [ ] Director prompt: handle the in-progress finding with judgement —
       re-dispatch, leave alone when the owner is live, or escalate to a human.
 - [ ] `docs/SECURITY.md` updated in **this** phase for the `verify:` shell surface
@@ -429,7 +450,9 @@ Phase 2 depends on Q1's `fsutil` helper for its atomic writes.
 - [ ] Pre-planned path: append only; never rewrite approved plan text.
 - [ ] Multi-file specs: record a `spec:` companion reference (the fixture's spec
       spans a second 1,500-line file) the worker reads selectively.
-- [ ] Closeout step per Q2 (prune the appendix to a summary, or not).
+- [ ] Closeout step per Q2: prune the appendix's round log to a short summary
+      before the PR merges, so `main` carries the summary while the full trace
+      stays on the PR and in branch lineage.
 - [ ] Bump the moda-skills pack version + `plugin.json`; update `guide` routing.
 
 **Validation gate**
@@ -566,6 +589,14 @@ depend on Q1's resolution being executed** (the review-remediation Amendment).}
   is deleted rather than ported. This removed `driver.py`, the typed run record,
   the lease module, the native-action executor, and the budget layer — the
   framework already provides every one of those jobs. Phases went 7 → 5 → 4.
+- **2026-07-26** (plan/checklist-execution-model): Q2 and Q3 decided; **Status →
+  Approved** (no open Questionables, claims verified, every phase gated, proof of
+  work concrete). Q3's mechanism was corrected during verification: the earlier
+  recommendation said "derive ownership from the branch", but `SessionEntry`
+  (`bobi/sdk.py:230-258`) has no `branch` field — ownership resolves by `cwd`
+  containment, with `run_key` as the cross-repo fallback. The Relevant-files entry
+  citing `bobi/registry.py` as the liveness signal was also wrong (that is the
+  *pack* registry); corrected to `bobi/sdk.py`.
 
 ## Notes
 
