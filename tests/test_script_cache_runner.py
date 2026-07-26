@@ -527,3 +527,60 @@ class TestObservability:
         assert st["fallback_runs"] == 1
         assert st["total_agent_cost_usd"] == pytest.approx(0.05)
         assert st["last_mode"] == "cached"
+
+
+# ---------------------------------------------------------------------------
+# Trusted-state durability
+# ---------------------------------------------------------------------------
+
+class TestTrustedStateDurability:
+    """The sidecar holds the security baseline (pinned sha256 + envelope), so
+    it goes through the one durable-write path rather than a second, weaker
+    tmp+rename of its own."""
+
+    def test_kill_mid_write_keeps_the_state_and_orphans_no_temp(self, scripts_dir):
+        """A partial `.tmp` left behind is the fixed-name hazard made real.
+
+        Only OSError was caught, so a KeyboardInterrupt (Ctrl-C, supervisor
+        restart) escaped with the half-written temp still on disk, where the
+        next writer's fixed name collides with it.
+        """
+        sc._save_trusted_state("email-watch", {"sha256": "baseline", "gen": 1})
+        before = (scripts_dir / "email-watch.state.json").read_bytes()
+
+        real_write_text = Path.write_text
+
+        def killed(self, data, *a, **kw):
+            real_write_text(self, data[:12], *a, **kw)
+            raise KeyboardInterrupt("simulated kill mid-write")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(Path, "write_text", killed)
+            with pytest.raises(KeyboardInterrupt):
+                sc._save_trusted_state("email-watch", {"sha256": "new", "gen": 2})
+
+        assert (scripts_dir / "email-watch.state.json").read_bytes() == before
+        assert [p.name for p in scripts_dir.iterdir()] == ["email-watch.state.json"]
+
+    def test_concurrent_writers_do_not_share_a_temp(self, scripts_dir):
+        """A fixed `.json.tmp` lets one writer's rename consume the other's.
+
+        The loser's `os.replace` then fails on a file it really did write, and
+        the OSError handler downgrades that lost write to a log line.
+        """
+        seen = {"nested": False}
+        real_replace = os.replace
+
+        def hooked(src, dst):
+            if not seen["nested"]:
+                seen["nested"] = True
+                sc._save_trusted_state("email-watch", {"sha256": "B"})
+            return real_replace(src, dst)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(os, "replace", hooked)
+            sc._save_trusted_state("email-watch", {"sha256": "A"})
+
+        assert seen["nested"] is True
+        assert _state(scripts_dir) == {"sha256": "A"}   # A's rename landed intact
+        assert [p.name for p in scripts_dir.iterdir()] == ["email-watch.state.json"]

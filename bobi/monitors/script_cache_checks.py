@@ -68,6 +68,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from bobi import fsutil
 from bobi.monitors.schema import Condition
 # Reuse the parse helpers verbatim — no behavior change to tool_poll.
 from bobi.monitors.tool_checks import (
@@ -603,15 +604,17 @@ def _load_trusted_state(name: str) -> dict:
 
 
 def _save_trusted_state(name: str, state: dict) -> None:
-    """Persist the trusted-state sidecar atomically (tmp write + os.replace), so a
+    """Persist the trusted-state sidecar through the one durable-write path, so a
     crash or fleet-churn kill mid-write can't truncate it into corrupt JSON that
     _load_trusted_state would discard (dropping the pinned sha256 + envelope =
-    losing the security baseline)."""
+    losing the security baseline).
+
+    ``fsutil`` rather than a local tmp+rename: its temp name carries pid +
+    nanoseconds, so two writers racing on one sidecar cannot consume each
+    other's temp, and it cleans up on any BaseException instead of orphaning a
+    partial file for the next writer to collide with."""
     try:
-        p = _state_path(name)
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(state, indent=2))
-        os.replace(tmp, p)
+        fsutil.atomic_write_json(_state_path(name), state)
     except OSError as e:
         log.warning("script_cache %s: couldn't persist trusted state: %s", name, e)
 
