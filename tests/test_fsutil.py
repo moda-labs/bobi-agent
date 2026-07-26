@@ -24,39 +24,32 @@ from bobi import fsutil
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Modules the durable-write guard cannot speak for. `fsutil.py` IS the
-# implementation; the rest hand-rolled tmp+rename before D092 and are outside
-# this convergence, so converging them is its own change - not a licence to
+# implementation; the rest persist durable state without it and are outside
+# D092's convergence, so converging them is its own change - not a licence to
 # add a new one.
+#
+# This is a DENY-list of known debt, not the discovery mechanism: every entry
+# is a writer the guard found and we consciously excluded. A durable writer
+# that is not listed here is held to the helper, so a new one cannot land
+# un-converged by simply not resembling the writers that already exist.
 NOT_CONVERGED = frozenset({
     "bobi/fsutil.py",
+    # Hand-rolled tmp+rename, pre-D092.
     "bobi/sdk.py",
     "bobi/launch_admission.py",
     "bobi/brain/instructions.py",
+    # Bare serialized writes, pre-D092. `config.py save_deployment_state` is
+    # the one this lane's PR body calls out by name; the rest are the same
+    # shape and are listed so the count is honest rather than invisible.
+    "bobi/build.py",
+    "bobi/config.py",
+    "bobi/events/artifact.py",
+    "bobi/events/client.py",
+    "bobi/events/server.py",
+    "bobi/monitors/registry.py",
+    "bobi/registry.py",
+    "bobi/setup/webui/server.py",
 })
-
-
-def _durable_writers() -> list[str]:
-    """Every module under `bobi/` that persists durable state.
-
-    DISCOVERED from source, not hand-listed: a module enrols by routing
-    through `fsutil` or by publishing a file with its own temp + `os.replace`.
-    A hand-typed roster guards only what someone remembered to type - it went
-    stale the moment a durable writer landed without being added to it, which
-    is exactly how a second atomic-write style survived inside an already
-    converged subsystem.
-    """
-    found = []
-    for path in sorted((REPO_ROOT / "bobi").rglob("*.py")):
-        rel = path.relative_to(REPO_ROOT).as_posix()
-        if rel in NOT_CONVERGED:
-            continue
-        source = path.read_text()
-        if "fsutil" in source or "os.replace(" in source:
-            found.append(rel)
-    return found
-
-
-DURABLE_WRITERS = _durable_writers()
 
 
 def _bare_serialized_writes(source: str) -> list[int]:
@@ -84,6 +77,36 @@ def _bare_serialized_writes(source: str) -> list[int]:
                 hits.append(node.lineno)
                 break
     return hits
+
+
+def _durable_writers() -> list[str]:
+    """Every module under `bobi/` that persists durable state.
+
+    DISCOVERED from source, not hand-listed: a module enrols by routing
+    through `fsutil`, by publishing a file with its own temp + `os.replace`,
+    or by writing a serialized document outright. A hand-typed roster guards
+    only what someone remembered to type - it went stale the moment a durable
+    writer landed without being added to it, which is exactly how a second
+    atomic-write style survived inside an already converged subsystem.
+
+    The third clause is what stops the discovery being circular. Enrolling on
+    `fsutil`/`os.replace` alone reaches only writers that ALREADY publish
+    atomically, so the un-converged shape the guard exists to catch - a bare
+    `write_text(json.dumps(...))` - was the one shape that could never enrol.
+    """
+    found = []
+    for path in sorted((REPO_ROOT / "bobi").rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel in NOT_CONVERGED:
+            continue
+        source = path.read_text()
+        if ("fsutil" in source or "os.replace(" in source
+                or _bare_serialized_writes(source)):
+            found.append(rel)
+    return found
+
+
+DURABLE_WRITERS = _durable_writers()
 
 
 def kill_mid_write(monkeypatch, *, keep: int = 12) -> None:
@@ -320,6 +343,31 @@ class TestSingleImplementation:
             "bobi/compose.py",
             "bobi/install.py",
         }
+
+    def test_discovery_reaches_an_unconverged_writer(self, tmp_path, monkeypatch):
+        """The shape the guard exists to catch must be able to ENROL.
+
+        Enrolling on `fsutil`/`os.replace` alone only ever reached writers that
+        already publish atomically, so a new module doing the un-converged
+        thing - `write_text(json.dumps(...))` and nothing else - was invisible
+        to the guard that was supposed to stop it. Discovery is only
+        meaningful if it reaches a module resembling none of the writers
+        already converged.
+        """
+        fake = tmp_path / "bobi" / "newcomer.py"
+        fake.parent.mkdir(parents=True)
+        fake.write_text(
+            "import json\n"
+            "from pathlib import Path\n"
+            "def save(p, state):\n"
+            "    Path(p).write_text(json.dumps(state))\n"
+        )
+        monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+        assert "bobi/newcomer.py" in _durable_writers(), (
+            "a durable writer that hand-rolls a bare serialized write never "
+            "enrols, so the guard cannot see the regression it describes"
+        )
 
     @pytest.mark.parametrize("relpath", DURABLE_WRITERS)
     def test_durable_writer_has_no_bare_serialized_write(self, relpath):
