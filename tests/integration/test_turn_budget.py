@@ -371,6 +371,43 @@ class TestTurnCapIsResumable:
             [t for t, _ in captured_lifecycle]
         )
 
+    def test_a_drain_failure_with_no_cause_still_names_the_gap(
+            self, stub_bobi_env, captured_lifecycle, monkeypatch):
+        """The orchestrator's last-resort fallback, driven through the real run.
+
+        The sibling of _emit_session_finished's fallback (see
+        tests/test_subagent_blocking.py). Both replaced a bare
+        ``"unknown error"`` that was "unreachable in practice" and reached
+        production anyway. This drives the REAL finally block by making the
+        drain fail the one way the code cannot defend against - reporting
+        ``final_text=None`` with an empty ``error`` - which is precisely the
+        defect shape a future drain path could reintroduce.
+        """
+        from bobi.workflow import orchestrator
+
+        async def _mute_drain(client, session_name, run_key, *, model):
+            return orchestrator.DrainResult(None, "", "")
+
+        monkeypatch.setattr(orchestrator, "_drain_response", _mute_drain)
+
+        result, session_name = _run_capped_workflow(
+            stub_bobi_env, "845h", step_max_turns=7, required=(),
+        )
+        assert result is False
+
+        failed = _one(captured_lifecycle, "agent/session.failed")
+        assert failed["error"] == "tcap failed with no error reported"
+        assert "unknown error" not in failed["error"]
+        # It names the workflow, so the gap is locatable from the event alone.
+        assert "tcap" in failed["error"]
+
+        # And the durable record agrees with what was emitted.
+        state = json.loads(
+            (_sessions_dir() / session_name / "state.json").read_text()
+        )
+        assert state["status"] == "failed"
+        assert state["error"] == failed["error"]
+
     def test_resume_is_bounded(self, stub_bobi_env, captured_lifecycle,
                                monkeypatch):
         """A step that keeps hitting the cap gives up with the honest error."""

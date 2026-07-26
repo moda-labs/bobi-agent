@@ -1088,6 +1088,34 @@ class TestSessionFinishedEvents:
         assert data["error"] == "timeout after 60s"
         assert kwargs.get("blocking") is True
 
+    def test_a_failure_with_no_error_names_the_gap(self):
+        """The last-resort fallback names itself instead of "unknown error".
+
+        Every failure path now populates ``result.error``, so this branch
+        should be unreachable - but "should be unreachable" is exactly what
+        was true of the literal it replaces. For hours a monitor's retry log
+        was reduced to `unknown error` because one path forgot to carry a
+        cause, and the bare literal told an operator nothing about WHERE the
+        gap was. Pinned so a future errorless failure path is at least
+        self-locating (#845).
+        """
+        calls = []
+        result = AgentResult(
+            session_id="", run_key="GAP-1", phase="implement",
+            success=False, error="",
+        )
+        with patch(f"{SDK_PATCH}._emit_lifecycle_event",
+                   side_effect=lambda *a, **kw: calls.append((a, kw))):
+            _emit_session_finished(result, "r", "agent-gap-1-implement", 0.0)
+
+        (event_type, data), _ = calls[0]
+        assert event_type == "agent/session.failed"
+        assert data["error"] == "implement failed with no error reported"
+        assert "unknown error" not in data["error"]
+        # It names the phase, so an operator can tell which path lost the cause.
+        assert "implement" in data["error"]
+        assert data["error"] in data["text"]
+
 
 class TestSpawnAdhocLifecycle:
     def test_emits_started_and_completed(self):
