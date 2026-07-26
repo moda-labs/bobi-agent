@@ -108,7 +108,7 @@ def _picker_roots(bobi_home: Path) -> list[Path]:
     """The folder-picker / scan confinement roots.
 
     The boundary is the user's HOME DIRECTORY, not the Bobi home: the folders
-    setup points at — an MCP server checkout, a team source tree — live in
+    setup points at - an MCP server checkout, a team source tree - live in
     ~/dev, ~/src, …, while ~/.bobi only holds the agent library. Confining to
     the Bobi home would reject every real project. The Bobi home is added only
     when it sits outside the home directory (a relocated BOBI_HOME), so the
@@ -188,7 +188,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     """Construct the FastAPI app. `stream_fn` overrides the LLM source
     (tests inject a fake). `home_root` overrides the Bobi home for tests, and
     seals the folder-picker boundary to that tree (production derives it from
-    the user's home directory — see _picker_roots).
+    the user's home directory - see _picker_roots).
     `base_path` is the mount prefix when hosted as a sub-app of the unified
     web app (e.g. "/setup") — the SPA prefixes its /api and /static URLs
     with it. Empty (the standalone `bobi setup` server) changes nothing.
@@ -209,7 +209,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     picker_roots = [home] if home_root else _picker_roots(home)
 
     def _within_home(raw: str, default: Path) -> tuple[Path, bool]:
-        """Resolve a user-supplied path and confine it to the home directory —
+        """Resolve a user-supplied path and confine it to the home directory -
         the single source of truth for the folder-picker / scan security
         boundary. Relative paths re-base under the Bobi home (consistent across
         endpoints). Returns (path, ok); ok is False when the resolved path
@@ -429,7 +429,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                           if d.is_dir() and not d.name.startswith("."))
         except OSError:
             dirs = []
-        # No "up" out of a root — that's the ceiling the picker can't cross.
+        # No "up" out of a root - that's the ceiling the picker can't cross.
         at_root = any(here == r for r in picker_roots)
         parent = None if at_root else str(here.parent)
         return JSONResponse({"path": str(here), "parent": parent, "dirs": dirs})
@@ -715,7 +715,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             live = (state.spec.mcp_servers or {}).get(key)
             recorded = isinstance(live, dict) and _same_connection(live, entry)
             if recorded:
-                # Persist ONLY coarse status — never raw error/stderr text, which
+                # Persist ONLY coarse status - never raw error/stderr text, which
                 # can carry secrets and is served to the browser via /api/state.
                 live["last_test"] = {"ok": bool(result.get("ok")),
                                      "live_ok": result.get("live_ok"),
@@ -737,7 +737,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             if not recorded:
                 reply += ("\n\nHeads up: this connection changed (or was removed) "
                           "while the test was running, so the result above is for "
-                          "the previous settings and I didn’t record it — ask me "
+                          "the previous settings and I didn’t record it - ask me "
                           "to test it again.")
             yield reply
             _record(user_text, reply)
@@ -1416,7 +1416,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # local page so it can be copied without being shown. Loopback + nonce
         # only; the value already lives in plaintext in .env on this machine.
         # The .env is setup's own file, so any var in it is answerable; the
-        # process environment is NOT — it carries unrelated secrets from the
+        # process environment is NOT - it carries unrelated secrets from the
         # shell that launched setup (AWS keys, ANTHROPIC_API_KEY), so fall back
         # to it only for the names in _setup_managed_vars(): the credential vars
         # the connector catalog and the INSTALLED pack declare, none of which a
@@ -1549,9 +1549,9 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             content = target.read_text()
         except (UnicodeDecodeError, OSError):
             # /api/files lists everything in the pack, and an opened pack can
-            # carry a binary (a logo, a latin-1 doc). The viewer can't show it —
+            # carry a binary (a logo, a latin-1 doc). The viewer can't show it -
             # say so instead of raising a 500 out of the endpoint.
-            return JSONResponse({"error": "this isn't a text file — open it "
+            return JSONResponse({"error": "this isn't a text file - open it "
                                           "from your file manager instead"},
                                 status_code=415)
         return JSONResponse({"path": path, "content": content})

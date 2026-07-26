@@ -230,7 +230,7 @@ class SetupState:
         Web handlers run in FastAPI's threadpool and nearly all of them save
         the shared state, so saves overlap; the lock serializes them and the
         atomic write keeps an interrupted one (Ctrl-C on the foreground
-        server) from truncating setup.json — which load() would read as
+        server) from truncating setup.json - which load() would read as
         'no setup in progress', discarding the whole in-progress setup.
         """
         path = paths.state_path(project_path) / STATE_FILENAME

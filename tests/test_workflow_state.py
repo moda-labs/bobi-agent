@@ -242,7 +242,7 @@ class TestClaim:
 
         Deterministic interleave: B runs its whole claim() in the window
         between A's claim rename and A's status update. Exactly one of them
-        must own the run — if both come back False the run is claimed on
+        must own the run - if both come back False the run is claimed on
         disk with nobody resuming it, i.e. permanently stuck.
         """
         _make_run(runs_dir, run_id="cl6", status="waiting",

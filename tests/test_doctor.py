@@ -573,7 +573,7 @@ def test_event_server_check_reports_healthy_remote_before_registration(
 
 def test_event_server_check_warns_for_unreachable_remote(tmp_path, monkeypatch):
     # An unreachable remote is worth reporting, but it is not this host's
-    # local server failing to start — never a required failure with a
+    # local server failing to start - never a required failure with a
     # `event-server start` hint.
     from bobi import doctor
 
@@ -600,7 +600,7 @@ def test_event_server_check_probes_the_configured_local_port(
     tmp_path, monkeypatch,
 ):
     """A local server on a configured non-default port is running, and doctor
-    must find it there — `bobi agent <n> event-server status` already does."""
+    must find it there - `bobi agent <n> event-server status` already does."""
     from bobi import doctor
 
     _install_team(tmp_path, "agent: test\n"

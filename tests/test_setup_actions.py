@@ -314,7 +314,7 @@ class TestInstallTeam:
         assert not paths.agent_yaml_path(project).exists()
 
     def test_never_validated_open_mode_source_raises(self, project, build_state):
-        # Never validated at all (validated=False, no hash) — the same refusal.
+        # Never validated at all (validated=False, no hash) - the same refusal.
         _write_minimal_pack(project / "agents" / "my-team")
         build_state.mode = "open"
         with pytest.raises(ActionError) as exc:

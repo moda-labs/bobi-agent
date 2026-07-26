@@ -61,7 +61,7 @@ class TestStateIO:
 
 
 def _hammer(project_path: Path, count: int) -> None:
-    """Record *count* invocations — the body of a concurrent recorder process."""
+    """Record *count* invocations - the body of a concurrent recorder process."""
     for _ in range(count):
         record_invocation(project_path)
 

@@ -390,7 +390,7 @@ class TestNonLossyMerges:
 
     def test_merge_agent_yaml_keeps_chat_when_setup_has_no_opinion(self):
         # An unset state.chat (the user never touched the chat surface) must
-        # leave the pack's own declaration alone — the overlay only writes
+        # leave the pack's own declaration alone - the overlay only writes
         # what setup actually decided.
         existing = ("agent: legacy\nversion: 0.1.0\nentry_point: lead\n"
                     "chat: slack\n")

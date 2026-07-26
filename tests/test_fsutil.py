@@ -1,4 +1,4 @@
-"""Tests for bobi.fsutil — the one durable-write path for bobi state files.
+"""Tests for bobi.fsutil - the one durable-write path for bobi state files.
 
 The crash-window test is the reason this module exists: it kills a REAL
 process between the temp write and the rename and asserts the previous
@@ -254,7 +254,7 @@ class TestCrashWindow:
         """A real process killed in the atomic-write window loses nothing.
 
         The child writes its temp file and is hard-killed (os._exit) before
-        os.replace runs — the exact window a bare write_text would spend
+        os.replace runs - the exact window a bare write_text would spend
         with the target truncated.
         """
         target = tmp_path / "state.json"

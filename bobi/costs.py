@@ -154,7 +154,7 @@ def _tok(v) -> int:
 
 
 def _usd(v) -> float:
-    """A dollar amount usable in arithmetic — :func:`_tok` for money.
+    """A dollar amount usable in arithmetic - :func:`_tok` for money.
 
     Same invariant, same reason: ``or 0.0`` passes a truthy string straight
     into the running totals, where ``+=`` raises and takes the whole fold

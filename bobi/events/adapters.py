@@ -116,7 +116,7 @@ def _parse_github_url(url: str) -> str:
     if url.endswith(".git"):
         url = url[:-4]
     if "://" not in url:
-        # scp-style SSH remote ([user@]host:org/repo) — give urlsplit a scheme.
+        # scp-style SSH remote ([user@]host:org/repo) - give urlsplit a scheme.
         url = "ssh://" + url.replace(":", "/", 1)
     parsed = urlsplit(url)
     if (parsed.hostname or "") not in _GITHUB_HOSTS:

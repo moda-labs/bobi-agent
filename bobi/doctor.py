@@ -72,7 +72,7 @@ def _configured_brain() -> tuple[str, bool]:
     """The selected runtime's brain ENGINE and whether it dials a gateway.
 
     Falls back to the framework default outside an installation or when the
-    config cannot be read — doctor stays useful on a half-installed host.
+    config cannot be read - doctor stays useful on a half-installed host.
     """
     from bobi.brain import DEFAULT_BRAIN, normalize_brain_kind
 
@@ -93,7 +93,7 @@ def _check_brain() -> list[CheckResult]:
 
     doctor probed the Claude CLI and Claude auth unconditionally, so a team on
     `brain: {kind: codex}` reported two REQUIRED failures (exit 1) on a host
-    with no claude binary — for a CLI that team never invokes. The checks
+    with no claude binary - for a CLI that team never invokes. The checks
     follow the config instead, like every other brain-aware site: the
     configured engine's CLI must be on PATH, and the vendor auth probe runs
     only for a DIRECT claude team. A gateway team authenticates to its own
@@ -433,8 +433,8 @@ def _check_event_server() -> CheckResult:
     remote whether or not this runtime has registered a deployment yet, and a
     local one lives on its configured (or remembered) port, not always 8080.
     doctor used to probe localhost:8080 unconditionally once registration was
-    missing, so a remote-configured instance that hadn't started yet — and any
-    local server on a non-default port — failed a REQUIRED check and was told
+    missing, so a remote-configured instance that hadn't started yet - and any
+    local server on a non-default port - failed a REQUIRED check and was told
     to start the local server it does not use.
     """
     from bobi.config import Config

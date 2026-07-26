@@ -382,7 +382,7 @@ class TestScriptCaching:
 class TestCacheConfigFingerprint:
     """Editing a monitor's config must invalidate its cached script (D023).
 
-    Real subprocesses, real cached scripts on disk — the cache only ever
+    Real subprocesses, real cached scripts on disk - the cache only ever
     self-healed on a non-zero exit, so a config edit whose old script still
     exits 0 kept polling the old target forever.
     """

@@ -234,7 +234,7 @@ def render_team_deps_script(cfg: Config, *, extra_recipes: list[dict] | None = N
         # BOBI_VERIFY_PHASE must be EXPORTED, not left as a bare shell variable:
         # a check is routinely a script, and a subprocess reads the phase from
         # the ENVIRONMENT. Unexported, such a check silently takes its
-        # runtime-tier branch during the image build — disagreeing with
+        # runtime-tier branch during the image build - disagreeing with
         # dep_bootstrap.preflight, the other surface of the same `success`
         # contract, which sets the phase in the child env.
         for entry in cfg.requires:

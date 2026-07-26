@@ -334,7 +334,7 @@ def _fts_query(query: str) -> str:
 
     FTS5 escapes a double quote inside a phrase by doubling it; wrapping a
     raw token instead ('5"' -> '"5""') is an unterminated string and the
-    MATCH raises. Empty for a blank query — callers must skip the MATCH.
+    MATCH raises. Empty for a blank query - callers must skip the MATCH.
     """
     quoted = ['"' + t.replace('"', '""') + '"' for t in query.split() if t]
     return " OR ".join(quoted)

@@ -126,7 +126,7 @@ def embed(texts: list[str]) -> list[list[float]]:
     try:
         embeddings = _post_embed(port, texts)
     except (OSError, httpx.RequestError):
-        # Sidecar died since the last call — restart once and retry. The
+        # Sidecar died since the last call - restart once and retry. The
         # pooled httpx client raises ConnectError, which is NOT an OSError,
         # so catching OSError alone would leave the dead port cached forever.
         _verified_port = None

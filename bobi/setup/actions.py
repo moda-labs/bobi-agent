@@ -368,7 +368,7 @@ def install_team(state: SetupState, project: Path) -> dict:
         state.validated = False
         state.save(project)
         raise ActionError("the team source changed since validate_team "
-                          "last passed — run validate_team again before "
+                          "last passed - run validate_team again before "
                           "installing")
 
     package = paths.package_dir(project)

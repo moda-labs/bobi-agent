@@ -54,7 +54,7 @@ def _repo_tarball(name: str = "eng-team", version: str = "1.1.0") -> bytes:
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    # The install cache hangs off BOBI_HOME, not the runtime root — without this
+    # The install cache hangs off BOBI_HOME, not the runtime root - without this
     # every fetch here would install its fixture tarball into the developer's
     # real ~/.bobi/cache/agents (same isolation test_registry_url.py uses).
     monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
@@ -247,7 +247,7 @@ def test_unpinned_fetch_fails_loudly_when_the_version_read_fails(project, monkey
 
 def test_absent_remote_agent_yaml_still_resolves_to_the_rolling_asset(project,
                                                                      monkeypatch):
-    """A 404 is a definitive 'nothing published there', not a failed read — it
+    """A 404 is a definitive 'nothing published there', not a failed read - it
     stays version-less → rolling asset (D-5). Only indeterminate reads raise."""
     calls = []
     _router(monkeypatch, {

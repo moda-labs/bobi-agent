@@ -495,12 +495,12 @@ async def _run_agent_supervised(
                         )
                     # Single-sourced transient classification (§4.3): a 529/rate-limit
                     # /5xx is tagged transient so the launcher can re-dispatch. We do
-                    # NOT retry here — survival/retry is owned by #444.
+                    # NOT retry here - survival/retry is owned by #444.
                     result.transient = is_transient_api_error(
                         result_msg.api_error_status,
                         result.error,
                     )
-                # RC#2: honest terminal status — never record `done` on an error
+                # RC#2: honest terminal status - never record `done` on an error
                 # result. A transient 529 surfaces as an error ResultMessage (not an
                 # exception), so the old unconditional `done` wrote a success over a
                 # real failure. We record it honestly as `failed` and let it be

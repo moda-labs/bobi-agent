@@ -310,7 +310,7 @@ def test_services_merge_by_name_and_remove(project):
 
 def test_services_remove_then_readd_replaces_wholesale(project):
     """Removing and re-declaring the same service in one overlay replaces it
-    wholesale — the natural idiom for "forget the inherited entry, here is
+    wholesale - the natural idiom for "forget the inherited entry, here is
     mine". The removal leaves a tombstone in the merged list, and merging the
     re-added entry onto that tombstone used to raise a raw TypeError."""
     _team(project, "core", 'version: "1.0.0"\nservices:\n'
@@ -492,8 +492,8 @@ def _compose_error(project, leaf) -> Exception | None:
     """Compose, returning the ComposeError instead of raising it.
 
     Lets a containment test assert the HOST is intact first: a vulnerable
-    compose deletes the path and then returns normally, and that deletion —
-    not the missing exception — is the failure worth reading."""
+    compose deletes the path and then returns normally, and that deletion -
+    not the missing exception - is the failure worth reading."""
     try:
         _compose(project, leaf)
     except compose.ComposeError as e:
@@ -515,7 +515,7 @@ def test_prune_relative_subpath_inside_surface_still_works(project):
 
 def test_prune_absolute_path_rejected_and_host_untouched(project, tmp_path):
     # A prune name is content INSIDE the frozen image. `dest / "roles" / "/x"`
-    # is Path("/x") — pathlib drops the base on an absolute join — so an
+    # is Path("/x") - pathlib drops the base on an absolute join - so an
     # unvalidated name rmtree'd host paths during `bobi agents install`.
     victim = tmp_path / "victim"
     (victim / "keep").mkdir(parents=True)

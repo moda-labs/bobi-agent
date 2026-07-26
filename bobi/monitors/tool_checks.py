@@ -8,10 +8,10 @@ scripts, MCP servers via CLI wrappers, etc.).
 Script caching: on first successful poll the resolved command is saved
 as a shell script, stamped with that command's fingerprint.  Subsequent
 runs try the cached script first, and only when the fingerprint still
-matches the monitor's current config — editing the monitor's command (or
+matches the monitor's current config - editing the monitor's command (or
 a venn_poll service/tool/query) retires the old script.  If the cached
 script fails, the runner falls back to direct execution and regenerates
-the cache — self-healing with zero agent involvement for mechanical
+the cache - self-healing with zero agent involvement for mechanical
 repairs.
 
 Check runners:
@@ -76,7 +76,7 @@ def _script_path(monitor_name: str) -> Path:
 # Stamped into every cached script so the cache is keyed on the monitor's
 # resolved command, not just its name. Editing a monitor's `command:` (or a
 # venn_poll `service`/`tool`/`query`) changes the fingerprint, which retires the
-# old script — otherwise a still-working stale script kept polling the old
+# old script - otherwise a still-working stale script kept polling the old
 # target forever, since the cache only ever self-healed on a non-zero exit.
 _FINGERPRINT_MARKER = "# bobi-command-fingerprint: "
 
@@ -114,13 +114,13 @@ def _run_cached_script(monitor_name: str, fingerprint: str, timeout: int,
     """Try running the cached script.
 
     Returns None when there is no script or it was cached for a different
-    command — a stale script is deleted so the caller re-runs and re-caches.
+    command - a stale script is deleted so the caller re-runs and re-caches.
     """
     path = _script_path(monitor_name)
     if not path.exists():
         return None
     if _cached_fingerprint(path) != fingerprint:
-        log.info(f"tool_poll monitor {monitor_name}: command changed — "
+        log.info(f"tool_poll monitor {monitor_name}: command changed - "
                  "discarding cached script")
         path.unlink(missing_ok=True)
         return None
@@ -187,7 +187,7 @@ def _run_command(cmd: list[str], env: dict, timeout: int,
     With cache_scripts=True (default), the resolved command is cached as a
     script on success and the cached script is tried first on the next run.
     """
-    # Try cached script first — but only when it was cached for THIS command.
+    # Try cached script first - but only when it was cached for THIS command.
     if cache_scripts:
         cached = _run_cached_script(monitor_name, _command_fingerprint(cmd),
                                     timeout, env)

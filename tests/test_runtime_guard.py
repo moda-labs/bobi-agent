@@ -94,7 +94,7 @@ class TestRuntimeWritePolicy:
         """An EPERM partway through the +w sweep must not leave the package
         writable: the readonly re-lock runs even when __enter__ raises (D044).
 
-        Mirrors the container case #774 handled for the readonly direction — one
+        Mirrors the container case #774 handled for the readonly direction - one
         file in the package image is owned by another uid. `agent.yaml` sits
         shallower than `roles/ROLE.md`, and the sweep walks deepest-first, so
         ROLE.md is already +w when agent.yaml raises.
@@ -117,7 +117,7 @@ class TestRuntimeWritePolicy:
 
         role = package / "roles" / "ROLE.md"
         assert not (role.stat().st_mode & 0o222), (
-            "file chmodded +w before the EPERM was left writable — no re-lock")
+            "file chmodded +w before the EPERM was left writable - no re-lock")
         assert check_runtime_write_policy(tmp_path).ok
 
     def test_check_fails_for_symlink_escaping_package(self, tmp_path):

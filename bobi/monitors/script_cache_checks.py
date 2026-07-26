@@ -1024,18 +1024,18 @@ def _self_heal(monitor, state: dict, policy: dict, fp: str, env: dict,
 
 
 # ---------------------------------------------------------------------------
-# Off-thread generation — the scheduler runs every monitor on ONE thread
+# Off-thread generation - the scheduler runs every monitor on ONE thread
 # ---------------------------------------------------------------------------
 
 # How long a tick waits for a just-dispatched generation before detaching it.
 # Generation drives the agent runtime (``run_check_blocking``: 2 attempts x
-# 600s), while the scheduler evaluates every monitor from a single thread — so
+# 600s), while the scheduler evaluates every monitor from a single thread - so
 # doing it inline stalls every other monitor for up to ~20 minutes: intervals
 # drift and an `at:` slot passing during the block is skipped as a
 # missed-while-down catch-up. This is exactly what the description-only check
 # flavor spawns out-of-band to avoid. Generation therefore runs on its own
-# thread and the tick hands off, returning None — the scheduler's existing
-# "detection in flight / indeterminate" value — with the items collected on the
+# thread and the tick hands off, returning None - the scheduler's existing
+# "detection in flight / indeterminate" value - with the items collected on the
 # next tick. The short grace keeps a fast generation in the same tick.
 GEN_HANDOFF_GRACE = 2.0
 
@@ -1057,7 +1057,7 @@ def _collect_generation(name: str) -> tuple[bool, list[Condition] | None]:
     A finished generation is popped and its items returned (never a wasted
     tick). A still-running one reports ``(True, None)``: the tick is
     indeterminate, so the scheduler leaves the monitor's state untouched and
-    retries — and the monitor's trusted state stays owned by the worker.
+    retries - and the monitor's trusted state stays owned by the worker.
     """
     with _generations_lock:
         gen = _generations.get(name)
@@ -1073,7 +1073,7 @@ def _dispatch_self_heal(monitor, state: dict, policy: dict, fp: str, env: dict,
                         id_field: str, cwd: str | None) -> list[Condition] | None:
     """Run ``_self_heal`` off the calling thread, waiting only for the grace.
 
-    The worker owns ``state`` from here on — it is the only writer left, and it
+    The worker owns ``state`` from here on - it is the only writer left, and it
     persists the pin, breaker counters and tick stats when it finishes, so a
     detached generation records everything an inline one did.
     """
@@ -1098,7 +1098,7 @@ def _dispatch_self_heal(monitor, state: dict, policy: dict, fp: str, env: dict,
 
     if gen.done.wait(GEN_HANDOFF_GRACE):
         return _collect_generation(monitor.name)[1]
-    log.info("script_cache %s: generation running out-of-band — this tick is "
+    log.info("script_cache %s: generation running out-of-band - this tick is "
              "indeterminate, its items land on the next one", monitor.name)
     return None
 

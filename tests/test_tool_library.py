@@ -183,7 +183,7 @@ _GIZMO_TEAM = 'version: "1.0.0"\nentry_point: director\ntool_library: [gizmo]\n'
 
 def test_generated_guide_refreshes_when_the_catalog_updates(project, gizmo_catalog):
     """A reinstall reuses dest, and install.py only clears surfaces a layer
-    contributes — so a team shipping no tools/ keeps the previous install's
+    contributes - so a team shipping no tools/ keeps the previous install's
     guide. It must still pick up a catalog guide update, not freeze forever."""
     leaf = _team(project, "solo", _GIZMO_TEAM)
     dest = _compose(project, leaf)[0]
@@ -197,7 +197,7 @@ def test_generated_guide_refreshes_when_the_catalog_updates(project, gizmo_catal
 
 def test_generated_guide_is_dropped_when_the_dependency_goes_away(
         project, gizmo_catalog):
-    """Removing the dependency removes its guide — an orphaned tools/<name>.md
+    """Removing the dependency removes its guide - an orphaned tools/<name>.md
     would keep telling the runtime agent about a tool it no longer has."""
     leaf = _team(project, "solo", _GIZMO_TEAM)
     dest = _compose(project, leaf)[0]
@@ -314,7 +314,7 @@ def test_tool_library_unions_across_layers(project):
 
 def test_leaf_layer_overrides_an_inherited_dependency(project):
     """The leaf always wins (compose §3.1): an overlay re-declaring an inherited
-    dependency by name replaces it — the union appends the overlay's entry after
+    dependency by name replaces it - the union appends the overlay's entry after
     the base's, so keeping the base's would invert compose's precedence and
     silently bake the base's pin."""
     _team(project, "core",

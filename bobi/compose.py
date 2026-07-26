@@ -651,8 +651,8 @@ def _merge_keyed_list(base: list | None, overlay: list | None,
     one (and itself).
 
     A removal also drops the key from the index, so an overlay that removes and
-    re-adds the same key in one list — the idiom for replacing an inherited
-    entry wholesale rather than field-merging onto it — appends a fresh entry
+    re-adds the same key in one list - the idiom for replacing an inherited
+    entry wholesale rather than field-merging onto it - appends a fresh entry
     instead of deep-merging onto the tombstone (which raised a raw TypeError).
     """
     result: list[dict] = [dict(e) for e in (base or [])]

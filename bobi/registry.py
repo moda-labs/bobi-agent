@@ -144,7 +144,7 @@ def _read_remote_version(name: str, repo: str = DEFAULT_REPO, *,
                          strict: bool = False) -> str | None:
     """Fetch just agent.yaml from GitHub to read the remote version.
 
-    None means "no version published there" — either the team is version-less
+    None means "no version published there" - either the team is version-less
     (D-5) or agent.yaml 404s, both definitive answers from the server.
 
     With ``strict=True`` an *indeterminate* read (timeout, rate limit, 5xx,

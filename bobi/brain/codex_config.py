@@ -206,7 +206,7 @@ def write_codex_config(mcp_servers: dict, home: Path | None = None) -> Path:
     config path. ``home`` defaults to :func:`codex_home`.
 
     The rewrite is atomic: config.toml carries foreign content bobi must never
-    lose, and a process killed mid-write would otherwise truncate it — taking
+    lose, and a process killed mid-write would otherwise truncate it - taking
     the operator's model settings and profiles with it, and leaving the next
     ``codex exec`` reading torn TOML.
     """

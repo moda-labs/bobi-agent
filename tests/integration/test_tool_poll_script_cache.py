@@ -28,7 +28,7 @@ def _write_cached_script(script_path: Path, cmd: list[str], body: str) -> None:
 
     The header stamp is what ties a cached script to the monitor's resolved
     command; an unstamped script is (correctly) retired as stale, which is a
-    different code path than these tests exercise — see
+    different code path than these tests exercise - see
     tests/test_tool_poll.py::TestCacheConfigFingerprint.
     """
     from bobi.monitors.tool_checks import (

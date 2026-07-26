@@ -80,7 +80,7 @@ def check_spend_cap(project_path: Path, cap: int) -> tuple[bool, int]:
 
         if count >= cap:
             # Persist the pruned state (removes expired entries) but do NOT
-            # record a new timestamp — the launch is being blocked.
+            # record a new timestamp - the launch is being blocked.
             _save_state(state_file, timestamps)
             return False, count
 

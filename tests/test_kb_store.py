@@ -534,7 +534,7 @@ class TestFTSQuery:
 
     def test_escapes_embedded_quote(self):
         """FTS5 escapes a quote inside a phrase by doubling it; wrapping the
-        raw token yields '"5""' — an unterminated string."""
+        raw token yields '"5""' - an unterminated string."""
         assert _fts_query('the 5" display') == '"the" OR "5""" OR "display"'
 
 

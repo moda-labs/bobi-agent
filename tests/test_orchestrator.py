@@ -2158,7 +2158,7 @@ class TestHandoffEdgeCases:
 
 
 # ---------------------------------------------------------------------------
-# Handoff freshness — a step's handoff must describe THIS turn
+# Handoff freshness - a step's handoff must describe THIS turn
 # ---------------------------------------------------------------------------
 
 class TestHandoffFreshness:

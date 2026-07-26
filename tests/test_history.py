@@ -201,7 +201,7 @@ class TestFtsQuery:
 
     def test_escapes_embedded_quote(self):
         """FTS5 escapes a quote inside a phrase by doubling it; wrapping the
-        raw token yields '"5""' — an unterminated string."""
+        raw token yields '"5""' - an unterminated string."""
         assert _fts_query('the 5" display') == '"the" OR "5""" OR "display"'
         assert _fts_query('fix "auth" bug') == '"fix" OR """auth""" OR "bug"'
 
@@ -690,7 +690,7 @@ class TestSearch:
 
     def test_project_filter_matches_hyphenated_repo_name(self, projects_dir):
         """`transcript search --project bobi-agent` must find the sessions of a
-        repo whose own name contains a hyphen — the encoded directory name
+        repo whose own name contains a hyphen - the encoded directory name
         alone decodes it to 'bobi/agent' and the filter matches nothing."""
         proj = projects_dir / "-Users-z-dev-bobi-agent"
         proj.mkdir()

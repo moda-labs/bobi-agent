@@ -153,14 +153,14 @@ def resolve_dependencies(merged_yaml: dict) -> list[Dependency]:
     Each `tool_library:` item is a string (catalog ref) or an inline mapping.
     De-duped by name, LAST occurrence wins: compose unions `tool_library:` with
     the overlaying layer's entries appended after the base's, so the last one is
-    the leaf's — keeping the first would invert compose's leaf-always-wins rule
+    the leaf's - keeping the first would invert compose's leaf-always-wins rule
     and silently bake a base layer's pin over the overlay's. A repeat across
     `from:` layers still collapses to one; an override replaces the inherited
     dependency wholesale (never field-merged, like the `requires:`/`mcp:` escape
     hatches), so an overlay that re-pins a tool restates the `guide:` it wants.
     Position follows the first occurrence, so an override does not reshuffle the
     accreted build/requires order. NB: `brain: codex` no longer implies a codex
-    dependency — the Codex CLI ships in the base image (#428), so a codex-brained
+    dependency - the Codex CLI ships in the base image (#428), so a codex-brained
     team bakes nothing extra."""
     resolved: dict[str, Dependency] = {}
     for item in (merged_yaml.get("tool_library") or []):
@@ -238,7 +238,7 @@ def _materialize_guides(deps: list[Dependency], dest: Path) -> None:
 
     A team-shipped guide always wins (the leaf-wins file rule, applied after the
     structured tools/ merge), so only a file this module generated is refreshed
-    or removed — identified by the digest recorded in `GUIDE_RECORD`, since mere
+    or removed - identified by the digest recorded in `GUIDE_RECORD`, since mere
     existence cannot tell a team file from our own leftover. `dest` is REUSED
     across installs and install.py clears only the surfaces some layer
     contributes, so without that record a team shipping no `tools/` dir would
@@ -253,7 +253,7 @@ def _materialize_guides(deps: list[Dependency], dest: Path) -> None:
         guide_path = dest / "tools" / f"{dep.name}.md"
         if guide_path.exists() and _guide_digest(
                 guide_path.read_bytes()) != owned.get(guide_path.name):
-            continue  # team-shipped (or locally edited) — never clobbered
+            continue  # team-shipped (or locally edited) - never clobbered
         guide_path.parent.mkdir(parents=True, exist_ok=True)
         body = dep.guide.encode()
         guide_path.write_bytes(body)

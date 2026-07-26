@@ -424,7 +424,7 @@ def _check_auto_dispatch_events(cfg) -> list[CheckResult]:
 
     ``AutoDispatchRule.matches`` compares the event type for exact equality,
     so a rule naming a type outside its source's grammar (the classic being
-    `github.issues.assigned` — GitHub's action rides in `fields.action`) never
+    `github.issues.assigned` - GitHub's action rides in `fields.action`) never
     fires. Nothing errors: the deterministic dispatch the rule promises just
     silently degrades to whatever the director LLM decides.
 
@@ -447,13 +447,13 @@ def _check_auto_dispatch_events(cfg) -> list[CheckResult]:
             continue
         patterns = _EVENT_TYPE_PATTERNS.get(event.split(".")[0])
         if not patterns:
-            continue  # unknown source — no grammar to check against
+            continue  # unknown source - no grammar to check against
         if any(_event_type_matches(p, event) for p in patterns):
             continue
         checks.append(CheckResult(
             f"auto_dispatch.{event}", ok=False, required=False,
             detail="no adapter emits this event type, so the rule never fires",
-            hint=f"emitted types: {', '.join(patterns)} — put the action in "
+            hint=f"emitted types: {', '.join(patterns)} - put the action in "
                  f"match: (e.g. match: {{action: assigned}}) rather than the "
                  f"event type",
         ))

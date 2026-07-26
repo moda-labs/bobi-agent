@@ -277,7 +277,7 @@ def run_workflow(
         }, blocking=True)
 
     # _run_workflow_async already persisted the honest terminal status. Only
-    # fall back to mark_done if it somehow didn't — never clobber a
+    # fall back to mark_done if it somehow didn't - never clobber a
     # completed/failed status with "done".
     _close_if_still_active(registry, session_name)
 
@@ -614,7 +614,7 @@ async def _run_workflow_async(
         except Exception as e:
             # Building the session (runtime guard, agent prompt resolution)
             # failing is not a stale-session symptom, so it gets no fresh
-            # retry — but it must not escape the terminal-emit `finally`
+            # retry - but it must not escape the terminal-emit `finally`
             # either, or the run dies with the entry stuck "running" and no
             # session.failed/workflow.failed ever emitted.
             log.error(f"Session setup failed: {e}")
@@ -1266,8 +1266,8 @@ def _build_step_prompt(step: StepDef, ctx: VariableContext, session_name: str = 
 def _read_handoff(session_name: str, step_name: str) -> dict:
     """Read the handoff YAML for a step.
 
-    Anything that is not a mapping — prose the agent wrote instead of the
-    contract, a bare list — is treated as no handoff at all, so the caller
+    Anything that is not a mapping - prose the agent wrote instead of the
+    contract, a bare list - is treated as no handoff at all, so the caller
     lands in the designed re-prompt path. Returning it would make
     ``_validate_handoff``'s ``in`` a substring/element test that wrongly
     passes, and the outputs capture would then crash on ``handoff.get()``.

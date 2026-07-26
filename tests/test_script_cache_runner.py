@@ -64,7 +64,7 @@ def scripts_dir(tmp_path):
          patch.object(sc, "GEN_HANDOFF_GRACE", _SETTLED_GRACE):
         yield d
     # Generation is dispatched to a worker thread and its result is held until
-    # a later tick collects it — an uncollected one must not leak into the next
+    # a later tick collects it - an uncollected one must not leak into the next
     # test (same monitor names are reused).
     sc._generations.clear()
 
@@ -382,7 +382,7 @@ class TestSchedulerThreadNotBlocked:
 
     The scheduler evaluates every monitor from ONE thread, so a self-heal that
     blocks on the agent runtime (``run_check_blocking``: 2 attempts x 600s)
-    stalls every other monitor for up to ~20 minutes — interval monitors drift
+    stalls every other monitor for up to ~20 minutes - interval monitors drift
     and a weekday-gated ``at:`` slot that passes during the block is skipped as
     a missed-while-down catch-up. Detection goes out-of-band instead, exactly
     like the description-only check flavor.

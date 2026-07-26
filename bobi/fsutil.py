@@ -1,10 +1,10 @@
-"""Durable filesystem writes — the single atomic-write path for bobi state.
+"""Durable filesystem writes - the single atomic-write path for bobi state.
 
 Every file bobi must not lose (workflow runs, monitor state, setup resume
 state, the spend window, ``config.toml``) is written the same way here:
 serialize fully, write a temp sibling, then ``os.replace`` it over the
 target. ``os.replace`` is atomic on POSIX, so a reader either sees the
-whole previous file or the whole new one — never a truncated middle.
+whole previous file or the whole new one - never a truncated middle.
 
 The threat model is a **process kill mid-write** (supervisor restart, OOM,
 deploy roll, Ctrl-C), which is what turns a bare ``path.write_text()`` into
@@ -96,7 +96,7 @@ def file_lock(path: Path | str) -> Iterator[None]:
     lock survives the ``os.replace`` that swaps the state file's inode.
 
     Advisory and best-effort: it excludes other holders of this same lock
-    (threads and processes alike — ``flock`` is per open file description),
+    (threads and processes alike - ``flock`` is per open file description),
     and degrades to a no-op where ``fcntl`` is unavailable.
     """
     lock_path = Path(f"{path}.lock")

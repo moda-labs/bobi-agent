@@ -243,7 +243,7 @@ class TestPersistence:
         """Ctrl-C on the foreground server mid-save keeps setup resumable.
 
         A truncated setup.json makes load() return None, which serve()
-        reports as 'No setup in progress to resume' — the whole in-progress
+        reports as 'No setup in progress to resume' - the whole in-progress
         setup silently discarded.
         """
         _goaled(stage=Stage.AUTOMATE, session_id="abc-123").save(tmp_path)

@@ -201,7 +201,7 @@ class TestCostRollup:
 
     def test_malformed_session_shapes_are_skipped_not_fatal(self, tmp_path):
         # A state.json that is not an object, or whose model_usage entries are
-        # not objects, is corrupt — skip it, keep the rest of the fold.
+        # not objects, is corrupt - skip it, keep the rest of the fold.
         sessions_dir = self._make_sessions(tmp_path, {
             "not-an-object": ["totally", "wrong"],
             "bad-usage": {"name": "bad-usage", "role": "eng",

@@ -203,7 +203,7 @@ def _as_number(value: object, name: str, default, cast):
             return cast(value)
         except (TypeError, ValueError):
             pass
-    log.warning("%s: expected a number, got %r — using %r", name, value, default)
+    log.warning("%s: expected a number, got %r - using %r", name, value, default)
     return default
 
 

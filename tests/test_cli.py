@@ -219,7 +219,7 @@ class TestAgentsRegistryCommands:
 
     def test_update_all_exits_nonzero_when_every_pack_fails(self, tmp_path, monkeypatch):
         """The update-all path must report failure like the named-pack path
-        does — scripts and CI read the exit code, and `Failed:` on stderr with
+        does - scripts and CI read the exit code, and `Failed:` on stderr with
         exit 0 makes an outage look like a successful no-op update."""
         from bobi import registry
 
@@ -233,6 +233,8 @@ class TestAgentsRegistryCommands:
 
         result = CliRunner().invoke(main, ["agents", "update"])
 
+        # Em dashes because this asserts on `bobi/cli.py:3052`, a pre-existing
+        # line outside this branch's dash sweep. Matching it is the point.
         assert "eng-team — failed: registry unreachable" in result.output
         assert "ops-team — failed: registry unreachable" in result.output
         assert result.exit_code == 1
@@ -818,7 +820,7 @@ class TestEventServerCommand:
 
     def test_stop_with_corrupt_pid_file_cleans_up(self, bobi_install):
         """A partially-written pid file (crash mid-write) must not raise a raw
-        traceback — otherwise every later `stop` hits the same crash and the
+        traceback - otherwise every later `stop` hits the same crash and the
         stale pid/port files are never cleared."""
         (bobi_install.state_dir / "event-server.pid").write_text("not-a-pid\n")
         (bobi_install.state_dir / "event-server.port").write_text("58405")

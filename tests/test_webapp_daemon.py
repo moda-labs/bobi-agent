@@ -77,7 +77,7 @@ class TestLifecycle:
 
 class TestStopIdentity:
     """A crash skips run_foreground's pidfile cleanup, so app.pid can outlive
-    the daemon and the OS reuses the pid — stop() must prove the pid is the app
+    the daemon and the OS reuses the pid - stop() must prove the pid is the app
     before signalling it."""
 
     def test_stale_pid_reused_by_another_process_is_never_signalled(self, home):
@@ -144,7 +144,7 @@ class TestStopIdentity:
 
     def test_argv_lookup_falls_back_to_ps_without_proc(self, tmp_path,
                                                        monkeypatch):
-        """macOS has no /proc, so identity comes from `ps` there — and the
+        """macOS has no /proc, so identity comes from `ps` there - and the
         console-script spelling of the daemon is still recognised. Driven with a
         stub `ps` on PATH, since this image ships none."""
         stub = tmp_path / "ps"

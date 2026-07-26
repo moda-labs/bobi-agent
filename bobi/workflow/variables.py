@@ -221,7 +221,7 @@ def _compare_numeric(
     except (TypeError, ValueError):
         log.warning(
             f"Condition '{left} {symbol} {right}' compares a non-numeric "
-            f"value — evaluating to False"
+            f"value - evaluating to False"
         )
         return False
 

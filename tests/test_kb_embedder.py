@@ -173,7 +173,7 @@ class TestEmbed:
         """The sidecar died since the last embed. The pooled httpx client
         raises ConnectError (NOT an OSError), so a recovery clause that only
         catches OSError never fires: the dead port stays cached and every
-        later embed — cold-memory sync, KB indexing — fails forever."""
+        later embed - cold-memory sync, KB indexing - fails forever."""
         ports: list[int] = []
 
         def handler(request):

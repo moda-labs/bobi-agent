@@ -198,7 +198,7 @@ def test_agent_yaml_optional_env_var_prefers_environment(tmp_path, monkeypatch):
 
 def test_null_valued_keys_fall_back_to_defaults(tmp_path):
     """A key left in agent.yaml with its value commented out parses as YAML
-    null. Every such key must fall back to its default — Config.load backs
+    null. Every such key must fall back to its default - Config.load backs
     every start/status/dispatch path, so a traceback here bricks the runtime
     over a blank line."""
     _write_agent_yaml(tmp_path, """

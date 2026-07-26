@@ -166,11 +166,11 @@ def test_verify_exports_build_phase_to_subprocesses(tmp_path):
     shell variable.
 
     The two-tier `success` contract (tool_library.py) lets a check branch on the
-    phase, and a check is routinely a *script* — a subprocess, which sees only
+    phase, and a check is routinely a *script* - a subprocess, which sees only
     the ENVIRONMENT. `BOBI_VERIFY_PHASE=build; <check>` leaves it unexported, so
     the script takes the runtime-tier branch during the image build (e.g. a
     credentialed probe in the credential-less builder). dep_bootstrap.preflight,
-    the other surface of the same contract, puts it in the child env — the two
+    the other surface of the same contract, puts it in the child env - the two
     must agree. Executes the rendered command so the env var is observed by a
     real subprocess, not just asserted textually.
     """
@@ -191,8 +191,8 @@ def test_verify_exports_build_phase_to_subprocesses(tmp_path):
 
     line = next(ln for ln in script.splitlines()
                 if str(probe) in ln and ln.startswith("gosu"))
-    # Drop the `gosu bobi ` privilege drop (no root here); the rest — the env
-    # pinning and the `bash -lc <check>` — runs verbatim as the image build runs it.
+    # Drop the `gosu bobi ` privilege drop (no root here); the rest - the env
+    # pinning and the `bash -lc <check>` - runs verbatim as the image build runs it.
     runnable = line[len(f"gosu {APP_USER} "):]
     proc = subprocess.run(runnable, shell=True, capture_output=True, text=True)
 

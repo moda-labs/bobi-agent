@@ -1356,7 +1356,7 @@ class TestPanelEdits:
 
         def _user_fixes_the_connection():
             """A real concurrent save through the same app, from another
-            connection — exactly what the browser does mid-test."""
+            connection - exactly what the browser does mid-test."""
             other = _testclient(c.app)
             other.headers.update({server.NONCE_HEADER: NONCE})
             r = other.post("/api/mcp/add", json={
@@ -1380,7 +1380,7 @@ class TestPanelEdits:
         assert entry["command"] == "uvx"          # the correction survives
         assert entry["args"] == ["substack-mcp"]
         # The verdict is about the settings that were tested, not the new ones,
-        # so it isn't stamped on the edited connection — and the reply says so.
+        # so it isn't stamped on the edited connection - and the reply says so.
         assert entry.get("last_test") is None
         assert "changed" in body
         assert SetupState.load(project).spec.mcp_servers[
@@ -1456,7 +1456,7 @@ class TestPanelEdits:
         # A default install: BOBI_HOME is ~/.bobi, and the MCP server the user
         # points detect at is a normal checkout elsewhere under their home
         # (~/dev/…). The boundary the picker copy promises is the HOME
-        # DIRECTORY — confining to ~/.bobi rejects every real MCP project.
+        # DIRECTORY - confining to ~/.bobi rejects every real MCP project.
         monkeypatch.setenv("HOME", str(tmp_path))   # the user's home directory
         assert paths.home_dir() == (tmp_path / ".bobi").resolve()   # ~/.bobi
         srv = tmp_path / "dev" / "acme"
@@ -2153,7 +2153,7 @@ class TestIntro:
 
     def test_browse_reaches_the_home_directory_outside_bobi_home(
             self, project, tmp_path, monkeypatch):
-        # The picker's promise is "a folder inside your home directory" — the
+        # The picker's promise is "a folder inside your home directory" - the
         # team sources and dev repos it exists to find live in ~/dev, ~/src, …,
         # not inside ~/.bobi. Walking up out of the Bobi home must work.
         monkeypatch.setenv("HOME", str(tmp_path))   # the user's home directory

@@ -89,7 +89,7 @@ class WorkflowRun:
         except FileNotFoundError:
             # Another process already renamed (claimed) the source file.
             return False
-        # Claim won — record the resume on the claimed file, atomically.
+        # Claim won - record the resume on the claimed file, atomically.
         self.status = "resuming"
         self.resumed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         fsutil.atomic_write_json(dst, asdict(self))
