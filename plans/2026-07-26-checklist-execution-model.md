@@ -378,6 +378,16 @@ Phase 2 depends on Q1's `fsutil` helper for its atomic writes.
       `orchestrator.py:933`) no longer masks a real diagnosis
 - [x] `pytest tests/ --ignore=tests/e2e --timeout=30 -q` and
       `pytest tests/integration -q -k "subagent or orchestrator"`
+      *Second command clean (30 passed). First command: 3764 passed with a
+      **pre-existing** failure set that reproduces identically on `main` — the
+      real-Claude legs in `test_cross_model_resume`, `test_manager_sdk` and
+      `test_sleep_cycle_flow`, and `test_packaged_event_server`'s Node-build
+      errors; `test_manager_lifecycle[claude]` flakes under full-suite load and
+      passes in isolation. No new failures. All 8 CI checks green on the head.
+      **Note for later phases:** this gate line is not literally satisfiable in
+      a dev environment without the `claude` CLI authenticated and a Node
+      toolchain, so "green" here means "no delta against `main`". Phases 2 and 4
+      should either say that explicitly or scope the command.*
 
 ### Phase 2 — The artifact, the loop, and the in-progress monitor
 
