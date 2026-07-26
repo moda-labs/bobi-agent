@@ -136,22 +136,41 @@ def embed(texts: list[str]) -> list[list[float]]:
     return embeddings
 
 
+def is_sidecar_argv(argv: list[str]) -> bool:
+    """True when *argv* is an embedding sidecar process.
+
+    `ensure_running` spawns it as ``python -m bobi.kb.sidecar
+    --project-root <root>``, and that module name is what identifies it.
+    """
+    return "bobi.kb.sidecar" in argv
+
+
 def stop(root: Path | None = None) -> None:
     """Stop the sidecar if running.
 
     ``root`` selects the team whose sidecar state to read; None means the
     process's bound root (in-team callers).
+
+    Routed through `service.stop_pidfile` rather than signalling the pid
+    directly: this sidecar holds a fastembed model, so it is the likeliest
+    OOM victim on the box, and an OOM kill runs no cleanup - leaving
+    `embedding-sidecar.pid` naming a pid the OS is free to reuse. `stop_team`
+    calls this two lines after stopping the manager through that same seam,
+    so a bare `os.kill` here would reintroduce, on the very next line, the
+    stranger-killing bug the seam exists to prevent.
     """
     global _verified_port
     _verified_port = None
-    pid_p = _pid_path(root)
-    if not pid_p.exists():
-        return
-    try:
-        pid = int(pid_p.read_text().strip())
-        os.kill(pid, signal.SIGTERM)
-        log.info("Stopped embedding sidecar (pid %d)", pid)
-    except (ValueError, ProcessLookupError, OSError):
-        pass
-    pid_p.unlink(missing_ok=True)
-    _port_path(root).unlink(missing_ok=True)
+    from bobi.service import stop_pidfile
+
+    result = stop_pidfile(
+        _pid_path(root),
+        identity=is_sidecar_argv,
+        kind="the embedding sidecar",
+        also_remove=[_port_path(root)],
+    )
+    if result.stopped or result.killed:
+        log.info("Stopped embedding sidecar (pid %d)", result.pid)
+    elif result.unidentified:
+        log.warning("Embedding sidecar pid %d is unidentifiable - leaving it "
+                    "running rather than signalling a stranger", result.pid)
