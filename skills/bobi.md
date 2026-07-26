@@ -103,9 +103,26 @@ bobi agent <name> subagents show <id>
 bobi agent <name> subagents cancel <id>
 ```
 
-`--wait` blocks until the launched adhoc agent completes. `--as-check` is the
-explicit short-lived monitoring-check harness; it prints verdict JSON and is the
-only `subagents launch` mode that accepts `--post-event`.
+`--wait` blocks until the launched adhoc agent completes. It requires
+`-w adhoc`: waiting works by running the task as one prompt, while a multi-step
+workflow returns as soon as it is dispatched, so there is no run to join.
+`--as-check` is the explicit short-lived monitoring-check harness; it prints
+verdict JSON and is the only `subagents launch` mode that accepts
+`--post-event`.
+
+To fan out and join without burning a turn per check, start the units in the
+background and block on all of them in a **single** shell command:
+
+```bash
+bobi agent <name> subagents launch -w adhoc --role engineer --wait \
+  --task "Review bobi/workflow/" > /tmp/r1.log 2>&1 &
+bobi agent <name> subagents launch -w adhoc --role engineer --wait \
+  --task "Review bobi/brain/" > /tmp/r2.log 2>&1 &
+wait; tail -20 /tmp/r1.log /tmp/r2.log
+```
+
+Polling a log in a loop instead is the pattern this replaces: one real engineer
+session spent 79 of its 201 turns doing exactly that (#845).
 
 `--model` and `--effort` override the launched agent's model and reasoning
 effort for the whole run (provider-native values; they win over workflow step

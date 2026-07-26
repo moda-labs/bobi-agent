@@ -2802,7 +2802,10 @@ main.add_command(event_server_cmd)
 @click.option("--id", "run_key", default=None, help="Explicit run key for correlation (e.g. issue number)")
 @click.option("--task", default=None, help="Task description / context for the agent")
 @click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
-@click.option("--wait", is_flag=True, help="Block until the launched agent completes")
+@click.option("--wait", is_flag=True,
+              help="Block until the launched agent completes. Requires "
+                   "'-w adhoc' — a multi-step workflow launch returns as soon "
+                   "as it is dispatched, so there is nothing to join.")
 @click.option("--as-check", "as_check", is_flag=True,
               help="Run the task as a short-lived monitoring check")
 @click.option("--post-event", "post_event", default=None,
@@ -2929,7 +2932,18 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
                     model: str = "", effort: str = "") -> None:
     """Run a real agent synchronously and print its final text."""
     if workflow != "adhoc":
-        click.echo("--wait only supports adhoc workflow runs", err=True)
+        # Deliberate limit, not an oversight: --wait blocks by running the task
+        # as ONE prompt through spawn_adhoc. A multi-step workflow goes through
+        # the orchestrator, which returns once the run is dispatched, so there
+        # is no in-process handle to join. Fan-out-and-block therefore uses
+        # adhoc units (#845; see the engineer role's "Parallel Work" section).
+        click.echo(
+            f"--wait requires '-w adhoc' (got '{workflow}'). A multi-step "
+            f"workflow returns as soon as it is dispatched, so there is "
+            f"nothing to block on. To fan out and join, launch adhoc units in "
+            f"the background and 'wait' for them in a single shell command.",
+            err=True,
+        )
         raise SystemExit(1)
     if persistent:
         click.echo("--wait cannot be used with --persistent", err=True)
