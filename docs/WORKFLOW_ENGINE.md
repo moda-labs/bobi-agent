@@ -162,6 +162,43 @@ whenever a resumable session id exists (the rare fallbacks that clear it - a
 stale resume, a session that never reported an id - re-seed a fresh session
 from the workflow context, exactly as a model switch would).
 
+### Turn budget
+
+`max_turns` caps how many turns one session may take. Precedence mirrors the
+other dials, minus a launch flag - it is a safety backstop an operator
+configures, not a per-invocation choice: step `max_turns:` >
+`roles.<role>.max_turns` > `brain.max_turns` > the framework default (1000).
+A cap change never rebuilds a session; it applies to whatever session the
+next step constructs.
+
+```yaml
+brain:
+  kind: claude
+  max_turns: 1500          # team default
+roles:
+  monitor: {max_turns: 8}  # a one-verdict agent that needs hundreds is broken
+steps:
+  - name: implement
+    agent: engineer
+    max_turns: 2000        # this step only
+```
+
+The real budget for a long session is its wall-clock `timeout`; the turn cap
+exists to bound a runaway loop. Size it well clear of honest work - a
+Bash-heavy build step spends turns on ordinary tool use, and the framework
+default was raised from 200 to 1000 after two real engineer sessions were
+killed on turn 201, hours inside their 6h timeouts (#845).
+
+Hitting the cap is **not** terminal for a prompt step. The transcript is
+intact and the session id is valid, so the engine restarts the step on that
+id - a fresh CLI process with a fresh turn budget - up to
+`MAX_TURN_BUDGET_RESUMES` times and only while the step's own `timeout` has
+time left. Each restart is logged to the session log as a
+`turn_budget_resume` record, and the final restart tells the agent to write
+its handoff immediately. When the restarts are exhausted the step fails with
+the brain's own diagnosis (`max_turns_reached (max=…, turns=…)`) in
+`state.json` and the `agent/session.failed` event.
+
 ### Route step
 
 Deterministic branch, no LLM. Evaluates `if:` and jumps to `goto:` when true or

@@ -66,6 +66,30 @@ class DrainResult(NamedTuple):
     error_kind: str = ""
 
 
+def _turn_budget_resume_prompt(step: StepDef, final_try: bool) -> str:
+    """The nudge that restarts a step after its session hit the turn cap.
+
+    A nudge, not a re-brief: the transcript survived the cap, so re-injecting
+    the step prompt would make the agent redo work it has already done. The
+    final continuation says so explicitly - that is the one chance to get a
+    handoff written before the step really does fail, which neither of the two
+    sessions killed at 200 turns ever got (#845).
+    """
+    tail = (
+        "This is the LAST continuation available for this step: write your "
+        "handoff file NOW with whatever you have verified so far, then keep "
+        "working."
+        if final_try else
+        "Keep going until the step is complete."
+    )
+    return (
+        f"Your session reached its turn cap and was restarted on the same "
+        f"transcript - no work was lost. Continue step `{step.name}` from "
+        f"where you left off (check the repo and your handoff file for what "
+        f"already landed rather than redoing it). {tail}"
+    )
+
+
 def _close_if_still_active(registry, session_name: str) -> None:
     """Close a session as ``done`` ONLY if it is still in an active status.
 
@@ -469,26 +493,6 @@ async def _run_workflow_async(
             "```yaml\n"
             f"{context_yaml}\n"
             "```"
-        )
-
-    def _turn_budget_resume_prompt(step: StepDef, final_try: bool) -> str:
-        # The transcript survived the cap, so this is a nudge, not a re-brief:
-        # re-injecting the step prompt would make the agent restart work it has
-        # already done. The final continuation says so explicitly - that is the
-        # one chance to get a handoff written before the step really does fail,
-        # which neither of the two sessions killed at 200 turns ever got (#845).
-        tail = (
-            "This is the LAST continuation available for this step: write your "
-            "handoff file NOW with whatever you have verified so far, then "
-            "keep working."
-            if final_try else
-            "Keep going until the step is complete."
-        )
-        return (
-            f"Your session reached its turn cap and was restarted on the same "
-            f"transcript - no work was lost. Continue step `{step.name}` from "
-            f"where you left off (check the repo and your handoff file for "
-            f"what already landed rather than redoing it). {tail}"
         )
 
     def _make_session(resume_id=None, agent_name="", model="", effort="",
