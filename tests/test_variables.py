@@ -261,7 +261,7 @@ class TestConditionContainment:
 
 
 # ---------------------------------------------------------------------------
-# Condition evaluation — numeric comparison
+# Condition evaluation - numeric comparison
 # ---------------------------------------------------------------------------
 
 class TestConditionNumeric:
@@ -322,7 +322,7 @@ class TestConditionNumeric:
 
 
 # ---------------------------------------------------------------------------
-# Condition evaluation — values are resolved by the parser, not by textual
+# Condition evaluation - values are resolved by the parser, not by textual
 # substitution into the expression (D026/Q017). A multi-word or backslash
 # bearing value used to corrupt the token stream before parsing.
 # ---------------------------------------------------------------------------
@@ -335,8 +335,12 @@ class TestFlatResolutionIsNotTextualSubstitution:
 
     def test_multi_word_value_inequality(self):
         ctx = VariableContext()
-        ctx.set_flat("complexity", "medium or large")
-        assert ctx.evaluate_condition("complexity != 'small'") is True
+        ctx.set_flat("verdict", "needs work")
+        # Textual substitution produced `needs work != 'approved'`, whose first
+        # bare word `needs` swallowed the comparison: the parser never saw the
+        # `!=` and fell through to a bare-truthy check on "needs" -> False, so
+        # the route silently never fired.
+        assert ctx.evaluate_condition("verdict != 'approved'") is True
 
     def test_multi_word_value_in_list(self):
         ctx = VariableContext()
@@ -368,9 +372,16 @@ class TestFlatResolutionIsNotTextualSubstitution:
     def test_flat_key_with_regex_metacharacters(self):
         ctx = VariableContext()
         ctx.set_flat("count.total", "5")
-        # Not a bare name the grammar can reference; it must not corrupt
-        # anything either.
-        assert ctx.evaluate_condition("'ok' == 'ok'") is True
+        ctx.set_flat("cost$", "12")
+        # The key IS the bare name: it is looked up verbatim, never compiled
+        # into a pattern, so `.` and `$` match nothing but themselves. The
+        # substitution this replaced anchored each key with `\b`, which a `$`
+        # suffix defeats outright: `cost$` never resolved at all.
+        assert ctx.evaluate_condition("count.total == '5'") is True
+        assert ctx.evaluate_condition("cost$ == '12'") is True
+        # `.` is not a wildcard: a same-shaped name that is not the key stays
+        # unresolved rather than matching it.
+        assert ctx.evaluate_condition("countXtotal == '5'") is False
 
     def test_greedy_rhs_resolves_a_bare_name(self):
         ctx = VariableContext()
