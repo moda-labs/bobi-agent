@@ -7,6 +7,7 @@ state survives byte-for-byte.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import stat
@@ -22,16 +23,67 @@ from bobi import fsutil
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# The five in-scope durable-state writers that must route through fsutil
-# rather than re-implementing tmp+rename (or writing bare). Guards D092:
-# one atomic-write implementation, not six.
-DURABLE_WRITERS = (
-    "bobi/workflow/state.py",
-    "bobi/setup/state.py",
-    "bobi/brain/codex_config.py",
-    "bobi/spend_governor.py",
-    "bobi/monitors/scheduler.py",
-)
+# Modules the durable-write guard cannot speak for. `fsutil.py` IS the
+# implementation; the rest hand-rolled tmp+rename before D092 and are outside
+# this convergence, so converging them is its own change - not a licence to
+# add a new one.
+NOT_CONVERGED = frozenset({
+    "bobi/fsutil.py",
+    "bobi/sdk.py",
+    "bobi/launch_admission.py",
+    "bobi/brain/instructions.py",
+})
+
+
+def _durable_writers() -> list[str]:
+    """Every module under `bobi/` that persists durable state.
+
+    DISCOVERED from source, not hand-listed: a module enrols by routing
+    through `fsutil` or by publishing a file with its own temp + `os.replace`.
+    A hand-typed roster guards only what someone remembered to type - it went
+    stale the moment a durable writer landed without being added to it, which
+    is exactly how a second atomic-write style survived inside an already
+    converged subsystem.
+    """
+    found = []
+    for path in sorted((REPO_ROOT / "bobi").rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel in NOT_CONVERGED:
+            continue
+        source = path.read_text()
+        if "fsutil" in source or "os.replace(" in source:
+            found.append(rel)
+    return found
+
+
+DURABLE_WRITERS = _durable_writers()
+
+
+def _bare_serialized_writes(source: str) -> list[int]:
+    """Line numbers where a serialized document is written with a bare write.
+
+    `path.write_text(json.dumps(...))` truncates the target before the new
+    bytes land, so a kill mid-write leaves a document every reader parses as
+    empty. The shape is matched on the AST rather than by substring so a
+    module's plain-text writes (a `.gitignore`, a generated script) do not
+    read as false positives.
+    """
+    hits = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute)
+                and func.attr in ("write_text", "write_bytes")):
+            continue
+        for sub in ast.walk(node.args[0]):
+            if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr in ("dumps", "dump")
+                    and isinstance(sub.func.value, ast.Name)
+                    and sub.func.value.id in ("json", "yaml")):
+                hits.append(node.lineno)
+                break
+    return hits
 
 
 def kill_mid_write(monkeypatch, *, keep: int = 12) -> None:
@@ -255,14 +307,32 @@ class TestFileLock:
 class TestSingleImplementation:
     """D092: one atomic-write helper, adopted by every durable-state writer."""
 
+    def test_the_roster_covers_the_modules_it_claims_to(self):
+        """Discovery must actually reach the durable writers, not an empty set."""
+        assert set(DURABLE_WRITERS) >= {
+            "bobi/workflow/state.py",
+            "bobi/setup/state.py",
+            "bobi/brain/codex_config.py",
+            "bobi/spend_governor.py",
+            "bobi/monitors/scheduler.py",
+            "bobi/monitors/script_cache_checks.py",
+            "bobi/tool_library.py",
+            "bobi/compose.py",
+            "bobi/install.py",
+        }
+
     @pytest.mark.parametrize("relpath", DURABLE_WRITERS)
-    def test_durable_writer_has_no_bare_write_text(self, relpath):
-        source = (REPO_ROOT / relpath).read_text()
-        assert ".write_text(" not in source, (
-            f"{relpath} writes durable state without fsutil.atomic_write_*"
+    def test_durable_writer_has_no_bare_serialized_write(self, relpath):
+        lines = _bare_serialized_writes((REPO_ROOT / relpath).read_text())
+        assert not lines, (
+            f"{relpath} writes a serialized document without "
+            f"fsutil.atomic_write_* (line(s) {lines})"
         )
 
     @pytest.mark.parametrize("relpath", DURABLE_WRITERS)
     def test_durable_writer_uses_the_shared_helper(self, relpath):
         source = (REPO_ROOT / relpath).read_text()
-        assert "fsutil" in source, f"{relpath} does not route through bobi.fsutil"
+        assert "fsutil" in source, (
+            f"{relpath} publishes state with its own tmp+os.replace instead of "
+            "routing through bobi.fsutil"
+        )
