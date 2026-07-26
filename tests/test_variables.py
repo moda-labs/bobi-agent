@@ -386,6 +386,48 @@ class TestMembershipDeniesAnUnknownValue:
         assert self._verdict_ctx("rejected").evaluate_condition(
             f"${{{{review.verdict}}}} not in {allowed}") is True
 
+    @pytest.mark.parametrize("allowed", _ALLOW_LIST_SPELLINGS)
+    def test_the_not_prefix_spelling_denies_a_blank_value_too(self, allowed):
+        """`not X in [...]` is the same gate as `X not in [...]`.
+
+        Fail-closed has to survive negation. Returning False for an unknown
+        value closes `in`, but a plain `not` in front of it turns that False
+        straight back into True - so the two spellings of one gate decided
+        OPPOSITELY on the blank verdict, and the `not` form went on admitting
+        it. `not ` is a first-class part of the grammar, so this is a spelling
+        a workflow author reaches for, not a curiosity.
+        """
+        ctx = self._verdict_ctx("")
+        assert ctx.evaluate_condition(f"not ${{{{review.verdict}}}} in {allowed}") is False
+
+    @pytest.mark.parametrize("allowed", _ALLOW_LIST_SPELLINGS)
+    def test_both_spellings_of_the_gate_always_agree(self, allowed):
+        """Whatever the value, the two spellings must decide the same way."""
+        for value in ("", "   ", "approved", "rejected", "app"):
+            ctx_a, ctx_b = self._verdict_ctx(value), self._verdict_ctx(value)
+            prefix = ctx_a.evaluate_condition(
+                f"not ${{{{review.verdict}}}} in {allowed}")
+            infix = ctx_b.evaluate_condition(
+                f"${{{{review.verdict}}}} not in {allowed}")
+            assert prefix is infix, (
+                f"verdict={value!r}: `not X in {allowed}` said {prefix} but "
+                f"`X not in {allowed}` said {infix}"
+            )
+
+    def test_not_still_negates_an_ordinary_comparison(self):
+        """Only an UNDECIDABLE result is immune to `not`; the rest negate."""
+        ctx = self._verdict_ctx("approved")
+        assert ctx.evaluate_condition("not ${{review.verdict}} == 'rejected'") is True
+        assert ctx.evaluate_condition("not ${{review.verdict}} == 'approved'") is False
+        ctx.set_flat("flag", "false")
+        assert ctx.evaluate_condition("not flag") is True
+
+    def test_stacked_nots_cannot_launder_an_unknown_value(self):
+        """Undecidable stays undecidable however many `not`s wrap it."""
+        ctx = self._verdict_ctx("")
+        assert ctx.evaluate_condition(
+            "not not ${{review.verdict}} in ['approved']") is False
+
     def test_an_allow_list_cannot_opt_the_empty_string_back_in(self):
         """The recorded cost: "" is undecidable even when listed explicitly.
 

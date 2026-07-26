@@ -35,11 +35,14 @@ def _stub_bsd_ps(tmp_path, monkeypatch) -> str:
     Returns the untruncated command line the stub reports.
     """
     stub = tmp_path / "ps"
+    # Matches the doubled w wherever it appears, so the contract is pinned by
+    # outcome rather than by one spelling: `-ww` and the dash-less BSD `ww`
+    # both mean unlimited width, and either reimplementation must pass.
     stub.write_text(
         "#!/bin/sh\n"
         f"full='{_LONG_DAEMON_ARGV}'\n"
         'case " $* " in\n'
-        '  *" -ww "*) printf "%s\\n" "$full" ;;\n'
+        '  *ww*) printf "%s\\n" "$full" ;;\n'
         '  *) printf "%s\\n" "$full" | cut -c1-80 ;;\n'
         "esac\n"
     )
@@ -204,6 +207,36 @@ class TestStopIdentity:
             "ps output was clipped at the default width - the tail of argv, "
             "which is the only part identity looks at, never arrived"
         )
+
+    def test_a_ps_that_rejects_the_flag_yields_no_argv_at_all(self, tmp_path,
+                                                              monkeypatch):
+        """A `ps` that will not take `-ww` must answer nothing, not garbage.
+
+        Asking for a flag creates a rejection path a bare `ps -p N -o command=`
+        never had, and `subprocess.run` does not raise on a non-zero exit. Some
+        `ps` implementations print their usage on STDOUT, so the words of that
+        usage message would be split into a plausible-looking argv - and an
+        argv that is merely WRONG is worse than none: identity fails, and
+        `stop_pidfile` reads "not our process" as a recycled pid, deletes the
+        pid file, and leaves the daemon running. That is the same damage `-ww`
+        was added to prevent, arriving through the flag itself.
+
+        Empty is the honest answer: it routes to `unidentified`, which signals
+        nothing and keeps the state files.
+        """
+        stub = tmp_path / "ps"
+        stub.write_text("#!/bin/sh\n"
+                        "echo 'ps: illegal option -- w'\n"
+                        "echo 'usage: ps [-AadefLlnwZ] [-p PID]'\n"
+                        "exit 1\n")
+        stub.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+        monkeypatch.setattr(service, "_proc_argv", lambda pid: [])
+
+        assert service._ps_argv(4242) == [], (
+            "usage text was parsed as an argv - identity would run against it"
+        )
+        assert service.is_process(4242, lambda argv: True) is False
 
     def test_a_long_argv_daemon_is_stopped_not_declared_stale(
             self, tmp_path, monkeypatch, sacrificial_process):

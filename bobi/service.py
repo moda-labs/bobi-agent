@@ -328,6 +328,15 @@ def _ps_argv(pid: int) -> list[str]:
         )
     except (OSError, subprocess.SubprocessError):
         return []
+    if proc.returncode != 0:
+        # Asking for a flag creates a rejection path the bare command never
+        # had, and `subprocess.run` does not raise on a non-zero exit. A `ps`
+        # that refuses `-ww` may print its usage on STDOUT, whose words would
+        # split into a plausible-looking argv - and a WRONG argv is worse than
+        # none, because identity then confidently says "not our process" and
+        # `stop_pidfile` deletes a live daemon's pid file as a recycled pid.
+        # Empty routes to `unidentified` instead: signal nothing, keep state.
+        return []
     return proc.stdout.split()
 
 

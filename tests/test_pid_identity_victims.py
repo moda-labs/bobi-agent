@@ -25,22 +25,32 @@ import pytest
 
 _TESTS = Path(__file__).resolve().parent
 
-# `python -c "import time; time.sleep(N)"` - the sacrificial-victim idiom. An
-# ordinary in-test `time.sleep(0.1)` is a direct call and does not match.
-_TIMED_VICTIM = re.compile(r"import time;\s*time\.sleep\(")
+# A timed sleep reached through the `time` module inside a spawned `-c`
+# program, however it is spelled: `import time; time.sleep(N)`, the same over a
+# real newline in a triple-quoted program, or `__import__('time').sleep(N)`. An
+# ordinary in-test `time.sleep(0.1)` has no `import time` beside it and does
+# not match - only a program being handed to another process does.
+_TIMED_VICTIM = re.compile(
+    r"""(?:import[ \t]+time[;\n\\][^\n]{0,120}?|__import__\([ \t]*['"]time['"][ \t]*\)\.)"""
+    r"""[ \t]*(?:time\.)?sleep\(""",
+)
 
-# `sleep N` as the last act of a shell stand-in, which runs out the same way.
-_TIMED_SHELL_VICTIM = re.compile(r"\\nsleep \d")
+# `sleep N` as a line of a shell stand-in, whether escaped or over a real
+# newline, indented or `exec`ed. It runs out the same way.
+_TIMED_SHELL_VICTIM = re.compile(r"(?:\\n|\n)[ \t]*(?:exec[ \t]+)?sleep[ \t]+\d")
 
 
 def _offenders(pattern: re.Pattern) -> list[str]:
+    """Scan the whole file text, so a spelling split across lines is seen."""
     hits = []
     for path in sorted(_TESTS.rglob("test_*.py")):
         if path.name == Path(__file__).name:
             continue
-        for lineno, line in enumerate(path.read_text().splitlines(), 1):
-            if pattern.search(line):
-                hits.append(f"{path.relative_to(_TESTS)}:{lineno}: {line.strip()}")
+        text = path.read_text()
+        for match in pattern.finditer(text):
+            lineno = text.count("\n", 0, match.start()) + 1
+            snippet = " ".join(match.group(0).split())[:80]
+            hits.append(f"{path.relative_to(_TESTS)}:{lineno}: {snippet}")
     return hits
 
 

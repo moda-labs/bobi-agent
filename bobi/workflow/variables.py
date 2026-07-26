@@ -142,8 +142,13 @@ def _resolve_operand(text: str, ctx: _Ctx) -> str:
 
 
 def _eval_expr(expr: str, ctx: _Ctx = None) -> bool:
-    """Recursive-descent parser for simple boolean expressions."""
-    return _parse_or(expr.strip(), ctx)[0]
+    """Recursive-descent parser for simple boolean expressions.
+
+    Coerced to a real bool here so UNDECIDABLE never escapes the parser: it
+    exists to survive `not` inside an expression, and every caller outside
+    wants a plain routing answer.
+    """
+    return bool(_parse_or(expr.strip(), ctx)[0])
 
 
 def _parse_or(expr: str, ctx: _Ctx = None) -> tuple[bool, str]:
@@ -173,7 +178,33 @@ _NUMERIC_OPS: dict[str, Callable[[float, float], bool]] = {
 }
 
 
-def _membership(haystack: Any, needle: Any, *, negate: bool) -> bool:
+class _Undecidable:
+    """A comparison that could not be decided. Falsy, and immune to ``not``.
+
+    Fail-closed has to survive negation. `not X in [...]` and `X not in [...]`
+    are the same gate written two ways, so if the second denies an unknown X by
+    returning False, a plain `not` in front of the first must not turn that
+    False straight back into True - which is exactly how the two spellings came
+    to disagree, leaving the `not` form still admitting a blank value.
+
+    Falsy so every ordinary consumer (`and`, `or`, the final bool) reads it as
+    "did not pass" without needing to know it exists; distinguishable only
+    where negation would otherwise launder it.
+    """
+
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "UNDECIDABLE"
+
+
+UNDECIDABLE = _Undecidable()
+
+
+def _membership(haystack: Any, needle: Any, *, negate: bool) -> Any:
     """Evaluate `needle in haystack`, or its `not in` inverse. Fails CLOSED.
 
     Two rules, both learned from the same routing gate failing open.
@@ -198,13 +229,22 @@ def _membership(haystack: Any, needle: Any, *, negate: bool) -> bool:
 
     `not in` is a separate gate - "proceed unless denied" - not the boolean
     negation of `in`, which is why the blank check precedes `negate` instead
-    of being inverted along with the result. The deliberate cost: an allow-list
-    can no longer admit "" on purpose. Letting it would reopen the hole for
-    every gate that never thought to list "" in the first place.
+    of being inverted along with the result. It returns UNDECIDABLE rather than
+    plain False for the same reason, one level up: a `not ` prefix would
+    otherwise negate the denial back into an admission. The deliberate cost:
+    an allow-list can no longer admit "" on purpose. Letting it would reopen
+    the hole for every gate that never thought to list "" in the first place.
+
+    Only the TESTED operand is guarded. A blank HAYSTACK - an allow/deny list
+    that failed to resolve - is NOT treated as unknown, because it is
+    indistinguishable from a legitimately empty one: `'error' not in
+    ${{step.output}}` over empty output is a real gate that must still pass.
+    Separating those needs the parser to carry resolution failure, which it
+    does not; see the PR discussion rather than guessing here.
     """
     value = str(needle).strip()
     if not value:
-        return False
+        return UNDECIDABLE
     if isinstance(haystack, list):
         member = value in [str(item).strip() for item in haystack]
     else:
@@ -217,7 +257,9 @@ def _parse_comparison(expr: str, ctx: _Ctx = None) -> tuple[bool, str]:
 
     if expr.startswith("not "):
         val, rest = _parse_comparison(expr[4:], ctx)
-        return not val, rest
+        # An undecidable comparison stays undecidable however many `not`s wrap
+        # it - negating it would launder "we could not tell" into "yes".
+        return (val if val is UNDECIDABLE else not val), rest
 
     left, rest = _parse_value(expr, ctx)
     rest = rest.strip()
