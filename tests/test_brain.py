@@ -207,6 +207,123 @@ def test_resolve_effort_precedence(monkeypatch):
     assert resolve_effort(None) == "medium"
 
 
+# --- turn budget (#845) - the third dial, and the honest error it names ----
+
+
+def test_config_parses_max_turns(tmp_path):
+    """agent.yaml `brain.max_turns` + `roles.<role>.max_turns` round-trip."""
+    from bobi.config import Config
+    from bobi import paths
+
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text(
+        "agent: t\nbrain:\n  kind: claude\n  max_turns: 1500\n"
+        "roles:\n  monitor:\n    max_turns: 8\n  planner: {}\n"
+    )
+    cfg = Config.load(tmp_path)
+    assert cfg.brain_max_turns == 1500
+    assert cfg.role_max_turns("monitor") == 8
+    assert cfg.role_max_turns("planner") == 0   # role entry without a cap
+    assert cfg.role_max_turns("engineer") == 0  # unknown role
+    # Absent config → 0 ("unconfigured"), everything falls through.
+    paths.agent_yaml_path(tmp_path).write_text("agent: t\n")
+    assert Config.load(tmp_path).brain_max_turns == 0
+    assert Config.load(tmp_path).role_max_turns("monitor") == 0
+
+
+def test_config_max_turns_rejects_unusable_values(tmp_path):
+    """A cap is a positive int; anything else reads as unconfigured, not 0 turns.
+
+    An unresolved ``${VAR}``, a typo, or a non-positive number must fall
+    through to the configured chain rather than pin a session to no turns at
+    all.
+    """
+    from bobi.config import Config
+    from bobi import paths
+
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    for value in ("''", "'not-a-number'", "0", "-5", "'${MISSING_VAR}'"):
+        paths.agent_yaml_path(tmp_path).write_text(
+            f"agent: t\nbrain:\n  max_turns: {value}\n"
+        )
+        assert Config.load(tmp_path).brain_max_turns == 0, value
+    # A quoted integer (what ${VAR} interpolation yields) still counts.
+    paths.agent_yaml_path(tmp_path).write_text(
+        "agent: t\nbrain:\n  max_turns: '750'\n"
+    )
+    assert Config.load(tmp_path).brain_max_turns == 750
+
+
+def test_resolve_max_turns_precedence():
+    """explicit > roles.<role>.max_turns > brain.max_turns > default (#845).
+
+    Unlike model/effort there is no provider default to fall through to, so
+    the framework default is the floor of the chain, never "".
+    """
+    from bobi.brain import DEFAULT_MAX_TURNS, resolve_max_turns
+    from bobi.config import Config
+
+    cfg = Config(brain={"max_turns": 1500}, roles={"monitor": {"max_turns": 8}})
+
+    assert resolve_max_turns(cfg, role="monitor", explicit=42) == 42
+    assert resolve_max_turns(cfg, role="monitor") == 8
+    assert resolve_max_turns(cfg, role="engineer") == 1500  # team default
+    assert resolve_max_turns(Config(), role="engineer") == DEFAULT_MAX_TURNS
+    assert resolve_max_turns(None) == DEFAULT_MAX_TURNS
+    # An unusable explicit value defers to config instead of capping at 0.
+    assert resolve_max_turns(cfg, role="monitor", explicit=0) == 8
+    assert resolve_max_turns(cfg, role="monitor", explicit=-1) == 8
+
+
+def test_default_max_turns_is_clear_of_real_agent_runs():
+    """The default must not be the 200 that killed two engineer sessions.
+
+    Both died on turn 201 hours inside their 6h timeouts; the cap is a
+    runaway-loop backstop, so it sits well above observed honest work.
+    """
+    from bobi.brain import DEFAULT_MAX_TURNS
+
+    assert DEFAULT_MAX_TURNS >= 1000
+
+
+def test_turn_error_text_prefers_the_brains_diagnosis():
+    """The composition that replaced the literal "turn failed" (#845)."""
+    from bobi.brain import ERROR_KIND_MAX_TURNS, TurnResult, turn_error_text
+
+    # A successful turn has no error text at all.
+    assert turn_error_text(is_error=False) == ""
+
+    # The turn-cap shape: error_message set, result_text EMPTY. This exact
+    # combination used to render as the literal fallback "turn failed".
+    capped = TurnResult(
+        is_error=True,
+        error_kind=ERROR_KIND_MAX_TURNS,
+        error_message="max_turns_reached (max=1000, turns=1001)",
+        result_text="",
+    )
+    assert capped.error_text() == "max_turns_reached (max=1000, turns=1001)"
+    assert "turn failed" not in capped.error_text()
+
+    # Both present → both reported, diagnosis first.
+    assert turn_error_text(
+        is_error=True, error_message="max_turns_reached", result_text="ran out",
+    ) == "max_turns_reached: ran out"
+
+    # Only result_text → use it.
+    assert turn_error_text(is_error=True, result_text="boom") == "boom"
+
+    # Nothing but a status: still self-describing, never "unknown error".
+    last_resort = turn_error_text(is_error=True, api_error_status=529)
+    assert "529" in last_resort and "unknown error" not in last_resort
+
+    # A classified kind with is_error unset is still a failure (the rule the
+    # adapters use to derive is_error).
+    assert TurnResult(
+        is_error=False, error_kind=ERROR_KIND_MAX_TURNS,
+        error_message="max_turns_reached (max=8, turns=9)",
+    ).error_text() == "max_turns_reached (max=8, turns=9)"
+
+
 def test_set_process_brain_pins_effort():
     from bobi.brain import (
         BRAIN_ENV,

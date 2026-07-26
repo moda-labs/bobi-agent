@@ -16,6 +16,8 @@ from typing import Any
 
 import yaml
 
+from bobi.config import positive_int
+
 
 DEFAULT_ROUTE_LOOP_MAX_ITERATIONS = 3
 
@@ -98,7 +100,7 @@ def load_workflow(path: Path) -> Workflow:
             agent=s.get("agent", ""),
             model=s.get("model", ""),
             effort=s.get("effort", ""),
-            max_turns=_positive_int(s.get("max_turns")),
+            max_turns=positive_int(s.get("max_turns")),
             handoff=handoff,
             timeout=s.get("timeout", 1800),
             worktree=s.get("worktree", False),
@@ -122,15 +124,6 @@ def load_workflow(path: Path) -> Workflow:
     )
     _validate_back_edges(workflow)
     return workflow
-
-
-def _positive_int(value: Any) -> int:
-    """*value* as a positive int, or 0 for absent/blank/unparseable input."""
-    try:
-        number = int(str(value).strip())
-    except (TypeError, ValueError):
-        return 0
-    return number if number > 0 else 0
 
 
 def _parse_max_iterations(raw_step: dict[str, Any]) -> int:

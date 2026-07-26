@@ -495,8 +495,8 @@ async def _run_workflow_async(
             "```"
         )
 
-    def _make_session(resume_id=None, agent_name="", model="", effort="",
-                      max_turns=0):
+    def _make_session(resume_id=None, agent_name="", model="", effort="", *,
+                      max_turns):
         from bobi.runtime_guard import prepare_brain_runtime
 
         prepare_brain_runtime()
@@ -506,10 +506,10 @@ async def _run_workflow_async(
         else:
             agent_prompt = resolve_agent_prompt("", project_root, interactive=interactive)
 
-        options = {
-            "max_turns": max_turns or resolve_max_turns(team_cfg, role=role),
-            "skills": "all",
-        }
+        # max_turns is keyword-REQUIRED: _effective_step_max_turns is the one
+        # place the cap is resolved, so a call site cannot quietly fall back to
+        # a second default and drift from the configured value (#845).
+        options = {"max_turns": max_turns, "skills": "all"}
         if model:
             options["model"] = model
         if effort:
@@ -954,15 +954,15 @@ async def _run_workflow_async(
                     await client.disconnect()
                 except Exception:
                     pass
-                resume_id = load_session_id(session_name)
-                if not resume_id:
+                cap_resume_id = load_session_id(session_name)
+                if not cap_resume_id:
                     log.error(
                         "Step %s hit the turn cap with no resumable session "
                         "id; cannot continue", step.name,
                     )
                     break
                 client = _make_session(
-                    resume_id=resume_id, agent_name=current_agent,
+                    resume_id=cap_resume_id, agent_name=current_agent,
                     model=current_model, effort=current_effort,
                     max_turns=current_max_turns,
                 )

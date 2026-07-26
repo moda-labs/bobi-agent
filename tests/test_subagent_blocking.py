@@ -57,6 +57,9 @@ from bobi.subagent import (
     run_phase_blocking,
     spawn_adhoc,
 )
+# The real Session, imported under an alias because SESSION_PATCH below
+# replaces ``bobi.session.Session`` for the duration of a test.
+from bobi.session import Session as _RealSession
 
 
 # ---------------------------------------------------------------------------
@@ -146,9 +149,14 @@ class FakeClient:
 class FakeSession:
     """Mimics bobi.session.Session for unit tests."""
 
+    # Borrowed, not restated (#845): the double supplies the recorded turn
+    # fields and the REAL Session owns how they compose into an error string,
+    # so the double can never drift into reporting something Session wouldn't.
+    last_error = _RealSession.last_error
+
     def __init__(self, success=True, response="done", session_id="sess-fake",
                  cost=0.10, duration=2000, turns=3, start_ok=True,
-                 is_error=False):
+                 is_error=False, error_kind="", error_message=""):
         self._success = success
         self._response = response
         self._start_ok = start_ok
@@ -156,6 +164,9 @@ class FakeSession:
         self.cwd = ""
         self._last_response = response
         self._last_is_error = is_error or (not success)
+        self._last_error_kind = error_kind
+        self._last_error_message = error_message
+        self._last_api_error_status = None
         self._total_cost_usd = cost
         self._total_duration_ms = duration
         self._total_turns = turns
