@@ -14,7 +14,7 @@ from pathlib import Path
 
 import yaml
 
-from bobi import paths
+from bobi import fsutil, paths
 
 
 def install_pack(pack_dir: Path, project_path: Path,
@@ -83,7 +83,8 @@ def _read_yaml(path: Path) -> dict:
 
 
 def _write_yaml(path: Path, data: dict) -> None:
-    path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+    fsutil.atomic_write_text(
+        path, yaml.dump(data, default_flow_style=False, sort_keys=False))
 
 
 def read_compose_lock(dest: Path) -> dict[str, str]:
@@ -108,11 +109,11 @@ def read_compose_lock(dest: Path) -> dict[str, str]:
 def write_compose_lock(dest: Path, chain, prov) -> None:
     """Record the resolved `from:` chain + provenance so a deploy/outside-org
     install is reproducible and `doctor` can flag a drifted local sibling."""
-    (dest / "compose-lock.json").write_text(json.dumps({
+    fsutil.atomic_write_json(dest / "compose-lock.json", {
         "chain": prov.chain,
         "provenance": prov.items,
         "warnings": prov.warnings,
-    }, indent=1))
+    }, indent=1)
 
 
 def seed_workspace(pack_dir: Path, project_path: Path) -> None:
@@ -156,12 +157,12 @@ def write_install_manifest(dest: Path, pack_dir: Path,
         if f.exists():
             files[name] = hashlib.sha256(f.read_bytes()).hexdigest()
 
-    (dest / "install-manifest.json").write_text(json.dumps({
+    fsutil.atomic_write_json(dest / "install-manifest.json", {
         "agent": pack_dir.name,
         "source": str(pack_dir),
         "frozen": local_source,
         "files": files,
-    }, indent=1))
+    }, indent=1)
 
 
 def write_install_gitignore(project_path: Path, local_source: bool) -> None:
@@ -181,4 +182,4 @@ def write_install_gitignore(project_path: Path, local_source: bool) -> None:
 
     with with_mutable_runtime_package(project_path):
         gitignore = paths.package_dir(project_path) / ".gitignore"
-        gitignore.write_text("\n".join(entries) + "\n")
+        fsutil.atomic_write_text(gitignore, "\n".join(entries) + "\n")

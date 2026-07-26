@@ -26,7 +26,7 @@ from pathlib import Path
 
 import yaml
 
-from bobi import registry
+from bobi import fsutil, registry
 
 log = logging.getLogger(__name__)
 
@@ -340,7 +340,11 @@ def compose(chain: list[ResolvedLayer], dest: Path) -> Provenance:
     # prune (§4) is applied after merge, across the frozen surfaces + agent.yaml.
     _apply_prune(chain, dest, merged_yaml, prov)
 
-    (dest / "agent.yaml").write_text(
+    # Atomic: every reader treats an empty agent.yaml as "the team declares
+    # nothing" rather than an error, so a compose killed mid-write would
+    # silently unwire a live team instead of failing loudly.
+    fsutil.atomic_write_text(
+        dest / "agent.yaml",
         yaml.dump(merged_yaml, default_flow_style=False, sort_keys=False))
     return prov
 
@@ -539,7 +543,8 @@ def _compose_structured_dir(chain: list[ResolvedLayer], dest: Path, sub: str,
     if monitor_yaml_seen:
         out.mkdir(parents=True, exist_ok=True)
         merged = [monitor_records[name] for name in monitor_order]
-        (out / "defaults.yaml").write_text(
+        fsutil.atomic_write_text(
+            out / "defaults.yaml",
             yaml.dump({"monitors": merged}, default_flow_style=False,
                       sort_keys=False))
         for name in monitor_order:
@@ -806,8 +811,9 @@ def _prune_one(dest: Path, merged_yaml: dict, surface: str, name: str) -> bool:
             mons = data.get("monitors", []) or []
             kept = [m for m in mons if m.get("name") != name]
             if len(kept) != len(mons):
-                mfile.write_text(yaml.dump({"monitors": kept},
-                                           default_flow_style=False, sort_keys=False))
+                fsutil.atomic_write_text(
+                    mfile, yaml.dump({"monitors": kept},
+                                     default_flow_style=False, sort_keys=False))
                 return True
         return False
     if surface == "roles":

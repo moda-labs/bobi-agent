@@ -9,6 +9,7 @@ Covers the acceptance criteria of both:
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 from pathlib import Path
@@ -371,6 +372,87 @@ def test_from_not_emitted(project):
     assert "from" not in cfg
     assert cfg["agent"] == "moda"
     assert cfg["version"] == "2.0.0"
+
+
+# --- durable writes ----------------------------------------------------------
+
+
+def _kill_writing(monkeypatch, needle: str, *, skip: int = 0, keep: int = 12):
+    """Kill the process part-way through the write of a file named *needle*.
+
+    Faithful to a supervisor restart / OOM / Ctrl-C: partial bytes land and
+    the write dies. A bare `write_text` has already truncated its target by
+    then; an atomic write is only part-way through a temp sibling, which is
+    why the needle matches the temp name too. *skip* passes that many matching
+    writes through untouched, so a test can aim at a specific writer when more
+    than one publishes the same filename.
+    """
+    real_write_text = Path.write_text
+    seen = {"n": 0}
+
+    def killed(self, data, *a, **kw):
+        if needle not in self.name:
+            return real_write_text(self, data, *a, **kw)
+        seen["n"] += 1
+        if seen["n"] <= skip:
+            return real_write_text(self, data, *a, **kw)
+        real_write_text(self, data[:keep], *a, **kw)
+        raise KeyboardInterrupt(f"simulated kill mid-write of {self.name}")
+
+    monkeypatch.setattr(Path, "write_text", killed)
+
+
+def test_compose_killed_writing_agent_yaml_keeps_the_previous_one(project, monkeypatch):
+    """`run/package/agent.yaml` must never be observable half-written.
+
+    Every reader treats an empty agent.yaml as "the team declares nothing"
+    rather than an error - `Config.load` returns all-defaults, and the setup
+    web UI derives its credential allow-list from it - so a torn write
+    silently unwires a live team instead of failing loudly.
+    """
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'services:\n  - {name: github, required: true}\n')
+    dest, _ = _compose(project, leaf)
+    before = (dest / "agent.yaml").read_text()
+
+    with pytest.MonkeyPatch.context() as mp:
+        _kill_writing(mp, "agent.yaml")
+        with pytest.raises(KeyboardInterrupt):
+            _compose(project, leaf)
+
+    assert (dest / "agent.yaml").read_text() == before
+    cfg = yaml.safe_load((dest / "agent.yaml").read_text())
+    assert cfg["entry_point"] == "director"       # still a whole document
+    assert [p.name for p in dest.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_install_killed_writing_agent_yaml_keeps_the_previous_one(project, monkeypatch):
+    """install.py stamps `agent:` onto the composed agent.yaml - atomically too.
+
+    compose() writes the file first and install rewrites it, so the kill skips
+    compose's write and lands on install's.
+    """
+    from bobi.cli import _install_pack
+
+    team = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'services:\n  - {name: github, required: true}\n')
+    monkeypatch.chdir(project)
+    _install_pack(team, project, local_source=True)
+    dest = paths.package_dir(project)
+    before = (dest / "agent.yaml").read_text()
+
+    with pytest.MonkeyPatch.context() as mp:
+        _kill_writing(mp, "agent.yaml", skip=1)
+        with pytest.raises(KeyboardInterrupt):
+            _install_pack(team, project, local_source=True)
+
+    cfg = yaml.safe_load((dest / "agent.yaml").read_text())
+    assert cfg["entry_point"] == "director"       # still a whole document
+    assert cfg["version"] == "1.0.0"
+    assert (dest / "agent.yaml").read_text() == before
+    assert [p.name for p in dest.iterdir() if p.name.endswith(".tmp")] == []
 
 
 # --- prune (#451 §4) ---------------------------------------------------------
