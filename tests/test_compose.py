@@ -574,13 +574,44 @@ def test_prune_unresolvable_path_is_rejected_and_host_untouched(project, tmp_pat
     assert error is not None and "could not be resolved" in str(error)
 
 
+def test_prune_unresolvable_runtimeerror_is_rejected_too(project):
+    """`Path.resolve` signals an unfollowable path as OSError OR RuntimeError.
+
+    Which one is a pathlib implementation detail that moved between supported
+    interpreters (see the symlink-loop test below), so the handler's RuntimeError
+    arm is pinned directly here rather than through whichever exception the
+    running version happens to raise.
+    """
+    _team(project, "core", 'version: "1.0.0"\n', tools={"github.md": "gh"})
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
+                 'prune:\n  tools: [github.md]\n')
+
+    surface = str(paths.package_dir(project) / "tools")
+    real_resolve = Path.resolve
+
+    def looping(self, *a, **kw):
+        if str(self).startswith(surface):
+            raise RuntimeError(f"Symlink loop from {str(self)!r}")
+        return real_resolve(self, *a, **kw)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Path, "resolve", looping)
+        error = _compose_error(project, leaf)
+
+    assert error is not None, "an unresolvable prune target was accepted"
+    assert "could not be resolved" in str(error)
+    assert "prune" in str(error) and "tools:github.md" in str(error)
+
+
 def test_prune_symlink_loop_fails_with_an_actionable_error(project):
-    """A symlink loop raises RuntimeError, not OSError, from `Path.resolve`.
+    """A looping prune target is named as a broken pack on EVERY interpreter.
 
     `dest` is reused across installs and only surfaces a layer contributes get
-    cleared, so a looping link can outlive the install that left it. Catching
-    only OSError let it crash `bobi agents install` with a raw traceback
-    instead of naming the `prune:` block at fault.
+    cleared, so a looping link can outlive the install that left it. `resolve()`
+    alone cannot carry this check: <=3.12 raises RuntimeError on a loop, while
+    3.13 resolves it to the looping path itself and reports nothing, which left
+    the same broken pack erroring on one interpreter and silently pruning
+    nothing on the other.
     """
     leaf = _team(project, "solo", 'version: "1.0.0"\nentry_point: director\n',
                  tools={"github.md": "gh"})
@@ -592,9 +623,30 @@ def test_prune_symlink_loop_fails_with_an_actionable_error(project):
                                 'prune:\n  tools: [loop]\n')
     error = _compose_error(project, leaf)
 
-    assert error is not None, "a looping prune target crashed instead of failing"
+    assert error is not None, "a looping prune target was silently accepted"
     assert "could not be resolved" in str(error)
     assert "prune" in str(error) and "tools:loop" in str(error)
+
+
+def test_prune_dangling_symlink_still_just_warns(project):
+    """A link that points nowhere is a MISSING target, not an unvouchable one.
+
+    The loop guard above follows the link to classify it, so it must not
+    reclassify the ordinary "prune names something that isn't there" case -
+    that has always been a warning, and turning it into a hard ComposeError
+    would fail installs for packs that prune an optional file.
+    """
+    leaf = _team(project, "solo", 'version: "1.0.0"\nentry_point: director\n',
+                 tools={"github.md": "gh"})
+    dest, _ = _compose(project, leaf)
+    dangling = dest / "tools" / "gone"
+    os.symlink(str(dest / "tools" / "never-existed"), str(dangling))
+
+    _write(leaf / "agent.yaml", 'version: "1.0.0"\nentry_point: director\n'
+                                'prune:\n  tools: [gone]\n')
+    error = _compose_error(project, leaf)
+
+    assert error is None, "a dangling prune target was rejected as unresolvable"
 
 
 # --- framework-default monitors (#471) ---------------------------------------

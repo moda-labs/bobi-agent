@@ -768,7 +768,7 @@ def _prune_target(dest: Path, surface: str, name: str) -> Path:
     walks out the same way, so the unlink/rmtree in `_prune_one` would delete
     host paths during `bobi agents install`. Team packs are trusted code
     (docs/SECURITY.md), but nothing in that trust extends to deleting outside
-    the image — and a typo must not cost a user their home directory. Symlinks
+    the image - and a typo must not cost a user their home directory. Symlinks
     are resolved, so an in-image link pointing out is an escape too.
 
     An escape is rejected loudly rather than skipped: a prune entry that cannot
@@ -778,16 +778,29 @@ def _prune_target(dest: Path, surface: str, name: str) -> Path:
     target = base / str(name)
     try:
         base_real, target_real = base.resolve(), target.resolve()
+        if target.is_symlink():
+            # `resolve()` alone reports a symlink loop differently per version:
+            # <=3.12 raises RuntimeError, 3.13 returns the looping path itself
+            # (it resolves through os.path.realpath now). Asking the filesystem
+            # to follow the link is the one check that answers the same on both,
+            # so a broken pack is named rather than silently pruning nothing on
+            # whichever interpreter the user happens to run.
+            #
+            # A DANGLING link is not this case: a prune entry that names nothing
+            # is already a "matched nothing" warning, not a broken pack.
+            try:
+                target.stat()
+            except FileNotFoundError:
+                pass
     except (OSError, RuntimeError) as e:
-        # Resolution failed: unreadable, or a symlink loop - which raises
-        # RuntimeError, not OSError, so the old handler never caught the case
-        # its own comment named. Falling back to the UNRESOLVED paths made this
-        # a lexical check, and `base in (base/"../../x").parents` is True, so
-        # the fallback silently accepted the very escape this function exists to
-        # stop. A path we cannot resolve is one we cannot vouch for: reject it.
+        # Resolution failed: unreadable, or a symlink we cannot follow. Falling
+        # back to the UNRESOLVED paths made this a lexical check, and
+        # `base in (base/"../../x").parents` is True, so the fallback silently
+        # accepted the very escape this function exists to stop. A path we
+        # cannot resolve is one we cannot vouch for: reject it.
         raise ComposeError(
             f"prune {surface}:{name} could not be resolved ({e}), so it cannot "
-            "be confirmed to point inside the composed team package — fix the "
+            "be confirmed to point inside the composed team package - fix the "
             "`prune:` block in the layer that declares it."
         ) from e
     if base_real not in target_real.parents:
@@ -795,7 +808,7 @@ def _prune_target(dest: Path, surface: str, name: str) -> Path:
             f"prune {surface}:{name} points outside the composed team package. "
             "A prune entry names content inside the package (e.g. `codex` or "
             "`methodology/old.md`), so an absolute path or a `..` segment is "
-            "never valid — fix the `prune:` block in the layer that declares it."
+            "never valid - fix the `prune:` block in the layer that declares it."
         )
     return target
 
