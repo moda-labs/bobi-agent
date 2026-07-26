@@ -175,9 +175,9 @@ turn instead of one per check:
 
 ```bash
 # Launch N independent units in the background...
-bobi agent eng subagents launch -w adhoc --role engineer --wait \
+bobi agent <agent> subagents launch -w adhoc --role engineer --wait \
   --task "Review bobi/workflow/ for correctness bugs" > /tmp/r1.log 2>&1 &
-bobi agent eng subagents launch -w adhoc --role engineer --wait \
+bobi agent <agent> subagents launch -w adhoc --role engineer --wait \
   --task "Review bobi/brain/ for correctness bugs" > /tmp/r2.log 2>&1 &
 pytest tests/ -q > /tmp/suite.log 2>&1 &
 
