@@ -154,8 +154,8 @@ check, using the existing safe parser (`variables.py` `evaluate_condition`).
     prompt: |
       Follow the Implement Phase instructions in your role prompt.
     handoff:
-      required: [status]
-      success_when: "status == 'complete'"
+      required: [status, phase]
+      success_when: "phase == 'implement_complete'"
 ```
 
 Schema (`bobi/workflow/schema.py`):
@@ -282,6 +282,16 @@ Every state a gated step can land in, and what it does:
 | `success_when` with no declared fields | **Rejected at load time** (Decision 5) |
 | Agent wrote no handoff file at all | Existing required-field retry path runs first and fails there; the gate is never reached |
 | No `success_when` | Today's behavior exactly (Decision 4) |
+
+**Known limitation this does not close.** A prompt step with no `handoff:` block
+at all has `required == []`, so `_validate_handoff` returns `[]` and the step
+passes unconditionally - there is nothing to gate on. That describes
+`adhoc.yaml`, the most-used workflow in every pack. Opt-in means `adhoc` runs
+keep completing regardless of what the agent did.
+
+Closing that needs a different mechanism (a default contract, or a terminal
+self-report every step must make), which is a larger design question than this
+ticket. Naming it so the gate is not mistaken for whole-engine coverage.
 
 Moving the undeclared-field case to load time is what keeps the runtime message
 shape single: at runtime a name can only fail to resolve because the agent
@@ -412,7 +422,56 @@ Deliberately **not** gated in this PR:
 and (b) the role prompt that writes it declaring its allowed values. A test in
 `tests/test_eng_team_role_constraints.py` enforces (b) so the two cannot drift.
 
-### 3. Fix `pr-feedback` task interpolation
+### 3. Apply the gate to native action steps too
+
+Prompt steps are not the only place completion is decided without looking at the
+result. Native action steps are worse: their completion is not structural, it is
+**unconditional**.
+
+`orchestrator.py:678-692`:
+
+```python
+if step.action:
+    result = _execute_native_action(step, ctx, cwd)
+    ctx.set_scope(step.name, result)
+    for k, v in result.items():
+        ctx.set_flat(k, v)
+    _emit_lifecycle_event("agent/step.completed", {
+        ...
+        "text": f"Native step {step.name} completed: {result.get('status', '')}",
+    })
+    step_idx += 1
+```
+
+`_execute_native_action` returns `{"status": "error", "reason": ...}` for an
+unknown action name and for any exception (`:1100-1107`), and
+`_cleanup_worktree_action` returns `{"status": "error"}` when it cannot resolve
+the target repo (`:1086`). Every one of those emits **`agent/step.completed`**,
+with the word `error` interpolated into the completion text, and the run walks on
+to report success.
+
+`pr-closed.yaml:9` opens with `action: cleanup_worktree`, so this is live.
+
+The fix needs no new concept. A native action's result dict already becomes the
+step's outputs via the same `set_scope` + `set_flat` calls a prompt step uses, so
+`success_when` applies to it unchanged:
+
+```yaml
+  - name: cleanup
+    action: cleanup_worktree
+    handoff:
+      success_when: "status in ['ok', 'skipped']"
+```
+
+This is the one place the spec relaxes Decision 5's rule that `success_when`
+requires declared fields: a native action has no `required`/`optional` because
+the engine, not an agent, produces its keys. For an action step the visible set
+is the result dict itself, and the empty-declared-fields rejection does not apply.
+
+Leaving this out would close the bug for one step type and leave it open in
+another, which is why it is in scope despite not being in the ticket.
+
+### 4. Fix `pr-feedback` task interpolation
 
 Interpolate `${{input.task}}` into the step prompt so the step states the actual
 task rather than asserting the hardcoded "A reviewer requested changes on the PR"
@@ -422,12 +481,12 @@ Note this is not sufficient on its own, and that is the point of pairing it with
 the gate: an agent that finds no feedback still has to report *something*, and
 without `success_when` that report is still recorded as success.
 
-### 4. Honor the retry drain error
+### 5. Honor the retry drain error
 
 Give `orchestrator.py:875-877` the same treatment `:856` already has: a turn that
 dies during a handoff-fix retry fails the step instead of being discarded.
 
-### 5. `StepDef.timeout`: correct the documentation, do not add a second enforcer
+### 6. `StepDef.timeout`: correct the documentation, do not add a second enforcer
 
 The ticket says "enforce or delete". Neither is right in this PR, because #847
 (issue #845) **already makes the field live** on its branch, as the wall-clock
@@ -447,7 +506,7 @@ What remains genuinely broken and in scope is the **false claim** in
 `docs/WORKFLOW_ENGINE.md:97-99`. That line is corrected to describe what
 `timeout` actually is; #847 owns making it load-bearing.
 
-### 6. Documentation
+### 7. Documentation
 
 Same PR, per the repo's verification rule. The bar is that the section **teaches**
 the gate, not that it mentions the key. `docs/WORKFLOW_ENGINE.md:247-263` (the
@@ -576,6 +635,17 @@ gated behind `BOBI_STUB_BRAIN` like the rest of the stub.
   including undeclared ones, so `remaining_before_complete` is visible.
 - A gate whose referenced name resolved to nothing reports it under
   `unresolved:`, distinguishing a misconfigured gate from an honest failure.
+- **A native action step returning `status: error` fails the run** rather than
+  emitting `agent/step.completed` (fix 3). Drive it through the real gap: an
+  unknown action name, which `_execute_native_action:1100` turns into
+  `{"status": "error"}` today and the loop reports as completed.
+- A gated step placed *after* an `await` step still gates correctly on resume:
+  `resume_workflow` restores the run-wide flat scope from `variable_scopes`, and
+  the isolated evaluation context must not pick values out of it.
+- YAML-typed handoff values behave: `true`/`false`, integers, `null`, and list
+  values all evaluate without corrupting the condition.
+- The gate does **not** fire on route, notify, or await steps, which have no
+  handoff.
 
 ### Schema tests
 
@@ -654,6 +724,19 @@ stays reviewable. Say the word and it rides along.
 
 ## Review Record
 
+- **Engineering lens** (2026-07-26, run directly): one material finding, folded
+  in as fix 3 - native action steps emit `agent/step.completed` unconditionally,
+  including when `_execute_native_action` returns `{"status": "error"}`, so the
+  first draft would have closed the bug for prompt steps and left it open for
+  action steps. `pr-closed.yaml:9` runs one. Also surfaced the `adhoc` limitation
+  above and the resume/YAML-typed-value test cases.
+- **Scope lens** (2026-07-26, run directly): the three-step adoption, the
+  deferrals, and the `timeout` reinterpretation all hold. The strictness increase
+  and the `__stub__:handoff:` directive are in scope, because without the first
+  the feature can be silently disabled and without the second the house-standard
+  integration test cannot be written at all. ROLE.md must ship in the same PR as
+  the gate: a gate without its vocabulary is a broken gate, not a smaller one.
+  The one thing found missing was the native action gap.
 - **Design / authoring-DX lens** (2026-07-26): scored 5/10, 10 findings.
   Accepted and folded in: the `phase`-vs-`status` vocabulary decision, the
   `pr-feedback` Feedback-Phase vocabulary gap, `qa_status: blocked` as an
@@ -666,7 +749,10 @@ stays reviewable. Say the word and it rides along.
   reaches the step" (corrected against the real session log) and a stale heading
   left behind by that correction.
 - **Cross-model second opinion: NOT AVAILABLE on this host.** `codex` is
-  installed but not authenticated (401), and `aichat` has no config, so the
+  installed but not authenticated (401), and `aichat` has no config
+  (`OPENROUTER_API_KEY`, `AICHAT_PLATFORM`, `OPENAI_API_KEY` all unset), so the
   house adversarial-review binding could not run. The two codex-backed legs of
-  the spec triple review stalled on it and were re-run as direct reviews. This
-  is a gap in the gate, recorded rather than papered over.
+  the spec triple review stalled on it and were re-run as direct reviews, which
+  means every lens above is a Claude reading its own author's work. That is a
+  real gap in the gate, recorded rather than papered over. If an outside model
+  matters before implementation, credentials need fixing first.
