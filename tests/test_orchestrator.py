@@ -1932,3 +1932,40 @@ class TestSetupWorktree:
 
         with pytest.raises(RuntimeError, match="Failed to create worktree"):
             _setup_worktree(str(non_git), "will-fail")
+
+
+# ---------------------------------------------------------------------------
+# Naming a cause that has none (#845 review)
+# ---------------------------------------------------------------------------
+#
+# Every failure the orchestrator reports must name SOMETHING. The turn-cap
+# resume path originally guarded this with ``e or type(e).__name__``, which is
+# a no-op: an exception object is always truthy, so the fallback never fired
+# and a bare ``raise SomeError()`` rendered as "resume failed: " - an empty
+# cause, the exact discard #845 exists to stop.
+
+
+class TestNamedException:
+    def test_empty_message_falls_back_to_the_type(self):
+        from bobi.workflow.orchestrator import _named_exception
+
+        assert _named_exception(RuntimeError()) == "RuntimeError (no message)"
+        assert _named_exception(RuntimeError("")) == "RuntimeError (no message)"
+
+    def test_real_message_is_used_verbatim(self):
+        from bobi.workflow.orchestrator import _named_exception
+
+        assert _named_exception(RuntimeError("transport gone")) == "transport gone"
+
+    def test_truthiness_guard_would_not_have_worked(self):
+        """The bug this helper replaces, pinned so it cannot come back.
+
+        ``e or <fallback>`` reads as a guard but never fires - which is why
+        the empty-cause case shipped unnoticed.
+        """
+        e = RuntimeError("")
+        assert bool(e) is True                     # always truthy
+        assert f"{e or type(e).__name__}" == ""    # the guard that did nothing
+
+        from bobi.workflow.orchestrator import _named_exception
+        assert _named_exception(e) != ""

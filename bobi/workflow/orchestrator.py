@@ -46,10 +46,28 @@ MAX_HANDOFF_RETRIES = 2
 # How many times one step may be restarted after the harness cut its session
 # off at the turn cap (#845). A cap hit is not a failure - the transcript is
 # intact and the session id is valid, so the work continues on a fresh CLI
-# process (fresh turn budget) resumed from that id. The step's own wall-clock
-# timeout is the real budget and bounds this; the count is the backstop that
-# keeps a genuinely looping agent from restarting forever.
+# process (fresh turn budget) resumed from that id.
+#
+# This count is the ONLY hard bound on the restart chain. `step.timeout` gates
+# whether a new resume STARTS, but nothing in this module enforces it against
+# a running drain (there is no `asyncio.wait_for` here, and `run_workflow`
+# calls `asyncio.run` bare), so a resume begun just under the deadline still
+# gets a full fresh budget. Worst case per prompt step is therefore
+# `max_turns * (MAX_TURN_BUDGET_RESUMES + 1)` turns, ended in-process only by
+# the agent finishing; the dead-man reconciler is the outer net. Raising
+# either number raises that product - see #845 review.
 MAX_TURN_BUDGET_RESUMES = 3
+
+
+def _named_exception(e: BaseException) -> str:
+    """*e* as a non-empty string, naming the type when ``str(e)`` is empty.
+
+    A bare ``raise SomeError()`` stringifies to "", and an empty cause is what
+    reaches an operator as "unknown error" - the exact discard #845 exists to
+    stop. Note ``e or ...`` does NOT work here: an exception object is always
+    truthy, so the fallback never fires.
+    """
+    return str(e) or f"{type(e).__name__} (no message)"
 
 
 @dataclass(frozen=True)
@@ -651,11 +669,10 @@ async def _run_workflow_async(
                 except Exception:
                     pass
                 continue
-            # str(e) alone can be empty (a bare `raise SomeError()`), and an
-            # empty failure_error is what surfaces to an operator as
+            # An empty failure_error is what surfaces to an operator as
             # "unknown error" - always name at least the exception type (#845).
             run_failed = True
-            failure_error = str(e) or f"{type(e).__name__} (no message)"
+            failure_error = _named_exception(e)
             break
 
     try:
@@ -979,7 +996,7 @@ async def _run_workflow_async(
                     drain = DrainResult(
                         None,
                         f"{drain.error}; resume failed: "
-                        f"{e or type(e).__name__}",
+                        f"{_named_exception(e)}",
                         drain.error_kind,
                     )
                     break
@@ -1045,7 +1062,7 @@ async def _run_workflow_async(
     except Exception as e:
         # An exception with an empty str() (a bare `raise SomeError()`) must
         # still name itself rather than reaching an operator as "" (#845).
-        error = str(e) or f"{type(e).__name__} (no message)"
+        error = _named_exception(e)
         log.error(f"Workflow error: {error}")
         run_failed, failure_error = True, error
         _emit_lifecycle_event("agent/workflow.failed", {
