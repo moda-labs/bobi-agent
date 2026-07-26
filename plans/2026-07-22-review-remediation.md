@@ -1,7 +1,7 @@
 # Full-repo review remediation (defects + mechanical quality)
 
 > **Status:** Approved
-> **Tracking issue:** moda-labs/bobi-agent#817 · **Created:** 2026-07-22 · **Last amended:** 2026-07-24 (see Amendments)
+> **Tracking issue:** moda-labs/bobi-agent#817 · **Created:** 2026-07-22 · **Last amended:** 2026-07-26 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -82,24 +82,30 @@ Fix shape: `_drain_turn`'s dead-transport path must make the failure observable 
 
 ### Phase 2 — Workflow engine + agent-pack routing correctness
 
-Fix shape for conditions: extend the recursive-descent parser in `variables.py` with numeric comparisons (`>`, `>=`, `<`, `<=`) — small and testable — AND fix the pack conditions/scopes; D015 needs both halves.
+**Mostly superseded 2026-07-26** by `plans/2026-07-26-checklist-execution-model.md`, which deletes the workflow step machine (steps, handoff contracts, route conditions, await/resume). Nine items below fix internals scheduled for deletion and are `[f]`-superseded; **three survive and remain in scope** because they are not step-machine code — see the dated Amendment. Item-level rationale is on each line.
 
-- [ ] **D005** `bobi/workflow/orchestrator.py:231` — suspended (await) run emits `agent/workflow.completed`: suspend returns `True` and both callers treat `True` as terminal success. Return a distinct suspend outcome; emit nothing terminal.
-- [ ] **D027** `bobi/workflow/orchestrator.py:88` — `try_resume_for_event` claims the run before checking the workflow still exists in the installed pack; a claim on a vanished workflow is never released. Also: nothing calls `try_resume_for_event` (D018) — wire the manager's event path to it or the entire await/resume feature is dead (re-verify caller graph first; if wiring it is design-shaped, `[f]` this line and escalate via Amendment rather than improvising).
-- [ ] **D024** `bobi/workflow/orchestrator.py:314` — launch-time `--role` override and agent identity lost across suspend/resume; persist them on the run and pass through `resume_workflow`.
-- [ ] **D029** `bobi/workflow/orchestrator.py:546` — `_make_session` exception in the initial connect loop escapes both the retry try and the terminal-honesty try/finally, leaving the registry entry stuck `running`.
-- [ ] **D025** `bobi/workflow/orchestrator.py:848` — stale handoff files not cleared before a prompt step; a failed turn validates against the previous visit's handoff.
-- [ ] **D028** `bobi/workflow/orchestrator.py:873` — non-mapping handoff YAML (string/list) crashes with AttributeError instead of entering the missing-fields re-prompt path.
-- [ ] **Q017/D026** `bobi/workflow/variables.py:92` — route conditions resolved by textual substitution into the expression before parsing (multi-word values break the grammar); resolve variables inside the parser instead, and add numeric comparison operators.
-- [ ] **D015** `agents/dogfood-content-review/workflows/dogfood-content-review.yaml:35` — `issues_count > 0` uses the unsupported `>` (fix step never routes); fixed by the parser extension above + verify the route actually takes.
-- [ ] **D016** `agents/eng-team/workflows/pr-closed.yaml:14` — `merged == true` references bare `merged`, never in flat scope (arrives as `input.merged`); fix the condition.
-- [ ] **D017** `agents/eng-team/agent.yaml:126` — `auto_dispatch` rule `event: github.issues.assigned` matches a type never emitted (adapter emits `github.issues` with the action in fields); fix the rule to match reality and add a validate-time check for unmatchable event types.
-- [ ] **D060** `agents/dogfood-content-review/roles/manager/ROLE.md:16` — routing table dispatches workflows `pr-feedback`/`pr-merged` that don't exist in the pack; correct the table.
-- [ ] **D119** `agents/dogfood-content-review/agent.yaml:4` — declares `chat: slack` and routes "Slack DM" events but no slack service is declared; make the pack internally consistent (and note `chat:` is currently parsed-but-unread, Q022 — resolve coherently with Phase 5's decision on that key).
+Fix shape for conditions (`variables.py` numeric comparisons) is withdrawn with Q017/D026 and D015.
+
+- [f] **D005** `bobi/workflow/orchestrator.py:231` — suspended (await) run emits `agent/workflow.completed`. *Superseded 2026-07-26: `await`/suspend is deleted by the checklist plan; nothing to fix.*
+- [f] **D027** `bobi/workflow/orchestrator.py:88` — `try_resume_for_event` claims a run before checking the workflow exists; nothing calls it (D018). *Superseded 2026-07-26: the whole await/resume feature is deleted rather than wired. The checklist plan's Problem 8 records that this was a missing wire, not a wrong architecture — the decision is to remove the feature, not repair it.*
+- [f] **D024** `bobi/workflow/orchestrator.py:314` — launch `--role`/agent identity lost across suspend/resume. *Superseded 2026-07-26: no suspend/resume to lose it across.*
+- [ ] **D029** `bobi/workflow/orchestrator.py:546` — `_make_session` exception in the initial connect loop escapes both the retry try and the terminal-honesty try/finally, leaving the registry entry stuck `running`. **SURVIVES and is now load-bearing:** the checklist plan's in-progress monitor resolves ownership from live registry entries (its Q3), so an entry stuck `running` makes a dead unit look permanently alive and blocks re-dispatch forever. Fix the leak in whichever spawn path survives the cutover.
+- [f] **D025** `bobi/workflow/orchestrator.py:848` — stale handoff files not cleared before a prompt step. *Superseded 2026-07-26: handoff files are deleted.*
+- [f] **D028** `bobi/workflow/orchestrator.py:873` — non-mapping handoff YAML crashes with AttributeError. *Superseded 2026-07-26: handoff files are deleted.*
+- [f] **Q017/D026** `bobi/workflow/variables.py:92` — route conditions resolved by textual substitution; add numeric comparison operators. *Superseded 2026-07-26: route conditions are deleted. (`${{}}` interpolation may survive — the checklist plan's Phase 4 re-verifies consumers before deleting `variables.py`.)*
+- [f] **D015** `agents/dogfood-content-review/workflows/dogfood-content-review.yaml:35` — `issues_count > 0` uses the unsupported `>`. *Superseded 2026-07-26: this workflow migrates to a checklist; the condition ceases to exist.*
+- [f] **D016** `agents/eng-team/workflows/pr-closed.yaml:14` — `merged == true` references bare `merged`. *Superseded 2026-07-26: `pr-closed.yaml`'s deterministic pieces become checklist items naming commands (`gh pr view <n> --json merged -q .merged`), so the condition is replaced rather than fixed.*
+- [ ] **D017** `agents/eng-team/agent.yaml:126` — `auto_dispatch` rule `event: github.issues.assigned` matches a type never emitted (adapter emits `github.issues` with the action in fields); fix the rule to match reality and add a validate-time check for unmatchable event types. **SURVIVES:** this is event→dispatch routing (`bobi/workflow/triggers.py` is explicitly KEPT by the checklist plan), not step-machine code, and per this plan's own Notes issue pickup needs a Slack directive until it lands.
+- [f] **D060** `agents/dogfood-content-review/roles/manager/ROLE.md:16` — routing table dispatches workflows that don't exist in the pack. *Absorbed 2026-07-26: the checklist plan's Phase 4 rewrites every pack's routing surface, and correcting a table that is about to be replaced is waste. If the cutover is abandoned, this returns to scope.*
+- [ ] **D119** `agents/dogfood-content-review/agent.yaml:4` — declares `chat: slack` and routes "Slack DM" events but no slack service is declared; make the pack internally consistent (and note `chat:` is currently parsed-but-unread, Q022 — resolve coherently with Phase 5's decision on that key). **SURVIVES:** pack/service declaration consistency, unrelated to the step machine.
 
 **Validation gate**
 
-- [ ] Failing-first tests: suspend emits `workflow.suspended` only; resume preserves role; condition parser handles `>`, multi-word values, `input.`-scoped variables; malformed handoff YAML re-prompts
+Rewritten 2026-07-26 to prove only the three surviving items (D029, D017, D119). The withdrawn lines proved suspend/resume, the condition parser, and handoff re-prompting — all of which the checklist plan deletes.
+
+- [ ] Failing-first test (**D029**): a `_make_session` exception in the initial connect loop leaves the registry entry **terminal**, never stuck `running` — asserted on the surviving spawn path, because the in-progress monitor's ownership check depends on it
+- [ ] Failing-first test (**D017**): an `auto_dispatch` rule whose `event:` can never be emitted fails validation; and the corrected rule actually matches a real `github.issues` payload with the action in fields
+- [ ] Failing-first test (**D119**): a pack declaring `chat: slack` with no slack service fails validation
 - [ ] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q && pytest tests/integration -q -k "workflow or orchestrator"`
 - [ ] `bobi validate` (or the validate suite) passes on all three `agents/` packs with the new unmatchable-event check active
 
@@ -408,6 +414,11 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
 - **2026-07-22** (Zach + planning session): Q1–Q5 decided (all recommended option — 5 lanes, plausible/unverified in scope with re-verification, remove `--resume`, delete expired compat now, restrict credential endpoint to declared vars). Status → Approved. Lane map filled (A–E).
 - **2026-07-24** (plan-file hygiene): renamed this plan and its findings appendix to date-prefixed filenames — `plans/review-remediation.md` → `plans/2026-07-22-review-remediation.md`, `plans/review-remediation-findings.md` → `plans/2026-07-22-review-remediation-findings.md` (dates = first-commit date; `git mv` preserved history). In-repo cross-references updated; GitHub issue bodies (#817–822) still cite the old paths and are left as historical record (this amendment is the pointer).
 - **2026-07-22** (build session, authorized by Zach): **D001+D002 shipped early** (ahead of Lane A dispatch) to unblock headless execute — PR **#825** (`_drain_turn` dead-transport branch sets `_last_is_error`; two behavioral regressions + a two-brain e2e with a new `__stub__:raise` directive and a claude leg that SIGKILLs the live CLI mid-turn). Bot PR **#800** (issue #799) landed the same day and independently fixed the D001 ack-loss via `_drain_turn`'s `None`-return; #825 was rebased on top and carries the D002 phase-honesty half #800 didn't cover. Bot PR #810 (atomic registry state.json publish) landed in the same batch. Lane A's remaining Phase 1–4 items are unchanged.
+
+- **2026-07-26** (planning session, authorized by Zach): **Phase 2 mostly superseded** by `plans/2026-07-26-checklist-execution-model.md` (tracking #852, PR #853), which retires the workflow step machine — steps, handoff contracts, route conditions, and await/resume all go. Nine of twelve Phase 2 items fix internals scheduled for deletion and are marked `[f]`-superseded with per-item rationale: D005, D027, D024, D025, D028, Q017/D026, D015, D016, and D060 (the last absorbed rather than superseded — the cutover rewrites every pack's routing surface). Phase 2's validation gate was rewritten to match, since its original lines proved suspend/resume, the condition parser, and handoff re-prompting.
+  **Three items survive and stay in scope**, because they are not step-machine code: **D029** (registry entry stuck `running` — now *load-bearing*, since the checklist plan's in-progress monitor resolves ownership from live registry entries, so a stuck entry makes a dead unit look permanently alive and blocks re-dispatch forever), **D017** (`auto_dispatch` event routing — `bobi/workflow/triggers.py` is explicitly kept, and per Notes issue pickup needs a Slack directive until this lands), and **D119** (pack/service declaration consistency).
+  **Phase 3 is untouched and explicitly retained as shared infrastructure** the successor plan consumes rather than forks: **D092** (hoist the atomic-write pattern into one `fsutil` helper) and **Q062/D071** (the `claim()` crash window). The checklist plan's Phase 2 depends on D092's helper for its artifact writes, so Phase 3 should land before it.
+  If the cutover is abandoned, the `[f]`-superseded items return to scope — this amendment is the pointer, and nothing was deleted from the plan.
 
 ## Notes
 
