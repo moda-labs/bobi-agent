@@ -69,8 +69,14 @@ def _log_records(session_name, event):
     ]
 
 
-def _run_capped_workflow(bobi_env, run_key, *, step_max_turns=0):
-    """Run a one-step workflow whose step is killed by the turn cap."""
+def _run_capped_workflow(bobi_env, run_key, *, step_max_turns=0,
+                         required=("status",)):
+    """Run a one-step workflow whose step is killed by the turn cap.
+
+    ``required=()`` drops the handoff contract, so the run's outcome depends on
+    the cap handling ALONE - which is what proves a resumed step reaches
+    ``completed`` rather than merely getting past the drain.
+    """
     from bobi.workflow.orchestrator import make_session_name, run_workflow
     from bobi.workflow.schema import HandoffContract, StepDef, Workflow
 
@@ -78,7 +84,7 @@ def _run_capped_workflow(bobi_env, run_key, *, step_max_turns=0):
         StepDef(
             name="build", prompt="__stub__:maxturns",
             max_turns=step_max_turns, timeout=60,
-            handoff=HandoffContract(required=["status"]),
+            handoff=HandoffContract(required=list(required)),
         ),
     ])
     session_name = make_session_name("tcap", "test-repo", run_key)
@@ -327,6 +333,43 @@ class TestTurnCapIsResumable:
         failed = _one(captured_lifecycle, "agent/session.failed")
         assert "max_turns_reached" not in failed["error"]
         assert "handoff" in failed["error"].lower(), failed["error"]
+
+    def test_capped_step_reaches_completed(
+            self, stub_bobi_env, captured_lifecycle):
+        """The whole point, end to end: cap hit -> resume -> run COMPLETES.
+
+        Phase 1's gate asks for "a long-job cap hit auto-continues and
+        completes". The test above stops short of that on purpose - its step
+        declares a handoff contract the stub never satisfies, so the run still
+        ends `failed` and only the getting-past-the-drain half is proven. Here
+        the step carries no contract, so the cap is the ONLY thing that could
+        fail the run. Had the cap stayed terminal, this would end `failed` with
+        `max_turns_reached`, which is exactly what happened to the two real
+        engineer sessions.
+        """
+        result, session_name = _run_capped_workflow(
+            stub_bobi_env, "845g", step_max_turns=7, required=(),
+        )
+
+        assert result is True
+        state = json.loads(
+            (_sessions_dir() / session_name / "state.json").read_text()
+        )
+        assert state["status"] == "completed"
+        assert not state.get("error")
+
+        # It really did hit the cap and recover, rather than never hitting it.
+        resumes = _log_records(session_name, "turn_budget_resume")
+        assert len(resumes) == 1, resumes
+        assert resumes[0]["error"] == "max_turns_reached (max=7, turns=8)"
+
+        # The success lifecycle, and no failure event anywhere.
+        _one(captured_lifecycle, "agent/step.completed")
+        _one(captured_lifecycle, "agent/session.completed")
+        assert not [t for t, _ in captured_lifecycle
+                    if t in ("agent/session.failed", "agent/step.failed")], (
+            [t for t, _ in captured_lifecycle]
+        )
 
     def test_resume_is_bounded(self, stub_bobi_env, captured_lifecycle,
                                monkeypatch):
