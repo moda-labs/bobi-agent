@@ -901,6 +901,37 @@ class TestRunPhaseBlocking:
         assert result.session_id == "sess-sync"
         assert result.total_cost_usd == 0.10
 
+    def test_turn_cap_kill_reports_the_brains_diagnosis(self):
+        """The point of #845, asserted end-to-end on AgentResult.
+
+        Reproduces the exact terminal shape of a turn-cap kill: is_error set,
+        error_kind/error_message carrying the brain's diagnosis, and an EMPTY
+        response - the empty response is what made the old code substitute a
+        literal and discard the cause.
+
+        Without this the fix is unproven: reverting `error=session.last_error()`
+        to the previous `session._last_response` left the whole suite green,
+        because teaching the double the new fields only stopped the crashes -
+        nothing asserted the fields are read.
+        """
+        diagnosis = "max_turns_reached (max=1000, turns=1001)"
+        fake_cls = _make_fake_session_class(
+            success=False, is_error=True, response="",
+            error_kind="max_turns_reached", error_message=diagnosis,
+        )
+
+        with patch(SESSION_PATCH, side_effect=fake_cls):
+            result = run_phase_blocking(
+                run_key="CAP-1", phase="implement", cwd="/tmp/test",
+            )
+
+        assert result.success is False
+        assert result.error == diagnosis
+        assert result.error_kind == "max_turns_reached"
+        # Neither literal the fix removed may come back on this path.
+        assert "turn failed" not in result.error
+        assert "unknown error" not in result.error
+
     def test_start_failure(self):
         """run_phase_blocking returns error when session fails to start."""
         fake_cls = _make_fake_session_class(start_ok=False)

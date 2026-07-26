@@ -170,8 +170,59 @@ class TestConfiguredCapIsHonored:
         assert echoed["max_turns"] > 200
 
     def test_step_override_wins(self, stub_bobi_env, captured_lifecycle):
+        # NOTE: _echo_options builds a ONE-step workflow, so this override is
+        # also the step that constructs the session. See the xfail below for
+        # the multi-step case, which is the one real workflows hit.
         echoed = self._echo_options(stub_bobi_env, "845c", max_turns=2500)
         assert echoed["max_turns"] == 2500
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="#845 review, BLOCKING: a step-level max_turns override is "
+               "dropped on every step after the first. The cap is a "
+               "construction-time CLI flag (--max-turns), but the session is "
+               "only rebuilt when the MODEL or EFFORT changes "
+               "(orchestrator.py: `if step_model != current_model or "
+               "step_effort != current_effort`) - a cap change alone never "
+               "rebuilds. In a workflow whose steps share one agent/model/"
+               "effort (issue-lifecycle.yaml, and the documented example in "
+               "docs/WORKFLOW_ENGINE.md + skills/create-agent.md), one "
+               "session spans every step, so the override silently no-ops. "
+               "Fixing it is a design call - rebuilding mid-run trades the "
+               "conversational continuity #642/#778 protect against a "
+               "per-step cap - so this pins the gap instead of guessing.",
+    )
+    def test_step_override_wins_on_a_later_step(
+            self, stub_bobi_env, captured_lifecycle):
+        """A step-level cap must apply to the step that declares it.
+
+        Identical to test_step_override_wins except the override sits on the
+        SECOND prompt step, with both steps on the same agent/model/effort -
+        which is what stops the session from being rebuilt.
+        """
+        from bobi.workflow.orchestrator import make_session_name, run_workflow
+        from bobi.workflow.schema import StepDef, Workflow
+
+        wf = Workflow(name="topt2", steps=[
+            StepDef(name="first", prompt="__stub__:options", timeout=60),
+            StepDef(name="second", prompt="__stub__:options", timeout=60,
+                    max_turns=2500),
+        ])
+        session_name = make_session_name("topt2", "test-repo", "845c2")
+        assert run_workflow(
+            wf, task="__stub__:options", repo="test-repo",
+            cwd=str(stub_bobi_env.project_path), run_key="845c2",
+            timeout=120, interactive=False,
+        ) is True
+        echoes = [
+            json.loads(r["text"]) for r in
+            _log_records(session_name, "response")
+            if r.get("text", "").startswith("{")
+        ]
+        assert len(echoes) >= 2, "both steps should have echoed their options"
+        # The second step declared 2500; the session it ran under still
+        # carries whatever the FIRST step resolved.
+        assert echoes[-1]["max_turns"] == 2500
 
     def test_role_config_beats_the_framework_default(
             self, stub_bobi_env, captured_lifecycle):

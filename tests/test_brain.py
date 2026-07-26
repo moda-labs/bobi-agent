@@ -242,7 +242,11 @@ def test_config_max_turns_rejects_unusable_values(tmp_path):
     from bobi import paths
 
     paths.package_dir(tmp_path).mkdir(parents=True)
-    for value in ("''", "'not-a-number'", "0", "-5", "'${MISSING_VAR}'"):
+    # `yes`/`no`/`true` are YAML BOOLS, and 1.5 is a float. A bool where a
+    # count belongs is a typo; honoring it as 1/0 would pin a session to one
+    # turn or none, which is worse than falling through to the default.
+    for value in ("''", "'not-a-number'", "0", "-5", "'${MISSING_VAR}'",
+                  "yes", "no", "true", "1.5"):
         paths.agent_yaml_path(tmp_path).write_text(
             f"agent: t\nbrain:\n  max_turns: {value}\n"
         )
