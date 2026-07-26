@@ -88,11 +88,11 @@ def _convert_markdown_line(line: str) -> str:
     return re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', line)
 
 
-def _map_lines_outside_code_blocks(text: str, convert) -> str:
-    """Apply `convert` to every line that is not inside a ``` fence.
+def _convert_markdown_outside_code_blocks(text: str) -> str:
+    """Convert markdown on every line that is not inside a ``` fence.
 
-    `convert` must not introduce newlines; the escape expansion does, and has
-    its own walker below.
+    Strictly line-for-line: `_convert_markdown_line` never introduces a
+    newline. The escape expansion does, and has its own walker below.
     """
     converted: list[str] = []
     in_code_block = False
@@ -103,7 +103,7 @@ def _map_lines_outside_code_blocks(text: str, convert) -> str:
         elif in_code_block:
             converted.append(line)
         else:
-            converted.append(convert(line))
+            converted.append(_convert_markdown_line(line))
     return "\n".join(converted)
 
 
@@ -159,10 +159,6 @@ def expand_shell_escapes(text: str) -> str:
                 in_code_block = True
                 fence_opened_by_expansion = from_expansion
     return "\n".join(out)
-
-
-def _convert_markdown_outside_code_blocks(text: str) -> str:
-    return _map_lines_outside_code_blocks(text, _convert_markdown_line)
 
 
 def _has_open_code_fence(text: str) -> bool:

@@ -204,6 +204,21 @@ def has_venn_services(state: SetupState, catalog=None) -> bool:
                for n in names)
 
 
+def _apply_chat(cfg: dict, state: SetupState) -> None:
+    """Write setup's `chat:` decision into an agent config - the one place the
+    policy lives, for a config built from scratch and one merged in place.
+
+    `chat` is setup-managed, so setup's decision OVERWRITES the pack's - and
+    "cli" is a decision: it means NO `chat:` key, so it must REMOVE an existing
+    one, else a slack→cli switch silently keeps running the Slack chat adapter.
+    An unset state.chat means setup has no opinion - leave the config's own
+    value alone."""
+    if state.chat == "cli":
+        cfg.pop("chat", None)
+    elif state.chat:
+        cfg["chat"] = state.chat
+
+
 def build_agent_cfg(state: SetupState, catalog=None) -> dict:
     cfg: dict = {
         "agent": derive_team_name(state),
@@ -228,8 +243,7 @@ def build_agent_cfg(state: SetupState, catalog=None) -> dict:
     # reports "venn — no API key" despite the key being set).
     if has_venn_services(state, catalog):
         cfg["venn_api_key"] = "${VENN_API_KEY}"
-    if state.chat and state.chat != "cli":
-        cfg["chat"] = state.chat
+    _apply_chat(cfg, state)
     # Monitor checks are frequent observe-and-report runs - default them to a
     # cheap model instead of inheriting the manager's (#617, #549 Part A).
     # `haiku` is a Claude alias: valid here because build_agent_cfg never
@@ -295,14 +309,7 @@ def merge_agent_yaml(existing_text: str, state: SetupState, catalog=None) -> str
         for k, v in managed_mcps.items():
             merged_mcps.setdefault(k, v)
         cfg["mcp_servers"] = merged_mcps
-    # `chat` is setup-managed, so setup's decision OVERWRITES the pack's — and
-    # "cli" is a decision: it must REMOVE an existing `chat:` key, else a
-    # slack→cli switch silently keeps running the Slack chat adapter. An unset
-    # state.chat means setup has no opinion — leave the pack's own value alone.
-    if state.chat == "cli":
-        cfg.pop("chat", None)
-    elif state.chat:
-        cfg["chat"] = state.chat
+    _apply_chat(cfg, state)
     return yaml.dump(cfg, sort_keys=False)
 
 
