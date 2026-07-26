@@ -48,6 +48,13 @@ STATIC_DIR = Path(__file__).parent / "static"
 NONCE_HEADER = WEBUI_TOKEN_HEADER
 
 
+class PackRootRefused(Exception):
+    """The team source this session points at is outside the pack-root
+    boundary. Raised by `_pack_dir()` and answered as a 400 by every endpoint
+    that reads or writes the pack, so a `setup.json` written before the
+    boundary existed can't restore an unconfined pack root on resume."""
+
+
 # --- serialization -------------------------------------------------------
 
 def serialize_state(state: SetupState) -> dict:
@@ -216,6 +223,32 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         p = p.resolve()
         return p, any(p == r or r in p.parents for r in picker_roots)
 
+    def _confine_pack_root(raw: str) -> tuple[Path, str | None]:
+        """Resolve a team-source path and hold it to the pack-root boundary.
+        Returns (resolved path, refusal message or None).
+
+        ONE definition of an acceptable team source, applied wherever a pack
+        root is SET (/api/start, for both paths it takes) and wherever one is
+        USED (_pack_dir, which reads whatever a past session persisted):
+
+        - inside the picker roots, because the pack root is what POST
+          /api/file writes under and GET /api/file reads back - unconfined,
+          that is an arbitrary read/write as the invoking user; and
+        - clear of run/ in BOTH directions, because the PARENT of run/ puts
+          run/package/agent.yaml - the file `_setup_managed_vars` trusts to
+          name readable credentials - inside the pack root.
+        """
+        if not raw:
+            return home, "choose a location for the team"
+        abs_loc, ok = _within_home(raw, home)
+        if not ok:
+            return abs_loc, "pick a location inside your home directory"
+        run_root = project.resolve()
+        if (abs_loc == run_root or run_root in abs_loc.parents
+                or abs_loc in run_root.parents):
+            return abs_loc, "pick a source location outside run/"
+        return abs_loc, None
+
     def _load_machine_config() -> dict:
         cfg_path = paths.ensure_global_config()
         try:
@@ -296,9 +329,15 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                     seen.add(t["path"])
                     teams.append(t)
         if state.source_dir:
-            src = team_source_dir(project, state)
-            teams += [t for t in open_mode.list_teams_in(src)
-                      if t["path"] not in seen]
+            # The session's source gets the same boundary as every other read
+            # of it: a persisted source_dir can name a tree this build never
+            # validated, and the hub must not offer what /api/file refuses to
+            # open. Skipped rather than raised - the hub is where a user with a
+            # stale checkpoint recovers, so it has to stay reachable.
+            src, err = _confine_pack_root(str(team_source_dir(project, state)))
+            if not err:
+                teams += [t for t in open_mode.list_teams_in(src)
+                          if t["path"] not in seen]
         return teams
 
     # --- intro: create / modify-existing / from-registry + a location --
@@ -397,7 +436,6 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
 
     @app.post("/api/rename")
     def rename(payload: dict) -> JSONResponse:
-        from bobi.setup.actions import team_source_dir
         from bobi.setup.authoring import slug
         new = slug(payload.get("name", ""))
         if not new:
@@ -411,8 +449,11 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # from-scratch flow starts in a placeholder slot
         # agents/<old>/src; treat that canonical source as team-named too so a
         # rename moves the editable source out of the placeholder slot.
+        # `src` comes from `_pack_dir()`, not `team_source_dir`: a rename MOVES
+        # the source tree, so it needs the same boundary as every other write
+        # to it (a persisted source_dir this build never validated included).
         if old and state.source_dir and Path(state.source_dir).name == old:
-            src = team_source_dir(project, state)
+            src = _pack_dir()
             dest = src.parent / new
             if src.resolve() != dest.resolve():
                 if dest.exists():
@@ -428,7 +469,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 state.validated = False
                 state.validated_hash = ""
         elif on_finish is not None and state.source_dir:
-            src = team_source_dir(project, state)
+            src = _pack_dir()
             try:
                 rel_src = src.resolve().relative_to(library.resolve())
                 slot = rel_src.parts[0] if rel_src.parts[1:] == ("src",) else ""
@@ -471,17 +512,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         if mode == "registry" and not team:
             return JSONResponse({"error": "pick a team to download"},
                                 status_code=400)
-        if location:
-            # Confined to the picker roots like every other path-taking
-            # endpoint. Unconfined, `location` set the pack root to anywhere
-            # on disk - `/` included - and POST /api/file writes anywhere under
-            # the pack root, so this was an arbitrary file write as the user.
-            abs_loc, ok = _within_home(location, project)
-            if not ok:
-                return JSONResponse(
-                    {"error": "pick a location inside your home directory"},
-                    status_code=400)
-        elif mode == "registry":
+        if not location and mode == "registry":
             # A template defaults into its own library slot - the same
             # agents/<name>/src shape the home scan reads, so the finished
             # team shows on the hub without the UI doing path math. A name
@@ -491,32 +522,28 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 return JSONResponse(
                     {"error": "choose a location for the team"},
                     status_code=400)
-            abs_loc = (library / slug(team) / "src").resolve()
-        else:
-            return JSONResponse({"error": "choose a location for the team"},
-                                status_code=400)
-        run_root = project.resolve()
-        # Outside run/ in BOTH directions. Blocking only "inside run/" left the
-        # PARENT of run/ acceptable, and the pack root is what POST /api/file
-        # writes under - so `location: agents/<name>` made
-        # `run/package/agent.yaml` caller-writable in one request, which is the
-        # file `_setup_managed_vars` trusts to name readable credentials.
-        if (abs_loc == run_root or run_root in abs_loc.parents
-                or abs_loc in run_root.parents):
-            return JSONResponse({"error": "pick a source location outside run/"},
-                                status_code=400)
+            location = str(library / slug(team) / "src")
+        abs_loc, err = _confine_pack_root(location)
+        if err:
+            return JSONResponse({"error": err}, status_code=400)
         # Validate and materialize the source first; session state is mutated
         # only after everything succeeded, so a rejected or failed start can't
         # leave the session pointing at a team it never opened.
         if mode == "open":
             # The UI sends the team's source path (from a scan of whatever
             # folder the user chose), not just a name — teams can live anywhere
-            # now, so a name alone is ambiguous.
+            # now, so a name alone is ambiguous. It is caller-supplied like
+            # `location`, and `copy_into` copytree's whatever it names into the
+            # pack root (dotfiles included, symlinks dereferenced) where
+            # /api/files and /api/file serve it straight back - so it gets the
+            # same boundary, not just an is_team() check.
             team_path = (payload.get("team_path") or payload.get("team") or "").strip()
-            src = Path(team_path).expanduser()
-            if not src.is_absolute():
-                src = project / src
-            src = src.resolve()
+            if not team_path:
+                return JSONResponse({"error": "pick a team to open"},
+                                    status_code=400)
+            src, err = _confine_pack_root(team_path)
+            if err:
+                return JSONResponse({"error": err}, status_code=400)
             if not open_mode.is_team(src):
                 return JSONResponse({"error": "that folder isn't a team "
                                      "(no agent.yaml)"}, status_code=400)
@@ -1432,6 +1459,11 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 return
             from bobi.setup import authoring
             try:
+                # author_pack writes the whole tree at the persisted
+                # source_dir - the same pack root /api/file writes under, so
+                # the same boundary applies (PackRootRefused surfaces as the
+                # SSE error below, this stream's form of a refusal).
+                _pack_dir()
                 async for event in authoring.author_pack(
                         state, project, model=app.state.model,
                         stream_fn=app.state.stream_fn):
@@ -1444,8 +1476,31 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
 
     # --- review: browse / edit the authored pack source ----------------
     def _pack_dir() -> Path:
+        """The team source tree the pack endpoints read and write under.
+
+        Re-confined on every use, not only where /api/start writes it:
+        `source_dir` is persisted, and setup.json outlives the code that wrote
+        it. A pre-fix build took any `location`, so a resumed session (`bobi
+        setup --resume`, or the hosted /api/setup/open resuming an unfinished
+        slot) can carry a pack root that was never held to this boundary.
+        Refused loudly - falling back to another directory would silently
+        author into, or serve back, a tree the user didn't choose.
+        """
         from bobi.setup import actions
-        return actions.team_source_dir(project, state).resolve()
+        pack = actions.team_source_dir(project, state).resolve()
+        _, err = _confine_pack_root(str(pack))
+        if err:
+            raise PackRootRefused(
+                f"this setup's saved team source {pack} is out of bounds - "
+                f"{err}. Open or start the team again to choose a new one.")
+        return pack
+
+    @app.exception_handler(PackRootRefused)
+    def pack_root_refused(request: Request, exc: PackRootRefused) -> JSONResponse:
+        # One refusal for every endpoint that reaches the pack through
+        # _pack_dir(), including any added later - the boundary must not
+        # depend on each new caller remembering to check it.
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
     def _safe_target(rel: str) -> Path | None:
         pack = _pack_dir()
@@ -1517,15 +1572,21 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                              "state": serialize_state(state)})
 
     # --- validate / install / preflight (deterministic) ----------------
+    # Both reach the persisted source through `actions`, so both take the
+    # pack-root boundary first: validate reads that tree, install freezes it
+    # into run/package/ (and the installed agent.yaml is what
+    # `_setup_managed_vars` trusts to name readable credentials).
     @app.post("/api/validate")
     def validate() -> dict:
         from bobi.setup import actions
+        _pack_dir()
         result = actions.validate_team(state, project)
         return {**result, "state": serialize_state(state)}
 
     @app.post("/api/install")
     def install() -> JSONResponse:
         from bobi.setup import actions
+        _pack_dir()
         try:
             result = actions.install_team(state, project)
         except actions.ActionError as e:

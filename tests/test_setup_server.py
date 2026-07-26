@@ -727,6 +727,42 @@ class TestConnect:
         assert r.status_code == 400, r.text
         assert "home directory" in r.json()["error"] or "run/" in r.json()["error"]
 
+    @pytest.mark.parametrize("shape", ["absolute", "dot-dot", "symlink"])
+    def test_start_open_confines_the_team_source_to_the_home_directory(
+            self, project, home, tmp_path, shape):
+        """`/api/start` takes TWO paths; only `location` was confined.
+
+        `team_path` got an `is_team()` check (an agent.yaml exists) and nothing
+        else, so any directory on the machine could be named as the source.
+        `copy_into` copytree's it into the (confined) location - dotfiles
+        included, symlinks DEREFERENCED - and `/api/files` + `/api/file` then
+        serve every copied file back to the caller. All three escape shapes go
+        through the same resolve-then-compare boundary `location` uses.
+        """
+        outside = tmp_path / "srv" / "other-tenant" / "team"
+        _write_team_source(outside, "other-tenant")
+        (outside / ".env").write_text(
+            "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI-not-yours\n")
+        if shape == "absolute":
+            team_path = str(outside)
+        elif shape == "dot-dot":
+            team_path = str(home / ".." / "srv" / "other-tenant" / "team")
+        else:
+            link = home / "tenant-link"
+            link.symlink_to(outside)
+            team_path = str(link)
+
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "open", "team_path": team_path,
+                                       "location": "agents/fresh/src"})
+        assert r.status_code == 400, r.text
+        assert "home directory" in r.json()["error"]
+        # nothing copied in, so nothing to serve back
+        assert not (home / "agents" / "fresh").exists()
+        assert c.get("/api/files").json()["files"] == []
+        leaked = c.get("/api/file", params={"path": ".env"})
+        assert "not-yours" not in leaked.text
+
 
 # --- Venn setup flow: discover account MCPs, apply picks -----------------
 
@@ -1530,6 +1566,78 @@ class TestReviewFiles:
         _, c = self._built(project)
         r = c.post("/api/file", json={"path": "../escape.txt", "content": "x"})
         assert r.status_code == 400
+
+
+# --- resumed state: a pack root this build never validated ---------------
+
+class TestResumedPackRoot:
+    """`/api/start` confines the pack root it WRITES; resume trusts the pack
+    root it READS.
+
+    `setup.json` outlives the code that wrote it. A pre-fix build accepted any
+    `location`, so an existing user's state can name a source outside the home
+    tree or straddling the run root - and `_pack_dir()` handed that straight to
+    the review endpoints. The boundary has to hold for state this build did not
+    write, or upgrading restores exactly the chain the confinement closed.
+    """
+
+    def _resume(self, project, source_dir) -> SetupState:
+        """The resume path: a checkpoint on disk, reloaded. `bobi setup
+        --resume` (server.serve) and the hosted `/api/setup/open` both do
+        exactly this and hand the result to `build_app`."""
+        SetupState(stage=Stage.REVIEW, mode="open", team_name="team",
+                   source_dir=str(source_dir)).save(project)
+        state = SetupState.load(project)
+        assert state is not None and state.source_dir == str(source_dir)
+        return state
+
+    def test_resume_refuses_a_pack_root_outside_the_home_directory(
+            self, project, home, tmp_path):
+        outside = tmp_path / "srv" / "other-tenant" / "team"
+        _write_team_source(outside, "other-tenant")
+        (outside / ".env").write_text(
+            "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI-not-yours\n")
+        c = _client(self._resume(project, outside), project, home_root=home)
+
+        assert c.get("/api/files").status_code == 400
+        r = c.get("/api/file", params={"path": ".env"})
+        assert r.status_code == 400, r.text
+        assert "not-yours" not in r.text
+        w = c.post("/api/file", json={"path": "agent.md", "content": "pwned\n"})
+        assert w.status_code == 400, w.text
+        assert "pwned" not in (outside / "agent.md").read_text()
+        # and the hub doesn't offer what the pack endpoints refuse to open
+        assert c.get("/api/home").json()["teams"] == []
+
+        # A refusal must not strand the session: the hub is still live, so
+        # re-opening a team inside the boundary restores the pack endpoints.
+        mine = _write_team_source(home / "agents" / "mine" / "src", "mine")
+        ok = c.post("/api/start", json={"mode": "open", "team_path": str(mine),
+                                        "location": str(mine)})
+        assert ok.status_code == 200, ok.text
+        assert "agent.yaml" in c.get("/api/files").json()["files"]
+
+    def test_resume_refuses_a_pack_root_holding_the_run_root(
+            self, project, home, monkeypatch):
+        """The full three-request chain, restored from an old checkpoint.
+
+        `location: agents/<name>` - the shape `/api/start` now refuses - puts
+        `run/package/agent.yaml` under the pack root, and that file is what
+        `_setup_managed_vars` trusts to name readable credentials.
+        """
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI-not-yours")
+        c = _client(self._resume(project, project.parent), project,
+                    home_root=home)
+
+        w = c.post("/api/file", json={
+            "path": "run/package/agent.yaml",
+            "content": "agent: pwn\nenv:\n  X: ${AWS_SECRET_ACCESS_KEY}\n"})
+        assert w.status_code == 400, w.text
+        assert "run/" in w.json()["error"]
+        assert not paths.agent_yaml_path(project).is_file()
+        r = c.get("/api/credential/value?var=AWS_SECRET_ACCESS_KEY")
+        assert r.status_code == 404, r.text
+        assert "not-yours" not in r.text
 
 
 # --- finish --------------------------------------------------------------
