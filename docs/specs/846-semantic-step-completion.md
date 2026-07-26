@@ -67,9 +67,23 @@ never interpolates `${{input.task}}`:
       Follow the Feedback Phase instructions in your role prompt.
 ```
 
-A dispatched task never reaches the step.
-The agent is told only that "a reviewer requested changes", finds no such review,
-writes `status: no_reviewer_feedback_found`, and the run is recorded as a success.
+The dispatched task does reach the *session* - on a fresh run the engine connects
+with `task` as the initial prompt (`orchestrator.py:576`) - but it never reaches
+the *step's* prompt.
+The agent therefore gets a contradiction: turn 1 says "FINISH Lane A PR #844 to a
+provable LANDABLE state", and the step prompt says "A reviewer requested changes
+on the PR".
+
+It resolved the contradiction by following the step prompt, went looking for a
+review, and found none. From the session log of `...-6fa1e5cd`:
+
+> The step's premise was false again. "A reviewer requested changes" - there is
+> no review. Verified across six surfaces: `reviews` `[]`, 0 inline comments, 0
+> conversation comments, no requested reviewers, no timeline review events,
+> `reviewDecision: REVIEW_REQUIRED`.
+
+It then wrote `status: no_reviewer_feedback_found`, and the engine recorded the
+run as a success.
 That is how the three sessions above happened.
 
 ## Goals
@@ -81,7 +95,8 @@ That is how the three sessions above happened.
 - The gate must fail closed: an unsatisfied condition, an unparseable condition,
   or a missing value all fail the step.
 - Existing workflows keep working unchanged until they opt in.
-- A `pr-feedback` run must receive the dispatched task.
+- A `pr-feedback` step's prompt must carry the dispatched task, so the agent is
+  not handed a premise that contradicts its own task.
 
 ## Non-Goals
 
@@ -258,8 +273,13 @@ The ROLE.md phase instructions gain the `status` vocabulary in the same PR.
 
 ### 3. Fix `pr-feedback` task interpolation
 
-Interpolate `${{input.task}}` so the dispatched task reaches the step, instead
-of the hardcoded "A reviewer requested changes on the PR" premise.
+Interpolate `${{input.task}}` into the step prompt so the step states the actual
+task rather than asserting the hardcoded "A reviewer requested changes on the PR"
+premise, which the run task may contradict.
+
+Note this is not sufficient on its own, and that is the point of pairing it with
+the gate: an agent that finds no feedback still has to report *something*, and
+without `success_when` that report is still recorded as success.
 
 ### 4. Honor the retry drain error
 
