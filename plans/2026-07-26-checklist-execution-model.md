@@ -557,12 +557,38 @@ depend on Q1's resolution being executed** (the review-remediation Amendment).}
 
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
-| — | — | — | {filled by Split} | — | — |
+| A | — (plan is the spec) | 1 | Honest turn/error reporting + a resumable turn cap; `max_turns` configurable | solo | open |
+| B | — (plan is the spec) | 2, 4 | Artifact parser, `verify:` provenance gate, worker loop prompt, in-progress monitor; then trial + cutover | solo | open |
+| C | — (moda-skills) | 3 | `build`-skill lifecycle rendering into the plan appendix | concurrent | open |
+
+**Lanes:** STACKED, three lanes, no fuse (no same-repo concurrency).
+
+- **Lane A** (bobi-agent, Phases 1) — cut as its own lane against Split's
+  one-lane default. **Same-repo justification:** Phase 1 fixes a *live* production
+  defect — the masked-error shape is logging `unknown error` every ~15 min from
+  monitor `check-c561144f` and cost a full day of debugging on 2026-07-26 — and it
+  is independently valuable whether or not the rest of this initiative proceeds.
+  Holding it behind Phases 2–4 would leave a diagnosable outage undiagnosable for
+  the length of the initiative. It also subsumes PR #847's reporting half.
+- **Lane B** (bobi-agent, Phases 2 + 4) — **depends on A** (build-blocking: Phase 2
+  treats a cap hit as re-dispatchable, which A makes possible) and on
+  `2026-07-22-review-remediation` **Phase 3** (D092's `fsutil` helper, which
+  Phase 2 adopts rather than forks; and D029, which Phase 2's ownership check
+  needs). Phases 2 and 4 stay one lane: 4 is the trial + cutover for what 2 builds,
+  and splitting them would ship a checklist runner nothing uses.
+- **Lane C** (moda-skills, Phase 3) — **lands after B** (merge ordering, not
+  build-blocking: it renders into the artifact format B defines, so it can be
+  authored in parallel once that format is fixed, but its gate needs a released
+  bobi carrying A+B with the pin moved). Cross-repo, so always `concurrent`.
+
+Dispatch issues are omitted deliberately: all three lanes can read this plan, so
+per `build`'s rule the plan is the spec and no issue is required. File one only if
+a lane turns out to need an inlined context slice.
 
 - [ ] Convergence gate: a real unit runs end-to-end through the rendered checklist
       on a released bobi + released moda-skills pack, with the artifact showing a
       survived death and zero review-surface violations (fuse-runnable on a merged
-      preview for the code half; the pack-release half is deferred).
+      preview for the code half; the pack-release half is deferred)
 
 ## Amendments
 
@@ -597,6 +623,14 @@ depend on Q1's resolution being executed** (the review-remediation Amendment).}
   containment, with `run_key` as the cross-repo fallback. The Relevant-files entry
   citing `bobi/registry.py` as the liveness signal was also wrong (that is the
   *pack* registry); corrected to `bobi/sdk.py`.
+- **2026-07-26** (Split): Lane map filled — three STACKED lanes, no fuse. **A**
+  (Phase 1, bobi-agent) is cut against Split's one-lane default on a recorded
+  same-repo justification: it fixes a live defect (`unknown error` spam every ~15
+  min from monitor `check-c561144f`) and is valuable whether or not the rest
+  proceeds. **B** (Phases 2+4, bobi-agent) depends on A and on
+  `2026-07-22-review-remediation` Phase 3 (D092's `fsutil` helper, D029's registry
+  leak). **C** (Phase 3, moda-skills) lands after B. Dispatch issues omitted —
+  every lane can read this plan, so the plan is the spec.
 
 ## Notes
 
