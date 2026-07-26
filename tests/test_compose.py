@@ -542,6 +542,61 @@ def test_prune_parent_traversal_rejected_and_host_untouched(project, tmp_path):
     assert error is not None and "prune" in str(error)
 
 
+def test_prune_unresolvable_path_is_rejected_and_host_untouched(project, tmp_path):
+    """An unresolvable path is REJECTED, never re-checked lexically.
+
+    Falling back to the unresolved paths turns the containment check lexical,
+    and `dest/tools` IS in `(dest/tools/../../victim.md).parents` lexically -
+    so the fallback accepts the exact escape this guard exists to stop and
+    `_prune_one` unlinks a real host file during `bobi agents install`.
+    """
+    victim = tmp_path / "victim.md"
+    victim.write_text("precious")
+    rel = os.path.relpath(victim, paths.package_dir(project) / "tools")
+    _team(project, "core", 'version: "1.0.0"\n', tools={"github.md": "gh"})
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
+                 f'prune:\n  tools: ["{rel}"]\n')
+
+    surface = str(paths.package_dir(project) / "tools")
+    real_resolve = Path.resolve
+
+    def unresolvable(self, *a, **kw):
+        if str(self).startswith(surface):
+            raise OSError(errno.EIO, "simulated unreadable path", str(self))
+        return real_resolve(self, *a, **kw)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Path, "resolve", unresolvable)
+        error = _compose_error(project, leaf)
+
+    assert victim.is_file(), \
+        "prune escaped the compose destination and deleted a host path"
+    assert error is not None and "could not be resolved" in str(error)
+
+
+def test_prune_symlink_loop_fails_with_an_actionable_error(project):
+    """A symlink loop raises RuntimeError, not OSError, from `Path.resolve`.
+
+    `dest` is reused across installs and only surfaces a layer contributes get
+    cleared, so a looping link can outlive the install that left it. Catching
+    only OSError let it crash `bobi agents install` with a raw traceback
+    instead of naming the `prune:` block at fault.
+    """
+    leaf = _team(project, "solo", 'version: "1.0.0"\nentry_point: director\n',
+                 tools={"github.md": "gh"})
+    dest, _ = _compose(project, leaf)
+    loop = dest / "tools" / "loop"
+    os.symlink(str(loop), str(loop))
+
+    _write(leaf / "agent.yaml", 'version: "1.0.0"\nentry_point: director\n'
+                                'prune:\n  tools: [loop]\n')
+    error = _compose_error(project, leaf)
+
+    assert error is not None, "a looping prune target crashed instead of failing"
+    assert "could not be resolved" in str(error)
+    assert "prune" in str(error) and "tools:loop" in str(error)
+
+
 # --- framework-default monitors (#471) ---------------------------------------
 
 # An eng-team-shaped sleep-cycle record, byte-identical to what the
