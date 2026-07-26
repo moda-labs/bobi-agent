@@ -56,7 +56,7 @@ The engine advanced to `pr`, then `qa`, and `state.json` for that run records
 The agent told the truth.
 The engine could not read it.
 
-### Compounding defect: `pr-feedback` never receives its task
+### Compounding defect: the `pr-feedback` step prompt contradicts the run task
 
 `agents/eng-team/workflows/pr-feedback.yaml:10-17` hardcodes its premise and
 never interpolates `${{input.task}}`:
@@ -172,13 +172,65 @@ Orchestrator: after `outputs` is captured and before `agent/step.completed`, an
 unsatisfied condition fails the step through the existing failure path
 (`_emit_step_failed` plus the honest terminal `finally`).
 
-The `agent/step.failed` payload carries the condition and the actual handoff
-values, so the operator sees why:
+#### The failure an operator reads
+
+An operator hitting this at 2am has exactly two branches, and they need opposite
+responses:
+
+- the agent honestly reported unfinished work -> inspect the work, re-dispatch
+- the gate references a field nobody writes -> fix the YAML or the role prompt
+
+One message shape serves both. It names the condition, every key actually present
+in the handoff file (marked declared or undeclared), which referenced names
+resolved, and the path to the file:
 
 ```
-Step implement handoff did not satisfy success_when "status == 'complete'"
-(handoff: status='in_progress')
+Step implement handoff did not satisfy success_when "phase == 'implement_complete'"
+  resolved:   phase='implement_in_progress'
+  unresolved: (none)
+  handoff:    phase, status, issue_id, branch, pushed, pr_url,
+              remaining_before_complete  [undeclared: issue_id, branch, pushed,
+              pr_url, remaining_before_complete]
+  file:       <session>/handoff-implement.yaml
 ```
+
+`unresolved:` is what separates the two branches: a name listed there is a
+misconfigured gate, not a dishonest agent.
+
+Printing the present keys matters. In run `6c040187` the `implement` step
+declared only `status`, so a message limited to declared fields would hide
+`remaining_before_complete` - the one field that told the operator what was left
+to do. Values are elided past a fixed length, because handoff values are free
+text and this string lands in `state.json`, the event payload, and Slack.
+
+#### `agent/step.failed` wire shape
+
+This is an API surface change, so the payload is specified rather than described.
+`_emit_step_failed` gains structured fields alongside the existing `error` and
+`text` strings, so programmatic consumers do not parse English:
+
+```json
+{
+  "run_key": "adhoc-6c040187",
+  "workflow": "issue-lifecycle",
+  "step": "implement",
+  "error": "handoff did not satisfy success_when \"phase == 'implement_complete'\"",
+  "text": "Step implement failed: handoff did not satisfy success_when ...",
+  "failure_kind": "handoff_gate",
+  "success_when": "phase == 'implement_complete'",
+  "handoff_resolved": {"phase": "implement_in_progress"},
+  "handoff_unresolved": [],
+  "handoff_keys": ["phase", "status", "issue_id", "branch", "pushed",
+                   "pr_url", "remaining_before_complete"]
+}
+```
+
+Field semantics: `failure_kind` is a stable vocabulary (`handoff_gate`,
+`handoff_missing_fields`, `turn_failed`, `step_exhausted`) so a consumer can
+branch without string matching; `handoff_resolved` maps each name the condition
+referenced to the value it saw; `handoff_unresolved` lists referenced names that
+resolved to nothing; `handoff_keys` is every key present in the file. Existing
+consumers reading `error`/`text` are unaffected.
 
 #### Decision 1: the condition sees only this step's handoff
 
@@ -219,40 +271,131 @@ The gate fails the step immediately.
 
 #### Decision 3: fail closed
 
-- Condition unsatisfied: step fails.
-- Condition references a field not in the step's declared handoff: it resolves
-  to nothing, the condition is unsatisfied, the step fails, and the error names
-  the condition and the visible fields.
-- Condition unparseable or raising: step fails.
+Every state a gated step can land in, and what it does:
+
+| State | Outcome |
+| --- | --- |
+| Condition satisfied | `agent/step.completed`, as today |
+| Condition unsatisfied | Step fails, message shape above |
+| Condition unparseable or raising | Step fails, `failure_kind: handoff_gate` |
+| Condition references an undeclared field | **Rejected at load time** (Decision 5) |
+| `success_when` with no declared fields | **Rejected at load time** (Decision 5) |
+| Agent wrote no handoff file at all | Existing required-field retry path runs first and fails there; the gate is never reached |
+| No `success_when` | Today's behavior exactly (Decision 4) |
+
+Moving the undeclared-field case to load time is what keeps the runtime message
+shape single: at runtime a name can only fail to resolve because the agent
+omitted an *optional* declared field, which `unresolved:` reports.
 
 #### Decision 4: opt-in
 
 No `success_when` means today's behavior exactly. Every existing workflow and
 every pack in the wild is unaffected until it opts in.
 
-#### Decision 5: reject unknown keys inside the `handoff:` block
+#### Decision 5: catch a broken gate at load time, not in production
 
 A fail-closed gate that a typo can silently delete is not fail-closed.
 `load_workflow` today does `s.get(...)` per key and ignores everything else, and
-there is no repo-wide workflow schema lint, so `success_if:` or
-`success-when:` would parse cleanly and ship a step with no gate.
+there is no repo-wide workflow schema lint. Verified against the real loader:
 
-The loader will reject unknown keys inside `handoff:` (whitelist: `required`,
-`optional`, `success_when`) and reject a step-level `success_when:` placed
-outside the `handoff:` block.
-This is a deliberate strictness increase, scoped to the handoff block only, and
-it surfaces through the existing pack validation (`bobi/setup/actions.py:270-282`).
+```
+loaded OK, no error raised
+  typo success_if          : silently dropped
+  step-level success_when  : silently dropped
+```
+
+Both mistakes ship a step with no gate at all. Three load-time checks close it:
+
+1. **Unknown keys inside `handoff:` are rejected** (whitelist: `required`,
+   `optional`, `success_when`), and a step-level `success_when:` outside the
+   block is rejected. Verified safe: across all 14 shipped workflow YAMLs the
+   only handoff-block keys in use are `required` and `optional`.
+2. **Every bare name in the condition must be a declared field.** This is the
+   same reasoning applied to the likelier mistake. A misspelled *key* leaves the
+   step ungated; a misspelled *field reference*
+   (`success_when: "statuss == 'complete'"`, or gating a field the author forgot
+   to add to `required`) leaves the step **permanently unpassable**, and nothing
+   catches it until production.
+3. **`success_when` with an empty `required` and `optional` is rejected.**
+   `_build_step_prompt` (`orchestrator.py:1186`) only appends handoff
+   instructions when `required or optional` is non-empty, so such a step tells
+   the agent nothing about what to write, has an empty visible field set, and
+   can never pass. Two reasonable behaviors compose into a permanently broken
+   step; reject it where it is written.
+
+Errors name the near-miss rather than just refusing, because the whitelist is
+the first thing an author meets:
+
+```
+workflows/issue-lifecycle.yaml: step 'implement': unknown key 'success_if' in
+handoff block (did you mean 'success_when'?). Allowed: required, optional,
+success_when.
+```
+
+These surface through the existing pack validation
+(`bobi/setup/actions.py:270-282`) and `bobi agent <name> workflows validate`,
+which also gains a line echoing each parsed gate so an author gets confirmation
+at authoring time instead of discovering silence weeks later:
+
+```
+Gates: implement -> phase == 'implement_complete'
+       qa        -> qa_status in ['pass', 'not_applicable']
+```
 
 ### 2. Adopt the gate where a false completion was observed
 
-| Workflow | Step | `success_when` |
-| --- | --- | --- |
-| `issue-lifecycle.yaml` | `implement` | `status == 'complete'` |
-| `issue-lifecycle.yaml` | `qa` | `qa_status in ['pass', 'not_applicable']` |
-| `pr-feedback.yaml` | `address` | `status == 'complete'` |
+**A gate is only as good as the vocabulary the agent was told to write.**
+Every gated field is listed below with the values the role prompt actually
+declares today, because a gate over an undeclared field ships a step the agent
+cannot reliably satisfy.
 
-`qa` needs the allow-list because its own prompt instructs `not_applicable` as a
-legitimate pass.
+| Workflow | Step | Gated field | Values ROLE.md declares today | Proposed gate |
+| --- | --- | --- | --- | --- |
+| `issue-lifecycle.yaml` | `implement` | `phase` | `implement_complete` (ROLE.md:453) | `phase == 'implement_complete'` |
+| `issue-lifecycle.yaml` | `qa` | `qa_status` | `pass`, `fail`, `blocked`, `not_applicable` (ROLE.md:507-510) | `qa_status in ['pass', 'not_applicable']` |
+| `pr-feedback.yaml` | `address` | `status` | **none - see below** | `status == 'complete'` |
+
+#### Gate `phase`, not `status`, on `implement`
+
+The eng-team pack already has a completion vocabulary and the engine never used
+it. ROLE.md instructs `phase: triage_complete` (:402), `spec_complete` (:435),
+`implement_complete` (:453), `pr_ready` (:470).
+
+The headline failure run wrote `phase: implement_in_progress`.
+That is an agent reporting honestly *against the vocabulary that already exists*.
+A gate of `phase == 'implement_complete'` would have caught run `6c040187` with
+no prompt change at all.
+
+Gating `status` instead would mean inventing a second completion vocabulary
+next to the one already declared, leaving two near-synonym fields in the same
+handoff where one is load-bearing and the other is decorative.
+So: `implement` declares `required: [status, phase]` and gates `phase`.
+`status` stays required as the human-readable summary line and is explicitly not
+the gate.
+
+#### `pr-feedback.address` needs a vocabulary before it can be gated
+
+`pr-feedback.yaml:19` requires `[status, resolution_summary]`, but the Feedback
+Phase in ROLE.md (:519-537) only ever mentions `resolution_summary` and **never
+mentions `status` at all**.
+
+That gap is the direct cause of the invented `status: no_reviewer_feedback_found`
+in all three observed runs: the engine demanded a field the role prompt never
+described, so the agent made one up.
+
+Gating that step without first giving the Feedback Phase its vocabulary would
+ship a gate the role prompt cannot satisfy. The Feedback Phase therefore gains an
+explicit `status` vocabulary (`complete`, plus a named value for "no feedback
+found" that is deliberately *not* a pass) in the same PR as the gate.
+
+#### `qa_status: blocked` now fails the run
+
+The allow-list admits 2 of the 4 declared values, so `blocked` fails the run as
+well as `fail`. `blocked` is not an accident in the role's design - it is a
+designed outcome with its own instructions ("error loudly", set `qa_findings`,
+comment on the PR). Failing the run on it is defensible, because a QA run that
+could not run is not a QA pass, but it is a **third** behavior change and it is
+called out here rather than discovered later. See Open Question 2.
 
 Deliberately **not** gated in this PR:
 
@@ -265,11 +408,9 @@ Deliberately **not** gated in this PR:
   and each has sentinel values (`awaiting_confirmation`, `not_applicable`) that
   need their own decision.
 
-Gating `status` requires the role prompt to state the allowed values.
-`agents/eng-team/roles/engineer/ROLE.md` currently tells the engineer to write
-`phase: implement_complete` and never describes `status`, which is why real
-handoffs carry free text like `status: build in progress - Phase 1 complete`.
-The ROLE.md phase instructions gain the `status` vocabulary in the same PR.
+**Rule this establishes:** gating a field means (a) declaring it in `required`,
+and (b) the role prompt that writes it declaring its allowed values. A test in
+`tests/test_eng_team_role_constraints.py` enforces (b) so the two cannot drift.
 
 ### 3. Fix `pr-feedback` task interpolation
 
@@ -308,14 +449,37 @@ What remains genuinely broken and in scope is the **false claim** in
 
 ### 6. Documentation
 
-Same PR, per the repo's verification rule:
+Same PR, per the repo's verification rule. The bar is that the section **teaches**
+the gate, not that it mentions the key. `docs/WORKFLOW_ENGINE.md:247-263` (the
+handoff contract) and `skills/create-agent.md:193-226, 443-450` (the canonical
+pack-format reference) must between them convey five things:
 
-- `docs/WORKFLOW_ENGINE.md`: the handoff contract section gains `success_when`
-  and the step-completion semantics; the `timeout` claim is corrected; the
-  `agent/step.failed` row covers the new cause.
-- `skills/create-agent.md:193-226, 443-450`: the canonical pack-format
-  reference gains `success_when`.
-- `agents/eng-team/roles/engineer/ROLE.md`: the `status` vocabulary.
+1. **Evaluation order**: required-field check -> up to `MAX_HANDOFF_RETRIES`
+   repair prompts -> `success_when` -> outputs captured -> `agent/step.completed`.
+2. **The scoping difference**: a route `if:` reads the run-wide flat scope; a
+   `success_when` reads only that step's declared fields. Same syntax, same file,
+   invisible difference, so it has to be stated where the key is introduced.
+3. **A failed gate is never retried, and why** (Decision 2).
+4. **The failure message shape**, so an operator recognises one before meeting it.
+5. **Gating a field means declaring it and teaching its vocabulary** in the role
+   prompt that writes it.
+
+Also updated:
+
+- `docs/WORKFLOW_ENGINE.md`: the false `timeout` claim (:97-99) is corrected; the
+  `agent/step.failed` row in the lifecycle-events table covers the new cause.
+- `docs/BUILDING_AGENT_TEAMS.md:379-388`: where `workflows validate` is
+  documented, now that it echoes gates.
+- `agents/eng-team/roles/engineer/ROLE.md`: the Implement Phase `phase`
+  vocabulary made explicit, and the Feedback Phase given a `status` vocabulary
+  it currently lacks entirely.
+
+**Version skew (documented, not fixed).** An older engine's loader ignores
+unknown handoff keys, so a pack authored with `success_when` and installed on a
+pre-#846 bobi loads clean and runs **ungated** - the same silent-deletion failure
+Decision 5 exists to prevent, reintroduced through the install path. `agent.yaml`
+has no engine-version floor to declare. In-repo packs are unaffected. This is
+called out in the docs and left as a follow-up rather than solved here.
 
 ## Dependency And Landing Order
 
@@ -408,16 +572,31 @@ gated behind `BOBI_STUB_BRAIN` like the rest of the stub.
 - An unparseable condition fails the step (Decision 3).
 - A turn that dies during a handoff-fix retry fails the step (fix 4).
 
+- The failure message names the handoff file path and the keys present in it,
+  including undeclared ones, so `remaining_before_complete` is visible.
+- A gate whose referenced name resolved to nothing reports it under
+  `unresolved:`, distinguishing a misconfigured gate from an honest failure.
+
 ### Schema tests
 
 - `success_when` parses onto `HandoffContract`.
-- An unknown key inside `handoff:` is rejected.
+- An unknown key inside `handoff:` is rejected, and the error names the
+  near-miss (`success_if` -> "did you mean `success_when`?").
 - A step-level `success_when:` outside `handoff:` is rejected (Decision 5).
+- A condition referencing an undeclared field is rejected at load time.
+- `success_when` with empty `required` and `optional` is rejected at load time.
+- Every shipped workflow YAML still loads: a test that globs
+  `agents/*/workflows/*.yaml` and calls `load_workflow` on each, which does not
+  exist today and is what makes the new strictness safe to add.
 
 ### Workflow YAML tests (`tests/test_eng_team_role_constraints.py`)
 
 - `pr-feedback.yaml`'s `address` prompt interpolates `${{input.task}}`.
 - The three gated steps carry their `success_when`.
+- **Every gated field's allowed values appear in the ROLE.md phase that writes
+  it**, so a gate and its vocabulary cannot drift apart. This is the test that
+  would have caught `pr-feedback.address` being gated on a `status` the Feedback
+  Phase never describes.
 
 ### Suites
 
@@ -434,16 +613,60 @@ the decision path, which the repo's own judgement rule puts on the stub side.
 | Risk | Mitigation |
 | --- | --- |
 | Runs that used to report success now report failure. | That is the point, and it is the honest signal. Scoped to three steps with observed false completions; everything else is opt-in. |
-| An agent learns to write `status: complete` to get past the gate. | The gate is not retried (Decision 2), so there is no in-run feedback loop teaching it. Longer term this is a role-prompt and review-gate concern, not an engine one. |
-| A gate on `qa` turns a real QA failure into a run failure. | Intended. `qa_status: fail` currently completes silently. |
-| Free-text `status` values fail the new gate. | The ROLE.md vocabulary change lands in the same PR. |
-| Handoff-block key whitelist rejects a pack in the wild. | Only `required` and `optional` exist today; the whitelist is scoped to the handoff block and surfaces through existing pack validation. |
+| An agent learns to write the passing value to get past the gate. | The gate is not retried (Decision 2), so there is no in-run feedback loop teaching it. Longer term this is a role-prompt and review-gate concern, not an engine one. |
+| `qa_status: fail` turns a real QA failure into a run failure. | Intended. It completes silently today. |
+| **`qa_status: blocked` also fails the run.** | A third behavior change, enumerated rather than discovered. `blocked` is a designed outcome (ROLE.md:495, 509), but a QA run that could not run is not a QA pass. Open Question 2. |
+| Free-text values fail the new gate. | The ROLE.md vocabulary changes land in the same PR, and a test binds each gate to its role-prompt vocabulary. |
+| Handoff-block key whitelist rejects a pack in the wild. | Verified: only `required` and `optional` appear across all 14 shipped workflows. Scoped to the handoff block, surfaces through existing pack validation, and a new load-every-workflow test guards it. |
+| A pack authored with `success_when` runs ungated on an older engine. | Documented, not fixed - there is no engine-version floor to declare. In-repo packs unaffected. |
+| A gated failure leaves the operator with no Slack message. | `issue-lifecycle` notifies only on start and complete, so a failed run skips `notify_complete`. Verified that `agent/session.failed` is in `LIFECYCLE_EVENTS` (`bobi/events/subscriptions.py:64`) and does route, so the signal exists; the verification plan drives one end to end to confirm what actually lands. |
 | Conflicts with #844 / #847. | Declared above; #846 rebases onto #844. |
+
+## Adjacent Finding (not fixed here)
+
+`issue-lifecycle.yaml:111` posts `"Completed #<run>: <task> - PR <url> merged"`,
+but nothing in that workflow merges the PR, and landing requires a human
+approval the workflow never waits for.
+
+That is the same family as this ticket - a workflow announcing an outcome that
+did not happen - but it is a one-line message fix in a file this PR already
+touches for other reasons. Flagged rather than folded in, so the gate change
+stays reviewable. Say the word and it rides along.
 
 ## Open Questions For The Approval Gate
 
-1. **`stall-recovery.recover`** is left ungated because its prompt offers two
+1. **Gate `phase` or `status` on `implement`?** The spec now recommends `phase`,
+   because ROLE.md already declares `implement_complete` and the observed failure
+   wrote `phase: implement_in_progress` - the gate would have fired with no prompt
+   change. Gating `status` instead means inventing a second vocabulary beside the
+   one that exists. Confirm the recommendation, or say gate `status`.
+2. **`qa_status`: confirm `fail` *and* `blocked` both fail the run.** The
+   allow-list admits 2 of the 4 declared values. `blocked` is a designed outcome,
+   so this is a deliberate call, not an oversight.
+3. **`stall-recovery.recover`** is left ungated because its prompt offers two
    valid outcomes. Gate it with an allow-list, or leave it?
-2. **`qa_status: fail`** failing the run is a deliberate behavior change. Confirm.
-3. **Landing order**: confirm #846 waits for #844 rather than duplicating the
+4. **Landing order**: confirm #846 waits for #844 rather than duplicating the
    parser fixes.
+5. **Scope check**: the review added load-time reference validation, the
+   `workflows validate` gate echo, and the structured `agent/step.failed` payload.
+   Each is defensible on its own, but they widen the PR. Say if any should be cut
+   to a follow-up.
+
+## Review Record
+
+- **Design / authoring-DX lens** (2026-07-26): scored 5/10, 10 findings.
+  Accepted and folded in: the `phase`-vs-`status` vocabulary decision, the
+  `pr-feedback` Feedback-Phase vocabulary gap, `qa_status: blocked` as an
+  unenumerated third behavior change, load-time validation of condition field
+  references, rejection of a gate with no declared fields, the unified failure
+  message with the handoff path and present keys, the structured event payload,
+  the five docs teachings, and the version-skew note. Verified each against the
+  source before accepting.
+- **Self-review** caught two of my own errors: the overclaimed "the task never
+  reaches the step" (corrected against the real session log) and a stale heading
+  left behind by that correction.
+- **Cross-model second opinion: NOT AVAILABLE on this host.** `codex` is
+  installed but not authenticated (401), and `aichat` has no config, so the
+  house adversarial-review binding could not run. The two codex-backed legs of
+  the spec triple review stalled on it and were re-run as direct reviews. This
+  is a gap in the gate, recorded rather than papered over.
