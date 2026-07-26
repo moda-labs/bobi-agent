@@ -422,11 +422,34 @@ class TestMembershipDeniesAnUnknownValue:
         ctx.set_flat("flag", "false")
         assert ctx.evaluate_condition("not flag") is True
 
-    def test_stacked_nots_cannot_launder_an_unknown_value(self):
-        """Undecidable stays undecidable however many `not`s wrap it."""
+    @pytest.mark.parametrize("nots", [1, 2, 3])
+    def test_stacked_nots_cannot_launder_an_unknown_value(self, nots):
+        """Undecidable stays undecidable however many `not`s wrap it.
+
+        Parametrized over the count because an EVEN number of `not`s cancels
+        out: `not not X` gives False under the bug too, so a two-`not` case
+        alone pins nothing. The odd counts are the ones that laundered.
+        """
         ctx = self._verdict_ctx("")
-        assert ctx.evaluate_condition(
-            "not not ${{review.verdict}} in ['approved']") is False
+        expr = "not " * nots + "${{review.verdict}} in ['approved']"
+        assert ctx.evaluate_condition(expr) is False
+
+    def test_a_deny_gate_spelled_with_inequality_is_NOT_covered(self):
+        """The recorded gap, pinned so it is not mistaken for covered.
+
+        `${{x}} != 'rejected'` is the same deny gate as `${{x}} not in
+        ['rejected']`, and it still admits a blank value. `==`/`!=` are
+        symmetric - neither side is "the tested one" - so closing it means
+        deciding what those operators mean, which is a design change to the
+        most-used operator in the grammar rather than a patch. This test
+        asserts the CURRENT behaviour so that changing it is a deliberate act
+        with a failing test to look at, not an accident.
+        """
+        ctx = self._verdict_ctx("")
+        assert ctx.evaluate_condition("${{review.verdict}} != 'rejected'") is True
+        assert ctx.evaluate_condition("not ${{review.verdict}} == 'rejected'") is True
+        # ...while the membership spellings of the same gate do deny it.
+        assert ctx.evaluate_condition("${{review.verdict}} not in ['rejected']") is False
 
     def test_an_allow_list_cannot_opt_the_empty_string_back_in(self):
         """The recorded cost: "" is undecidable even when listed explicitly.
@@ -439,12 +462,15 @@ class TestMembershipDeniesAnUnknownValue:
         assert ctx.evaluate_condition("${{review.verdict}} in ['', 'approved']") is False
 
     def test_a_blank_verdict_routes_to_the_else_branch(self):
-        """The same decision through the orchestrator's real routing line.
+        """The same decision expressed as a route step's branch choice.
 
-        `orchestrator.py` gates a route step with exactly this expression and
-        picks `goto` or `else_goto` off the result, so a gate that failed open
-        did not merely return True - it sent a blank-verdict run down the
-        approved branch.
+        This MIRRORS `orchestrator.py`'s routing line (`taken =
+        ctx.evaluate_condition(step.condition)`, then `step.goto if taken else
+        step.else_goto`) rather than importing the orchestrator - the same
+        shape `tests/test_dogfood_content_review_pack.py::_route_target` uses.
+        So it pins the decision, not the wiring: it shows a gate that failed
+        open did not merely return True but chose the approved branch, and it
+        would NOT catch a change to the orchestrator's own dispatch.
         """
         from bobi.workflow.schema import StepDef
 

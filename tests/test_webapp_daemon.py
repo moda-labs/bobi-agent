@@ -236,7 +236,11 @@ class TestStopIdentity:
         assert service._ps_argv(4242) == [], (
             "usage text was parsed as an argv - identity would run against it"
         )
-        assert service.is_process(4242, lambda argv: True) is False
+        # Through the identity gate, on a pid that IS alive - otherwise
+        # `is_process` short-circuits on liveness and the assertion is vacuous.
+        assert service.is_process(os.getpid(), lambda argv: True) is False, (
+            "a live pid was identified from ps's usage message"
+        )
 
     def test_a_long_argv_daemon_is_stopped_not_declared_stale(
             self, tmp_path, monkeypatch, sacrificial_process):

@@ -251,6 +251,33 @@ write `${{ input.merged }} == true`, never a bare `merged`. A bare name with no
 step output behind it stays a literal word, and a numeric comparison against a
 non-numeric operand is `false` (with a warning) rather than a lexical compare.
 
+### `in` / `not in` deny an unknown value
+
+A missing reference resolves to an empty string (above), so the value a routing
+gate exists to judge is blank on the most ordinary failure there is - a step
+whose brain returned nothing, or a handoff missing the field. A membership test
+against a blank value is therefore **undecidable, and both operators are
+`false`**:
+
+```yaml
+    if: "${{review.verdict}} in ['approved', 'lgtm']"    # blank -> false
+    if: "${{review.verdict}} not in ['rejected']"        # blank -> false
+```
+
+`not in` is a separate gate ("proceed unless denied"), not the boolean negation
+of `in`, which is why both are `false` rather than complements — and the same
+holds for the `not X in [...]` spelling. Consequences worth knowing:
+
+- An allow-list **cannot** opt the empty string back in: `'' in ['', 'ok']` is
+  `false`. Listing `''` would reopen the hole for every gate that never thought
+  to exclude it.
+- `in` against a **list literal** compares whole items; against a **string** it
+  is still a substring test. `'app' in ['approved']` is `false`.
+- Only the tested (left) operand is guarded, and only in the membership
+  spellings. An allow/deny **list** that failed to resolve reads as an empty
+  one, and `${{x}} != 'rejected'` is `true` for a blank `x` — write a deny gate
+  as `not in` when the value may be missing.
+
 ## The handoff contract
 
 A prompt step's `handoff` block is the contract between the engine and the

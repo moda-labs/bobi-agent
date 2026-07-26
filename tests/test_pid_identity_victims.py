@@ -31,7 +31,9 @@ _TESTS = Path(__file__).resolve().parent
 # ordinary in-test `time.sleep(0.1)` has no `import time` beside it and does
 # not match - only a program being handed to another process does.
 _TIMED_VICTIM = re.compile(
-    r"""(?:import[ \t]+time[;\n\\][^\n]{0,120}?|__import__\([ \t]*['"]time['"][ \t]*\)\.)"""
+    r"""(?:import[ \t]+time[;\n\\,][^\n]{0,120}?"""
+    r"""|__import__\([ \t]*['"]time['"][ \t]*\)\."""
+    r"""|from[ \t]+time[ \t]+import[ \t]+sleep[^\n]{0,120}?)"""
     r"""[ \t]*(?:time\.)?sleep\(""",
 )
 
@@ -39,12 +41,21 @@ _TIMED_VICTIM = re.compile(
 # newline, indented or `exec`ed. It runs out the same way.
 _TIMED_SHELL_VICTIM = re.compile(r"(?:\\n|\n)[ \t]*(?:exec[ \t]+)?sleep[ \t]+\d")
 
+# `sleep` as the spawned program itself: Popen(["sleep", "30"]) or via a shell.
+_TIMED_ARGV_VICTIM = re.compile(r"""['"]sleep['"][ \t]*,[ \t]*['"]?\d"""
+                                r"""|['"]-c['"][ \t]*,[ \t]*['"][^'"\n]*\bsleep[ \t]+\d""")
+
 
 def _offenders(pattern: re.Pattern) -> list[str]:
-    """Scan the whole file text, so a spelling split across lines is seen."""
+    """Scan the whole file text, so a spelling split across lines is seen.
+
+    Every .py under tests/ - not just `test_*.py`. A shared spawn helper
+    belongs in a `conftest.py` or a utils module, which is exactly where this
+    would otherwise hide, and it is where `sacrificial_process` itself lives.
+    """
     hits = []
-    for path in sorted(_TESTS.rglob("test_*.py")):
-        if path.name == Path(__file__).name:
+    for path in sorted(_TESTS.rglob("*.py")):
+        if path.name == Path(__file__).name or "__pycache__" in path.parts:
             continue
         text = path.read_text()
         for match in pattern.finditer(text):
@@ -56,7 +67,8 @@ def _offenders(pattern: re.Pattern) -> list[str]:
 
 @pytest.mark.parametrize("pattern, spelling", [
     (_TIMED_VICTIM, 'python -c "import time; time.sleep(N)"'),
-    (_TIMED_SHELL_VICTIM, "a shell stand-in ending in `sleep N`"),
+    (_TIMED_SHELL_VICTIM, "a shell stand-in with a `sleep N` line"),
+    (_TIMED_ARGV_VICTIM, '`sleep` spawned directly, e.g. Popen(["sleep", "30"])'),
 ])
 def test_no_test_spawns_a_victim_bounded_by_a_wall_clock(pattern, spelling):
     offenders = _offenders(pattern)

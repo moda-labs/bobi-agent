@@ -26,10 +26,19 @@ claude_marked = pytest.mark.claude
 
 
 def _child_process_args() -> list[str]:
-    """argv strings of this process's direct children (the SDK-spawned CLI)."""
-    out = subprocess.run(
-        ["ps", "-axo", "ppid=,args="], capture_output=True, text=True,
-    ).stdout
+    """argv strings of this process's direct children (the SDK-spawned CLI).
+
+    `-ww` for the same reason `bobi.service._ps_argv` needs it: BSD `ps` clips
+    the command column to 80 columns when stdout is a pipe, which it always is
+    here, and the flag this test looks for sits at the TAIL of a long
+    `node <path>/cli.js ... --effort low`. Without it the assertion fails
+    against a feature that works. A non-zero exit yields no rows rather than
+    an error message parsed as argv.
+    """
+    proc = subprocess.run(
+        ["ps", "-ww", "-axo", "ppid=,args="], capture_output=True, text=True,
+    )
+    out = proc.stdout if proc.returncode == 0 else ""
     me = str(os.getpid())
     args = []
     for line in out.splitlines():

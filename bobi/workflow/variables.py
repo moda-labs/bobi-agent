@@ -151,7 +151,7 @@ def _eval_expr(expr: str, ctx: _Ctx = None) -> bool:
     return bool(_parse_or(expr.strip(), ctx)[0])
 
 
-def _parse_or(expr: str, ctx: _Ctx = None) -> tuple[bool, str]:
+def _parse_or(expr: str, ctx: _Ctx = None) -> tuple[Any, str]:
     left, rest = _parse_and(expr, ctx)
     while rest.lstrip().startswith("or "):
         rest = rest.lstrip()[3:]
@@ -160,7 +160,7 @@ def _parse_or(expr: str, ctx: _Ctx = None) -> tuple[bool, str]:
     return left, rest
 
 
-def _parse_and(expr: str, ctx: _Ctx = None) -> tuple[bool, str]:
+def _parse_and(expr: str, ctx: _Ctx = None) -> tuple[Any, str]:
     left, rest = _parse_comparison(expr, ctx)
     while rest.lstrip().startswith("and "):
         rest = rest.lstrip()[4:]
@@ -235,12 +235,25 @@ def _membership(haystack: Any, needle: Any, *, negate: bool) -> Any:
     an allow-list can no longer admit "" on purpose. Letting it would reopen
     the hole for every gate that never thought to list "" in the first place.
 
-    Only the TESTED operand is guarded. A blank HAYSTACK - an allow/deny list
-    that failed to resolve - is NOT treated as unknown, because it is
-    indistinguishable from a legitimately empty one: `'error' not in
-    ${{step.output}}` over empty output is a real gate that must still pass.
-    Separating those needs the parser to carry resolution failure, which it
-    does not; see the PR discussion rather than guessing here.
+    TWO GAPS, both known and deliberately left, so nobody reads this as more
+    than it is:
+
+    - Only the TESTED operand is guarded. A blank HAYSTACK - an allow/deny list
+      that failed to resolve - is NOT treated as unknown, because it is
+      indistinguishable from a legitimately empty one: `'error' not in
+      ${{step.output}}` over empty output is a real gate that must still pass.
+    - Only the MEMBERSHIP spelling is guarded. `${{x}} != 'rejected'` and
+      `not ${{x}} == 'rejected'` are the same deny gate and still return True
+      for a blank `x`. Unlike `in`, `==`/`!=` are symmetric - neither side is
+      "the tested one" - so there is no operand to guard without deciding what
+      those operators mean, which is a design change to the most-used operator
+      in the grammar, not a patch.
+
+    Both need the parser to carry resolution failure (missing vs legitimately
+    empty) rather than collapsing it to ""; see the PR discussion rather than
+    guessing here. Note the asymmetry meanwhile: ALLOW gates fail closed in
+    every spelling (`"" == 'approved'` is False); DENY gates fail closed only
+    in the two membership spellings.
     """
     value = str(needle).strip()
     if not value:
@@ -252,7 +265,7 @@ def _membership(haystack: Any, needle: Any, *, negate: bool) -> Any:
     return not member if negate else member
 
 
-def _parse_comparison(expr: str, ctx: _Ctx = None) -> tuple[bool, str]:
+def _parse_comparison(expr: str, ctx: _Ctx = None) -> tuple[Any, str]:
     expr = expr.strip()
 
     if expr.startswith("not "):
