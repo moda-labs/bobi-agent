@@ -174,11 +174,16 @@ def write_install_gitignore(project_path: Path, local_source: bool) -> None:
     of truth, so it stays check-in-able. Install owns this file and
     rewrites it each run so switching paths doesn't leave stale entries.
     """
-    entries = [".gitignore", "install-manifest.json", "compose-lock.json"]
+    # Local imports (as elsewhere in this module): tool_library reaches compose,
+    # which install deliberately keeps out of its import-time graph.
+    from bobi import tool_library
+    from bobi.runtime_guard import with_mutable_runtime_package
+
+    entries = [".gitignore", "install-manifest.json", "compose-lock.json",
+               tool_library.GUIDE_RECORD]
     if local_source:
         entries += ["roles/", "tools/", "workflows/", "monitors/", "context/",
                     "agent.md", "agent.yaml", "AGENTS.md"]
-    from bobi.runtime_guard import with_mutable_runtime_package
 
     with with_mutable_runtime_package(project_path):
         gitignore = paths.package_dir(project_path) / ".gitignore"

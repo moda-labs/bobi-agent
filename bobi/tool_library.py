@@ -54,6 +54,7 @@ from pathlib import Path
 
 import yaml
 
+from bobi import fsutil
 from bobi.compose import ComposeError, _merge_build
 
 # Catalog root — one directory per entry, the directory name IS the entry id.
@@ -217,11 +218,18 @@ def _read_guide_record(dest: Path) -> dict[str, str]:
 
 
 def _write_guide_record(dest: Path, record: dict[str, str]) -> None:
+    """Publish the ownership record atomically - a torn one is unrecoverable.
+
+    `_read_guide_record` maps unparseable JSON to `{}`, which reclassifies every
+    generated guide as team-shipped: the next compose skips them all, then
+    `_write_guide_record(dest, {})` unlinks the record and the loss is permanent.
+    """
     path = dest / GUIDE_RECORD
     if not record:
         path.unlink(missing_ok=True)
         return
-    path.write_text(
+    fsutil.atomic_write_text(
+        path,
         json.dumps({"guides": dict(sorted(record.items()))}, indent=2) + "\n")
 
 
@@ -260,7 +268,7 @@ def _materialize_guides(deps: list[Dependency], dest: Path) -> None:
     _write_guide_record(dest, written)
 
 
-def _expand_dependency(dep: Dependency, merged_yaml: dict, dest: Path) -> None:
+def _expand_dependency(dep: Dependency, merged_yaml: dict) -> None:
     """Splice one dependency's agent.yaml surfaces into the merged config.
 
     Reuses compose's own merge rules so a dependency behaves exactly like the
@@ -348,7 +356,7 @@ def expand(merged_yaml: dict, dest: Path) -> None:
     """
     deps = resolve_dependencies(merged_yaml)
     for dep in deps:
-        _expand_dependency(dep, merged_yaml, dest)
+        _expand_dependency(dep, merged_yaml)
     _materialize_guides(deps, dest)
     merged_yaml.pop("tool_library", None)
 

@@ -16,6 +16,7 @@ Covers the verification plan:
 
 from __future__ import annotations
 
+import inspect
 import os
 import subprocess
 from pathlib import Path
@@ -217,6 +218,67 @@ def test_team_shipped_guide_survives_a_reinstall(project, gizmo_catalog):
     _compose(project, leaf, dest=dest)
 
     assert (dest / "tools" / "gizmo.md").read_text() == "TEAM OWN"
+
+
+def test_guide_record_torn_write_does_not_orphan_the_generated_guides(
+        project, gizmo_catalog):
+    """The ownership record must never be observable half-written.
+
+    `_read_guide_record` maps unparseable JSON to `{}`, and an empty record
+    reclassifies every generated guide as team-shipped: the next compose skips
+    it forever and `_write_guide_record({})` then unlinks the record, making
+    the loss permanent. Exactly what the record exists to prevent.
+    """
+    leaf = _team(project, "solo", _GIZMO_TEAM)
+    dest = _compose(project, leaf)[0]
+    record = dest / tool_library.GUIDE_RECORD
+    before = record.read_text()
+
+    real_write_text = Path.write_text
+
+    def killed(self, data, *a, **kw):
+        if tool_library.GUIDE_RECORD not in self.name:
+            return real_write_text(self, data, *a, **kw)
+        real_write_text(self, data[:12], *a, **kw)
+        raise KeyboardInterrupt("simulated kill mid-write")
+
+    _write(gizmo_catalog / "gizmo" / "guide.md", "GUIDE v2")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Path, "write_text", killed)
+        with pytest.raises(KeyboardInterrupt):
+            _compose(project, leaf, dest=dest)
+
+    assert record.read_text() == before          # whole previous record survives
+    assert [p.name for p in dest.iterdir() if p.name.endswith(".tmp")] == []
+    # Ownership intact, so the next compose still refreshes its own guide.
+    _compose(project, leaf, dest=dest)
+    assert (dest / "tools" / "gizmo.md").read_text() == "GUIDE v2"
+
+
+def test_expanding_a_dependency_takes_no_destination(project):
+    """Splicing agent.yaml surfaces touches no filesystem.
+
+    Guide materialization moved out to `_materialize_guides`, so a `dest` here
+    is a dead second seam suggesting `_expand_dependency` still writes files.
+    """
+    params = inspect.signature(tool_library._expand_dependency).parameters
+    assert list(params) == ["dep", "merged_yaml"]
+
+
+def test_generated_guide_record_is_gitignored(project):
+    """`run/package/tool-library-guides.json` is generated, so install ignores it.
+
+    install owns package/.gitignore and rewrites it every run; a generated
+    artifact missing from that list shows up untracked on a fresh clone and
+    churns on every reinstall.
+    """
+    from bobi import install, paths
+
+    paths.package_dir(project).mkdir(parents=True, exist_ok=True)
+    for local_source in (True, False):
+        install.write_install_gitignore(project, local_source)
+        entries = (paths.package_dir(project) / ".gitignore").read_text().split("\n")
+        assert tool_library.GUIDE_RECORD in entries
 
 
 def test_explicit_requires_wins(project):
