@@ -168,8 +168,12 @@ from the workflow context, exactly as a model switch would).
 other dials, minus a launch flag - it is a safety backstop an operator
 configures, not a per-invocation choice: step `max_turns:` >
 `roles.<role>.max_turns` > `brain.max_turns` > the framework default (1000).
-A cap change never rebuilds a session; it applies to whatever session the
-next step constructs.
+
+The cap is a construction-time CLI flag, so a step that changes it rebuilds the
+session - and because the cap never changes the model, that rebuild resumes the
+**same transcript** natively, exactly as an effort-only change does. No
+conversational context is lost, so a per-step cap costs nothing but a
+reconnect.
 
 ```yaml
 brain:
@@ -198,6 +202,13 @@ time left. Each restart is logged to the session log as a
 its handoff immediately. When the restarts are exhausted the step fails with
 the brain's own diagnosis (`max_turns_reached (max=…, turns=…)`) in
 `state.json` and the `agent/session.failed` event.
+
+Know the resulting bound before raising either number. `step.timeout` gates
+whether a new resume **starts**; nothing enforces it against a drain already
+running, so a resume begun just under the deadline still gets a full fresh
+budget. Worst case for one prompt step is therefore
+`max_turns × (MAX_TURN_BUDGET_RESUMES + 1)` turns, ended in-process only by the
+agent finishing. The dead-man reconciler is the outer net.
 
 ### Route step
 
