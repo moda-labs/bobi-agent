@@ -170,35 +170,25 @@ class TestConfiguredCapIsHonored:
         assert echoed["max_turns"] > 200
 
     def test_step_override_wins(self, stub_bobi_env, captured_lifecycle):
-        # NOTE: _echo_options builds a ONE-step workflow, so this override is
-        # also the step that constructs the session. See the xfail below for
-        # the multi-step case, which is the one real workflows hit.
+        # The single-step case: this override is also the step that constructs
+        # the session. The multi-step case below is the one real workflows hit.
         echoed = self._echo_options(stub_bobi_env, "845c", max_turns=2500)
         assert echoed["max_turns"] == 2500
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="#845 review, BLOCKING: a step-level max_turns override is "
-               "dropped on every step after the first. The cap is a "
-               "construction-time CLI flag (--max-turns), but the session is "
-               "only rebuilt when the MODEL or EFFORT changes "
-               "(orchestrator.py: `if step_model != current_model or "
-               "step_effort != current_effort`) - a cap change alone never "
-               "rebuilds. In a workflow whose steps share one agent/model/"
-               "effort (issue-lifecycle.yaml, and the documented example in "
-               "docs/WORKFLOW_ENGINE.md + skills/create-agent.md), one "
-               "session spans every step, so the override silently no-ops. "
-               "Fixing it is a design call - rebuilding mid-run trades the "
-               "conversational continuity #642/#778 protect against a "
-               "per-step cap - so this pins the gap instead of guessing.",
-    )
     def test_step_override_wins_on_a_later_step(
             self, stub_bobi_env, captured_lifecycle):
-        """A step-level cap must apply to the step that declares it.
+        """A step-level cap must apply to the step that DECLARES it.
 
-        Identical to test_step_override_wins except the override sits on the
-        SECOND prompt step, with both steps on the same agent/model/effort -
-        which is what stops the session from being rebuilt.
+        The regression test for the BLOCKING #845 review finding. Identical to
+        test_step_override_wins except the override sits on the SECOND prompt
+        step, with both steps on the same agent/model/effort - exactly the
+        arrangement that used to stop the session from being rebuilt, so the
+        second step silently ran under the first step's cap. Every multi-step
+        workflow in the fleet has that shape (issue-lifecycle.yaml), as does
+        the worked example in docs/WORKFLOW_ENGINE.md.
+
+        Fails against the previous head (129d2bc) with `assert 1000 == 2500`
+        - the framework default the FIRST step resolved.
         """
         from bobi.workflow.orchestrator import make_session_name, run_workflow
         from bobi.workflow.schema import StepDef, Workflow
@@ -220,9 +210,61 @@ class TestConfiguredCapIsHonored:
             if r.get("text", "").startswith("{")
         ]
         assert len(echoes) >= 2, "both steps should have echoed their options"
-        # The second step declared 2500; the session it ran under still
-        # carries whatever the FIRST step resolved.
+        # The first step resolved the framework default; the second declared
+        # its own cap and must run under it.
+        assert echoes[0]["max_turns"] == DEFAULT_MAX_TURNS
         assert echoes[-1]["max_turns"] == 2500
+
+    def test_a_cap_change_resumes_rather_than_starting_fresh(
+            self, stub_bobi_env, captured_lifecycle):
+        """The reason the fix above is cheap: continuity is not the price.
+
+        The cap is a construction-time CLI flag, so honoring a per-step
+        override means rebuilding the session - which is what made the gap look
+        like a design trade against the conversational continuity #642/#778
+        protect. It is not one. A cap change never changes the MODEL, so
+        ``continuation_token`` returns the saved session id (same model on both
+        sides always continues) and the rebuild resumes the SAME transcript,
+        exactly as an effort-only change already does.
+
+        Asserted on the session id the run records rather than on a log
+        message, because a fresh session would have minted a different one.
+        The cap assertion is what keeps this honest: without it the test would
+        pass vacuously on the previous head, where nothing rebuilt at all.
+        """
+        from bobi.workflow.orchestrator import make_session_name, run_workflow
+        from bobi.workflow.schema import StepDef, Workflow
+
+        wf = Workflow(name="topt3", steps=[
+            StepDef(name="first", prompt="__stub__:options", timeout=60),
+            StepDef(name="second", prompt="__stub__:options", timeout=60,
+                    max_turns=2500),
+        ])
+        session_name = make_session_name("topt3", "test-repo", "845c3")
+        assert run_workflow(
+            wf, task="__stub__:options", repo="test-repo",
+            cwd=str(stub_bobi_env.project_path), run_key="845c3",
+            timeout=120, interactive=False,
+        ) is True
+
+        # A rebuild really did happen (else this test proves nothing).
+        echoes = [
+            json.loads(r["text"]) for r in
+            _log_records(session_name, "response")
+            if r.get("text", "").startswith("{")
+        ]
+        assert echoes[-1]["max_turns"] == 2500
+
+        # ...and it resumed rather than starting over.
+        ids = [
+            r["session_id"] for r in _log_records(session_name, "stop")
+            if r.get("session_id")
+        ]
+        assert len(ids) >= 2, f"expected a stop record per step, got {ids}"
+        assert len(set(ids)) == 1, (
+            f"the cap change started a FRESH session instead of resuming the "
+            f"transcript: {ids}"
+        )
 
     def test_role_config_beats_the_framework_default(
             self, stub_bobi_env, captured_lifecycle):
