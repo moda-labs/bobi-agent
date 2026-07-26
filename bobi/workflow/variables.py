@@ -173,19 +173,43 @@ _NUMERIC_OPS: dict[str, Callable[[float, float], bool]] = {
 }
 
 
-def _contains(haystack: Any, needle: Any) -> bool:
-    """`in` against a LIST literal is membership; against text it is substring.
+def _membership(haystack: Any, needle: Any, *, negate: bool) -> bool:
+    """Evaluate `needle in haystack`, or its `not in` inverse. Fails CLOSED.
 
-    A list literal is the allow-list idiom (`verdict in ['approved', 'lgtm']`),
-    so it has to compare whole items. Stringifying the list first turned the
-    gate into a substring test over `"['approved', 'lgtm']"`, which admits any
-    fragment of it - `app` passed, and so did the empty string every list
-    contains, so a step whose value was blank or missing was ADMITTED by the
-    allow-list meant to exclude it. `not in` failed the same way inverted.
+    Two rules, both learned from the same routing gate failing open.
+
+    ONE: `in` against a LIST literal is membership; against text it stays a
+    substring. A list literal is the allow-list idiom
+    (`verdict in ['approved', 'lgtm']`), so it has to compare whole items.
+    Stringifying the list first turned the gate into a substring test over
+    `"['approved', 'lgtm']"`, which admits any fragment of it - `app` passed.
+
+    TWO: an unknown value decides nothing, so a blank `needle` is False for
+    BOTH operators. Whole-item comparison alone did not close this: written
+    against a string - a literal, or a policy resolved from a scope - the gate
+    is still a substring test, and every string contains "". `not in` leaked
+    the same way inverted, admitting blank because it is not a member.
+
+    Blank is the ordinary case, not an exotic one: a step whose brain returned
+    nothing, or a handoff missing the field, since an unknown scope key
+    resolves to "" with a warning rather than an error. The value the gate
+    exists to judge is therefore unknown on exactly the runs where judging it
+    matters, and both directions used to route as if the check had passed.
+
+    `not in` is a separate gate - "proceed unless denied" - not the boolean
+    negation of `in`, which is why the blank check precedes `negate` instead
+    of being inverted along with the result. The deliberate cost: an allow-list
+    can no longer admit "" on purpose. Letting it would reopen the hole for
+    every gate that never thought to list "" in the first place.
     """
+    value = str(needle).strip()
+    if not value:
+        return False
     if isinstance(haystack, list):
-        return str(needle).strip() in [str(item).strip() for item in haystack]
-    return str(needle).strip() in str(haystack)
+        member = value in [str(item).strip() for item in haystack]
+    else:
+        member = value in str(haystack)
+    return not member if negate else member
 
 
 def _parse_comparison(expr: str, ctx: _Ctx = None) -> tuple[bool, str]:
@@ -206,10 +230,10 @@ def _parse_comparison(expr: str, ctx: _Ctx = None) -> tuple[bool, str]:
         return str(left).strip() != str(right).strip(), rest
     elif rest.startswith("not in "):
         right, rest = _parse_value_greedy(rest[7:], ctx)
-        return not _contains(right, left), rest
+        return _membership(right, left, negate=True), rest
     elif rest.startswith("in "):
         right, rest = _parse_value_greedy(rest[3:], ctx)
-        return _contains(right, left), rest
+        return _membership(right, left, negate=False), rest
 
     for symbol, apply in _NUMERIC_OPS.items():
         if rest.startswith(symbol):

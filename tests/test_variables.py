@@ -289,7 +289,7 @@ class TestListContainmentComparesWholeItems:
 
     @pytest.mark.parametrize("value, denied", [
         ("rejected", True),
-        ("", False),             # empty is not a member, so it is not denied
+        ("", True),              # unknown value: undecidable, so denied
         ("reject", False),
     ])
     def test_deny_list_catches_only_whole_items(self, value, denied):
@@ -304,6 +304,119 @@ class TestListContainmentComparesWholeItems:
         ctx.set_flat("body", "please deploy to staging")
         assert ctx.evaluate_condition("'staging' in body") is True
         assert ctx.evaluate_condition("'production' in body") is False
+
+
+# The right-hand spellings of one allow-list. The list literal is the idiom the
+# fix above already covers; the other two are the same gate written against a
+# string, which is what a policy value resolved from a scope arrives as.
+_ALLOW_LIST_SPELLINGS = [
+    pytest.param("['approved', 'lgtm']", id="list-literal"),
+    pytest.param("'approved'", id="string-literal"),
+    pytest.param("${{policy.allowed}}", id="scope-resolved-string"),
+]
+
+
+class TestMembershipDeniesAnUnknownValue:
+    """A membership gate whose tested value is blank must route NOWHERE.
+
+    Comparing whole items stopped `in ['approved']` admitting the empty string,
+    but only for that one spelling. Written against a string - a literal, or a
+    policy value resolved from a scope - the gate is still a substring test,
+    and every string contains "". Inverted, the list form failed the same way:
+
+      ${{review.verdict}} in 'approved'           verdict=""  was True   ADMITTED
+      ${{review.verdict}} in ${{policy.allowed}}  verdict=""  was True   ADMITTED
+      ${{review.verdict}} not in ['rejected']     verdict=""  was True   PROCEEDED
+
+    Blank is not an exotic input: it is what a routing gate sees on the most
+    ordinary failure there is - a review step whose brain returned nothing, or
+    a handoff missing the field, since an unknown scope key resolves to "" (a
+    warning, not an error). So the value the gate exists to judge is unknown
+    on exactly the runs where judging it matters.
+
+    An unknown value is therefore undecidable and BOTH operators evaluate to
+    False. `not in` is a separate gate - "proceed unless denied" - not the
+    boolean negation of `in`, so failing closed means False for each of them
+    rather than one being the complement of the other. The deliberate cost is
+    that an allow-list can no longer admit the empty string on purpose; that
+    is pinned below so it reads as a choice, not an oversight.
+    """
+
+    def _verdict_ctx(self, value: str) -> VariableContext:
+        ctx = VariableContext()
+        ctx.scopes["review"] = {"verdict": value}
+        ctx.scopes["policy"] = {"allowed": "approved"}
+        return ctx
+
+    @pytest.mark.parametrize("allowed", _ALLOW_LIST_SPELLINGS)
+    def test_blank_value_is_never_admitted_by_an_allow_list(self, allowed):
+        ctx = self._verdict_ctx("")
+        assert ctx.evaluate_condition(f"${{{{review.verdict}}}} in {allowed}") is False
+
+    @pytest.mark.parametrize("allowed", _ALLOW_LIST_SPELLINGS)
+    def test_blank_value_is_never_passed_by_a_deny_list(self, allowed):
+        ctx = self._verdict_ctx("")
+        assert ctx.evaluate_condition(
+            f"${{{{review.verdict}}}} not in {allowed}") is False
+
+    @pytest.mark.parametrize("allowed", _ALLOW_LIST_SPELLINGS)
+    def test_a_missing_field_denies_exactly_like_a_blank_one(self, allowed):
+        """The scope key is absent entirely - the omitted-field shape."""
+        ctx = VariableContext()
+        ctx.scopes["review"] = {}
+        ctx.scopes["policy"] = {"allowed": "approved"}
+        assert ctx.evaluate_condition(f"${{{{review.verdict}}}} in {allowed}") is False
+        assert ctx.evaluate_condition(
+            f"${{{{review.verdict}}}} not in {allowed}") is False
+
+    @pytest.mark.parametrize("allowed", _ALLOW_LIST_SPELLINGS)
+    def test_a_whitespace_only_value_is_blank_too(self, allowed):
+        ctx = self._verdict_ctx("   ")
+        assert ctx.evaluate_condition(f"${{{{review.verdict}}}} in {allowed}") is False
+        assert ctx.evaluate_condition(
+            f"${{{{review.verdict}}}} not in {allowed}") is False
+
+    @pytest.mark.parametrize("allowed", _ALLOW_LIST_SPELLINGS)
+    def test_a_known_value_still_decides_in_every_spelling(self, allowed):
+        """The gate must still WORK - fail-closed is not deny-everything."""
+        assert self._verdict_ctx("approved").evaluate_condition(
+            f"${{{{review.verdict}}}} in {allowed}") is True
+        assert self._verdict_ctx("rejected").evaluate_condition(
+            f"${{{{review.verdict}}}} in {allowed}") is False
+        assert self._verdict_ctx("rejected").evaluate_condition(
+            f"${{{{review.verdict}}}} not in {allowed}") is True
+
+    def test_an_allow_list_cannot_opt_the_empty_string_back_in(self):
+        """The recorded cost: "" is undecidable even when listed explicitly.
+
+        Admitting it would reopen the hole for every gate that did not think
+        to exclude it, so the blank check precedes the membership test rather
+        than deferring to what the author happened to list.
+        """
+        ctx = self._verdict_ctx("")
+        assert ctx.evaluate_condition("${{review.verdict}} in ['', 'approved']") is False
+
+    def test_a_blank_verdict_routes_to_the_else_branch(self):
+        """The same decision through the orchestrator's real routing line.
+
+        `orchestrator.py` gates a route step with exactly this expression and
+        picks `goto` or `else_goto` off the result, so a gate that failed open
+        did not merely return True - it sent a blank-verdict run down the
+        approved branch.
+        """
+        from bobi.workflow.schema import StepDef
+
+        step = StepDef(name="route_verdict",
+                       condition="${{review.verdict}} in ['approved', 'lgtm']",
+                       goto="merge", else_goto="escalate")
+
+        def target(verdict: str) -> str:
+            ctx = self._verdict_ctx(verdict)
+            return step.goto if ctx.evaluate_condition(step.condition) else step.else_goto
+
+        assert target("approved") == "merge"
+        assert target("") == "escalate", "a blank verdict reached the merge branch"
+        assert target("rejected") == "escalate"
 
 
 # ---------------------------------------------------------------------------
