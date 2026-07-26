@@ -1,7 +1,7 @@
 # Checklist-driven execution: retire the workflow engine's step machine
 
 > **Status:** Draft
-> **Tracking issue:** moda-labs/bobi-agent#{N} · **Created:** 2026-07-26 · **Last amended:** — (see Amendments)
+> **Tracking issue:** moda-labs/bobi-agent#852 · **Created:** 2026-07-26 · **Last amended:** — (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
