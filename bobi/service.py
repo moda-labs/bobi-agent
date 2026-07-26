@@ -309,10 +309,21 @@ def _proc_argv(pid: int) -> list[str]:
 
 
 def _ps_argv(pid: int) -> list[str]:
-    """argv of `pid` from `ps` - the macOS/BSD path, where /proc does not exist."""
+    """argv of `pid` from `ps` - the macOS/BSD path, where /proc does not exist.
+
+    `-ww` is load-bearing, not tidiness. BSD `ps` clips the command column to
+    the output width, and with stdout a pipe - always, under `capture_output`
+    - macOS falls back to 80 columns instead of a terminal size. `node
+    <root>/event-server/dist/local.js` passes that at any ordinary install
+    path, and what gets cut is the TAIL, which is the only part `is_process`'s
+    identity predicates read. A clipped argv does not read as unidentifiable;
+    it reads as a different process, so `stop_pidfile` classified a live
+    daemon as a recycled pid, deleted its pid file, and reported it already
+    gone. `-ww` asks for as many columns as it takes.
+    """
     try:
         proc = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
             capture_output=True, text=True, timeout=5,
         )
     except (OSError, subprocess.SubprocessError):

@@ -5,6 +5,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -16,6 +17,36 @@ from bobi.webapp import daemon
 def _is_app(pid: int) -> bool:
     """What `stop()` asks before it signals: live AND wearing the app's argv."""
     return service.is_process(pid, daemon._is_app_argv)
+
+
+# 96 characters - an install path of unremarkable length, and 16 past the 80
+# columns BSD `ps` falls back to when its output is a pipe. What gets cut is
+# the tail, which is the only part any `is_*_argv` predicate looks at.
+_LONG_DAEMON_ARGV = (
+    "/usr/local/bin/node "
+    "/Users/somebody/dev/moda/bobi/agents/eng-team/run/event-server/dist/local.js"
+)
+
+
+def _stub_bsd_ps(tmp_path, monkeypatch) -> str:
+    """Put a `ps` on PATH that clips like BSD's unless asked for full width.
+
+    This image ships no `ps` at all, and the Linux one does not clip the way
+    macOS's does, so the platform behaviour under test has to be supplied.
+    Returns the untruncated command line the stub reports.
+    """
+    stub = tmp_path / "ps"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"full='{_LONG_DAEMON_ARGV}'\n"
+        'case " $* " in\n'
+        '  *" -ww "*) printf "%s\\n" "$full" ;;\n'
+        '  *) printf "%s\\n" "$full" | cut -c1-80 ;;\n'
+        "esac\n"
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    return _LONG_DAEMON_ARGV
 
 
 @pytest.fixture
@@ -155,6 +186,69 @@ class TestStopIdentity:
 
         assert service.process_argv(4242) == ["/usr/local/bin/bobi", "app", "run"]
         assert daemon._is_app_argv(service.process_argv(4242)) is True
+
+    def test_ps_argv_is_not_truncated_at_the_default_width(self, tmp_path,
+                                                           monkeypatch):
+        """BSD `ps` clips the command column, so identity must ask for it all.
+
+        `ps -o command=` is width-limited, and when stdout is a pipe - always,
+        under `subprocess.run(capture_output=True)` - macOS falls back to 80
+        columns rather than a terminal size. A real install path blows past
+        that: `node <root>/event-server/dist/local.js` is 95 characters here,
+        so the tail is cut off. The tail is the whole identity: every
+        `is_*_argv` predicate matches on the END of argv.
+
+        Only `-ww` lifts the limit. The stub reproduces both behaviours so the
+        contract is pinned by outcome, not by asserting on the flags passed.
+        """
+        monkeypatch.setattr(service, "_proc_argv", lambda pid: [])
+        full = _stub_bsd_ps(tmp_path, monkeypatch)
+
+        assert service._ps_argv(4242) == full.split(), (
+            "ps output was clipped at the default width - the tail of argv, "
+            "which is the only part identity looks at, never arrived"
+        )
+
+    def test_a_long_argv_daemon_is_stopped_not_declared_stale(self, tmp_path,
+                                                              monkeypatch):
+        """The damage the clipping does, through the real stop policy.
+
+        A truncated argv does not read as "unidentifiable" - it reads as a
+        DIFFERENT process. `stop_pidfile` treats that as a recycled pid: it
+        deletes the pid file and reports `stale`. So on macOS, with an install
+        path of ordinary length, `bobi ... event-server stop` left the server
+        running, threw away the only record of it, and told the operator it
+        had already exited. Nothing could find it afterwards and the next
+        start could not bind.
+        """
+        monkeypatch.setattr(service, "_proc_argv", lambda pid: [])
+        full = _stub_bsd_ps(tmp_path, monkeypatch)
+        from bobi.events.server import is_event_server_argv
+
+        assert is_event_server_argv(full.split()) is True, "stub argv is not the daemon"
+
+        victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        pid_path = tmp_path / "event-server.pid"
+        pid_path.write_text(str(victim.pid))
+        # Reap on exit, so the pid stops answering `kill(pid, 0)` once the
+        # SIGTERM lands. An unreaped child stays a signalable zombie, which
+        # would keep the grace loop spinning for a reason unrelated to the bug.
+        reaper = threading.Thread(target=victim.wait, daemon=True)
+        reaper.start()
+        try:
+            result = service.stop_pidfile(
+                pid_path, identity=is_event_server_argv, kind="the event server")
+
+            assert result.stale is False, (
+                "a live daemon was reported stale because ps clipped its argv"
+            )
+            assert result.stopped is True
+            reaper.join(timeout=5)
+            assert victim.poll() is not None, "the daemon was never signalled"
+        finally:
+            if victim.poll() is None:
+                victim.kill()
+                victim.wait()
 
     def test_a_process_we_cannot_identify_is_never_signalled(self, monkeypatch):
         """No /proc and no ps: identity is unprovable, so the pid is off-limits
