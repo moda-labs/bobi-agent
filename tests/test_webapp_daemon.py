@@ -4,7 +4,6 @@ detached start/stop round-trip against a temp BOBI_HOME."""
 import os
 import stat
 import subprocess
-import sys
 import threading
 import time
 
@@ -111,49 +110,46 @@ class TestStopIdentity:
     the daemon and the OS reuses the pid - stop() must prove the pid is the app
     before signalling it."""
 
-    def test_stale_pid_reused_by_another_process_is_never_signalled(self, home):
+    def test_stale_pid_reused_by_another_process_is_never_signalled(
+            self, home, sacrificial_process):
         (home / "webapp").mkdir(parents=True)
-        victim = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(30)"])
+        victim = sacrificial_process()
+        (home / "webapp" / "app.pid").write_text(str(victim.pid))
+        (home / "webapp" / "app.port").write_text("1")
+
+        st = daemon.stop()
+
+        assert st.stale is True
+        assert victim.poll() is None, "stop() killed an unrelated process"
+        # The stale state is cleared, so a later start() is unobstructed.
+        assert not (home / "webapp" / "app.pid").exists()
+        assert not (home / "webapp" / "app.port").exists()
+
+    def test_identifies_the_real_daemon_and_not_a_bystander(
+            self, home, sacrificial_process):
+        bystander = sacrificial_process()
+        st = daemon.start(open_browser=False)
         try:
-            (home / "webapp" / "app.pid").write_text(str(victim.pid))
-            (home / "webapp" / "app.port").write_text("1")
-
-            st = daemon.stop()
-
-            assert st.stale is True
-            assert victim.poll() is None, "stop() killed an unrelated process"
-            # The stale state is cleared, so a later start() is unobstructed.
-            assert not (home / "webapp" / "app.pid").exists()
-            assert not (home / "webapp" / "app.port").exists()
+            assert _is_app(st.pid) is True
+            assert _is_app(bystander.pid) is False
         finally:
-            victim.kill()
-            victim.wait()
-
-    def test_identifies_the_real_daemon_and_not_a_bystander(self, home):
-        bystander = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(30)"])
-        try:
-            st = daemon.start(open_browser=False)
-            try:
-                assert _is_app(st.pid) is True
-                assert _is_app(bystander.pid) is False
-            finally:
-                daemon.stop()
-        finally:
-            bystander.kill()
-            bystander.wait()
+            daemon.stop()
 
     def test_a_wedged_app_is_still_escalated_to_sigkill(self, home, tmp_path):
         """Identity must not make `bobi app stop` toothless: an app that
         ignores SIGTERM is still force-killed."""
         ready = tmp_path / "ready"
         fake = tmp_path / "bobi"
-        fake.write_text('#!/bin/sh\ntrap "" TERM\ntouch "$READY"\nsleep 30\n')
+        # `read` blocks on a pipe this test holds open, so the stand-in cannot
+        # run out a clock while a loaded box delays the assertion (see
+        # tests/test_pid_identity_victims.py). The ignored TERM does not
+        # interrupt it, which is exactly the wedged behaviour under test.
+        fake.write_text('#!/bin/sh\ntrap "" TERM\ntouch "$READY"\nread _\n')
         fake.chmod(0o755)
         (home / "webapp").mkdir(parents=True)
         wedged = subprocess.Popen([str(fake), "app", "run"],
-                                  env={**os.environ, "READY": str(ready)})
+                                  env={**os.environ, "READY": str(ready)},
+                                  stdin=subprocess.PIPE)
         try:
             for _ in range(50):  # the trap is only armed once the script runs
                 if ready.exists():
@@ -209,8 +205,8 @@ class TestStopIdentity:
             "which is the only part identity looks at, never arrived"
         )
 
-    def test_a_long_argv_daemon_is_stopped_not_declared_stale(self, tmp_path,
-                                                              monkeypatch):
+    def test_a_long_argv_daemon_is_stopped_not_declared_stale(
+            self, tmp_path, monkeypatch, sacrificial_process):
         """The damage the clipping does, through the real stop policy.
 
         A truncated argv does not read as "unidentifiable" - it reads as a
@@ -227,7 +223,7 @@ class TestStopIdentity:
 
         assert is_event_server_argv(full.split()) is True, "stub argv is not the daemon"
 
-        victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        victim = sacrificial_process()
         pid_path = tmp_path / "event-server.pid"
         pid_path.write_text(str(victim.pid))
         # Reap on exit, so the pid stops answering `kill(pid, 0)` once the
@@ -235,20 +231,16 @@ class TestStopIdentity:
         # would keep the grace loop spinning for a reason unrelated to the bug.
         reaper = threading.Thread(target=victim.wait, daemon=True)
         reaper.start()
-        try:
-            result = service.stop_pidfile(
-                pid_path, identity=is_event_server_argv, kind="the event server")
 
-            assert result.stale is False, (
-                "a live daemon was reported stale because ps clipped its argv"
-            )
-            assert result.stopped is True
-            reaper.join(timeout=5)
-            assert victim.poll() is not None, "the daemon was never signalled"
-        finally:
-            if victim.poll() is None:
-                victim.kill()
-                victim.wait()
+        result = service.stop_pidfile(
+            pid_path, identity=is_event_server_argv, kind="the event server")
+
+        assert result.stale is False, (
+            "a live daemon was reported stale because ps clipped its argv"
+        )
+        assert result.stopped is True
+        reaper.join(timeout=5)
+        assert victim.poll() is not None, "the daemon was never signalled"
 
     def test_a_process_we_cannot_identify_is_never_signalled(self, monkeypatch):
         """No /proc and no ps: identity is unprovable, so the pid is off-limits

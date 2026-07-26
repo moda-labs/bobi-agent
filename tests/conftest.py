@@ -271,3 +271,55 @@ def bobi_install(tmp_path, monkeypatch):
         agents_dir=agents_dir,
         agent_name=TEST_AGENT_NAME,
     )
+
+
+@pytest.fixture
+def sacrificial_process():
+    """Spawn a live process whose lifetime is bounded by the TEST, not a clock.
+
+    The pid-identity tests write a real pid into a pidfile and assert how the
+    stop path classifies it. Bounding that victim with ``time.sleep(N)`` makes
+    the classification a function of how busy the box is: on a loaded run more
+    than N seconds pass between the spawn and the assertion, the child exits,
+    and nothing has reaped it - so it is a ZOMBIE. A zombie still answers
+    ``os.kill(pid, 0)``, but ``/proc/<pid>/cmdline`` is already empty, so
+    ``process_argv`` returns ``[]`` and the stop path reports ``unidentified``
+    where the test demanded ``stale``. Observed as a real suite failure under
+    contention, and reproducible by nothing more than delaying the assertion.
+
+    The victim here blocks reading a pipe this fixture holds open, so it cannot
+    run out of anything - only the teardown, or the code under test signalling
+    it, can end it. Extra argv is passed through for the tests that need the
+    victim to WEAR a daemon's identity rather than lack it.
+
+    It is also handed back only once it has ANSWERED, which closes the other
+    half of the same problem: ``Popen`` returns as soon as the fork happens, and
+    a process caught mid-``exec`` is live with an empty ``/proc/<pid>/cmdline``
+    - indistinguishable from the zombie above, and read the same way. Waiting
+    for a byte from the child proves the exec completed, so the pid the test
+    hands to the stop path is identifiable from its first read.
+    """
+    import subprocess
+
+    spawned: list = []
+
+    def _spawn(*argv: str) -> "subprocess.Popen":
+        proc = subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys; sys.stdout.write('R'); sys.stdout.flush();"
+             " sys.stdin.read()",
+             *argv],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        )
+        spawned.append(proc)
+        assert proc.stdout.read(1) == b"R", (
+            f"victim {proc.pid} died before it finished starting"
+        )
+        return proc
+
+    yield _spawn
+
+    for proc in spawned:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()

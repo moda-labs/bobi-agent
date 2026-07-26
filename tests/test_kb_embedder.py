@@ -4,7 +4,6 @@ import json
 import os
 import signal
 import subprocess
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch, mock_open
 
@@ -214,7 +213,8 @@ class TestStop:
 
         assert not (state_dir / "embedding-sidecar.pid").exists()
 
-    def test_never_signals_a_pid_the_sidecar_no_longer_owns(self, state_dir):
+    def test_never_signals_a_pid_the_sidecar_no_longer_owns(
+            self, state_dir, sacrificial_process):
         """embedding-sidecar.pid outlives a crashed sidecar and pids get reused.
 
         The sidecar holds a fastembed model, so it is the likeliest OOM victim
@@ -223,26 +223,22 @@ class TestStop:
         checked seam, so without the same check here `bobi agent <name> stop`
         SIGTERMs whatever inherited the pid.
         """
-        bystander = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(30)"])
-        try:
-            (state_dir / "embedding-sidecar.pid").write_text(str(bystander.pid))
-            (state_dir / "embedding-sidecar.port").write_text("8000")
+        bystander = sacrificial_process()
+        (state_dir / "embedding-sidecar.pid").write_text(str(bystander.pid))
+        (state_dir / "embedding-sidecar.port").write_text("8000")
 
-            embedder.stop()
+        embedder.stop()
 
-            assert bystander.poll() is None, (
-                "stop() signalled a live process that is not the sidecar"
-            )
-            # The pid is answerable and provably not ours, so the state files
-            # are the stale ones and go - same classification as the seam.
-            assert not (state_dir / "embedding-sidecar.pid").exists()
-            assert not (state_dir / "embedding-sidecar.port").exists()
-        finally:
-            bystander.kill()
-            bystander.wait()
+        assert bystander.poll() is None, (
+            "stop() signalled a live process that is not the sidecar"
+        )
+        # The pid is answerable and provably not ours, so the state files
+        # are the stale ones and go - same classification as the seam.
+        assert not (state_dir / "embedding-sidecar.pid").exists()
+        assert not (state_dir / "embedding-sidecar.port").exists()
 
-    def test_stops_a_sidecar_it_can_identify(self, state_dir):
+    def test_stops_a_sidecar_it_can_identify(self, state_dir,
+                                             sacrificial_process):
         """The other half: a process wearing the sidecar's real argv IS stopped.
 
         The argv has to be genuine, not patched: `stop_pidfile` re-reads it
@@ -250,19 +246,12 @@ class TestStop:
         while its argv is already gone - which is exactly how it tells an
         exited process from a live one.
         """
-        sidecar = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(30)",
-             "bobi.kb.sidecar"])
-        try:
-            (state_dir / "embedding-sidecar.pid").write_text(str(sidecar.pid))
-            (state_dir / "embedding-sidecar.port").write_text("8000")
+        sidecar = sacrificial_process("bobi.kb.sidecar")
+        (state_dir / "embedding-sidecar.pid").write_text(str(sidecar.pid))
+        (state_dir / "embedding-sidecar.port").write_text("8000")
 
-            embedder.stop()
+        embedder.stop()
 
-            assert sidecar.poll() is not None, "the sidecar was not signalled"
-            assert not (state_dir / "embedding-sidecar.pid").exists()
-            assert not (state_dir / "embedding-sidecar.port").exists()
-        finally:
-            if sidecar.poll() is None:
-                sidecar.kill()
-            sidecar.wait()
+        assert sidecar.poll() is not None, "the sidecar was not signalled"
+        assert not (state_dir / "embedding-sidecar.pid").exists()
+        assert not (state_dir / "embedding-sidecar.port").exists()

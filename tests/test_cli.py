@@ -3,7 +3,6 @@
 import json
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -28,12 +27,16 @@ def _fake_event_server(tmp_path, *, trap_term: bool = False):
     """
     ready = tmp_path / "ready"
     node = tmp_path / "node"
+    # `read` blocks on a pipe the caller holds open, so the stand-in cannot run
+    # out a clock while a loaded box delays the assertion, and an ignored TERM
+    # does not interrupt it (see tests/test_pid_identity_victims.py).
     node.write_text("#!/bin/sh\n"
                     + ('trap "" TERM\n' if trap_term else "")
-                    + 'touch "$READY"\nsleep 30\n')
+                    + 'touch "$READY"\nread _\n')
     node.chmod(0o755)
     proc = subprocess.Popen([str(node), str(tmp_path / "dist" / "local.js")],
-                            env={**os.environ, "READY": str(ready)})
+                            env={**os.environ, "READY": str(ready)},
+                            stdin=subprocess.PIPE)
     for _ in range(50):
         if ready.exists():
             return proc
@@ -868,30 +871,25 @@ class TestEventServerCommand:
         assert "Event server is still running on port 58405" in result.output
 
     def test_stop_never_signals_a_pid_the_server_no_longer_owns(
-        self, bobi_install,
+        self, bobi_install, sacrificial_process,
     ):
         """event-server.pid outlives a crashed server - nothing removes it on a
         SIGKILL or an OOM kill - and the OS then hands that pid to someone
         else. A stop that trusts liveness alone SIGTERMs a stranger."""
-        victim = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(30)"])
-        try:
-            (bobi_install.state_dir / "event-server.pid").write_text(
-                str(victim.pid))
-            (bobi_install.state_dir / "event-server.port").write_text("58405")
+        victim = sacrificial_process()
+        (bobi_install.state_dir / "event-server.pid").write_text(
+            str(victim.pid))
+        (bobi_install.state_dir / "event-server.port").write_text("58405")
 
-            result = CliRunner().invoke(
-                main, ["agent", TEST_AGENT_NAME, "event-server", "stop"])
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "event-server", "stop"])
 
-            with pytest.raises(subprocess.TimeoutExpired):
-                victim.wait(timeout=1)  # i.e. it was never signalled
-            assert result.exit_code == 0, result.output
-            assert "stale PID file" in result.output
-            assert not (bobi_install.state_dir / "event-server.pid").exists()
-            assert not (bobi_install.state_dir / "event-server.port").exists()
-        finally:
-            victim.kill()
-            victim.wait()
+        with pytest.raises(subprocess.TimeoutExpired):
+            victim.wait(timeout=1)  # i.e. it was never signalled
+        assert result.exit_code == 0, result.output
+        assert "stale PID file" in result.output
+        assert not (bobi_install.state_dir / "event-server.pid").exists()
+        assert not (bobi_install.state_dir / "event-server.port").exists()
 
     def test_stop_reports_a_server_that_ignored_sigterm(
         self, bobi_install, tmp_path,
@@ -965,11 +963,13 @@ class TestAgentStop:
         monkeypatch.setattr("bobi.events.server.health", lambda url: None)
         ready = tmp_path / "ready"
         fake = tmp_path / "bobi"
-        fake.write_text('#!/bin/sh\ntouch "$READY"\nsleep 30\n')
+        # `read` blocks on a pipe this test holds open, so the stand-in cannot
+        # run out a clock (see tests/test_pid_identity_victims.py).
+        fake.write_text('#!/bin/sh\ntouch "$READY"\nread _\n')
         fake.chmod(0o755)
         manager = subprocess.Popen(
             [str(fake), "agent", TEST_AGENT_NAME, "start", "--foreground"],
-            env={**os.environ, "READY": str(ready)})
+            env={**os.environ, "READY": str(ready)}, stdin=subprocess.PIPE)
         try:
             for _ in range(50):
                 if ready.exists():
@@ -992,27 +992,22 @@ class TestAgentStop:
                 manager.wait()
 
     def test_stop_never_signals_a_pid_the_manager_no_longer_owns(
-        self, bobi_install, monkeypatch,
+        self, bobi_install, monkeypatch, sacrificial_process,
     ):
         """manager.pid is cleaned up by an atexit handler, which a SIGKILL, an
         OOM kill or a hard crash skips - so a live pid in manager.pid proves
         nothing on its own, and the pid may since have been reused."""
         monkeypatch.setattr("bobi.events.server.health", lambda url: None)
-        victim = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(30)"])
-        try:
-            (bobi_install.state_dir / "manager.pid").write_text(str(victim.pid))
+        victim = sacrificial_process()
+        (bobi_install.state_dir / "manager.pid").write_text(str(victim.pid))
 
-            result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "stop"])
+        result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "stop"])
 
-            with pytest.raises(subprocess.TimeoutExpired):
-                victim.wait(timeout=1)  # i.e. it was never signalled
-            assert result.exit_code == 0, result.output
-            assert "stale PID file" in result.output
-            assert not (bobi_install.state_dir / "manager.pid").exists()
-        finally:
-            victim.kill()
-            victim.wait()
+        with pytest.raises(subprocess.TimeoutExpired):
+            victim.wait(timeout=1)  # i.e. it was never signalled
+        assert result.exit_code == 0, result.output
+        assert "stale PID file" in result.output
+        assert not (bobi_install.state_dir / "manager.pid").exists()
 
     def test_stop_leaves_a_pid_it_cannot_identify_alone(
         self, bobi_install, monkeypatch,
