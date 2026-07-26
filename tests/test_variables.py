@@ -262,6 +262,50 @@ class TestConditionContainment:
         assert ctx.evaluate_condition("'bye' not in text") is True
 
 
+class TestListContainmentComparesWholeItems:
+    """A list literal is the allow-list idiom, so `in` must compare items.
+
+    Stringifying the list made the gate a substring test over
+    "['approved', 'lgtm']", which admits any fragment of that text - including
+    the empty string, which every string contains. A step that returned a
+    blank or missing field was therefore ADMITTED by the allow-list written to
+    exclude it, and `not in` rejected it for the same reason inverted. These
+    are the two directions a routing gate can fail, so both are pinned.
+    """
+
+    @pytest.mark.parametrize("value, allowed", [
+        ("", False),             # the one that failed open
+        ("app", False),          # a fragment of 'approved'
+        ("approved", True),
+        ("lgtm", True),
+        ("rejected", False),
+        ("['approved'", False),  # a fragment of the rendered list itself
+    ])
+    def test_allow_list_admits_only_whole_items(self, value, allowed):
+        ctx = VariableContext()
+        ctx.scopes["review"] = {"verdict": value}
+        expr = "${{review.verdict}} in ['approved', 'lgtm']"
+        assert ctx.evaluate_condition(expr) is allowed
+
+    @pytest.mark.parametrize("value, denied", [
+        ("rejected", True),
+        ("", False),             # empty is not a member, so it is not denied
+        ("reject", False),
+    ])
+    def test_deny_list_catches_only_whole_items(self, value, denied):
+        ctx = VariableContext()
+        ctx.scopes["review"] = {"verdict": value}
+        expr = "${{review.verdict}} not in ['rejected']"
+        assert ctx.evaluate_condition(expr) is not denied
+
+    def test_substring_still_works_against_plain_text(self):
+        """Only the LIST form changed - `in` over a string stays a substring."""
+        ctx = VariableContext()
+        ctx.set_flat("body", "please deploy to staging")
+        assert ctx.evaluate_condition("'staging' in body") is True
+        assert ctx.evaluate_condition("'production' in body") is False
+
+
 # ---------------------------------------------------------------------------
 # Condition evaluation - numeric comparison
 # ---------------------------------------------------------------------------

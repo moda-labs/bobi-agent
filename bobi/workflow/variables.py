@@ -173,6 +173,21 @@ _NUMERIC_OPS: dict[str, Callable[[float, float], bool]] = {
 }
 
 
+def _contains(haystack: Any, needle: Any) -> bool:
+    """`in` against a LIST literal is membership; against text it is substring.
+
+    A list literal is the allow-list idiom (`verdict in ['approved', 'lgtm']`),
+    so it has to compare whole items. Stringifying the list first turned the
+    gate into a substring test over `"['approved', 'lgtm']"`, which admits any
+    fragment of it - `app` passed, and so did the empty string every list
+    contains, so a step whose value was blank or missing was ADMITTED by the
+    allow-list meant to exclude it. `not in` failed the same way inverted.
+    """
+    if isinstance(haystack, list):
+        return str(needle).strip() in [str(item).strip() for item in haystack]
+    return str(needle).strip() in str(haystack)
+
+
 def _parse_comparison(expr: str, ctx: _Ctx = None) -> tuple[bool, str]:
     expr = expr.strip()
 
@@ -191,10 +206,10 @@ def _parse_comparison(expr: str, ctx: _Ctx = None) -> tuple[bool, str]:
         return str(left).strip() != str(right).strip(), rest
     elif rest.startswith("not in "):
         right, rest = _parse_value_greedy(rest[7:], ctx)
-        return str(left).strip() not in str(right), rest
+        return not _contains(right, left), rest
     elif rest.startswith("in "):
         right, rest = _parse_value_greedy(rest[3:], ctx)
-        return str(left).strip() in str(right), rest
+        return _contains(right, left), rest
 
     for symbol, apply in _NUMERIC_OPS.items():
         if rest.startswith(symbol):
