@@ -340,12 +340,28 @@ of by textual substitution. Two consequences matter here:
    Shipping the `qa` gate on `main`'s parser would ship a gate that admits
    fragments.
 
-2. **Handoff values are untrusted text.** On `main` a value is substituted into
-   the expression before parsing, so a value containing ` in `, ` and `, or a
-   quote re-tokenizes the condition. (Probing plausible free-text statuses
-   against a `==` gate did not produce a wrong pass, so this is a robustness
-   argument, not a demonstrated false pass - but a fail-closed gate should not
-   depend on that luck.)
+2. **Handoff values are untrusted text, and on `main` some of them crash the
+   evaluator.** `main` substitutes the value into the expression with
+   `re.sub`, where the value becomes the *replacement* string, so a backslash
+   escape is read as a regex backreference. Measured:
+
+   | `status` value | `main` | #844 |
+   | --- | --- | --- |
+   | `failed: bad escape \1 in regex` | **raises `re.error`** | `False` |
+   | `C:\temp\1` | **raises `re.error`** | `False` |
+   | `complete\g<0>` | `False` | `False` |
+
+   `evaluate_condition` returning an exception instead of a bool is a live
+   defect for route steps on `main` today, not only for this gate. Decision 3
+   catches it and fails the step closed, but the error an operator would read
+   is `invalid group reference 1 at position 20`, which says nothing about the
+   handoff. #844 removes the class by never substituting values into expression
+   text.
+
+   Value-driven re-tokenization is the same class: a value containing ` in ` or
+   ` and ` re-parses the condition. Probing plausible free-text statuses against
+   a `==` gate did not produce a wrong *pass*, so that half stays a robustness
+   argument - but a fail-closed gate should not depend on that luck.
 
 #844 also adds the per-visit stale-handoff unlink that `success_when` needs to
 be correct on a route-loop back-edge, a hazard already recorded at
