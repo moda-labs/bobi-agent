@@ -1,36 +1,38 @@
-# Checklist-driven execution: retire the workflow engine's step machine
+# Checklist-driven execution: retire the workflow step machine
 
 > **Status:** Draft
-> **Tracking issue:** moda-labs/bobi-agent#852 · **Created:** 2026-07-26 · **Last amended:** — (see Amendments)
+> **Tracking issue:** moda-labs/bobi-agent#852 · **Created:** 2026-07-26 · **Last amended:** 2026-07-26 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
 ## Purpose
 
-Move agent execution off a YAML step machine and onto a checklist model: the plan
-file is the one human artifact for a unit of work — enhanced in place with
-engineering-lifecycle tasks, or minted when none exists — and a mechanical driver
-re-dispatches short-lived workers against a typed run record until the work is
-done, pausing at declared gates and yielding to a human when it must.
+Move agent execution off the YAML step machine and onto a single plan file that
+is both the human-reviewable design document and the agent's working checklist.
+An agent reads it, does the next unchecked item, proves the item, checks it off,
+commits, and repeats until done or blocked. Nothing orchestrates it; the loop is
+prompt text.
 
-The goal is **flexibility and durability**, in that order. Flexibility: the
-lifecycle lives in prompts and skills, where it can be changed by editing text,
-instead of in a second control-flow language that duplicates the plan badly.
-Durability: work survives any single session's death, because the state is on
-disk and the driver just dispatches again.
+The goal is **flexibility first, durability second**. Flexibility: the lifecycle
+lives in prompts and skills, changeable by editing text, instead of in a second
+control-flow language that duplicates the plan badly. Durability: the state is a
+committed file, so a dead session loses at most its current item.
 
-The 10x version is not more machinery, it is less: the framework contributes a
-generic checklist-coordination primitive that knows nothing about engineering,
-and the `build` skill contributes all the lifecycle detail. That split is the
-reason this is worth doing rather than patching the engine a third time.
+The 10x version here was *less machinery*, and finding that took three rounds of
+review. Successive drafts of this plan proposed a driver process, a typed run
+record, a lease module, a native-action executor, and a budget accounting layer.
+All of it is gone. What survives is one code change (make a turn-cap hit
+resumable), one small parser, one default monitor, and prompt text — because the
+framework already has the pieces: the session registry knows what is alive, the
+monitor scheduler is a mechanical tick that spawns agents, and the director is
+already good at deciding whether a stalled unit needs a poke.
 
-**One correction to the motivation, up front.** An earlier draft argued this was
-needed to escape the 200-turn cap. Review refuted that: the cap is per prompt,
-multi-step workflows already get one budget per step, and the only sessions that
-died were single-step `adhoc` runs (see Problem 3). Turn-budget survival is a
-*consequence* of this design, not its justification — and a much cheaper fix
-exists for that symptom alone (Alternatives, option 5). The case for this plan is
-the duplication and rigidity, not the cap.
+**A correction to the motivation, up front.** An earlier draft argued this was
+needed to escape the 200-turn cap. That is false: the cap is per prompt,
+multi-step workflows already get a fresh budget per step, and the only sessions
+that died were single-prompt `adhoc` runs (Problem 3). Turn-budget survival is a
+*consequence* of this design, and the narrow fix for that symptom alone is
+Phase 1. The case for the rest is duplication and rigidity, not the cap.
 
 ## Problem
 
@@ -41,31 +43,25 @@ Line references are from that day's `main` (`29a382b`).
 done.** `_validate_handoff` (`bobi/workflow/orchestrator.py:1211-1213`) checks
 only that required handoff *keys* exist, never their values. `status: in_progress`
 is accepted identically to `status: complete`; the run walks to the end of its
-step list and emits `agent/session.completed`. Making this semantic inside the
-engine would mean teaching `bobi/` what "reviewed" and "documented" mean, which
+step list and emits `agent/session.completed`. Fixing this inside the engine
+would mean teaching `bobi/` what "reviewed" and "documented" mean, which
 CLAUDE.md's first principle forbids.
 
 **2. The step list has stopped carrying information, while the plan file carries
 more.** Of 14 workflow YAMLs in `agents/`, **8 are single-step** (eng-team
 `adhoc`, `build-failure`, `merge-conflict`, `stall-recovery`, `pr-feedback`;
-`personal-assistant/adhoc`; `smoke-test`) — `agents/eng-team/workflows/adhoc.yaml`
+`personal-assistant/adhoc`; `smoke-test`). `agents/eng-team/workflows/adhoc.yaml`
 is one step whose entire body is `prompt: "${{input.task}}"`. The multi-step
 survivors delegate their substance to skills: every agent step in `moda-agents`'
 `plan-execute.yaml` amounts to "read the `build` skill in full and do what it
 says." Meanwhile `plans/2026-07-22-review-remediation.md` carries 251 checklist
 items across 9 phases with `file:line` anchors and gates like
 `grep -rn "write_text" bobi/ | grep -iE "state|config"`. The step list is a
-weaker copy of a better artifact — but note the corollary the review surfaced:
-that plan's items are **undifferentiated markdown**, with runnable commands and
-prose intent side by side and only one literal `verify:` in the whole file (and
-that one is prose). Machine-verifiable done-ness does not exist in today's plans
-and has to be built (Q2).
+weaker copy of a better artifact.
 
-**3. Long ad-hoc work dies in one session and loses everything unpushed.** Two
-Lane A workers died on 2026-07-26 at `maxTurns: 200, turnCount: 201`
-(`state.json status=failed, error="turn failed"`), both mid-edit with no handoff.
-The budget is per prompt (`orchestrator.py:851` queries per step;
-`session.py:1171` per inbox message), so:
+**3. Long single-prompt work dies and loses everything unpushed.** Two Lane A
+workers died on 2026-07-26 at `maxTurns: 200, turnCount: 201`
+(`state.json status=failed, error="turn failed"`), both mid-edit with no handoff:
 
 | session | kind | prompts | tool calls | hit the cap |
 |---|---|---|---|---|
@@ -74,13 +70,14 @@ The budget is per prompt (`orchestrator.py:851` queries per step;
 | `fcc79fc7` | `adhoc` (1 step) | 2 | 213 | **yes** |
 | `05d25f94` | `adhoc` (1 step) | 1 | 231 | **yes** |
 
-Read honestly, this table says *per-step re-query already works* and only the
-single-prompt path lacks it. `max_turns=200` is hardcoded at
-`orchestrator.py:457`, `subagent.py:746` (`spawn_adhoc`), `subagent.py:587`
-(`run_phase_blocking` — **no production callers**, tests only), and
-`subagent.py:351`. The deliberate small caps (`CHECK_MAX_TURNS = 8` at `:1564`,
-`GATE_MAX_TURNS = 2` at `:1847`, `CURATOR_MAX_TURNS = 10` at `:1992`) must keep
-failing fast and are out of scope for any resumability change.
+`max_turns=200` is hardcoded at `orchestrator.py:457`, `subagent.py:746`
+(`spawn_adhoc`), `subagent.py:587` (`run_phase_blocking` — **no production
+callers**), and `subagent.py:351`. `bobi/brain/claude.py:278-292` already detects
+`max_turns_reached` correctly; the orchestrator drain
+(`orchestrator.py:984-985`) throws the diagnosis away and substitutes the literal
+string `"turn failed"`. The deliberate small caps (`CHECK_MAX_TURNS = 8` at
+`:1564`, `GATE_MAX_TURNS = 2` at `:1847`, `CURATOR_MAX_TURNS = 10` at `:1992`)
+must keep failing fast and are out of scope.
 
 **4. A worker cannot wait without paying turns.** In `fcc79fc7`, **79 of 201**
 Bash calls were `tail -1 /tmp/final-suite.log` in one contiguous idle block while
@@ -88,613 +85,487 @@ Bash calls were `tail -1 /tmp/final-suite.log` in one contiguous idle block whil
 `sleep 240` was silently backgrounded, `sleep 540` hard-blocked, an `until` loop
 backgrounded, and `Monitor` replied *"Keep working — do not poll or sleep"* when
 there was no work left. ~40% of that budget bought nothing. `subagents launch
---wait` does block on the agent (#753) but **only for the `adhoc` workflow**
-(`cli.py:2931` rejects anything else), and the fan-out used the harness `Agent`
-tool, which has no blocking join.
+--wait` does block on the agent (#753) but **only for `adhoc`** (`cli.py:2931`).
 
-**5. Ad-hoc work keeps no durable record of what it learned.** `spawn_adhoc`
+**5. Retroactive verification is expensive and self-inflicted.** `fcc79fc7`
+inherited 1,293 insertions of uncommitted work from a dead predecessor and spent
+turns 34–47 and 106–120 — **~25 turns, >12% of its budget** — proving
+failing-test-first by reverting source in scratch worktrees (`git worktree add`,
+`git checkout HEAD -- .`, `git stash -u`). None of that is required by TDD, which
+is forward-only: the `build` skill's Stage 2 says *"write the failing test that
+reproduces the bug FIRST, then fix."* The cost came from having no durable record
+of what the predecessor had proven, so it re-derived instead of reading.
+
+**6. Ad-hoc work keeps no durable record of what it learned.** `spawn_adhoc`
 (`bobi/subagent.py:663`) takes a freeform prompt and holds everything in session
-context; when the session dies or rotates on `context_cap`, the research and
-decisions die with it. `fcc79fc7` spent its first ~30 turns (~15%) re-orienting.
+context; when the session dies or rotates on `context_cap`, research and
+decisions die with it. `fcc79fc7` spent its first ~30 turns re-orienting.
 
-**6. What is actually broken about human yield is a missing wire, not the
-architecture.** `await:` is already durable: `orchestrator.py:721-745` marks the
-registry `waiting`, persists the full `WorkflowRun` with variable scopes, emits
-`agent/workflow.suspended`, disconnects and returns — no process waits. The real
-defect is that `try_resume_for_event` has **no production caller** (its own
-docstring, `orchestrator.py:76-83`), so the only live resume is the operator CLI
-(`cli.py:2250`). `StepDef.timeout` is parsed and never read, so the `timeout:`
-values on await steps are dead config. Any replacement inherits this same gap and
-must say who provides the wire.
-
-**7. The engine has non-LLM capabilities the checklist model has no answer for
-yet.** `agents/eng-team/workflows/pr-closed.yaml` uses all four deterministic step
-types in one file: `action: cleanup_worktree` (→ `bobi/workflow/cleanup.py`, which
-runs `git worktree remove --force` and `git branch -D`), `if: "merged == true"` /
-`goto:` / `else:`, and `notify: slack`. `content-lifecycle.yaml` rotates roles
-`editor → researcher → editor → fact_checker → editor`, and
-`orchestrator.py:767-786` deliberately starts a **fresh session** on an agent
-change so a reviewer step is not contaminated by the builder's reasoning. Handing
-destructive git cleanup and `merged == true` to an LLM worker is a regression, not
-a simplification.
-
-**8. `bobi setup` generates workflows.** `bobi/setup/authoring.py:420` emits
-`{"name": f"{name}-approval", "await": "approval", ...}` for every human-in-the-loop
-automation, and `:309`/`:394-438` emit `steps:`. Deleting `await`/`steps` without
+**7. `bobi setup` generates workflows.** `bobi/setup/authoring.py:420` emits
+`{"name": f"{name}-approval", "await": "approval", ...}` for human-in-the-loop
+automations, and `:309`/`:394-438` emit `steps:`. Deleting `await`/`steps` without
 touching the authoring path breaks new-team creation and
 `tests/test_setup_authoring.py` (936 lines).
 
+**8. Human yield is a missing wire, not a wrong architecture.** `await:` is
+already durable — `orchestrator.py:721-745` marks the registry `waiting`,
+persists the run, emits `agent/workflow.suspended`, disconnects and returns. No
+process waits. The real defect is `try_resume_for_event` having **no production
+caller** (`orchestrator.py:76-83`), so the only live resume is the operator CLI
+(`cli.py:2250`). `StepDef.timeout` is parsed and never read, so await timeouts are
+dead config.
+
 ## Solution
 
-**One human artifact: the plan file.** If a plan exists, the lifecycle appends to
-it; if none exists, ad-hoc execution mints one in the same format. There is no
-second checklist type and no second control-flow language.
+**One artifact: the plan file.** Human-authored beforehand, or authored by the
+agent as its first step when none exists. It carries the design (human-readable,
+reviewable), the checklist, the proof of each item, and the accumulated research
+and decisions. There is no sidecar, no second state file, and no separate journal.
 
-**But run state is a typed record, not the markdown.** This is the one place the
-design departs from "the plan file *is* the state machine", and it is forced by
-mechanics the review surfaced (see Q1): the markdown lives in git, so a
-`rebase`/`stash`/`checkout` silently reverts it, two lanes conflict at the append
-point, a mid-rebase file contains conflict markers, and a worker's worktree copy
-diverges from the `main` copy the driver reads. So:
+**The loop is prompt text, not a program.** The worker is told: read the plan;
+re-verify the last completed item from its recorded proof; take the next unchecked
+item; do it; run its `verify:`; check it off with proof; commit; repeat until
+everything is checked or an item blocks. Markers update live and each transition
+is committed — squash-merge means `main` never sees the churn, and the branch
+lineage is a free proof-of-work trace on the PR.
 
-- **`ChecklistRun` (typed, under `state_dir()`) is authoritative** for item
-  status, ids, proof references, round history, and the lease.
-- **The plan file is the reviewable projection**: human-authored design and tasks,
-  with markers written back at phase boundaries. Machines write nothing but
-  markers above the fence, and lifecycle expansions only inside a fenced appendix.
+**Recovery is a monitor plus the director, not a driver.** The one thing prompt
+text cannot do is restart itself after its process dies. That does not need new
+machinery: a scheduled monitor enumerates in-progress units (unchecked items,
+liveness from the existing session registry) and publishes a finding; the
+director exercises judgement on it. This is the framework's existing detect→publish
+path. The director is demonstrably good at exactly this call — on 2026-07-26 it
+declined to dispatch onto PR #847 because *"the owning worker is still live…
+intermediate red CI on a draft bot PR is the live owner's to self-heal"*, which a
+mechanical no-progress rule would have gotten wrong. `stall-recovery.yaml` is
+deleted rather than ported.
 
-This keeps one artifact for a human to read and review, while the thing the driver
-trusts is typed, single-writer, and outside git's reach.
+**Proof is a commit range, never a re-derivation.** An item's proof is
+machine-resolvable — `proof: <test-sha>..<fix-sha>` — so failing-test-first is
+provable read-only from history (`git log`), not by reverting source in a scratch
+tree. This is load-bearing: it removes Problem 5's entire cost class, it gives
+resuming workers something to trust without touching the tree, and it makes proof
+un-fakeable (a commit ordering either resolves or it does not). **The `build`
+skill's rendering must never emit an item that re-derives what history can
+prove.**
 
-**Two surfaces, one file — the human surface stays human.** A hard invariant, not
-a convention:
+**Two surfaces, one file.** The review surface (Purpose → Notes) is
+human-authored and machine-read-only except for the marker character inside an
+existing `- [ ]`. A fenced appendix at the end of the file carries rendered
+lifecycle items and the accumulated round log. A reviewer reads the design
+top-down and stops at the fence. The invariant is checkable: a mutation leaves
+every byte above the fence unchanged apart from markers.
 
-- **Review surface** — Purpose, Problem, Solution, Relevant files, Questionables,
-  Phases (tasks + gates), Proof of work, Lane map, Amendments, Notes.
-  Human-authored; machines may change only the marker character inside an existing
-  `- [ ]`, which is already today's approved contract.
-- **Execution surface** — one fenced appendix block at the *end* of the file
-  holding rendered lifecycle tasks and resolved item ids. A reviewer reads the
-  design top-down and stops at the fence.
+**Gate lines are classified, so "done" is never vacuous.** Every gate line either
+carries a `verify:` or is explicitly tagged `judgement:`. Most existing gate lines
+already qualify as-is (`pytest …`, `grep …`), and the failing-first ones become
+commit ranges. This closes the hole where "no falsely-completed items" would be
+trivially true because nothing was checkable, without rewriting approved plan text.
 
-Enforced three ways, because CI alone does not cover it: the mutating CLI is the
-only sanctioned writer, the run record stores a sha256 of the review surface and
-the driver **refuses to dispatch on mismatch**, and a CI check guards the path
-(placed in the always-run job — `.github/workflows/ci.yml:26-66` skips heavy jobs
-for `plans/`-only changes, so a naive placement would never run).
-
-**Three layers, split on the framework boundary:**
-
-- **`bobi/checklist/` (framework — generic).** Run record, lease, driver loop,
-  artifact projection, mutating CLI, native-item execution, worker prompt
-  template. It knows `id`, `status`, `proof`, `verify`, `role`, `kind`, and
-  `awaiting-human`. It does not know what a PR, a review, or a doc is.
-- **The `build` skill (`moda-skills`).** Renders its Stage 1–7 lifecycle
-  (worktree, implement, test, verify, document, adversarial review + fix, PR) into
-  appendix items with concrete `verify:` lines, expanded against the plan's
-  phases. This is the detail `plan` does not emit: `plan` says *what*, `build`
-  says *how*.
-- **The driver (mechanical, no LLM).** Dispatch a worker; on exit re-read the run
-  record and decide continue / escalate / done. Progress is defined as **item-state
-  transitions**, never file bytes (a byte digest both false-passes on a cosmetic
-  edit or an upstream merge, and false-escalates on a research round that writes
-  only the journal). An absolute `max_rounds` backs it up.
-
-**Item kinds, so determinism survives.** `kind: agent` items dispatch a worker.
-`kind: native` items name a whitelisted Python action the driver executes itself —
-the same registry `bobi/workflow/cleanup.py` feeds today — so worktree cleanup and
-notification stay deterministic and no LLM decides `merged == true`. Items carry
-an optional `role:`, and the driver starts a fresh session when the role changes,
-preserving the reviewer/builder isolation `orchestrator.py:767-786` provides now.
-
-**`verify:` is a sandboxed, provenance-gated, default-off capability.** It is a
-shell string in a file that agents write and that can arrive from a public repo,
-so it gets the treatment `bobi/monitors/script_cache_checks.py` already
-established for LLM-written shell — `validate_script`'s binary allowlist/denylist
-and flat-command rule, the rlimit sandbox with its pre-run re-verify, and a
-sha256-pinned envelope so changing a `verify:` re-enters approval. Default: a
+**Security rules that survive however thin the machinery gets.** `verify:` is a
+shell string in a file that agents write and that can arrive from a **public**
+repo — `agents/eng-team/agent.yaml:97-101` auto-dispatches `pr-feedback` on any
+account's `changes_requested` review, and workers run with
+`permission_mode="bypassPermissions"` (`bobi/brain/claude.py:499,549`). So:
 `verify:` executes only when its provenance is trusted, defined mechanically (the
-artifact is under `state_dir()` and written by this driver, or the file is at a
-commit on a protected branch). Untrusted provenance means the item is **refused,
-not run**.
-
-**Human yield keeps today's strongest property: `awaiting-human` clears only via
-the operator CLI.** An inbound event may *notify* the driver that a reply exists;
-it may never satisfy the gate. There is no sender allowlist anywhere in `bobi/`
-today, and event-bus authorization proves resource access, not personhood — so
-event-driven resume would let anyone who can comment on a public repo walk a run
-past its approval gate. The `awaiting-human` emit is `blocking=True`, and a
-failed emit marks the item `blocked` and escalates loudly rather than entering a
-silent forever-halt (the guard `orchestrator.py:695-716` already implements for
-undeliverable notifications before an await).
-
-**The artifact is never an authorization source.** Landing authorization is read
-from GitHub — a SHA-stamped LANDABLE verdict plus human approval — never from a
-checklist item. `proof` must be a machine-resolvable reference (commit sha, PR
-review id, run URL); free text is `[f]`, not `[x]`.
-
-**The accumulating journal**, local and uncommitted per CLAUDE.md's continuity
-rule: research findings, dated decisions, dead ends, verified-vs-assumed. Entries
-are structured records carrying mandatory `source` (`self-derived` |
-`untrusted:<origin>`) and are rendered to the next worker inside an explicit
-untrusted-data envelope — without that, one injected "decision" becomes
-first-party trusted context for every future worker in the run. The journal is
-never a source of `verify:` commands, item ids, or status. It is bounded in size
-with a summarization step, because it is read whole each round and would otherwise
-cost O(N²) tokens across N rounds.
+file is at a commit on a protected branch, or was written by this agent under
+`state_dir()`); untrusted provenance means the item is **refused, not run**; and
+the existing pattern for LLM-written shell is reused rather than reinvented
+(`bobi/monitors/script_cache_checks.py`'s `validate_script` binary
+allowlist/denylist and `run_sandboxed`). Blocked items clear only through a human
+act, never through an inbound event — there is no sender allowlist anywhere in
+`bobi/`, and event authorization proves resource access, not personhood. And the
+artifact is **never an authorization source**: landing authorization is read from
+GitHub, never from a checklist item.
 
 **Alternatives considered.** (1) *Patch the engine with `success_when`* (#846) —
 forces engineering vocabulary into `bobi/` and keeps two control-flow languages.
 (2) *Raise `max_turns` to ~1M* — discards the cheap runaway-loop tripwire while
-leaving work non-resumable. (3) *One long-lived persistent session driven by its
-inbox* — already gets per-message budget resets and `context_cap` rotation free,
-but its state dies with its process. (4) *Keep the engine for multi-step packs,
-checklists for ad-hoc* — two execution models is the current problem wearing a
-compromise. (5) **Make the ad-hoc path multi-prompt** (a re-prompt loop in
-`spawn_adhoc`, or give `adhoc.yaml` steps) — this is the *correct minimal fix for
-Problem 3 alone*, and it is much cheaper than this plan. It loses because it fixes
-only the turn symptom: no durable state, no yield gate, no lifecycle rendering, and
-the plan-vs-YAML duplication (Problems 1, 2, 6, 7) all survive. If the
-Questionables resolve against this plan, option 5 is the fallback to file instead.
+leaving work non-resumable. (3) *A driver process re-dispatching short workers* —
+what earlier drafts of this plan proposed; loses to prompt text plus the existing
+monitor scheduler, and every module it needed (lease, run record, tripwire,
+budget) was machinery for a job the framework already does. (4) *Keep the engine
+for multi-step packs, checklists for ad-hoc* — two execution models is the current
+problem wearing a compromise. (5) **Make the ad-hoc path multi-prompt** — the
+correct minimal fix for Problem 3 *alone*, and it is Phase 1 of this plan; it
+leaves Problems 1, 2, 5, 6, 8 standing.
 
 **Not in scope:** a harness-side blocking join for `Agent`-tool fan-out (Problem
-4's second half) is an upstream affordance, not a `bobi/` change; a sender-identity
-model for event-driven resume (its own initiative, prerequisite to ever relaxing
-the operator-CLI rule).
+4's second half is an upstream affordance, not a `bobi/` change); a sender-identity
+model for event-driven resume (its own initiative, and a prerequisite to ever
+relaxing the human-act rule).
 
 ## Relevant files
 
 ### Existing (verified 2026-07-26 against `29a382b`)
 
 - `bobi/workflow/orchestrator.py` (1213) — step loop; `_validate_handoff:1211`,
-  `_drain_response:961` (literal `"turn failed"` at `:984-985`), `"unknown error"`
-  at `:933`, `max_turns` at `:457`, per-step `client.query` at `:851`, await
-  suspend at `:721-745`, undeliverable-notify guard at `:695-716`, agent-change
-  fresh session at `:767-786`, `_setup_worktree:131`, `_execute_notify_step:1110`,
-  `_execute_native_action:1097`, `try_resume_for_event:66` (no production caller).
+  `_drain_response:961` (literal `"turn failed"` `:984-985`, `"unknown error"`
+  `:933`), `max_turns:457`, per-step `client.query:851`, await suspend `:721-745`,
+  undeliverable-notify guard `:695-716`, agent-change fresh session `:767-786`,
+  `_setup_worktree:131`, `_execute_notify_step:1110`, `_execute_native_action:1097`,
+  `try_resume_for_event:66` (no production caller).
 - `bobi/workflow/schema.py` (186) — `StepDef` incl. `agent`/`model`/`effort`
   (`:34-35`), `HandoffContract`, `DEFAULT_ROUTE_LOOP_MAX_ITERATIONS = 3`
-  auto-applied to every back-edge (`:178-186`); `StepDef.timeout` never read.
-- `bobi/workflow/state.py` (157) — `WorkflowRun`; `claim():76` has the **double
-  `os.replace` crash window** (`:95-97`) that leaves a run permanently
-  unresumable, with no lease TTL or force-unclaim, and `find_waiting:117` globs
-  `*.json` so the wedged file still reports `waiting`. Already ticketed as
-  **Q062/D071** in `plans/2026-07-22-review-remediation.md:112`.
-- `bobi/workflow/variables.py` (201) — `${{scope.key}}` interpolation +
-  `evaluate_condition`.
-- `bobi/workflow/triggers.py` (80) — event→dispatch routing. **Keep.**
-- `bobi/workflow/cleanup.py` (168) — `cleanup_worktree`, the native-action impl.
-- `bobi/subagent.py` — `spawn_adhoc:663` (`run_key = sha256(task)[:8]` at `:694`,
-  `max_turns` `:746`), `run_phase_blocking:530` (`:587`, no production callers),
-  `launch_agent:954` (`persistent` at `:960`), the admission check that **raises
-  on an existing `starting|running|idle` entry** at `:1036-1042`,
-  `_check_spend_governor:930-950`, `_emit_lifecycle_event:166-204` (swallows
-  errors when non-blocking), `_make_defer_hook:322` (`on_input_needed`, no live
-  caller), `CHECK_MAX_TURNS:1564`, `GATE_MAX_TURNS:1847`, `CURATOR_MAX_TURNS:1992`,
-  `break` on `max_turns_reached` at `:1823`.
+  auto-applied to every back-edge (`:178-186`); `timeout` never read.
+- `bobi/workflow/{state.py:157, variables.py:201, triggers.py:80, cleanup.py:168}`
+  — `WorkflowRun.claim():76` has the double-`os.replace` crash window (`:95-97`)
+  that wedges a run unresumable, already ticketed as **Q062/D071** in
+  `plans/2026-07-22-review-remediation.md:112`. **Keep `triggers.py`** (event→dispatch
+  routing is orthogonal to control flow).
+- `bobi/subagent.py` — `spawn_adhoc:663` (`run_key = sha256(task)[:8]` `:694`,
+  `max_turns:746`), `run_phase_blocking:530` (`:587`, no production callers),
+  `launch_agent:954`, admission check raising on a live entry `:1036-1042`,
+  `_check_spend_governor:930-950`, `_emit_lifecycle_event:166-204`,
+  `break` on `max_turns_reached` `:1823`, small caps `:1564,:1847,:1992`.
 - `bobi/session.py:1171,1195` — per-inbox-message `client.query()`; `:1404`
-  `load_resumable_session_id(self.name, …)` — **a re-dispatch reusing a session
-  name resumes the dead transcript**.
-- `bobi/cli.py` — `subagents launch:2799` (`--workflow` `required=True` at `:2799`,
-  `--wait:2804`, second "required" guard in `_dispatch_agent:2853-2855`),
-  `_run_agent_wait:2927` (rejects any workflow but `adhoc` at `:2931`), the
-  `workflows` CLI group (`list`/`status`/`resume`/`validate`, `:2201-2327`,
-  registered `:3409`,`:3419`).
-- `bobi/spend_governor.py` — **not a cost ceiling**: `DEFAULT_CAP = 50` agent
-  *invocations* per rolling hour per deployment, shared by every launch path;
-  breach makes `launch_agent` raise.
-- `bobi/service.py:613-617` — `MonitorScheduler(...).start()` inside the manager;
-  `bobi/monitors/scheduler.py:617-622` — `threading.Thread(daemon=True)`.
+  `load_resumable_session_id` (a re-dispatch reusing a session name resumes the
+  dead transcript — the monitor's dispatch must not).
+- `bobi/registry.py` + `bobi/manager_health.py` — the liveness signal the
+  in-progress monitor reads instead of inventing a lease.
+- `bobi/monitors/scheduler.py` (1472) — `_spawn_monitor_agent:256`,
+  `_load_framework_checks:84`; `start():617` is a `daemon=True` thread inside the
+  manager (`bobi/service.py:613-617`).
 - `bobi/monitors/script_cache_checks.py` (1139) — `validate_script`,
   `run_sandboxed`, `CapabilityEnvelope`: the existing pattern for LLM-written
-  shell, to be reused rather than reinvented.
-- `bobi/setup/authoring.py:309,383,394-438` — generates `steps:` and
-  `await: approval`.
-- `bobi/validate.py:293` — `_check_workflow_effort`.
-- `bobi/webapp/runtime.py:275` — folds run state on `phase`; N sessions per unit
-  breaks the fold.
-- `bobi/paths.py` — `workflows_dir:187`, `state_dir:219`, `worktrees_dir:282`
-  (**zero callers in `bobi/`** — dead; a third worktree convention alongside
-  `orchestrator._setup_worktree` and CLAUDE.md's policy).
-- `agents/{eng-team,personal-assistant,dogfood-content-review}/workflows/*.yaml`
-  (14) + `agents/*/agent.yaml` + `agents/registry.yaml` (pack versions),
-  `agents/eng-team/roles/engineer/ROLE.md` (prompt surface naming handoffs).
-- `docs/WORKFLOW_ENGINE.md` (344), `docs/SECURITY.md`, `docs/MONITORS.md`.
-- Tests broken by the cutover (re-derived, not the earlier 2,868 estimate):
-  `test_orchestrator.py` 1934, `test_setup_authoring.py` 936, `test_validate.py`
-  717, `test_notify_step.py` 569, `test_cleanup.py` 574, `test_variables.py` 390,
-  `test_setup_digestion.py` 305, `test_workflow_state.py` 273,
-  `integration/test_workflow_orchestrator.py` 271, `test_triggers.py` 235,
-  `integration/test_effort_selection.py` 214,
-  `integration/test_cross_model_resume.py` 201, `test_cli.py:221`
-  (`test_workflow_required`), `test_dogfood_content_review_pack.py:43`,
-  `workflow_utils.py` 19 — **~6,900 lines**.
+  shell, reused for both the monitor's check and the `verify:` gate.
+- `bobi/cli.py` — `subagents launch:2799` (`--workflow` `required=True`, second
+  guard in `_dispatch_agent:2853-2855`), `_run_agent_wait:2927` (adhoc-only
+  `:2931`), `workflows` CLI group `:2201-2327` (registered `:3409`,`:3419`).
+- `bobi/spend_governor.py` — **not a cost ceiling**: `DEFAULT_CAP = 50` agent
+  *invocations* per rolling hour per deployment, shared across every launch path.
+- `bobi/setup/authoring.py:309,383,394-438`; `bobi/validate.py:293`;
+  `bobi/webapp/runtime.py:275` (folds run state on `phase`).
+- `bobi/brain/claude.py:278-292` (detects `max_turns_reached`), `:499,549`
+  (`bypassPermissions`); `bobi/brain/base.py:71-86` (`TurnResult` carries
+  `error_kind`/`error_message`/`num_turns`/`duration_ms`).
+- `agents/eng-team/agent.yaml:97-101` — `pr-feedback` auto-dispatch on any
+  account's `changes_requested`; `agents/*/workflows/*.yaml` (14);
+  `agents/*/agent.yaml` + `agents/registry.yaml` (pack versions);
+  `agents/eng-team/monitors/defaults.yaml`; `agents/eng-team/roles/engineer/ROLE.md`.
+- `docs/{WORKFLOW_ENGINE.md:344, SECURITY.md, MONITORS.md}`;
+  `.github/workflows/ci.yml:26-66` (skips heavy jobs on `plans/`-only changes — a
+  guard job must not live behind that gate).
+- Tests broken by the cutover: `test_orchestrator.py` 1934,
+  `test_setup_authoring.py` 936, `test_validate.py` 717, `test_notify_step.py` 569,
+  `test_cleanup.py` 574, `test_variables.py` 390, `test_setup_digestion.py` 305,
+  `test_workflow_state.py` 273, `integration/test_workflow_orchestrator.py` 271,
+  `test_triggers.py` 235, `integration/test_effort_selection.py` 214,
+  `integration/test_cross_model_resume.py` 201, `test_cli.py:221`,
+  `test_dogfood_content_review_pack.py:43`, `workflow_utils.py` 19 — **~6,900 lines**.
 - `plans/2026-07-22-review-remediation.md` (9 phases, 251 items) +
-  `plans/2026-07-22-review-remediation-findings.md` — the live plan this one
-  collides with, and the multi-file-spec case.
+  `-findings.md` — the live plan this collides with (Q1), and the multi-file-spec case.
 
 ### New
 
-- `bobi/checklist/run.py` — `ChecklistRun`: authoritative item state, round
-  history, review-surface sha256, lease with `claimed_by` + `lease_expires_at`.
-- `bobi/checklist/lease.py` — **single**-`os.replace` claim with TTL and
-  mechanical takeover, adopted by `WorkflowRun` too (one lease, not two).
-- `bobi/checklist/artifact.py` — parse the plan file; project markers back;
-  enforce the review-surface freeze.
-- `bobi/checklist/journal.py` — bounded, provenance-tagged, summarizing journal.
-- `bobi/checklist/driver.py` — the loop, transition-based tripwire, `max_rounds`,
-  budget accounting, native-item execution.
+- `bobi/checklist/artifact.py` — parse the plan file (items, markers, `verify:`,
+  `judgement:`, `proof:`, the appendix fence); project marker updates back;
+  enforce the review-surface freeze. The whole framework module.
 - `bobi/checklist/verify.py` — provenance gate + sandbox for `verify:`.
-- `bobi/templates/checklist-worker.md` — generic worker prompt (override path and
-  precedence specified, since `bobi/templates/` has no override mechanism today).
+- `bobi/templates/checklist-worker.md` — the worker loop prompt (override path and
+  precedence specified; `bobi/templates/` has no override mechanism today).
+- A framework-default `in-progress-work` monitor definition + its check script.
 - `docs/CHECKLIST_EXECUTION.md`.
-- `tests/fixtures/plan-snapshot.md` — frozen copy; the live plan is mutating.
-- `tests/test_checklist_*.py`, `tests/integration/test_checklist_driver.py`,
+- `tests/fixtures/plan-snapshot.md` — frozen fixture (the live plan is mutating
+  under lanes A/B/E).
+- `tests/test_checklist_*.py`, `tests/integration/test_checklist_loop.py`,
   `tests/e2e/test_checklist_worker.py`.
 - (`moda-skills`) a new `build` rendering stage.
 
 ## Questionables
 
-- **Q1 — Where does authoritative run state live?** Zach's direction was to
-  centralize on the plan file. Review found the markdown cannot safely *be* the
-  state machine: it lives in git (rebase/stash/checkout silently revert it; a
-  worker's worktree copy diverges from the `main` copy the driver reads; two lanes
-  conflict at the append point; a mid-merge file contains conflict markers that
-  make the parser raise), five item states do not fit four markers, and `[f]`
-  renders "waiting for a human" as "failed". Options: (a) typed `ChecklistRun`
-  authoritative + the plan file as reviewable projection with markers written back
-  at phase boundaries; (b) markdown authoritative, accepting the git hazards and
-  adding conflict-recovery rules; (c) markdown authoritative but moved out of git
-  into `state_dir()` — which abandons human reviewability, the thing Zach asked to
-  protect. Recommendation: **(a)** — it preserves the intent (one artifact a human
-  reads and reviews, enhanced with lifecycle tasks) while the thing the driver
-  trusts is typed and single-writer. This is a deliberate narrowing of "the plan
-  file is the state machine" and needs Zach's explicit call.
-- **Q2 — How do items become machine-verifiable?** `verify:` appears exactly once
-  in the designated fixture, as prose. Today's plan items are undifferentiated
-  markdown, so "re-verify before trusting `done`" has nothing to run for
-  human-authored items, and Phase 6's "zero falsely-done items" gate would be
-  vacuously true. Options: (a) `verify:` exists only in the machine-written
-  appendix; human-authored gates stay unverified and the plan says so plainly;
-  (b) the `plan` skill's template gains explicit `verify:` syntax, making every
-  future plan machine-checkable (and this a migration for existing plans);
-  (c) hybrid — appendix items require `verify:`, human gate lines get an optional
-  one that `build`'s rendering step proposes and a human accepts. Recommendation:
-  **(c)** — it gets mechanical verification where it matters most (the lifecycle
-  stages, which is exactly the detail Zach wants added) without silently
-  rewriting approved plans, and the proposal step keeps a human in the loop on
-  what will be executed.
-- **Q3 — What hosts the driver?** It must be mechanical (no LLM: the director
-  rotated on `context_cap` mid-thread on 2026-07-26 and burned turns replying "No
-  action" to individual `check_run` webhooks) and survive a box restart. The
-  earlier draft recommended "a monitor-scheduler flavor, no new process" — that is
-  **wrong**: `MonitorScheduler.start()` is a `daemon=True` thread started inside
-  the manager (`service.py:615`, `scheduler.py:617-622`), so it dies with the
-  manager, and it is the same thread implicated in the curator GIL-starvation
-  incident. Real options: (a) a supervised standalone `bobi checklist run` process,
-  like the event server — survives independently, adds a process to supervise;
-  (b) the manager/scheduler thread **plus** boot-time reconciliation of orphaned
-  leases — no new process, but every driver outage is a manager outage.
-  Recommendation: **(a)**, with driver logic in `bobi/checklist/driver.py` so the
-  host stays swappable.
-- **Q4 — Where does an ad-hoc unit's minted plan file live?** "Plans only for
-  initiatives" (single-unit work is issue-only) collides with centralizing on a
-  plan file. Options: (a) local under `state_dir()`, never a repo artifact —
-  preserves the ticketing rule, but invisible to a human and lost with the volume;
-  (b) committed to `plans/` like any plan — visible and durable, but makes every
-  one-line fix a plan file; (c) local, mirrored **write-only** into a pinned PR
-  comment for visibility, promoted to `plans/` only if the work turns out
-  initiative-sized. Recommendation: **(c)**, with the mirror explicitly never a
-  read source (otherwise any GitHub user can post a look-alike comment and become
-  the state machine's input).
-- **Q5 — Sequencing against the live `2026-07-22-review-remediation` plan.** That
+- **Q1 — Sequencing against the live `2026-07-22-review-remediation` plan.** That
   plan is Approved with lanes A–E open (#818–822). Its **Phase 2** is "Workflow
   engine + agent-pack routing correctness" — 12 open items in exactly the
   `orchestrator.py`/`variables.py`/`pr-closed.yaml` code this plan's cutover
-  deletes, including extending the condition parser with `>` operators. Its
-  **D092** hoists five copies of the atomic-write pattern into one helper, and its
-  **Q062/D071** fixes the `claim()` crash window — both of which this plan also
-  needs, and landing this plan's Phase 1 first would create a sixth copy. Options:
-  (a) this plan blocks on that plan's Phases 2–3 landing; (b) that plan's Phase 2
-  is formally descoped as superseded by an Amendment, keeping only its
-  `fsutil`/claim work; (c) run both and reconcile at merge. Recommendation:
-  **(b)** — fixing engine internals scheduled for deletion is waste, but the
-  `fsutil` helper and the lease fix are shared infrastructure this plan consumes,
-  so they stay and this plan adopts rather than forks them.
-- **Q6 — What happens to the in-flight #845/#846 work?** The directive was to
-  ignore it. PR **#848** (#846, `handoff.success_when`, draft) is cleanly
-  superseded — it gates a step machine this plan deletes. PR **#847** (#845,
-  **ready**, green) is two changes in one: the *reporting* half (surface
-  `error_message`/`error_kind` instead of the literal `"turn failed"`, widen the
-  `stop` log record) is engine-agnostic and is the defect that masked a full day of
-  debugging — the same shape currently logs `unknown error` every ~15 min from
-  monitor `check-c561144f` — while the *`max_turns` raise* half encodes a ceiling
-  this plan removes. Options: (a) land #847's reporting half now as a standalone
-  fix, close #848 and the `max_turns` half as superseded; (b) close both PRs and
-  re-derive the reporting fix inside this plan; (c) land #847 whole.
-  Recommendation: **(a)** — the observability fix is real, orthogonal, and already
-  green; folding it into a 5-phase initiative delays a fix that costs nothing to
-  take, and the `max_turns` half would encode a ceiling this design deletes.
+  deletes, including extending the condition parser with `>` operators.
+  Separately its **D092** (hoist five copies of the atomic-write pattern into one
+  `fsutil` helper) and **Q062/D071** (the `claim()` crash window) are shared
+  infrastructure. Options: (a) block on that plan's Phases 2–3 landing;
+  (b) Amend it to mark Phase 2 superseded, keeping only the `fsutil` and lease
+  work; (c) run both and reconcile at merge. Recommendation: **(b)** — fixing
+  engine internals scheduled for deletion is waste, but the shared helpers stay
+  and this plan adopts rather than forks them.
+  **Decision (2026-07-26, Zach):** (b) — descope its Phase 2 as superseded, keep
+  D092 and Q062/D071 as shared infrastructure this plan consumes.
+- **Q2 — Does the accumulated context survive the merge?** The plan file
+  accumulates research, decisions, and dead ends as *"a reusable artifact"*. Two
+  readings, and they pull opposite ways: if the value is reuse *within* a run
+  (cheap re-dispatch), the appendix should be pruned to a summary at closeout so
+  `main` stays clean; if the value outlives the work, it should survive the merge
+  in full. Squash-merge means only the file's final state lands on `main`, so this
+  is purely a choice about what the closeout step does. Options: (a) prune to a
+  summary at closeout, full trace stays on the PR; (b) keep it in full on `main`;
+  (c) keep in full, but move it to a companion file at closeout so the plan proper
+  stays readable. Recommendation: **(a)** — the trace is already durable on the PR
+  and in branch lineage, and an unpruned appendix grows without bound in a file
+  whose front half must stay reviewable.
+- **Q3 — What is the unit of ownership for the in-progress monitor?** The monitor
+  must not dispatch a second agent onto a unit whose agent is alive. The session
+  registry knows liveness per *session*, but the mapping from "plan artifact" to
+  "the session working it" is not recorded anywhere today. Options: (a) derive it
+  from the branch (one artifact ↔ one branch ↔ one session), reading the existing
+  registry with no new state; (b) record the owning session name in the artifact's
+  appendix; (c) a real lease file. Recommendation: **(a)** — it adds no state and
+  the branch is already the unit of work, but it needs verifying that the registry
+  carries enough to resolve it (and note `session.py:1404` will resume a dead
+  transcript if a dispatch reuses a session name, so the dispatch path must vary
+  the name deliberately).
 
 ## Phases
 
-Phase order note: **Phase 1 depends on Q5's `fsutil` durable-write helper and the
-shared lease fix**; do not start it while those are unresolved.
+Phase 1 is independently valuable and should land regardless of the rest.
+Phase 2 depends on Q1's `fsutil` helper for its atomic writes.
 
-### Phase 1 — Run record, lease, artifact projection, mutating CLI
+### Phase 1 — Make a turn-cap hit survivable, and stop lying about errors
 
-- [ ] `bobi/checklist/lease.py`: single-`os.replace` claim (write the new state
-      into the temp, one atomic rename — never the current two), `claimed_by`
-      pid/host, `lease_expires_at` TTL, mechanical takeover on expiry, and a
-      force-unclaim. `WorkflowRun` adopts it too — one lease implementation, not a
-      second copy of a known-buggy one.
-- [ ] `bobi/checklist/run.py`: `ChecklistRun` — typed item records (`id`, `status`
-      ∈ {`todo`,`wip`,`done`,`blocked`,`awaiting-human`}, `kind` ∈
-      {`agent`,`native`}, optional `role`, optional `verify`, `proof` as a
-      machine-resolvable reference), round history, `review_surface_sha256`.
-      Authoritative per Q1.
-- [ ] `bobi/checklist/artifact.py`: parse the plan file into items; project status
-      back as markers; a fenced appendix appended at EOF (never inserted).
-      `awaiting-human` renders `[f]` with a machine-readable tag the parser
-      asserts on, so the driver's halt-vs-fail branch never depends on prose.
-- [ ] **Mutating CLI as the only sanctioned write path**:
-      `checklist set-status <id> <state> --proof … --note …`, `checklist expand`,
-      `checklist approve`, `checklist unclaim`. Read-only `show|verify` too.
-      Without this the worker uses `Edit`/`Write` and no lock, atomicity, or fence
-      invariant holds.
-- [ ] Atomic writes via Q5's shared `fsutil` helper — adopt, never re-implement.
-- [ ] `bobi/checklist/journal.py`: bounded, append-only, provenance-tagged
-      (`source: self-derived | untrusted:<origin>`), with a summarization step;
-      rendered to workers inside an untrusted-data envelope.
-- [ ] Genericness guard over `bobi/checklist/` **and** `bobi/templates/checklist-*`
-      (the template says "push", which is git vocabulary in `bobi/`), as an
-      explicit denylist of *domain* terms (`pull_request`, `changelog`, `pytest`,
-      `landable`, `worktree`) — not a substring scan for `test`/`review`/`merge`,
-      which collide with unavoidable identifiers.
-- [ ] `docs/SECURITY.md` updated in **this** phase for the new shell surface and
-      the artifact-is-not-an-authorization-source invariant.
+- [ ] Surface the real terminal error instead of the literal `"turn failed"`:
+      `orchestrator.py:984-985`, `:933`, `bobi/subagent.py:275,489` read
+      `error_message`/`error_kind`/`api_error_status`. `bobi/brain/claude.py:278-292`
+      already produces the diagnosis; only the consumers discard it.
+- [ ] Widen the `stop` log record (`orchestrator.py:982`) with `is_error`,
+      `error_kind`, `error_message`, `num_turns`, `duration_ms`.
+- [ ] `max_turns` configurable per role/launch, replacing the hardcoded literals
+      at `orchestrator.py:457`, `subagent.py:746`, `:351` (and `:587`, or delete it
+      as dead).
+- [ ] **A cap hit auto-continues** within the wall-clock and spend budget instead
+      of terminating: re-query and keep going. Scoped to the long-job caps only —
+      `CHECK_MAX_TURNS`, `GATE_MAX_TURNS`, `CURATOR_MAX_TURNS` keep failing fast,
+      and `subagent.py:1823`'s `break` on `max_turns_reached` stays for those.
+- [ ] Document the fan-out-and-block pattern (background `subagents launch --wait`
+      joined in one Bash call) in the engineer role prompt, and widen `--wait`
+      beyond `adhoc` (`cli.py:2931`) or document the limit.
 
 **Validation gate** — do not exit this phase until every line passes.
 
-- [ ] Failing-first: parse/project/mutate round-trip on `tests/fixtures/plan-snapshot.md`
-      (frozen copy — the live plan is being mutated by lanes A/B/E right now)
-- [ ] Failing-first: **review-surface freeze** — every mutation API leaves bytes
-      above the fence identical except markers, and RAISES on an attempt to write
-      prose above it
-- [ ] Failing-first: an out-of-band edit above the fence is **detected on next
-      parse** via `review_surface_sha256` mismatch and refuses dispatch
-- [ ] Failing-first: `[f]` without a state tag raises rather than defaulting
-- [ ] Failing-first: a `proof` that is not machine-resolvable yields `[f]`, not `[x]`
-- [ ] Failing-first: **crash inside the claim window** (kill between rename steps)
-      leaves the run claimable, and the next driver takes over on TTL expiry
-- [ ] Failing-first: journal text resembling a `verify:` line or status marker is
-      not honored by `artifact.py`
-- [ ] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q`
+- [ ] Failing-first: a session killed by the turn cap surfaces
+      `max_turns_reached (max=…, turns=…)` in `state.json` and the lifecycle event
+- [ ] Failing-first: a configured non-default `max_turns` is honored at every
+      former literal site
+- [ ] Failing-first: a long-job cap hit auto-continues and completes; a
+      `CHECK_MAX_TURNS` hit still fails fast
+- [ ] Failing-first: the `unknown error` shape (`subagent.py:275`,
+      `orchestrator.py:933`) no longer masks a real diagnosis
+- [ ] `pytest tests/ --ignore=tests/e2e --timeout=30 -q` and
+      `pytest tests/integration -q -k "subagent or orchestrator"`
 
-### Phase 2 — Driver + worker + dispatch contract
+### Phase 2 — The artifact, the loop, and the in-progress monitor
 
-Merged from the earlier draft's Phases 3 and 4: the driver cannot be validated
-without a worker that mutates the artifact, and the worker cannot be dispatched
-without the driver.
-
-- [ ] **Dispatch contract, explicitly** — the earlier draft left this to the
-      builder and both available paths are broken: `launch_agent` raises on an
-      existing `starting|running|idle` registry entry (`subagent.py:1036-1042`), so
-      a killed worker blocks re-dispatch until the dead-man reconciler expires it;
-      `spawn_adhoc` derives `run_key` from `sha256(task)` (`:694`) and
-      `session.py:1404` then **resumes the dead worker's transcript**, destroying
-      the fresh-budget premise. Specify per-round session identity, driver-owned
-      termination of the prior round's registry entry, and one event-server
-      deployment per run (not per round).
-- [ ] `bobi/checklist/driver.py`: one worker per round per artifact, enforced by
-      the Phase 1 lease. Progress = **item-state transitions**, never file bytes.
-      Absolute `max_rounds` alongside the tripwire.
-- [ ] Budget: correct the earlier draft's error — `spend_governor` is a shared
-      50-invocations-per-hour admission gate, not a cost ceiling. The driver gets
-      its own accounting (wall-clock + `TurnResult.total_cost_usd`) and must
-      **reserve against, never monopolize**, the shared cap; a governor breach
-      halts the run observably instead of propagating `RuntimeError`.
-- [ ] `kind: native` items execute in the driver against the whitelisted action
-      registry (`bobi/workflow/cleanup.py`'s `cleanup_worktree` and the notify
-      path), so destructive git and `merged == true` stay non-LLM.
-- [ ] `role:` per item; a role change starts a fresh session, preserving
-      `orchestrator.py:767-786`'s reviewer-isolation invariant.
-- [ ] `awaiting-human`: emit `blocking=True`; a failed emit marks `blocked` and
-      escalates loudly. **Clears only via `checklist approve` on the operator CLI**
-      — an inbound event may notify, never satisfy.
-- [ ] `bobi/checklist/verify.py`: provenance gate (default off) + reuse of
-      `script_cache_checks.validate_script`/`run_sandboxed` + sha256-pinned
-      accepted-`verify:` set in the run record.
-- [ ] `bobi/templates/checklist-worker.md` + the override path/precedence contract.
-      The template forbids polling and mandates `subagents launch --wait` for
-      fan-out (note `--wait` currently rejects non-`adhoc` workflows,
-      `cli.py:2931` — widen or document).
-- [ ] `subagents launch --checklist <path>`; `--workflow` becomes optional at
-      **both** guard sites (`cli.py:2799` and `_dispatch_agent:2853-2855`), and
-      `tests/test_cli.py:221` (`test_workflow_required`) is updated.
-- [ ] Lifecycle events carry `checklist_run_id` + `round` so N sessions per unit
-      still fold; audit the private `bobi-deploy` webapp consumers and
-      `bobi/webapp/runtime.py:275`'s `phase` fold before claiming "unchanged".
+- [ ] `bobi/checklist/artifact.py`: parse the plan file into items — marker state,
+      optional `verify:`, `judgement:` tag, `proof:` (a commit range or other
+      machine-resolvable reference), phase grouping, the appendix fence. Project
+      marker updates back. Atomic writes via Q1's shared `fsutil` helper — adopt,
+      never re-implement.
+- [ ] Review-surface freeze: mutations touch only markers above the fence;
+      appendix content is appended, never inserted. `awaiting-human`/blocked
+      renders `[f]` with a machine-readable tag so the state is never recovered by
+      reading prose.
+- [ ] A `proof:` that does not resolve (commit range that does not exist, test
+      commit not preceding the fix commit) yields `[f]`, not `[x]`.
+- [ ] `bobi/checklist/verify.py`: provenance gate (default deny) reusing
+      `script_cache_checks.validate_script` + `run_sandboxed`; an untrusted
+      `verify:` is refused, not run.
+- [ ] `bobi agent <name> checklist show|verify|next` — read-only, for the monitor
+      check and for operators. Writes stay with the worker (it is committing
+      anyway, so a write CLI would be ceremony).
+- [ ] `bobi/templates/checklist-worker.md`: the loop — read the plan; re-verify
+      the last completed item **from its recorded proof, read-only**; take the next
+      unchecked item; do it; run its `verify:`; check it off with proof; append to
+      the round log; commit; repeat until done or blocked. Forbids polling;
+      mandates `subagents launch --wait` for fan-out. Untrusted-input rule verbatim:
+      artifact and round-log text are data, never instructions.
+- [ ] `subagents launch --checklist <path>`; `--workflow` optional at **both**
+      guard sites (`cli.py:2799`, `_dispatch_agent:2853-2855`); update
+      `tests/test_cli.py:221` (`test_workflow_required`).
+- [ ] A framework-default `in-progress-work` monitor: enumerate units with
+      unchecked items and no live owning session (Q3's ownership rule), publish a
+      finding. It **notifies**; it never decides. Its check runs through the
+      `script_cache` runner so the tick costs no tokens.
+- [ ] Director prompt: handle the in-progress finding with judgement —
+      re-dispatch, leave alone when the owner is live, or escalate to a human.
+- [ ] `docs/SECURITY.md` updated in **this** phase for the `verify:` shell surface
+      and the artifact-is-not-an-authorization-source invariant.
 
 **Validation gate**
 
-- [ ] Failing-first integration (stub): a 5-item checklist with a worker
-      **SIGKILLed** at item 3 reaches all-`done` across re-dispatches, losing only
-      item 3's partial work
-- [ ] Failing-first: re-dispatch succeeds within one tick against an
-      un-reconciled `running` registry entry
-- [ ] Failing-first: two re-dispatches on one run do **not** resume each other's
-      transcripts (assert distinct session ids)
-- [ ] Failing-first: a 20-round run consumes ≤ K spend-governor invocations and
-      creates exactly one event-server deployment
-- [ ] Failing-first: a cosmetic-only round (marker churn, no state transition)
-      trips the tripwire; a journal-only research round does **not**
-- [ ] Failing-first: `max_rounds` halts observably
-- [ ] Failing-first: two concurrent drivers — exactly one claims
-- [ ] Failing-first: an inbound reply does **NOT** clear `awaiting-human`; only
-      `checklist approve` does (the earlier draft's "a simulated reply resumes it"
-      was a test that the vulnerability works)
-- [ ] Failing-first: a `verify:` from untrusted provenance is **refused, not run**;
-      a denylisted binary is refused; a changed `verify:` re-enters approval
-- [ ] Failing-first: consecutive items with different `role:` dispatch to
-      different sessions
-- [ ] Failing-first: a `kind: native` item never dispatches an LLM
+- [ ] Failing-first: review-surface freeze holds on `tests/fixtures/plan-snapshot.md`,
+      and an attempt to write prose above the fence RAISES
+- [ ] Failing-first: a mid-rebase artifact (conflict markers) or a transiently
+      missing file makes the parser signal *retry*, never *escalate*
+- [ ] Failing-first: `[f]` without a state tag raises rather than defaulting
+- [ ] Failing-first: an unresolvable or mis-ordered `proof:` yields `[f]`
+- [ ] Failing-first: a `verify:` from untrusted provenance is refused, not run; a
+      denylisted binary is refused
+- [ ] Failing-first: an inbound event does **not** clear a blocked item; only a
+      human act does
+- [ ] Failing-first: the monitor does not report a unit whose owning session is
+      live; a re-dispatch does **not** resume the dead session's transcript
+      (assert distinct session ids)
+- [ ] Integration (stub): a 5-item checklist with the agent SIGKILLed at item 3 is
+      carried to all-checked after one re-dispatch, losing only item 3's partial
+      work
 - [ ] **Real-Claude e2e, `[stub]+[claude]`, claude leg required**: a real session
-      completes a 4-item checklist in order, records resolvable proof, does not
-      mark `done` an item whose `verify:` fails, and mutates the artifact **only**
-      through the CLI (assert no direct file edit in the transcript)
+      loops through a 4-item checklist in order, records resolvable proof, does not
+      check off an item whose `verify:` fails, and leaves the review surface
+      byte-identical apart from markers
 - [ ] `pytest tests/ --ignore=tests/e2e --timeout=30 -q`,
       `pytest tests/integration -q -k checklist`, `pytest tests/e2e -q -k checklist`
 
-### Phase 3 — `build`-skill lifecycle rendering (moda-skills)
+### Phase 3 — `build`-skill rendering (moda-skills)
 
-- [ ] New `build` stage: render Stage 1–7 into the plan file's fenced appendix as
-      items with `verify:` lines, `kind`, and `role`, expanded against the phases
-      the unit covers. This is the detail `plan` does not emit.
-- [ ] Ad-hoc path: no plan → mint one in the same format (location per Q4) from the
-      issue's acceptance criteria plus the same stages. One code path, not two.
-- [ ] Pre-planned path: append only; never rewrite approved plan text (Q1/Q2).
+- [ ] New `build` stage: render Stage 1–7 (worktree, implement, test, verify,
+      document, adversarial review + fix, PR) into the plan's fenced appendix as
+      items with concrete `verify:` lines. This is the lifecycle detail the `plan`
+      skill does not emit.
+- [ ] **Never emit an item that re-derives what git history can prove.**
+      Failing-test-first is a commit-range proof, not a revert-and-rerun task —
+      this is what removes Problem 5's ~12%-of-budget cost.
+- [ ] Gate-line classification: every gate line gets a `verify:` or an explicit
+      `judgement:` tag; the rendering proposes, a human accepts.
+- [ ] Ad-hoc path: no plan → author one in the same format from the issue's
+      acceptance criteria plus the lifecycle stages, **commit and push the branch**
+      so a human can read it, and pause for input if the scope is ambiguous. One
+      code path with the plan-born case, not two.
+- [ ] Pre-planned path: append only; never rewrite approved plan text.
 - [ ] Multi-file specs: record a `spec:` companion reference (the fixture's spec
-      spans a second 1,500-line file) that the worker reads selectively.
-- [ ] `plan` skill: document the `verify:` proposal flow per Q2(c).
+      spans a second 1,500-line file) the worker reads selectively.
+- [ ] Closeout step per Q2 (prune the appendix to a summary, or not).
 - [ ] Bump the moda-skills pack version + `plugin.json`; update `guide` routing.
 
 **Validation gate**
 
 - [ ] Rendering `tests/fixtures/plan-snapshot.md` produces an artifact
-      `checklist verify` accepts, every original gate line preserved
+      `checklist verify` accepts, every original gate line preserved and classified
 - [ ] Rendering a real planless issue produces a valid artifact with lifecycle
       stages and acceptance criteria
-- [ ] **The review surface is byte-identical after rendering** (`git diff` confined
-      to the appendix), and a human confirms the plan still reads top-down as a
-      design document — `[f]` if it got harder to review
-- [ ] The rendering runs against a **released** bobi carrying Phase 1–2 (name the
-      release and pin move; a moda-skills lane runs against the installed version)
+- [ ] **The review surface is byte-identical after rendering** (`git diff`
+      confined to the appendix), and a human confirms the plan still reads
+      top-down as a design document — `[f]` if it got harder to review
+- [ ] No rendered item asks a worker to revert source to prove a test
+- [ ] The rendering runs against a **released** bobi carrying Phases 1–2 (name the
+      release and the pin move)
 
-### Phase 4 — Parallel trial with a real baseline
+### Phase 4 — Trial with a real baseline, then cut over
 
-- [ ] Gate the `build` skill's rendering behind a flag so **both** paths are live —
-      without this, Phase 3 rewrites the engine's only consumer and nothing drives
-      the engine during the "parallel" trial.
-- [ ] Publish the **engine baseline first**: run one lane the existing way and
-      record turns, rounds, wall-clock, spend, human interventions.
-- [ ] Run a comparable lane on the checklist model. Induce a worker death
-      (SIGKILL mid-item) — the "survived a death" evidence is unobtainable
-      otherwise.
-- [ ] Run one ad-hoc unit through the minting path.
+- [ ] Gate the `build` rendering behind a flag so **both** paths are live —
+      without it Phase 3 rewrites the engine's only consumer and nothing drives the
+      engine during the trial.
+- [ ] Publish the **engine baseline first**: run one lane the existing way, record
+      turns, wall-clock, spend, human interventions.
+- [ ] Run a comparable lane on the checklist model, with an **induced** worker
+      death (SIGKILL mid-item) — the "survived a death" evidence is otherwise
+      unobtainable. Run one ad-hoc unit through the authoring path.
 - [ ] **Binary stop criteria, written before the trial:** halt and amend if spend
-      exceeds the baseline by >2×, if human interventions exceed the baseline, if
-      any item is falsely `done`, or if the review surface is ever violated.
+      exceeds baseline by >2×, human interventions exceed baseline, any item is
+      falsely checked off, or the review surface is ever violated.
+- [ ] Then cut over: per-step-type disposition table (route / await / notify /
+      action / agent / model / effort → replacement or explicit keep) before
+      deleting anything.
+- [ ] Migrate **all 14** workflows. `stall-recovery.yaml` is **deleted**, not
+      ported (the monitor + director replace it). Named explicitly:
+      `issue-lifecycle` (11), `content-lifecycle` (7), `pr-closed` (4),
+      `dogfood-content-review` (5), `research-task` (2), `daily-briefing` (2),
+      `request` (2), and the 8 single-step files.
+- [ ] `pr-closed.yaml`'s deterministic pieces become items naming commands
+      (`verify: gh pr view <n> --json merged -q .merged`, a worktree-cleanup
+      command) — determinism comes from the item text, not an LLM judgement.
+- [ ] `bobi/setup/authoring.py` emits checklists instead of `steps:`/`await:`;
+      update `tests/test_setup_authoring.py` (936) and `DESIGN.md` if the setup UI's
+      automation step changes.
+- [ ] Delete the step loop, `HandoffContract`, handoff validation, back-edge
+      validation, route/await conditions. **Keep `triggers.py`**; re-verify `${{}}`
+      interpolation consumers before deleting `variables.py`.
+- [ ] Retire or re-point the `workflows` CLI group (`cli.py:2201-2327`,
+      `:3409`, `:3419`).
+- [ ] Bump every touched pack version **and** `agents/registry.yaml`; update
+      `agents/eng-team/roles/engineer/ROLE.md`.
+- [ ] Port or delete ~6,900 lines of tests with per-file disposition.
+- [ ] `docs/CHECKLIST_EXECUTION.md` replaces `docs/WORKFLOW_ENGINE.md`; update
+      `OVERVIEW.md`, `QUICKSTART.md`, `BUILDING_AGENT_TEAMS.md`, `EVENT_SERVER.md`,
+      `MONITORS.md`, `README.md`, `skills/bobi.md`, `skills/create-agent.md`,
+      `skills/linear-setup.md`.
+- [ ] Close #845/#846 and PRs #847/#848 with dated pointers (see Notes).
 
 **Validation gate**
 
 - [ ] Baseline numbers published before the checklist arm runs
 - [ ] The checklist lane reaches a PR with a SHA-stamped LANDABLE verdict, with the
-      run record showing ≥3 rounds, ≥1 non-terminal round, and **zero operator
-      edits to the artifact**
-- [ ] The induced death was survived without human intervention, evidenced from the
-      run record
-- [ ] Every `done` item with a `verify:` re-passes on re-run, **and** every
-      verify-less `done` item has a resolvable proof reference
-- [ ] The comparison table is written into Notes with real numbers against the
-      stop criteria
-
-### Phase 5 — Hard cutover
-
-- [ ] Per-step-type disposition table (route / await / notify / action / agent /
-      model / effort → replacement or explicit keep) before deleting anything.
-- [ ] Migrate **all 14** workflows with step counts and target shape — the earlier
-      draft accounted for 10, omitting `dogfood-content-review.yaml` (5, incl. a
-      route), `research-task.yaml` (2), `daily-briefing.yaml` (2), `request.yaml` (2).
-- [ ] `bobi/setup/authoring.py` emits checklists instead of `steps:`/`await:`
-      (`:309`, `:394-438`), with `tests/test_setup_authoring.py` (936) updated.
-- [ ] Delete the step loop, `HandoffContract`, handoff validation, back-edge
-      validation, route/await conditions. **Keep** `triggers.py`; re-verify
-      `${{}}` interpolation consumers before deleting `variables.py`.
-- [ ] Retire the `workflows` CLI group (`cli.py:2201-2327`, `:3409`, `:3419`) or
-      re-point it at checklist runs.
-- [ ] Bump every touched pack version **and** `agents/registry.yaml` (exact-pin
-      consumers otherwise fetch the stale immutable tarball); update
-      `agents/eng-team/roles/engineer/ROLE.md`.
-- [ ] Port or delete ~6,900 lines of tests with per-file disposition.
-- [ ] `docs/CHECKLIST_EXECUTION.md` replaces `docs/WORKFLOW_ENGINE.md`; update
-      `docs/OVERVIEW.md`, `QUICKSTART.md`, `BUILDING_AGENT_TEAMS.md`,
-      `EVENT_SERVER.md`, `MONITORS.md`, `README.md`, `skills/bobi.md`,
-      `skills/create-agent.md`, `skills/linear-setup.md`, and `DESIGN.md` if the
-      setup UI's automation step changes.
-- [ ] Close #845/#846 and PRs #847/#848 per Q6 with dated pointers.
-
-**Validation gate**
-
+      artifact showing ≥1 survived death and **zero operator edits**
+- [ ] Every checked item with a `verify:` re-passes on re-run; every
+      `judgement:`-tagged item is explicitly tagged, not merely unverified
+- [ ] The comparison table is written into Notes against the stop criteria
 - [ ] `grep -rn "StepDef\|HandoffContract\|evaluate_condition\|await_event" bobi/ tests/`
       **and** `grep -rnE "^\s+(await|handoff|notify|action|goto|if):" agents/`
-      (the YAML surface — identifier greps alone miss every pack residue) return
-      only deliberately-kept survivors, each named in the PR
+      return only deliberately-kept survivors, each named in the PR
 - [ ] `grep -rn "handoff:" docs/ skills/ README.md agents/*/roles/*/ROLE.md` clean
 - [ ] `pytest tests/ -q` (full suite incl. integration) green
 - [ ] `bobi validate` passes on all three `agents/` packs and on `moda-eng-team`
-- [ ] Real-Claude e2e green on the migrated `issue-lifecycle` equivalent
 - [ ] A fresh `bobi setup` run produces a working team with a human-approval step
+- [ ] Real-Claude e2e green on the migrated `issue-lifecycle` equivalent
 
 ## Proof of work
 
-- **Bugs get a failing test first.** The lease crash window, the review-surface
-  freeze, the provenance gate, and the resume-authorization rule each land with a
-  test that fails against current `main`.
+- **Bugs get a failing test first.** Phase 1's reporting and auto-continue
+  changes, the review-surface freeze, the provenance gate, and the proof-resolution
+  rule each land with a test that fails against current `main`.
 - **Suites:** unit every phase; `pytest tests/integration -q` from Phase 2;
-  `pytest tests/ -q` at Phase 5.
-- **Real-Claude e2e required in Phase 2 and Phase 5.** Per CLAUDE.md's judgement
-  call: the lease, run record, driver, and event emission are brain-agnostic and
-  the stub proves them — but "does a real model faithfully use the mutating CLI,
-  refuse to mark an unverified item `done`, and record resolvable proof" is
-  exactly where the risk lives.
-- **Security properties are tests, not prose:** untrusted `verify:` refused;
-  inbound reply does not clear `awaiting-human`; journal content never becomes a
-  command or a status; artifact never an authorization source.
-- **Genericness is mechanical** (Phase 1 guard) and must fail when a domain term
-  enters `bobi/checklist/` or the worker template.
+  `pytest tests/ -q` at Phase 4.
+- **Real-Claude e2e required in Phase 2 and Phase 4.** Per CLAUDE.md's judgement
+  call: the parser, the monitor check, and error surfacing are brain-agnostic and
+  the stub proves them — but "does a real model loop faithfully, refuse to check
+  off an unverified item, and record resolvable proof" is exactly where the risk
+  lives.
+- **Security properties are tests, not prose:** untrusted `verify:` refused; an
+  inbound event never clears a blocked item; round-log text never becomes a
+  command or a status; the artifact is never an authorization source.
 - **Phase 4 is acceptance evidence with a baseline and a kill switch**, not a demo.
-- **Migration completeness is grep-gated on both the Python and YAML surfaces.**
+- **Migration completeness is grep-gated on both the Python and YAML surfaces**,
+  because identifier greps alone miss every pack residue.
 
 ## Lane map
 
-{Filled by Split. Cross-repo: Phases 1, 2, 4, 5 → `moda-labs/bobi-agent`; Phase 3
-→ `moda-labs/moda-skills`. Cross-repo lanes are always marker mode `concurrent`.
-Phase 3 depends on Phase 1–2 shipping in a cut bobi release with the pin moved;
-Phase 4 depends on Phase 3. The bobi-agent phases are sequential by construction,
-so same-repo parallelism is not warranted and Split should cut one lane per repo
-absent a recorded wall-clock justification. **All lanes block on Q5.**}
+{Filled by Split. Cross-repo: Phases 1, 2, 4 → `moda-labs/bobi-agent`; Phase 3 →
+`moda-labs/moda-skills`. Cross-repo lanes are always marker mode `concurrent`.
+Phase 1 is independently landable and should go first. Phase 3 depends on Phases
+1–2 shipping in a cut bobi release with the pin moved; Phase 4 depends on Phase 3.
+The bobi-agent phases are otherwise sequential, so same-repo parallelism is not
+warranted absent a recorded wall-clock justification. **All lanes after Phase 1
+depend on Q1's resolution being executed** (the review-remediation Amendment).}
 
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
 | — | — | — | {filled by Split} | — | — |
 
-- [ ] Convergence gate: a real unit of work runs end-to-end through the rendered
-      checklist on a released bobi + released moda-skills pack, with the run record
-      showing a survived death and zero review-surface violations (fuse-runnable on
-      a merged preview for the code half; the pack-release half is deferred).
+- [ ] Convergence gate: a real unit runs end-to-end through the rendered checklist
+      on a released bobi + released moda-skills pack, with the artifact showing a
+      survived death and zero review-surface violations (fuse-runnable on a merged
+      preview for the code half; the pack-release half is deferred).
 
 ## Amendments
 
 - **2026-07-26** (plan/checklist-execution-model): created.
-- **2026-07-26** (plan/checklist-execution-model): substantially revised after a
-  3-lens adversarial review (implementer / staff-engineer / red-team). Corrections
-  to load-bearing claims that were **false** in the first draft: `await:` is
-  already a durable disk-persisted suspend, not a live suspension (the real defect
-  is `try_resume_for_event` having no caller); `spend_governor` caps invocations
-  per hour, not cost; `MonitorScheduler` is a daemon thread inside the manager, so
-  the original Q3 recommendation failed Q3's own restart requirement;
-  `verify:` does not exist in the designated fixture; the fixture has 9 phases not
-  6; 8 workflows are single-step not 7; the test surface is ~6,900 lines not 2,868;
-  `run_phase_blocking` has no production callers; `launch_detached:960` was a
-  wrong reference (`launch_agent:954`). Design changes: run state moved to a typed
-  record (Q1); `verify:` became a sandboxed provenance-gated capability;
-  `awaiting-human` resume restricted to the operator CLI; a mutating CLI added as
-  the only write path; native item kinds and per-item roles added to preserve
-  determinism and reviewer isolation; the progress tripwire re-keyed from file
-  digest to item-state transitions; Phases 3+4 merged; a baseline arm and binary
-  stop criteria added to the trial; Q5 (collision with the live review-remediation
-  plan) added.
+- **2026-07-26** (plan/checklist-execution-model): revised after a 3-lens
+  adversarial review (implementer / staff engineer / red team). Corrected
+  load-bearing claims that were **false** in the first draft: `await:` is already a
+  durable disk-persisted suspend (the real defect is `try_resume_for_event` having
+  no caller); `spend_governor` caps invocations per hour, not cost;
+  `MonitorScheduler` is a daemon thread inside the manager; `verify:` does not
+  exist in today's plans; the fixture has 9 phases not 6; 8 workflows are
+  single-step not 7; the test surface is ~6,900 lines not 2,868;
+  `run_phase_blocking` has no production callers.
+- **2026-07-26** (plan/checklist-execution-model): **design simplified twice on
+  Zach's direction.** (i) Run state stays in the plan file — no typed sidecar and
+  no separate journal; the earlier "the markdown is unsafe" argument was
+  overreach, traced to a session doing *retroactive* verification of a dead
+  predecessor's uncommitted work rather than forward-only TDD. Proof became a
+  commit range so nothing is ever re-derived by mutating the tree, which removes
+  that cost class. Markers commit per transition (squash-merge keeps `main`
+  clean and the branch lineage is a free proof-of-work trace). (ii) **The driver
+  is deleted.** The loop is prompt text; recovery is a scheduled in-progress-work
+  monitor that notifies the director, who exercises judgement; `stall-recovery.yaml`
+  is deleted rather than ported. This removed `driver.py`, the typed run record,
+  the lease module, the native-action executor, and the budget layer — the
+  framework already provides every one of those jobs. Phases went 7 → 5 → 4.
 
 ## Notes
 
@@ -705,19 +576,26 @@ absent a recorded wall-clock justification. **All lanes block on Q5.**}
   the two turn-cap deaths; the `max_turns_reached` attachment is the ground truth
   the engine discards.
 - **The two deaths had different profiles** and both matter: `fcc79fc7` wasted
-  ~40% of its budget idle-polling, while `05d25f94` did 231 tool calls of genuine
-  work across 13 subagent launches and still did not finish — no turn budget makes
-  a 90-file/7,550-line review gate fit in one session. Fixing only one would not
-  have saved Lane A. **Splitting that diff remains worthwhile independent of this
+  ~40% of its budget idle-polling and another ~12% on retroactive revert-testing,
+  while `05d25f94` did 231 tool calls of genuine work across 13 subagent launches
+  and still did not finish — no turn budget makes a 90-file/7,550-line review gate
+  fit in one session. **Splitting that diff remains worthwhile independent of this
   plan.**
+- **The director as poke-responder, not driver.** On 2026-07-26 it declined to
+  dispatch onto PR #847 because the owning worker was still live and intermediate
+  red CI on a draft bot PR is the owner's to self-heal. A mechanical no-progress
+  rule would have double-dispatched. That judgement is why recovery is a
+  notification, not an algorithm — and it is a narrow, low-frequency job, unlike
+  the per-round decisions a driver would have needed.
+- **#847 / #848 disposition (decided 2026-07-26, Zach):** #847's *reporting* half
+  is the substance of Phase 1 and lands on its own schedule; its `max_turns` raise
+  is superseded by Phase 1's auto-continue; #848 (`handoff.success_when`) is closed
+  as superseded — it gates a step machine this plan deletes. The same
+  masked-error defect is currently logging `unknown error` every ~15 min from
+  monitor `check-c561144f`.
 - **Prior art:** #753 (closed) made `subagents launch --wait` block on the launched
-  agent and started normalizing `max_turns_reached`; `bobi/brain/claude.py:278-292`
-  detects it correctly today and only the orchestrator drain discards it.
-- **The observability fix is not in this plan** (Q6): surfacing the real terminal
-  error instead of the literal `"turn failed"` is engine-agnostic, already green in
-  PR #847, and would have made the original incident diagnosable in one minute
-  instead of one day. It should land on its own schedule.
+  agent and started normalizing `max_turns_reached`.
 - **Deferred:** a harness-side blocking join for `Agent` fan-out; a sender-identity
   model for event-driven resume; consolidating the three worktree conventions
   (`orchestrator._setup_worktree:131`, the dead `paths.worktrees_dir:282`,
-  CLAUDE.md's policy) — Phase 5 should pick one rather than adding a fourth.
+  CLAUDE.md's policy) — Phase 4 should pick one rather than adding a fourth.
