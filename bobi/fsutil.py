@@ -40,21 +40,45 @@ def _temp_sibling(path: Path) -> Path:
     return path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
 
 
-def _inherit_mode(tmp: Path, path: Path) -> None:
-    """Give *tmp* the mode *path* already has, so the rename does not drop it.
+def _open_temp(tmp: Path) -> int:
+    """Create *tmp* readable only by this user, and fail if it already exists.
+
+    The content lands BEFORE the mode is settled, so creating at the umask
+    default would publish the whole payload world-readable for the length of
+    the write - on the very files this module exists to keep restrictive
+    (``~/.codex/config.toml`` holds live MCP tokens, ``run/.env`` holds the
+    credentials behind them). Starting at 0600 and widening after means the
+    window exposes nothing; a target that wants a laxer mode gets it from
+    :func:`_inherit_mode` before the rename.
+
+    ``O_EXCL`` because a predictable name is the other half of that risk: it
+    refuses to write through a symlink or an attacker-planted file.
+    """
+    return os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+
+
+def _settle_mode(tmp: Path, path: Path) -> None:
+    """Give *tmp* the mode the finished file should carry.
 
     ``os.replace`` swaps in the temp file's inode, so an unadjusted temp
-    carries its own umask-default mode (typically 0644) onto the target - a
-    silent `chmod 600` strip on files bobi fills with resolved credentials
-    (``~/.codex/config.toml`` holds live MCP tokens). A target that does not
-    exist yet keeps the process default, exactly as a bare ``write_text``
-    would have created it.
+    carries its own mode onto the target - which would silently `chmod 600`
+    every file bobi writes, since :func:`_open_temp` starts there. An existing
+    target keeps the mode it already had; a new one gets what a bare
+    ``write_text`` would have created (the process default), so adopting this
+    helper never changes how a file first appears.
     """
     try:
         mode = stat.S_IMODE(path.stat().st_mode)
     except FileNotFoundError:
-        return
+        mode = 0o666 & ~_umask()
     os.chmod(tmp, mode)
+
+
+def _umask() -> int:
+    """Read the process umask without leaving it changed."""
+    current = os.umask(0o022)
+    os.umask(current)
+    return current
 
 
 def atomic_write_text(path: Path | str, text: str, *,
@@ -69,8 +93,9 @@ def atomic_write_text(path: Path | str, text: str, *,
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = _temp_sibling(path)
     try:
+        os.close(_open_temp(tmp))
         tmp.write_text(text, encoding=encoding)
-        _inherit_mode(tmp, path)
+        _settle_mode(tmp, path)
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)

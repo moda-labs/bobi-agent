@@ -213,6 +213,57 @@ class TestModeIsPreserved:
         fsutil.atomic_write_text(target, "new")
         assert stat.S_IMODE(target.stat().st_mode) == 0o750
 
+    def test_the_temp_never_holds_the_content_world_readable(self, tmp_path):
+        """The mode has to be right WHILE the secret is on disk, not just after.
+
+        The content lands in the temp before the mode is settled, so creating
+        that temp at the umask default published the whole payload 0644 for the
+        length of the write. Preserving the target's 0600 afterwards does not
+        help a co-tenant who read the temp during the window.
+        """
+        target = tmp_path / "config.toml"
+        target.write_text("old")
+        os.chmod(target, 0o600)
+
+        seen: list[int] = []
+        real_write_text = Path.write_text
+
+        def observe(self, data, *a, **kw):
+            # Mid-write: the temp exists and holds the secret.
+            result = real_write_text(self, data, *a, **kw)
+            seen.append(stat.S_IMODE(self.stat().st_mode))
+            return result
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(Path, "write_text", observe)
+            fsutil.atomic_write_text(target, "Authorization = 'Bearer live'")
+
+        assert seen, "the temp write was never observed"
+        assert not any(m & 0o077 for m in seen), (
+            f"temp exposed the payload to group/other: {[oct(m) for m in seen]}"
+        )
+
+    def test_a_planted_temp_is_refused_rather_than_written_through(self, tmp_path):
+        """A predictable temp name must not be writable through by someone else.
+
+        The name carries pid + nanoseconds so a collision is already unlikely,
+        but the write opens O_EXCL so the unlikely case fails loudly instead of
+        following a symlink an attacker left in the state directory.
+        """
+        target = tmp_path / "state.json"
+        target.write_text("old")
+        planted = tmp_path / "planted"
+        planted.write_text("attacker")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(fsutil, "_temp_sibling", lambda p: tmp_path / "fixed.tmp")
+            (tmp_path / "fixed.tmp").symlink_to(planted)
+            with pytest.raises(FileExistsError):
+                fsutil.atomic_write_text(target, "new")
+
+        assert planted.read_text() == "attacker", "wrote through a planted link"
+        assert target.read_text() == "old"
+
     def test_a_new_file_keeps_the_process_default_mode(self, tmp_path):
         """Creation is unchanged: only an EXISTING target's mode is preserved.
 
