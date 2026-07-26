@@ -20,7 +20,6 @@ defense-in-depth, same trust model as the other local UIs.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import secrets
 import subprocess
@@ -31,9 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from bobi import paths
+from bobi.service import StopResult, stop_pidfile
 from bobi.webui_common.security import WEBUI_TOKEN_HEADER
-
-log = logging.getLogger(__name__)
 
 DEFAULT_PORT = 8642
 START_TIMEOUT = 20.0
@@ -102,50 +100,19 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _proc_argv(pid: int) -> list[str]:
-    """argv of `pid` from /proc (Linux); empty when it cannot be read."""
-    try:
-        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        return []
-    return [arg for arg in raw.decode(errors="replace").split("\0") if arg]
-
-
-def _ps_argv(pid: int) -> list[str]:
-    """argv of `pid` from `ps` — the macOS/BSD path, where /proc does not exist."""
-    try:
-        proc = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    return proc.stdout.split()
-
-
-def _process_argv(pid: int) -> list[str]:
-    return _proc_argv(pid) or _ps_argv(pid)
-
-
-def _is_app_process(pid: int) -> bool:
-    """True when `pid` really is this machine's app daemon.
+def _is_app_argv(argv: list[str]) -> bool:
+    """True when `argv` is this machine's app daemon.
 
     A crash skips `run_foreground`'s pidfile cleanup and the OS reuses pids, so
     an app.pid naming a live process proves nothing on its own. Identity is the
-    daemon's own argv — `… -m bobi.cli app run` (what `start()` spawns) or the
-    `bobi app run` console script. argv we cannot read (no /proc, no ps) is not
-    a match: a process we cannot identify is never one we may signal.
+    daemon's own argv - `… -m bobi.cli app run` (what `start()` spawns) or the
+    `bobi app run` console script. This is the signature `stop()` hands to
+    `service.stop_pidfile`.
     """
-    argv = _process_argv(pid)
     return (
         argv[-2:] == ["app", "run"]
         and any(a == "bobi.cli" or Path(a).name == "bobi" for a in argv[:-2])
     )
-
-
-def _app_alive(pid: int) -> bool:
-    """Liveness AND identity — the only thing that may be signalled."""
-    return _pid_alive(pid) and _is_app_process(pid)
 
 
 def _ping(port: int, token: str, timeout: float = 1.0) -> bool:
@@ -228,46 +195,25 @@ def start(*, open_browser: bool = True) -> AppStatus:
     )
 
 
-def stop() -> AppStatus:
-    """Stop the daemon; returns the pre-stop status.
+def stop() -> StopResult:
+    """Stop the daemon; returns what actually happened to it.
 
-    Only ever signals a pid confirmed to BE the app: a stale pidfile left by a
-    crashed daemon points at a pid the OS has since handed to someone else, and
-    SIGTERM/SIGKILL there would kill an unrelated process. A pid that is not the
-    app is treated as not running, and its stale state files are cleared.
+    The shared pidfile-stop policy (`service.stop_pidfile`), with the app's own
+    process signature: a stale app.pid left by a crashed daemon points at a pid
+    the OS has since handed to someone else, and SIGTERM/SIGKILL there would
+    kill an unrelated process.
+
+    `escalate` because nobody is watching a daemon: there is no `bobi app stop
+    --force` to retry with, so a daemon that ignores SIGTERM is force-killed
+    once the grace period expires.
     """
-    import signal
-
-    pid = _read_int(_pid_path())
-    if not _app_alive(pid):
-        if pid and _pid_alive(pid) and not _process_argv(pid):
-            # Alive, but argv is unreadable (no /proc and no ps), so we cannot
-            # tell our own daemon from a stranger. Signalling is out - but so is
-            # clearing the state files: that would orphan a daemon which is very
-            # likely still serving AND destroy the only record of its port, so
-            # nothing could find it and the next start() would fail to bind for
-            # good. Keep the record and say what happened.
-            log.warning(
-                "Cannot identify pid %s (no readable argv); leaving it running "
-                "and keeping app.pid/app.port. Stop it by hand if it is stale.",
-                pid,
-            )
-            return AppStatus(running=False, pid=pid)
-        _pid_path().unlink(missing_ok=True)
-        _port_path().unlink(missing_ok=True)
-        return AppStatus(running=False)
-    os.kill(pid, signal.SIGTERM)
-    for _ in range(50):
-        # Re-checked, not just liveness: were the pid recycled while we wait,
-        # escalating to SIGKILL would hit the new owner.
-        if not _app_alive(pid):
-            break
-        time.sleep(0.1)
-    else:
-        os.kill(pid, signal.SIGKILL)
-    _pid_path().unlink(missing_ok=True)
-    _port_path().unlink(missing_ok=True)
-    return AppStatus(running=False, pid=pid)
+    return stop_pidfile(
+        _pid_path(),
+        identity=_is_app_argv,
+        kind="the bobi app",
+        escalate=True,
+        also_remove=[_port_path()],
+    )
 
 
 def run_foreground() -> int:

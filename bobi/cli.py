@@ -837,8 +837,8 @@ def app_stop():
     """Stop the web app daemon."""
     from bobi.webapp import daemon
 
-    st = daemon.stop()
-    click.echo(f"Stopped (pid {st.pid})." if st.pid else "Not running.")
+    if not _echo_stop(daemon.stop()):
+        raise SystemExit(1)
 
 
 @app_group.command("restart")
@@ -945,56 +945,41 @@ def _clear_manager_session(project_path: Path) -> None:
     click.echo("Cleared manager session — starting fresh.")
 
 
-def _find_pid_path() -> Path | None:
-    """Find the PID file for the selected Bobi Agent's manager."""
-    project_path = _detect_project_root()
-    if project_path:
-        p = _project_state_dir(project_path) / "manager.pid"
-        if p.exists():
-            return p
-    return None
+def _echo_stop(result, force_hint: str | None = None) -> bool:
+    """Report a `service.stop_pidfile` outcome; True when the process is down.
 
-
-def _stop_manager_pid(pid_path: Path, force: bool) -> None:
-    """Kill the manager process at pid_path."""
-    import signal
-    import time
-
-    try:
-        pid = int(pid_path.read_text().strip())
-    except (ValueError, OSError):
-        click.echo("Invalid PID file — cleaning up.")
-        pid_path.unlink(missing_ok=True)
-        return
-
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        click.echo(f"Process {pid} not found — cleaning up stale PID file.")
-        pid_path.unlink(missing_ok=True)
-        return
-    except PermissionError:
-        click.echo(f"No permission to signal process {pid}.", err=True)
-        return
-
-    sig = signal.SIGKILL if force else signal.SIGTERM
-    click.echo(f"Stopping bobi (pid {pid})...")
-    os.kill(pid, sig)
-
-    for _ in range(30):
-        time.sleep(0.2)
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            pid_path.unlink(missing_ok=True)
+    The one renderer for every `bobi ... stop`. The outcomes come from the one
+    stop seam, so the words for them - and the answer to the only question a
+    script asks after a stop, "is it down?" - exist in one place too. A caller
+    turns False into a non-zero exit: anything that leaves the process running
+    is a failed stop, whichever pid file it was reading.
+    """
+    if result.invalid_pid:
+        click.echo("Invalid PID file - cleaning up.")
+    elif result.stale:
+        click.echo(f"Process {result.pid} is not {result.kind} - "
+                   "cleaning up stale PID file.")
+    elif result.permission_denied:
+        click.echo(f"No permission to signal process {result.pid}.", err=True)
+        return False
+    elif result.unidentified:
+        click.echo(f"Cannot identify pid {result.pid} (no readable argv) - "
+                   "leaving it running. Stop it by hand if it is stale.",
+                   err=True)
+        return False
+    elif result.stopped or result.killed or result.still_running:
+        click.echo(f"Stopping {result.kind} (pid {result.pid})...")
+        if result.stopped:
             click.echo("Stopped.")
-            return
-
-    if not force:
-        click.echo("Process didn't exit — try: bobi agent <name> stop --force")
+        elif result.killed:
+            click.echo("Killed.")
+        else:
+            hint = f" - try: {force_hint}" if force_hint else ""
+            click.echo(f"Process didn't exit{hint}", err=True)
+            return False
     else:
-        pid_path.unlink(missing_ok=True)
-        click.echo("Killed.")
+        click.echo(f"No PID file found - {result.kind} is not running.")
+    return True
 
 
 @main.command()
@@ -1015,29 +1000,15 @@ def stop(force):
     from bobi.service import stop_team
 
     result = stop_team(project_path, force=force)
-    if result.invalid_pid:
-        click.echo("Invalid PID file — cleaning up.")
-    elif result.stale:
-        click.echo(f"Process {result.pid} not found — cleaning up stale PID file.")
-    elif result.permission_denied:
-        click.echo(f"No permission to signal process {result.pid}.", err=True)
-    elif result.stopped:
-        click.echo(f"Stopping bobi (pid {result.pid})...")
-        click.echo("Stopped.")
-    elif result.killed:
-        click.echo(f"Stopping bobi (pid {result.pid})...")
-        click.echo("Killed.")
-    elif result.still_running:
-        click.echo(f"Stopping bobi (pid {result.pid})...")
-        click.echo("Process didn't exit — try: bobi agent <name> stop --force")
-    else:
-        click.echo("No PID file found — bobi is not running.")
+    ok = _echo_stop(result, "bobi agent <name> stop --force")
 
     if result.event_server_running:
         click.echo(
             f"Event server is still running on port {result.event_server_port}. "
             "Use `bobi agent <name> event-server stop` to stop it."
         )
+    if not ok:
+        raise SystemExit(1)
 
 
 @main.command()
@@ -2756,41 +2727,25 @@ def event_server_start(foreground, port):
 
 
 @event_server_cmd.command("stop")
-def event_server_stop():
+@click.option("--force", is_flag=True, help="Send SIGKILL if SIGTERM doesn't work")
+def event_server_stop(force):
     """Stop the local event server."""
-    import signal
+    from bobi.events.server import is_event_server_argv
+    from bobi.service import stop_pidfile
+
     project_path = _detect_project_root()
     if not project_path:
         click.echo("Not inside a bobi project.", err=True)
         raise SystemExit(1)
-    pid_file = _project_state_dir(project_path) / "event-server.pid"
-    port_file = _event_server_port_file(project_path)
-    if not pid_file.exists():
-        click.echo("Event server is not running")
-        port_file.unlink(missing_ok=True)
-        return
-    try:
-        pid = int(pid_file.read_text().strip())
-    except (ValueError, OSError):
-        # A crash mid-write leaves an empty/garbage pid file; without this the
-        # traceback repeats on every later `stop` and the stale files persist.
-        click.echo("Invalid PID file — cleaning up.")
-        pid_file.unlink(missing_ok=True)
-        port_file.unlink(missing_ok=True)
-        return
-    try:
-        os.kill(pid, signal.SIGTERM)
-        click.echo(f"Event server stopped (pid {pid})")
-    except ProcessLookupError:
-        click.echo("Event server was not running (stale PID file)")
-    except PermissionError:
-        # Another user owns the process: it is still running, so keep the pid
-        # file and report the failure rather than claiming a stop that never
-        # happened.
-        click.echo(f"No permission to signal process {pid}.", err=True)
+    result = stop_pidfile(
+        _project_state_dir(project_path) / "event-server.pid",
+        identity=is_event_server_argv,
+        kind="the event server",
+        force=force,
+        also_remove=[_event_server_port_file(project_path)],
+    )
+    if not _echo_stop(result, "bobi agent <name> event-server stop --force"):
         raise SystemExit(1)
-    pid_file.unlink(missing_ok=True)
-    port_file.unlink(missing_ok=True)
 
 
 @event_server_cmd.command("restart")

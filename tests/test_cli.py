@@ -1,9 +1,14 @@
 """CLI contract tests for the Bobi Agent command tree."""
 
 import json
+import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 
 from bobi.__version__ import __version__
@@ -11,6 +16,31 @@ from bobi import paths
 from bobi.cli import main
 from bobi.subagent import AgentResult, CheckResult, GateResult
 from tests.conftest import TEST_AGENT_NAME
+
+
+def _fake_event_server(tmp_path, *, trap_term: bool = False):
+    """A live process wearing the local event server's argv.
+
+    The server is `node <es_dir>/dist/local.js` (bobi/events/server.py), which
+    is what identifies it in a pidfile; this stands in for it without a node
+    runtime. Returns the started process once it is known to be running, so a
+    SIGTERM trap is armed before the caller signals it.
+    """
+    ready = tmp_path / "ready"
+    node = tmp_path / "node"
+    node.write_text("#!/bin/sh\n"
+                    + ('trap "" TERM\n' if trap_term else "")
+                    + 'touch "$READY"\nsleep 30\n')
+    node.chmod(0o755)
+    proc = subprocess.Popen([str(node), str(tmp_path / "dist" / "local.js")],
+                            env={**os.environ, "READY": str(ready)})
+    for _ in range(50):
+        if ready.exists():
+            return proc
+        time.sleep(0.1)
+    proc.kill()
+    proc.wait()
+    raise AssertionError("fake event server never started")
 
 
 def test_version_flag():
@@ -834,6 +864,199 @@ class TestEventServerCommand:
 
         assert result.exit_code == 0, result.output
         assert "Event server is still running on port 58405" in result.output
+
+    def test_stop_never_signals_a_pid_the_server_no_longer_owns(
+        self, bobi_install,
+    ):
+        """event-server.pid outlives a crashed server - nothing removes it on a
+        SIGKILL or an OOM kill - and the OS then hands that pid to someone
+        else. A stop that trusts liveness alone SIGTERMs a stranger."""
+        victim = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            (bobi_install.state_dir / "event-server.pid").write_text(
+                str(victim.pid))
+            (bobi_install.state_dir / "event-server.port").write_text("58405")
+
+            result = CliRunner().invoke(
+                main, ["agent", TEST_AGENT_NAME, "event-server", "stop"])
+
+            with pytest.raises(subprocess.TimeoutExpired):
+                victim.wait(timeout=1)  # i.e. it was never signalled
+            assert result.exit_code == 0, result.output
+            assert "stale PID file" in result.output
+            assert not (bobi_install.state_dir / "event-server.pid").exists()
+            assert not (bobi_install.state_dir / "event-server.port").exists()
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_stop_reports_a_server_that_ignored_sigterm(
+        self, bobi_install, tmp_path,
+    ):
+        """Signalling is not stopping: a server that ignores SIGTERM is still
+        serving, so saying "stopped" and deleting its pid file would strand it
+        with nothing left pointing at it."""
+        wedged = _fake_event_server(tmp_path, trap_term=True)
+        try:
+            (bobi_install.state_dir / "event-server.pid").write_text(
+                str(wedged.pid))
+            (bobi_install.state_dir / "event-server.port").write_text("58405")
+
+            result = CliRunner().invoke(
+                main, ["agent", TEST_AGENT_NAME, "event-server", "stop"])
+
+            assert result.exit_code != 0
+            assert "didn't exit" in result.output
+            assert "--force" in result.output
+            assert wedged.poll() is None
+            assert (bobi_install.state_dir / "event-server.pid").exists()
+        finally:
+            wedged.kill()
+            wedged.wait()
+
+    def test_stop_force_kills_a_wedged_server(self, bobi_install, tmp_path):
+        """The identity guard must not make `stop` toothless: a real event
+        server that ignores SIGTERM is still force-killed."""
+        wedged = _fake_event_server(tmp_path, trap_term=True)
+        try:
+            (bobi_install.state_dir / "event-server.pid").write_text(
+                str(wedged.pid))
+            (bobi_install.state_dir / "event-server.port").write_text("58405")
+
+            result = CliRunner().invoke(
+                main,
+                ["agent", TEST_AGENT_NAME, "event-server", "stop", "--force"])
+
+            assert result.exit_code == 0, result.output
+            assert wedged.wait(timeout=5) == -9
+            assert not (bobi_install.state_dir / "event-server.pid").exists()
+            assert not (bobi_install.state_dir / "event-server.port").exists()
+        finally:
+            if wedged.poll() is None:
+                wedged.kill()
+                wedged.wait()
+
+
+class TestAgentStop:
+    """`bobi agent <name> stop` runs the same pidfile-stop seam as every other
+    stop: prove the pid is ours before signalling it."""
+
+    def test_the_manager_it_spawns_is_the_manager_it_recognises(
+        self, bobi_install,
+    ):
+        """The identity guard and the spawn command are one contract: a guard
+        that does not recognise what `spawn_team` launches would refuse to stop
+        the manager it just started."""
+        from bobi import service
+
+        assert service.is_manager_argv(
+            service.manager_command(bobi_install.repo_path)) is True
+        assert service.is_manager_argv(service.manager_command(
+            bobi_install.repo_path, fresh=True, subscribe=["linear:MOD"])
+        ) is True
+
+    def test_stop_signals_a_manager_it_can_identify(self, bobi_install,
+                                                    tmp_path, monkeypatch):
+        """The guard must not make `stop` toothless: a live process wearing the
+        console-script spelling of the manager is stopped for real."""
+        monkeypatch.setattr("bobi.events.server.health", lambda url: None)
+        ready = tmp_path / "ready"
+        fake = tmp_path / "bobi"
+        fake.write_text('#!/bin/sh\ntouch "$READY"\nsleep 30\n')
+        fake.chmod(0o755)
+        manager = subprocess.Popen(
+            [str(fake), "agent", TEST_AGENT_NAME, "start", "--foreground"],
+            env={**os.environ, "READY": str(ready)})
+        try:
+            for _ in range(50):
+                if ready.exists():
+                    break
+                time.sleep(0.1)
+            assert ready.exists(), "fake manager never started"
+            (bobi_install.state_dir / "manager.pid").write_text(
+                str(manager.pid))
+
+            result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "stop"])
+
+            assert result.exit_code == 0, result.output
+            assert f"Stopping bobi (pid {manager.pid})..." in result.output
+            assert "Stopped." in result.output
+            assert manager.wait(timeout=5) == -15
+            assert not (bobi_install.state_dir / "manager.pid").exists()
+        finally:
+            if manager.poll() is None:
+                manager.kill()
+                manager.wait()
+
+    def test_stop_never_signals_a_pid_the_manager_no_longer_owns(
+        self, bobi_install, monkeypatch,
+    ):
+        """manager.pid is cleaned up by an atexit handler, which a SIGKILL, an
+        OOM kill or a hard crash skips - so a live pid in manager.pid proves
+        nothing on its own, and the pid may since have been reused."""
+        monkeypatch.setattr("bobi.events.server.health", lambda url: None)
+        victim = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            (bobi_install.state_dir / "manager.pid").write_text(str(victim.pid))
+
+            result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "stop"])
+
+            with pytest.raises(subprocess.TimeoutExpired):
+                victim.wait(timeout=1)  # i.e. it was never signalled
+            assert result.exit_code == 0, result.output
+            assert "stale PID file" in result.output
+            assert not (bobi_install.state_dir / "manager.pid").exists()
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_stop_leaves_a_pid_it_cannot_identify_alone(
+        self, bobi_install, monkeypatch,
+    ):
+        """Where no argv source answers (no /proc, no ps) identity is
+        unprovable. Guessing means killing a stranger, so the pid is off
+        limits - and the pid file stays, because a manager that is very likely
+        still running must remain findable."""
+        from bobi import service
+
+        monkeypatch.setattr("bobi.events.server.health", lambda url: None)
+        monkeypatch.setattr(service, "_proc_argv", lambda pid: [])
+        monkeypatch.setattr(service, "_ps_argv", lambda pid: [])
+        (bobi_install.state_dir / "manager.pid").write_text(str(os.getpid()))
+
+        result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "stop"])
+
+        assert result.exit_code != 0
+        assert f"Cannot identify pid {os.getpid()}" in result.output
+        assert "Stopped" not in result.output
+        assert (bobi_install.state_dir / "manager.pid").exists()
+
+
+class TestAppStop:
+    def test_stop_does_not_claim_a_daemon_it_left_running_was_stopped(
+        self, tmp_path, monkeypatch,
+    ):
+        """`stop()` declines to signal a pid it cannot identify and leaves the
+        daemon serving. Reporting that as a stop tells the user the app is
+        down while it still holds its port."""
+        from bobi import service
+        from bobi.webapp import daemon
+
+        monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(service, "_proc_argv", lambda pid: [])
+        monkeypatch.setattr(service, "_ps_argv", lambda pid: [])
+        pid_path, port_path = daemon._pid_path(), daemon._port_path()
+        pid_path.write_text(str(os.getpid()))  # a pid that IS alive
+        port_path.write_text("8899")
+
+        result = CliRunner().invoke(main, ["app", "stop"])
+
+        assert result.exit_code != 0
+        assert "Stopped" not in result.output
+        assert f"Cannot identify pid {os.getpid()}" in result.output
+        assert pid_path.exists() and port_path.exists()
 
 
 class TestSetupCommand:

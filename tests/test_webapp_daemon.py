@@ -9,7 +9,13 @@ import time
 
 import pytest
 
+from bobi import service
 from bobi.webapp import daemon
+
+
+def _is_app(pid: int) -> bool:
+    """What `stop()` asks before it signals: live AND wearing the app's argv."""
+    return service.is_process(pid, daemon._is_app_argv)
 
 
 @pytest.fixture
@@ -59,12 +65,14 @@ class TestLifecycle:
             assert again.pid == st.pid
         finally:
             stopped = daemon.stop()
-        assert stopped.running is False
+        assert stopped.stopped is True
+        assert stopped.pid == st.pid
         assert daemon.status().running is False
 
     def test_stop_when_not_running(self, home):
         st = daemon.stop()
-        assert st.running is False
+        assert st.pid == 0
+        assert (st.stopped, st.killed, st.still_running) == (False, False, False)
 
 
 class TestStopIdentity:
@@ -82,7 +90,7 @@ class TestStopIdentity:
 
             st = daemon.stop()
 
-            assert st.running is False
+            assert st.stale is True
             assert victim.poll() is None, "stop() killed an unrelated process"
             # The stale state is cleared, so a later start() is unobstructed.
             assert not (home / "webapp" / "app.pid").exists()
@@ -97,8 +105,8 @@ class TestStopIdentity:
         try:
             st = daemon.start(open_browser=False)
             try:
-                assert daemon._is_app_process(st.pid) is True
-                assert daemon._is_app_process(bystander.pid) is False
+                assert _is_app(st.pid) is True
+                assert _is_app(bystander.pid) is False
             finally:
                 daemon.stop()
         finally:
@@ -122,11 +130,12 @@ class TestStopIdentity:
                 time.sleep(0.1)
             assert ready.exists(), "fake daemon never started"
             (home / "webapp" / "app.pid").write_text(str(wedged.pid))
-            assert daemon._is_app_process(wedged.pid) is True
+            assert _is_app(wedged.pid) is True
 
             st = daemon.stop()
 
             assert st.pid == wedged.pid
+            assert st.killed is True
             assert wedged.wait(timeout=5) == -9
         finally:
             if wedged.poll() is None:
@@ -142,17 +151,17 @@ class TestStopIdentity:
         stub.write_text("#!/bin/sh\necho '/usr/local/bin/bobi app run'\n")
         stub.chmod(0o755)
         monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
-        monkeypatch.setattr(daemon, "_proc_argv", lambda pid: [])
+        monkeypatch.setattr(service, "_proc_argv", lambda pid: [])
 
-        assert daemon._process_argv(4242) == ["/usr/local/bin/bobi", "app", "run"]
-        assert daemon._is_app_process(4242) is True
+        assert service.process_argv(4242) == ["/usr/local/bin/bobi", "app", "run"]
+        assert daemon._is_app_argv(service.process_argv(4242)) is True
 
     def test_a_process_we_cannot_identify_is_never_signalled(self, monkeypatch):
         """No /proc and no ps: identity is unprovable, so the pid is off-limits
-        — the failure mode of guessing is killing a stranger."""
-        monkeypatch.setattr(daemon, "_proc_argv", lambda pid: [])
-        monkeypatch.setattr(daemon, "_ps_argv", lambda pid: [])
-        assert daemon._is_app_process(os.getpid()) is False
+        - the failure mode of guessing is killing a stranger."""
+        monkeypatch.setattr(service, "_proc_argv", lambda pid: [])
+        monkeypatch.setattr(service, "_ps_argv", lambda pid: [])
+        assert _is_app(os.getpid()) is False
 
     def test_unidentifiable_pid_keeps_its_state_files(self, tmp_path,
                                                       monkeypatch):
@@ -168,11 +177,14 @@ class TestStopIdentity:
         pid_path.write_text(str(os.getpid()))   # a pid that IS alive
         port_path.write_text("8899")
         # Alive, but unidentifiable: neither argv source answers.
-        monkeypatch.setattr(daemon, "_proc_argv", lambda pid: [])
-        monkeypatch.setattr(daemon, "_ps_argv", lambda pid: [])
+        monkeypatch.setattr(service, "_proc_argv", lambda pid: [])
+        monkeypatch.setattr(service, "_ps_argv", lambda pid: [])
 
         st = daemon.stop()
 
-        assert st.running is False
+        # Distinguishable from a real stop: the daemon is still running, and
+        # `bobi app stop` has to say so rather than report it stopped.
+        assert st.unidentified is True
+        assert st.stopped is False and st.killed is False
         assert pid_path.exists(), "app.pid deleted for a live, unidentified pid"
         assert port_path.exists(), "app.port deleted - the daemon is unfindable"

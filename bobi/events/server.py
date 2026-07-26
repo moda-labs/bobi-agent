@@ -266,6 +266,17 @@ def health(base_url: str, timeout: float = 2) -> dict | None:
         return None
 
 
+def is_event_server_argv(argv: list[str]) -> bool:
+    """True when *argv* is a local event server process.
+
+    `ensure_running` spawns it as ``node <es_dir>/dist/local.js``, and that
+    entry script is what identifies it: event-server.pid survives a crash that
+    skipped every cleanup, so a live pid in it is only ours if the process
+    still wears this argv. See `bobi.service.stop_pidfile`.
+    """
+    return bool(argv) and Path(argv[-1]).parts[-2:] == ("dist", "local.js")
+
+
 def _is_local_url(url: str) -> bool:
     """Whether *url* points at the local machine (localhost / loopback).
 

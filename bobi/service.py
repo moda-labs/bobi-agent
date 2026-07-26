@@ -7,9 +7,9 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from bobi import paths
 from bobi.__version__ import __version__
@@ -17,6 +17,10 @@ from bobi.sdk import SessionEntry
 
 
 log = logging.getLogger(__name__)
+
+# How long a signalled process has to exit before `stop_pidfile` gives up on it
+# (and escalates, when the caller asked to).
+STOP_GRACE = 6.0
 
 
 class ServiceError(Exception):
@@ -105,12 +109,19 @@ class LaunchResult:
 
 @dataclass(frozen=True)
 class StopResult:
+    """The outcome of one `stop_pidfile` call; exactly one flag is set.
+
+    `kind` names the process for the CLI to render ("bobi", "the event
+    server"), so one renderer serves every stop command.
+    """
+    kind: str = ""
     pid: int = 0
     stopped: bool = False
     killed: bool = False
     stale: bool = False
     invalid_pid: bool = False
     permission_denied: bool = False
+    unidentified: bool = False
     still_running: bool = False
     event_server_running: bool = False
     event_server_port: int = 0
@@ -288,6 +299,178 @@ def _pid_alive(pid: int) -> bool:
     return pid_alive(pid)
 
 
+def _proc_argv(pid: int) -> list[str]:
+    """argv of `pid` from /proc (Linux); empty when it cannot be read."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [arg for arg in raw.decode(errors="replace").split("\0") if arg]
+
+
+def _ps_argv(pid: int) -> list[str]:
+    """argv of `pid` from `ps` - the macOS/BSD path, where /proc does not exist."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return proc.stdout.split()
+
+
+def process_argv(pid: int) -> list[str]:
+    """argv of `pid`; empty when neither source can answer."""
+    return _proc_argv(pid) or _ps_argv(pid)
+
+
+def is_process(pid: int, identity: Callable[[list[str]], bool]) -> bool:
+    """True when `pid` is live AND is the process `identity` describes.
+
+    Liveness alone proves nothing. A pid file outlives its writer whenever the
+    writer dies without cleaning up (SIGKILL, an OOM kill, a hard crash) and
+    the OS reuses pids, so the pid it names may belong to a stranger. argv we
+    cannot read is not a match either: a process we cannot identify is never
+    one we may signal.
+    """
+    if not _pid_alive(pid):
+        return False
+    argv = process_argv(pid)
+    return bool(argv) and identity(argv)
+
+
+def manager_command(
+    project_path: Path,
+    *,
+    fresh: bool = False,
+    subscribe: Iterable[str] = (),
+) -> list[str]:
+    """The argv `spawn_team` launches a manager with.
+
+    Split out because it is half of a contract: whatever this spawns is what
+    `is_manager_argv` has to recognise later, or `stop` refuses to signal the
+    process it started.
+    """
+    cmd = [
+        sys.executable,
+        "-m",
+        "bobi.cli",
+        "agent",
+        paths.agent_name_for_root(project_path),
+        "start",
+        "--foreground",
+    ]
+    if fresh:
+        cmd.append("--fresh")
+    for item in subscribe:
+        cmd.extend(["--subscribe", item])
+    return cmd
+
+
+def is_manager_argv(argv: list[str]) -> bool:
+    """True when `argv` is a bobi manager, however it was launched.
+
+    `manager_command` runs `python -m bobi.cli agent <name> start
+    --foreground`; a manager started by hand or as a container's entry process
+    wears the `bobi` console script instead. Both spell the same thing: a bobi
+    entry point followed by `start`.
+    """
+    if "start" not in argv:
+        return False
+    entry = argv[:argv.index("start")]
+    return any(a == "bobi.cli" or Path(a).name == "bobi" for a in entry)
+
+
+def _unlink_all(files: Iterable[Path]) -> None:
+    for f in files:
+        f.unlink(missing_ok=True)
+
+
+def stop_pidfile(
+    pid_path: Path,
+    *,
+    identity: Callable[[list[str]], bool],
+    kind: str,
+    force: bool = False,
+    escalate: bool = False,
+    also_remove: Iterable[Path] = (),
+) -> StopResult:
+    """Stop the process named by `pid_path`, or report why it was not stopped.
+
+    THE pidfile-stop policy. Every `bobi ... stop` runs through here, so the
+    invalid / stale / permission-denied / unidentified classifications - and
+    the words the CLI prints for them - exist exactly once.
+
+    `identity` is the caller's signature for its OWN process (see
+    `is_process`): the pid is signalled only once its argv matches, because
+    the failure mode of guessing is killing an unrelated process that happens
+    to have inherited the pid.
+
+    `force` sends SIGKILL instead of SIGTERM. `escalate` escalates to SIGKILL
+    on its own once the grace period expires - for an unattended daemon, which
+    has no operator to retry with --force. `also_remove` names files that
+    share the pid file's lifetime (a port file); they are cleaned up with it.
+    """
+    import signal
+
+    pid_path = Path(pid_path)
+    state = [pid_path, *[Path(p) for p in also_remove]]
+
+    if not pid_path.exists():
+        _unlink_all(state)
+        return StopResult(kind=kind)
+
+    pid = _read_pid(pid_path)
+    if not pid:
+        # A crash mid-write leaves an empty or garbage pid file; without this
+        # every later stop hits the same parse and the state files persist.
+        _unlink_all(state)
+        return StopResult(kind=kind, invalid_pid=True)
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        _unlink_all(state)
+        return StopResult(kind=kind, pid=pid, stale=True)
+    except PermissionError:
+        # Another user owns the pid: it is alive and not ours, so keep the
+        # state files and report rather than claim a stop that never happened.
+        return StopResult(kind=kind, pid=pid, permission_denied=True)
+
+    argv = process_argv(pid)
+    if not argv:
+        # Alive, but no argv source answers, so we cannot tell our own process
+        # from a stranger. Signalling is out - and so is clearing the state
+        # files: that would orphan a process very likely still running and
+        # destroy the only record of it, leaving nothing able to find it.
+        return StopResult(kind=kind, pid=pid, unidentified=True)
+    if not identity(argv):
+        _unlink_all(state)
+        return StopResult(kind=kind, pid=pid, stale=True)
+
+    killed = force
+    os.kill(pid, signal.SIGKILL if killed else signal.SIGTERM)
+    deadline = time.monotonic() + STOP_GRACE
+    while time.monotonic() < deadline:
+        time.sleep(0.1)
+        # Identity again, not just liveness: a pid recycled while we wait must
+        # not be escalated to SIGKILL. An exited process is also its own answer
+        # here - a zombie is signalable but has no argv left.
+        if not is_process(pid, identity):
+            _unlink_all(state)
+            return StopResult(kind=kind, pid=pid,
+                              killed=killed, stopped=not killed)
+
+    if escalate and not killed:
+        os.kill(pid, signal.SIGKILL)
+        killed = True
+    if killed:
+        _unlink_all(state)
+        return StopResult(kind=kind, pid=pid, killed=True)
+    return StopResult(kind=kind, pid=pid, still_running=True)
+
+
 def _check_nested_runtime(project_path: Path) -> None:
     from bobi.sdk import find_runtime_root
 
@@ -379,19 +562,7 @@ def spawn_team(
     local_bin = str(Path.home() / ".local" / "bin")
     env["PATH"] = f"{venv_bin}:{local_bin}:{env.get('PATH', '')}"
     env["PYTHONUNBUFFERED"] = "1"
-    cmd = [
-        sys.executable,
-        "-m",
-        "bobi.cli",
-        "agent",
-        paths.agent_name_for_root(project_path),
-        "start",
-        "--foreground",
-    ]
-    if fresh:
-        cmd.append("--fresh")
-    for item in subscribe:
-        cmd.extend(["--subscribe", item])
+    cmd = manager_command(project_path, fresh=fresh, subscribe=subscribe)
 
     with open(log_file, "a") as lf:
         proc = subprocess.Popen(
@@ -654,45 +825,13 @@ def run_manager_from_config(
 
 def stop_team(project_path: Path, *, force: bool = False) -> StopResult:
     """Stop the selected manager process."""
-    import signal
-
     project_path = Path(project_path)
-    pid_path = paths.manager_pid_path(project_path)
-    result_kwargs: dict[str, object] = {}
-
-    if not pid_path.exists():
-        result_kwargs["pid"] = 0
-    else:
-        pid = _read_pid(pid_path)
-        result_kwargs["pid"] = pid
-        if not pid:
-            pid_path.unlink(missing_ok=True)
-            result_kwargs["invalid_pid"] = True
-        else:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                pid_path.unlink(missing_ok=True)
-                result_kwargs["stale"] = True
-            except PermissionError:
-                result_kwargs["permission_denied"] = True
-            else:
-                sig = signal.SIGKILL if force else signal.SIGTERM
-                os.kill(pid, sig)
-                for _ in range(30):
-                    time.sleep(0.2)
-                    try:
-                        os.kill(pid, 0)
-                    except ProcessLookupError:
-                        pid_path.unlink(missing_ok=True)
-                        result_kwargs["stopped"] = True
-                        break
-                else:
-                    if force:
-                        pid_path.unlink(missing_ok=True)
-                        result_kwargs["killed"] = True
-                    else:
-                        result_kwargs["still_running"] = True
+    result = stop_pidfile(
+        paths.manager_pid_path(project_path),
+        identity=is_manager_argv,
+        kind="bobi",
+        force=force,
+    )
 
     from bobi.kb.embedder import stop as stop_embedder
 
@@ -701,9 +840,11 @@ def stop_team(project_path: Path, *, force: bool = False) -> StopResult:
     from bobi.events.server import health
 
     es_port = _selected_local_event_server_port(project_path)
-    result_kwargs["event_server_port"] = es_port
-    result_kwargs["event_server_running"] = bool(health(f"http://localhost:{es_port}"))
-    return StopResult(**result_kwargs)
+    return replace(
+        result,
+        event_server_port=es_port,
+        event_server_running=bool(health(f"http://localhost:{es_port}")),
+    )
 
 
 def restart_team(
