@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -108,6 +109,46 @@ class TestAtomicWriteText:
         assert seen["nested"] is True
         assert target.read_text() == "from A"  # A's rename landed last, intact
         assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
+
+
+class TestModeIsPreserved:
+    """The replacement inherits the target's mode, so a restrictive one survives.
+
+    `os.replace` swaps in a brand-new inode, so without this the temp file's
+    umask-default mode (typically 0644) silently becomes the target's. That
+    would strip `chmod 600` from files bobi fills with resolved credentials -
+    `~/.codex/config.toml` carries live MCP tokens.
+    """
+
+    @pytest.mark.parametrize("write", [
+        lambda p: fsutil.atomic_write_text(p, "new"),
+        lambda p: fsutil.atomic_write_json(p, {"new": True}),
+    ])
+    def test_restrictive_mode_on_an_existing_target_survives(self, tmp_path, write):
+        target = tmp_path / "config.toml"
+        target.write_text("old")
+        os.chmod(target, 0o600)
+        write(target)
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+    def test_executable_bit_survives(self, tmp_path):
+        target = tmp_path / "check.sh"
+        target.write_text("old")
+        os.chmod(target, 0o750)
+        fsutil.atomic_write_text(target, "new")
+        assert stat.S_IMODE(target.stat().st_mode) == 0o750
+
+    def test_a_new_file_keeps_the_process_default_mode(self, tmp_path):
+        """Creation is unchanged: only an EXISTING target's mode is preserved.
+
+        A bare `write_text` created the file at the umask default too, so
+        matching it is what keeps the atomic-write seam a pure swap-in.
+        """
+        plain = tmp_path / "plain.json"
+        plain.write_text("x")
+        fsutil.atomic_write_text(tmp_path / "atomic.json", "x")
+        assert stat.S_IMODE((tmp_path / "atomic.json").stat().st_mode) == \
+            stat.S_IMODE(plain.stat().st_mode)
 
 
 class TestAtomicWriteJson:

@@ -17,6 +17,9 @@ Temp names carry pid + nanosecond stamp so two writers racing on one target
 never share a temp file (a fixed temp name lets one writer's rename consume
 or delete the other's, failing a write that had already succeeded).
 
+The swap is otherwise invisible: the temp inherits an existing target's
+permission mode before the rename, so replacing a file never relaxes it.
+
 :func:`file_lock` is the companion guard for **read-modify-write** state
 (load → mutate → save), where atomicity alone cannot prevent a lost update.
 """
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -36,19 +40,37 @@ def _temp_sibling(path: Path) -> Path:
     return path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
 
 
+def _inherit_mode(tmp: Path, path: Path) -> None:
+    """Give *tmp* the mode *path* already has, so the rename does not drop it.
+
+    ``os.replace`` swaps in the temp file's inode, so an unadjusted temp
+    carries its own umask-default mode (typically 0644) onto the target - a
+    silent `chmod 600` strip on files bobi fills with resolved credentials
+    (``~/.codex/config.toml`` holds live MCP tokens). A target that does not
+    exist yet keeps the process default, exactly as a bare ``write_text``
+    would have created it.
+    """
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        return
+    os.chmod(tmp, mode)
+
+
 def atomic_write_text(path: Path | str, text: str, *,
                       encoding: str = "utf-8") -> Path:
     """Write *text* to *path* atomically. Returns *path*.
 
-    Missing parent directories are created. If the write fails (including a
-    KeyboardInterrupt), the target keeps its previous content and no temp
-    file is left behind.
+    Missing parent directories are created. An existing target's permission
+    mode is preserved. If the write fails (including a KeyboardInterrupt),
+    the target keeps its previous content and no temp file is left behind.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = _temp_sibling(path)
     try:
         tmp.write_text(text, encoding=encoding)
+        _inherit_mode(tmp, path)
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
