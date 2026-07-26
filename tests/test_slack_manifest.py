@@ -21,6 +21,7 @@ from bobi.slack_manifest import (
     TEMPLATE_PATH,
     WEBHOOK_PATH,
     create_app_url,
+    event_server_error,
     manifest_to_dict,
     manifest_to_json,
     render_manifest,
@@ -199,6 +200,52 @@ def test_invalid_event_server_url_is_rejected(event_server):
     work, so it's refused where it enters."""
     with pytest.raises(ValueError):
         render_manifest("Bot", event_server)
+
+
+SCHEME_LESS = [
+    pytest.param("my-worker.workers.dev", id="bare-host"),
+    # urlsplit reads `localhost` as the SCHEME here, so the value has neither a
+    # usable scheme nor a netloc.
+    pytest.param("localhost:8080", id="host-and-port"),
+    pytest.param("//my-worker.workers.dev", id="protocol-relative"),
+]
+
+
+@pytest.mark.parametrize("event_server", SCHEME_LESS)
+def test_scheme_less_host_is_told_to_add_the_scheme(event_server):
+    """The natural typo - a host with no scheme - has to name its own fix.
+
+    urlsplit puts a scheme-less authority in `path`, never in `netloc`, so a
+    netloc-first check answers "needs a host" for a value that is nothing BUT a
+    host: `bobi create-slack-bot --event-server my-worker.workers.dev` would
+    exit telling the user they omitted the thing they just supplied, and the
+    setup UI renders the same string verbatim as its 400 error.
+    """
+    problem = event_server_error(event_server)
+    assert problem, "a scheme-less host is not a usable event server"
+    assert "needs a host" not in problem
+    assert "absolute http(s) URL" in problem
+    assert event_server in problem
+
+
+@pytest.mark.parametrize("event_server", SCHEME_LESS)
+def test_scheme_less_host_is_told_to_use_https_when_public(event_server):
+    """The setup UI's field is specifically a PUBLIC server, so its answer to
+    the same typo is the https:// guidance, not a missing-host report."""
+    assert (event_server_error(event_server, require_https=True)
+            == "use a public https:// event server URL")
+
+
+@pytest.mark.parametrize("event_server", [
+    pytest.param("https://", id="scheme-only"),
+    pytest.param("https:///webhooks", id="scheme-and-path"),
+])
+def test_genuinely_host_less_url_still_reports_the_missing_host(event_server):
+    """The host check keeps its own case: a value that names a scheme and no
+    authority really is missing a host."""
+    assert "needs a host" in event_server_error(event_server)
+    assert "needs a host" in event_server_error(event_server,
+                                                require_https=True)
 
 
 @pytest.mark.parametrize("event_server", [

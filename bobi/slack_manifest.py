@@ -64,6 +64,18 @@ def event_server_error(event_server: str, *, require_https: bool = False
     if any(c.isspace() or ord(c) < 0x20 for c in url):
         return ("event server URL cannot contain spaces or control characters "
                 f"- got {event_server!r}")
+    # Scheme before host: urlsplit puts a scheme-less authority in `path`, so a
+    # bare `my-worker.workers.dev` has an EMPTY netloc and a netloc-first check
+    # would answer "needs a host" for a value that is nothing but a host. The
+    # scheme is also what `localhost:8080` is missing - urlsplit reads
+    # `localhost` there as the scheme - so both spellings of the natural typo
+    # land on the branch that names the fix.
+    if require_https:
+        if parts.scheme != "https":
+            return "use a public https:// event server URL"
+    elif parts.scheme not in ("http", "https"):
+        return ("event server URL must be an absolute http(s) URL "
+                f"(e.g. https://my-worker.workers.dev) - got {event_server!r}")
     if not parts.netloc:
         return f"event server URL needs a host - got {event_server!r}"
     if parts.query or parts.fragment:
@@ -74,12 +86,6 @@ def event_server_error(event_server: str, *, require_https: bool = False
         # error anywhere - the same silent failure a swallowed path caused.
         return ("event server URL cannot carry a query or fragment - the "
                 f"webhook path is appended to it - got {event_server!r}")
-    if require_https:
-        if parts.scheme != "https":
-            return "use a public https:// event server URL"
-    elif parts.scheme not in ("http", "https"):
-        return ("event server URL must be an absolute http(s) URL "
-                f"(e.g. https://my-worker.workers.dev) - got {event_server!r}")
     return None
 
 
