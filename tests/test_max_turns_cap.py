@@ -1,8 +1,8 @@
 """Tests for max_turns cap on the check path (MDS-53 Part B, step 3).
 
 Ensures the check budget is capped so a single poll can't balloon into a
-200-turn run. _run_agent_supervised accepts max_turns, and run_check_blocking
-passes a small cap (~8).
+full-length agent run. _run_agent_supervised accepts max_turns, and
+run_check_blocking passes a small cap (~8).
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -27,7 +27,7 @@ class TestMaxTurnsCap:
         # Mock the entire execution chain
         async def mock_supervised(prompt, cwd, run_key, phase, timeout,
                                   on_input_needed=None, role="",
-                                  max_turns=200, fresh=False):
+                                  max_turns=0, fresh=False):
             # Capture the max_turns that was passed
             captured_options.append(max_turns)
             from bobi.subagent import AgentResult
@@ -51,10 +51,14 @@ class TestMaxTurnsCap:
         assert CHECK_MAX_TURNS >= 1
 
     def test_run_agent_supervised_accepts_max_turns(self):
-        """_run_agent_supervised signature includes max_turns parameter."""
+        """_run_agent_supervised takes max_turns, defaulting to resolve-from-config.
+
+        The default is 0, not a literal (#845): 0 means "ask
+        _resolve_launch_max_turns", so an operator's role/team cap applies to
+        every caller that does not pass its own deliberate cap.
+        """
         import inspect
         from bobi.subagent import _run_agent_supervised
         sig = inspect.signature(_run_agent_supervised)
         assert "max_turns" in sig.parameters
-        # Default should be the original 200 for backward compat
-        assert sig.parameters["max_turns"].default == 200
+        assert sig.parameters["max_turns"].default == 0

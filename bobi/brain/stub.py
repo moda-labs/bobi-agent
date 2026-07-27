@@ -30,6 +30,17 @@ Directives:
                              enough to trip wedge detection) before completing,
                              so the manager reads as ``running``/``wedged``.
   ``__stub__:error``         complete with ``TurnResult(is_error=True)``.
+  ``__stub__:maxturns[:<n>]``
+                             complete with the harness's TURN-CAP terminal
+                             shape (#845): ``error_kind="max_turns_reached"``,
+                             a rendered ``error_message``, and an EMPTY
+                             ``result_text`` - the empty result is precisely
+                             what made a real cap kill surface as the literal
+                             fallback ``"turn failed"``. Fires off the prompt,
+                             so a resumed session (whose continuation prompt
+                             carries no directive) completes normally - the
+                             double for "restart on the transcript and the work
+                             goes on".
   ``__stub__:exit[:<code>]`` hard-exit the process (default 0) mid-turn, to
                              exercise supervisor crash-restart.
   ``__stub__:raise[:<msg>]`` raise ``RuntimeError(<msg>)`` from
@@ -50,6 +61,7 @@ import re
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
+    ERROR_KIND_MAX_TURNS,
     AssistantText,
     BrainCapabilities,
     BrainMessage,
@@ -142,6 +154,25 @@ class _StubSession:
         else:
             reply = f"stub ack: {(self._pending or '').strip()[:120]}"
         yield AssistantText(text=reply, usage=None)
+
+        if verb == "maxturns":
+            # The harness cut the turn off, so the SDK reports no final result
+            # text at all - only the terminal metadata. Reproduced faithfully:
+            # result_text="" is the whole reason this failure mode was invisible.
+            cap = _int_arg(arg, int(self._options.get("max_turns") or 0) or 200)
+            yield TurnResult(
+                session_id=self._session_id,
+                is_error=True,
+                error_kind=ERROR_KIND_MAX_TURNS,
+                error_message=f"{ERROR_KIND_MAX_TURNS} (max={cap}, "
+                              f"turns={cap + 1})",
+                max_turns=cap,
+                turn_count=cap + 1,
+                num_turns=cap + 1,
+                result_text="",
+            )
+            return
+
         yield TurnResult(
             session_id=self._session_id,
             is_error=(verb == "error"),

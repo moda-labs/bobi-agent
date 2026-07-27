@@ -19,6 +19,7 @@ import os
 from collections.abc import MutableMapping
 
 from bobi.brain.base import (
+    ERROR_KIND_MAX_TURNS,
     AssistantText,
     BrainCapabilities,
     BrainCost,
@@ -28,6 +29,7 @@ from bobi.brain.base import (
     DeferredTool,
     StreamDelta,
     TurnResult,
+    turn_error_text,
 )
 from bobi.brain.claude import ClaudeBrain
 from bobi.brain.codex import CodexBrain
@@ -210,6 +212,51 @@ def resolve_effort(cfg, role: str | None = None, explicit: str | None = None) ->
     if not chosen and role and cfg is not None:
         chosen = cfg.role_effort(role)
     return resolve_effort_option(chosen)
+
+
+# The framework default per-session turn cap (#845).
+#
+# A long agent session's real budget is its WALL-CLOCK timeout (6h for an
+# engineer workflow run); the turn cap exists to bound a runaway loop, not to
+# end useful work. At 200 it did the opposite: two real engineer sessions were
+# killed on turn 201 - one 227 minutes in, both hours inside their timeout and
+# both mid-edit with no handoff written - because a Bash-heavy build spends
+# turns on ordinary tool use (141 and 201 Bash calls respectively). 1000 is
+# sized off that measurement: ~5x the observed real ceiling, so honest work
+# never reaches it, while a pathological loop still terminates instead of
+# burning the full 6h. Operators can tune it per role or per step; the
+# orchestrator additionally treats the cap as resumable, so hitting it costs a
+# session restart rather than the whole run.
+DEFAULT_MAX_TURNS = 1000
+
+
+def _positive_int(value: object) -> int:
+    """*value* as a positive int, or 0 for anything unusable."""
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
+
+
+def resolve_max_turns(cfg, role: str | None = None, explicit: int = 0) -> int:
+    """Resolve the per-session turn cap for an agent launch (#845).
+
+    The sibling of :func:`resolve_model` / :func:`resolve_effort`: *explicit*
+    (a caller or workflow-step override) > ``roles.<role>.max_turns`` >
+    ``brain.max_turns`` (the team default) > :data:`DEFAULT_MAX_TURNS`. Unlike
+    model and effort there is no "provider default" to fall through to - a
+    brain needs a number - so the framework default is the floor of the chain.
+
+    *cfg* is duck-typed (``role_max_turns`` / ``brain_max_turns``) so this
+    module stays import-free of ``bobi.config``.
+    """
+    chosen = _positive_int(explicit)
+    if not chosen and role and cfg is not None:
+        chosen = _positive_int(cfg.role_max_turns(role))
+    if not chosen and cfg is not None:
+        chosen = _positive_int(getattr(cfg, "brain_max_turns", 0))
+    return chosen or DEFAULT_MAX_TURNS
 
 
 def _pin_env(
@@ -487,7 +534,9 @@ __all__ = [
     "BRAIN_KIND_ALIASES",
     "GATEWAY_ENGINES",
     "DEFAULT_BRAIN",
+    "DEFAULT_MAX_TURNS",
     "BRAIN_ENV",
+    "ERROR_KIND_MAX_TURNS",
     "GATEWAY_BASE_URL_ENV",
     "GATEWAY_SMALL_MODEL_ENV",
     "GATEWAY_UNRESOLVED_BASE_URL",
@@ -501,11 +550,13 @@ __all__ = [
     "pin_process_brain",
     "resolve_effort",
     "resolve_effort_option",
+    "resolve_max_turns",
     "resolve_model",
     "resolve_model_option",
     "session_brain_label",
     "set_process_brain",
     "set_process_brain_from_config",
+    "turn_error_text",
     "with_default_effort_option",
     "with_default_model_option",
 ]

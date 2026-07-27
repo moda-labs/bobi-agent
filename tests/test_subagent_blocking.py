@@ -57,6 +57,9 @@ from bobi.subagent import (
     run_phase_blocking,
     spawn_adhoc,
 )
+# The real Session, imported under an alias because SESSION_PATCH below
+# replaces ``bobi.session.Session`` for the duration of a test.
+from bobi.session import Session as _RealSession
 
 
 # ---------------------------------------------------------------------------
@@ -146,9 +149,14 @@ class FakeClient:
 class FakeSession:
     """Mimics bobi.session.Session for unit tests."""
 
+    # Borrowed, not restated (#845): the double supplies the recorded turn
+    # fields and the REAL Session owns how they compose into an error string,
+    # so the double can never drift into reporting something Session wouldn't.
+    last_error = _RealSession.last_error
+
     def __init__(self, success=True, response="done", session_id="sess-fake",
                  cost=0.10, duration=2000, turns=3, start_ok=True,
-                 is_error=False):
+                 is_error=False, error_kind="", error_message=""):
         self._success = success
         self._response = response
         self._start_ok = start_ok
@@ -156,6 +164,9 @@ class FakeSession:
         self.cwd = ""
         self._last_response = response
         self._last_is_error = is_error or (not success)
+        self._last_error_kind = error_kind
+        self._last_error_message = error_message
+        self._last_api_error_status = None
         self._total_cost_usd = cost
         self._total_duration_ms = duration
         self._total_turns = turns
@@ -890,6 +901,37 @@ class TestRunPhaseBlocking:
         assert result.session_id == "sess-sync"
         assert result.total_cost_usd == 0.10
 
+    def test_turn_cap_kill_reports_the_brains_diagnosis(self):
+        """The point of #845, asserted end-to-end on AgentResult.
+
+        Reproduces the exact terminal shape of a turn-cap kill: is_error set,
+        error_kind/error_message carrying the brain's diagnosis, and an EMPTY
+        response - the empty response is what made the old code substitute a
+        literal and discard the cause.
+
+        Without this the fix is unproven: reverting `error=session.last_error()`
+        to the previous `session._last_response` left the whole suite green,
+        because teaching the double the new fields only stopped the crashes -
+        nothing asserted the fields are read.
+        """
+        diagnosis = "max_turns_reached (max=1000, turns=1001)"
+        fake_cls = _make_fake_session_class(
+            success=False, is_error=True, response="",
+            error_kind="max_turns_reached", error_message=diagnosis,
+        )
+
+        with patch(SESSION_PATCH, side_effect=fake_cls):
+            result = run_phase_blocking(
+                run_key="CAP-1", phase="implement", cwd="/tmp/test",
+            )
+
+        assert result.success is False
+        assert result.error == diagnosis
+        assert result.error_kind == "max_turns_reached"
+        # Neither literal the fix removed may come back on this path.
+        assert "turn failed" not in result.error
+        assert "unknown error" not in result.error
+
     def test_start_failure(self):
         """run_phase_blocking returns error when session fails to start."""
         fake_cls = _make_fake_session_class(start_ok=False)
@@ -1045,6 +1087,34 @@ class TestSessionFinishedEvents:
         assert event_type == "agent/session.failed"
         assert data["error"] == "timeout after 60s"
         assert kwargs.get("blocking") is True
+
+    def test_a_failure_with_no_error_names_the_gap(self):
+        """The last-resort fallback names itself instead of "unknown error".
+
+        Every failure path now populates ``result.error``, so this branch
+        should be unreachable - but "should be unreachable" is exactly what
+        was true of the literal it replaces. For hours a monitor's retry log
+        was reduced to `unknown error` because one path forgot to carry a
+        cause, and the bare literal told an operator nothing about WHERE the
+        gap was. Pinned so a future errorless failure path is at least
+        self-locating (#845).
+        """
+        calls = []
+        result = AgentResult(
+            session_id="", run_key="GAP-1", phase="implement",
+            success=False, error="",
+        )
+        with patch(f"{SDK_PATCH}._emit_lifecycle_event",
+                   side_effect=lambda *a, **kw: calls.append((a, kw))):
+            _emit_session_finished(result, "r", "agent-gap-1-implement", 0.0)
+
+        (event_type, data), _ = calls[0]
+        assert event_type == "agent/session.failed"
+        assert data["error"] == "implement failed with no error reported"
+        assert "unknown error" not in data["error"]
+        # It names the phase, so an operator can tell which path lost the cause.
+        assert "implement" in data["error"]
+        assert data["error"] in data["text"]
 
 
 class TestSpawnAdhocLifecycle:
@@ -1534,6 +1604,7 @@ def _write_roles_yaml(root: Path) -> None:
     paths.package_dir(root).mkdir(parents=True, exist_ok=True)
     paths.agent_yaml_path(root).write_text(
         "agent: t\nroles:\n  monitor:\n    model: haiku\n    effort: low\n"
+        "    max_turns: 8\n"
     )
 
 
@@ -1696,6 +1767,128 @@ class TestLaunchEffortResolution:
 
         assert result.success is True
         assert captured["options"]["effort"] == "low"
+
+
+class TestLaunchMaxTurnsResolution:
+    """Per-role turn cap threads into every launch path (#845), mirroring
+    TestLaunchModelResolution / TestLaunchEffortResolution.
+
+    These are the sites that used to hardcode ``max_turns=200``:
+    ``spawn_adhoc`` (subagent.py:746), ``run_phase_blocking`` (:587) and
+    ``_run_agent_supervised`` (:351). Phase 1's gate requires a configured
+    cap be honored at EVERY one of them, and the model/effort classes above
+    already establish the idiom - the cap simply had no equivalent coverage,
+    so nothing proved the resolved value reached the brain session.
+
+    One asymmetry with model/effort: an unconfigured role omits those keys
+    entirely and lets the provider default apply, but a brain needs a NUMBER
+    for the cap, so the framework default is always present.
+    """
+
+    @pytest.fixture(autouse=True)
+    def no_ambient_dials(self, monkeypatch):
+        monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
+        monkeypatch.delenv("BOBI_BRAIN_EFFORT", raising=False)
+
+    def _capture_session_cls(self, captured: dict):
+        def _cls(*args, **kwargs):
+            captured.update(kwargs)
+            return FakeSession(success=True)
+        return _cls
+
+    def test_spawn_adhoc_passes_role_max_turns(self, tmp_path):
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+        with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event"):
+            spawn_adhoc(cwd="/tmp", task="t", name="x", role="monitor")
+        assert captured["extra_options"]["max_turns"] == 8
+
+    def test_spawn_adhoc_unconfigured_role_gets_the_framework_default(
+            self, tmp_path):
+        from bobi.brain import DEFAULT_MAX_TURNS
+
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+        with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event"):
+            spawn_adhoc(cwd="/tmp", task="t", name="x", role="engineer")
+        assert captured["extra_options"]["max_turns"] == DEFAULT_MAX_TURNS
+        # The literal that killed two engineer sessions is gone from this path.
+        assert captured["extra_options"]["max_turns"] != 200
+
+    def test_run_phase_blocking_passes_role_max_turns(self, tmp_path):
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+        with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event"):
+            run_phase_blocking(run_key="1", phase="implement", cwd="/tmp",
+                               role="monitor")
+        assert captured["extra_options"]["max_turns"] == 8
+
+    def test_run_phase_blocking_unconfigured_role_gets_the_default(
+            self, tmp_path):
+        from bobi.brain import DEFAULT_MAX_TURNS
+
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+        with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
+             patch(f"{SDK_PATCH}._emit_lifecycle_event"):
+            run_phase_blocking(run_key="1", phase="implement", cwd="/tmp",
+                               role="engineer")
+        assert captured["extra_options"]["max_turns"] == DEFAULT_MAX_TURNS
+
+    @pytest.mark.asyncio
+    async def test_supervised_resolves_the_role_cap(self, tmp_path):
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                captured.update(kwargs)
+                return _CapturingBrainSession()
+
+        with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
+             patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = await _run_agent_supervised(
+                prompt="check", cwd="/tmp", run_key="k", phase="check",
+                timeout=5, role="monitor",
+            )
+
+        assert result.success is True
+        assert captured["options"]["max_turns"] == 8
+
+    @pytest.mark.asyncio
+    async def test_supervised_explicit_cap_beats_role_config(self, tmp_path):
+        """A verdict caller's deliberately small cap must survive role config.
+
+        This is what keeps CHECK_MAX_TURNS / GATE_MAX_TURNS / CURATOR_MAX_TURNS
+        meaningful: an operator raising roles.monitor.max_turns must not
+        quietly un-bound a check that is supposed to fail fast.
+        """
+        _write_roles_yaml(tmp_path)
+        captured: dict = {}
+
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                captured.update(kwargs)
+                return _CapturingBrainSession()
+
+        with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
+             patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = await _run_agent_supervised(
+                prompt="check", cwd="/tmp", run_key="k", phase="check",
+                timeout=5, role="monitor", max_turns=3,
+            )
+
+        assert result.success is True
+        assert captured["options"]["max_turns"] == 3
 
 
 class TestModelAwareSessionResume:

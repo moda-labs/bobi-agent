@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
+    ERROR_KIND_MAX_TURNS,
     AssistantText,
     BrainCapabilities,
     BrainCost,
@@ -279,7 +280,7 @@ def _terminal_error(msg: Any) -> tuple[str, str, int | None, int | None]:
         getattr(msg, "errors", None)
     )
     if (
-        stop_reason != "max_turns_reached"
+        stop_reason != ERROR_KIND_MAX_TURNS
         and not found
         and (getattr(msg, "is_error", False) or not getattr(msg, "result", None))
     ):
@@ -287,10 +288,9 @@ def _terminal_error(msg: Any) -> tuple[str, str, int | None, int | None]:
             getattr(msg, "session_id", "") or ""
         )
 
-    if stop_reason == "max_turns_reached" or found:
-        kind = "max_turns_reached"
+    if stop_reason == ERROR_KIND_MAX_TURNS or found:
         message = _render_max_turns_error(max_turns, turn_count)
-        return kind, message, max_turns, turn_count
+        return ERROR_KIND_MAX_TURNS, message, max_turns, turn_count
 
     return "", "", None, None
 
@@ -312,7 +312,7 @@ def _max_turns_from_errors(errors: Any) -> tuple[bool, int | None, int | None]:
         if (
             parsed.get("type") == "attachment"
             and isinstance(attachment, dict)
-            and attachment.get("type") == "max_turns_reached"
+            and attachment.get("type") == ERROR_KIND_MAX_TURNS
         ):
             return (
                 True,
@@ -385,8 +385,8 @@ def _render_max_turns_error(max_turns: int | None,
     if turn_count is not None:
         details.append(f"turns={turn_count}")
     if details:
-        return f"max_turns_reached ({', '.join(details)})"
-    return "max_turns_reached"
+        return f"{ERROR_KIND_MAX_TURNS} ({', '.join(details)})"
+    return ERROR_KIND_MAX_TURNS
 
 
 def _int_or_none(value: Any) -> int | None:

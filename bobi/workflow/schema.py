@@ -16,6 +16,8 @@ from typing import Any
 
 import yaml
 
+from bobi.config import positive_int
+
 
 DEFAULT_ROUTE_LOOP_MAX_ITERATIONS = 3
 
@@ -33,6 +35,11 @@ class StepDef:
     agent: str = ""
     model: str = ""
     effort: str = ""
+    # Per-session turn cap override (#845). 0 = inherit the acting role's /
+    # team's cap (see bobi.brain.resolve_max_turns). Expressed per step for the
+    # same reason as ``timeout``: a build step's budget is nothing like a
+    # triage step's.
+    max_turns: int = 0
     handoff: HandoffContract = field(default_factory=HandoffContract)
     timeout: int = 1800
     worktree: bool = False
@@ -93,6 +100,7 @@ def load_workflow(path: Path) -> Workflow:
             agent=s.get("agent", ""),
             model=s.get("model", ""),
             effort=s.get("effort", ""),
+            max_turns=positive_int(s.get("max_turns")),
             handoff=handoff,
             timeout=s.get("timeout", 1800),
             worktree=s.get("worktree", False),

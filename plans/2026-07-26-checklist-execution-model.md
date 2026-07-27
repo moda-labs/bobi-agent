@@ -335,35 +335,59 @@ Phase 2 depends on Q1's `fsutil` helper for its atomic writes.
 
 ### Phase 1 — Make a turn-cap hit survivable, and stop lying about errors
 
-- [ ] Surface the real terminal error instead of the literal `"turn failed"`:
+- [x] Surface the real terminal error instead of the literal `"turn failed"`:
       `orchestrator.py:984-985`, `:933`, `bobi/subagent.py:275,489` read
       `error_message`/`error_kind`/`api_error_status`. `bobi/brain/claude.py:278-292`
       already produces the diagnosis; only the consumers discard it.
-- [ ] Widen the `stop` log record (`orchestrator.py:982`) with `is_error`,
+      *One shared composition (`bobi.brain.turn_error_text`) rather than four
+      call sites; both `unknown error` fallbacks now name the gap that lost the
+      cause; `_named_exception` covers the bare-`raise` case (empty `str(e)`).*
+- [x] Widen the `stop` log record (`orchestrator.py:982`) with `is_error`,
       `error_kind`, `error_message`, `num_turns`, `duration_ms`.
-- [ ] `max_turns` configurable per role/launch, replacing the hardcoded literals
+      *Also `api_error_status`.*
+- [x] `max_turns` configurable per role/launch, replacing the hardcoded literals
       at `orchestrator.py:457`, `subagent.py:746`, `:351` (and `:587`, or delete it
       as dead).
-- [ ] **A cap hit auto-continues** within the wall-clock and spend budget instead
+      *Chain: step > `roles.<role>.max_turns` > `brain.max_turns` >
+      `DEFAULT_MAX_TURNS` (1000). Two deviations, both deliberate — see the
+      2026-07-26 (Lane A) amendment: there is **no launch flag**, and `:587`
+      (`run_phase_blocking`) was kept rather than deleted.*
+- [x] **A cap hit auto-continues** within the wall-clock and spend budget instead
       of terminating: re-query and keep going. Scoped to the long-job caps only —
       `CHECK_MAX_TURNS`, `GATE_MAX_TURNS`, `CURATOR_MAX_TURNS` keep failing fast,
       and `subagent.py:1823`'s `break` on `max_turns_reached` stays for those.
-- [ ] Document the fan-out-and-block pattern (background `subagents launch --wait`
+      *Bounded by `MAX_TURN_BUDGET_RESUMES` (3) and `step.timeout`. **No spend
+      bound**, because there is no cost budget in the framework to bind to —
+      `spend_governor` counts agent *invocations* per hour and a resume is not a
+      new invocation. Recorded in the amendment rather than left implied.*
+- [x] Document the fan-out-and-block pattern (background `subagents launch --wait`
       joined in one Bash call) in the engineer role prompt, and widen `--wait`
       beyond `adhoc` (`cli.py:2931`) or document the limit.
+      *Took the "document the limit" branch, in four places (flag help, runtime
+      error, `skills/bobi.md`, role prompt). Rationale in the amendment.*
 
 **Validation gate** — do not exit this phase until every line passes.
 
-- [ ] Failing-first: a session killed by the turn cap surfaces
+- [x] Failing-first: a session killed by the turn cap surfaces
       `max_turns_reached (max=…, turns=…)` in `state.json` and the lifecycle event
-- [ ] Failing-first: a configured non-default `max_turns` is honored at every
+- [x] Failing-first: a configured non-default `max_turns` is honored at every
       former literal site
-- [ ] Failing-first: a long-job cap hit auto-continues and completes; a
+- [x] Failing-first: a long-job cap hit auto-continues and completes; a
       `CHECK_MAX_TURNS` hit still fails fast
-- [ ] Failing-first: the `unknown error` shape (`subagent.py:275`,
+- [x] Failing-first: the `unknown error` shape (`subagent.py:275`,
       `orchestrator.py:933`) no longer masks a real diagnosis
-- [ ] `pytest tests/ --ignore=tests/e2e --timeout=30 -q` and
+- [x] `pytest tests/ --ignore=tests/e2e --timeout=30 -q` and
       `pytest tests/integration -q -k "subagent or orchestrator"`
+      *Second command clean (30 passed). First command: 3764 passed with a
+      **pre-existing** failure set that reproduces identically on `main` — the
+      real-Claude legs in `test_cross_model_resume`, `test_manager_sdk` and
+      `test_sleep_cycle_flow`, and `test_packaged_event_server`'s Node-build
+      errors; `test_manager_lifecycle[claude]` flakes under full-suite load and
+      passes in isolation. No new failures. All 8 CI checks green on the head.
+      **Note for later phases:** this gate line is not literally satisfiable in
+      a dev environment without the `claude` CLI authenticated and a Node
+      toolchain, so "green" here means "no delta against `main`". Phases 2 and 4
+      should either say that explicitly or scope the command.*
 
 ### Phase 2 — The artifact, the loop, and the in-progress monitor
 
@@ -557,7 +581,7 @@ depend on Q1's resolution being executed** (the review-remediation Amendment).}
 
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
-| A | — (plan is the spec) | 1 | Honest turn/error reporting + a resumable turn cap; `max_turns` configurable | solo | open |
+| A | — (plan is the spec) | 1 | Honest turn/error reporting + a resumable turn cap; `max_turns` configurable | solo | in review (PR #847) |
 | B | — (plan is the spec) | 2, 4 | Artifact parser, `verify:` provenance gate, worker loop prompt, in-progress monitor; then trial + cutover | solo | open |
 | C | — (moda-skills) | 3 | `build`-skill lifecycle rendering into the plan appendix | concurrent | open |
 
@@ -623,6 +647,42 @@ a lane turns out to need an inlined context slice.
   containment, with `run_key` as the cross-repo fallback. The Relevant-files entry
   citing `bobi/registry.py` as the liveness signal was also wrong (that is the
   *pack* registry); corrected to `bobi/sdk.py`.
+- **2026-07-26** (Lane A): **Phase 1 complete**, all five task items and all
+  five gate lines verified. Landed by taking over PR #847, whose reporting half
+  the plan already identified as Phase 1's substance. Four deviations from the
+  phase text, each deliberate and none silent:
+  1. **No launch flag for `max_turns`.** The chain is step > role > team >
+     framework default, with no `subagents launch --max-turns`. The cap is a
+     runaway-loop backstop an operator configures, not a per-invocation dial
+     like `--model`/`--effort`, and adding one would invite exactly the
+     "raise it until the job fits" habit the resume behavior removes the need
+     for.
+  2. **No spend bound on the resume chain.** The phase text says "within the
+     wall-clock and spend budget"; the implementation bounds by
+     `MAX_TURN_BUDGET_RESUMES` (3) and `step.timeout` only. There is no cost
+     budget to bind to: `spend_governor` caps agent *invocations* per rolling
+     hour (as this plan's own Relevant-files entry notes) and a turn-cap resume
+     is not a new invocation. The phrase was loose, not unmet. Worst case per
+     prompt step is `max_turns × (MAX_TURN_BUDGET_RESUMES + 1)` turns, because
+     `step.timeout` gates whether a resume *starts* and nothing enforces it
+     against a running drain — a real bound worth knowing, documented in
+     `docs/WORKFLOW_ENGINE.md`.
+  3. **`--wait` limit documented rather than widened.** `--wait` blocks by
+     running one prompt through `spawn_adhoc`; a workflow goes through the
+     orchestrator and returns once dispatched, so there is no in-process handle
+     to join. Widening it means running the orchestrator synchronously inside a
+     CLI invocation — disproportionate to Phase 1, and unnecessary because
+     fan-out units are adhoc-shaped anyway.
+  4. **`run_phase_blocking` (`subagent.py:587`) kept, not deleted.** The phase
+     text allowed either. It has no production callers but substantial test
+     coverage; deleting it is a separable cleanup, not turn-budget work.
+  **A finding for Lanes B and C, from doing this:** the plan's
+  `proof: <test-sha>..<fix-sha>` model does **not survive a rebase** — this
+  lane's ranges rotated when the branch was rebased onto the plan merge, so a
+  proof recorded in a commit message went stale while remaining true in
+  ordering. Phase 2's `proof:` resolution should verify *ordering* against the
+  current branch, not pin absolute SHAs, or the parser will report `[f]` on
+  every rebased artifact.
 - **2026-07-26** (Split): Lane map filled — three STACKED lanes, no fuse. **A**
   (Phase 1, bobi-agent) is cut against Split's one-lane default on a recorded
   same-repo justification: it fixes a live defect (`unknown error` spam every ~15
@@ -658,6 +718,17 @@ a lane turns out to need an inlined context slice.
   as superseded — it gates a step machine this plan deletes. The same
   masked-error defect is currently logging `unknown error` every ~15 min from
   monitor `check-c561144f`.
+  **Executed 2026-07-26:** #848 and #846 both closed as superseded (#846 closed
+  ahead of its Phase 4 slot because an open issue with no PR re-dispatches the
+  bot onto machinery Phase 4 deletes). #847 was **taken over** rather than
+  closed and now carries all of Phase 1; its `max_turns` raise was kept, not
+  discarded — the auto-continue makes the raise safe rather than redundant,
+  since a low cap would just resume more often. Three defects in
+  `evaluate_condition` that #848's spec found are live *today* and outlive it:
+  the substring-matching allow-list idiom (owned by #844), a handoff value
+  containing `\1` raising `re.error` via `re.sub`'s replacement slot, and a
+  stale-value leak from the run-wide flat condition scope. They are recorded on
+  #846/#848 for whoever needs them before Phase 4 deletes the surface.
 - **Prior art:** #753 (closed) made `subagents launch --wait` block on the launched
   agent and started normalizing `max_turns_reached`.
 - **Deferred:** a harness-side blocking join for `Agent` fan-out; a sender-identity

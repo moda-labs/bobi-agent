@@ -85,6 +85,60 @@ class TurnResult:
     deferred_tool: DeferredTool | None = None
     costs: list[BrainCost] = field(default_factory=list)
 
+    def error_text(self) -> str:
+        """The honest error string for this turn, or "" when it succeeded."""
+        return turn_error_text(
+            is_error=self.is_error,
+            error_kind=self.error_kind,
+            error_message=self.error_message,
+            result_text=self.result_text,
+            api_error_status=self.api_error_status,
+        )
+
+
+# The brain-neutral error kind for a turn the harness cut off at its turn cap.
+# One constant so the cap's terminal handling (resume, retry-vs-give-up) keys
+# off the same string the adapters set.
+ERROR_KIND_MAX_TURNS = "max_turns_reached"
+
+
+def turn_error_text(
+    *,
+    is_error: bool,
+    error_kind: str = "",
+    error_message: str = "",
+    result_text: str = "",
+    api_error_status: int | None = None,
+) -> str:
+    """Compose the honest error string for a failed turn (#845).
+
+    The ONE composition every call site shares (``TurnResult.error_text``,
+    ``session.py``, ``subagent.py``, the workflow drain), so no path can
+    reinvent a friendlier-looking lie.
+
+    Order matters. ``error_message`` carries the brain's own diagnosis (e.g.
+    ``max_turns_reached (max=1000, turns=1001)``) and is the only field
+    populated on exactly the terminal paths that need naming; ``result_text``
+    is EMPTY there, which is how a turn-cap kill used to reach operators as the
+    literal fallback ``"turn failed"`` with the real cause discarded. The last
+    resort still names the kind and API status rather than a bare literal, so
+    an unrecognized failure is at least self-describing.
+
+    A set ``error_kind`` counts as a failure even when ``is_error`` is False -
+    the same rule the adapters use to derive ``is_error`` - so a brain that
+    classifies a terminal condition without raising the flag still gets named.
+    """
+    if not (is_error or error_kind):
+        return ""
+    if error_message and result_text:
+        return f"{error_message}: {result_text}"
+    return (
+        error_message
+        or result_text
+        or f"turn failed (kind={error_kind or 'unknown'}, "
+           f"api_status={api_error_status})"
+    )
+
 
 @dataclass
 class StreamDelta:

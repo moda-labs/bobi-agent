@@ -19,7 +19,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -43,11 +43,69 @@ log = logging.getLogger(__name__)
 
 MAX_HANDOFF_RETRIES = 2
 
+# How many times one step may be restarted after the harness cut its session
+# off at the turn cap (#845). A cap hit is not a failure - the transcript is
+# intact and the session id is valid, so the work continues on a fresh CLI
+# process (fresh turn budget) resumed from that id.
+#
+# This count is the ONLY hard bound on the restart chain. `step.timeout` gates
+# whether a new resume STARTS, but nothing in this module enforces it against
+# a running drain (there is no `asyncio.wait_for` here, and `run_workflow`
+# calls `asyncio.run` bare), so a resume begun just under the deadline still
+# gets a full fresh budget. Worst case per prompt step is therefore
+# `max_turns * (MAX_TURN_BUDGET_RESUMES + 1)` turns, ended in-process only by
+# the agent finishing; the dead-man reconciler is the outer net. Raising
+# either number raises that product - see #845 review.
+MAX_TURN_BUDGET_RESUMES = 3
+
+
+def _named_exception(e: BaseException) -> str:
+    """*e* as a non-empty string, naming the type when ``str(e)`` is empty.
+
+    A bare ``raise SomeError()`` stringifies to "", and an empty cause is what
+    reaches an operator as "unknown error" - the exact discard #845 exists to
+    stop. Note ``e or ...`` does NOT work here: an exception object is always
+    truthy, so the fallback never fires.
+    """
+    return str(e) or f"{type(e).__name__} (no message)"
+
 
 @dataclass(frozen=True)
 class _NotifyOutcome:
     delivered: bool
     error: str = ""
+
+
+class DrainResult(NamedTuple):
+    """One drained turn: ``final_text`` (None on failure), error, error kind."""
+
+    final_text: str | None
+    error: str
+    error_kind: str = ""
+
+
+def _turn_budget_resume_prompt(step: StepDef, final_try: bool) -> str:
+    """The nudge that restarts a step after its session hit the turn cap.
+
+    A nudge, not a re-brief: the transcript survived the cap, so re-injecting
+    the step prompt would make the agent redo work it has already done. The
+    final continuation says so explicitly - that is the one chance to get a
+    handoff written before the step really does fail, which neither of the two
+    sessions killed at 200 turns ever got (#845).
+    """
+    tail = (
+        "This is the LAST continuation available for this step: write your "
+        "handoff file NOW with whatever you have verified so far, then keep "
+        "working."
+        if final_try else
+        "Keep going until the step is complete."
+    )
+    return (
+        f"Your session reached its turn cap and was restarted on the same "
+        f"transcript - no work was lost. Continue step `{step.name}` from "
+        f"where you left off (check the repo and your handoff file for what "
+        f"already landed rather than redoing it). {tail}"
+    )
 
 
 def _close_if_still_active(registry, session_name: str) -> None:
@@ -380,8 +438,9 @@ async def _run_workflow_async(
 ) -> bool:
     """Async core: one brain session for all steps."""
     from bobi.brain import (
-        continuation_token, get_brain, get_process_brain_model,
-        resolve_effort, resolve_model,
+        ERROR_KIND_MAX_TURNS, continuation_token, get_brain,
+        get_process_brain_model, resolve_effort, resolve_max_turns,
+        resolve_model,
     )
 
     _brain = get_brain()
@@ -418,6 +477,16 @@ async def _run_workflow_async(
         step_role = role or ((step.agent if step else "") or current_agent)
         return resolve_effort(team_cfg, role=step_role)
 
+    def _effective_step_max_turns(step: StepDef | None) -> int:
+        # The turn-cap sibling (#845): step override > role > team default >
+        # framework default. There is no launch flag - the cap is a safety
+        # backstop an operator configures, not a per-invocation dial.
+        step_role = role or ((step.agent if step else "") or current_agent)
+        return resolve_max_turns(
+            team_cfg, role=step_role,
+            explicit=(step.max_turns if step else 0),
+        )
+
     def _is_prompt_step(step: StepDef) -> bool:
         return not (
             step.condition or step.action or step.notify or step.await_event
@@ -444,7 +513,8 @@ async def _run_workflow_async(
             "```"
         )
 
-    def _make_session(resume_id=None, agent_name="", model="", effort=""):
+    def _make_session(resume_id=None, agent_name="", model="", effort="", *,
+                      max_turns):
         from bobi.runtime_guard import prepare_brain_runtime
 
         prepare_brain_runtime()
@@ -454,7 +524,10 @@ async def _run_workflow_async(
         else:
             agent_prompt = resolve_agent_prompt("", project_root, interactive=interactive)
 
-        options = {"max_turns": 200, "skills": "all"}
+        # max_turns is keyword-REQUIRED: _effective_step_max_turns is the one
+        # place the cap is resolved, so a call site cannot quietly fall back to
+        # a second default and drift from the configured value (#845).
+        options = {"max_turns": max_turns, "skills": "all"}
         if model:
             options["model"] = model
         if effort:
@@ -499,6 +572,10 @@ async def _run_workflow_async(
     # effort on a resumed session, so the effective dial is simply recomputed
     # for the next step - no saved-effort record, no continue-vs-fresh check.
     current_effort = _effective_step_effort(first_prompt_step)
+    # Like effort, the turn cap is simply recomputed for the step about to run:
+    # it is a session-construction option, not conversational state, so it
+    # never gates resume-vs-fresh (#845).
+    current_max_turns = _effective_step_max_turns(first_prompt_step)
     runtime_scope = ctx.scopes.get("_runtime", {})
     saved_session_model = (
         str(runtime_scope.get("model", "") or "")
@@ -561,7 +638,7 @@ async def _run_workflow_async(
         resume_id = (saved_id or None) if attempt == 0 else None
         client = _make_session(
             resume_id, agent_name=current_agent, model=current_model,
-            effort=current_effort,
+            effort=current_effort, max_turns=current_max_turns,
         )
         try:
             if resume_id:
@@ -577,11 +654,11 @@ async def _run_workflow_async(
             await client.connect(initial_prompt)
             if resume_id:
                 await client.query(task)
-            _, drain_error = await _drain_response(
+            drain = await _drain_response(
                 client, session_name, run_key, model=current_model,
             )
-            if drain_error:
-                raise RuntimeError(drain_error)
+            if drain.error:
+                raise RuntimeError(drain.error)
             break
         except Exception as e:
             if resume_id and attempt == 0:
@@ -592,7 +669,10 @@ async def _run_workflow_async(
                 except Exception:
                     pass
                 continue
-            run_failed, failure_error = True, str(e)
+            # An empty failure_error is what surfaces to an operator as
+            # "unknown error" - always name at least the exception type (#845).
+            run_failed = True
+            failure_error = _named_exception(e)
             break
 
     try:
@@ -761,20 +841,42 @@ async def _run_workflow_async(
 
             step_model = _effective_step_model(step)
             step_effort = _effective_step_effort(step)
-            if step_model != current_model or step_effort != current_effort:
+            # The cap is a construction-time CLI flag, so it can only change by
+            # rebuilding the session - exactly like effort (#845 review). An
+            # earlier cut of this change recomputed it here WITHOUT joining the
+            # condition below, on the theory that a construction-time option
+            # with no conversational consequence need not force a rebuild. That
+            # silently dropped every step-level override after the first,
+            # because one session spans every step whose agent/model/effort
+            # match (issue-lifecycle.yaml, and the documented example in
+            # docs/WORKFLOW_ENGINE.md). Rebuilding costs nothing here: the cap
+            # never changes the MODEL, so continuation_token returns the saved
+            # session id and the transcript is resumed natively - the same
+            # exemption an effort-only change already relies on.
+            step_max_turns = _effective_step_max_turns(step)
+            if (
+                step_model != current_model
+                or step_effort != current_effort
+                or step_max_turns != current_max_turns
+            ):
                 # Continue the live session natively on the new model when
                 # the brain supports it (#642); otherwise fresh + re-inject
                 # the workflow scopes as YAML (lossy fallback). An agent
                 # change entering this branch starts fresh: the new agent
                 # must not inherit the previous agent's transcript under its
                 # system prompt (e.g. a reviewer step contaminated by the
-                # builder's reasoning; an agent change with identical dials
-                # never enters the branch - a pre-existing gap in that
-                # isolation, not one this condition can close). An
-                # effort-only change is exempt from the resume guard (#778):
-                # continuation_token sees the same model on both sides, so
-                # whenever a resumable session id exists the session just
-                # reconnects natively under the new dial.
+                # builder's reasoning). An agent change matching on ALL THREE
+                # dials still never enters the branch - a pre-existing gap in
+                # that isolation, narrowed but not closed by adding the cap to
+                # the condition: an agent change that also moves the cap now
+                # gets the fresh-session isolation it always should have had.
+                # No shipped workflow sets a per-step cap yet, so that is a
+                # latent improvement rather than a live behavior change. An
+                # effort-only
+                # or cap-only change is exempt from the resume guard
+                # (#778/#845): continuation_token sees the same model on both
+                # sides, so whenever a resumable session id exists the session
+                # just reconnects natively under the new dial.
                 next_agent = (
                     current_agent if role else (step.agent or current_agent)
                 )
@@ -786,11 +888,12 @@ async def _run_workflow_async(
                     )
                 log.info(
                     "Step %s: switching session options (model %r -> %r, "
-                    "effort %r -> %r): %s",
+                    "effort %r -> %r, max_turns %d -> %d): %s",
                     step.name, current_model or "<default>",
                     step_model or "<default>",
                     current_effort or "<default>",
                     step_effort or "<default>",
+                    current_max_turns, step_max_turns,
                     "native resume" if token else "fresh session",
                 )
                 try:
@@ -799,11 +902,13 @@ async def _run_workflow_async(
                     pass
                 current_model = step_model
                 current_effort = step_effort
+                current_max_turns = step_max_turns
                 current_agent = next_agent
                 if token:
                     client = _make_session(
                         resume_id=token, agent_name=current_agent,
                         model=current_model, effort=current_effort,
+                        max_turns=current_max_turns,
                     )
                     try:
                         await client.connect(None)
@@ -824,16 +929,17 @@ async def _run_workflow_async(
                     client = _make_session(
                         resume_id=None, agent_name=current_agent,
                         model=current_model, effort=current_effort,
+                        max_turns=current_max_turns,
                     )
                     await client.connect(_continuation_prompt(step))
-                    _, drain_error = await _drain_response(
+                    drain = await _drain_response(
                         client, session_name, run_key, model=current_model,
                     )
-                    if drain_error:
+                    if drain.error:
                         failed_step = step.name
-                        run_failed, failure_error = True, drain_error
+                        run_failed, failure_error = True, drain.error
                         _emit_step_failed(
-                            run_key, workflow.name, step.name, drain_error,
+                            run_key, workflow.name, step.name, drain.error,
                         )
                         return False
 
@@ -849,15 +955,80 @@ async def _run_workflow_async(
             log.info(f"Step {step.name}: injecting prompt ({len(prompt)} chars)")
 
             await client.query(prompt)
-            final_text, drain_error = await _drain_response(
+            drain = await _drain_response(
                 client, session_name, run_key, model=current_model,
             )
 
-            if final_text is None:
+            # A turn-cap kill is recoverable, not terminal (#845): the harness
+            # ended the CLI process, but the transcript is intact and the saved
+            # session id resumes it on a fresh process with a fresh turn
+            # budget. Restart the step there instead of throwing away the whole
+            # run mid-edit - bounded by the step's wall-clock timeout (the
+            # budget operators actually set) and MAX_TURN_BUDGET_RESUMES.
+            resumes = 0
+            while (
+                drain.final_text is None
+                and drain.error_kind == ERROR_KIND_MAX_TURNS
+                and resumes < MAX_TURN_BUDGET_RESUMES
+                and time.time() - step_start < step.timeout
+            ):
+                resumes += 1
+                final_try = resumes == MAX_TURN_BUDGET_RESUMES
+                log.warning(
+                    "Step %s hit the turn cap (%s); resuming session %s "
+                    "(%d/%d)%s", step.name, drain.error, session_name,
+                    resumes, MAX_TURN_BUDGET_RESUMES,
+                    " - final continuation" if final_try else "",
+                )
+                log_activity("turn_budget_resume", {
+                    "step": step.name,
+                    "error": drain.error,
+                    "attempt": resumes,
+                    "max_attempts": MAX_TURN_BUDGET_RESUMES,
+                    "max_turns": current_max_turns,
+                }, session=session_name)
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                cap_resume_id = load_session_id(session_name)
+                if not cap_resume_id:
+                    log.error(
+                        "Step %s hit the turn cap with no resumable session "
+                        "id; cannot continue", step.name,
+                    )
+                    break
+                client = _make_session(
+                    resume_id=cap_resume_id, agent_name=current_agent,
+                    model=current_model, effort=current_effort,
+                    max_turns=current_max_turns,
+                )
+                try:
+                    await client.connect(None)
+                    await client.query(
+                        _turn_budget_resume_prompt(step, final_try)
+                    )
+                except Exception as e:
+                    log.error(
+                        "Step %s could not be resumed after the turn cap: %s",
+                        step.name, e,
+                    )
+                    drain = DrainResult(
+                        None,
+                        f"{drain.error}; resume failed: "
+                        f"{_named_exception(e)}",
+                        drain.error_kind,
+                    )
+                    break
+                drain = await _drain_response(
+                    client, session_name, run_key, model=current_model,
+                )
+
+            if drain.final_text is None:
                 failed_step = step.name
-                run_failed, failure_error = True, drain_error
+                run_failed, failure_error = True, drain.error
                 _emit_step_failed(run_key, workflow.name, step.name,
-                                  drain_error)
+                                  drain.error)
                 return False
 
             # Validate handoff
@@ -909,13 +1080,16 @@ async def _run_workflow_async(
         return True
 
     except Exception as e:
-        log.error(f"Workflow error: {e}")
-        run_failed, failure_error = True, str(e)
+        # An exception with an empty str() (a bare `raise SomeError()`) must
+        # still name itself rather than reaching an operator as "" (#845).
+        error = _named_exception(e)
+        log.error(f"Workflow error: {error}")
+        run_failed, failure_error = True, error
         _emit_lifecycle_event("agent/workflow.failed", {
             "run_key": run_key,
             "workflow": workflow.name,
-            "error": str(e),
-            "text": f"Workflow error: {e}",
+            "error": error,
+            "text": f"Workflow error: {error}",
         }, blocking=True)
         return False
     finally:
@@ -928,9 +1102,15 @@ async def _run_workflow_async(
             # right after workflow.failed. RC#4: carry requested_by so the
             # launcher can route it to the requester's thread.
             if run_failed:
+                # Every path above populates failure_error with a named cause,
+                # so this fallback is unreachable in practice - it names the
+                # gap rather than inventing an "unknown error" (#845).
+                failure_error = failure_error or (
+                    f"{workflow.name} failed with no error reported"
+                )
                 landed = _emit_lifecycle_event("agent/session.failed", {
                     "run_key": run_key, "role": role, "project": repo,
-                    "error": failure_error or "unknown error",
+                    "error": failure_error,
                     "requested_by": requested_by or None,
                     "text": f"{role or 'Agent'} failed on {run_key}: {failure_error}",
                 }, blocking=True)
@@ -960,8 +1140,13 @@ async def _run_workflow_async(
 
 async def _drain_response(
     client, session_name: str, run_key: str, *, model: str,
-) -> tuple[str | None, str]:
-    """Drain one turn. Returns ``(final_text, error)``.
+) -> DrainResult:
+    """Drain one turn. Returns ``(final_text, error, error_kind)``.
+
+    ``final_text`` is None exactly when the turn failed; ``error`` is then
+    always non-empty and ``error_kind`` carries the brain's classification
+    (e.g. ``max_turns_reached``) so callers can act on the failure MODE
+    without pattern-matching prose.
 
     ``model`` is required: it is the model the session currently runs under,
     and every save must record it so the store's model record stays in step
@@ -979,20 +1164,34 @@ async def _drain_response(
                                  session=session_name)
             elif isinstance(msg, TurnResult):
                 save_session_id(session_name, msg.session_id, model=model)
-                log_activity("stop", {"session_id": msg.session_id},
-                             session=session_name)
+                # Every terminal fact the brain reported, in the session log
+                # (#845). A bare `stop` record is why diagnosing a turn-cap
+                # kill used to require the vendor CLI's own transcript: the
+                # error was in hand right here and none of it was written down.
+                log_activity("stop", {
+                    "session_id": msg.session_id,
+                    "is_error": msg.is_error,
+                    "error_kind": msg.error_kind,
+                    "error_message": msg.error_message,
+                    "api_error_status": msg.api_error_status,
+                    "num_turns": msg.num_turns,
+                    "duration_ms": msg.duration_ms,
+                }, session=session_name)
                 if msg.is_error:
-                    return None, msg.result_text or "turn failed"
-                return final_text, ""
+                    # Prefer the brain's own diagnosis. result_text is EMPTY on
+                    # a turn-cap kill, which is how "turn failed" - a literal
+                    # fallback - reached operators as the whole story (#845).
+                    return DrainResult(None, msg.error_text(), msg.error_kind)
+                return DrainResult(final_text, "", "")
     except asyncio.TimeoutError:
         error = _timeout_error()
         log.error(f"Drain timeout: {error}")
-        return None, error
+        return DrainResult(None, error, "timeout")
     except Exception as e:
         error = _tool_crash_error(e)
         log.error(f"Drain error: {error}")
-        return None, error
-    return None, _network_drop_error()
+        return DrainResult(None, error, "tool_crash")
+    return DrainResult(None, _network_drop_error(), "network_drop")
 
 
 def _emit_step_failed(run_key, workflow_name, step_name, error):
