@@ -865,9 +865,14 @@ async def _run_workflow_async(
                 # change entering this branch starts fresh: the new agent
                 # must not inherit the previous agent's transcript under its
                 # system prompt (e.g. a reviewer step contaminated by the
-                # builder's reasoning; an agent change with identical dials
-                # never enters the branch - a pre-existing gap in that
-                # isolation, not one this condition can close). An effort-only
+                # builder's reasoning). An agent change matching on ALL THREE
+                # dials still never enters the branch - a pre-existing gap in
+                # that isolation, narrowed but not closed by adding the cap to
+                # the condition: an agent change that also moves the cap now
+                # gets the fresh-session isolation it always should have had.
+                # No shipped workflow sets a per-step cap yet, so that is a
+                # latent improvement rather than a live behavior change. An
+                # effort-only
                 # or cap-only change is exempt from the resume guard
                 # (#778/#845): continuation_token sees the same model on both
                 # sides, so whenever a resumable session id exists the session
