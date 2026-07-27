@@ -12,7 +12,7 @@ truststore.inject_into_ssl()
 
 import click
 
-from bobi import paths
+from bobi import fsutil, paths
 from bobi.install import (
     install_pack as _install_pack,
     write_install_gitignore as _write_install_gitignore,
@@ -846,7 +846,10 @@ def app_restart():
     """Restart the web app daemon."""
     from bobi.webapp import daemon
 
-    daemon.stop()
+    # A restart inherits stop's contract: starting over a daemon that is still
+    # holding its port is not a restart, it is a second daemon.
+    if not _echo_stop(daemon.stop()):
+        raise SystemExit(1)
     try:
         st = daemon.start(open_browser=False)
     except RuntimeError as e:
@@ -949,10 +952,10 @@ def _echo_stop(result, force_hint: str | None = None) -> bool:
     """Report a `service.stop_pidfile` outcome; True when the process is down.
 
     The one renderer for every `bobi ... stop`. The outcomes come from the one
-    stop seam, so the words for them - and the answer to the only question a
-    script asks after a stop, "is it down?" - exist in one place too. A caller
-    turns False into a non-zero exit: anything that leaves the process running
-    is a failed stop, whichever pid file it was reading.
+    stop seam, so the words for them exist in one place too. The ANSWER is
+    `StopResult.settled` rather than a verdict re-derived per branch here, so
+    the library restart paths - which have no CLI to echo through - gate on
+    exactly what this returns. A caller turns False into a non-zero exit.
     """
     if result.invalid_pid:
         click.echo("Invalid PID file - cleaning up.")
@@ -961,12 +964,10 @@ def _echo_stop(result, force_hint: str | None = None) -> bool:
                    "cleaning up stale PID file.")
     elif result.permission_denied:
         click.echo(f"No permission to signal process {result.pid}.", err=True)
-        return False
     elif result.unidentified:
         click.echo(f"Cannot identify pid {result.pid} (no readable argv) - "
                    "leaving it running. Stop it by hand if it is stale.",
                    err=True)
-        return False
     elif result.stopped or result.killed or result.still_running:
         click.echo(f"Stopping {result.kind} (pid {result.pid})...")
         if result.stopped:
@@ -975,11 +976,10 @@ def _echo_stop(result, force_hint: str | None = None) -> bool:
             click.echo("Killed.")
         else:
             hint = f" - try: {force_hint}" if force_hint else ""
-            click.echo(f"Process didn't exit{hint}", err=True)
-            return False
+            click.echo(f"Process didn't exit{hint}.", err=True)
     else:
         click.echo(f"No PID file found - {result.kind} is not running.")
-    return True
+    return result.settled
 
 
 @main.command()
@@ -3095,7 +3095,8 @@ def agents_add_registry(repo):
     registries.append(repo)
     raw["registries"] = registries
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(_yaml.dump(raw, default_flow_style=False))
+    fsutil.atomic_write_text(
+        config_path, _yaml.dump(raw, default_flow_style=False))
     click.echo(f"Added registry: {repo}")
 
 
@@ -3119,7 +3120,8 @@ def agents_remove_registry(repo):
 
     registries.remove(repo)
     raw["registries"] = registries
-    config_path.write_text(_yaml.dump(raw, default_flow_style=False))
+    fsutil.atomic_write_text(
+        config_path, _yaml.dump(raw, default_flow_style=False))
     click.echo(f"Removed registry: {repo}")
 
 

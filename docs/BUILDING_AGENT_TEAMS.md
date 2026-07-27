@@ -95,7 +95,7 @@ Fields the framework parses (see `bobi/config.py`):
 ```yaml
 version: "1.0.0"
 entry_point: manager        # role launched by `bobi agent <name> start` — must exist in roles/
-chat: slack                 # human interaction surface: slack | telegram | none
+chat: slack                 # human interaction surface: slack | telegram | cli
 
 services:                   # what the team connects to
   - name: github            # native: github | slack | linear

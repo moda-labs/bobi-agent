@@ -218,8 +218,15 @@ def _as_float(value: object, name: str, default: float) -> float:
 def positive_int(value: object) -> int:
     """A YAML scalar as a positive int, or 0 for absent/blank/unusable input.
 
-    The ONE parser for "a positive integer setting", shared with the workflow
-    schema (#845). Values arrive as YAML scalars OR as ``${VAR}``
+    The parser for "a positive integer setting where 0 means unconfigured",
+    shared with the workflow schema (#845). Distinct from ``_as_int`` above,
+    which is for settings with a meaningful default and warns on junk: this one
+    is SILENT and collapses everything unusable to 0, because its callers treat
+    0 as "not set" and supply their own default downstream. Do not merge them
+    without picking one contract - a setting routed through the wrong one
+    either loses its warning or gains a spurious 0.
+
+    Values arrive as YAML scalars OR as ``${VAR}``
     interpolations that resolved to a string (or to nothing), so a plain
     ``int()`` is not enough; and 0 must mean "unconfigured" rather than a
     literal zero, because no such setting has a valid zero.

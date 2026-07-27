@@ -836,7 +836,11 @@ def test_slack_registration_reports_failure_on_rejected_status(
     cfg = _StubCfg({("slack", "bot_token"): "xoxb-tok",
                     ("slack", "signing_secret"): "sek"})
 
-    with caplog.at_level(logging.WARNING):
+    # INFO, not WARNING: the success line this test exists to prove ABSENT is
+    # logged at INFO, so capturing from WARNING up made
+    # `"Registered Slack workspace" not in caplog.text` an assertion that could
+    # not fail - it would have passed with the early `return []` deleted.
+    with caplog.at_level(logging.INFO):
         result = es.register_slack_workspaces(
             "http://localhost:8080", cfg,
             bubble_id="bub_A", bubble_key="bkey_A",

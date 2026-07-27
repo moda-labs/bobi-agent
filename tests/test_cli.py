@@ -1061,6 +1061,38 @@ class TestAppStop:
         assert f"Cannot identify pid {os.getpid()}" in result.output
         assert pid_path.exists() and port_path.exists()
 
+    def test_restart_does_not_start_a_second_daemon_on_a_failed_stop(
+        self, tmp_path, monkeypatch,
+    ):
+        """`restart` = stop THEN start, so it inherits stop's contract.
+
+        `app_restart` called `daemon.stop()` and discarded the result, which
+        this lane made able to report `unidentified`/`still_running` while
+        KEEPING the pid and port files. `start()` then returns early on the
+        live daemon and the command prints "bobi app is running at ..." - a
+        restart that restarted nothing, reported as success. `bobi app stop`
+        was given the non-zero exit; `restart` was not.
+        """
+        from bobi import service
+        from bobi.webapp import daemon
+
+        monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(service, "_proc_argv", lambda pid: [])
+        monkeypatch.setattr(service, "_ps_argv", lambda pid: [])
+        pid_path, port_path = daemon._pid_path(), daemon._port_path()
+        pid_path.write_text(str(os.getpid()))
+        port_path.write_text("8899")
+
+        started: list = []
+        monkeypatch.setattr(daemon, "start",
+                            lambda **kw: started.append(kw))
+
+        result = CliRunner().invoke(main, ["app", "restart"])
+
+        assert result.exit_code != 0, result.output
+        assert not started, "started a second daemon over one still running"
+        assert pid_path.exists() and port_path.exists()
+
 
 class TestSetupCommand:
     def _home(self, tmp_path, monkeypatch):

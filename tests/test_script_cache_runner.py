@@ -80,6 +80,65 @@ def _monitor(name="email-watch", **extra):
                    event="monitor/email.received", extra=base)
 
 
+class TestPinIsAtomicUnderConcurrency:
+    """`_pin` must not keep its own tmp+rename beside the shared helper.
+
+    `_save_trusted_state` in this same module adopted `fsutil` precisely
+    because "its temp name carries pid + nanoseconds, so two writers racing on
+    one sidecar cannot consume each other's temp" - and `_pin`, 230 lines
+    below, kept writing a FIXED `.tmp-<name>.sh`. D004 is what makes that
+    reachable: generation moved onto its own worker thread, so two generations
+    for one monitor can now overlap where the scheduler used to serialize them.
+    The loser's write lands under the winner's rename, so the active script no
+    longer hashes to the `sha256` the winner stamped into trusted state and
+    `_verify_integrity` refuses to run the monitor at all.
+    """
+
+    def test_racing_pins_leave_a_script_matching_its_recorded_hash(
+            self, scripts_dir):
+        import threading
+
+        monitor = _monitor()
+        env = sc.CapabilityEnvelope()
+        start = threading.Barrier(8)
+        errors: list = []
+        states: list = []
+
+        def pin(i: int):
+            body = f"#!/bin/sh\necho '{{\"id\": \"{i}\"}}'\n" + "# pad\n" * 200
+            state: dict = {}
+            try:
+                start.wait(timeout=10)
+                sc._pin(monitor.name, body, monitor, f"fp{i}", env, state)
+            except Exception as e:              # noqa: BLE001 - reported below
+                errors.append(e)
+            else:
+                states.append(state)
+
+        threads = [threading.Thread(target=pin, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=20)
+
+        assert not errors, f"a racing _pin raised: {errors}"
+        active = sc._active_path(monitor.name)
+        assert active.is_file(), "the active script went missing in the race"
+        on_disk = sc._sha256(active.read_text())
+        assert on_disk in {s["sha256"] for s in states}, (
+            "the pinned script matches no writer's recorded hash - a torn "
+            "write, so _verify_integrity would refuse to run this monitor"
+        )
+
+    def test_pin_leaves_no_temp_behind(self, scripts_dir):
+        monitor = _monitor()
+        sc._pin(monitor.name, "#!/bin/sh\necho '{\"id\": \"1\"}'\n",
+                monitor, "fp", sc.CapabilityEnvelope(), {})
+        leftovers = [p.name for p in scripts_dir.iterdir()
+                     if p.name.startswith(".") and p.name.endswith(".tmp")]
+        assert not leftovers, leftovers
+
+
 def _gen(items, script=GOOD_SCRIPT, success=True, cost=0.02):
     return lambda monitor, cwd, policy: GenResult(
         success=success, items=items, script=script, cost_usd=cost)

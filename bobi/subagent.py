@@ -839,6 +839,22 @@ def spawn_adhoc(
     return result
 
 
+def is_subagent_argv(argv: list[str]) -> bool:
+    """True when `argv` is a detached bobi sub-agent.
+
+    `_launch_detached` runs ``python -c "<bootstrap>" <args-json>``, so the
+    bootstrap source sits in argv immediately after ``-c`` - early enough to
+    survive a BSD `ps` column clip, unlike the `run_key` buried inside the JSON
+    payload behind it, which is why identity is per-KIND here rather than per
+    run. Joined rather than matched per element because the two argv sources
+    disagree on shape: ``/proc/<pid>/cmdline`` splits on NUL and keeps the
+    whole ``-c`` script as ONE element, while `ps` whitespace-splits it into
+    a dozen.
+    """
+    joined = " ".join(argv)
+    return "bobi.subagent" in joined and "_run_agent_entry" in joined
+
+
 def _launch_detached(script: str, args: list[str], log_file: Path,
                      env: dict[str, str] | None = None) -> int:
     """Launch a detached subprocess that survives parent exit. Returns pid."""
@@ -2133,16 +2149,24 @@ def find_agent(ref: str) -> SessionEntry | None:
 def cancel_agent(ref: str) -> bool:
     """Cancel a running agent by session name or run key.
 
-    Terminates the detached process (if its pid is alive) and marks the
-    registry entry cancelled.
+    Terminates the detached process (only if the pid is still identifiably
+    THIS sub-agent) and marks the registry entry cancelled.
+
+    Liveness alone is not enough to signal on: a registry entry outlives a
+    sub-agent that was OOM-killed or crashed, and the OS reuses pids, so a
+    cancel against a stale entry would SIGTERM whatever inherited it. The
+    entry is cancelled either way - refusing to signal must not leave a run
+    that can never be re-dispatched.
     """
     import os
     import signal
 
+    from bobi.service import is_process
+
     entry = find_agent(ref)
     if not entry or entry.status not in ("starting", "running", "idle"):
         return False
-    if entry.pid:
+    if entry.pid and is_process(entry.pid, is_subagent_argv):
         try:
             os.kill(entry.pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):

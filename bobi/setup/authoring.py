@@ -23,6 +23,7 @@ from pathlib import Path
 
 import yaml
 
+from bobi import fsutil
 from bobi.setup import llm, services
 from bobi.setup.state import SetupState
 
@@ -820,7 +821,7 @@ async def author_pack(state: SetupState, project: Path, *,
         if spec.deterministic:
             body = (_deterministic_body(spec, target, state, catalog)
                     if editing else spec.content)
-            target.write_text(body)
+            fsutil.atomic_write_text(target, body)
             yield {"type": "delta", "path": spec.path, "text": body}
         else:
             # Open mode edits a file that already exists; otherwise (create, or
@@ -853,7 +854,7 @@ async def author_pack(state: SetupState, project: Path, *,
             cleaned = _strip_fences("".join(parts))
             if not cleaned.strip():
                 cleaned = original or f"# {spec.path}\n"
-            target.write_text(cleaned)
+            fsutil.atomic_write_text(target, cleaned)
             if spec.path == "agent.md":
                 base_md = cleaned
 

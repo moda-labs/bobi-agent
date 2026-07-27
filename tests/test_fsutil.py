@@ -48,7 +48,6 @@ NOT_CONVERGED = frozenset({
     "bobi/events/server.py",
     "bobi/monitors/registry.py",
     "bobi/registry.py",
-    "bobi/setup/webui/server.py",
 })
 
 
@@ -60,22 +59,95 @@ def _bare_serialized_writes(source: str) -> list[int]:
     empty. The shape is matched on the AST rather than by substring so a
     module's plain-text writes (a `.gitignore`, a generated script) do not
     read as false positives.
+
+    Two escapes had to be closed, and each had a live writer hiding behind it.
+    The serializer is matched by what a name is BOUND to rather than by
+    spelling, because `import yaml as _yaml` made `bobi/cli.py`'s
+    machine-global `config.yaml` rewrite invisible; and a dump bound to a local
+    first (`body = yaml.dump(...)` ... `path.write_text(body)`) counts, because
+    `bobi/setup/authoring.py` wrote the whole authored team source that way,
+    one function removed from its serializer call.
     """
+    tree = ast.parse(source)
+
+    serializers = {"json", "yaml"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in ("json", "yaml"):
+                    serializers.add(alias.asname or alias.name)
+
+    def _is_dump(node) -> bool:
+        return (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("dumps", "dump")
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in serializers)
+
+    def _holds_dump(node) -> bool:
+        if any(_is_dump(sub) for sub in ast.walk(node)):
+            return True
+        # One hop through an intra-module helper that RETURNS a serialized
+        # document. `bobi/setup/authoring.py` writes the authored team source
+        # as `target.write_text(body)` where `body` came from
+        # `_deterministic_body()`, whose own `return yaml.dump(...)` sits in a
+        # different function - so neither the direct nor the local-binding
+        # rule could see it, and a bare write of a whole agent.yaml stayed
+        # invisible to a guard whose entire job was finding exactly that.
+        return any(isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+                   and sub.func.id in serializing_funcs
+                   for sub in ast.walk(node))
+
+    def _returns_serialized(fn) -> bool:
+        for sub in ast.walk(fn):
+            if not (isinstance(sub, ast.Return) and sub.value is not None):
+                continue
+            for x in ast.walk(sub.value):
+                if _is_dump(x):
+                    return True
+                if (isinstance(x, ast.Call) and isinstance(x.func, ast.Name)
+                        and x.func.id in serializing_funcs):
+                    return True
+        return False
+
+    # To a fixed point, because the real chain is more than one hop:
+    # `author_pack` writes what `_deterministic_body` returned, and THAT is a
+    # call to `merge_agent_yaml`, which is where the `yaml.dump` finally is.
+    # Stopping at one hop leaves the writer of a whole agent.yaml invisible.
+    serializing_funcs: set[str] = set()
+    funcs = [n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    changed = True
+    while changed:
+        changed = False
+        for fn in funcs:
+            if fn.name not in serializing_funcs and _returns_serialized(fn):
+                serializing_funcs.add(fn.name)
+                changed = True
+
+    serialized: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _holds_dump(node.value):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    serialized.add(target.id)
+        elif (isinstance(node, ast.AnnAssign) and node.value is not None
+                and isinstance(node.target, ast.Name)
+                and _holds_dump(node.value)):
+            serialized.add(node.target.id)
+
     hits = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not node.args:
             continue
         func = node.func
         if not (isinstance(func, ast.Attribute)
                 and func.attr in ("write_text", "write_bytes")):
             continue
-        for sub in ast.walk(node.args[0]):
-            if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
-                    and sub.func.attr in ("dumps", "dump")
-                    and isinstance(sub.func.value, ast.Name)
-                    and sub.func.value.id in ("json", "yaml")):
-                hits.append(node.lineno)
-                break
+        arg = node.args[0]
+        if _holds_dump(arg) or (isinstance(arg, ast.Name)
+                                and arg.id in serialized):
+            hits.append(node.lineno)
     return hits
 
 
@@ -277,6 +349,67 @@ class TestModeIsPreserved:
             stat.S_IMODE(plain.stat().st_mode)
 
 
+class TestSymlinkedTarget:
+    """A symlinked target is written THROUGH, not replaced.
+
+    `os.replace` swaps inodes, so an unguarded swap unlinks the symlink and
+    drops a regular file in its place - the link is gone and the file it
+    pointed at silently keeps its old content forever. Every adopter of this
+    helper came from `path.write_text()`, which follows the link, and the
+    module's contract is that "the swap is otherwise invisible". A
+    dotfile-managed `~/.codex/config.toml -> ~/dotfiles/codex/config.toml` is
+    the shape that makes this bite: Codex keeps reading the real file, and
+    every later sync overwrites a link that is no longer there.
+    """
+
+    def test_write_text_follows_the_link(self, tmp_path):
+        real = tmp_path / "real.toml"
+        real.write_text("secret=1\n")
+        link = tmp_path / "config.toml"
+        link.symlink_to(real)
+
+        fsutil.atomic_write_text(link, "new=2\n")
+
+        assert link.is_symlink(), "the symlink was replaced by a regular file"
+        assert real.read_text() == "new=2\n", "the real file kept stale content"
+
+    def test_write_json_follows_the_link(self, tmp_path):
+        real = tmp_path / "real.json"
+        real.write_text('{"old": true}')
+        link = tmp_path / "state.json"
+        link.symlink_to(real)
+
+        fsutil.atomic_write_json(link, {"new": True})
+
+        assert link.is_symlink()
+        assert json.loads(real.read_text()) == {"new": True}
+
+    def test_a_dangling_link_creates_its_target(self, tmp_path):
+        """`write_text()` through a dangling link creates the target; so do we."""
+        target = tmp_path / "not-yet.toml"
+        link = tmp_path / "config.toml"
+        link.symlink_to(target)
+
+        fsutil.atomic_write_text(link, "made=1\n")
+
+        assert link.is_symlink()
+        assert target.read_text() == "made=1\n"
+
+    def test_the_real_file_s_mode_is_the_one_preserved(self, tmp_path):
+        """Mode comes from the file being written, not from the link."""
+        real = tmp_path / "real.env"
+        real.write_text("TOKEN=x\n")
+        real.chmod(0o600)
+        link = tmp_path / ".env"
+        link.symlink_to(real)
+
+        fsutil.atomic_write_text(link, "TOKEN=y\n")
+
+        assert link.is_symlink()
+        assert real.read_text() == "TOKEN=y\n"
+        assert stat.S_IMODE(real.stat().st_mode) == 0o600
+
+
 class TestAtomicWriteJson:
     def test_round_trip(self, tmp_path):
         target = tmp_path / "state.json"
@@ -394,6 +527,57 @@ class TestSingleImplementation:
             "bobi/compose.py",
             "bobi/install.py",
         }
+
+    def test_an_aliased_serializer_import_still_matches(self):
+        """`import yaml as _yaml` must not launder a bare durable write.
+
+        The matcher keyed on the literal names `json`/`yaml`, so
+        `bobi/cli.py`'s machine-global `config.yaml` rewrite - two
+        read-modify-writes of the file holding every configured registry -
+        never enrolled and sat on no deny list either. The guard's own
+        docstring, "a durable writer that is not listed here is held to the
+        helper", was simply false for that module.
+        """
+        source = (
+            "import yaml as _yaml\n"
+            "from pathlib import Path\n"
+            "def save(p, raw):\n"
+            "    Path(p).write_text(_yaml.dump(raw))\n"
+        )
+        assert _bare_serialized_writes(source) == [4]
+
+    def test_a_dump_reached_through_helpers_still_matches(self):
+        """The serializer may sit several functions from the write.
+
+        `bobi/setup/authoring.py` wrote the authored team source as
+        `target.write_text(body)`, where `body` came from
+        `_deterministic_body()`, which returns `merge_agent_yaml()`, which is
+        where the `yaml.dump` finally lives. Matching only the direct call, or
+        only one hop, leaves a bare write of a whole `agent.yaml` invisible -
+        and that file is the one an interrupted `bobi setup` truncates.
+        """
+        source = (
+            "import yaml\n"
+            "from pathlib import Path\n"
+            "def _merge(existing):\n"
+            "    return yaml.dump(existing)\n"
+            "def _body(spec):\n"
+            "    return _merge(spec)\n"
+            "def author(p, spec):\n"
+            "    body = _body(spec)\n"
+            "    Path(p).write_text(body)\n"
+        )
+        assert _bare_serialized_writes(source) == [9]
+
+    def test_a_plain_text_write_is_not_a_false_positive(self):
+        """The counterweight: the matcher must stay narrow enough to be usable."""
+        source = (
+            "import json\n"
+            "from pathlib import Path\n"
+            "def note(p, text):\n"
+            "    Path(p).write_text(text)\n"
+        )
+        assert _bare_serialized_writes(source) == []
 
     def test_discovery_reaches_an_unconverged_writer(self, tmp_path, monkeypatch):
         """The shape the guard exists to catch must be able to ENROL.

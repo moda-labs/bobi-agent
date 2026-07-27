@@ -74,7 +74,10 @@ mention that installed package files are regenerated from source.
 ```yaml
 version: "1.0.0"
 entry_point: <starting-role>
-chat: slack                       # optional: where humans talk to the team
+chat: slack                       # optional: where humans talk to the
+                                  # team - slack | telegram | cli
+                                  # (`cli` means no chat surface; setup
+                                  #  writes it as an absent key)
 
 services:
   - name: slack

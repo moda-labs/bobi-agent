@@ -5,6 +5,7 @@ For blocking execution and SDK interaction tests, see test_subagent_blocking.py.
 
 import json
 import os
+import subprocess
 import tempfile
 import shutil
 from pathlib import Path
@@ -12,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bobi import paths
+from bobi import paths, service
 from bobi.sdk import SessionEntry
 from bobi.subagent import (
     AgentResult,
@@ -20,6 +21,7 @@ from bobi.subagent import (
     _resolve_project_name,
     cancel_agent,
     find_agent,
+    is_subagent_argv,
     list_agents,
 )
 
@@ -138,6 +140,57 @@ class TestAgentLifecycle:
             assert cancel_agent("AGD-12")
         registry.update.assert_called_once_with(
             "agent-agd-12-implement", status="cancelled", pid=0)
+
+    def test_cancel_never_signals_a_pid_it_cannot_identify(
+            self, sacrificial_process):
+        """A registry entry outlives a crashed sub-agent, and pids get reused.
+
+        `cancel_agent` signalled `entry.pid` on liveness alone, so
+        `bobi agent <name> subagents cancel <ref>` against a stale entry
+        SIGTERMed whatever had inherited the pid - an editor, another team's
+        manager - and then reported success. Every other signal site in bobi
+        was routed through the identity-checked seam (`service.is_process`,
+        whose docstring is "a process we cannot identify is never one we may
+        signal"); this one was missed by the consolidation.
+
+        Refusing to signal must still not strand the entry: an uncancellable
+        run would block re-dispatch forever, so the registry update stands
+        either way.
+        """
+        bystander = sacrificial_process()
+        entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",
+                             phase="implement", status="running",
+                             pid=bystander.pid)
+        registry = _mock_registry([entry])
+        with patch("bobi.subagent.get_registry", return_value=registry):
+            assert cancel_agent("AGD-12")
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            bystander.wait(timeout=1)   # i.e. it was never signalled
+        registry.update.assert_called_once_with(
+            "agent-agd-12-implement", status="cancelled", pid=0)
+
+    def test_cancel_does_signal_a_pid_wearing_the_sub_agent_shape(
+            self, sacrificial_process):
+        """The positive control for the guard above.
+
+        An identity predicate that matched NOTHING would pass the refusal test
+        while making `cancel` silently toothless - a run nobody can stop, and
+        no test to say so. Pin the other direction too.
+        """
+        victim = sacrificial_process(
+            "from bobi.subagent import _run_agent_entry", "{}")
+        assert is_subagent_argv(service.process_argv(victim.pid)) is True, (
+            "the victim does not wear the sub-agent argv shape"
+        )
+        entry = SessionEntry(name="agent-agd-13-implement", run_key="AGD-13",
+                             phase="implement", status="running",
+                             pid=victim.pid)
+        with patch("bobi.subagent.get_registry",
+                   return_value=_mock_registry([entry])):
+            assert cancel_agent("AGD-13")
+
+        assert victim.wait(timeout=5) == -15, "the sub-agent was not signalled"
 
     def test_cancel_done_agent_returns_false(self):
         entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",

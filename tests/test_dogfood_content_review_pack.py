@@ -6,6 +6,7 @@ zero framework edits" — email has no adapter, so the monitor injects
 events directly into the manager's event queue.
 """
 
+import re
 from pathlib import Path
 
 import yaml
@@ -27,7 +28,7 @@ class TestPackStructure:
     def test_agent_yaml_parses(self):
         cfg = yaml.safe_load((PACK_DIR / "agent.yaml").read_text())
         assert cfg["entry_point"] == "manager"
-        assert cfg["version"] == "1.2.1"
+        assert re.fullmatch(r"\d+\.\d+\.\d+", str(cfg["version"])), cfg["version"]
 
     def test_agent_md_exists(self):
         assert (PACK_DIR / "agent.md").exists()
@@ -241,6 +242,29 @@ class TestManagerRoutingTable:
             f"declared, so the chat surface can never deliver a message"
         )
 
+    def test_this_pack_ships_with_no_chat_surface_at_all(self, tmp_path):
+        """The END STATE D119 resolved to, asserted rather than skipped past.
+
+        The check above early-exits for `cli`/absent, so for the value this
+        pack actually ships it asserts nothing: a change to `chat: github` -
+        a declared event service, but not a chat transport - would sail
+        through, and so would re-adding a chat service and the credential it
+        drags back into the release-smoke pack. This one names the intent:
+        credential-free, no chat surface.
+        """
+        _install_pack(PACK_DIR, tmp_path)
+        cfg = Config.load(tmp_path)
+        assert cfg.chat in (None, "", "cli"), (
+            f"chat: {cfg.chat} - the dogfood pack is the credential-free "
+            f"release-smoke team and must declare no chat surface"
+        )
+        chat_transports = {"slack", "telegram", "discord", "whatsapp"}
+        declared = {s.name for s in cfg.event_services}
+        assert not (declared & chat_transports), (
+            f"a chat transport crept back into the pack: "
+            f"{sorted(declared & chat_transports)}"
+        )
+
 
 class TestReviewWorkflowRouting:
     """dogfood-content-review must route to `fix` when the audit finds issues.
@@ -295,5 +319,21 @@ class TestRegistryEntry:
         registry = yaml.safe_load(registry_path.read_text())
         assert "dogfood-content-review" in registry["agents"]
         entry = registry["agents"]["dogfood-content-review"]
-        assert entry["version"] == "1.2.1"
         assert "description" in entry
+
+    def test_registry_version_matches_the_pack(self):
+        """The registry version and the pack's own must agree.
+
+        Pinning a literal here (`== "1.2.1"`) was worse than no check at all:
+        it passed while the pack's content changed underneath an unbumped
+        version - the failure this is meant to catch - and FAILED the moment
+        someone did the right thing and bumped. What is load-bearing is that
+        the two agree, since the registry version is what `fetch()` resolves to
+        an immutable release asset; a mismatch ships one pack's content under
+        another's tarball.
+        """
+        registry_path = Path(__file__).parent.parent / "agents" / "registry.yaml"
+        registry = yaml.safe_load(registry_path.read_text())
+        cfg = yaml.safe_load((PACK_DIR / "agent.yaml").read_text())
+        assert (registry["agents"]["dogfood-content-review"]["version"]
+                == str(cfg["version"]))

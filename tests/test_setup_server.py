@@ -713,6 +713,55 @@ class TestConnect:
         assert r.status_code == 404, r.text
         assert "not-yours" not in r.text
 
+    def test_start_refuses_a_run_root_spelled_in_another_case(
+            self, project, monkeypatch, home):
+        """The same three-request chain, reopened by changing the spelling.
+
+        `Path.resolve()` is pure string work - it does not case-fold - so on a
+        case-insensitive filesystem (macOS/APFS by default, this repo's own dev
+        platform) `.../RUN` compares unequal to `.../run` while opening the very
+        same directory, and the run/ clause let it through. `_within_home` did
+        not catch it either, but for the opposite reason: it is an ALLOW check,
+        so a case mismatch there fails closed. This is a DENY check, and it
+        failed open.
+
+        The refusal is unconditional rather than filesystem-dependent. A deny
+        gate at a credential boundary is the wrong place to ask whether this
+        particular filesystem happens to fold case, and answering it wrong is
+        one request away from `${AWS_SECRET_ACCESS_KEY}`.
+        """
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI-not-yours")
+        c = _client(SetupState(), project)
+        started = c.post("/api/start", json={
+            "mode": "create", "name": "pwn",
+            "location": str(project.parent / project.name.upper())})
+        assert started.status_code == 400, started.text
+        assert "outside run/" in started.json()["error"]
+
+        c.post("/api/file", json={
+            "path": "package/agent.yaml",
+            "content": "agent: pwn\nenv:\n  X: ${AWS_SECRET_ACCESS_KEY}\n"})
+        assert not paths.agent_yaml_path(project).is_file()
+        r = c.get("/api/credential/value?var=AWS_SECRET_ACCESS_KEY")
+        assert r.status_code == 404, r.text
+        assert "not-yours" not in r.text
+
+    def test_start_refuses_the_run_root_s_parent_in_another_case(
+            self, project, monkeypatch, home):
+        """The PARENT-of-run/ route, same spelling trick.
+
+        `_confine_pack_root` rejects in both directions; both directions have
+        to survive a re-spelling, not just the one the first repro used.
+        """
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI-not-yours")
+        c = _client(SetupState(), project)
+        parent = project.parent
+        started = c.post("/api/start", json={
+            "mode": "create", "name": "pwn",
+            "location": str(parent.parent / parent.name.upper())})
+        assert started.status_code == 400, started.text
+        assert "outside run/" in started.json()["error"]
+
     @pytest.mark.parametrize("location", ["/", "/etc", "../../../.."])
     def test_start_confines_the_location_to_the_home_directory(
             self, project, home, location):

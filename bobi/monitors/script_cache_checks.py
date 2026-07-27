@@ -842,11 +842,22 @@ def _pin(name: str, content: str, monitor, fp: str, envelope: CapabilityEnvelope
          state: dict) -> None:
     """Atomically activate a validated+smoked script and record trusted state."""
     headed = _write_header(content, monitor, fp)
-    tmp = _scripts_dir() / f".tmp-{_safe_name(name)}.sh"
-    tmp.write_text(headed)
-    tmp.chmod(tmp.stat().st_mode | stat.S_IEXEC)
     active = _active_path(name)
-    os.replace(tmp, active)
+    # Through `fsutil`, not a local tmp+rename, for the same reason
+    # `_save_trusted_state` above uses it: a FIXED temp name (`.tmp-<name>.sh`)
+    # let two writers racing on one monitor consume each other's temp, so the
+    # loser's write landed under the winner's rename and the active script no
+    # longer hashed to the sha256 trusted state recorded - and
+    # `_verify_integrity` then refuses to run the monitor at all. D004 is what
+    # made that reachable: generation moved onto its own worker thread, so two
+    # generations for one monitor can overlap where the single scheduler
+    # thread used to serialize them.
+    #
+    # The exec bit is settled after the swap rather than before because it is
+    # cosmetic here: `_verify_integrity` reads this file as TEXT, and
+    # `run_sandboxed` executes a fresh copy it writes and chmods itself.
+    fsutil.atomic_write_text(active, headed)
+    active.chmod(active.stat().st_mode | stat.S_IEXEC)
     state["fingerprint"] = fp
     state["sha256"] = _sha256(headed)
     state["envelope"] = envelope.to_json()

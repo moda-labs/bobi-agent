@@ -1,10 +1,13 @@
-version: "1.2.1"
+version: "1.2.2"
 
 entry_point: manager
-# No chat service is declared below - the pack stays credential-free for the
-# release smoke (github + email only), so it has no chat surface to deliver a
-# message on. `chat: slack` claimed one that could never subscribe.
-chat: cli
+# No `chat:` key, deliberately: the pack stays credential-free for the release
+# smoke (github + email only), so it has no chat surface to deliver a message
+# on. `chat: slack` claimed one that could never subscribe (D119). An ABSENT
+# key is the canonical spelling for that - `setup/authoring.py::_apply_chat`
+# writes the "cli" decision by REMOVING the key, and `open_mode` reads a
+# missing key back as "cli" - so spelling it out here would be a second form
+# of one decision that setup would delete on the next edit.
 
 # Baked CLI tools from the framework catalog (#416). `venn` provides the
 # `venn` CLI the new-emails monitor shells out to (tools execute -s gmail …);

@@ -383,8 +383,17 @@ def test_make_session_render_failure_propagates(tmp_path, monkeypatch):
 
 
 def test_make_session_clears_stale_managed_block(tmp_path, monkeypatch):
-    """A codex team that dropped its MCP deps clears a previously-rendered block
-    (an explicitly EMPTY options.mcp_servers, plus a managed block on disk)."""
+    """An explicitly EMPTY `options.mcp_servers` clears a rendered block.
+
+    Pins the CONTRACT, not a live path: no production call site passes an empty
+    dict - `subagent.py`'s two option builders omit the key entirely when the
+    team declares none (`**({"mcp_servers": x} if x else {})`), and the
+    key-presence gate then leaves config.toml alone. So the clearing branch
+    below is unreachable in production today, which is the D009 residual the
+    2026-07-25 amendment escalates rather than patches: closing it needs
+    per-agent `CODEX_HOME` scoping or an ownership-stamped block, not a patch.
+    Kept so the contract is fixed if a caller ever does state "no servers".
+    """
     import tomllib
     from bobi.brain import codex_config
 

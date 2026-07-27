@@ -1,8 +1,6 @@
 """Unit tests for the embedding sidecar client — mocked subprocess and HTTP."""
 
 import json
-import os
-import signal
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch, mock_open
@@ -229,9 +227,12 @@ class TestStop:
 
         embedder.stop()
 
-        assert bystander.poll() is None, (
-            "stop() signalled a live process that is not the sidecar"
-        )
+        # NOT `poll() is None`: poll() reaps only an already-exited child, so a
+        # just-SIGTERMed victim still reads as None and the assertion cannot
+        # fail. Staying alive through a wait is the thing that proves it was
+        # never signalled.
+        with pytest.raises(subprocess.TimeoutExpired):
+            bystander.wait(timeout=1)
         # The pid is answerable and provably not ours, so the state files
         # are the stale ones and go - same classification as the seam.
         assert not (state_dir / "embedding-sidecar.pid").exists()

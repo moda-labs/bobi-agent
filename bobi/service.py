@@ -109,7 +109,12 @@ class LaunchResult:
 
 @dataclass(frozen=True)
 class StopResult:
-    """The outcome of one `stop_pidfile` call; exactly one flag is set.
+    """The outcome of one `stop_pidfile` call.
+
+    At MOST one of the outcome flags is set - and none is when there was no pid
+    file at all, which is the commonest case and reads as "nothing was
+    running". `event_server_running`/`event_server_port` are not outcomes;
+    `stop_team` rides them along on top of whichever outcome it got.
 
     `kind` names the process for the CLI to render ("bobi", "the event
     server"), so one renderer serves every stop command.
@@ -125,6 +130,22 @@ class StopResult:
     still_running: bool = False
     event_server_running: bool = False
     event_server_port: int = 0
+
+    @property
+    def settled(self) -> bool:
+        """Whether the process is DOWN - the only question a caller asks next.
+
+        False means something is, or may still be, running: we were refused,
+        could not identify it, or it outlived the grace. Anything that leaves
+        the process up is a failed stop, whichever pid file it was reading.
+
+        Lives here rather than in the CLI because it is not a rendering
+        decision: `_echo_stop` turns it into an exit code, and `restart_team` /
+        `app_restart` turn it into "do not start a second process on top of the
+        one still holding the port".
+        """
+        return not (self.permission_denied or self.unidentified
+                    or self.still_running)
 
 
 @dataclass(frozen=True)
@@ -472,15 +493,36 @@ def stop_pidfile(
     killed = force
     os.kill(pid, signal.SIGKILL if killed else signal.SIGTERM)
     deadline = time.monotonic() + STOP_GRACE
+    unreadable = False
     while time.monotonic() < deadline:
         time.sleep(0.1)
-        # Identity again, not just liveness: a pid recycled while we wait must
-        # not be escalated to SIGKILL. An exited process is also its own answer
-        # here - a zombie is signalable but has no argv left.
-        if not is_process(pid, identity):
+        if not _pid_alive(pid):
             _unlink_all(state)
             return StopResult(kind=kind, pid=pid,
                               killed=killed, stopped=not killed)
+        # Identity again, not just liveness: a pid recycled while we wait must
+        # not be escalated to SIGKILL. But `is_process` folds "I could not read
+        # argv" into the same False as "it exited", and reading that as a
+        # successful stop is how ONE failed `ps` (fork EAGAIN, a sandbox
+        # denial) deleted a live daemon's pidfile and reported "Stopped." The
+        # pre-loop gate refuses to guess from an unreadable argv; so does this.
+        argv = process_argv(pid)
+        if not argv:
+            unreadable = True
+            continue            # keep waiting - the next read may answer
+        unreadable = False
+        if not identity(argv):
+            # It answered, and it is someone else: ours exited and the pid was
+            # recycled mid-wait. Never a candidate for escalation.
+            _unlink_all(state)
+            return StopResult(kind=kind, pid=pid,
+                              killed=killed, stopped=not killed)
+
+    if unreadable:
+        # The window closed without one answer, so we never learned whether it
+        # died - the same verdict, and the same refusal to throw away its state
+        # files, as an unidentifiable pid before the signal.
+        return StopResult(kind=kind, pid=pid, unidentified=True)
 
     if escalate and not killed:
         os.kill(pid, signal.SIGKILL)
@@ -873,7 +915,15 @@ def restart_team(
     fresh: bool = False,
     wait_timeout: float = 30,
 ) -> LaunchResult:
-    stop_team(project_path)
+    result = stop_team(project_path)
+    if not result.settled:
+        # Starting over a manager that is still running is not a restart: the
+        # new one races the old one for the same runtime root, and the old one
+        # is the only thing still holding the pid file that could find it.
+        raise RuntimeError(
+            f"Cannot restart: the stop did not take (pid {result.pid}). "
+            "Stop it by hand, then start."
+        )
     return start_team(project_path, fresh=fresh, wait_timeout=wait_timeout)
 
 

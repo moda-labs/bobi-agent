@@ -123,7 +123,10 @@ class TestStopIdentity:
         st = daemon.stop()
 
         assert st.stale is True
-        assert victim.poll() is None, "stop() killed an unrelated process"
+        # NOT `poll() is None` - that reaps only an already-exited child, so it
+        # reads None straight after a SIGTERM that did land and can never fail.
+        with pytest.raises(subprocess.TimeoutExpired):
+            victim.wait(timeout=1)      # i.e. stop() never signalled it
         # The stale state is cleared, so a later start() is unobstructed.
         assert not (home / "webapp" / "app.pid").exists()
         assert not (home / "webapp" / "app.port").exists()
@@ -285,6 +288,73 @@ class TestStopIdentity:
         monkeypatch.setattr(service, "_proc_argv", lambda pid: [])
         monkeypatch.setattr(service, "_ps_argv", lambda pid: [])
         assert _is_app(os.getpid()) is False
+
+    def test_a_transient_argv_failure_mid_wait_is_not_read_as_exited(
+            self, tmp_path, monkeypatch):
+        """The fail-closed rule has to survive INTO the grace loop.
+
+        Pre-loop, an unreadable argv returns `unidentified` and signals
+        nothing. Inside the wait loop the same condition ran through
+        `is_process`, whose `False` conflates "it exited" with "I could not
+        read it" - so a single `ps` that failed to answer (fork EAGAIN under
+        load, a sandbox denial, a non-zero exit) deleted the pidfile and
+        returned `stopped`. The CLI printed "Stopped.", exited 0, and the next
+        `start` spawned a SECOND daemon against the same runtime root, with the
+        only record of the first one already thrown away.
+
+        `_ps_argv`'s own docstring describes this exact shape as the bug it was
+        widened to fix; the loop kept a second way to reach it.
+        """
+        ready = tmp_path / "ready"
+        fake = tmp_path / "bobi"
+        # Ignores TERM and blocks on a pipe: alive for the whole grace window,
+        # so "did stop() lie?" is the only thing the assertions can be reading.
+        fake.write_text('#!/bin/sh\ntrap "" TERM\ntouch "$READY"\nread _\n')
+        fake.chmod(0o755)
+        wedged = subprocess.Popen([str(fake), "app", "run"],
+                                  env={**os.environ, "READY": str(ready)},
+                                  stdin=subprocess.PIPE)
+        try:
+            for _ in range(50):     # the trap is only armed once the script runs
+                if ready.exists():
+                    break
+                time.sleep(0.1)
+            assert ready.exists(), "fake daemon never started"
+
+            pid_path = tmp_path / "app.pid"
+            port_path = tmp_path / "app.port"
+            pid_path.write_text(str(wedged.pid))
+            port_path.write_text("1234")
+
+            real_argv = service.process_argv
+            reads: list[int] = []
+
+            def flaky(pid: int) -> list[str]:
+                """Answers the identity gate, then stops answering."""
+                reads.append(pid)
+                return real_argv(pid) if len(reads) == 1 else []
+
+            monkeypatch.setattr(service, "process_argv", flaky)
+            monkeypatch.setattr(service, "STOP_GRACE", 0.5)
+
+            result = service.stop_pidfile(
+                pid_path, identity=lambda argv: True, kind="bobi app",
+                also_remove=[port_path])
+
+            assert result.stopped is False, (
+                "a live daemon was reported stopped because one ps failed"
+            )
+            assert result.killed is False
+            assert len(reads) > 1, "the grace loop never re-read argv"
+            assert pid_path.exists(), (
+                "the only record of a live daemon was deleted on a failed read"
+            )
+            assert port_path.exists()
+            with pytest.raises(subprocess.TimeoutExpired):
+                wedged.wait(timeout=0.5)    # i.e. still running, as reported
+        finally:
+            wedged.kill()
+            wedged.wait()
 
     def test_unidentifiable_pid_keeps_its_state_files(self, tmp_path,
                                                       monkeypatch):
