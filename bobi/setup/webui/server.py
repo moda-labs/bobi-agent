@@ -223,6 +223,35 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         p = p.resolve()
         return p, any(p == r or r in p.parents for r in picker_roots)
 
+    def _all_run_roots(this_project: Path) -> list[Path]:
+        """Every installed team's `run/` under this machine's agent library.
+
+        The pack root a setup session writes must not be inside ANY of them.
+        `run/package/agent.yaml` is the file `_setup_managed_vars` trusts to
+        name readable credentials, and each slot serves its own copy of that
+        endpoint - so reaching a neighbour's run/ is reaching a neighbour's
+        secrets, whichever slot you drove to get there. It is also that team's
+        frozen runtime image, i.e. code that executes on its next launch.
+
+        Discovered from the library rather than passed in, because the set is
+        whatever is installed at the time of the request, not what this session
+        happens to know about.
+        """
+        roots = [this_project.resolve()]
+        try:
+            for slot in library.iterdir():
+                if not slot.is_dir():
+                    continue
+                try:
+                    resolved = (slot / "run").resolve()
+                except OSError:
+                    continue
+                if resolved not in roots:
+                    roots.append(resolved)
+        except OSError:                 # no library yet - this session's only
+            pass
+        return roots
+
     def _confine_pack_root(raw: str) -> tuple[Path, str | None]:
         """Resolve a team-source path and hold it to the pack-root boundary.
         Returns (resolved path, refusal message or None).
@@ -243,11 +272,20 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         abs_loc, ok = _within_home(raw, home)
         if not ok:
             return abs_loc, "pick a location inside your home directory"
-        run_root = project.resolve()
-        if (fsutil.same_location(abs_loc, run_root)
-                or any(fsutil.same_location(p, run_root) for p in abs_loc.parents)
-                or any(fsutil.same_location(p, abs_loc) for p in run_root.parents)):
-            return abs_loc, "pick a source location outside run/"
+        # EVERY run root, not just this session's. The clause was
+        # parameterised on `project` alone, so a setup session for slot A could
+        # point `location` at slot B's `run/`, write `run/package/agent.yaml`
+        # there, and read B's `${VAR}`s out of B's own /api/credential/value -
+        # the same three-request chain, one hop sideways. Multi-slot is the
+        # normal topology, so the boundary is "no team's run/ is a pack root",
+        # not "not mine".
+        for run_root in _all_run_roots(project):
+            if (fsutil.same_location(abs_loc, run_root)
+                    or any(fsutil.same_location(p, run_root)
+                           for p in abs_loc.parents)
+                    or any(fsutil.same_location(p, abs_loc)
+                           for p in run_root.parents)):
+                return abs_loc, "pick a source location outside run/"
         return abs_loc, None
 
     def _load_machine_config() -> dict:

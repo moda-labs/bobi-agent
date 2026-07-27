@@ -762,6 +762,38 @@ class TestConnect:
         assert started.status_code == 400, started.text
         assert "outside run/" in started.json()["error"]
 
+    def test_start_refuses_another_slot_s_run_root(self, project, monkeypatch,
+                                                    home):
+        """The same leak, one hop sideways - a NEIGHBOUR's run/.
+
+        The run/ deny was parameterised on THIS session's `project`, so every
+        other `<home>/agents/<n>/run` passed `_within_home` and hit no clause
+        at all. A setup session for slot A could set its pack root to slot B's
+        run/, write `run/package/agent.yaml` there, and read B's `${VAR}`s from
+        B's own `/api/credential/value` - no authoring, no validate, no
+        install. Multi-slot is the normal topology: `webapp/server.py` mounts a
+        setup app per slot under one BOBI_HOME.
+
+        The same primitive also overwrites a neighbour's frozen runtime image,
+        which is code that executes on its next launch.
+        """
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI-not-yours")
+        victim_run = paths.home_dir() / "agents" / "victim" / "run"
+        (victim_run / "package").mkdir(parents=True)
+
+        c = _client(SetupState(), project)
+        started = c.post("/api/start", json={
+            "mode": "create", "name": "pwn", "location": str(victim_run)})
+        assert started.status_code == 400, started.text
+        assert "outside run/" in started.json()["error"]
+
+        c.post("/api/file", json={
+            "path": "package/agent.yaml",
+            "content": "agent: pwn\nenv:\n  X: ${AWS_SECRET_ACCESS_KEY}\n"})
+        assert not (victim_run / "package" / "agent.yaml").is_file(), (
+            "wrote into a neighbouring team's frozen runtime image"
+        )
+
     @pytest.mark.parametrize("location", ["/", "/etc", "../../../.."])
     def test_start_confines_the_location_to_the_home_directory(
             self, project, home, location):

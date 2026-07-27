@@ -18,10 +18,12 @@ never share a temp file (a fixed temp name lets one writer's rename consume
 or delete the other's, failing a write that had already succeeded).
 
 The swap is otherwise invisible: the temp inherits an existing target's
-permission mode before the rename, so replacing a file never relaxes it, and
-a symlinked target is written THROUGH rather than replaced (``os.replace``
-swaps inodes, so an unguarded swap would unlink the link and strand the file
-it pointed at - see :func:`_write_target`).
+permission mode before the rename, so replacing a file never relaxes it.
+
+A SYMLINKED target is refused outright (:func:`_check_target`) rather than
+replaced or followed - ``os.replace`` would strand the file the link pointed
+at, and following the link turns a planted symlink in an agent-writable state
+directory into an arbitrary write.
 
 :func:`file_lock` is the companion guard for **read-modify-write** state
 (load → mutate → save), where atomicity alone cannot prevent a lost update.
@@ -101,20 +103,41 @@ def _open_temp(tmp: Path) -> int:
     return os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 
 
-def _write_target(path: Path) -> Path:
-    """The file the swap should actually land on.
+class SymlinkedTarget(OSError):
+    """Raised when a durable write is aimed at a symlink."""
 
-    ``os.replace`` swaps INODES, so a symlinked target is replaced by the temp
-    rather than written through: the link disappears, and the file it pointed
-    at silently keeps its old content forever. Every adopter of this helper
-    came from ``path.write_text()``, which follows the link - so following it
-    here is what keeps the swap invisible, as this module's contract claims.
 
-    ``resolve()`` also handles a dangling link (``write_text`` through one
-    creates the target) and a chain of links. The temp is then a sibling of the
-    RESOLVED file, which is what keeps the rename on one filesystem.
+def _check_target(path: Path) -> None:
+    """Refuse a symlinked target, loudly.
+
+    Three behaviours were possible and two of them are wrong.
+
+    ``os.replace`` REPLACES a symlinked target: the link is unlinked and the
+    file it pointed at silently keeps its old content forever. That is quiet
+    data loss - the shape that made this a finding.
+
+    Following the link instead - what ``path.write_text()`` does, and what
+    this helper briefly did - is worse. Several of these targets live in
+    directories that are writable by things bobi does not trust:
+    ``run/state/scripts/`` holds LLM-authored monitor scripts and is not
+    covered by ``runtime_guard``'s read-only sweep, so a planted symlink there
+    turns the next write into an arbitrary write (and, in ``_pin``'s case, an
+    arbitrary ``chmod +x``) anywhere the user can reach. A dangling link makes
+    it worse still: ``mkdir(parents=True)`` on the resolved path fabricates a
+    directory tree outside the intended root.
+
+    So: refuse. A durable state file is never legitimately a symlink here, and
+    an operator who has deliberately linked one (a dotfile-managed
+    ``config.toml``) is better served by a loud error naming the file than by
+    either silent outcome. Callers that genuinely want to follow a link must
+    resolve it themselves, where the containment question is theirs to answer.
     """
-    return path.resolve() if path.is_symlink() else path
+    if path.is_symlink():
+        raise SymlinkedTarget(
+            f"{path} is a symlink; refusing to write durable state through it. "
+            f"Point the setting at {os.readlink(path)!r} directly, or replace "
+            f"the link with a regular file."
+        )
 
 
 def _settle_mode(tmp: Path, path: Path) -> None:
@@ -150,15 +173,14 @@ def atomic_write_text(path: Path | str, text: str, *,
     the target keeps its previous content and no temp file is left behind.
     """
     path = Path(path)
+    _check_target(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    target = _write_target(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _temp_sibling(target)
+    tmp = _temp_sibling(path)
     try:
         os.close(_open_temp(tmp))
         tmp.write_text(text, encoding=encoding)
-        _settle_mode(tmp, target)
-        os.replace(tmp, target)
+        _settle_mode(tmp, path)
+        os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
