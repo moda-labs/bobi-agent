@@ -154,9 +154,11 @@ class TestAgentLifecycle:
         whose docstring is "a process we cannot identify is never one we may
         signal"); this one was missed by the consolidation.
 
-        Refusing to signal must still not strand the entry: an uncancellable
-        run would block re-dispatch forever, so the registry update stands
-        either way.
+        A pid that is ALIVE but does not answer as this run is refused
+        outright - not signalled, and not erased either: zeroing `pid` there
+        would destroy the only record of a live process. A stale entry whose
+        pid is simply GONE is still cancelled (covered separately below), so
+        refusing here cannot strand a crashed run.
         """
         bystander = sacrificial_process()
         entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",
@@ -164,12 +166,15 @@ class TestAgentLifecycle:
                              pid=bystander.pid)
         registry = _mock_registry([entry])
         with patch("bobi.subagent.get_registry", return_value=registry):
-            assert cancel_agent("AGD-12")
+            result = cancel_agent("AGD-12")
+        assert not result
+        assert result.reason == "unidentified", (
+            "a live-but-unanswerable pid must not read as 'no such run'"
+        )
 
         with pytest.raises(subprocess.TimeoutExpired):
             bystander.wait(timeout=1)   # i.e. it was never signalled
-        registry.update.assert_called_once_with(
-            "agent-agd-12-implement", status="cancelled", pid=0)
+        registry.update.assert_not_called()
 
     def test_cancel_does_signal_a_pid_wearing_the_sub_agent_shape(
             self, sacrificial_process):
@@ -183,7 +188,7 @@ class TestAgentLifecycle:
         a synthetic argv would keep both tests green through a rename of the
         entry point, which is precisely when `cancel_agent` would go quiet.
         """
-        victim = sacrificial_process(AGENT_BOOTSTRAP, "{}")
+        victim = sacrificial_process(AGENT_BOOTSTRAP, '{"run_key": "AGD-13"}')
         assert is_subagent_argv(service.process_argv(victim.pid)) is True, (
             "the victim does not wear the sub-agent argv shape"
         )
@@ -220,6 +225,71 @@ class TestAgentLifecycle:
             assert cancel_agent("AGD-14")
 
         assert victim.wait(timeout=5) == -15, "the resumed run was not signalled"
+
+    def test_cancel_refuses_and_keeps_the_record_for_a_live_stranger(
+            self, sacrificial_process):
+        """Refusing to signal must not also erase the run.
+
+        The gate refused, then fell straight through to
+        `update(status="cancelled", pid=0)` and returned True - reporting a
+        cancellation that never happened AND destroying the only record of a
+        process that is still running and still spending, so no later cancel
+        could ever reach it. `stop_pidfile`'s `unidentified` path refuses to do
+        exactly this; the sibling did the opposite.
+        """
+        bystander = sacrificial_process()
+        entry = SessionEntry(name="agent-agd-15-implement", run_key="AGD-15",
+                             phase="implement", status="running",
+                             pid=bystander.pid)
+        registry = _mock_registry([entry])
+        with patch("bobi.subagent.get_registry", return_value=registry):
+            result = cancel_agent("AGD-15")
+        assert not result
+        assert result.reason == "unidentified"
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            bystander.wait(timeout=1)   # not signalled
+        registry.update.assert_not_called()
+
+    def test_cancel_still_cleans_up_an_entry_whose_process_is_gone(self):
+        """The counterweight: a stale entry must stay cancellable.
+
+        Refusing on "alive but not ours" must not also refuse on "the pid is
+        simply gone", or a crashed run becomes permanently un-redispatchable.
+        """
+        entry = SessionEntry(name="agent-agd-16-implement", run_key="AGD-16",
+                             phase="implement", status="running",
+                             pid=999999)      # not a live pid
+        registry = _mock_registry([entry])
+        with patch("bobi.subagent.get_registry", return_value=registry):
+            result = cancel_agent("AGD-16")
+        assert result
+        assert result.reason == "cancelled"
+        registry.update.assert_called_once_with(
+            "agent-agd-16-implement", status="cancelled", pid=0)
+
+    def test_cancel_does_not_kill_a_different_live_sub_agent(
+            self, sacrificial_process):
+        """Identity must be per-RUN, not per-KIND.
+
+        A pid recycled from a crashed run onto a DIFFERENT live sub-agent
+        wears the same bootstrap, so a kind-level check authorised SIGTERMing
+        an unrelated run - the stranger-killing bug the gate exists to
+        prevent, one step removed.
+        """
+        other = sacrificial_process(AGENT_BOOTSTRAP, '{"run_key": "AGD-99"}')
+        entry = SessionEntry(name="agent-agd-17-implement", run_key="AGD-17",
+                             phase="implement", status="running",
+                             pid=other.pid)
+        registry = _mock_registry([entry])
+        with patch("bobi.subagent.get_registry", return_value=registry):
+            result = cancel_agent("AGD-17")
+        assert not result
+        assert result.reason == "unidentified"
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            other.wait(timeout=1)       # the other run survived
+        registry.update.assert_not_called()
 
     def test_cancel_done_agent_returns_false(self):
         entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",

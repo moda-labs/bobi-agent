@@ -69,7 +69,15 @@ def _default_emit(event_type: str, data: dict) -> bool:
 def _default_cancel(name: str) -> None:
     try:
         from bobi.subagent import cancel_agent
-        cancel_agent(name)
+        result = cancel_agent(name)
+        if not result and result.reason == "unidentified":
+            # The reconciler is unattended, so a refusal that only logs at
+            # WARNING inside cancel_agent would be the only trace. Surface it
+            # here too: the run is NOT reaped and the entry deliberately stays.
+            log.warning(
+                "Reconcile could not cancel %s: pid %d is alive but does not "
+                "answer as this run; left running and left recorded.",
+                name, result.pid)
     except Exception:
         log.debug("Reconcile cancel failed for %s", name, exc_info=True)
 

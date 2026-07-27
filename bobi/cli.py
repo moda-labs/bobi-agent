@@ -1822,8 +1822,18 @@ def subagents_cancel(ref):
     _ensure_root_bound()
     from bobi.subagent import cancel_agent
 
-    if cancel_agent(ref):
+    result = cancel_agent(ref)
+    if result:
         click.echo(f"Cancelled {ref}")
+    elif result.reason == "unidentified":
+        # NOT "no running sub-agent": there is one, it is alive, and we
+        # declined to signal a pid that does not answer as this run. Saying
+        # otherwise sends the operator away from a process still burning spend.
+        click.echo(
+            f"Refusing to cancel {ref}: pid {result.pid} is alive but does not "
+            f"answer as this run. Its record is kept so you can find it; stop "
+            f"it by hand if it is stale.", err=True)
+        raise SystemExit(1)
     else:
         click.echo(f"No running sub-agent for {ref}")
 

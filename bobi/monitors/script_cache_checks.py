@@ -856,8 +856,7 @@ def _pin(name: str, content: str, monitor, fp: str, envelope: CapabilityEnvelope
     # The exec bit is settled after the swap rather than before because it is
     # cosmetic here: `_verify_integrity` reads this file as TEXT, and
     # `run_sandboxed` executes a fresh copy it writes and chmods itself.
-    fsutil.atomic_write_text(active, headed)
-    active.chmod(active.stat().st_mode | stat.S_IEXEC)
+    fsutil.atomic_write_text(active, headed, extra_mode=stat.S_IEXEC)
     state["fingerprint"] = fp
     state["sha256"] = _sha256(headed)
     state["envelope"] = envelope.to_json()

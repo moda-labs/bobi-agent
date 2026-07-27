@@ -91,14 +91,12 @@ def _open_temp(tmp: Path) -> int:
     (``~/.codex/config.toml`` holds live MCP tokens, ``run/.env`` holds the
     credentials behind them). Starting at 0600 and widening after means the
     window exposes nothing; a target that wants a laxer mode gets it from
-    :func:`_inherit_mode` before the rename.
+    :func:`_settle_mode` before the rename.
 
     ``O_EXCL`` because a predictable name is the other half of that risk: it
     refuses to write through a symlink or an attacker-planted file **at the
-    temp path**. It says nothing about the TARGET: :func:`_write_target`
-    deliberately follows a symlinked target, because every adopter came from
-    ``path.write_text()``, which does. Confinement of the target is the
-    caller's job, not this module's.
+    temp path**. The TARGET is answered separately and more bluntly, by
+    :func:`_check_target`, which refuses a symlinked target outright.
     """
     return os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 
@@ -140,7 +138,7 @@ def _check_target(path: Path) -> None:
         )
 
 
-def _settle_mode(tmp: Path, path: Path) -> None:
+def _settle_mode(tmp: Path, path: Path, extra_bits: int = 0) -> None:
     """Give *tmp* the mode the finished file should carry.
 
     ``os.replace`` swaps in the temp file's inode, so an unadjusted temp
@@ -154,7 +152,7 @@ def _settle_mode(tmp: Path, path: Path) -> None:
         mode = stat.S_IMODE(path.stat().st_mode)
     except FileNotFoundError:
         mode = 0o666 & ~_umask()
-    os.chmod(tmp, mode)
+    os.chmod(tmp, mode | extra_bits)
 
 
 def _umask() -> int:
@@ -165,12 +163,18 @@ def _umask() -> int:
 
 
 def atomic_write_text(path: Path | str, text: str, *,
-                      encoding: str = "utf-8") -> Path:
+                      encoding: str = "utf-8", extra_mode: int = 0) -> Path:
     """Write *text* to *path* atomically. Returns *path*.
 
     Missing parent directories are created. An existing target's permission
     mode is preserved. If the write fails (including a KeyboardInterrupt),
     the target keeps its previous content and no temp file is left behind.
+
+    *extra_mode* ORs bits onto the settled mode BEFORE the swap, for callers
+    that need the published file to carry them (``stat.S_IEXEC`` for a pinned
+    script). Doing it after the rename means a second `stat`/`chmod` on a path
+    another process can already see and unlink, which is a `FileNotFoundError`
+    the caller has no way to unwind.
     """
     path = Path(path)
     _check_target(path)
@@ -179,7 +183,7 @@ def atomic_write_text(path: Path | str, text: str, *,
     try:
         os.close(_open_temp(tmp))
         tmp.write_text(text, encoding=encoding)
-        _settle_mode(tmp, path)
+        _settle_mode(tmp, path, extra_mode)
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)

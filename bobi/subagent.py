@@ -873,9 +873,46 @@ def is_subagent_argv(argv: list[str]) -> bool:
     # identity gate matched nothing for a resumed run and `cancel_agent`
     # became a silent no-op: no signal sent, entry marked cancelled anyway,
     # and the resume kept running with its registry record gone.
-    from pathlib import Path as _P
     return ("workflows" in argv and "resume" in argv
-            and any(a == "bobi.cli" or _P(a).name == "bobi" for a in argv))
+            and any(a == "bobi.cli" or Path(a).name == "bobi" for a in argv))
+
+
+def subagent_identity(entry) -> "Callable[[list[str]], bool]":
+    """Identity for THIS recorded run - not for sub-agents in general.
+
+    `is_subagent_argv` answers "is this a bobi sub-agent?", which is the wrong
+    question for cancel. A pid recycled from a crashed run onto a DIFFERENT
+    live sub-agent wears the same bootstrap, so the kind-level check happily
+    authorises SIGTERMing an unrelated run - the stranger-killing bug the gate
+    exists to prevent, one step removed. It is also loose enough to match any
+    command line that merely mentions both markers, because it joins argv
+    (`bash -c 'echo bobi.subagent && echo _run_agent_entry'` matched).
+
+    Binding to the run's own key closes both: `launch_agent` serialises
+    `run_key` into the JSON argv, and `_ps_argv` passes `-ww` precisely so that
+    payload is not clipped - the earlier "identity is per-KIND because ps
+    clips" reasoning was already stale when it was written.
+
+    RESIDUAL, deliberate: the resumed-workflow shape carries the workflow
+    `run_id` in argv, which the registry entry does not record, so that branch
+    stays per-kind. Reaching it wrongly needs two concurrent resumes on one box
+    AND a recycled pid - far narrower than the kind-level check it replaces,
+    but not zero, and it is the reason this returns a predicate per entry
+    rather than a global one that could be trusted everywhere.
+    """
+    ident = (getattr(entry, "run_key", "") or getattr(entry, "name", "") or "")
+
+    def _matches(argv: list[str]) -> bool:
+        if not ident:               # nothing to bind to - never signal
+            return False
+        joined = " ".join(argv)
+        if all(m in joined for m in _BOOTSTRAP_MARKERS):
+            return ident in joined
+        return ("workflows" in argv and "resume" in argv
+                and any(a == "bobi.cli" or Path(a).name == "bobi"
+                        for a in argv))
+
+    return _matches
 
 
 def _launch_detached(script: str, args: list[str], log_file: Path,
@@ -2165,7 +2202,25 @@ def find_agent(ref: str) -> SessionEntry | None:
     return max(pool, key=lambda e: e.last_activity)
 
 
-def cancel_agent(ref: str) -> bool:
+@dataclass(frozen=True)
+class CancelResult:
+    """The outcome of one `cancel_agent` call.
+
+    THREE outcomes, not two. A bare bool conflated "there is no such run" with
+    "there is one, it is alive, and I refused to touch it" - so the CLI told
+    the operator "No running sub-agent" about a process that was still running
+    and still spending. `bool(result)` is the cancelled flag, so the old
+    `if cancel_agent(ref):` reading stays correct.
+    """
+    cancelled: bool
+    reason: str = ""
+    pid: int = 0
+
+    def __bool__(self) -> bool:
+        return self.cancelled
+
+
+def cancel_agent(ref: str) -> "CancelResult":
     """Cancel a running agent by session name or run key.
 
     Terminates the detached process (only if the pid is still identifiably
@@ -2173,23 +2228,40 @@ def cancel_agent(ref: str) -> bool:
 
     Liveness alone is not enough to signal on: a registry entry outlives a
     sub-agent that was OOM-killed or crashed, and the OS reuses pids, so a
-    cancel against a stale entry would SIGTERM whatever inherited it. The
-    entry is cancelled either way - refusing to signal must not leave a run
-    that can never be re-dispatched.
+    cancel against a stale entry would SIGTERM whatever inherited it.
+
+    THREE outcomes, because two of them used to be one. If the pid is gone the
+    entry is simply stale and cancelling it is the cleanup. If it answers as
+    this run, it is signalled and cancelled. But if it is ALIVE and does not
+    answer as this run, we may neither signal it nor erase it: zeroing `pid`
+    there destroys the only record of a process that is still running and still
+    spending, and no later cancel could ever reach it. That is exactly what
+    `stop_pidfile` refuses to do on its `unidentified` path, and this function
+    used to do the opposite - reporting a cancellation that had not happened.
     """
     import os
     import signal
 
+    from bobi.sdk import pid_alive
     from bobi.service import is_process
 
     entry = find_agent(ref)
     if not entry or entry.status not in ("starting", "running", "idle"):
-        return False
-    if entry.pid and is_process(entry.pid, is_subagent_argv):
+        return CancelResult(False, "not_found")
+    if entry.pid and not is_process(entry.pid, subagent_identity(entry)):
+        if pid_alive(entry.pid):
+            log.warning(
+                "Refusing to cancel %s: pid %d is alive but does not answer as "
+                "this run. Not signalling it, and keeping the record so it "
+                "stays findable.", entry.name, entry.pid,
+            )
+            return CancelResult(False, "unidentified", pid=entry.pid)
+        # The pid is gone: the entry outlived its process. Cancel is cleanup.
+    elif entry.pid:
         try:
             os.kill(entry.pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
     get_registry().update(entry.name, status="cancelled", pid=0)
     log.info(f"Sub-agent cancelled: {entry.name}")
-    return True
+    return CancelResult(True, "cancelled")
