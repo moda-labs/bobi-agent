@@ -6,6 +6,7 @@ For blocking execution and SDK interaction tests, see test_subagent_blocking.py.
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import shutil
 from pathlib import Path
@@ -24,6 +25,7 @@ from bobi.subagent import (
     find_agent,
     is_subagent_argv,
     list_agents,
+    subagent_identity,
 )
 
 
@@ -86,7 +88,12 @@ class TestAgentLifecycle:
     def test_cancel_no_agent(self):
         with patch("bobi.subagent.get_registry",
                    return_value=_mock_registry([])):
-            assert not cancel_agent("AGD-99")
+            result = cancel_agent("AGD-99")
+        assert not result
+        # The REASON, not just the bool: both False outcomes are falsy, and the
+        # CLI branches on the reason - a wrong string here sends "no such run"
+        # down the "refusing, pid is alive" path.
+        assert result.reason == "not_found"
 
     def test_find_agent_none(self):
         with patch("bobi.subagent.get_registry",
@@ -189,12 +196,12 @@ class TestAgentLifecycle:
         entry point, which is precisely when `cancel_agent` would go quiet.
         """
         victim = sacrificial_process(AGENT_BOOTSTRAP, '{"run_key": "AGD-13"}')
-        assert is_subagent_argv(service.process_argv(victim.pid)) is True, (
-            "the victim does not wear the sub-agent argv shape"
-        )
         entry = SessionEntry(name="agent-agd-13-implement", run_key="AGD-13",
                              phase="implement", status="running",
                              pid=victim.pid)
+        # The predicate cancel ACTUALLY uses. Asserting `is_subagent_argv` here
+        # verified a function no longer on this code path.
+        assert subagent_identity(entry)(service.process_argv(victim.pid)) is True
         with patch("bobi.subagent.get_registry",
                    return_value=_mock_registry([entry])):
             assert cancel_agent("AGD-13")
@@ -257,9 +264,15 @@ class TestAgentLifecycle:
         Refusing on "alive but not ours" must not also refuse on "the pid is
         simply gone", or a crashed run becomes permanently un-redispatchable.
         """
+        # A pid that is PROVABLY dead: spawned, exited, reaped. 999999 is
+        # allocatable on Linux (pid_max is 4194304) and CI is Linux, so
+        # hard-coding it is a flake that only ever fires where it is checked
+        # least - the shape test_pid_identity_victims.py exists to outlaw.
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
         entry = SessionEntry(name="agent-agd-16-implement", run_key="AGD-16",
                              phase="implement", status="running",
-                             pid=999999)      # not a live pid
+                             pid=gone.pid)
         registry = _mock_registry([entry])
         with patch("bobi.subagent.get_registry", return_value=registry):
             result = cancel_agent("AGD-16")
@@ -290,6 +303,64 @@ class TestAgentLifecycle:
         with pytest.raises(subprocess.TimeoutExpired):
             other.wait(timeout=1)       # the other run survived
         registry.update.assert_not_called()
+
+    def test_identity_binds_the_run_key_as_a_field_not_a_substring(self):
+        """A bare `run_key in argv` collides two ways, both reopening the bug.
+
+        `AGD-1` is a substring of another live run's `AGD-12`, so cancelling
+        the first would SIGTERM the second - the stranger-killing class this
+        gate exists to close, merely narrowed. And the payload also carries
+        the free-text `task`, which is LLM-authored: a task that merely
+        MENTIONS a run key made that run's process cancellable under someone
+        else's name.
+        """
+        from bobi.subagent import subagent_identity
+
+        def argv(payload):
+            return ["python", "-c", AGENT_BOOTSTRAP, json.dumps(payload)]
+
+        e1 = SessionEntry(name="a1", run_key="AGD-1", status="running", pid=1)
+        assert subagent_identity(e1)(argv({"run_key": "AGD-1"})) is True
+        assert subagent_identity(e1)(
+            argv({"run_key": "AGD-12", "task": "x"})) is False, (
+            "a prefix of another run's key matched that run's process"
+        )
+        e2 = SessionEntry(name="a2", run_key="AGD-7", status="running", pid=1)
+        assert subagent_identity(e2)(
+            argv({"run_key": "ZZ-9", "task": "fix AGD-7 please"})) is False, (
+            "a run key mentioned in LLM-authored task text was a match"
+        )
+
+    def test_identity_survives_a_ps_style_argv(self):
+        """`_ps_argv` whitespace-splits and the caller rejoins with single
+        spaces, so the JSON separator must be matched in both spellings."""
+        from bobi.subagent import subagent_identity
+
+        raw = ["python", "-c", AGENT_BOOTSTRAP, json.dumps({"run_key": "AGD-1"})]
+        entry = SessionEntry(name="a1", run_key="AGD-1", status="running", pid=1)
+        assert subagent_identity(entry)(" ".join(raw).split()) is True
+
+    def test_identity_falls_back_to_the_kind_check_without_a_run_key(self):
+        """An entry with no run key degrades to per-KIND rather than refusing.
+
+        `Session.start()` re-`register()`s with a fresh `SessionEntry` that
+        carries no `run_key`, which is how EVERY persistent agent and every
+        manager session ends up recorded. Refusing there would make them
+        permanently uncancellable and wedge `launch_agent`'s admission gate
+        against the same name forever, with no `--force` to escape - strictly
+        worse than the recycled-pid exposure the kind check carries, which is
+        just the pre-existing behaviour.
+        """
+        from bobi.subagent import subagent_identity
+
+        entry = SessionEntry(name="a3", run_key="", status="running", pid=1)
+        assert subagent_identity(entry)(
+            ["python", "-c", AGENT_BOOTSTRAP, "{}"]) is True
+        # ...but an entry that DOES carry a key is still held to it.
+        keyed = SessionEntry(name="a4", run_key="AGD-1", status="running", pid=1)
+        assert subagent_identity(keyed)(
+            ["python", "-c", AGENT_BOOTSTRAP,
+             json.dumps({"run_key": "AGD-12"})]) is False
 
     def test_cancel_done_agent_returns_false(self):
         entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",

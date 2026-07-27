@@ -893,6 +893,26 @@ def subagent_identity(entry) -> "Callable[[list[str]], bool]":
     payload is not clipped - the earlier "identity is per-KIND because ps
     clips" reasoning was already stale when it was written.
 
+    The key is matched as the JSON FIELD, never as a bare substring. A plain
+    `run_key in joined` collides two ways, both of which re-open the bug this
+    is meant to close: `AGD-1` is a substring of another run's `AGD-12`, so
+    cancelling the first SIGTERMs the second; and the payload also carries the
+    free-text `task`, so a task merely MENTIONING a run key made that run's
+    process cancellable under someone else's name - and task text is
+    LLM-authored, i.e. not ours to trust. Both spellings of the separator are
+    accepted because `_ps_argv` whitespace-splits and rejoins, while
+    `/proc/<pid>/cmdline` preserves the original.
+
+    An entry with no `run_key` falls back to the KIND check. That is weaker -
+    it is the pre-round-3 behaviour, with the recycled-pid exposure that comes
+    with it - but refusing outright would be worse: `Session.start()`
+    re-`register()`s with a fresh `SessionEntry` carrying no `run_key`, which
+    is how EVERY persistent agent and every manager session ends up recorded,
+    so a refusal there makes them permanently uncancellable AND wedges
+    `launch_agent`'s admission gate against the same name forever. The root fix
+    is for `Session.start()` to update rather than clobber; until then, degrade
+    rather than deadlock.
+
     RESIDUAL, deliberate: the resumed-workflow shape carries the workflow
     `run_id` in argv, which the registry entry does not record, so that branch
     stays per-kind. Reaching it wrongly needs two concurrent resumes on one box
@@ -900,14 +920,16 @@ def subagent_identity(entry) -> "Callable[[list[str]], bool]":
     but not zero, and it is the reason this returns a predicate per entry
     rather than a global one that could be trusted everywhere.
     """
-    ident = (getattr(entry, "run_key", "") or getattr(entry, "name", "") or "")
+    run_key = getattr(entry, "run_key", "") or ""
+    needles = (f'"run_key": {json.dumps(run_key)}',
+               f'"run_key":{json.dumps(run_key)}') if run_key else ()
 
     def _matches(argv: list[str]) -> bool:
-        if not ident:               # nothing to bind to - never signal
-            return False
         joined = " ".join(argv)
         if all(m in joined for m in _BOOTSTRAP_MARKERS):
-            return ident in joined
+            if not needles:         # no key to bind to - kind-level fallback
+                return True
+            return any(n in joined for n in needles)
         return ("workflows" in argv and "resume" in argv
                 and any(a == "bobi.cli" or Path(a).name == "bobi"
                         for a in argv))
@@ -2243,13 +2265,18 @@ def cancel_agent(ref: str) -> "CancelResult":
     import signal
 
     from bobi.sdk import pid_alive
-    from bobi.service import is_process
+    from bobi.service import _is_zombie, is_process
 
     entry = find_agent(ref)
     if not entry or entry.status not in ("starting", "running", "idle"):
         return CancelResult(False, "not_found")
     if entry.pid and not is_process(entry.pid, subagent_identity(entry)):
-        if pid_alive(entry.pid):
+        # `pid_alive` is True for an unreaped ZOMBIE, whose argv is empty or
+        # `<defunct>` and so never matches. Treating that as "alive, refuse"
+        # made the entry permanently uncancellable and wedged `launch_agent`'s
+        # admission gate against the name - with no `--force` to escape. A
+        # zombie has exited; cancelling it is cleanup.
+        if pid_alive(entry.pid) and not _is_zombie(entry.pid):
             log.warning(
                 "Refusing to cancel %s: pid %d is alive but does not answer as "
                 "this run. Not signalling it, and keeping the record so it "

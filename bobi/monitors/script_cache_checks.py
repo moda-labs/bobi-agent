@@ -853,10 +853,18 @@ def _pin(name: str, content: str, monitor, fp: str, envelope: CapabilityEnvelope
     # generations for one monitor can overlap where the single scheduler
     # thread used to serialize them.
     #
-    # The exec bit is settled after the swap rather than before because it is
-    # cosmetic here: `_verify_integrity` reads this file as TEXT, and
-    # `run_sandboxed` executes a fresh copy it writes and chmods itself.
-    fsutil.atomic_write_text(active, headed, extra_mode=stat.S_IEXEC)
+    # The exec bit is settled BEFORE the swap, via `extra_mode`. Doing it after
+    # meant a second stat/chmod on a path other callers can already see and
+    # unlink - a concurrent `recache()` turned that into a FileNotFoundError
+    # with trusted state never stamped. (It is cosmetic in the sense that
+    # `_verify_integrity` reads this file as TEXT and `run_sandboxed` executes
+    # a fresh chmod'd copy - but "cosmetic" was never a reason to publish it
+    # unatomically.)
+    # `within`: this directory holds LLM-authored scripts and is NOT covered
+    # by runtime_guard, so a planted symlink - on the FILE or on the
+    # directory above it - would redirect this write outside run/.
+    fsutil.atomic_write_text(active, headed, extra_mode=stat.S_IEXEC,
+                             within=_scripts_dir())
     state["fingerprint"] = fp
     state["sha256"] = _sha256(headed)
     state["envelope"] = envelope.to_json()

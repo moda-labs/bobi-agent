@@ -66,20 +66,28 @@ def _default_emit(event_type: str, data: dict) -> bool:
         return False
 
 
-def _default_cancel(name: str) -> None:
+def _default_cancel(name: str) -> bool:
+    """Cancel a run. False means it is ALIVE and was deliberately not touched.
+
+    The caller must not mark such an entry terminal: `cancel_agent` refuses to
+    signal a pid it cannot identify precisely so the record survives and the
+    process stays findable, and marking it `failed` two lines later throws
+    away the thing the refusal was protecting.
+    """
     try:
         from bobi.subagent import cancel_agent
         result = cancel_agent(name)
         if not result and result.reason == "unidentified":
             # The reconciler is unattended, so a refusal that only logs at
-            # WARNING inside cancel_agent would be the only trace. Surface it
-            # here too: the run is NOT reaped and the entry deliberately stays.
+            # WARNING inside cancel_agent would be the only trace.
             log.warning(
                 "Reconcile could not cancel %s: pid %d is alive but does not "
                 "answer as this run; left running and left recorded.",
                 name, result.pid)
+            return False
     except Exception:
         log.debug("Reconcile cancel failed for %s", name, exc_info=True)
+    return True
 
 
 def _failed_payload(entry, reason: str) -> dict:
@@ -175,7 +183,14 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
         if entry.timeout and entry.started_at and (
             entry.started_at + entry.timeout + RECONCILE_GRACE < now
         ):
-            cancel(entry.name)
+            if not cancel(entry.name):
+                # Alive and unidentifiable: the cancel deliberately left both
+                # the process and its record alone, so marking it terminal here
+                # would erase the only handle anyone has on a run that is still
+                # spending. Leave it for the next sweep, or for an operator.
+                actions.append({"name": entry.name, "action": "timeout-refused",
+                                "emitted": False})
+                continue
             registry.mark_terminal(
                 entry.name, TERMINAL_FAILED,
                 error=(f"agent exceeded its {entry.timeout}s timeout "

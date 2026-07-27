@@ -787,12 +787,23 @@ class TestConnect:
         assert started.status_code == 400, started.text
         assert "outside run/" in started.json()["error"]
 
+        # The 400 above is the load-bearing assertion - it is the only thing
+        # that fails when the `_all_run_roots` clause is removed (verified by
+        # mutation). The chain below is the consequence, and it is asserted for
+        # what it actually shows: the refused start left the pack root UNSET,
+        # so the write falls back to the default location instead of landing
+        # in the neighbour's frozen image. It is not itself a confinement
+        # check, and reading it as one would be reading a pass for the wrong
+        # reason.
         c.post("/api/file", json={
             "path": "package/agent.yaml",
             "content": "agent: pwn\nenv:\n  X: ${AWS_SECRET_ACCESS_KEY}\n"})
         assert not (victim_run / "package" / "agent.yaml").is_file(), (
             "wrote into a neighbouring team's frozen runtime image"
         )
+        r = c.get("/api/credential/value?var=AWS_SECRET_ACCESS_KEY")
+        assert r.status_code == 404, r.text
+        assert "not-yours" not in r.text
 
     @pytest.mark.parametrize("location", ["/", "/etc", "../../../.."])
     def test_start_confines_the_location_to_the_home_directory(

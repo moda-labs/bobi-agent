@@ -591,7 +591,13 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             # team already living there — copy_into merges (copytree
             # dirs_exist_ok) and would corrupt it. Opening a team in place sends
             # location == team_path (src == abs_loc), which is allowed.
-            if abs_loc != src and abs_loc.exists():
+            # `same_location`, not `!=`: this decides whether `copy_into` is
+            # even reached, and `copy_into`'s own guard was folded. On a
+            # case-insensitive filesystem a location differing from team_path
+            # only in case is the SAME directory, so the raw compare 409s "a
+            # team already exists - rename or remove it first" about the very
+            # team the user is opening.
+            if not fsutil.same_location(abs_loc, src) and abs_loc.exists():
                 return JSONResponse(
                     {"error": f"a team already exists at {abs_loc} — rename or "
                      "remove it first, or choose another location."},

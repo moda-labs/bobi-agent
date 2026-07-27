@@ -295,3 +295,90 @@ def test_restart_proceeds_when_the_stop_settled(monkeypatch):
 
     assert service.restart_team(SimpleNamespace(name="proj")) == "launched"
     assert started, "a settled stop must not block the restart"
+
+
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize("flags,expected", [
+    ({}, True),                              # no pid file at all - commonest
+    ({"stopped": True}, True),
+    ({"killed": True}, True),
+    ({"stale": True}, True),
+    ({"invalid_pid": True}, True),
+    ({"permission_denied": True}, False),
+    ({"unidentified": True}, False),
+    ({"still_running": True}, False),
+])
+def test_settled_answers_every_outcome(flags, expected):
+    """`settled` is the sanctioned "do not start a second process" gate.
+
+    Only two of its eight shapes were exercised, so mutating it to
+    `not self.unidentified` - or to `self.stopped` - kept the suite green while
+    `restart` either started over a live daemon or hard-errored on an
+    already-stopped one. Pin all eight.
+    """
+    from bobi.service import StopResult
+    assert StopResult(kind="bobi", **flags).settled is expected
+
+
+@_pytest.mark.parametrize("flag", ["permission_denied", "still_running"])
+def test_restart_refuses_on_every_unsettled_outcome(monkeypatch, flag):
+    """The guard must fire for all three refusal flags, not just the one the
+    original test happened to pick."""
+    from bobi import service
+
+    started: list = []
+    monkeypatch.setattr(
+        service, "stop_team",
+        lambda p: service.StopResult(kind="bobi", pid=7, **{flag: True}))
+    monkeypatch.setattr(
+        service, "start_team", lambda *a, **kw: started.append(a) or "launched")
+
+    with _pytest.raises(RuntimeError, match="stop did not take"):
+        service.restart_team(SimpleNamespace(name="proj"))
+    assert not started
+
+
+def test_restart_proceeds_when_nothing_was_running(monkeypatch):
+    """The zero-flag case: no pid file means nothing to stop, not a failure."""
+    from bobi import service
+
+    started: list = []
+    monkeypatch.setattr(service, "stop_team",
+                        lambda p: service.StopResult(kind="bobi"))
+    monkeypatch.setattr(
+        service, "start_team", lambda *a, **kw: started.append(a) or "launched")
+
+    assert service.restart_team(SimpleNamespace(name="proj")) == "launched"
+    assert started, "restart on an already-stopped team must not hard-error"
+
+
+class TestIsZombie:
+    """`_is_zombie` decides "already exited" vs "keep waiting" inside the stop
+    grace loop. Stubbed to False it wedges a stop on a dead daemon for the full
+    grace; stubbed to True it reports a LIVE daemon stopped and unlinks its pid
+    file. Neither direction was covered."""
+
+    def test_an_unreaped_child_reads_as_a_zombie(self):
+        import subprocess
+        import sys
+        import time
+
+        from bobi.service import _is_zombie
+
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        try:
+            for _ in range(100):        # wait for exit, deliberately NOT reaping
+                if _is_zombie(proc.pid):
+                    break
+                time.sleep(0.05)
+            assert _is_zombie(proc.pid) is True
+        finally:
+            proc.wait()
+
+    def test_a_live_process_is_not_a_zombie(self):
+        import os
+
+        from bobi.service import _is_zombie
+        assert _is_zombie(os.getpid()) is False

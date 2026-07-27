@@ -472,10 +472,14 @@ def stop_pidfile(
 
     `force` sends SIGKILL instead of SIGTERM. `escalate` escalates to SIGKILL
     on its own once the grace period expires - for an unattended daemon, which
-    has no operator to retry with --force. It does NOT escalate when the grace
-    window closed without a single readable argv: SIGKILLing a pid we can no
-    longer prove is ours is the exact harm the identity gate exists to prevent,
-    so that case reports `unidentified` and leaves the process alone. `also_remove` names files that
+    has no operator to retry with --force. Escalation is NOT conditioned on the
+    argv staying readable through the grace window: the pre-loop gate already
+    proved this pid was ours before the first signal, and an argv that stops
+    answering is missing information, not evidence the pid changed hands. The
+    residual - a pid recycled inside the grace window, on a host where argv is
+    also unreadable, under `escalate` - is accepted, because the alternative
+    (never force-killing a wedged unattended daemon) has no operator to fall
+    back on. `also_remove` names files that
     share the pid file's lifetime (a port file); they are cleaned up with it.
     """
     import signal
@@ -921,7 +925,16 @@ def stop_team(project_path: Path, *, force: bool = False) -> StopResult:
 
     from bobi.kb.embedder import stop as stop_embedder
 
-    stop_embedder(project_path)
+    # The team is not down until BOTH are. Discarding the sidecar's outcome
+    # made `settled` answer for the manager alone, so a sidecar left holding
+    # its port and a loaded fastembed model reported "Stopped." and let
+    # `restart` start a second one on top of it.
+    sidecar = stop_embedder(project_path)
+    if result.settled and not sidecar.settled:
+        result = replace(result, stopped=False, killed=False,
+                         unidentified=sidecar.unidentified,
+                         permission_denied=sidecar.permission_denied,
+                         still_running=sidecar.still_running)
 
     from bobi.events.server import health
 

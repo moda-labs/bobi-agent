@@ -101,12 +101,27 @@ def _open_temp(tmp: Path) -> int:
     return os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 
 
-class SymlinkedTarget(OSError):
-    """Raised when a durable write is aimed at a symlink."""
+class SymlinkedTarget(Exception):
+    """Raised when a durable write is aimed at a symlink, or outside `within`.
+
+    Deliberately NOT an ``OSError``. Every durable writer in bobi wraps its
+    write in ``except OSError`` to survive a full disk or a permissions blip -
+    ``spend_governor`` swallows it at DEBUG, ``scheduler`` and
+    ``script_cache_checks`` at WARNING - so inheriting from ``OSError`` would
+    have made this refusal the quietest possible failure on the very files it
+    exists to protect. The spend governor is the sharp case: its own docstring
+    says a lost write "would silently reset the cap and let a runaway loop
+    start counting from zero", and reads still follow the link to a file that
+    never advances.
+
+    A refusal here means a misconfigured or attacked state path, which is an
+    operator's problem to fix, not a transient the runtime should absorb. A
+    caller that genuinely wants to tolerate it must name it.
+    """
 
 
-def _check_target(path: Path) -> None:
-    """Refuse a symlinked target, loudly.
+def _check_target(path: Path, within: Path | None = None) -> None:
+    """Refuse a target we should not write, loudly.
 
     Three behaviours were possible and two of them are wrong.
 
@@ -127,8 +142,17 @@ def _check_target(path: Path) -> None:
     So: refuse. A durable state file is never legitimately a symlink here, and
     an operator who has deliberately linked one (a dotfile-managed
     ``config.toml``) is better served by a loud error naming the file than by
-    either silent outcome. Callers that genuinely want to follow a link must
-    resolve it themselves, where the containment question is theirs to answer.
+    either silent outcome.
+
+    Checking the final component ALONE is not enough, and that gap is the whole
+    reason *within* exists: linking a parent DIRECTORY redirects the write just
+    as effectively, and ``path.is_symlink()`` is False for every component
+    above the leaf. A blanket "no component may be a link" rule would be wrong
+    - ``/tmp`` is itself a link on macOS - so containment is expressed the only
+    way it can be honestly: the caller names the root the write must stay
+    inside, because only the caller knows it. Callers writing into a directory
+    something untrusted can reach (``run/state/scripts/`` holds LLM-authored
+    scripts and is outside ``runtime_guard``'s sweep) MUST pass it.
     """
     if path.is_symlink():
         raise SymlinkedTarget(
@@ -136,6 +160,24 @@ def _check_target(path: Path) -> None:
             f"Point the setting at {os.readlink(path)!r} directly, or replace "
             f"the link with a regular file."
         )
+    if within is not None:
+        # The claimed root FIRST. Resolving `within` and the target together
+        # follows the same planted link and the comparison comes out equal -
+        # a containment check that cannot fail. If the root the caller names
+        # is itself redirected, nothing below it can be trusted.
+        if within.is_symlink():
+            raise SymlinkedTarget(
+                f"{within} is a symlink; refusing to write durable state "
+                f"beneath it. Replace the link with a real directory."
+            )
+        root = within.resolve()
+        landing = path.parent.resolve() / path.name
+        if not landing.is_relative_to(root):
+            raise SymlinkedTarget(
+                f"{path} resolves to {landing}, outside {root}; refusing. A "
+                f"directory on that path is a symlink pointing out of the "
+                f"intended root."
+            )
 
 
 def _settle_mode(tmp: Path, path: Path, extra_bits: int = 0) -> None:
@@ -163,12 +205,18 @@ def _umask() -> int:
 
 
 def atomic_write_text(path: Path | str, text: str, *,
-                      encoding: str = "utf-8", extra_mode: int = 0) -> Path:
+                      encoding: str = "utf-8", extra_mode: int = 0,
+                      within: Path | None = None) -> Path:
     """Write *text* to *path* atomically. Returns *path*.
 
     Missing parent directories are created. An existing target's permission
     mode is preserved. If the write fails (including a KeyboardInterrupt),
     the target keeps its previous content and no temp file is left behind.
+
+    *within* names a root the write must stay inside after resolution - pass
+    it whenever the target directory is reachable by something untrusted, since
+    a symlinked PARENT redirects the write and the leaf-only check cannot see
+    it.
 
     *extra_mode* ORs bits onto the settled mode BEFORE the swap, for callers
     that need the published file to carry them (``stat.S_IEXEC`` for a pinned
@@ -177,7 +225,7 @@ def atomic_write_text(path: Path | str, text: str, *,
     the caller has no way to unwind.
     """
     path = Path(path)
-    _check_target(path)
+    _check_target(path, within)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = _temp_sibling(path)
     try:

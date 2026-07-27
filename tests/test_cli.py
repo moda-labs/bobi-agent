@@ -1094,6 +1094,52 @@ class TestAppStop:
         assert pid_path.exists() and port_path.exists()
 
 
+class TestSubagentsCancel:
+    """`subagents cancel` has three outcomes and the middle one is new.
+
+    Without a test, deleting the refusal branch makes the command fall back to
+    printing "No running sub-agent for X" with exit 0 about a process that is
+    still running and still spending - verbatim the defect this round fixed.
+    """
+
+    def _patch(self, monkeypatch, result):
+        monkeypatch.setattr("bobi.subagent.cancel_agent", lambda ref: result)
+        monkeypatch.setattr("bobi.cli._ensure_root_bound", lambda: None)
+
+    def test_refusal_names_the_pid_and_exits_non_zero(self, bobi_install, monkeypatch):
+        from bobi.subagent import CancelResult
+
+        self._patch(monkeypatch, CancelResult(False, "unidentified", pid=4242))
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "subagents", "cancel", "AGD-1"])
+
+        assert result.exit_code != 0, result.output
+        assert "4242" in result.output
+        assert "No running sub-agent" not in result.output, (
+            "a live, unidentifiable run was reported as 'nothing running'"
+        )
+
+    def test_not_found_still_reads_as_nothing_running(self, bobi_install, monkeypatch):
+        from bobi.subagent import CancelResult
+
+        self._patch(monkeypatch, CancelResult(False, "not_found"))
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "subagents", "cancel", "AGD-1"])
+
+        assert result.exit_code == 0, result.output
+        assert "No running sub-agent" in result.output
+
+    def test_cancelled_reports_success(self, bobi_install, monkeypatch):
+        from bobi.subagent import CancelResult
+
+        self._patch(monkeypatch, CancelResult(True, "cancelled"))
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "subagents", "cancel", "AGD-1"])
+
+        assert result.exit_code == 0, result.output
+        assert "Cancelled AGD-1" in result.output
+
+
 class TestSetupCommand:
     def _home(self, tmp_path, monkeypatch):
         home = tmp_path / "home"

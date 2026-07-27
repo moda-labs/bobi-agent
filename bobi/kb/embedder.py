@@ -172,3 +172,7 @@ def stop(root: Path | None = None) -> None:
     elif result.unidentified:
         log.warning("Embedding sidecar pid %d is unidentifiable - leaving it "
                     "running rather than signalling a stranger", result.pid)
+    # RETURNED, not just logged: `stop_team` composes the team's verdict
+    # from both processes, and a sidecar left holding its port and a loaded
+    # model must not read as "the team is down".
+    return result

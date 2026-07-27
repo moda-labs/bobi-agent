@@ -80,12 +80,33 @@ class TestTimeoutReconcile:
                      started_at=time.time() - (10 + RECONCILE_GRACE + 60))
         cancelled = []
         emit = _Emitter()
-        reconcile_sessions(emit=emit, cancel=cancelled.append)
+        # `cancel` now REPORTS: True means the run is down. `list.append`
+        # returns None, which the sweep must read as a refusal.
+        reconcile_sessions(emit=emit,
+                           cancel=lambda n: (cancelled.append(n), True)[1])
 
         entry = get_registry().get(name)
         assert entry.status == TERMINAL_FAILED
         assert cancelled == [name]
         assert "agent/session.failed" in emit.types()
+
+    def test_a_refused_cancel_leaves_the_entry_alone(self):
+        """`cancel_agent` refuses to signal a live pid it cannot identify,
+        precisely so the record survives and the process stays findable.
+        Marking it terminal two lines later zeroes the pid and closes the
+        entry, erasing the only handle on a run that is still spending - which
+        is the outcome the refusal exists to prevent."""
+        name = _seed("wf-t-3", status="running", pid=__import__("os").getpid(),
+                     project="r", timeout=10,
+                     started_at=time.time() - (10 + RECONCILE_GRACE + 60))
+        emit = _Emitter()
+        actions = reconcile_sessions(emit=emit, cancel=lambda n: False)
+
+        entry = get_registry().get(name)
+        assert entry.status == "running", "a refused cancel closed the entry"
+        assert entry.pid != 0, "the pid record was erased anyway"
+        assert "agent/session.failed" not in emit.types()
+        assert [a["action"] for a in actions] == ["timeout-refused"]
 
     def test_within_deadline_is_left_running(self):
         name = _seed("wf-t-2", status="running", pid=__import__("os").getpid(),
