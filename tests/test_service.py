@@ -251,3 +251,47 @@ def test_team_status_returns_manager_and_active_agents(bobi_install):
         "bobi-test-agent-director",
         "wf-test-agent-task",
     ]
+
+
+def test_restart_refuses_to_start_over_a_stop_that_did_not_take(monkeypatch):
+    """`restart_team` = stop THEN start, so it inherits stop's contract.
+
+    `stop_team` can report `unidentified`/`permission_denied`/`still_running`
+    while KEEPING the pid files - the manager is up and we could not prove
+    otherwise. Starting anyway races a second manager against the same runtime
+    root, and the old one holds the only pid file that could find it. The guard
+    lives on `StopResult.settled`, whose docstring names this caller; without a
+    test, deleting the guard leaves the whole suite green.
+    """
+    import pytest
+
+    from bobi import service
+
+    started: list = []
+    monkeypatch.setattr(
+        service, "stop_team",
+        lambda p: service.StopResult(kind="bobi", pid=4242, unidentified=True))
+    monkeypatch.setattr(
+        service, "start_team",
+        lambda *a, **kw: started.append(a) or "launched")
+
+    with pytest.raises(RuntimeError, match="stop did not take"):
+        service.restart_team(SimpleNamespace(name="proj"))
+
+    assert not started, "started a manager over one still running"
+
+
+def test_restart_proceeds_when_the_stop_settled(monkeypatch):
+    """The positive control: a guard that always refused would be invisible."""
+    from bobi import service
+
+    started: list = []
+    monkeypatch.setattr(
+        service, "stop_team",
+        lambda p: service.StopResult(kind="bobi", pid=4242, stopped=True))
+    monkeypatch.setattr(
+        service, "start_team",
+        lambda *a, **kw: started.append(a) or "launched")
+
+    assert service.restart_team(SimpleNamespace(name="proj")) == "launched"
+    assert started, "a settled stop must not block the restart"

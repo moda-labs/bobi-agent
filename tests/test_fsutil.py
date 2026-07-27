@@ -399,7 +399,11 @@ class TestSymlinkedTarget:
         """Mode comes from the file being written, not from the link."""
         real = tmp_path / "real.env"
         real.write_text("TOKEN=x\n")
-        real.chmod(0o600)
+        # NOT 0o600: that is the mode `_open_temp` already creates the temp
+        # with, so the assertion would hold with `_settle_mode` deleted
+        # outright. 0o640 is reachable only by actually reading the target's
+        # mode and applying it.
+        real.chmod(0o640)
         link = tmp_path / ".env"
         link.symlink_to(real)
 
@@ -407,7 +411,7 @@ class TestSymlinkedTarget:
 
         assert link.is_symlink()
         assert real.read_text() == "TOKEN=y\n"
-        assert stat.S_IMODE(real.stat().st_mode) == 0o600
+        assert stat.S_IMODE(real.stat().st_mode) == 0o640
 
 
 class TestAtomicWriteJson:

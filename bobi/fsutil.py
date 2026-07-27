@@ -33,9 +33,46 @@ import json
 import os
 import stat
 import time
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+
+
+def fold_path(p: Path) -> str:
+    """A path flattened to what a case- and normalization-insensitive
+    filesystem would treat as one name."""
+    return unicodedata.normalize("NFC", str(p)).casefold()
+
+
+def same_location(a: Path, b: Path) -> bool:
+    """Whether two already-resolved paths name the same directory or file.
+
+    `==` is not enough at a DENY boundary. ``Path.resolve()`` is pure string
+    work (``posixpath.realpath``) - it resolves symlinks but does not fold case
+    or normalize unicode - so on macOS/APFS, case-insensitive by default,
+    ``.../RUN`` compares unequal to ``.../run`` while opening the same inode.
+
+    Identity is authoritative when both sides exist; the folded comparison is
+    the fail-closed fallback for a path that does not exist yet. Folding is
+    applied unconditionally: on a case-SENSITIVE filesystem a sibling genuinely
+    named ``RUN`` is a different directory and gets refused anyway. That costs
+    one re-pick; guessing wrong the other way costs a containment boundary, and
+    a deny gate is the wrong place to be asking which kind of filesystem this
+    is.
+
+    Lives here, not at either call site, because both of bobi's setup-side deny
+    checks need it - ``_confine_pack_root`` (the pack root vs ``run/``) and
+    ``copy_into`` (a fork destination vs its own source).
+    """
+    if a == b:
+        return True
+    try:
+        if a.exists() and b.exists() and a.samefile(b):
+            return True
+    except OSError:                     # unreadable or racing - fold instead
+        pass
+    return fold_path(a) == fold_path(b)
 
 
 def _temp_sibling(path: Path) -> Path:
@@ -55,7 +92,11 @@ def _open_temp(tmp: Path) -> int:
     :func:`_inherit_mode` before the rename.
 
     ``O_EXCL`` because a predictable name is the other half of that risk: it
-    refuses to write through a symlink or an attacker-planted file.
+    refuses to write through a symlink or an attacker-planted file **at the
+    temp path**. It says nothing about the TARGET: :func:`_write_target`
+    deliberately follows a symlinked target, because every adopter came from
+    ``path.write_text()``, which does. Confinement of the target is the
+    caller's job, not this module's.
     """
     return os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 

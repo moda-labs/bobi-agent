@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import os
-import unicodedata
 from pathlib import Path
 from typing import AsyncIterator
 from urllib.error import HTTPError, URLError
@@ -103,41 +102,6 @@ def serialize_state(state: SetupState) -> dict:
 
 def _sse(event: str, data) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
-
-def _fold(p: Path) -> str:
-    """A path flattened to what a case- and normalization-insensitive
-    filesystem would treat as one name."""
-    return unicodedata.normalize("NFC", str(p)).casefold()
-
-
-def _same_location(a: Path, b: Path) -> bool:
-    """Whether two already-resolved paths name the same directory.
-
-    `==` is not enough at a DENY boundary. `Path.resolve()` is pure string work
-    (`posixpath.realpath`) - it resolves symlinks but does not fold case or
-    normalize unicode - so on macOS/APFS, case-insensitive by default, `.../RUN`
-    compares unequal to `.../run` while opening the same inode. That is one
-    request away from the process environment: it puts `run/package/agent.yaml`
-    back inside the writable pack root, and `_setup_managed_vars` trusts that
-    file to name readable credentials.
-
-    Identity is authoritative when both sides exist; the folded comparison is
-    the fail-closed fallback for a location that has not been created yet.
-    Folding is applied unconditionally - on a case-SENSITIVE filesystem a
-    sibling genuinely named `RUN` is a different directory and gets refused
-    anyway. That costs the operator one re-pick; guessing wrong in the other
-    direction costs them their shell secrets, and a deny gate is the wrong
-    place to be asking which kind of filesystem this is.
-    """
-    if a == b:
-        return True
-    try:
-        if a.exists() and b.exists() and a.samefile(b):
-            return True
-    except OSError:                     # unreadable or racing - fold instead
-        pass
-    return _fold(a) == _fold(b)
 
 
 def _picker_roots(bobi_home: Path) -> list[Path]:
@@ -280,9 +244,9 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         if not ok:
             return abs_loc, "pick a location inside your home directory"
         run_root = project.resolve()
-        if (_same_location(abs_loc, run_root)
-                or any(_same_location(p, run_root) for p in abs_loc.parents)
-                or any(_same_location(p, abs_loc) for p in run_root.parents)):
+        if (fsutil.same_location(abs_loc, run_root)
+                or any(fsutil.same_location(p, run_root) for p in abs_loc.parents)
+                or any(fsutil.same_location(p, abs_loc) for p in run_root.parents)):
             return abs_loc, "pick a source location outside run/"
         return abs_loc, None
 

@@ -402,8 +402,10 @@ class LocalRuntime(TeamRuntime):
         root = self._resolve(name)
         result = service.stop_team(root)
         return {
-            "ok": result.stopped or result.killed or result.stale
-                  or result.pid == 0,
+            # `settled`, not a second allow-list: the CLI and the hosted
+            # control plane must not answer "is it down?" differently, and an
+            # outcome flag added later would diverge them silently.
+            "ok": result.settled,
             "stopped": result.stopped,
             "pid": result.pid,
             "still_running": result.still_running,
@@ -414,7 +416,11 @@ class LocalRuntime(TeamRuntime):
 
         root = self._resolve(name)
         stop = service.stop_team(root)
-        if stop.still_running:
+        # The THIRD restart path. `still_running` alone misses `unidentified`
+        # and `permission_denied` - both leave the manager up and its pid file
+        # in place - so a restart started a second manager over a live one and
+        # surfaced it as a bogus "already running" 409 from spawn's own guard.
+        if not stop.settled:
             raise TeamDidNotStop(stop.pid)
         # One spawn path: restart is stop + start, so a preflight failure
         # carries the same structured report either way.

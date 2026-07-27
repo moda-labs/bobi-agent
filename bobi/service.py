@@ -366,6 +366,28 @@ def process_argv(pid: int) -> list[str]:
     return _proc_argv(pid) or _ps_argv(pid)
 
 
+def _is_zombie(pid: int) -> bool:
+    """True when `pid` has exited but has not been reaped.
+
+    A zombie answers `kill(pid, 0)` and has an EMPTY argv, so it is
+    indistinguishable from "alive but unreadable" unless asked directly - and
+    conflating the two is how the stop loop either reports a live daemon
+    stopped, or waits out the whole grace for a process that is already dead.
+    Only consulted when argv came back empty.
+    """
+    try:
+        stat_line = Path(f"/proc/{pid}/stat").read_text()
+        return stat_line.rsplit(")", 1)[1].split()[0] == "Z"
+    except (OSError, IndexError):
+        pass
+    try:
+        out = subprocess.run(["ps", "-o", "state=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5)
+        return out.stdout.strip().startswith("Z")
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def is_process(pid: int, identity: Callable[[list[str]], bool]) -> bool:
     """True when `pid` is live AND is the process `identity` describes.
 
@@ -450,7 +472,10 @@ def stop_pidfile(
 
     `force` sends SIGKILL instead of SIGTERM. `escalate` escalates to SIGKILL
     on its own once the grace period expires - for an unattended daemon, which
-    has no operator to retry with --force. `also_remove` names files that
+    has no operator to retry with --force. It does NOT escalate when the grace
+    window closed without a single readable argv: SIGKILLing a pid we can no
+    longer prove is ours is the exact harm the identity gate exists to prevent,
+    so that case reports `unidentified` and leaves the process alone. `also_remove` names files that
     share the pid file's lifetime (a port file); they are cleaned up with it.
     """
     import signal
@@ -493,7 +518,6 @@ def stop_pidfile(
     killed = force
     os.kill(pid, signal.SIGKILL if killed else signal.SIGTERM)
     deadline = time.monotonic() + STOP_GRACE
-    unreadable = False
     while time.monotonic() < deadline:
         time.sleep(0.1)
         if not _pid_alive(pid):
@@ -501,28 +525,28 @@ def stop_pidfile(
             return StopResult(kind=kind, pid=pid,
                               killed=killed, stopped=not killed)
         # Identity again, not just liveness: a pid recycled while we wait must
-        # not be escalated to SIGKILL. But `is_process` folds "I could not read
-        # argv" into the same False as "it exited", and reading that as a
+        # not be escalated to SIGKILL. But `is_process` folded "I could not
+        # read argv" into the same False as "it exited", and reading that as a
         # successful stop is how ONE failed `ps` (fork EAGAIN, a sandbox
-        # denial) deleted a live daemon's pidfile and reported "Stopped." The
-        # pre-loop gate refuses to guess from an unreadable argv; so does this.
+        # denial) deleted a live daemon's pidfile and reported "Stopped."
         argv = process_argv(pid)
         if not argv:
-            unreadable = True
-            continue            # keep waiting - the next read may answer
-        unreadable = False
+            # No information - NOT evidence that it exited. The pre-loop gate
+            # already proved this pid is ours, so keep that belief and wait;
+            # the next read may answer. The one thing an empty argv can still
+            # mean is an unreaped zombie, which IS an exit, so ask directly
+            # rather than inferring either way from silence.
+            if _is_zombie(pid):
+                _unlink_all(state)
+                return StopResult(kind=kind, pid=pid,
+                                  killed=killed, stopped=not killed)
+            continue
         if not identity(argv):
             # It answered, and it is someone else: ours exited and the pid was
             # recycled mid-wait. Never a candidate for escalation.
             _unlink_all(state)
             return StopResult(kind=kind, pid=pid,
                               killed=killed, stopped=not killed)
-
-    if unreadable:
-        # The window closed without one answer, so we never learned whether it
-        # died - the same verdict, and the same refusal to throw away its state
-        # files, as an unidentifiable pid before the signal.
-        return StopResult(kind=kind, pid=pid, unidentified=True)
 
     if escalate and not killed:
         os.kill(pid, signal.SIGKILL)

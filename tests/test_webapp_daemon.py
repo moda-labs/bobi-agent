@@ -345,6 +345,20 @@ class TestStopIdentity:
                 "a live daemon was reported stopped because one ps failed"
             )
             assert result.killed is False
+            # The CLASSIFICATION, not just the absence of the wrong flags.
+            # Asserting only `stopped is False` passes a mutant that returns a
+            # flagless StopResult - and `settled` is then True, so `_echo_stop`
+            # prints "not running", returns True, and `app restart` starts a
+            # second daemon: the exact bug, reached a different way.
+            #
+            # `still_running`, not `unidentified`: the pre-loop gate already
+            # proved this pid is ours, so an argv we cannot re-read is missing
+            # information, not a loss of identity. It is alive and it outlived
+            # the grace, which is exactly what `still_running` means.
+            assert result.still_running is True
+            assert result.settled is False, (
+                "an unconfirmed stop must not read as 'it is down'"
+            )
             assert len(reads) > 1, "the grace loop never re-read argv"
             assert pid_path.exists(), (
                 "the only record of a live daemon was deleted on a failed read"

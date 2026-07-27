@@ -96,6 +96,9 @@ Fields the framework parses (see `bobi/config.py`):
 version: "1.0.0"
 entry_point: manager        # role launched by `bobi agent <name> start` — must exist in roles/
 chat: slack                 # human interaction surface: slack | telegram | cli
+                            # (`cli` = no chat surface; the canonical
+                            #  spelling is to OMIT the key - setup
+                            #  removes it when you pick cli)
 
 services:                   # what the team connects to
   - name: github            # native: github | slack | linear

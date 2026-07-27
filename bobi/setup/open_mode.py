@@ -15,6 +15,7 @@ from pathlib import Path
 
 import yaml
 
+from bobi import fsutil
 from bobi.setup.state import SPEC_SLOTS, SetupState
 
 
@@ -304,9 +305,14 @@ def copy_into(source: Path, dest: Path) -> None:
     """Copy a team source into the working location (no-op if it's the same
     folder). The original is left untouched until Install."""
     source, dest = source.resolve(), dest.resolve()
-    if source == dest:
+    # `fsutil.same_location`, not `==`/`in .parents`: this is the same DENY
+    # shape as `_confine_pack_root`'s run/ clause and it is reached from the
+    # same request. `Path.resolve()` does not fold case, so on macOS a
+    # `location` differing from `team_path` only in case slipped both guards -
+    # copytree'ing a team onto itself, or into its own subdirectory.
+    if fsutil.same_location(source, dest):
         return
-    if source in dest.parents:
+    if any(fsutil.same_location(p, source) for p in dest.parents):
         raise ValueError("the working location can't be inside the team's own "
                          "folder — pick a different folder to fork into")
     dest.parent.mkdir(parents=True, exist_ok=True)

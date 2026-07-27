@@ -16,6 +16,7 @@ import pytest
 from bobi import paths, service
 from bobi.sdk import SessionEntry
 from bobi.subagent import (
+    AGENT_BOOTSTRAP,
     AgentResult,
     _build_prompt,
     _resolve_project_name,
@@ -177,9 +178,12 @@ class TestAgentLifecycle:
         An identity predicate that matched NOTHING would pass the refusal test
         while making `cancel` silently toothless - a run nobody can stop, and
         no test to say so. Pin the other direction too.
+
+        The victim wears `AGENT_BOOTSTRAP` itself, not a hand-typed lookalike:
+        a synthetic argv would keep both tests green through a rename of the
+        entry point, which is precisely when `cancel_agent` would go quiet.
         """
-        victim = sacrificial_process(
-            "from bobi.subagent import _run_agent_entry", "{}")
+        victim = sacrificial_process(AGENT_BOOTSTRAP, "{}")
         assert is_subagent_argv(service.process_argv(victim.pid)) is True, (
             "the victim does not wear the sub-agent argv shape"
         )
@@ -191,6 +195,31 @@ class TestAgentLifecycle:
             assert cancel_agent("AGD-13")
 
         assert victim.wait(timeout=5) == -15, "the sub-agent was not signalled"
+
+    def test_cancel_signals_a_resumed_run_stamped_with_the_cli_pid(
+            self, sacrificial_process):
+        """A resumed workflow owns its entry under a DIFFERENT argv.
+
+        `resume_workflow` re-stamps the entry with `os.getpid()` of the
+        `bobi ... workflows resume` process (#826), so an identity gate that
+        knows only the sub-agent bootstrap matches nothing for a resumed run:
+        no signal is sent, the entry is marked cancelled regardless, and the
+        resume keeps running with its only registry record gone. That is worse
+        than the bug the gate was added to fix, because it is silent.
+        """
+        victim = sacrificial_process("-m", "bobi.cli", "agent", "x",
+                                     "workflows", "resume", "wf-1")
+        assert is_subagent_argv(service.process_argv(victim.pid)) is True, (
+            "the resume CLI shape is not recognised as owning the entry"
+        )
+        entry = SessionEntry(name="agent-agd-14-implement", run_key="AGD-14",
+                             phase="implement", status="running",
+                             pid=victim.pid)
+        with patch("bobi.subagent.get_registry",
+                   return_value=_mock_registry([entry])):
+            assert cancel_agent("AGD-14")
+
+        assert victim.wait(timeout=5) == -15, "the resumed run was not signalled"
 
     def test_cancel_done_agent_returns_false(self):
         entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",

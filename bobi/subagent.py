@@ -839,6 +839,19 @@ def spawn_adhoc(
     return result
 
 
+# AGENT_BOOTSTRAP is the ONE spelling of the detached child's `-c` script.
+# `is_subagent_argv` matches against it, so a rename of the entry point moves
+# both together instead of silently making `cancel_agent` a no-op.
+AGENT_BOOTSTRAP = (
+    "import json, sys; "
+    "from bobi.subagent import _run_agent_entry; "
+    "_run_agent_entry(json.loads(sys.argv[1]))"
+)
+
+# The tokens identity keys on - derived from the bootstrap, never retyped.
+_BOOTSTRAP_MARKERS = ("bobi.subagent", "_run_agent_entry")
+
+
 def is_subagent_argv(argv: list[str]) -> bool:
     """True when `argv` is a detached bobi sub-agent.
 
@@ -852,7 +865,17 @@ def is_subagent_argv(argv: list[str]) -> bool:
     a dozen.
     """
     joined = " ".join(argv)
-    return "bobi.subagent" in joined and "_run_agent_entry" in joined
+    if all(m in joined for m in _BOOTSTRAP_MARKERS):
+        return True
+    # A RESUMED workflow re-stamps the same registry entry with the pid of the
+    # `bobi ... workflows resume` process (orchestrator's #826 re-stamp), so
+    # that process legitimately owns the entry too. Without this clause the
+    # identity gate matched nothing for a resumed run and `cancel_agent`
+    # became a silent no-op: no signal sent, entry marked cancelled anyway,
+    # and the resume kept running with its registry record gone.
+    from pathlib import Path as _P
+    return ("workflows" in argv and "resume" in argv
+            and any(a == "bobi.cli" or _P(a).name == "bobi" for a in argv))
 
 
 def _launch_detached(script: str, args: list[str], log_file: Path,
@@ -1084,11 +1107,7 @@ def launch_agent(
         "model": model,
         "effort": effort,
     })
-    script = (
-        "import json, sys; "
-        "from bobi.subagent import _run_agent_entry; "
-        "_run_agent_entry(json.loads(sys.argv[1]))"
-    )
+    script = AGENT_BOOTSTRAP
 
     with _LAUNCH_ADMISSION_LOCK:
         existing = registry.get(session_name)

@@ -105,7 +105,14 @@ class TestPinIsAtomicUnderConcurrency:
         states: list = []
 
         def pin(i: int):
-            body = f"#!/bin/sh\necho '{{\"id\": \"{i}\"}}'\n" + "# pad\n" * 200
+            # Over `TextIOWrapper`'s 8192-byte buffer AND of differing length
+            # per writer. At 1.3 KB every body fitted one `write()` syscall, so
+            # a racing pair could only ever swap whole contents - the torn
+            # write this asserts against was unreachable and the hash check was
+            # decorative. Multi-syscall, ragged-length payloads can actually
+            # interleave.
+            body = (f"#!/bin/sh\necho '{{\"id\": \"{i}\"}}'\n"
+                    + f"# pad {i}\n" * (2000 + i * 250))
             state: dict = {}
             try:
                 start.wait(timeout=10)
@@ -131,12 +138,19 @@ class TestPinIsAtomicUnderConcurrency:
         )
 
     def test_pin_leaves_no_temp_behind(self, scripts_dir):
+        """Any leftover, not just one shaped like `fsutil`'s temp.
+
+        Filtering on a `.tmp` SUFFIX only ever matched `fsutil`'s own
+        `.<name>.<pid>.<ns>.tmp`, which `atomic_write_text` always renames or
+        unlinks - so the check could fail only if `fsutil` were broken, never
+        if `_pin` regressed to its old `.tmp-<name>.sh`. Assert the directory
+        holds exactly the active script and nothing else.
+        """
         monitor = _monitor()
         sc._pin(monitor.name, "#!/bin/sh\necho '{\"id\": \"1\"}'\n",
                 monitor, "fp", sc.CapabilityEnvelope(), {})
-        leftovers = [p.name for p in scripts_dir.iterdir()
-                     if p.name.startswith(".") and p.name.endswith(".tmp")]
-        assert not leftovers, leftovers
+        present = sorted(p.name for p in scripts_dir.iterdir())
+        assert present == [sc._active_path(monitor.name).name], present
 
 
 def _gen(items, script=GOOD_SCRIPT, success=True, cost=0.02):
