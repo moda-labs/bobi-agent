@@ -222,7 +222,7 @@ class TestConfiguredCapIsHonored:
         assert echoes[-1]["max_turns"] == 2500
 
     def test_a_cap_change_resumes_rather_than_starting_fresh(
-            self, stub_bobi_env, captured_lifecycle):
+            self, stub_bobi_env, captured_lifecycle, caplog):
         """The reason the fix above is cheap: continuity is not the price.
 
         The cap is a construction-time CLI flag, so honoring a per-step
@@ -233,11 +233,15 @@ class TestConfiguredCapIsHonored:
         sides always continues) and the rebuild resumes the SAME transcript,
         exactly as an effort-only change already does.
 
-        Asserted on the session id the run records rather than on a log
-        message, because a fresh session would have minted a different one.
-        The cap assertion is what keeps this honest: without it the test would
-        pass vacuously on the previous head, where nothing rebuilt at all.
+        Asserted on the orchestrator's own recorded decision ("native resume"
+        vs "fresh session"), NOT on the session id. The stub reports
+        ``resume or "stub-session"`` (stub.py:104), so a fresh session yields
+        the identical constant and a session-id comparison cannot tell the two
+        paths apart - it would pass either way. The negative case is pinned
+        separately below, so this assertion is known to bite.
         """
+        import logging
+
         from bobi.workflow.orchestrator import make_session_name, run_workflow
         from bobi.workflow.schema import StepDef, Workflow
 
@@ -247,11 +251,12 @@ class TestConfiguredCapIsHonored:
                     max_turns=2500),
         ])
         session_name = make_session_name("topt3", "test-repo", "845c3")
-        assert run_workflow(
-            wf, task="__stub__:options", repo="test-repo",
-            cwd=str(stub_bobi_env.project_path), run_key="845c3",
-            timeout=120, interactive=False,
-        ) is True
+        with caplog.at_level(logging.INFO, logger="bobi.workflow.orchestrator"):
+            assert run_workflow(
+                wf, task="__stub__:options", repo="test-repo",
+                cwd=str(stub_bobi_env.project_path), run_key="845c3",
+                timeout=120, interactive=False,
+            ) is True
 
         # A rebuild really did happen (else this test proves nothing).
         echoes = [
@@ -261,16 +266,50 @@ class TestConfiguredCapIsHonored:
         ]
         assert echoes[-1]["max_turns"] == 2500
 
-        # ...and it resumed rather than starting over.
-        ids = [
-            r["session_id"] for r in _log_records(session_name, "stop")
-            if r.get("session_id")
-        ]
-        assert len(ids) >= 2, f"expected a stop record per step, got {ids}"
-        assert len(set(ids)) == 1, (
-            f"the cap change started a FRESH session instead of resuming the "
-            f"transcript: {ids}"
-        )
+        # ...and it resumed the transcript rather than starting over.
+        switches = [r.getMessage() for r in caplog.records
+                    if "switching session options" in r.getMessage()]
+        assert len(switches) == 1, switches
+        assert "native resume" in switches[0], switches[0]
+        assert "max_turns 1000 -> 2500" in switches[0], switches[0]
+
+    def test_a_failed_continuation_token_falls_back_to_fresh(
+            self, stub_bobi_env, captured_lifecycle, caplog, monkeypatch):
+        """The negative case that proves the assertion above bites.
+
+        With ``continuation_token`` returning "" the same cap change takes the
+        fresh-session path and says so. Without this, "native resume" could be
+        the only outcome the code is capable of producing, and the assertion
+        above would be untestable rather than merely true.
+
+        Patched on ``bobi.brain`` because ``_run_workflow_async`` imports the
+        symbol at call time, so the module attribute is the live seam.
+        """
+        import logging
+
+        import bobi.brain
+        from bobi.workflow.orchestrator import run_workflow
+        from bobi.workflow.schema import StepDef, Workflow
+
+        monkeypatch.setattr(bobi.brain, "continuation_token",
+                            lambda *a, **kw: "")
+
+        wf = Workflow(name="topt4", steps=[
+            StepDef(name="first", prompt="__stub__:options", timeout=60),
+            StepDef(name="second", prompt="__stub__:options", timeout=60,
+                    max_turns=2500),
+        ])
+        with caplog.at_level(logging.INFO, logger="bobi.workflow.orchestrator"):
+            assert run_workflow(
+                wf, task="__stub__:options", repo="test-repo",
+                cwd=str(stub_bobi_env.project_path), run_key="845c4",
+                timeout=120, interactive=False,
+            ) is True
+
+        switches = [r.getMessage() for r in caplog.records
+                    if "switching session options" in r.getMessage()]
+        assert len(switches) == 1, switches
+        assert "fresh session" in switches[0], switches[0]
 
     def test_role_config_beats_the_framework_default(
             self, stub_bobi_env, captured_lifecycle):
