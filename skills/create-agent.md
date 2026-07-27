@@ -281,14 +281,15 @@ The pre-0.46 spellings `kind: gateway` and `kind: gateway-openai` remain
 accepted aliases for exactly these two configurations (`bobi agent <name>
 doctor` suggests the current form).
 
-Individual roles can declare their own model and reasoning effort, applied
-whenever an agent launches with that role (subagents, workflow steps, monitor
-checks):
+Individual roles can declare their own model, reasoning effort, and turn cap,
+applied whenever an agent launches with that role (subagents, workflow steps,
+monitor checks):
 
 ```yaml
 roles:
-  monitor: {model: haiku, effort: low}    # cheap observe-and-report checks
+  monitor: {model: haiku, effort: low, max_turns: 8}   # cheap, bounded checks
   planner: {model: opus, effort: xhigh}
+  engineer: {max_turns: 2000}                          # long Bash-heavy builds
 ```
 
 Role models pick a model within the team's brain, never a different brain.
@@ -303,6 +304,15 @@ the doctor warning (it checks against the configured brain's accepted set)
 rather than the run's apparent success. On a gateway team, `effort` rides the
 engine CLI to the backend like `model` does: whether the backend honors,
 ignores, or rejects it is the backend's own behavior.
+
+`max_turns` caps one session's turns: step `max_turns:` >
+`roles.<role>.max_turns` > `brain.max_turns` > the framework default (1000).
+There is no launch flag - it is a runaway-loop backstop, not a dial you tune
+per invocation. Size it well clear of honest work: the real budget for a long
+session is its wall-clock timeout, and a tool-heavy build spends turns fast.
+A monitor check that needs hundreds of turns is malfunctioning, so cap those
+low; a builder should be free to run. See `docs/WORKFLOW_ENGINE.md` for what
+happens when a workflow step does hit the cap (it is resumed, not failed).
 
 Workflow prompt steps can override that team default for just one step:
 

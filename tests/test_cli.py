@@ -491,7 +491,13 @@ class TestSubagents:
             "--wait", "--task", "Fix #1",
         ])
         assert result.exit_code != 0
-        assert "--wait only supports adhoc workflow runs" in result.output
+        # Names the limit, the workflow that tripped it, WHY it exists, and the
+        # pattern to use instead - an agent that hits this must be able to
+        # recover without reading the source (#845).
+        assert "--wait requires '-w adhoc'" in result.output
+        assert "issue-lifecycle" in result.output
+        assert "dispatched" in result.output
+        assert "wait" in result.output
 
     def test_passes_requested_by(self, bobi_install):
         req = '{"requester":"Alice","source":{"kind":"test"},"ids":[1,2]}'

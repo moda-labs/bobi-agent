@@ -351,6 +351,12 @@ class Session:
         self._last_response = ""
         self._last_is_error = False
         self._last_api_error_status: int | None = None
+        # The brain's own diagnosis of the last failed turn (#845). Without
+        # these, consumers built an error out of _last_response, which is EMPTY
+        # on exactly the terminal paths that need naming - a turn-cap kill
+        # reached operators as "unknown error".
+        self._last_error_kind = ""
+        self._last_error_message = ""
         self._total_cost_usd = 0.0
         self._total_duration_ms = 0
         self._total_turns = 0
@@ -381,6 +387,23 @@ class Session:
         self._state = state
         if state in ("waiting_input", "stopped", "error") and self._input_ready:
             self._input_ready.set()
+
+    def last_error(self) -> str:
+        """The honest error text for the last turn, or "" when it succeeded.
+
+        Thin delegate over the shared composition in ``bobi.brain`` so the
+        Session-backed paths (``run_phase_blocking``, ``spawn_adhoc``) name the
+        same cause the workflow drain does (#845).
+        """
+        from bobi.brain import turn_error_text
+
+        return turn_error_text(
+            is_error=self._last_is_error,
+            error_kind=self._last_error_kind,
+            error_message=self._last_error_message,
+            result_text=self._last_response,
+            api_error_status=self._last_api_error_status,
+        )
 
     def _is_transient_turn_error(self) -> bool:
         """Whether the last turn's error is worth retrying.
@@ -827,6 +850,10 @@ class Session:
 
     async def _drain_turn(self) -> str | None:
         self._last_response = ""
+        # Cleared with the response so this turn's outcome can never be
+        # reported using the previous turn's diagnosis (#845).
+        self._last_error_kind = ""
+        self._last_error_message = ""
         turn_completed = False
         if self._input_ready:
             self._input_ready.clear()
@@ -870,6 +897,8 @@ class Session:
                     save_session_id(self.name, msg.session_id,
                                     model=self._session_model())
                     self._last_is_error = msg.is_error
+                    self._last_error_kind = msg.error_kind
+                    self._last_error_message = msg.error_message
                     cost = msg.total_cost_usd or 0.0
                     self._total_cost_usd += cost
                     self._total_duration_ms += msg.duration_ms

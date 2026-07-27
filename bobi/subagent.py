@@ -25,6 +25,7 @@ from bobi.sdk import (
     get_registry, SessionEntry,
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
+from bobi.brain.base import ERROR_KIND_MAX_TURNS
 from bobi.transient import is_transient_api_error
 from bobi.env import (
     agent_spawn_env,
@@ -133,6 +134,20 @@ def _resolve_launch_effort(role: str, explicit: str = "", cfg=None) -> str:
     if cfg is None and not explicit:
         cfg = _load_team_config()
     return resolve_effort(cfg, role=role, explicit=explicit)
+
+
+def _resolve_launch_max_turns(role: str, explicit: int = 0, cfg=None) -> int:
+    """Resolve the per-session turn cap for a launch (#845).
+
+    The sibling of ``_resolve_launch_model``. Always returns a positive int:
+    unlike model/effort there is no provider default to fall through to, so
+    the framework default is the floor.
+    """
+    from bobi.brain import resolve_max_turns
+
+    if cfg is None and not explicit:
+        cfg = _load_team_config()
+    return resolve_max_turns(cfg, role=role, explicit=explicit)
 
 
 def _session_name(run_key: str, role: str = "", phase: str = "") -> str:
@@ -272,7 +287,12 @@ def _emit_session_finished(
             "text": f"{label} finished {result.run_key} in {duration:.0f}s",
         }, blocking=True)
     else:
-        error = result.error or "unknown error"
+        # Every failure path now populates result.error with a named cause, so
+        # this fallback is unreachable in practice - it names the gap instead of
+        # emitting the bare "unknown error" that hid a turn-cap kill (#845).
+        error = result.error or (
+            f"{result.phase or 'agent'} failed with no error reported"
+        )
         landed = _emit_lifecycle_event("agent/session.failed", {
             "run_key": result.run_key,
             "role": role,
@@ -348,7 +368,7 @@ async def _run_agent_supervised(
     timeout: int,
     on_input_needed: InputHandler | None = None,
     role: str = "",
-    max_turns: int = 200,
+    max_turns: int = 0,
     fresh: bool = False,
 ) -> AgentResult:
     """Core agent loop. Blocks until the agent finishes or times out.
@@ -361,6 +381,10 @@ async def _run_agent_supervised(
     relevance gate) must never carry a previous run's transcript, both for
     cost (the context would grow every interval) and correctness (stale
     items from an earlier batch could pollute the verdict).
+
+    ``max_turns=0`` means "resolve from config" (role > team > framework
+    default). The verdict callers pass their own deliberately small caps -
+    a check or gate that needs hundreds of turns is malfunctioning, not busy.
 
     Unlike Session-backed agents, this path runs a raw ``ClaudeSDKClient``
     with no inbox and no ``inbox/<self>`` subscription, so it is **not
@@ -376,6 +400,7 @@ async def _run_agent_supervised(
     _cfg = _load_team_config()
     model = _resolve_launch_model(role, cfg=_cfg)
     effort = _resolve_launch_effort(role, cfg=_cfg)
+    max_turns = _resolve_launch_max_turns(role, explicit=max_turns, cfg=_cfg)
     saved_id = "" if fresh else load_resumable_session_id(name, model)
     registry = get_registry()
 
@@ -483,16 +508,10 @@ async def _run_agent_supervised(
                 result.success = not (result_msg.is_error or result_msg.error_kind)
                 if not result.success:
                     result.error_kind = result_msg.error_kind
-                    if result_msg.error_message and result_msg.result_text:
-                        result.error = (
-                            f"{result_msg.error_message}: {result_msg.result_text}"
-                        )
-                    else:
-                        result.error = (
-                            result_msg.error_message
-                            or result_msg.result_text
-                            or "unknown error"
-                        )
+                    # The shared composition (#845): never "unknown error" - the
+                    # last resort still names the kind and API status, which is
+                    # what a monitor's retry log had been reduced to for hours.
+                    result.error = result_msg.error_text()
                     # Single-sourced transient classification (§4.3): a 529/rate-limit
                     # /5xx is tagged transient so the launcher can re-dispatch. We do
                     # NOT retry here - survival/retry is owned by #444.
@@ -598,7 +617,7 @@ def run_phase_blocking(
         },
         extra_options={
             "skills": "all",
-            "max_turns": 200,
+            "max_turns": _resolve_launch_max_turns(role, cfg=_cfg),
             **({"mcp_servers": _mcp} if _mcp else {}),
             **({"model": model} if model else {}),
             **({"effort": effort} if effort else {}),
@@ -617,7 +636,10 @@ def run_phase_blocking(
             total_cost_usd=session._total_cost_usd,
             num_turns=session._total_turns,
             final_text=session._last_response,
-            error="" if not session._last_is_error else session._last_response,
+            # The brain's diagnosis, not the (empty-on-terminal) last response
+            # (#845).
+            error_kind=session._last_error_kind,
+            error=session.last_error(),
         )
     else:
         result = AgentResult(
@@ -757,7 +779,7 @@ def spawn_adhoc(
         },
         extra_options={
             "skills": "all",
-            "max_turns": 200,
+            "max_turns": _resolve_launch_max_turns(role, cfg=_cfg),
             **({"mcp_servers": merged_mcp} if merged_mcp else {}),
             **({"model": model} if model else {}),
             **({"effort": effort} if effort else {}),
@@ -800,6 +822,10 @@ def spawn_adhoc(
             total_cost_usd=session._total_cost_usd,
             num_turns=session._total_turns,
             final_text=session._last_response,
+            # A failed adhoc run carried NO error at all before #845, so the
+            # launcher reported it as "unknown error".
+            error_kind=session._last_error_kind,
+            error=session.last_error(),
         )
     else:
         result = AgentResult(
@@ -1834,7 +1860,7 @@ def _run_verdict_agent_blocking(
             last_error = result.error or f"{phase} agent failed"
             log.warning(f"{phase.capitalize()} '{slug}' attempt "
                         f"{attempt}/{attempts} failed: {last_error}")
-            if result.error_kind == "max_turns_reached":
+            if result.error_kind == ERROR_KIND_MAX_TURNS:
                 break
             continue
 

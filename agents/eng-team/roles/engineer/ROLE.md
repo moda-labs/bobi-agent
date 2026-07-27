@@ -155,6 +155,54 @@ settled scope — spec only the ticket's slice and never re-litigate it.
 
 ---
 
+## Parallel Work and Your Turn Budget
+
+Every tool call costs a turn, and your session has a finite turn cap. The cap
+is generous (see `docs/WORKFLOW_ENGINE.md`) and a workflow step that hits it is
+restarted on the same transcript rather than killed — but turns spent waiting
+are turns not spent working, so how you wait matters.
+
+**Never poll.** This is the single largest measured waste in a real session: one
+engineer run spent **79 of its 201 turns** on repeated `tail -1 /tmp/suite.log`
+in one contiguous idle block, watching background work it could not join —
+roughly 40% of the budget, buying nothing. Do not write a `tail` loop, a
+`sleep`-and-check, or an `until` loop to wait for something. Blocking sleeps are
+refused or silently backgrounded, so they do not do what they look like.
+
+**Fan out, then join in ONE Bash call.** Launch the parallel work in the
+background and block on all of it in a single call, so the entire wait costs one
+turn instead of one per check:
+
+```bash
+# Launch N independent units in the background...
+bobi agent <agent> subagents launch -w adhoc --role engineer --wait \
+  --task "Review bobi/workflow/ for correctness bugs" > /tmp/r1.log 2>&1 &
+bobi agent <agent> subagents launch -w adhoc --role engineer --wait \
+  --task "Review bobi/brain/ for correctness bugs" > /tmp/r2.log 2>&1 &
+pytest tests/ -q > /tmp/suite.log 2>&1 &
+
+# ...then join them ALL in one turn, and read the results.
+wait; tail -20 /tmp/r1.log /tmp/r2.log /tmp/suite.log
+```
+
+`wait` with no arguments blocks on every background job in that shell. Because
+the launches and the `wait` are one Bash invocation, the whole fan-out costs two
+turns total: one to start, one to collect.
+
+**`--wait` only supports `-w adhoc`.** It blocks on the launched agent (#753) by
+running the task as a single prompt; a multi-step workflow launch returns as
+soon as it is dispatched and there is nothing to join. So fan-out units must be
+`adhoc`. If you need a multi-step workflow to finish before you continue,
+restructure the work rather than polling for it — dispatch it and let the event
+that reports its completion drive the next step.
+
+**Do not fan out work you cannot describe self-containedly.** Each unit gets a
+freeform prompt and its own session with no access to your context, so a unit
+whose task only makes sense given what you already know will do the wrong thing.
+Give each one the file paths, the ticket, and the acceptance criteria it needs.
+
+---
+
 ## Scope Guards
 
 Before implementation, scan the request and plan for these triggers.
