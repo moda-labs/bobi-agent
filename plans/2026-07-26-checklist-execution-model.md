@@ -1,10 +1,10 @@
 # Checklist-driven execution: move eng-team off the workflow step machine
 
-> **Status:** Approved. Originally approved 2026-07-26; the 2026-07-29 revision
-> changed the thesis (the engine is frozen, not deleted), removed the recovery
-> monitor, the `bobi/checklist` modules and the `proof:` field, and cut Phase
-> 4's scope to eng-team, which put it past that approval. **Re-approved
-> 2026-07-29 (Zach)** on the revised text.
+> **Status:** Approved (re-approved 2026-07-29 — see Amendments). Approved 2026-07-26; the 2026-07-29
+> revision changed the thesis (the engine is frozen, not deleted), removed the
+> recovery monitor, the `bobi/checklist` modules and the `proof:` field, and cut
+> Phase 4's scope to eng-team. That is past what the prior approval covers.
+> **Phase 1 stays `[x]` — it landed and is unaffected.**
 > **Tracking issue:** moda-labs/bobi-agent#852 · **Created:** 2026-07-26 · **Last amended:** 2026-07-29 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
@@ -306,15 +306,9 @@ relaxing the human-act rule).
   `launch_agent:954`, admission check raising on a live entry `:1036-1042`,
   `_check_spend_governor:930-950`, `_emit_lifecycle_event:166-204`,
   `break` on `max_turns_reached` `:1823`, small caps `:1564,:1847,:1992`.
-- `bobi/session.py:1171,1195` — per-inbox-message `client.query()`; `:1433`
+- `bobi/session.py:1171,1195` — per-inbox-message `client.query()`; `:1404`
   `load_resumable_session_id` (a re-dispatch reusing a session name resumes the
-  dead transcript — **any** re-dispatch must not, human or automated). The
-  function itself is `bobi/sdk.py:557`, with a third caller at
-  `bobi/subagent.py:404` that ALREADY has a `fresh=` opt-out; the orchestrator
-  resumes separately via `load_session_id` (`orchestrator.py:446`), which is the
-  path a `-w adhoc` re-dispatch actually travels. *Anchors corrected 2026-07-29:
-  the plan's line refs were verified against `29a382b`, and Phase 1's own PR
-  #847 then added 29 lines to `session.py`.*
+  dead transcript — **any** re-dispatch must not, human or automated).
 - `bobi/subagent.py:1063-1070` — launch admission refuses a session name whose
   registry entry is `starting`/`running`/`idle` (*"A run is already active"*).
   This is why **D029** is in scope: an entry stuck `running` after a crashed
@@ -450,13 +444,10 @@ edit.
   (#837), it should answer this with data from Phase 4's trial rather than
   re-derive it here.
   **One constraint survives the withdrawal** and moves into Phase 2 on its own
-  merit: a re-dispatch must **not resume a dead transcript**, because
-  `session.py:1433` (`load_resumable_session_id`) does exactly that when a
-  re-dispatch reuses a name, silently defeating the fresh-budget property. That
+  merit: the dispatch path must **vary the session name deliberately**, because
+  `session.py:1404` (`load_resumable_session_id`) resumes a dead transcript when
+  a re-dispatch reuses a name, silently defeating the fresh-budget property. That
   bites the first time a human re-dispatches by hand, so it is not deferrable.
-  *Revised 2026-07-29 during the build: this said "vary the session name
-  deliberately". Varying it is actively wrong — the name IS the worktree branch
-  name and the admission dedupe key. See the 2026-07-29 (Phase 2) amendment.*
 
 ## Phases
 
@@ -558,17 +549,15 @@ outside the agent.
       the whole control on `verify:`; there is no provenance gate and no sandbox
       behind it, so the prompt has to carry it explicitly rather than by
       implication.
-- [x] **The one framework change: a re-dispatch must not resume a dead
-      transcript.** Reusing a name makes `session.py:1433`
-      (`load_resumable_session_id`) resume the dead transcript and silently
-      defeat the fresh-budget property. Needed for **human** re-dispatch, which
-      is the only recovery path this plan ships, and a real framework bug
-      independent of checklists.
-      *Delivered as a `fresh` opt-out threaded through Session -> spawn_adhoc ->
-      launch_agent -> run_workflow plus a `--fresh` CLI flag, NOT as session-name
-      variation: the name is the worktree branch name (`_setup_worktree`) and the
-      launch admission key, so varying it would fork the branch on every
-      re-dispatch. Default unchanged (Zach, 2026-07-29). See the amendment.*
+- [x] **The one framework change: vary the session name per dispatch.** Reusing a
+      name makes `session.py:1404` (`load_resumable_session_id`) resume the dead
+      transcript and silently defeat the fresh-budget property. Needed for **human**
+      re-dispatch, which is the only recovery path this plan ships, and a real
+      framework bug independent of checklists.
+      *Delivered 2026-07-29 as a `fresh` opt-out (Session -> spawn_adhoc ->
+      launch_agent -> run_workflow, plus `--fresh`), NOT as name variation:
+      varying the name forks the worktree branch. Anchor reads `:1433` now.
+      See the 2026-07-29 (Phase 2, build) amendment, deviation 1.*
 - [x] **A CI check on `plans/` diffs — the only non-agent verification, and the
       reason it is not in `bobi/`.** Asserts: the review surface is unchanged apart
       from marker characters; appendix content was appended, not inserted; every
@@ -593,14 +582,11 @@ outside the agent.
       this as a standing invariant: **if anything ever runs `verify:` unattended,
       the provenance gate comes back with it.**
 - [f] state:not-needed `--workflow` optional at both guard sites (`cli.py:2800`,
-      `_dispatch_agent:2857`) — **only if it earns itself.**
-      *Skipped 2026-07-29, as the item's own default said. `-w adhoc --task
-      "work the checklist at <path>"` works today and is what
-      `skills/checklist-execution.md` documents; a `--checklist` synonym would
-      add a flag and no capability.* `-w adhoc --task
+      `_dispatch_agent:2857`) — **only if it earns itself.** `-w adhoc --task
       "work the checklist at <path>"` already works today and the second guard
       already says so, making a `--checklist` flag a synonym rather than a
       capability. Default is to skip this and change nothing.
+      *Skipped 2026-07-29, taking the item's own default.*
 - [x] `docs/SECURITY.md` updated in **this** phase: `verify:` is worker-executed
       shell with no framework runner behind it, nothing executes it unattended,
       and the artifact is never an authorization source.
@@ -618,80 +604,59 @@ reached.
 - [x] Mutation-proof: a diff editing prose **above the fence** fails the check,
       against `tests/fixtures/plan-snapshot.md` — *mutant: drop the review-surface
       comparison*
-      *Run: removing the comparison fails exactly that test and no other.*
+      *Run. Rule shipped as insertion-only rather than byte-identical; see
+      deviation 8.*
 - [x] Mutation-proof: `[f]` without a machine-readable state tag fails —
       *mutant: drop the tag assertion*
-      *Scoped to lines the diff ADDS: the live plans carry prose-only `[f]`
-      markers and retro-fitting them would rewrite approved text. Verified all
-      three live plans pass unchanged.*
+      *Run. Scoped to ADDED lines so approved text is not retro-fitted.*
 - [x] Mutation-proof: a re-dispatch does **not** resume the dead session's
-      transcript — *mutant: drop `_run`'s `fresh` guard*
-      *Asserts the resume is not even attempted (`load_resumable_session_id` not
-      called) rather than comparing ids, which is stronger. The mutant fails with
-      `assert 'dead-session-id' is None` — the defect itself. Each negative has a
-      default-behavior twin so it cannot pass against a never-resuming path.*
+      transcript (assert distinct session ids) — *mutant: drop the session-name
+      variation*
+      *Run, as *mutant: drop `_run`'s `fresh` guard*; asserts the resume is never
+      attempted, which is stronger than comparing ids.*
 - [x] **Assert by absence — this is how "we removed an engine" is proven:**
       `grep -rn` shows **no** code path in `bobi/` that writes a checklist marker,
       parses the artifact format, or executes a `verify:` string. If this ever
       fails, the framework grew an execution engine again
-      *`tests/test_no_checklist_engine.py`. Each absence assertion carries a
-      POSITIVE CONTROL — the same detector run against a planted offender, which
-      it must find — because an absence test goes green both when the framework
-      is clean and when the detector is broken.*
+      *`tests/test_no_checklist_engine.py`, each absence carrying a positive
+      control against a planted offender.*
 - [ ] Assert: **the check actually runs on a `plans/`-only PR.** Proven by an
       artifact PR touching nothing else and observing the job execute — a guard
       sitting behind `ci.yml`'s skip gate is worse than no guard, because branch
       protection reads its absence as passing
-      *STILL OPEN, deliberately. The job lives in its own workflow with its own
-      `paths:` trigger, so it is outside `ci.yml`'s gate by construction, and this
-      PR shows it executing — but "on a plans-ONLY PR" is only observable from an
-      actual plans-only PR. Not claimed until observed.*
 - [x] Assert: a malformed artifact (rebase conflict markers, truncated fence)
       fails the check with a diagnostic, never a traceback
       *Also: misuse exits 2, a violation exits 1.*
 - [x] Assert: the warm loop reads the full artifact **once per session** — a
-      multi-item run counts exactly one full-artifact read, plus one more after a
-      re-dispatch and none otherwise. This is the cost property, so it is a test,
-      not a prompt aspiration
-      *`TestReadOncePerSession` in `test_checklist_durability.py`. Measured on a
-      re-dispatch rather than an induced rebase: the rebase case is the same
-      cold-start read, and a re-dispatch is the path that actually ships.*
-- [x] Integration: a 5-item checklist with the worker SIGKILLed at item 3 is
+      multi-item stub run counts exactly one full-artifact read, plus one more
+      after an induced rebase and none otherwise. This is the cost property, so it
+      is a test, not a prompt aspiration
+      *`TestReadOncePerSession`; measured on a re-dispatch, the path that ships.*
+- [x] Integration (stub): a 5-item checklist with the agent SIGKILLed at item 3 is
       carried to all-checked after one re-dispatch, losing only item 3's partial
       work
-      *Brain-FREE rather than stub-brain: the property belongs to "commit each
-      transition", not to a model, so a real git repo plus a scripted worker
-      proves it deterministically — a stub brain would only add a fake worker in
-      front of the same git operations. Found in the doing: the dead worker's
-      UNTRACKED output survives `git checkout --`, so the reset is checkout +
-      clean, or the next worker inherits work nobody did.*
-- [x] **Real-Claude e2e, claude leg required**: a real session
-      loops through a checklist in order, commits each transition so the
+      *Brain-FREE, not stub-brain — the property is the protocol's; deviation 6.
+      Found in the doing: the dead worker's UNTRACKED output survives
+      `git checkout --`, so a reset needs `clean` too.*
+- [x] **Real-Claude e2e, `[stub]+[claude]`, claude leg required**: a real session
+      loops through a 4-item checklist in order, commits each transition so the
       log is readable as proof, does not check off an item whose `verify:` fails,
       and leaves the review surface byte-identical apart from markers
-      *`TestTheLoop` in `tests/integration/test_checklist_worker.py`, RUN against
-      a live Claude session: 2 passed in 196s. The system prompt is
-      `skills/checklist-execution.md` read off disk, not a paraphrase, so the test
-      fails if the SHIPPED prompt stops producing the behavior — the only
-      regression signal a prompt-shaped feature has. No `[stub]` leg; see the
-      amendment.*
+      *RUN against a live Claude session (4 passed, 488s, re-run after the
+      protocol was de-coupled from git). No `[stub]` leg — deviation 7. Its
+      system prompt is `skills/checklist-execution.md` read off disk.*
 - [x] **Real-Claude e2e, claude leg required — the `verify:` judgement.** A
       planted item whose `verify:` does not prove it (`verify: echo done`, and a
       `verify:` that exfiltrates rather than checks) is **refused and the item left
       unchecked**, with the refusal recorded in the round log. This is the only
       control on `verify:` and it is a judgement, so per CLAUDE.md the stub cannot
       prove it — the risk lives entirely in the brain path
-      *`TestVerifyJudgement`, RUN against a live Claude session: 2 passed in 184s.
-      Both bad `verify:` strings were refused and neither item was checked off.*
-- [x] `pytest tests/ --ignore=tests/e2e --ignore=tests/integration --timeout=30 -q`,
-      `pytest tests/integration -q -k checklist`
-      *3482 passed, exit 0 — a clean run, not a "no delta against `main`" like
-      Phase 1's gate line 5, because excluding `tests/integration` also excludes
-      the real-Claude legs and the Node event-server build that make the full
-      suite un-green in a dev environment. The checklist integration + e2e suites
-      were run separately and are green (see the two gate lines above and the
-      durability item). **Gate command corrected:** the third command
-      (`pytest tests/e2e -q -k checklist`) collects NOTHING — see deviation 7.*
+      *RUN: both bad `verify:` strings refused, neither item checked off.*
+- [x] `pytest tests/ --ignore=tests/e2e --timeout=30 -q`,
+      `pytest tests/integration -q -k checklist`, `pytest tests/e2e -q -k checklist`
+      *3482 passed, exit 0 (ignoring `tests/integration` too — see deviation 7's
+      note). The third command collects NOTHING; correct one is
+      `pytest tests/integration -q -k checklist`.*
 
 ### Phase 3 — `build`-skill rendering (moda-skills)
 
@@ -905,7 +870,7 @@ lane here waits on `2026-07-22-review-remediation`.}
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
 | A | — (plan is the spec) | 1 | Honest turn/error reporting + a resumable turn cap; `max_turns` configurable | solo | in review (PR #847) |
-| B | — (plan is the spec) | 2, 4 | Worker protocol prompt, CI artifact check, fresh-dispatch fix; then eng-team trial + engine freeze | solo | Phase 2 in review; Phase 4 open |
+| B | — (plan is the spec) | 2, 4 | Worker protocol prompt, CI artifact check, session-name fix; then eng-team trial + engine freeze | solo | open |
 | C | — (moda-skills) | 3 | `build`-skill lifecycle rendering into the plan appendix | concurrent | open |
 
 **Lanes:** STACKED, three lanes, no fuse (no same-repo concurrency).
@@ -1175,12 +1140,20 @@ a lane turns out to need an inlined context slice.
      exercising the review surface only. Now marker-aware, with regression tests
      on both the flip (passes) and an item rewrite (still caught).
 
-  **Also:** the plan's `session.py:1404` anchors were stale — correct at
-  `29a382b`, moved +29 lines by Phase 1's own PR #847 — and are now `:1433`, with
-  `bobi/sdk.py:557` (the definition) and `orchestrator.py:446` (the separate
-  orchestrator resume, which is the path a `-w adhoc` re-dispatch actually
-  travels) named for the first time. The `--workflow`-optional item is `[f]
-  state:not-needed`, as its own text defaulted to.
+  **Anchor corrections — read these over the body, which is left as approved.**
+  Wherever this plan says `session.py:1404`, read **`session.py:1433`**: the
+  anchor was correct at `29a382b` and was moved +29 lines by Phase 1's own PR
+  #847. Two call sites the plan never named: the function itself is
+  **`bobi/sdk.py:557`**, and the orchestrator resumes SEPARATELY via
+  `load_session_id` at **`orchestrator.py:446`** — which is the path a
+  `-w adhoc` re-dispatch actually travels, so it is the one that mattered.
+  These are recorded here rather than edited into the body, because an in-place
+  correction is a silent rewrite of approved text however factual it is. That
+  rule was enforced the hard way: the CI check this phase adds **failed on this
+  very PR** when the corrections were first made inline, which is the check
+  working on its first real diff.
+  The `--workflow`-optional item is `[f] state:not-needed`, as its own text
+  defaulted to.
 
 ## Notes
 

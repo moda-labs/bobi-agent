@@ -46,13 +46,28 @@ appendix() {
   awk -v fence="$FENCE" 'seen { print } $0 == fence { seen = 1 }'
 }
 
-# Collapse a marker transition to a single token so a diff sees past it.
-# `- [ ]` / `- [wip]` / `- [x]` / `- [f] state:<tag>` all normalize to `- [@]`,
-# which is what makes this comparison marker-AWARE rather than a plain diff.
-# The optional state tag is included because tagging an [f] is the one marker
-# transition that legitimately adds text above the fence.
+# Collapse the STATE fields of a plan to fixed tokens so a diff sees past them.
+# Everything else above the fence is approved prose and must survive verbatim.
+#
+# Two things count as state rather than prose:
+#
+#  - A checklist marker. `- [ ]` / `- [wip]` / `- [x]` / `- [f] state:<tag>` all
+#    become `- [@]`, which is what makes this comparison marker-AWARE rather
+#    than a plain diff. The optional state tag rides along because tagging an
+#    [f] is the one marker transition that legitimately adds text.
+#  - The `**Status:**` line. Every plan transitions Draft -> Approved -> done,
+#    and a builder flipping it is doing the same bookkeeping as flipping a
+#    marker. Freezing it would make the check unusable on the exact PRs that
+#    advance a plan.
+#
+# Deliberately NOT normalized: anything else. A stale line reference, an item's
+# wording, a gate command that turned out to be wrong — those are corrected by a
+# dated amendment, never edited in place, because an in-place edit is how the
+# reviewed document and the built one silently diverge.
 normalize_markers() {
-  sed -E 's/^([[:space:]]*)- \[(x| |wip|f)\]([[:space:]]+state:[a-z][a-z0-9-]*)?/\1- [@]/'
+  sed -E \
+    -e 's/^([[:space:]]*)- \[(x| |wip|f)\]([[:space:]]+state:[a-z][a-z0-9-]*)?/\1- [@]/' \
+    -e 's/^(>?[[:space:]]*\*\*Status:\*\*).*/\1 [@]/'
 }
 
 changed_plans="$(git diff --name-only --no-renames "$BASE" "$HEAD" -- 'plans/*.md' || true)"
