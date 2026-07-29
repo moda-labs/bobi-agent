@@ -24,14 +24,20 @@ This skill is the *generic* protocol. A team layers its own lifecycle on top
 
 One file. No sidecar, no second state file, no separate journal.
 
-It has **two surfaces**, split by a fence:
+It has **two surfaces**, split by a fence. The fence is the first line in the
+file that is exactly ```` ```checklist ````; everything below it is the
+appendix, to end of file:
 
 ```text
-  <design, problem, decisions, the checklist>     <- review surface
-  ```<fence>                                       <- everything below is
-  <rendered items, round log>                          appended, never edited
-  ```
+<design, problem, decisions, the checklist>   <- review surface: frozen
+
+```checklist
+<rendered items, round log>                   <- appendix: appended, never
+                                                 edited in place
 ```
+
+A file with no ```` ```checklist ```` line has no appendix and is not under
+checklist execution yet — it is an ordinary plan document.
 
 **The review surface is frozen.** Above the fence, the only byte you may
 change is the marker character inside an existing `- [ ]`. Not the wording of
@@ -52,10 +58,22 @@ because a reviewer reads it as a chronology.
 | `- [x]` | done, and its `verify:` passed |
 | `- [f]` | failed or blocked — **always** with a machine-readable state tag |
 
-An `- [f]` records *why* in a form something other than a human can read, e.g.
-`- [f] state:blocked-on-human ...` or `- [f] state:verify-failed ...`. Prose
-alone is not enough: a stale `[f]` whose reason has silently changed is the
-defect this rule exists to prevent.
+An `- [f]` records *why* in a form something other than a human can read: the
+marker is immediately followed by `state:<tag>`, e.g.
+
+```text
+- [f] state:blocked-on-human The API key rotation needs an owner decision
+- [f] state:verify-failed pytest is red on an unrelated import error
+- [f] state:superseded Phase 2 replaces this item wholesale
+```
+
+Prose alone is not enough. A stale `[f]` whose justification has silently
+changed — still marked failed, but for a reason that no longer holds — is
+exactly the defect this rule exists to catch, and it is invisible if the reason
+lives only in a sentence.
+
+Adding that tag is the one case where a marker transition also adds text above
+the fence, and it is permitted for that reason.
 
 ### Gate lines
 
