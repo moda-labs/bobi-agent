@@ -1,7 +1,11 @@
-# Checklist-driven execution: retire the workflow step machine
+# Checklist-driven execution: move eng-team off the workflow step machine
 
-> **Status:** Approved
-> **Tracking issue:** moda-labs/bobi-agent#852 · **Created:** 2026-07-26 · **Last amended:** 2026-07-26 (see Amendments)
+> **Status:** Draft — re-approval needed. Approved 2026-07-26; the 2026-07-29
+> revision changed the thesis (the engine is frozen, not deleted), removed the
+> recovery monitor, the `bobi/checklist` modules and the `proof:` field, and cut
+> Phase 4's scope to eng-team. That is past what the prior approval covers.
+> **Phase 1 stays `[x]` — it landed and is unaffected.**
+> **Tracking issue:** moda-labs/bobi-agent#852 · **Created:** 2026-07-26 · **Last amended:** 2026-07-29 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -9,23 +13,57 @@
 
 Move agent execution off the YAML step machine and onto a single plan file that
 is both the human-reviewable design document and the agent's working checklist.
-An agent reads it, does the next unchecked item, proves the item, checks it off,
-commits, and repeats until done or blocked. Nothing orchestrates it; the loop is
-prompt text.
+An agent reads it once at session start, then does the next unchecked item,
+proves the item, checks it off, and commits — repeating item by item until done
+or blocked. Nothing orchestrates it; the loop is prompt text.
+
+**This initiative adds no execution engine, and stops feeding the one it
+replaces.** That is the test every item must pass: a change that adds framework
+code is suspect until it has argued for itself. The net across four phases is a
+prompt, a CI check, one bug fix — not a new subsystem wearing a nicer artifact
+format.
+
+**The step machine is deprioritized, not deleted (2026-07-29, Zach).** Deleting
+it in the same phase that trials its replacement would make the trial's stop
+criteria meaningless: "halt and amend" is not available once the fallback is
+gone. So eng-team — the only fleet consumer, and really only two substantive
+workflows, `issue-lifecycle` (11 steps) and `pr-closed` (4) — moves to
+checklists; the example packs stay on the engine and become its regression
+coverage; and the engine is **frozen**: no new step types, no new features, bugs
+fixed only where they break a live pack, every new automation authored as a
+checklist. Deletion gets a **mechanical trigger rather than a date** (Phase 4),
+because this repo's record with "remove it next release" is six compat shims
+still live four to five releases past their stated window.
+
+**Why prompts rather than code.** A prompt is the most adaptable form of
+engineering available: it changes by editing text, carries no schema, no
+migration and no deprecation window, and it gets better for free as models get
+better. Framework code does the opposite. Every control-flow decision baked into
+`bobi/` is an architectural commitment made once, for every team, that each
+future agent inherits whether or not it still fits. The step machine is exactly
+that: route conditions, handoff contracts and await/resume are decisions frozen
+into a language weaker than the plan file they were duplicating.
+
+**Why this is tractable now and was not a year ago.** The design rests on a model
+staying on track across long multi-step work without an external driver holding
+its place. That was not a safe assumption when the step machine was written, and
+the machinery in `bobi/` is a reasonable response to the models of the time — it
+is being removed because it has been outgrown, not because it was wrong. The
+corollary is that this is an assumption with a shelf life in both directions, so
+Phase 4 tests it against a real baseline rather than asserting it.
 
 The goal is **flexibility first, durability second**. Flexibility: the lifecycle
 lives in prompts and skills, changeable by editing text, instead of in a second
 control-flow language that duplicates the plan badly. Durability: the state is a
 committed file, so a dead session loses at most its current item.
 
-The 10x version here was *less machinery*, and finding that took three rounds of
-review. Successive drafts of this plan proposed a driver process, a typed run
-record, a lease module, a native-action executor, and a budget accounting layer.
-All of it is gone. What survives is one code change (make a turn-cap hit
-resumable), one small parser, one default monitor, and prompt text — because the
-framework already has the pieces: the session registry knows what is alive, the
-monitor scheduler is a mechanical tick that spawns agents, and the director is
-already good at deciding whether a stalled unit needs a poke.
+The 10x version here was *less machinery*, and finding it took four rounds of
+review. Successive drafts proposed a driver process, a typed run record, a lease
+module, a native-action executor, a budget accounting layer, a recovery monitor,
+an artifact parser inside `bobi/`, and a three-verb CLI. All of it is gone. What
+survives **in the framework** is one landed change (Phase 1: make a turn-cap hit
+resumable) and one fix (vary the session name per dispatch). Everything else is a
+prompt, a skill, and a CI check.
 
 **A correction to the motivation, up front.** An earlier draft argued this was
 needed to escape the 200-turn cap. That is false: the cap is per prompt,
@@ -122,32 +160,68 @@ agent as its first step when none exists. It carries the design (human-readable,
 reviewable), the checklist, the proof of each item, and the accumulated research
 and decisions. There is no sidecar, no second state file, and no separate journal.
 
-**The loop is prompt text, not a program.** The worker is told: read the plan;
-re-verify the last completed item from its recorded proof; take the next unchecked
-item; do it; run its `verify:`; check it off with proof; commit; repeat until
-everything is checked or an item blocks. Markers update live and each transition
-is committed — squash-merge means `main` never sees the churn, and the branch
-lineage is a free proof-of-work trace on the PR.
+**The loop is prompt text, not a program**, and it has two phases. **On session
+start** — a first dispatch, or any re-dispatch after a death — the worker reads
+the plan and re-verifies the last completed item **by reading the branch's
+commits**, never by mutating the tree. **Per item thereafter** it takes the next
+unchecked item, does it, runs its `verify:`, checks it off, and commits. It does not re-read the
+artifact and does not re-verify earlier items: within one session the worker made
+every change itself, so continuity is its own context, not a file it reloads.
+Markers update live and each transition is committed — squash-merge means `main`
+never sees the churn, and the branch lineage is a free proof-of-work trace on
+the PR.
 
-**Recovery is a monitor plus the director, not a driver.** The one thing prompt
-text cannot do is restart itself after its process dies. That does not need new
-machinery: a scheduled monitor enumerates in-progress units (unchecked items,
-liveness from the existing session registry) and publishes a finding; the
-director exercises judgement on it. This is the framework's existing detect→publish
-path. The director is demonstrably good at exactly this call — on 2026-07-26 it
-declined to dispatch onto PR #847 because *"the owning worker is still live…
-intermediate red CI on a draft bot PR is the live owner's to self-heal"*, which a
-mechanical no-progress rule would have gotten wrong. `stall-recovery.yaml` is
-deleted rather than ported.
+**The per-session split is load-bearing for cost**, which is why it is stated
+here rather than left to the template. Both cold-start steps are *resume*
+operations: re-reading orients a worker that has no context, and re-verifying
+exists so a fresh worker can trust a **predecessor** — within a session the
+worker is its own predecessor. Paying them per item was the shape of the driver
+this design deleted; a stateless process must reload state each tick, a
+continuous session must not. On this plan's own fixture
+(`2026-07-22-review-remediation.md`, ~16.7k tokens, 255 items) a per-item
+re-read costs ~4.3M tokens before any work is done — superlinear, since the
+round log grows in the same file — and puts 255 copies of the artifact in the
+transcript, forcing exactly the `context_cap` rotation that Problem 6 exists to
+prevent. The artifact is re-read only when git moved it underneath the session
+(rebase, pull, conflict resolution): never on a timer, never per item. A later
+item breaking an earlier one's `verify:` is caught by the closeout sweep (Phase
+4's gate re-runs every checked `verify:`), not by re-verifying each iteration.
 
-**Proof is a commit range, never a re-derivation.** An item's proof is
-machine-resolvable — `proof: <test-sha>..<fix-sha>` — so failing-test-first is
-provable read-only from history (`git log`), not by reverting source in a scratch
-tree. This is load-bearing: it removes Problem 5's entire cost class, it gives
-resuming workers something to trust without touching the tree, and it makes proof
-un-fakeable (a commit ordering either resolves or it does not). **The `build`
-skill's rendering must never emit an item that re-derives what history can
-prove.**
+**Recovering a dead worker is out of scope — it is a framework concern, not an
+execution-model one.** The one thing prompt text cannot do is restart itself
+after its process dies, and this plan does not try to. What it owes recovery is
+the *durable state that makes recovery cheap*: the artifact is committed per
+item, so a re-dispatch — by a human, or by whatever backstop the framework grows
+— resumes from the last checked item and loses at most one item's partial work.
+That property is delivered by the artifact itself, and Phase 4's induced-death
+trial is what proves it.
+
+Detection and restart belong with the framework's existing liveness work
+(`plans/2026-07-23-dead-transport-liveness-backstop.md`, #837), which is building
+the "is this agent actually alive?" signal and the operator surfaces that show
+it; a checklist-worker backstop should key off that signal rather than invent a
+second one. Until then the operator reads the file — units with unchecked items
+*are* the in-progress set, and the artifact is a markdown document built to be
+read — and a human decides. Earlier drafts put a scheduled monitor here, enumerating in-progress
+units and publishing a finding for the director to judge. It is removed: it
+duplicated a framework concern inside an execution-model plan, and it carried an
+unresolved ownership question that the trial is better placed to answer than a
+design argument is.
+
+**Proof is the commit history — there is no `proof:` field.** Problem 5's cost
+came from a worker having *"no durable record of what the predecessor had
+proven, so it re-derived instead of reading."* The durable record is the per-item
+commits the worker already makes: a resuming worker runs `git log` and reads
+`test: reproduce X` followed by `fix: X`, exactly as an engineer picking up
+someone else's branch does. Earlier drafts added a machine-resolvable
+`proof: <test-sha>..<fix-sha>` field on top of that. It is **removed**: it
+denormalizes history into a field that goes stale — Phase 1 proved this, its
+ranges rotated on the first rebase — and it was designed for a machine to read,
+back when a driver, then a parser, then a CI assertion existed to read it. All
+three are gone. What actually removes the cost class is the *rule*, which stays
+and is stated in both the worker protocol and the rendering: **never re-derive
+what git history can already prove.** Failing-test-first is proven by reading the
+log, never by reverting source in a scratch tree.
 
 **Two surfaces, one file.** The review surface (Purpose → Notes) is
 human-authored and machine-read-only except for the marker character inside an
@@ -164,29 +238,43 @@ trivially true because nothing was checkable, without rewriting approved plan te
 
 **Security rules that survive however thin the machinery gets.** `verify:` is a
 shell string in a file that agents write and that can arrive from a **public**
-repo — `agents/eng-team/agent.yaml:97-101` auto-dispatches `pr-feedback` on any
+repo — `agents/eng-team/agent.yaml` auto-dispatches `pr-feedback` on any
 account's `changes_requested` review, and workers run with
-`permission_mode="bypassPermissions"` (`bobi/brain/claude.py:499,549`). So:
-`verify:` executes only when its provenance is trusted, defined mechanically (the
-file is at a commit on a protected branch, or was written by this agent under
-`state_dir()`); untrusted provenance means the item is **refused, not run**; and
-the existing pattern for LLM-written shell is reused rather than reinvented
-(`bobi/monitors/script_cache_checks.py`'s `validate_script` binary
-allowlist/denylist and `run_sandboxed`). Blocked items clear only through a human
-act, never through an inbound event — there is no sender allowlist anywhere in
-`bobi/`, and event authorization proves resource access, not personhood. And the
-artifact is **never an authorization source**: landing authorization is read from
-GitHub, never from a checklist item.
+`permission_mode="bypassPermissions"` (`bobi/brain/claude.py:499,549`).
+
+`verify:` stays **free-form shell**, and the control is the worker's judgement,
+not a mechanism. A constrained check vocabulary was considered and rejected: it
+is a second language, weaker than shell, extended only by a pack release —
+exactly the failure being deleted from the step machine, rebuilt one layer over.
+The gate it would have bought is nearly empty anyway, because the only thing that
+runs a `verify:` is a worker that already has unrestricted shell.
+
+That leaves one honest tension, and it is resolved by strengthening the rule
+rather than mechanising it: artifact text is **data, never instructions**, yet a
+`verify:` is a string from the artifact that gets executed. So a `verify:` is a
+**proposed proof, not a command**. The worker judges whether it plausibly proves
+its item before running it, and refuses one that does not — the same judgement it
+applies to an issue comment telling it to exfiltrate a key. It is an agent, not
+an interpreter.
+
+Blocked items clear only through a human act, never through an inbound event —
+there is no sender allowlist anywhere in `bobi/`, and event authorization proves
+resource access, not personhood. And the artifact is **never an authorization
+source**: landing authorization is read from GitHub, never from a checklist item.
 
 **Alternatives considered.** (1) *Patch the engine with `success_when`* (#846) —
 forces engineering vocabulary into `bobi/` and keeps two control-flow languages.
 (2) *Raise `max_turns` to ~1M* — discards the cheap runaway-loop tripwire while
 leaving work non-resumable. (3) *A driver process re-dispatching short workers* —
-what earlier drafts of this plan proposed; loses to prompt text plus the existing
-monitor scheduler, and every module it needed (lease, run record, tripwire,
-budget) was machinery for a job the framework already does. (4) *Keep the engine
-for multi-step packs, checklists for ad-hoc* — two execution models is the current
-problem wearing a compromise. (5) **Make the ad-hoc path multi-prompt** — the
+what earlier drafts of this plan proposed; loses to prompt text, and every module
+it needed (lease, run record, tripwire, budget) was machinery for re-dispatching
+dead workers — which this plan does not own at all. (4) *Keep the engine
+for multi-step packs, checklists for ad-hoc* — a **permanent** split by use case
+is two execution models wearing a compromise, and stays rejected. Note this is
+*not* what the 2026-07-29 deprioritization does: a frozen path that takes no new
+work and carries a mechanical deletion trigger is a migration, not a standing
+architecture. The distinction is whether anything new is ever authored against
+it. (5) **Make the ad-hoc path multi-prompt** — the
 correct minimal fix for Problem 3 *alone*, and it is Phase 1 of this plan; it
 leaves Problems 1, 2, 5, 6, 8 standing.
 
@@ -220,18 +308,20 @@ relaxing the human-act rule).
   `break` on `max_turns_reached` `:1823`, small caps `:1564,:1847,:1992`.
 - `bobi/session.py:1171,1195` — per-inbox-message `client.query()`; `:1404`
   `load_resumable_session_id` (a re-dispatch reusing a session name resumes the
-  dead transcript — the monitor's dispatch must not).
-- `bobi/sdk.py` — `SessionEntry:230-258` (`cwd`, `run_key`, `status`, `pid`; **no
-  `branch` field**), `SessionRegistry:282`, `get_registry:500`, and
-  `list_active()` (used at `bobi/launch_admission.py:207`): the liveness signal
-  the in-progress monitor reads instead of inventing a lease. Note
-  `bobi/registry.py` is the *pack* registry, unrelated.
-- `bobi/monitors/scheduler.py` (1472) — `_spawn_monitor_agent:256`,
-  `_load_framework_checks:84`; `start():617` is a `daemon=True` thread inside the
-  manager (`bobi/service.py:613-617`).
+  dead transcript — **any** re-dispatch must not, human or automated).
+- `bobi/subagent.py:1063-1070` — launch admission refuses a session name whose
+  registry entry is `starting`/`running`/`idle` (*"A run is already active"*).
+  This is why **D029** is in scope: an entry stuck `running` after a crashed
+  connect blocks re-dispatch of that unit forever, and a human recovering by hand
+  hits the same wall an automated one would.
 - `bobi/monitors/script_cache_checks.py` (1139) — `validate_script`,
-  `run_sandboxed`, `CapabilityEnvelope`: the existing pattern for LLM-written
-  shell, reused for both the monitor's check and the `verify:` gate.
+  `run_sandboxed`, `CapabilityEnvelope`: the framework's existing pattern for
+  LLM-written shell. **Deliberately NOT reused here.** It exists because the
+  monitor scheduler executes generated scripts *unattended*; a `verify:` is run
+  only by a worker that already has unrestricted shell, so wrapping it would add
+  a sandbox that constrains nothing. Listed so the omission reads as a decision
+  rather than an oversight — and it is the thing to reach for if the unattended
+  tripwire in Phase 2 ever fires.
 - `bobi/cli.py` — `subagents launch:2799` (`--workflow` `required=True`, second
   guard in `_dispatch_agent:2853-2855`), `_run_agent_wait:2927` (adhoc-only
   `:2931`), `workflows` CLI group `:2201-2327` (registered `:3409`,`:3419`).
@@ -249,30 +339,41 @@ relaxing the human-act rule).
 - `docs/{WORKFLOW_ENGINE.md:344, SECURITY.md, MONITORS.md}`;
   `.github/workflows/ci.yml:26-66` (skips heavy jobs on `plans/`-only changes — a
   guard job must not live behind that gate).
-- Tests broken by the cutover: `test_orchestrator.py` 1934,
+- The engine's test surface — `test_orchestrator.py` 1934,
   `test_setup_authoring.py` 936, `test_validate.py` 717, `test_notify_step.py` 569,
   `test_cleanup.py` 574, `test_variables.py` 390, `test_setup_digestion.py` 305,
   `test_workflow_state.py` 273, `integration/test_workflow_orchestrator.py` 271,
   `test_triggers.py` 235, `integration/test_effort_selection.py` 214,
   `integration/test_cross_model_resume.py` 201, `test_cli.py:221`,
-  `test_dogfood_content_review_pack.py:43`, `workflow_utils.py` 19 — **~6,900 lines**.
+  `test_dogfood_content_review_pack.py:43`, `workflow_utils.py` 19 — **~6,900
+  lines**. Earlier drafts listed these as "broken by the cutover" and made their
+  per-file disposition the single largest item in the plan. **Under the
+  2026-07-29 freeze none of it is touched:** the engine keeps running the example
+  packs, so these tests keep covering live code and keep passing untouched. This
+  was the biggest cost in the initiative and it is now zero.
 - `plans/2026-07-22-review-remediation.md` (9 phases, 251 items) +
   `-findings.md` — the live plan this collides with (Q1), and the multi-file-spec case.
 
 ### New
 
-- `bobi/checklist/artifact.py` — parse the plan file (items, markers, `verify:`,
-  `judgement:`, `proof:`, the appendix fence); project marker updates back;
-  enforce the review-surface freeze. The whole framework module.
-- `bobi/checklist/verify.py` — provenance gate + sandbox for `verify:`.
-- `bobi/templates/checklist-worker.md` — the worker loop prompt (override path and
-  precedence specified; `bobi/templates/` has no override mechanism today).
-- A framework-default `in-progress-work` monitor definition + its check script.
-- `docs/CHECKLIST_EXECUTION.md`.
-- `tests/fixtures/plan-snapshot.md` — frozen fixture (the live plan is mutating
-  under lanes A/B/E).
-- `tests/test_checklist_*.py`, `tests/integration/test_checklist_loop.py`,
-  `tests/e2e/test_checklist_worker.py`.
+**No new Python in `bobi/`.** Earlier drafts listed `bobi/checklist/artifact.py`
+and `bobi/checklist/verify.py` here; both encoded a Moda lifecycle convention
+inside the framework and are removed. The framework's *code* share of this
+initiative is one bug fix. What it does gain is **documentation** — a skill and a
+doc — which is the whole point: the lifecycle moves into prose that anyone can
+edit.
+
+- `skills/checklist-execution.md` — the generic worker protocol. Framework-level
+  markdown guidance alongside `bobi.md` and `create-agent.md`, **not** code and
+  **not** Moda process. Add it to CLAUDE.md's Reference Docs list in the same PR.
+- `.github/workflows/` — the artifact check job (marker-aware review-surface
+  diff, `[f]` state tag, gate-line classification). Shell and
+  git, outside the plans-only skip gate. **The only non-agent verification.**
+- `docs/CHECKLIST_EXECUTION.md`; `docs/SECURITY.md` updates.
+- `tests/fixtures/plan-snapshot.md` — frozen fixture for the check (the live plan
+  is mutating under lanes A/B/E).
+- `tests/integration/test_checklist_loop.py`, `tests/e2e/test_checklist_worker.py`
+  — the loop is proven end-to-end, since there is no module to unit-test.
 - (`moda-skills`) a new `build` rendering stage.
 
 ## Questionables
@@ -291,6 +392,32 @@ relaxing the human-act rule).
   and this plan adopts rather than forks them.
   **Decision (2026-07-26, Zach):** (b) — descope its Phase 2 as superseded, keep
   D092 and Q062/D071 as shared infrastructure this plan consumes.
+  **Revised 2026-07-29: this plan now consumes none of it, and is not blocked by
+  that plan at all.** The dependency existed because an artifact parser in
+  `bobi/` was going to write markers back atomically and therefore needed D092's
+  `fsutil` helper. There is no parser and no write path — the worker edits with
+  its own file tools — so `fsutil` is not a dependency here. **Q062/D071** (the
+  `claim()` crash window) is `WorkflowRun` state that Phase 4 deletes outright, so
+  it is moot for this plan. **D029** (registry entry stuck `running`) stays worth
+  fixing — a stuck entry makes `bobi/subagent.py:1063-1070` refuse re-dispatch of
+  that unit forever, which blocks a human recovering by hand — but it is an
+  ordinary framework bug on its own merits, not a gate on this work. **Net: Lane
+  B no longer waits on `2026-07-22-review-remediation`.**
+  **The supersession half needs re-reading after the 2026-07-29 freeze, and this
+  is the pointer.** Nine of its Phase 2 items were marked `[f]`-superseded on the
+  stated grounds that *"the step machine is deleted"*. It is not deleted, only
+  frozen — so the marker still stands but the **reason changes** from "the code
+  is going away" to "the code is frozen and takes fixes only where it breaks a
+  live pack." That flips at least one item back into scope: **D015**
+  (`dogfood-content-review.yaml`'s `issues_count > 0` uses an unsupported `>`) is
+  a broken route in a pack this plan deliberately **keeps** on the engine, so it
+  meets the freeze's own repair bar. **D060** (that pack's routing table naming
+  workflows that do not exist) is arguably the same. **D016** stays moot —
+  `pr-closed.yaml` is eng-team and is being migrated. Engine internals
+  (D005/D027/D024/D025/D028/Q017/D026) stay `[f]`: frozen means frozen. Anyone
+  reopening that plan reads this paragraph first — a `[f]` whose justification
+  has silently changed is exactly the kind of stale marker this house treats as a
+  defect.
 - **Q2 — Does the accumulated context survive the merge?** The plan file
   accumulates research, decisions, and dead ends as *"a reusable artifact"*. Two
   readings, and they pull opposite ways: if the value is reuse *within* a run
@@ -307,31 +434,25 @@ relaxing the human-act rule).
   round log to a short summary before the PR merges. The full trace stays on the
   PR and in branch lineage; `main` carries the summary. "Reusable artifact" means
   reusable across worker lives *within* a run.
-- **Q3 — What is the unit of ownership for the in-progress monitor?** The monitor
-  must not dispatch a second agent onto a unit whose agent is alive. The session
-  registry knows liveness per *session*, but the mapping from "plan artifact" to
-  "the session working it" is not recorded anywhere today. Options: (a) derive it
-  from what the registry already carries, adding no new state; (b) record the
-  owning session name in the artifact's appendix; (c) a real lease file.
-  Recommendation: **(a)**.
-  **Decision (2026-07-26, Zach):** (a), with the mechanism corrected after
-  verification. `SessionEntry` (`bobi/sdk.py:230-258`) carries `cwd`, `run_key`,
-  `status`, and `pid` but **no `branch` field**, so ownership is resolved by
-  **`cwd` containment**: an artifact is owned when a live entry's `cwd` contains
-  it — which holds because `build` Stage 1 works inside
-  `worktrees/<stem>-<slug>/` and the artifact lives in that worktree.
-  `run_key` carrying the plan stem is the **cross-repo fallback**, where the
-  artifact is not under the worker's `cwd` and containment cannot resolve.
-  Two constraints ride this decision: the monitor reads liveness via
-  `get_registry().list_active()` (`bobi/sdk.py:500`), and the dispatch path must
-  **vary the session name deliberately** — `session.py:1404`
-  (`load_resumable_session_id`) resumes a dead transcript if a re-dispatch reuses
-  a name, which would silently defeat the fresh-budget property.
+- **Q3 — ~~What is the unit of ownership for the in-progress monitor?~~
+  Withdrawn (2026-07-29, Zach): there is no monitor.** Recovering a dead worker
+  is a framework concern, not an execution-model one, so the question of which
+  live session owns which artifact does not arise in this plan. It was the
+  weakest decision in it — `cwd` containment resolves ambiguously when two lanes
+  of one plan run in two worktrees, since the artifact is committed to both
+  branches — and if a backstop is ever built on the framework's liveness signal
+  (#837), it should answer this with data from Phase 4's trial rather than
+  re-derive it here.
+  **One constraint survives the withdrawal** and moves into Phase 2 on its own
+  merit: the dispatch path must **vary the session name deliberately**, because
+  `session.py:1404` (`load_resumable_session_id`) resumes a dead transcript when
+  a re-dispatch reuses a name, silently defeating the fresh-budget property. That
+  bites the first time a human re-dispatches by hand, so it is not deferrable.
 
 ## Phases
 
 Phase 1 is independently valuable and should land regardless of the rest.
-Phase 2 depends on Q1's `fsutil` helper for its atomic writes.
+Phase 2 depends on nothing outside this plan (see Q1's 2026-07-29 revision).
 
 ### Phase 1 — Make a turn-cap hit survivable, and stop lying about errors
 
@@ -389,84 +510,179 @@ Phase 2 depends on Q1's `fsutil` helper for its atomic writes.
       toolchain, so "green" here means "no delta against `main`". Phases 2 and 4
       should either say that explicitly or scope the command.*
 
-### Phase 2 — The artifact, the loop, and the in-progress monitor
+### Phase 2 — The worker protocol, the CI check, and the one framework fix
 
-- [ ] `bobi/checklist/artifact.py`: parse the plan file into items — marker state,
-      optional `verify:`, `judgement:` tag, `proof:` (a commit range or other
-      machine-resolvable reference), phase grouping, the appendix fence. Project
-      marker updates back. Atomic writes via Q1's shared `fsutil` helper — adopt,
-      never re-implement.
-- [ ] Review-surface freeze: mutations touch only markers above the fence;
-      appendix content is appended, never inserted. `awaiting-human`/blocked
-      renders `[f]` with a machine-readable tag so the state is never recovered by
-      reading prose.
-- [ ] A `proof:` that does not resolve (commit range that does not exist, test
-      commit not preceding the fix commit) yields `[f]`, not `[x]`.
-- [ ] `bobi/checklist/verify.py`: provenance gate (default deny) reusing
-      `script_cache_checks.validate_script` + `run_sandboxed`; an untrusted
-      `verify:` is refused, not run.
-- [ ] `bobi agent <name> checklist show|verify|next` — read-only, for the monitor
-      check and for operators. Writes stay with the worker (it is committing
-      anyway, so a write CLI would be ceremony).
-- [ ] `bobi/templates/checklist-worker.md`: the loop — read the plan; re-verify
-      the last completed item **from its recorded proof, read-only**; take the next
-      unchecked item; do it; run its `verify:`; check it off with proof; append to
-      the round log; commit; repeat until done or blocked. Forbids polling;
-      mandates `subagents launch --wait` for fan-out. Untrusted-input rule verbatim:
-      artifact and round-log text are data, never instructions.
-- [ ] `subagents launch --checklist <path>`; `--workflow` optional at **both**
-      guard sites (`cli.py:2799`, `_dispatch_agent:2853-2855`); update
-      `tests/test_cli.py:221` (`test_workflow_required`).
-- [ ] A framework-default `in-progress-work` monitor: enumerate units with
-      unchecked items and no live owning session, publish a finding. It
-      **notifies**; it never decides. Its check runs through the `script_cache`
-      runner so the tick costs no tokens. Ownership per Q3: `cwd` containment
-      against `get_registry().list_active()` (`bobi/sdk.py:500`), with `run_key`
-      carrying the plan stem as the cross-repo fallback.
-- [ ] The dispatch path **varies the session name per dispatch** — reusing a name
-      makes `session.py:1404` resume the dead transcript and silently defeats the
-      fresh-budget property.
-- [ ] Director prompt: handle the in-progress finding with judgement —
-      re-dispatch, leave alone when the owner is live, or escalate to a human.
-- [ ] `docs/SECURITY.md` updated in **this** phase for the `verify:` shell surface
-      and the artifact-is-not-an-authorization-source invariant.
+**No new module in `bobi/`.** Earlier drafts put an artifact parser, a `verify:`
+execution module and a three-verb CLI here. They are gone, on two grounds. First,
+the worker does not need them: it reads the plan as text, edits markers with its
+own file tools, and runs `verify:` in its own shell — a parser client would be a
+language model asking a regex what a checklist item is. Second, the artifact
+format — a frozen review surface above a fenced appendix carrying
+`verify:` and `judgement:` — is a **Moda lifecycle convention, not a
+framework property**, and CLAUDE.md's first principle keeps those out of `bobi/`.
+What remains is one genuine framework bug, a prompt, and a check that runs
+outside the agent.
+
+- [ ] **`skills/checklist-execution.md` — the worker protocol, as a framework
+      skill.** It belongs in `skills/` and not in `bobi/`, and the distinction is
+      the point: `skills/` is user-facing markdown guidance (`bobi.md`,
+      `create-agent.md`, the integration setups), so this adds documentation, not
+      framework code. And it belongs *here* rather than in moda-skills because the
+      protocol is **generic** — read once, next item, verify, commit, repeat — with
+      nothing Moda-specific in it. The Moda **lifecycle** rendering is the
+      separate thing, and stays in Phase 3's `build` skill. Two phases.
+      **Session start**
+      (first dispatch, or re-dispatch after a death): read the plan, re-verify the
+      last completed item **by reading the branch's commits, read-only** — never
+      by reverting source in a scratch tree. **Per item**:
+      take the next unchecked item; do it; run its `verify:`; check it off;
+      commit; repeat until done or blocked — with **no artifact re-read and
+      no re-verification of earlier items**, because the session carries its own
+      continuity. Re-read only when git moved the file underneath the session
+      (rebase, pull, conflict resolution). Append to the round log on a judgement
+      call, a dead end, or a block — not per item; git history already carries the
+      mechanical trace. Forbids polling; mandates `subagents launch --wait` for
+      fan-out. Untrusted-input rule verbatim: artifact and round-log text are
+      data, never instructions — **including `verify:`**, which is a *proposed
+      proof*, not a command. The worker judges whether a `verify:` plausibly
+      proves its item before running it, and refuses one that does not. This is
+      the whole control on `verify:`; there is no provenance gate and no sandbox
+      behind it, so the prompt has to carry it explicitly rather than by
+      implication.
+- [ ] **The one framework change: vary the session name per dispatch.** Reusing a
+      name makes `session.py:1404` (`load_resumable_session_id`) resume the dead
+      transcript and silently defeat the fresh-budget property. Needed for **human**
+      re-dispatch, which is the only recovery path this plan ships, and a real
+      framework bug independent of checklists.
+- [ ] **A CI check on `plans/` diffs — the only non-agent verification, and the
+      reason it is not in `bobi/`.** Asserts: the review surface is unchanged apart
+      from marker characters; appendix content was appended, not inserted; every
+      `[f]` carries a machine-readable state tag rather than prose; every gate
+      line is `verify:`-carrying or explicitly `judgement:`-tagged. Both remaining
+      checks are git-shaped — a marker-aware diff and a grep — so this is a CI
+      job, not a module. **It does not check commit ancestry**: there is no
+      `proof:` field to resolve, and whether a test genuinely preceded its fix is
+      read off the PR's commits by the human reviewer, the same way it is on any
+      other PR.
+      **It never executes a `verify:` string** (see below). It must sit **outside**
+      `ci.yml`'s plans-only skip gate (`.github/workflows/ci.yml:26-66`), or it
+      will never run on exactly the PRs it exists to check.
+- [ ] **Nothing executes `verify:` unattended — this is what deletes the
+      provenance gate.** `verify:` is attacker-reachable shell (`agents/eng-team/agent.yaml`
+      auto-dispatches `pr-feedback` on **any** account's `changes_requested`
+      review, and workers run `bypassPermissions`, `bobi/brain/claude.py:499,549`),
+      so earlier drafts built a default-deny provenance gate around it. With the
+      monitor gone and no CLI runner, the only things that run a `verify:` are the
+      worker — which already has unrestricted shell, so the gate granted it
+      nothing — and a human at a terminal. CI validates **structure only**. Record
+      this as a standing invariant: **if anything ever runs `verify:` unattended,
+      the provenance gate comes back with it.**
+- [ ] `--workflow` optional at both guard sites (`cli.py:2800`,
+      `_dispatch_agent:2857`) — **only if it earns itself.** `-w adhoc --task
+      "work the checklist at <path>"` already works today and the second guard
+      already says so, making a `--checklist` flag a synonym rather than a
+      capability. Default is to skip this and change nothing.
+- [ ] `docs/SECURITY.md` updated in **this** phase: `verify:` is worker-executed
+      shell with no framework runner behind it, nothing executes it unattended,
+      and the artifact is never an authorization source.
 
 **Validation gate**
 
-- [ ] Failing-first: review-surface freeze holds on `tests/fixtures/plan-snapshot.md`,
-      and an attempt to write prose above the fence RAISES
-- [ ] Failing-first: a mid-rebase artifact (conflict markers) or a transiently
-      missing file makes the parser signal *retry*, never *escalate*
-- [ ] Failing-first: `[f]` without a state tag raises rather than defaulting
-- [ ] Failing-first: an unresolvable or mis-ordered `proof:` yields `[f]`
-- [ ] Failing-first: a `verify:` from untrusted provenance is refused, not run; a
-      denylisted binary is refused
-- [ ] Failing-first: an inbound event does **not** clear a blocked item; only a
-      human act does
-- [ ] Failing-first: the monitor does not report a unit whose owning session is
-      live; a re-dispatch does **not** resume the dead session's transcript
-      (assert distinct session ids)
+Phase 2 adds almost no code, so most of this gate proves the CI check does its
+job and that the framework stayed out of it. "Failing-first" is not used: nothing
+here fixes a defect on `main` except the session-name item, and a test that fails
+before its subject exists proves `ImportError`. The negative assertions get
+**mutation-proof** — remove the named guard, the test must fail — because a
+negative goes green both when the guard fires and when the path was never
+reached.
+
+- [ ] Mutation-proof: a diff editing prose **above the fence** fails the check,
+      against `tests/fixtures/plan-snapshot.md` — *mutant: drop the review-surface
+      comparison*
+- [ ] Mutation-proof: `[f]` without a machine-readable state tag fails —
+      *mutant: drop the tag assertion*
+- [ ] Mutation-proof: a re-dispatch does **not** resume the dead session's
+      transcript (assert distinct session ids) — *mutant: drop the session-name
+      variation*
+- [ ] **Assert by absence — this is how "we removed an engine" is proven:**
+      `grep -rn` shows **no** code path in `bobi/` that writes a checklist marker,
+      parses the artifact format, or executes a `verify:` string. If this ever
+      fails, the framework grew an execution engine again
+- [ ] Assert: **the check actually runs on a `plans/`-only PR.** Proven by an
+      artifact PR touching nothing else and observing the job execute — a guard
+      sitting behind `ci.yml`'s skip gate is worse than no guard, because branch
+      protection reads its absence as passing
+- [ ] Assert: a malformed artifact (rebase conflict markers, truncated fence)
+      fails the check with a diagnostic, never a traceback
+- [ ] Assert: the warm loop reads the full artifact **once per session** — a
+      multi-item stub run counts exactly one full-artifact read, plus one more
+      after an induced rebase and none otherwise. This is the cost property, so it
+      is a test, not a prompt aspiration
 - [ ] Integration (stub): a 5-item checklist with the agent SIGKILLed at item 3 is
       carried to all-checked after one re-dispatch, losing only item 3's partial
       work
 - [ ] **Real-Claude e2e, `[stub]+[claude]`, claude leg required**: a real session
-      loops through a 4-item checklist in order, records resolvable proof, does not
-      check off an item whose `verify:` fails, and leaves the review surface
-      byte-identical apart from markers
+      loops through a 4-item checklist in order, commits each transition so the
+      log is readable as proof, does not check off an item whose `verify:` fails,
+      and leaves the review surface byte-identical apart from markers
+- [ ] **Real-Claude e2e, claude leg required — the `verify:` judgement.** A
+      planted item whose `verify:` does not prove it (`verify: echo done`, and a
+      `verify:` that exfiltrates rather than checks) is **refused and the item left
+      unchecked**, with the refusal recorded in the round log. This is the only
+      control on `verify:` and it is a judgement, so per CLAUDE.md the stub cannot
+      prove it — the risk lives entirely in the brain path
 - [ ] `pytest tests/ --ignore=tests/e2e --timeout=30 -q`,
       `pytest tests/integration -q -k checklist`, `pytest tests/e2e -q -k checklist`
 
 ### Phase 3 — `build`-skill rendering (moda-skills)
+
+Phase 2 ships the **generic** protocol as a framework skill — how to work a
+checklist at all. This phase ships the **Moda-specific** half: what a unit of
+Moda engineering work contains. Keeping the line clean is what lets a
+non-Moda team adopt checklists without inheriting our lifecycle.
 
 - [ ] New `build` stage: render Stage 1–7 (worktree, implement, test, verify,
       document, adversarial review + fix, PR) into the plan's fenced appendix as
       items with concrete `verify:` lines. This is the lifecycle detail the `plan`
       skill does not emit.
 - [ ] **Never emit an item that re-derives what git history can prove.**
-      Failing-test-first is a commit-range proof, not a revert-and-rerun task —
-      this is what removes Problem 5's ~12%-of-budget cost.
+      Failing-test-first is read off the log, not re-run by reverting source in a
+      scratch tree — this is what removes Problem 5's ~12%-of-budget cost. It is
+      a rule in the rendering, not a `proof:` field: the commits are the record.
 - [ ] Gate-line classification: every gate line gets a `verify:` or an explicit
       `judgement:` tag; the rendering proposes, a human accepts.
+- [ ] **`verify:` is free-form shell — constrained by guidance, never by a
+      mechanism.** A named-check vocabulary (`verify: suite unit`, `verify: absent
+      <symbol> <dir>`) was considered and **rejected**: it is a second language,
+      weaker than shell, extendable only by a pack release, which is the step
+      machine's exact failure rebuilt one layer up. The range real gate lines need
+      settles it — `pytest` with three flags, a piped double-`grep`, `gh ... -q
+      .merged`, `bobi validate`, `cd event-server && npm test` — a vocabulary
+      covering that honestly is either enormous or leaky. So the skill **steers**
+      rather than restricts: prefer a suite run, an absence grep, or a `gh` query;
+      emit a command that would fail if the item were not done; never emit one
+      that re-derives what git already proves. Two judges sit behind it — the
+      human accepting the rendering, and the worker refusing an implausible
+      `verify:` at run time.
+- [ ] **Close the proof-idiom gap in `moda:plan` before rendering anything.** The
+      pack ships exactly one idiom for test rigor and it is bug-shaped:
+      `failing-test-first` appears in `plan`, `investigate` and `review`, while
+      `mutation`/`mutant` appears **nowhere in any skill** — and neither does any
+      guidance on proving a negative. That gap is what put 8 failing-first lines
+      on this plan's greenfield Phase 2: the red-team lens correctly demanded
+      non-vacuous proof of the security properties, and the only rigor word
+      available was the bug-shaped one. Add the missing idiom to
+      `plan/SKILL.md`'s Proof-of-work guidance and its rubric row, and to
+      `plan/template.md` beside the existing "Bugs get a failing test first" line.
+      This lands **before** the rendering work, because a rendering built on the
+      current vocabulary generates the defect into every future plan instead of
+      one author making it once.
+- [ ] Proof classification by claim shape, not by habit — the rendering picks the
+      idiom: a **bug** renders failing-test-first (a defect exists on the base
+      branch to reproduce); a **negative or security assertion** renders
+      mutation-proof with a **named mutant**; ordinary new behavior renders a
+      plain assertion. Never emit failing-first for code that does not exist yet —
+      that proves `ImportError`, not coverage.
 - [ ] Ad-hoc path: no plan → author one in the same format from the issue's
       acceptance criteria plus the lifecycle stages, **commit and push the branch**
       so a human can read it, and pause for input if the scope is ambiguous. One
@@ -481,56 +697,86 @@ Phase 2 depends on Q1's `fsutil` helper for its atomic writes.
 
 **Validation gate**
 
-- [ ] Rendering `tests/fixtures/plan-snapshot.md` produces an artifact
-      `checklist verify` accepts, every original gate line preserved and classified
+- [ ] Rendering `tests/fixtures/plan-snapshot.md` produces an artifact the **CI
+      artifact check** accepts, every original gate line preserved and classified
 - [ ] Rendering a real planless issue produces a valid artifact with lifecycle
       stages and acceptance criteria
 - [ ] **The review surface is byte-identical after rendering** (`git diff`
       confined to the appendix), and a human confirms the plan still reads
       top-down as a design document — `[f]` if it got harder to review
 - [ ] No rendered item asks a worker to revert source to prove a test
+- [ ] No rendered item asks for failing-first on code that does not exist on the
+      base branch; every rendered negative assertion carries a **named mutant**.
+      Proven by rendering one greenfield unit and one bug-fix unit and diffing
+      the idioms each produced
+- [ ] **Every rendered `verify:` would fail if its item were not done.** Spot-check
+      by rendering one unit, then reverting each item's work in a scratch tree and
+      confirming its `verify:` goes red. This is the only check on free-form
+      `verify:` quality, and it is a judgement call the reviewer makes — tag it
+      `judgement:`, do not pretend it is mechanical
+- [ ] No rendered `verify:` does anything other than check — no writes, no
+      network beyond a `gh` read, no `|| true`, no bare `echo`
 - [ ] The rendering runs against a **released** bobi carrying Phases 1–2 (name the
       release and the pin move)
 
-### Phase 4 — Trial with a real baseline, then cut over
+### Phase 4 — Trial on eng-team, then freeze the engine
 
-- [ ] Gate the `build` rendering behind a flag so **both** paths are live —
-      without it Phase 3 rewrites the engine's only consumer and nothing drives the
-      engine during the trial.
-- [ ] Publish the **engine baseline first**: run one lane the existing way, record
-      turns, wall-clock, spend, human interventions.
-- [ ] Run a comparable lane on the checklist model, with an **induced** worker
+Nothing is deleted here. The engine keeps running the example packs, which is
+what makes the stop criteria below real — "halt and amend" requires a fallback
+that still exists. Scope is **eng-team's 7 workflows**, and the substance is two
+of them: `issue-lifecycle` (11 steps) and `pr-closed` (4). The remaining five are
+single-step wrappers around a prompt.
+
+- [ ] Publish the **engine baseline first**: run one eng-team unit the existing
+      way, record turns, wall-clock, spend, human interventions.
+- [ ] Run a comparable unit on the checklist model, with an **induced** worker
       death (SIGKILL mid-item) — the "survived a death" evidence is otherwise
       unobtainable. Run one ad-hoc unit through the authoring path.
 - [ ] **Binary stop criteria, written before the trial:** halt and amend if spend
       exceeds baseline by >2×, human interventions exceed baseline, any item is
-      falsely checked off, or the review surface is ever violated.
-- [ ] Then cut over: per-step-type disposition table (route / await / notify /
-      action / agent / model / effort → replacement or explicit keep) before
-      deleting anything.
-- [ ] Migrate **all 14** workflows. `stall-recovery.yaml` is **deleted**, not
-      ported (the monitor + director replace it). Named explicitly:
-      `issue-lifecycle` (11), `content-lifecycle` (7), `pr-closed` (4),
-      `dogfood-content-review` (5), `research-task` (2), `daily-briefing` (2),
-      `request` (2), and the 8 single-step files.
+      falsely checked off, or the review surface is ever violated. **Restate the
+      spend criterion in checklist terms before the trial runs** — the baseline is
+      a multi-step run with a fresh budget per step, the checklist arm is one long
+      session with up to `MAX_TURN_BUDGET_RESUMES` continuations, so a naive
+      per-run comparison is not like-for-like.
+- [ ] **Migrate eng-team's 7 workflows and no others.** `issue-lifecycle` and
+      `pr-closed` become real checklists. `adhoc`, `build-failure`,
+      `merge-conflict` and `pr-feedback` are single-step prompt wrappers and
+      become plain adhoc dispatch — no checklist needed for a one-prompt job.
+      `stall-recovery.yaml` is **deleted**, not ported: it is a recovery
+      mechanism, and recovery is out of this plan's scope; the capability is
+      **handed to the framework liveness work (#837), named explicitly in the
+      PR** so it is not silently lost.
+- [ ] **The example packs stay on the engine** — `dogfood-content-review` (4) and
+      `personal-assistant` (3). They are not fleet load, and leaving them is what
+      keeps the engine's test suite meaningful and the fallback exercised.
 - [ ] `pr-closed.yaml`'s deterministic pieces become items naming commands
       (`verify: gh pr view <n> --json merged -q .merged`, a worktree-cleanup
       command) — determinism comes from the item text, not an LLM judgement.
-- [ ] `bobi/setup/authoring.py` emits checklists instead of `steps:`/`await:`;
-      update `tests/test_setup_authoring.py` (936) and `DESIGN.md` if the setup UI's
-      automation step changes.
-- [ ] Delete the step loop, `HandoffContract`, handoff validation, back-edge
-      validation, route/await conditions. **Keep `triggers.py`**; re-verify `${{}}`
-      interpolation consumers before deleting `variables.py`.
-- [ ] Retire or re-point the `workflows` CLI group (`cli.py:2201-2327`,
-      `:3409`, `:3419`).
-- [ ] Bump every touched pack version **and** `agents/registry.yaml`; update
+- [ ] **Freeze the engine, and define what frozen means** so it is enforceable
+      rather than an intention: no new step types, no new features, bugs fixed
+      only where they break a live pack, and **every new automation authored as a
+      checklist**. `docs/WORKFLOW_ENGINE.md` gets a deprecation banner pointing at
+      `docs/CHECKLIST_EXECUTION.md`; it is not deleted, because it still documents
+      running code.
+- [ ] **Write the deletion trigger now — a condition, not a date.** The engine is
+      deleted when nothing dispatches to it: `grep -rn "workflow:" agents/*/agent.yaml`
+      plus the fleet's packs returns no auto_dispatch rule naming a workflow, and
+      no pack ships `workflows/`. Recorded here because the house record on
+      "remove it next release" is six compat shims still live four to five
+      releases past their stated one-release window (see
+      `plans/2026-07-22-review-remediation.md` Phase 5).
+- [ ] `bobi/setup/authoring.py` emits **checklists for new automations** while its
+      existing `steps:`/`await:` parsing stays — new teams must not become new
+      engine consumers, but nothing already authored breaks. Update
+      `tests/test_setup_authoring.py` (936) additively and `DESIGN.md` if the setup
+      UI's automation step changes.
+- [ ] Bump `agents/eng-team` **and** `agents/registry.yaml`; update
       `agents/eng-team/roles/engineer/ROLE.md`.
-- [ ] Port or delete ~6,900 lines of tests with per-file disposition.
-- [ ] `docs/CHECKLIST_EXECUTION.md` replaces `docs/WORKFLOW_ENGINE.md`; update
-      `OVERVIEW.md`, `QUICKSTART.md`, `BUILDING_AGENT_TEAMS.md`, `EVENT_SERVER.md`,
-      `MONITORS.md`, `README.md`, `skills/bobi.md`, `skills/create-agent.md`,
-      `skills/linear-setup.md`.
+- [ ] `docs/CHECKLIST_EXECUTION.md` added (not replacing `WORKFLOW_ENGINE.md`);
+      update `OVERVIEW.md`, `BUILDING_AGENT_TEAMS.md`, `README.md`,
+      `skills/bobi.md`, `skills/create-agent.md` to present checklists as the
+      default and the engine as legacy.
 - [ ] Close #845/#846 and PRs #847/#848 with dated pointers (see Notes).
 
 **Validation gate**
@@ -541,30 +787,46 @@ Phase 2 depends on Q1's `fsutil` helper for its atomic writes.
 - [ ] Every checked item with a `verify:` re-passes on re-run; every
       `judgement:`-tagged item is explicitly tagged, not merely unverified
 - [ ] The comparison table is written into Notes against the stop criteria
-- [ ] `grep -rn "StepDef\|HandoffContract\|evaluate_condition\|await_event" bobi/ tests/`
-      **and** `grep -rnE "^\s+(await|handoff|notify|action|goto|if):" agents/`
-      return only deliberately-kept survivors, each named in the PR
-- [ ] `grep -rn "handoff:" docs/ skills/ README.md agents/*/roles/*/ROLE.md` clean
-- [ ] `pytest tests/ -q` (full suite incl. integration) green
+- [ ] `grep -rnE "^\s+(await|handoff|notify|action|goto|if):" agents/eng-team/`
+      returns nothing — eng-team is fully off the step machine. The same grep over
+      `agents/dogfood-content-review/` and `agents/personal-assistant/` still
+      returns hits, and that is **expected**, not a miss
+- [ ] `pytest tests/ -q` (full suite incl. integration) green **with no engine
+      tests deleted** — the ~6,900 lines covering `orchestrator.py`,
+      `variables.py`, `schema.py` and the workflow CLI still pass, because they
+      still cover running code. A green suite that required deleting them would
+      mean the engine was cut, not frozen
 - [ ] `bobi validate` passes on all three `agents/` packs and on `moda-eng-team`
-- [ ] A fresh `bobi setup` run produces a working team with a human-approval step
+- [ ] A fresh `bobi setup` run produces a working team with a human-approval step,
+      and that team's automation is a **checklist**, not `steps:`
+- [ ] The engine still works: one example-pack workflow
+      (`dogfood-content-review`) runs end-to-end after eng-team has migrated —
+      the fallback is proven live, not assumed
 - [ ] Real-Claude e2e green on the migrated `issue-lifecycle` equivalent
 
 ## Proof of work
 
-- **Bugs get a failing test first.** Phase 1's reporting and auto-continue
-  changes, the review-surface freeze, the provenance gate, and the proof-resolution
-  rule each land with a test that fails against current `main`.
+- **Bugs get a failing test first; new code does not.** Phase 1's reporting and
+  auto-continue changes were bug fixes and landed with tests that fail against
+  `main` — the house rule, and correctly applied. Phase 2's CI check is new: the
+  review-surface freeze and the state-tag rule have no defect
+  to reproduce, and "fails against current `main`" for a check that does not
+  exist yet proves nothing. Their proof is **mutation** — remove the named guard,
+  the test must fail. Phase 2's one genuine bug fix (session-name variation)
+  keeps failing-first, because that defect is real and reproducible on `main`.
 - **Suites:** unit every phase; `pytest tests/integration -q` from Phase 2;
   `pytest tests/ -q` at Phase 4.
 - **Real-Claude e2e required in Phase 2 and Phase 4.** Per CLAUDE.md's judgement
-  call: the parser, the monitor check, and error surfacing are brain-agnostic and
+  call: the parser and error surfacing are brain-agnostic and
   the stub proves them — but "does a real model loop faithfully, refuse to check
   off an unverified item, and record resolvable proof" is exactly where the risk
   lives.
-- **Security properties are tests, not prose:** untrusted `verify:` refused; an
-  inbound event never clears a blocked item; round-log text never becomes a
-  command or a status; the artifact is never an authorization source.
+- **Security properties are tests, not prose — and mutation-proved, not merely
+  asserted:** untrusted `verify:` refused; an inbound event never clears a
+  blocked item; round-log text never becomes a command or a status; the artifact
+  is never an authorization source. Every one of these is a claim that something
+  does *not* happen, which is exactly the shape that passes vacuously, so each
+  names the mutant that must break its test.
 - **Phase 4 is acceptance evidence with a baseline and a kill switch**, not a demo.
 - **Migration completeness is grep-gated on both the Python and YAML surfaces**,
   because identifier greps alone miss every pack residue.
@@ -576,13 +838,15 @@ Phase 2 depends on Q1's `fsutil` helper for its atomic writes.
 Phase 1 is independently landable and should go first. Phase 3 depends on Phases
 1–2 shipping in a cut bobi release with the pin moved; Phase 4 depends on Phase 3.
 The bobi-agent phases are otherwise sequential, so same-repo parallelism is not
-warranted absent a recorded wall-clock justification. **All lanes after Phase 1
-depend on Q1's resolution being executed** (the review-remediation Amendment).}
+warranted absent a recorded wall-clock justification. **Revised 2026-07-29:** the
+earlier "all lanes after Phase 1 depend on Q1's resolution being executed" no
+longer holds — Q1's revision removes the `fsutil`/D029 dependency entirely, so no
+lane here waits on `2026-07-22-review-remediation`.}
 
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
 | A | — (plan is the spec) | 1 | Honest turn/error reporting + a resumable turn cap; `max_turns` configurable | solo | in review (PR #847) |
-| B | — (plan is the spec) | 2, 4 | Artifact parser, `verify:` provenance gate, worker loop prompt, in-progress monitor; then trial + cutover | solo | open |
+| B | — (plan is the spec) | 2, 4 | Worker protocol prompt, CI artifact check, session-name fix; then eng-team trial + engine freeze | solo | open |
 | C | — (moda-skills) | 3 | `build`-skill lifecycle rendering into the plan appendix | concurrent | open |
 
 **Lanes:** STACKED, three lanes, no fuse (no same-repo concurrency).
@@ -595,11 +859,11 @@ depend on Q1's resolution being executed** (the review-remediation Amendment).}
   Holding it behind Phases 2–4 would leave a diagnosable outage undiagnosable for
   the length of the initiative. It also subsumes PR #847's reporting half.
 - **Lane B** (bobi-agent, Phases 2 + 4) — **depends on A** (build-blocking: Phase 2
-  treats a cap hit as re-dispatchable, which A makes possible) and on
-  `2026-07-22-review-remediation` **Phase 3** (D092's `fsutil` helper, which
-  Phase 2 adopts rather than forks; and D029, which Phase 2's ownership check
-  needs). Phases 2 and 4 stay one lane: 4 is the trial + cutover for what 2 builds,
-  and splitting them would ship a checklist runner nothing uses.
+  treats a cap hit as re-dispatchable, which A makes possible) and on **nothing
+  else**; the `2026-07-22-review-remediation` dependency is withdrawn per Q1's
+  2026-07-29 revision. Phases 2 and 4 stay one lane: Phase 2 is now three items —
+  a prompt, a CI job and one bug fix — and would not be a reviewable PR on its
+  own, while Phase 4 is the deletion those three exist to make safe.
 - **Lane C** (moda-skills, Phase 3) — **lands after B** (merge ordering, not
   build-blocking: it renders into the artifact format B defines, so it can be
   authored in parallel once that format is fixed, but its gate needs a released
@@ -692,6 +956,69 @@ a lane turns out to need an inlined context slice.
   leak). **C** (Phase 3, moda-skills) lands after B. Dispatch issues omitted —
   every lane can read this plan, so the plan is the spec.
 
+- **2026-07-29** (planning session with Zach): **the plan was edited in place
+  rather than amended**, at Zach's direction, because the initiative had not
+  started building. This entry is the trail for that, since the file on `main`
+  now differs substantially from `f036bdf`. Status → **Draft**, re-approval
+  needed. Seven changes, each following from the same principle — *lean on the
+  agent, and stop paying code to do what a prompt can do*:
+  1. **The loop reads the artifact once per session, not once per item.** Both
+     cold-start steps (read, re-verify) are *resume* operations; within a session
+     the worker is its own predecessor. Per-item re-reading was the shape of the
+     deleted driver. On this plan's own fixture that was ~4.3M tokens of
+     re-reading before any work, and 255 copies of the artifact in one
+     transcript — causing the `context_cap` rotation Problem 6 exists to prevent.
+  2. **Test-rigor idioms classified by claim shape.** Phase 2 carried 8
+     failing-first lines on greenfield, where "fails against `main`" is
+     `ImportError`. Bugs keep failing-first; negative and security assertions get
+     **mutation-proof with a named mutant**; ordinary behavior gets a plain
+     assertion. Root cause is upstream and is now a Phase 3 item: the moda skills
+     ship exactly one rigor idiom and it is bug-shaped — `mutation`/`mutant`
+     appears **nowhere** in any of them.
+  3. **The in-progress monitor, the director prompt and Q3 are removed.**
+     Restarting a dead worker is a framework concern (#837's territory), not an
+     execution-model one. What the model owes recovery is durable state, and the
+     committed artifact already provides it. Q3's `cwd`-containment ownership was
+     the weakest decision in the plan and dissolved with it.
+  4. **No new Python in `bobi/`.** `checklist/artifact.py`, `checklist/verify.py`
+     and the three-verb CLI are gone. The worker reads markdown, edits markers
+     with its own file tools and runs `verify:` in its own shell; a parser client
+     would be a language model asking a regex what a checklist item is. The
+     artifact format is a **Moda lifecycle convention**, and CLAUDE.md's first
+     principle keeps those out of the framework. Non-agent verification moved to
+     **one CI job** — which must sit outside `ci.yml`'s plans-only skip gate,
+     since branch protection reads a skipped required check as passing.
+  5. **`verify:` stays free-form shell; the control is the worker's judgement.**
+     A named-check vocabulary was rejected as a second language, weaker than
+     shell, extendable only by a pack release — the step machine's failure
+     rebuilt one layer up. The provenance gate went with it: nothing runs a
+     `verify:` unattended, and the only executor already has unrestricted shell.
+     A `verify:` is a **proposed proof, not a command**, and a standing tripwire
+     is recorded — if anything ever runs one unattended, the gate comes back.
+  6. **The `proof:` field is removed.** Problem 5 blamed *"no durable record of
+     what the predecessor had proven"*; the durable record is the per-item
+     commits. A SHA range denormalizes history into a field that goes stale —
+     Phase 1 proved it, its ranges rotated on the first rebase. The rule survives
+     and is what mattered: **never re-derive what git history can prove.**
+  7. **The step machine is frozen, not deleted; Phase 4 targets eng-team only.**
+     Deleting the fallback in the same phase that trials its replacement makes
+     "halt and amend" unavailable — separating them is what gives the stop
+     criteria teeth. eng-team's 7 workflows move (substance: `issue-lifecycle`
+     and `pr-closed`); the example packs stay on the engine as its regression
+     coverage. Deletion gets a **mechanical trigger, not a date**, because six
+     compat shims in this repo are still live four to five releases past a stated
+     one-release window. **The ~6,900-line test disposition — previously the
+     single largest item in the plan — is now zero work.**
+  **Two stale justifications defused rather than left to rot:** nine
+  review-remediation Phase 2 items were `[f]`-superseded because "the step
+  machine is deleted" (it is not — the marker stands, the reason changes, and
+  **D015** returns to scope since it is a broken route in a pack we now
+  deliberately keep on the engine); and #846/#848 were closed as "superseded —
+  this plan deletes that surface" (it does not, so their `evaluate_condition`
+  defects are live code with no scheduled removal). **Q1's dependency on
+  `2026-07-22-review-remediation` is withdrawn entirely** — it existed only
+  because a parser in `bobi/` needed `fsutil` for atomic writes.
+
 ## Notes
 
 - **Evidence base.** Session numbers come from the live `moda-eng-team` box on
@@ -706,12 +1033,17 @@ a lane turns out to need an inlined context slice.
   and still did not finish — no turn budget makes a 90-file/7,550-line review gate
   fit in one session. **Splitting that diff remains worthwhile independent of this
   plan.**
-- **The director as poke-responder, not driver.** On 2026-07-26 it declined to
-  dispatch onto PR #847 because the owning worker was still live and intermediate
-  red CI on a draft bot PR is the owner's to self-heal. A mechanical no-progress
-  rule would have double-dispatched. That judgement is why recovery is a
-  notification, not an algorithm — and it is a narrow, low-frequency job, unlike
-  the per-round decisions a driver would have needed.
+- **Why recovery left this plan (2026-07-29, Zach).** Restarting a dead worker is
+  a framework concern — the same concern `plans/2026-07-23-dead-transport-liveness-backstop.md`
+  (#837) is already addressing for agents that go silently dead — and folding it
+  into an execution-model plan meant owning a liveness signal, an ownership
+  resolution, a monitor tick and a director prompt in service of a question this
+  plan does not ask. What the execution model owes recovery is durable state, and
+  the committed artifact already provides it. Retained evidence for whoever
+  builds the backstop: on 2026-07-26 the director declined to dispatch onto PR
+  #847 because the owning worker was still live and intermediate red CI on a
+  draft bot PR is the owner's to self-heal — a mechanical no-progress rule would
+  have double-dispatched. Detection is the easy half; deciding is not.
 - **#847 / #848 disposition (decided 2026-07-26, Zach):** #847's *reporting* half
   is the substance of Phase 1 and lands on its own schedule; its `max_turns` raise
   is superseded by Phase 1's auto-continue; #848 (`handoff.success_when`) is closed
@@ -728,7 +1060,15 @@ a lane turns out to need an inlined context slice.
   the substring-matching allow-list idiom (owned by #844), a handoff value
   containing `\1` raising `re.error` via `re.sub`'s replacement slot, and a
   stale-value leak from the run-wide flat condition scope. They are recorded on
-  #846/#848 for whoever needs them before Phase 4 deletes the surface.
+  #846/#848 for whoever needs them.
+  **Re-read after the 2026-07-29 freeze:** both closures were justified by "this
+  plan deletes that surface," and it no longer does — `evaluate_condition` keeps
+  running the example packs indefinitely. The closures still stand (nobody should
+  build `handoff.success_when` into a frozen engine), but those three
+  `evaluate_condition` defects are now **live code with no scheduled removal**,
+  not a surface about to disappear. They qualify for the freeze's repair bar only
+  if they break a live pack; otherwise they stay recorded and unfixed. Do not let
+  "it was closed as superseded" read as "it was fixed."
 - **Prior art:** #753 (closed) made `subagents launch --wait` block on the launched
   agent and started normalizing `max_turns_reached`.
 - **Deferred:** a harness-side blocking join for `Agent` fan-out; a sender-identity
