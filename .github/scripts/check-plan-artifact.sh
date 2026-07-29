@@ -110,7 +110,31 @@ while IFS= read -r path; do
     note "use e.g. '- [f] state:blocked-on-human <why>'"
   fi
 
-  # --- 3. Review-surface freeze ------------------------------------------
+  # --- 3. Gate lines in the appendix are classified ----------------------
+  # Scoped to the appendix on purpose. The appendix is the machine-rendered
+  # surface, where a renderer is responsible for emitting `verify:` or
+  # `judgement:` on every gate line. Hand-written gate lines above the fence
+  # predate that contract and are not retro-fitted here.
+  # An item is its marker line plus the indented continuation lines under it,
+  # so the tag is looked for across the whole block — `verify:` almost always
+  # sits on a line below the item text, not beside it.
+  head_appendix="$(printf '%s\n' "$head_body" | appendix)"
+  unclassified="$(printf '%s\n' "$head_appendix" | awk '
+    function flush() {
+      if (item != "" && block !~ /verify:/ && block !~ /judgement:/)
+        print line ": " item
+    }
+    /^[[:space:]]*- \[(x| |wip|f)\]/ { flush(); item = $0; block = $0; line = NR; next }
+    item != "" { block = block "\n" $0 }
+    END { flush() }
+  ')"
+  if [ -n "$unclassified" ]; then
+    fail "$path: appendix items with neither a verify: nor a judgement: tag"
+    printf '%s\n' "$unclassified" | head -10 | sed 's/^/        /' >&2
+    note "an item with neither is not checkable, so 'done' against it is empty"
+  fi
+
+  # --- 4. Review-surface freeze ------------------------------------------
   # Scope: only when this diff touches the appendix. That is the mechanical
   # signal for "a worker mutated this file" as opposed to "a human amended
   # it" — amendments legitimately rewrite prose above the fence, and freezing
@@ -129,14 +153,13 @@ while IFS= read -r path; do
   printf '%s\n' "$head_body" | has_fence || { note "$path: no appendix"; continue; }
 
   base_appendix="$(printf '%s\n' "$base_body" | appendix)"
-  head_appendix="$(printf '%s\n' "$head_body" | appendix)"
 
   if [ "$base_appendix" = "$head_appendix" ]; then
     note "$path: appendix unchanged — treated as a human amendment"
     continue
   fi
 
-  # 3a. The appendix grew by appending, not by insertion or rewrite: the old
+  # 4a. The appendix grew by appending, not by insertion or rewrite: the old
   # appendix must be a literal prefix of the new one. A reviewer reads it as a
   # chronology, so an edit in the middle is a rewritten history.
   if [ -n "$base_appendix" ] && \
@@ -145,7 +168,7 @@ while IFS= read -r path; do
     note "the existing round log must survive byte-for-byte as a prefix"
   fi
 
-  # 3b. Above the fence, only markers moved.
+  # 4b. Above the fence, only markers moved.
   base_surface="$(printf '%s\n' "$base_body" | review_surface | normalize_markers)"
   head_surface="$(printf '%s\n' "$head_body" | review_surface | normalize_markers)"
 
@@ -155,29 +178,6 @@ while IFS= read -r path; do
       | head -40 | sed 's/^/        /' >&2
     note "a worker may only change the marker inside an existing '- [ ]'"
     note "if the approved text is wrong, that is a block, not an edit"
-  fi
-
-  # --- 4. Gate lines in the appendix are classified ----------------------
-  # Scoped to the appendix on purpose. The appendix is the machine-rendered
-  # surface, where a renderer is responsible for emitting `verify:` or
-  # `judgement:` on every gate line. Hand-written gate lines above the fence
-  # predate that contract and are not retro-fitted here.
-  # An item is its marker line plus the indented continuation lines under it,
-  # so the tag is looked for across the whole block — `verify:` almost always
-  # sits on a line below the item text, not beside it.
-  unclassified="$(printf '%s\n' "$head_appendix" | awk '
-    function flush() {
-      if (item != "" && block !~ /verify:/ && block !~ /judgement:/)
-        print line ": " item
-    }
-    /^[[:space:]]*- \[(x| |wip|f)\]/ { flush(); item = $0; block = $0; line = NR; next }
-    item != "" { block = block "\n" $0 }
-    END { flush() }
-  ')"
-  if [ -n "$unclassified" ]; then
-    fail "$path: appendix items with neither a verify: nor a judgement: tag"
-    printf '%s\n' "$unclassified" | head -10 | sed 's/^/        /' >&2
-    note "an item with neither is not checkable, so 'done' against it is empty"
   fi
 
 done <<< "$changed_plans"

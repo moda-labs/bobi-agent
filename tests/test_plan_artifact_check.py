@@ -106,7 +106,7 @@ class TestAccepts:
 class TestRejects:
     def test_prose_edited_above_the_fence(self, repo):
         """MUTATION-PROOF — mutant: drop the review-surface comparison (step
-        3b). This is the property the whole freeze exists for: the document a
+        4b). This is the property the whole freeze exists for: the document a
         human approved and the document that got built must stay the same one."""
         body = _plan(repo).replace(
             "Move the key to the immutable id.",
@@ -133,7 +133,7 @@ class TestRejects:
         assert "without a machine-readable state: tag" in result.stderr
 
     def test_the_round_log_rewritten_rather_than_appended(self, repo):
-        """MUTATION-PROOF — mutant: drop the prefix comparison (step 3a). A
+        """MUTATION-PROOF — mutant: drop the prefix comparison (step 4a). A
         reviewer reads the appendix as a chronology, so editing its middle is
         rewriting history, not recording it."""
         body = _plan(repo).replace(
@@ -147,7 +147,7 @@ class TestRejects:
         assert "appendix was rewritten, not appended to" in result.stderr
 
     def test_an_appendix_item_with_no_verify_or_judgement(self, repo):
-        """MUTATION-PROOF — mutant: drop the gate-line classification (step 4).
+        """MUTATION-PROOF — mutant: drop the gate-line classification (step 3).
         An item with neither tag is not checkable, so 'done' against it asserts
         nothing at all."""
         body = _plan(repo).replace(
@@ -187,6 +187,21 @@ class TestMalformed:
         assert result.returncode == 1
         assert "the appendix must open exactly once" in result.stderr
         assert "Traceback" not in result.stderr
+
+    def test_a_brand_new_plan_file_still_gets_its_appendix_checked(self, repo):
+        """Regression from self-review. The gate-line check used to sit AFTER
+        the "no base to compare" early-exit, so a plan file ADDED in a PR
+        skipped it entirely — and Phase 3's renderer creates appendices on new
+        files, which is exactly the case that matters."""
+        (repo / "plans" / "fresh.md").write_text(
+            "# New plan\n\n```checklist\n- [ ] an item with no tag at all\n```\n"
+        )
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "add a new plan")
+
+        result = _run(repo)
+        assert result.returncode == 1
+        assert "neither a verify: nor a judgement: tag" in result.stderr
 
     def test_misuse_exits_two_not_one(self):
         result = subprocess.run(

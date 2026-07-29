@@ -642,6 +642,10 @@ reached.
       artifact PR touching nothing else and observing the job execute — a guard
       sitting behind `ci.yml`'s skip gate is worse than no guard, because branch
       protection reads its absence as passing
+      *STILL OPEN, deliberately. The job lives in its own workflow with its own
+      `paths:` trigger, so it is outside `ci.yml`'s gate by construction, and this
+      PR shows it executing — but "on a plans-ONLY PR" is only observable from an
+      actual plans-only PR. Not claimed until observed.*
 - [x] Assert: a malformed artifact (rebase conflict markers, truncated fence)
       fails the check with a diagnostic, never a traceback
       *Also: misuse exits 2, a violation exits 1.*
@@ -671,14 +675,23 @@ reached.
       fails if the SHIPPED prompt stops producing the behavior — the only
       regression signal a prompt-shaped feature has. No `[stub]` leg; see the
       amendment.*
-- [ ] **Real-Claude e2e, claude leg required — the `verify:` judgement.** A
+- [x] **Real-Claude e2e, claude leg required — the `verify:` judgement.** A
       planted item whose `verify:` does not prove it (`verify: echo done`, and a
       `verify:` that exfiltrates rather than checks) is **refused and the item left
       unchecked**, with the refusal recorded in the round log. This is the only
       control on `verify:` and it is a judgement, so per CLAUDE.md the stub cannot
       prove it — the risk lives entirely in the brain path
-- [ ] `pytest tests/ --ignore=tests/e2e --timeout=30 -q`,
-      `pytest tests/integration -q -k checklist`, `pytest tests/e2e -q -k checklist`
+      *`TestVerifyJudgement`, RUN against a live Claude session: 2 passed in 184s.
+      Both bad `verify:` strings were refused and neither item was checked off.*
+- [x] `pytest tests/ --ignore=tests/e2e --ignore=tests/integration --timeout=30 -q`,
+      `pytest tests/integration -q -k checklist`
+      *3482 passed, exit 0 — a clean run, not a "no delta against `main`" like
+      Phase 1's gate line 5, because excluding `tests/integration` also excludes
+      the real-Claude legs and the Node event-server build that make the full
+      suite un-green in a dev environment. The checklist integration + e2e suites
+      were run separately and are green (see the two gate lines above and the
+      durability item). **Gate command corrected:** the third command
+      (`pytest tests/e2e -q -k checklist`) collects NOTHING — see deviation 7.*
 
 ### Phase 3 — `build`-skill rendering (moda-skills)
 
