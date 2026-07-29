@@ -307,10 +307,20 @@ class Session:
         extra_options: dict | None = None,
         role: str = "engineer",
         subscribe: list[str] | None = None,
+        fresh: bool = False,
     ) -> None:
         self.name = name
         self.cwd = cwd
         self.role = role
+        # ``fresh`` skips resuming this name's saved transcript. Session names
+        # are deliberately stable — they name the worktree branch
+        # (orchestrator._setup_worktree) and are what the launch admission
+        # check dedupes on — so a re-dispatch reuses the name and would
+        # otherwise inherit the DEAD session's context and its spent turn
+        # budget. Opt-in, not the default: the workflow engine's documented
+        # retry semantics (launch_agent's docstring) resume a failed run on
+        # purpose. skills/checklist-execution.md sets it on every re-dispatch.
+        self._fresh = fresh
         # Extra event topics beyond this session's own inbox/<self> (e.g. the
         # manager's external resource topics). inbox/<self> is always added.
         self._subscribe = list(subscribe or [])
@@ -1430,7 +1440,10 @@ class Session:
                     return
 
     async def _run(self, startup_prompt: str | None = None) -> None:
-        saved_id = load_resumable_session_id(self.name, self._session_model())
+        saved_id = (
+            "" if self._fresh
+            else load_resumable_session_id(self.name, self._session_model())
+        )
         resume_id = saved_id or None
 
         self._client = self._make_brain_session(resume=resume_id)
