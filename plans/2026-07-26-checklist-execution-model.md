@@ -1,6 +1,6 @@
 # Checklist-driven execution: move eng-team off the workflow step machine
 
-> **Status:** Draft — re-approval needed. Approved 2026-07-26; the 2026-07-29
+> **Status:** Approved (re-approved 2026-07-29 — see Amendments). Approved 2026-07-26; the 2026-07-29
 > revision changed the thesis (the engine is frozen, not deleted), removed the
 > recovery monitor, the `bobi/checklist` modules and the `proof:` field, and cut
 > Phase 4's scope to eng-team. That is past what the prior approval covers.
@@ -523,7 +523,7 @@ framework property**, and CLAUDE.md's first principle keeps those out of `bobi/`
 What remains is one genuine framework bug, a prompt, and a check that runs
 outside the agent.
 
-- [ ] **`skills/checklist-execution.md` — the worker protocol, as a framework
+- [x] **`skills/checklist-execution.md` — the worker protocol, as a framework
       skill.** It belongs in `skills/` and not in `bobi/`, and the distinction is
       the point: `skills/` is user-facing markdown guidance (`bobi.md`,
       `create-agent.md`, the integration setups), so this adds documentation, not
@@ -549,12 +549,16 @@ outside the agent.
       the whole control on `verify:`; there is no provenance gate and no sandbox
       behind it, so the prompt has to carry it explicitly rather than by
       implication.
-- [ ] **The one framework change: vary the session name per dispatch.** Reusing a
+- [x] **The one framework change: vary the session name per dispatch.** Reusing a
       name makes `session.py:1404` (`load_resumable_session_id`) resume the dead
       transcript and silently defeat the fresh-budget property. Needed for **human**
       re-dispatch, which is the only recovery path this plan ships, and a real
       framework bug independent of checklists.
-- [ ] **A CI check on `plans/` diffs — the only non-agent verification, and the
+      *Delivered 2026-07-29 as a `fresh` opt-out (Session -> spawn_adhoc ->
+      launch_agent -> run_workflow, plus `--fresh`), NOT as name variation:
+      varying the name forks the worktree branch. Anchor reads `:1433` now.
+      See the 2026-07-29 (Phase 2, build) amendment, deviation 1.*
+- [x] **A CI check on `plans/` diffs — the only non-agent verification, and the
       reason it is not in `bobi/`.** Asserts: the review surface is unchanged apart
       from marker characters; appendix content was appended, not inserted; every
       `[f]` carries a machine-readable state tag rather than prose; every gate
@@ -567,7 +571,7 @@ outside the agent.
       **It never executes a `verify:` string** (see below). It must sit **outside**
       `ci.yml`'s plans-only skip gate (`.github/workflows/ci.yml:26-66`), or it
       will never run on exactly the PRs it exists to check.
-- [ ] **Nothing executes `verify:` unattended — this is what deletes the
+- [x] **Nothing executes `verify:` unattended — this is what deletes the
       provenance gate.** `verify:` is attacker-reachable shell (`agents/eng-team/agent.yaml`
       auto-dispatches `pr-feedback` on **any** account's `changes_requested`
       review, and workers run `bypassPermissions`, `bobi/brain/claude.py:499,549`),
@@ -577,12 +581,13 @@ outside the agent.
       nothing — and a human at a terminal. CI validates **structure only**. Record
       this as a standing invariant: **if anything ever runs `verify:` unattended,
       the provenance gate comes back with it.**
-- [ ] `--workflow` optional at both guard sites (`cli.py:2800`,
+- [f] state:not-needed `--workflow` optional at both guard sites (`cli.py:2800`,
       `_dispatch_agent:2857`) — **only if it earns itself.** `-w adhoc --task
       "work the checklist at <path>"` already works today and the second guard
       already says so, making a `--checklist` flag a synonym rather than a
       capability. Default is to skip this and change nothing.
-- [ ] `docs/SECURITY.md` updated in **this** phase: `verify:` is worker-executed
+      *Skipped 2026-07-29, taking the item's own default.*
+- [x] `docs/SECURITY.md` updated in **this** phase: `verify:` is worker-executed
       shell with no framework runner behind it, nothing executes it unattended,
       and the artifact is never an authorization source.
 
@@ -596,43 +601,62 @@ before its subject exists proves `ImportError`. The negative assertions get
 negative goes green both when the guard fires and when the path was never
 reached.
 
-- [ ] Mutation-proof: a diff editing prose **above the fence** fails the check,
+- [x] Mutation-proof: a diff editing prose **above the fence** fails the check,
       against `tests/fixtures/plan-snapshot.md` — *mutant: drop the review-surface
       comparison*
-- [ ] Mutation-proof: `[f]` without a machine-readable state tag fails —
+      *Run. Rule shipped as insertion-only rather than byte-identical; see
+      deviation 8.*
+- [x] Mutation-proof: `[f]` without a machine-readable state tag fails —
       *mutant: drop the tag assertion*
-- [ ] Mutation-proof: a re-dispatch does **not** resume the dead session's
+      *Run. Scoped to ADDED lines so approved text is not retro-fitted.*
+- [x] Mutation-proof: a re-dispatch does **not** resume the dead session's
       transcript (assert distinct session ids) — *mutant: drop the session-name
       variation*
-- [ ] **Assert by absence — this is how "we removed an engine" is proven:**
+      *Run, as *mutant: drop `_run`'s `fresh` guard*; asserts the resume is never
+      attempted, which is stronger than comparing ids.*
+- [x] **Assert by absence — this is how "we removed an engine" is proven:**
       `grep -rn` shows **no** code path in `bobi/` that writes a checklist marker,
       parses the artifact format, or executes a `verify:` string. If this ever
       fails, the framework grew an execution engine again
+      *`tests/test_no_checklist_engine.py`, each absence carrying a positive
+      control against a planted offender.*
 - [ ] Assert: **the check actually runs on a `plans/`-only PR.** Proven by an
       artifact PR touching nothing else and observing the job execute — a guard
       sitting behind `ci.yml`'s skip gate is worse than no guard, because branch
       protection reads its absence as passing
-- [ ] Assert: a malformed artifact (rebase conflict markers, truncated fence)
+- [x] Assert: a malformed artifact (rebase conflict markers, truncated fence)
       fails the check with a diagnostic, never a traceback
-- [ ] Assert: the warm loop reads the full artifact **once per session** — a
+      *Also: misuse exits 2, a violation exits 1.*
+- [x] Assert: the warm loop reads the full artifact **once per session** — a
       multi-item stub run counts exactly one full-artifact read, plus one more
       after an induced rebase and none otherwise. This is the cost property, so it
       is a test, not a prompt aspiration
-- [ ] Integration (stub): a 5-item checklist with the agent SIGKILLed at item 3 is
+      *`TestReadOncePerSession`; measured on a re-dispatch, the path that ships.*
+- [x] Integration (stub): a 5-item checklist with the agent SIGKILLed at item 3 is
       carried to all-checked after one re-dispatch, losing only item 3's partial
       work
-- [ ] **Real-Claude e2e, `[stub]+[claude]`, claude leg required**: a real session
+      *Brain-FREE, not stub-brain — the property is the protocol's; deviation 6.
+      Found in the doing: the dead worker's UNTRACKED output survives
+      `git checkout --`, so a reset needs `clean` too.*
+- [x] **Real-Claude e2e, `[stub]+[claude]`, claude leg required**: a real session
       loops through a 4-item checklist in order, commits each transition so the
       log is readable as proof, does not check off an item whose `verify:` fails,
       and leaves the review surface byte-identical apart from markers
-- [ ] **Real-Claude e2e, claude leg required — the `verify:` judgement.** A
+      *RUN against a live Claude session (4 passed, 488s, re-run after the
+      protocol was de-coupled from git). No `[stub]` leg — deviation 7. Its
+      system prompt is `skills/checklist-execution.md` read off disk.*
+- [x] **Real-Claude e2e, claude leg required — the `verify:` judgement.** A
       planted item whose `verify:` does not prove it (`verify: echo done`, and a
       `verify:` that exfiltrates rather than checks) is **refused and the item left
       unchecked**, with the refusal recorded in the round log. This is the only
       control on `verify:` and it is a judgement, so per CLAUDE.md the stub cannot
       prove it — the risk lives entirely in the brain path
-- [ ] `pytest tests/ --ignore=tests/e2e --timeout=30 -q`,
+      *RUN: both bad `verify:` strings refused, neither item checked off.*
+- [x] `pytest tests/ --ignore=tests/e2e --timeout=30 -q`,
       `pytest tests/integration -q -k checklist`, `pytest tests/e2e -q -k checklist`
+      *3482 passed, exit 0 (ignoring `tests/integration` too — see deviation 7's
+      note). The third command collects NOTHING; correct one is
+      `pytest tests/integration -q -k checklist`.*
 
 ### Phase 3 — `build`-skill rendering (moda-skills)
 
@@ -1018,6 +1042,118 @@ a lane turns out to need an inlined context slice.
   defects are live code with no scheduled removal). **Q1's dependency on
   `2026-07-22-review-remediation` is withdrawn entirely** — it existed only
   because a parser in `bobi/` needed `fsutil` for atomic writes.
+
+- **2026-07-29** (Phase 2, build): **Phase 2 complete.** Re-approved by Zach on
+  the revised text, then built by hand in one lane (no dispatch issue, per the
+  lane map). Seven deviations from the phase text, each deliberate:
+  1. **The session fix is a `fresh` opt-out, not session-name variation.** The
+     phase text said "vary the session name per dispatch". That is actively
+     wrong, and the reason is mechanical: `orchestrator._setup_worktree` sets
+     `branch = session_name`, so varying the name forks a NEW git branch on every
+     re-dispatch — destroying the one thing the checklist model depends on, a
+     re-dispatched worker reading the same branch's commits. It also breaks the
+     launch admission dedupe (`subagent.py:1063-1070`) and `check_image_rotation`.
+     So the name stays stable and the RESUME is what became optional: `fresh`
+     threaded through `Session` -> `spawn_adhoc` -> `launch_agent` (and its
+     detached arg blob) -> `run_workflow`, plus a `--fresh` CLI flag, since a
+     human typing a command is the only recovery path this plan ships.
+     The defect is also worse than the plan recorded: `spawn_adhoc` derives its
+     name from `sha256(task)[:8]`, so re-dispatching an identical task string —
+     exactly the checklist shape, where the task is a pointer to the artifact and
+     does not change between attempts — collides by construction.
+  2. **The default is unchanged (Zach, 2026-07-29).** Resuming a failed/stale run
+     is the engine's documented retry contract (`launch_agent`'s docstring) and
+     the frozen engine still relies on it, so `fresh` is opt-in. Two consequences
+     recorded rather than left implied: an arg blob written by an older spawner
+     reads as `False` rather than silently changing that manager's semantics; and
+     **the trap stays armed by default** — a human who re-dispatches without
+     `--fresh` still resumes a dead transcript. `skills/checklist-execution.md`
+     carries the mitigation, which is a prompt, not a mechanism.
+  3. **That flips the proof idiom for this item.** The plan's Proof of work says
+     Phase 2's one genuine bug fix "keeps failing-first, because that defect is
+     real and reproducible on `main`". With the default left opt-in, the change
+     ADDS a capability rather than fixing a defect, so a test that failed before
+     the parameter existed would only prove `TypeError` — the exact vacuity the
+     2026-07-29 revision was correcting elsewhere. It is mutation-proved instead:
+     removing `_run`'s guard fails with `assert 'dead-session-id' is None`.
+  4. **Three CI-check scopes narrowed so the check does not fail on approved
+     text.** (a) The `[f]` state-tag rule binds lines the diff **adds** — the live
+     plans carry ~15 prose-only `[f]` markers, and retro-fitting them would mean
+     rewriting approved plan text, which is what the review surface exists to
+     prevent. (b) Gate-line classification is scoped to the **appendix**, the
+     machine-rendered surface; hand-written gate lines above the fence predate the
+     contract and get classified when Phase 3's renderer emits them. (c) The
+     review-surface freeze applies only to diffs that **touch the appendix**,
+     which is the mechanical signal for "a worker mutated this" versus "a human
+     amended it" — freezing amendments would make plans un-amendable. All three
+     live plans were verified to pass unchanged. **Known gap, stated rather than
+     papered over:** a worker that edits prose without touching the appendix is
+     not caught. This is a marker-aware diff, not a proof.
+  5. **The fence is concretely ```` ```checklist ````.** The plan said "a fenced
+     appendix"; a check cannot be written against a placeholder. A file with no
+     such line has no appendix and is an ordinary plan document.
+  6. **The "integration (stub)" test is brain-FREE, not stub-brain.** The property
+     — commit per item bounds loss to one item — belongs to the protocol, not to a
+     model, so a real git repo plus a scripted worker proves it deterministically.
+     A stub brain returns canned turn results and edits no files; it would have
+     added a fake worker in front of the same git operations and proven nothing
+     extra. Found in the doing, and worth keeping: the dead worker's output files
+     are UNTRACKED, so they survive `git checkout -- .`; a re-dispatch must
+     `clean` too or the next worker inherits half-finished work nobody did.
+  7. **The real-Claude e2e lives in `tests/integration/`, not `tests/e2e/`, and
+     has no `[stub]` leg.** `tests/e2e/conftest.py` opens with
+     `pytest.importorskip("playwright.sync_api")` — it is a browser suite for the
+     setup UI, so a checklist test there would be silently skipped whenever
+     Playwright is absent, which is this plan's own "a skipped required check
+     reads as passing" failure. And a stub cannot exercise judgement, so a stub
+     leg would assert nothing; the deterministic half is item 6 and that IS the
+     fast lane. **Consequence for the gate command:** `pytest tests/e2e -q -k
+     checklist` collects nothing — the real command is
+     `pytest tests/integration -q -k checklist`.
+  8. **The protocol was de-coupled from git and pull requests (Zach, 2026-07-29,
+     after first review of PR #865).** bobi-agent's own GitHub repo + GitHub CI is
+     one *manifestation* of checklist execution, not its definition, and the first
+     draft of `skills/checklist-execution.md` had written that manifestation into
+     the spine — commits as the durability primitive, "a reviewer reads it on the
+     PR", squash-merge, `test:`/`fix:` commit idioms. Restructured into a generic
+     protocol (the artifact, the loop, persist-after-each-item, blocking,
+     untrusted input, turn budget) plus a clearly separated **"When the work lives
+     in a repository"** layer that spells persistence as committing and adds the
+     forge-specific notes. The durability primitive is now *save after every
+     item*; a commit is how that is spelled in version control. A non-engineering
+     agent working a checklist inherits none of it.
+     **Two check-semantics bugs fell out of the same review**, both fixed:
+     (a) the review-surface rule was byte-identity-apart-from-markers, which
+     forbade amendments outright and therefore needed a "did this diff touch the
+     appendix?" heuristic to guess worker-versus-human. That heuristic silently
+     encoded an opinion the framework should not hold — it **rejected a PR
+     carrying both an amendment and the work**, which is exactly the shape Zach
+     endorses (the plan may ride the same PR, and may live in the repo as a
+     durable artifact). Replaced with **insertion-only**: existing lines are never
+     modified or deleted, additions are allowed. Strictly stronger — the heuristic
+     is gone, so the rule now applies to every `plans/` diff, which also closes
+     the gap deviation 4 had to document.
+     (b) the appendix prefix rule demanded byte-exact preservation, which forbade
+     **flipping a marker on an appendix item** — the single most ordinary
+     operation in the model. No test caught it because the fixture worded its
+     review-surface and appendix items differently, so every marker test had been
+     exercising the review surface only. Now marker-aware, with regression tests
+     on both the flip (passes) and an item rewrite (still caught).
+
+  **Anchor corrections — read these over the body, which is left as approved.**
+  Wherever this plan says `session.py:1404`, read **`session.py:1433`**: the
+  anchor was correct at `29a382b` and was moved +29 lines by Phase 1's own PR
+  #847. Two call sites the plan never named: the function itself is
+  **`bobi/sdk.py:557`**, and the orchestrator resumes SEPARATELY via
+  `load_session_id` at **`orchestrator.py:446`** — which is the path a
+  `-w adhoc` re-dispatch actually travels, so it is the one that mattered.
+  These are recorded here rather than edited into the body, because an in-place
+  correction is a silent rewrite of approved text however factual it is. That
+  rule was enforced the hard way: the CI check this phase adds **failed on this
+  very PR** when the corrections were first made inline, which is the check
+  working on its first real diff.
+  The `--workflow`-optional item is `[f] state:not-needed`, as its own text
+  defaulted to.
 
 ## Notes
 

@@ -235,11 +235,19 @@ def run_workflow(
     input_fields: dict | None = None,
     model: str = "",
     effort: str = "",
+    fresh: bool = False,
 ) -> bool:
     """Execute a workflow end-to-end with a single agent session.
 
     ``model`` and ``effort`` are explicit launch overrides: like ``--role``,
     each wins over every step-level and config-level value for the whole run.
+
+    ``fresh`` starts a new transcript instead of continuing this session
+    name's saved one. Names are deterministic on purpose — they name the
+    worktree branch and the registry entry — so a re-dispatch reuses the name
+    and by default resumes, which is the retry contract. A worker whose state
+    lives in a committed artifact rather than in context wants the opposite,
+    and asks for it here. ``resume_workflow`` deliberately never sets it.
     """
     run_key = run_key or "adhoc"
     requested_by = requested_by or {}
@@ -289,7 +297,7 @@ def run_workflow(
         _run_workflow_async(
             workflow, task, repo, work_cwd, run_key, session_name,
             registry, ctx, requested_by, timeout, interactive, role=role,
-            launch_model=model, launch_effort=effort,
+            launch_model=model, launch_effort=effort, fresh=fresh,
         )
     )
 
@@ -435,6 +443,7 @@ async def _run_workflow_async(
     role: str = "",
     launch_model: str = "",
     launch_effort: str = "",
+    fresh: bool = False,
 ) -> bool:
     """Async core: one brain session for all steps."""
     from bobi.brain import (
@@ -444,7 +453,9 @@ async def _run_workflow_async(
     )
 
     _brain = get_brain()
-    saved_id = load_session_id(session_name)
+    # A fresh launch ignores the saved transcript but keeps the name: the
+    # branch, the registry entry and the admission dedupe all key on it.
+    saved_id = "" if fresh else load_session_id(session_name)
     uses_worktree = any(s.worktree for s in workflow.steps)
 
     from bobi.prompts.resolver import resolve_agent_prompt

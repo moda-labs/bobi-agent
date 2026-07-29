@@ -1,0 +1,41 @@
+name: Plan artifact
+
+# Structural checks on plan artifacts under plans/.
+#
+# DELIBERATELY A SEPARATE WORKFLOW FROM ci.yml. ci.yml gates its heavy jobs on
+# a `changes` job that reports docs/plans-only diffs and skips (ci.yml, the
+# `changes` job). This check exists precisely FOR plans-only pull requests, so
+# living inside ci.yml would mean it never ran on the changes it is meant to
+# check — and branch protection reads a skipped required check as passing,
+# which is worse than having no check at all.
+#
+# It runs on pull requests only: the checks are diff-shaped (base vs head) and
+# there is no meaningful base for a push to the default branch.
+
+on:
+  pull_request:
+    paths:
+      - 'plans/**.md'
+      - '.github/scripts/check-plan-artifact.sh'
+      - '.github/workflows/plan-artifact.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check plan artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Both the PR base commit and the full head history must be present
+          # locally: the check diffs one against the other.
+          fetch-depth: 0
+
+      - name: Check plan artifacts
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          bash .github/scripts/check-plan-artifact.sh "$BASE_SHA" "$HEAD_SHA"

@@ -694,6 +694,7 @@ def spawn_adhoc(
     subscribe: list[str] | None = None,
     model: str = "",
     effort: str = "",
+    fresh: bool = False,
 ) -> AgentResult:
     """Spawn an agent with a freeform task prompt.
 
@@ -709,6 +710,14 @@ def spawn_adhoc(
     With ``persistent=True`` the session stays alive after the initial
     task completes, accepting messages via its inbox until explicitly
     stopped. The caller blocks for the lifetime of the session.
+
+    ``fresh=True`` starts a new transcript instead of resuming this name's
+    saved one. It matters here more than anywhere else: the default
+    ``run_key`` is ``adhoc-<sha256(task)[:8]>``, so dispatching the SAME task
+    text twice collides by construction and the second run would silently
+    continue the first's dead session. A re-dispatched worker that re-orients
+    from durable state (a committed checklist, the branch's commits) wants the
+    stable name and a clean transcript, which is exactly this flag.
     """
     import hashlib
     from bobi.session import Session
@@ -772,6 +781,7 @@ def spawn_adhoc(
         },
         role=role,
         subscribe=subscribe,
+        fresh=fresh,
     )
 
     ok = session.start(startup_prompt=task, timeout=timeout)
@@ -991,6 +1001,7 @@ def launch_agent(
     input_fields: dict | None = None,
     model: str = "",
     effort: str = "",
+    fresh: bool = False,
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
@@ -998,6 +1009,12 @@ def launch_agent(
     - If an active run exists for the same session → reject
     - If a failed/stale run exists → resume (same session ID)
     - If completed or new → fresh start
+
+    ``fresh=True`` overrides the second rule for this launch only: the run
+    keeps its deterministic name (so the worktree branch, the admission
+    dedupe and the registry entry are unchanged) but starts a NEW transcript
+    rather than continuing the failed run's. The default stays resume —
+    that is the engine's retry contract and callers depend on it.
 
     With ``persistent=True``, the agent stays alive after its initial
     task, accepting messages via its inbox. Uses spawn_adhoc() directly
@@ -1053,6 +1070,7 @@ def launch_agent(
         "input_fields": input_fields or {},
         "model": model,
         "effort": effort,
+        "fresh": fresh,
     })
     script = (
         "import json, sys; "
@@ -1502,6 +1520,9 @@ def _run_agent_entry(args: dict) -> None:
     input_fields = args.get("input_fields", {})
     model = args.get("model", "")
     effort = args.get("effort", "")
+    # Absent on a blob written by an older spawner: default to the historical
+    # resume behavior rather than silently starting fresh.
+    fresh = args.get("fresh", False)
 
     from bobi.paths import bind_root, bobi_root
     # The spawner tells the child its installation root — identity is
@@ -1552,6 +1573,7 @@ def _run_agent_entry(args: dict) -> None:
             subscribe=subscribe,
             model=model,
             effort=effort,
+            fresh=fresh,
         )
         return
 
@@ -1579,6 +1601,7 @@ def _run_agent_entry(args: dict) -> None:
         input_fields=input_fields,
         model=model,
         effort=effort,
+        fresh=fresh,
     )
 
 

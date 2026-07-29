@@ -2825,9 +2825,18 @@ main.add_command(event_server_cmd)
               help="Reasoning-effort override for this launch (provider-native, "
                    "e.g. low, medium, high, xhigh). Wins over step and role "
                    "config.")
+@click.option("--fresh", is_flag=True,
+              help="Start a new transcript instead of resuming this run key's "
+                   "saved session. The run keeps its name (and so its worktree "
+                   "branch and registry entry) but does not inherit the "
+                   "previous session's context or spent turn budget. Use it on "
+                   "every RE-dispatch of a worker that re-orients from durable "
+                   "state — a committed checklist, the branch's commits — "
+                   "since re-running the same --task otherwise resumes the "
+                   "dead session.")
 def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
                      post_event, requested_by, non_interactive, persistent,
-                     subscribe, model, effort):
+                     subscribe, model, effort, fresh):
     """Launch a sub-agent with a workflow and role.
 
     Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
@@ -2845,13 +2854,13 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
                     interactive=not non_interactive,
                     persistent=persistent,
                     subscribe=list(subscribe),
-                    model=model, effort=effort)
+                    model=model, effort=effort, fresh=fresh)
 
 
 def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
                     as_check=False, post_event=None, requested_by=None,
                     interactive=True, persistent=False, subscribe=None,
-                    model="", effort=""):
+                    model="", effort="", fresh=False):
     """Dispatch logic for the agent command."""
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
@@ -2894,7 +2903,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
                         run_key=run_key, timeout=timeout,
                         requested_by=requested_by, interactive=interactive,
                         persistent=persistent, subscribe=subscribe or [],
-                        model=model, effort=effort)
+                        model=model, effort=effort, fresh=fresh)
         return
 
     requester: dict = {}
@@ -2921,6 +2930,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
         run_key=run_key,
         model=model,
         effort=effort,
+        fresh=fresh,
     )
     click.echo(f"Agent started: {session_name}")
 
@@ -2929,7 +2939,8 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
 def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
                     run_key: str | None, timeout: int, requested_by,
                     interactive: bool, persistent: bool, subscribe: list[str],
-                    model: str = "", effort: str = "") -> None:
+                    model: str = "", effort: str = "",
+                    fresh: bool = False) -> None:
     """Run a real agent synchronously and print its final text."""
     if workflow != "adhoc":
         # Deliberate limit, not an oversight: --wait blocks by running the task
@@ -2966,7 +2977,7 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
     result = spawn_adhoc(
         cwd=cwd, task=task, timeout=timeout, name=run_key,
         requested_by=requester, persistent=False, role=role,
-        subscribe=subscribe, model=model, effort=effort,
+        subscribe=subscribe, model=model, effort=effort, fresh=fresh,
     )
     if result.final_text:
         click.echo(result.final_text)
