@@ -34,13 +34,26 @@ It has **two surfaces**, split by a fence. The fence is the first line in the
 file that is exactly ```` ```checklist ````; everything below it is the
 appendix, to end of file:
 
-```text
-<design, problem, decisions, the checklist>   <- review surface: append-only
+````text
+# Widget cache invalidation                    <-- review surface starts here
+                                                   design, problem, decisions,
+## Phases                                          the human-readable checklist.
+                                                   APPEND-ONLY.
+- [x] Key on the immutable id
+- [ ] Evict stale entries
 
-```checklist
-<rendered items, round log>                   <- appendix: appended, never
-                                                 edited in place
+```checklist                                   <-- the fence
+- [x] Key on widget.id                         <-- appendix: rendered items
+      verify: grep -q "widget.id" src/cache.py     with their gate lines,
+- [ ] Evict stale entries                          then the round log.
+      verify: pytest tests/test_cache.py -q        APPEND-ONLY, in place.
+
+### Round log
+
+2026-07-29 - keyed on id, not id+name: a composite keeps the rename
+information in the key, which is what makes the entry unreachable.
 ```
+````
 
 A file with no ```` ```checklist ```` line has no appendix and is not under
 checklist execution yet — it is an ordinary plan document.

@@ -85,6 +85,11 @@ while IFS= read -r path; do
     note "a conflicted plan is not a plan; resolve it before committing"
   fi
 
+  # Known limitation: a plan that DOCUMENTS the artifact format — quoting the
+  # fence inside an example — trips this. No live plan does, and the fix if one
+  # ever needs to is to wrap the example in a longer (````) fence, exactly as
+  # skills/checklist-execution.md does. Rejecting an ambiguous appendix boundary
+  # is worth that cost; guessing which fence is "the real one" is not.
   fence_count="$(printf '%s\n' "$head_body" | grep -cxF "$FENCE" || true)"
   if [ "$fence_count" -gt 1 ]; then
     fail "$path: $fence_count '$FENCE' fences — the appendix must open exactly once"
