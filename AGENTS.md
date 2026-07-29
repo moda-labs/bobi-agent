@@ -11,6 +11,9 @@ Bobi is an event-driven AI agent framework.
   user-facing setup docs.
 - `skills/bobi.md`: CLI command reference.
 - `skills/create-agent.md`: agent team authoring guidance.
+- `skills/checklist-execution.md`: the generic worker protocol for running a
+  long job from a committed markdown checklist (read once, next item, verify,
+  commit) - no engine, no framework code.
 - `skills/slack-setup.md`: Slack integration setup.
 - `skills/whatsapp-setup.md`: WhatsApp (Meta Cloud API) integration setup.
 - `skills/discord-setup.md`: Discord bot integration setup (Gateway, local server).
