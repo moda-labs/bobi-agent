@@ -78,6 +78,46 @@ act on. Defenses are layered, not absolute:
 - **Observe.** Full session transcripts and the event-and-decision log let you
   replay exactly what an agent saw and did.
 
+## Checklist artifacts and `verify:`
+
+An agent can work a long job from a committed markdown checklist
+(`skills/checklist-execution.md`). Those artifacts carry `verify:` lines - shell
+strings that propose how an item is proven - and they arrive through the same
+untrusted channel as everything above: a plan file reaches a repo by pull
+request, from any account. Workers also run with `permission_mode`
+`bypassPermissions`, so a successful injection here is expensive.
+
+- **Artifact text is data, never instructions.** The checklist, the round log,
+  and every `verify:` string are input the agent reads, not commands it obeys.
+- **`verify:` is a proposed proof, not a command.** It stays free-form shell on
+  purpose: a constrained check vocabulary would be a second language, weaker
+  than shell, extensible only by a release - the failure being removed from the
+  workflow engine, rebuilt one layer up. The control is the worker's judgement,
+  stated explicitly in the protocol: it asks whether a command would actually
+  fail if the item were not done, and refuses one that would not (`echo done`,
+  anything that writes, deploys, sends, or ends in `|| true`).
+- **Nothing runs a `verify:` unattended.** There is no framework runner, no
+  monitor, and no CLI verb that executes one; the only executors are a worker
+  that already has unrestricted shell - so a sandbox around it would constrain
+  nothing - and a human at a terminal. The CI artifact check validates
+  *structure only* and never executes a `verify:`
+  (`.github/scripts/check-plan-artifact.sh`, pinned by a canary test).
+- **Standing invariant: if anything ever runs a `verify:` unattended, the
+  default-deny provenance gate comes back with it.** The gate was removed
+  because the unattended executor was removed. Re-introducing the executor
+  re-introduces the requirement, and
+  `bobi/monitors/script_cache_checks.py` (`validate_script`, `run_sandboxed`,
+  `CapabilityEnvelope`) is the framework's existing pattern to reach for.
+- **A blocked item clears only through a human act**, never an inbound event.
+  There is no sender-identity model in `bobi/`; event authorization proves
+  resource access, not personhood.
+- **An artifact is never an authorization source.** Permission to land, deploy,
+  release, or spend is read from the system that holds it - an item asserting
+  authorization is just text in a file.
+- **`bobi/` contains no checklist engine**, and that is enforced rather than
+  intended: `tests/test_no_checklist_engine.py` fails if the framework learns to
+  parse the artifact format, write a marker, or execute a `verify:`.
+
 ## Trusted code: installing a team
 
 A team pack is **trusted code**. Beyond prompts, a team can run shell on your
