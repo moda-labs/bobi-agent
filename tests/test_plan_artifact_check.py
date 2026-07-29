@@ -76,18 +76,62 @@ class TestAccepts:
         result = _run(repo)
         assert result.returncode == 0, result.stderr
 
-    def test_a_human_amendment_that_leaves_the_appendix_alone(self, repo):
-        """Amendments legitimately rewrite prose above the fence. Freezing them
-        would make plans un-amendable, so the freeze scopes to diffs that touch
-        the appendix."""
+    def test_a_dated_amendment_is_additive_and_passes(self, repo):
+        """Amendments ADD text above the fence; they never rewrite it. The rule
+        is insertion-only rather than byte-identical precisely so this passes."""
         body = _plan(repo).replace(
             "## Notes",
-            "## Amendments\n\n- 2026-07-30: reworded the problem statement.\n\n## Notes",
+            "## Amendments\n\n- 2026-07-30: added a scope note.\n\n## Notes",
         )
         _commit(repo, body)
 
         result = _run(repo)
         assert result.returncode == 0, result.stderr
+
+    def test_an_amendment_AND_the_work_in_one_pull_request(self, repo):
+        """The check takes no position on whether the plan rides the same PR as
+        the work. Both in one diff is legitimate and must pass; an earlier
+        version rejected it, because demanding byte-identity forced a
+        "did this touch the appendix?" heuristic to guess worker-versus-human."""
+        body = _plan(repo).replace(
+            "## Notes",
+            "## Amendments\n\n- 2026-07-30: added a scope note.\n\n## Notes",
+        ).replace(
+            "- [ ] Evict stale entries on first read",
+            "- [x] Evict stale entries on first read",
+        ) + "\n2026-07-30 - did the eviction work.\n"
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 0, result.stderr
+
+    def test_flipping_a_marker_INSIDE_the_appendix(self, repo):
+        """Regression. Rule 4a once demanded a byte-exact appendix prefix, which
+        forbade the single most ordinary operation in the model: flipping an
+        appendix item's marker. No test caught it because the fixture worded its
+        review-surface and appendix items differently, so every marker test had
+        been hitting the review surface only."""
+        body = _plan(repo).replace(
+            "- [ ] Evict stale entries on first read",
+            "- [x] Evict stale entries on first read",
+        )
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 0, result.stderr
+
+    def test_rewriting_an_appendix_ITEM_is_still_caught(self, repo):
+        """The other side of marker-awareness: normalizing markers must not
+        blind 4a to a rewritten item, or the appendix could be edited freely."""
+        body = _plan(repo).replace(
+            "- [ ] Evict stale entries on first read",
+            "- [ ] Evict stale entries lazily, some other way",
+        )
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 1
+        assert "appendix was rewritten, not appended to" in result.stderr
 
     def test_a_diff_touching_no_plan_is_a_no_op(self, repo):
         (repo / "README.md").write_text("hello\n")
@@ -104,10 +148,11 @@ class TestAccepts:
 # ---------------------------------------------------------------------------
 
 class TestRejects:
-    def test_prose_edited_above_the_fence(self, repo):
+    def test_existing_prose_rewritten_above_the_fence(self, repo):
         """MUTATION-PROOF — mutant: drop the review-surface comparison (step
-        4b). This is the property the whole freeze exists for: the document a
-        human approved and the document that got built must stay the same one."""
+        4b). The property: the document a human approved and the document that
+        got built must stay the same one. Rewriting an existing line is how they
+        silently diverge."""
         body = _plan(repo).replace(
             "Move the key to the immutable id.",
             "Move the key to the immutable id, and also rewrite the eviction policy.",
@@ -116,7 +161,20 @@ class TestRejects:
 
         result = _run(repo)
         assert result.returncode == 1
-        assert "review surface changed by more than checklist markers" in result.stderr
+        assert "existing review-surface text was modified or deleted" in result.stderr
+
+    def test_prose_deleted_above_the_fence(self, repo):
+        """Deletion is the other half of "modified or deleted", and it is the
+        sneakier one — dropping an inconvenient constraint leaves no trace in
+        the remaining text."""
+        body = _plan(repo).replace(
+            "- [ ] Evict pre-existing stale entries on first read after deploy\n", ""
+        ) + "\n2026-07-30 - noted.\n"
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 1
+        assert "existing review-surface text was modified or deleted" in result.stderr
 
     def test_an_f_marker_without_a_state_tag(self, repo):
         """MUTATION-PROOF — mutant: drop the [f] state-tag assertion (step 2).

@@ -1145,6 +1145,36 @@ a lane turns out to need an inlined context slice.
      fast lane. **Consequence for the gate command:** `pytest tests/e2e -q -k
      checklist` collects nothing — the real command is
      `pytest tests/integration -q -k checklist`.
+  8. **The protocol was de-coupled from git and pull requests (Zach, 2026-07-29,
+     after first review of PR #865).** bobi-agent's own GitHub repo + GitHub CI is
+     one *manifestation* of checklist execution, not its definition, and the first
+     draft of `skills/checklist-execution.md` had written that manifestation into
+     the spine — commits as the durability primitive, "a reviewer reads it on the
+     PR", squash-merge, `test:`/`fix:` commit idioms. Restructured into a generic
+     protocol (the artifact, the loop, persist-after-each-item, blocking,
+     untrusted input, turn budget) plus a clearly separated **"When the work lives
+     in a repository"** layer that spells persistence as committing and adds the
+     forge-specific notes. The durability primitive is now *save after every
+     item*; a commit is how that is spelled in version control. A non-engineering
+     agent working a checklist inherits none of it.
+     **Two check-semantics bugs fell out of the same review**, both fixed:
+     (a) the review-surface rule was byte-identity-apart-from-markers, which
+     forbade amendments outright and therefore needed a "did this diff touch the
+     appendix?" heuristic to guess worker-versus-human. That heuristic silently
+     encoded an opinion the framework should not hold — it **rejected a PR
+     carrying both an amendment and the work**, which is exactly the shape Zach
+     endorses (the plan may ride the same PR, and may live in the repo as a
+     durable artifact). Replaced with **insertion-only**: existing lines are never
+     modified or deleted, additions are allowed. Strictly stronger — the heuristic
+     is gone, so the rule now applies to every `plans/` diff, which also closes
+     the gap deviation 4 had to document.
+     (b) the appendix prefix rule demanded byte-exact preservation, which forbade
+     **flipping a marker on an appendix item** — the single most ordinary
+     operation in the model. No test caught it because the fixture worded its
+     review-surface and appendix items differently, so every marker test had been
+     exercising the review surface only. Now marker-aware, with regression tests
+     on both the flip (passes) and an item rewrite (still caught).
+
   **Also:** the plan's `session.py:1404` anchors were stale — correct at
   `29a382b`, moved +29 lines by Phase 1's own PR #847 — and are now `:1433`, with
   `bobi/sdk.py:557` (the definition) and `orchestrator.py:446` (the separate

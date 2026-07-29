@@ -1,9 +1,15 @@
 # Checklist Execution
 
-Work a long job from a committed markdown checklist instead of from an
-orchestrator. One file is the design document, the work queue, and the record
-of what was proven. You read it once, then do items one at a time, committing
-each transition — so a session that dies loses at most the item it was on.
+Work a long job from a durable markdown checklist instead of from an
+orchestrator. One file is the design document, the work queue, and the record of
+what was proven. You read it once, then do items one at a time, saving after
+each — so a session that dies loses at most the item it was on.
+
+Nothing here assumes what kind of job it is. A build, a migration, an audit, a
+research sweep, an ops runbook: the protocol is the same, because all it needs is
+a file it can read and save. Where the work happens to live — a git repository, a
+ticket system, a workspace directory — changes only how "save" is spelled, and
+that is the last section.
 
 Nothing drives this loop. There is no engine, no step machine, no driver
 process, and no framework code that parses the file or ticks it forward. The
@@ -29,7 +35,7 @@ file that is exactly ```` ```checklist ````; everything below it is the
 appendix, to end of file:
 
 ```text
-<design, problem, decisions, the checklist>   <- review surface: frozen
+<design, problem, decisions, the checklist>   <- review surface: append-only
 
 ```checklist
 <rendered items, round log>                   <- appendix: appended, never
@@ -39,15 +45,20 @@ appendix, to end of file:
 A file with no ```` ```checklist ```` line has no appendix and is not under
 checklist execution yet — it is an ordinary plan document.
 
-**The review surface is frozen.** Above the fence, the only byte you may
-change is the marker character inside an existing `- [ ]`. Not the wording of
-an item, not a heading, not a typo you spotted. A human approved that text;
-rewriting it while working means the thing they approved and the thing you
-built are no longer the same document. If the text is wrong, that is a block
-(see below), not an edit.
+**The review surface is append-only.** Above the fence you may change a marker
+inside an existing `- [ ]`, and you may ADD lines. You may never modify or delete
+a line that is already there — not the wording of an item, not a heading, not a
+typo you spotted. A human approved that text; rewriting it while working means
+the thing they approved and the thing you built are no longer the same document.
+If the text is wrong, that is a block (see below), not an edit.
 
-Below the fence you **append**. Never insert into the middle of the appendix,
-because a reviewer reads it as a chronology.
+The rule is insertion-only rather than byte-frozen for a reason: it lets a human
+amend the plan — additively, dated — without the protocol having to guess whether
+a given change came from a worker or an author. Both can even arrive together.
+
+Below the fence you **append**. Existing appendix text must survive; markers in
+it may change as work lands, but nothing already written gets rewritten, because
+a reader takes the round log as a chronology.
 
 ### Markers
 
@@ -95,18 +106,19 @@ them.
 Only on a **cold** start: your first dispatch, or a re-dispatch after a death.
 
 1. **Read the artifact once, in full.**
-2. **Re-verify the last completed item by reading the branch's commits.**
-   `git log`, `git show`, `git diff` — read-only. You are checking that the
-   previous worker's last `[x]` is real before you build on it.
+2. **Re-verify the last completed item, read-only.** You are checking that a
+   predecessor's last `[x]` is real before building on it. Re-run that item's
+   `verify:` — it is a check, so running it changes nothing. If the environment
+   keeps a durable history of the work, read that instead: it is cheaper and it
+   shows *ordering* a re-run cannot.
 3. Find the first unchecked item. Start there.
 
-**Never re-derive what git history can already prove.** If the record you need
-is "was there a failing test before the fix", read the log — the `test:` commit
-sits before the `fix:` commit, and that ordering *is* the proof. Do not revert
-source in a scratch worktree to re-observe a red test. Do not `git stash`. Do
-not check out an old SHA over the working tree. That re-derivation is
-expensive, it is the single largest recorded waste in this model's evidence
-base, and it risks destroying uncommitted work.
+**Never re-derive what the record already proves.** Re-verification is reading,
+not re-doing. Do not undo work to watch it fail again, do not rebuild state from
+scratch to confirm it was built, and never mutate the workspace to establish a
+fact a log already carries. That re-derivation is expensive — it is the single
+largest measured waste in this model's evidence base — and it risks destroying
+work that was never recorded.
 
 ### Per item, thereafter
 
@@ -115,7 +127,7 @@ base, and it risks destroying uncommitted work.
 3. Run its `verify:` — after judging it (see below). If it fails, the item does
    **not** get checked off. Fix it, or mark it `[f]` with a state tag.
 4. Mark it `[x]`.
-5. **Commit** — the marker change together with the work it describes.
+5. **Persist** — save the artifact, together with whatever the item produced.
 6. Next item.
 
 **Do not re-read the artifact, and do not re-verify earlier items.** Both are
@@ -127,10 +139,11 @@ costs per item is the shape of the driver process this model deleted. On a real
 ~250-item plan, re-reading per item costs millions of tokens before any work is
 done, grows superlinearly as the round log grows in the same file, and puts
 hundreds of copies of the artifact in one transcript — forcing exactly the
-context rotation that committing state is supposed to prevent.
+context rotation that persisting state is supposed to prevent.
 
-**Re-read only when git moved the file underneath you**: after a rebase, a
-pull, or resolving a conflict. Never on a timer, never per item.
+**Re-read only when something outside the session changed the file underneath
+you** — you pulled, rebased, resolved a conflict, or a human edited it. Never on
+a timer, never per item.
 
 An item that breaks an earlier item's `verify:` is caught by a closeout sweep
 that re-runs every checked `verify:` at the end — not by re-verifying each
@@ -140,21 +153,23 @@ iteration.
 
 Append to the round log when there is something a successor could not
 reconstruct: a judgement call and why you made it, a dead end and why you
-abandoned it, a block. **Not per item** — git history already carries the
-mechanical trace, and duplicating it into the file is what makes the artifact
-grow without bound.
+abandoned it, a block. **Not per item** — the mechanical trace is already
+recorded by the act of persisting each item, and duplicating it into the file is
+what makes the artifact grow without bound.
 
-## Committing
+## Persisting
 
-Commit every marker transition alongside the work. Two reasons, both load-bearing:
+**Save the artifact after every item, together with what the item produced.**
+This is the durability primitive and the reason the model works at all: the
+artifact IS the state, so a session that dies loses the item it was on and
+nothing else. Batching saves, or saving only at the end, trades that away — a
+death then loses everything since the last save.
 
-- **Durability.** The commit is the state. A dead session loses the current
-  item and nothing else.
-- **Proof.** The branch's commit lineage is a free proof-of-work trace a
-  reviewer reads on the PR — `test: reproduce X` followed by `fix: X` shows
-  ordering no field could assert as reliably.
-
-A squash-merge means the base branch never sees the churn, so commit freely.
+Where "save" lands depends on where the work lives. In a version-controlled
+repository it is a commit (see below). Elsewhere it is whatever makes the change
+durable and visible to a successor: writing the file to the workspace, updating
+the record system that owns the work. The requirement is per-item durability,
+not a particular tool.
 
 ## Blocking
 
@@ -233,12 +248,51 @@ bobi agent <agent> subagents launch -w adhoc --role <role> \
   --id <unit> --fresh --task "Work the checklist at <path>"
 ```
 
-**`--fresh` is not optional here.** The session name is deterministic — it names
-the worktree branch and is what the launcher dedupes on — so a re-dispatch
-reuses it and, without `--fresh`, resumes the *dead* session's transcript along
-with its spent turn budget. The new worker is supposed to cold-start: read the
-artifact, re-verify the last item from the commits, and carry on. That only
-happens with a clean transcript.
+**`--fresh` is not optional here.** The session name is deterministic — reusing
+it is what keeps the run's identity stable — so a re-dispatch without `--fresh`
+resumes the *dead* session's transcript along with its spent turn budget. The new
+worker is supposed to cold-start: read the artifact, re-verify the last item,
+carry on. That only happens with a clean transcript.
 
-The task string does not need to change between attempts, and should not. It is
-a pointer to the artifact; the artifact carries the state.
+The task string does not need to change between attempts, and should not. It is a
+pointer to the artifact; the artifact carries the state.
+
+---
+
+# When the work lives in a repository
+
+Everything above is the protocol. This part is the common instantiation, not part
+of the definition — skip it if the work is not in version control.
+
+## Saving is committing
+
+Commit each marker transition together with the work it describes. That satisfies
+the persistence rule, and it buys a second thing for free: **the commit lineage
+is a proof-of-work trace**. A reader sees `test: reproduce X` followed by
+`fix: X` and knows the ordering, which is stronger than any field asserting it —
+and it is why "never re-derive what the record proves" has teeth here. Read the
+log instead of reverting source to watch a test go red.
+
+Commit freely. If the branch is squash-merged, the base branch never sees the
+churn, so per-item commits cost nothing downstream.
+
+On a cold start, prefer reading the commits over re-running the last `verify:`:
+it is cheaper and it shows ordering.
+
+Two things not to do, both of which have destroyed work: do not `git stash`
+(a stash from another context pops into your tree), and do not check out an old
+revision over a dirty working tree.
+
+## If there is a code-review forge
+
+When the repository has pull requests (GitHub, GitLab, or similar):
+
+- The plan file is a durable artifact. Checking it into the repository is fine
+  and usually right — it outlives the work.
+- **Whether the plan travels in the same pull request as the work or its own is
+  the author's call.** This protocol takes no position, and neither should any
+  check built on it. Both shapes are legitimate.
+- A structural check on the artifact belongs in CI, where it can run on the diff.
+  If you add one: it must never execute a `verify:` string, and it must not sit
+  behind a path filter that skips plan-only changes — branch protection reads a
+  skipped required check as a passing one.

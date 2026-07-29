@@ -117,6 +117,10 @@ request, from any account. Workers also run with `permission_mode`
 - **`bobi/` contains no checklist engine**, and that is enforced rather than
   intended: `tests/test_no_checklist_engine.py` fails if the framework learns to
   parse the artifact format, write a marker, or execute a `verify:`.
+- **The protocol itself assumes no repository and no code-review forge.** Git and
+  pull requests are one instantiation of it; the CI check above guards *this*
+  repo's plans and is not a framework capability. Anything built on the protocol
+  should stay similarly free of an opinion about how the work is reviewed.
 
 ## Trusted code: installing a team
 

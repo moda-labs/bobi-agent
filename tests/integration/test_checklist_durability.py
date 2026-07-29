@@ -4,9 +4,12 @@ This is the durability claim the whole model rests on: the artifact is the
 state, so a worker that dies loses at most the item it was on, and a
 re-dispatch picks up from the last committed marker.
 
-Deliberately brain-free. The property belongs to the PROTOCOL — "commit each
-transition" — not to any model's behavior, so proving it with a real git repo
-and a scripted worker is both honest and deterministic. A stub brain would not
+Deliberately brain-free. The property belongs to the PROTOCOL — "persist after
+each item" — not to any model's behavior, so proving it with a real git repo and
+a scripted worker is both honest and deterministic. Git is the instantiation
+under test here, not the requirement: the protocol only asks for per-item
+durability, and a commit is how that is spelled when the work lives in a
+repository. A stub brain would not
 strengthen this; it would only add a fake worker in front of the same git
 operations. Whether a real model *follows* the protocol is a different claim
 and lives in `tests/e2e/test_checklist_worker.py`, where the risk actually is.

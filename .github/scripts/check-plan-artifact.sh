@@ -46,10 +46,6 @@ appendix() {
   awk -v fence="$FENCE" 'seen { print } $0 == fence { seen = 1 }'
 }
 
-has_fence() {
-  grep -qxF "$FENCE"
-}
-
 # Collapse a marker transition to a single token so a diff sees past it.
 # `- [ ]` / `- [wip]` / `- [x]` / `- [f] state:<tag>` all normalize to `- [@]`,
 # which is what makes this comparison marker-AWARE rather than a plain diff.
@@ -134,15 +130,23 @@ while IFS= read -r path; do
     note "an item with neither is not checkable, so 'done' against it is empty"
   fi
 
-  # --- 4. Review-surface freeze ------------------------------------------
-  # Scope: only when this diff touches the appendix. That is the mechanical
-  # signal for "a worker mutated this file" as opposed to "a human amended
-  # it" — amendments legitimately rewrite prose above the fence, and freezing
-  # them would make the plan un-amendable.
+  # --- 4. The review surface is append-only ------------------------------
+  # The rule is INSERTION-ONLY, not byte-identical: an existing line above the
+  # fence may never be modified or deleted, but new lines may be added.
   #
-  # Known and accepted gap: a worker that edits prose WITHOUT touching the
-  # appendix is not caught here. Stated rather than papered over — this is a
-  # marker-aware diff, not a proof.
+  # That distinction is what keeps this check out of workflow politics. A dated
+  # amendment is additive by convention ("post-approval changes are dated
+  # amendments, never silent rewrites"), so it passes — in ANY pull request,
+  # including one that also carries the work. A worker rewriting approved text
+  # is a modification, so it fails — again in any pull request. The check
+  # therefore takes NO position on whether the plan rides the same PR as the
+  # work or a separate one; that is the author's call, not this script's.
+  #
+  # An earlier version demanded byte-identity apart from markers, which forbade
+  # amendments outright — and then needed a "did this diff touch the appendix?"
+  # heuristic to guess worker-versus-human so amendments could escape. The
+  # heuristic is gone, and so is the gap it left: this now applies to every
+  # plans/ diff, including a prose edit that never touches the appendix.
   if ! git cat-file -e "$BASE:$path" 2>/dev/null; then
     note "$path: new file, no base to compare"
     continue
@@ -150,34 +154,39 @@ while IFS= read -r path; do
 
   base_body="$(git show "$BASE:$path")"
 
-  printf '%s\n' "$head_body" | has_fence || { note "$path: no appendix"; continue; }
-
   base_appendix="$(printf '%s\n' "$base_body" | appendix)"
 
-  if [ "$base_appendix" = "$head_appendix" ]; then
-    note "$path: appendix unchanged — treated as a human amendment"
-    continue
-  fi
-
-  # 4a. The appendix grew by appending, not by insertion or rewrite: the old
-  # appendix must be a literal prefix of the new one. A reviewer reads it as a
-  # chronology, so an edit in the middle is a rewritten history.
-  if [ -n "$base_appendix" ] && \
-     [ "${head_appendix:0:${#base_appendix}}" != "$base_appendix" ]; then
+  # 4a. The appendix grew by appending, not by rewriting: the old appendix must
+  # be a prefix of the new one. A reader takes it as a chronology, so an edit in
+  # the middle is a rewritten history.
+  #
+  # MARKER-AWARE, like 4b. The appendix holds two different kinds of line — the
+  # items, whose markers are supposed to change as work lands, and the round
+  # log, which is append-only. A byte-exact prefix would forbid the ordinary
+  # case of flipping an appendix item's marker, so markers are normalized away
+  # first and what remains is the text, which must not move.
+  base_ap_n="$(printf '%s\n' "$base_appendix" | normalize_markers)"
+  head_ap_n="$(printf '%s\n' "$head_appendix" | normalize_markers)"
+  if [ -n "$base_appendix" ] && [ "$base_ap_n" != "$head_ap_n" ] && \
+     [ "${head_ap_n:0:${#base_ap_n}}" != "$base_ap_n" ]; then
     fail "$path: appendix was rewritten, not appended to"
-    note "the existing round log must survive byte-for-byte as a prefix"
+    note "existing appendix text must survive as a prefix; markers may change"
   fi
 
-  # 4b. Above the fence, only markers moved.
+  # 4b. Above the fence: markers may move, lines may be added, nothing else.
+  # `diff` emitting any '<' line means a base line was changed or removed —
+  # pure insertion yields only '>' lines.
   base_surface="$(printf '%s\n' "$base_body" | review_surface | normalize_markers)"
   head_surface="$(printf '%s\n' "$head_body" | review_surface | normalize_markers)"
+  removed="$(diff <(printf '%s\n' "$base_surface") \
+                  <(printf '%s\n' "$head_surface") | grep '^<' || true)"
 
-  if [ "$base_surface" != "$head_surface" ]; then
-    fail "$path: the review surface changed by more than checklist markers"
-    diff <(printf '%s\n' "$base_surface") <(printf '%s\n' "$head_surface") \
-      | head -40 | sed 's/^/        /' >&2
-    note "a worker may only change the marker inside an existing '- [ ]'"
-    note "if the approved text is wrong, that is a block, not an edit"
+  if [ -n "$removed" ]; then
+    fail "$path: existing review-surface text was modified or deleted"
+    printf '%s\n' "$removed" | head -20 | sed 's/^/        /' >&2
+    note "above the fence you may change a marker or ADD lines — nothing else"
+    note "if approved text is wrong, that is a block or a dated amendment,"
+    note "never an in-place edit"
   fi
 
 done <<< "$changed_plans"
