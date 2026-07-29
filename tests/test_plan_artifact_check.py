@@ -133,6 +133,28 @@ class TestAccepts:
         assert result.returncode == 1
         assert "appendix was rewritten, not appended to" in result.stderr
 
+    def test_flipping_the_status_field(self, repo):
+        """A plan's Status is state, like a marker — every plan transitions
+        Draft -> Approved -> done, and freezing it would make the check unusable
+        on exactly the PRs that advance a plan."""
+        body = _plan(repo).replace(
+            "**Status:** Approved ·", "**Status:** Draft \u2014 needs re-approval ·",
+        )
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 0, result.stderr
+
+    def test_other_metadata_on_the_status_line_stays_frozen(self, repo):
+        """Normalizing the status VALUE must not unprotect the rest of the line.
+        Only text up to the first separator is treated as state."""
+        body = _plan(repo).replace("**Created:** 2026-07-29", "**Created:** 2020-01-01")
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 1
+        assert "existing review-surface text was modified or deleted" in result.stderr
+
     def test_a_diff_touching_no_plan_is_a_no_op(self, repo):
         (repo / "README.md").write_text("hello\n")
         _git(repo, "add", "-A")

@@ -58,7 +58,8 @@ appendix() {
 #  - The `**Status:**` line. Every plan transitions Draft -> Approved -> done,
 #    and a builder flipping it is doing the same bookkeeping as flipping a
 #    marker. Freezing it would make the check unusable on the exact PRs that
-#    advance a plan.
+#    advance a plan. Only the status VALUE is normalized — up to the first `·` —
+#    so other metadata sharing that line (`· **Created:** ...`) stays frozen.
 #
 # Deliberately NOT normalized: anything else. A stale line reference, an item's
 # wording, a gate command that turned out to be wrong — those are corrected by a
@@ -67,7 +68,7 @@ appendix() {
 normalize_markers() {
   sed -E \
     -e 's/^([[:space:]]*)- \[(x| |wip|f)\]([[:space:]]+state:[a-z][a-z0-9-]*)?/\1- [@]/' \
-    -e 's/^(>?[[:space:]]*\*\*Status:\*\*).*/\1 [@]/'
+    -e 's/^(>?[[:space:]]*\*\*Status:\*\*)[^·]*/\1 [@]/'
 }
 
 changed_plans="$(git diff --name-only --no-renames "$BASE" "$HEAD" -- 'plans/*.md' || true)"
