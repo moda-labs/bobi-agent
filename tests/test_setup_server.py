@@ -1467,6 +1467,50 @@ class TestIntro:
                                        "location": str(project / "src")})
         assert r.status_code == 400
 
+    def test_start_create_rejects_the_agents_root(self, project, home):
+        # The reported failure: the agents ROOT passed the picker because
+        # is_team() only spots an agent.yaml sitting right at the location, and
+        # the run/ containment check only looked downward. Authoring there
+        # scatters the new pack across the root and pulls run/state/setup.json
+        # into the source tree the freshness hash covers, which then made
+        # install fail with "changed since validate_team last passed" forever.
+        _seed_library_team(home, "existing-bot")
+        agents_root = home / "agents"
+        assert agents_root in project.resolve().parents   # encloses run/
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "create", "name": "roadmap-pm",
+                                       "location": str(agents_root)})
+        assert r.status_code == 400
+        assert "run/" in r.json()["error"]
+        # the sibling team is untouched and no pack was scattered at the root
+        assert (agents_root / "existing-bot").exists()
+        assert not (agents_root / "agent.yaml").exists()
+        assert not (agents_root / "roles").exists()
+
+    def test_start_create_rejects_a_non_empty_directory(self, project, home):
+        # Same bar the registry branch already enforced: a new team needs its
+        # own directory, even when nothing there looks like a team yet.
+        dest = home / "scratch"
+        dest.mkdir()
+        (dest / "notes.md").write_text("unrelated work in progress")
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "create", "name": "roadmap-pm",
+                                       "location": str(dest)})
+        assert r.status_code == 409
+        assert "isn't empty" in r.json()["error"]
+        assert (dest / "notes.md").exists()
+
+    def test_start_create_still_accepts_an_empty_location(self, project, home):
+        # The guard must not block the ordinary case: a fresh, empty slot.
+        _seed_library_team(home, "existing-bot")
+        dest = home / "agents" / "roadmap-pm" / "src"
+        dest.mkdir(parents=True)
+        c = _client(SetupState(), project, home_root=home)
+        r = c.post("/api/start", json={"mode": "create", "name": "roadmap-pm",
+                                       "location": str(dest)})
+        assert r.status_code == 200
+        assert r.json()["source_dir"] == str(dest.resolve())
+
     def test_start_open_unknown_team_400(self, project, home):
         c = _client(SetupState(), project, home_root=home)
         r = c.post("/api/start", json={

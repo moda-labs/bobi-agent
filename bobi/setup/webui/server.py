@@ -454,6 +454,21 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         if abs_loc == run_root or run_root in abs_loc.parents:
             return JSONResponse({"error": "pick a source location outside run/"},
                                 status_code=400)
+        # The containment also has to hold the other way: a source directory
+        # that ENCLOSES run/ swallows the setup checkpoint and the installed
+        # image into the team's own source tree.
+        if abs_loc in run_root.parents:
+            return JSONResponse(
+                {"error": f"{abs_loc} contains this agent's run/ directory — "
+                 "pick a source location that doesn't enclose it."},
+                status_code=400)
+
+        def _occupied(d: Path) -> bool:
+            try:
+                return d.is_dir() and any(d.iterdir())
+            except OSError:
+                return False
+
         # Validate and materialize the source first; session state is mutated
         # only after everything succeeded, so a rejected or failed start can't
         # leave the session pointing at a team it never opened.
@@ -489,11 +504,6 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             # have been created by the slot scaffolding. Also don't nest one
             # inside a direct-root team (agent.yaml right at the parent) - the
             # scanner would list both as editable teams.
-            def _occupied(d: Path) -> bool:
-                try:
-                    return d.is_dir() and any(d.iterdir())
-                except OSError:
-                    return False
             if abs_loc.is_file() or _occupied(abs_loc) or open_mode.is_team(abs_loc.parent):
                 return JSONResponse(
                     {"error": f"a team already exists at {abs_loc} — open it from "
@@ -515,6 +525,17 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 return JSONResponse(
                     {"error": f"a team already exists at {abs_loc} — open it "
                      "from the hub, or choose another source directory."},
+                    status_code=409)
+            # is_team() only spots an agent.yaml sitting right here, so it waves
+            # through a directory that merely CONTAINS teams — picking the agents
+            # root scatters the new pack across it and makes every sibling agent
+            # part of the source tree the freshness hash covers. Hold create to
+            # the same empty-target bar as the registry branch.
+            if abs_loc.is_file() or _occupied(abs_loc) or open_mode.is_team(abs_loc.parent):
+                return JSONResponse(
+                    {"error": f"{abs_loc} isn't empty — a new team needs its own "
+                     "directory. Choose an empty folder, or open the team that "
+                     "already lives there from the hub."},
                     status_code=409)
         state.source_dir = str(abs_loc)
         state.finished = False   # starting/opening a team begins a fresh session

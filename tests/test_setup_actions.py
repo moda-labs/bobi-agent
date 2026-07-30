@@ -290,6 +290,26 @@ class TestInstallTeam:
         assert build_state.installed is True
         assert SetupState.load(project).installed is True
 
+    def test_validate_then_install_when_state_file_sits_inside_source_tree(
+            self, project, build_state):
+        # Pointing a team at a directory that encloses run/ puts the setup
+        # checkpoint inside the hashed source tree. validate_team's own
+        # state.save() then rewrote a file the freshly frozen hash covered, so
+        # install could never match it and re-validating just re-armed the same
+        # trap. The checkpoint is not team source — it must not be hashed.
+        _write_minimal_pack(project)
+        build_state.source_dir = str(project)
+        assert paths.state_path(project).is_relative_to(project)
+
+        result = actions.validate_team(build_state, project)
+        assert result["passed"] is True
+
+        reloaded = SetupState.load(project)
+        assert reloaded.validated is True
+        # install_team must not raise "changed since validate_team last passed"
+        payload = actions.install_team(reloaded, project)
+        assert payload["installed"] == "my-team"
+
     def test_stale_validation_raises_and_unsets_validated(self, project, build_state):
         _write_minimal_pack(project / "agents" / "my-team")
         build_state.validated = True

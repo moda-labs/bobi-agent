@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -258,13 +259,30 @@ class SetupState:
         (paths.state_path(project_path) / STATE_FILENAME).unlink(missing_ok=True)
 
 
-def source_tree_hash(pack_dir: Path) -> str:
-    """Content hash of a team source tree — validation freshness check."""
+def source_tree_hash(pack_dir: Path, exclude: Iterable[Path] = ()) -> str:
+    """Content hash of a team source tree — validation freshness check.
+
+    ``exclude`` drops paths that live under ``pack_dir`` but are not part of
+    the team source. Callers must exclude the setup state file: when a setup's
+    run/ directory sits inside the source tree, the ``state.save()`` that
+    records a freshly computed hash rewrites a file the hash covers, so the
+    frozen value is stale the instant it is written and install can never
+    match it. Hashing after the save does not help — the digest would then
+    have to cover the file that stores it, which has no fixed point.
+    """
     h = hashlib.sha256()
     if not pack_dir.is_dir():
         return ""
+    skip = {p.resolve() for p in exclude}
     for f in sorted(pack_dir.rglob("*")):
-        if f.is_file() and "__pycache__" not in f.parts:
+        if (f.is_file() and "__pycache__" not in f.parts
+                and f.resolve() not in skip):
             h.update(f.relative_to(pack_dir).as_posix().encode())
             h.update(f.read_bytes())
     return h.hexdigest()
+
+
+def setup_state_file(project_path: Path) -> Path:
+    """The setup checkpoint written by ``SetupState.save`` — never part of a
+    team source tree, even when it happens to sit inside one."""
+    return paths.state_path(project_path) / STATE_FILENAME
