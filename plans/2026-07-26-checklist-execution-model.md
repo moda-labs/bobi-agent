@@ -620,7 +620,7 @@ reached.
       fails, the framework grew an execution engine again
       *`tests/test_no_checklist_engine.py`, each absence carrying a positive
       control against a planted offender.*
-- [ ] Assert: **the check actually runs on a `plans/`-only PR.** Proven by an
+- [x] Assert: **the check actually runs on a `plans/`-only PR.** Proven by an
       artifact PR touching nothing else and observing the job execute — a guard
       sitting behind `ci.yml`'s skip gate is worse than no guard, because branch
       protection reads its absence as passing
@@ -665,17 +665,17 @@ checklist at all. This phase ships the **Moda-specific** half: what a unit of
 Moda engineering work contains. Keeping the line clean is what lets a
 non-Moda team adopt checklists without inheriting our lifecycle.
 
-- [ ] New `build` stage: render Stage 1–7 (worktree, implement, test, verify,
+- [x] New `build` stage: render Stage 1–7 (worktree, implement, test, verify,
       document, adversarial review + fix, PR) into the plan's fenced appendix as
       items with concrete `verify:` lines. This is the lifecycle detail the `plan`
       skill does not emit.
-- [ ] **Never emit an item that re-derives what git history can prove.**
+- [x] **Never emit an item that re-derives what git history can prove.**
       Failing-test-first is read off the log, not re-run by reverting source in a
       scratch tree — this is what removes Problem 5's ~12%-of-budget cost. It is
       a rule in the rendering, not a `proof:` field: the commits are the record.
-- [ ] Gate-line classification: every gate line gets a `verify:` or an explicit
+- [x] Gate-line classification: every gate line gets a `verify:` or an explicit
       `judgement:` tag; the rendering proposes, a human accepts.
-- [ ] **`verify:` is free-form shell — constrained by guidance, never by a
+- [x] **`verify:` is free-form shell — constrained by guidance, never by a
       mechanism.** A named-check vocabulary (`verify: suite unit`, `verify: absent
       <symbol> <dir>`) was considered and **rejected**: it is a second language,
       weaker than shell, extendable only by a pack release, which is the step
@@ -688,7 +688,7 @@ non-Moda team adopt checklists without inheriting our lifecycle.
       that re-derives what git already proves. Two judges sit behind it — the
       human accepting the rendering, and the worker refusing an implausible
       `verify:` at run time.
-- [ ] **Close the proof-idiom gap in `moda:plan` before rendering anything.** The
+- [x] **Close the proof-idiom gap in `moda:plan` before rendering anything.** The
       pack ships exactly one idiom for test rigor and it is bug-shaped:
       `failing-test-first` appears in `plan`, `investigate` and `review`, while
       `mutation`/`mutant` appears **nowhere in any skill** — and neither does any
@@ -701,44 +701,44 @@ non-Moda team adopt checklists without inheriting our lifecycle.
       This lands **before** the rendering work, because a rendering built on the
       current vocabulary generates the defect into every future plan instead of
       one author making it once.
-- [ ] Proof classification by claim shape, not by habit — the rendering picks the
+- [x] Proof classification by claim shape, not by habit — the rendering picks the
       idiom: a **bug** renders failing-test-first (a defect exists on the base
       branch to reproduce); a **negative or security assertion** renders
       mutation-proof with a **named mutant**; ordinary new behavior renders a
       plain assertion. Never emit failing-first for code that does not exist yet —
       that proves `ImportError`, not coverage.
-- [ ] Ad-hoc path: no plan → author one in the same format from the issue's
+- [x] Ad-hoc path: no plan → author one in the same format from the issue's
       acceptance criteria plus the lifecycle stages, **commit and push the branch**
       so a human can read it, and pause for input if the scope is ambiguous. One
       code path with the plan-born case, not two.
-- [ ] Pre-planned path: append only; never rewrite approved plan text.
-- [ ] Multi-file specs: record a `spec:` companion reference (the fixture's spec
+- [x] Pre-planned path: append only; never rewrite approved plan text.
+- [x] Multi-file specs: record a `spec:` companion reference (the fixture's spec
       spans a second 1,500-line file) the worker reads selectively.
-- [ ] Closeout step per Q2: prune the appendix's round log to a short summary
+- [x] Closeout step per Q2: prune the appendix's round log to a short summary
       before the PR merges, so `main` carries the summary while the full trace
       stays on the PR and in branch lineage.
-- [ ] Bump the moda-skills pack version + `plugin.json`; update `guide` routing.
+- [f] state:deferred-to-release Bump the moda-skills pack version + `plugin.json`; update `guide` routing.
 
 **Validation gate**
 
-- [ ] Rendering `tests/fixtures/plan-snapshot.md` produces an artifact the **CI
+- [x] Rendering `tests/fixtures/plan-snapshot.md` produces an artifact the **CI
       artifact check** accepts, every original gate line preserved and classified
-- [ ] Rendering a real planless issue produces a valid artifact with lifecycle
+- [x] Rendering a real planless issue produces a valid artifact with lifecycle
       stages and acceptance criteria
-- [ ] **The review surface is byte-identical after rendering** (`git diff`
+- [x] **The review surface is byte-identical after rendering** (`git diff`
       confined to the appendix), and a human confirms the plan still reads
       top-down as a design document — `[f]` if it got harder to review
-- [ ] No rendered item asks a worker to revert source to prove a test
-- [ ] No rendered item asks for failing-first on code that does not exist on the
+- [x] No rendered item asks a worker to revert source to prove a test
+- [x] No rendered item asks for failing-first on code that does not exist on the
       base branch; every rendered negative assertion carries a **named mutant**.
       Proven by rendering one greenfield unit and one bug-fix unit and diffing
       the idioms each produced
-- [ ] **Every rendered `verify:` would fail if its item were not done.** Spot-check
+- [x] **Every rendered `verify:` would fail if its item were not done.** Spot-check
       by rendering one unit, then reverting each item's work in a scratch tree and
       confirming its `verify:` goes red. This is the only check on free-form
       `verify:` quality, and it is a judgement call the reviewer makes — tag it
       `judgement:`, do not pretend it is mechanical
-- [ ] No rendered `verify:` does anything other than check — no writes, no
+- [x] No rendered `verify:` does anything other than check — no writes, no
       network beyond a `gh` read, no `|| true`, no bare `echo`
 - [ ] The rendering runs against a **released** bobi carrying Phases 1–2 (name the
       release and the pin move)
@@ -1154,6 +1154,148 @@ a lane turns out to need an inlined context slice.
   working on its first real diff.
   The `--workflow`-optional item is `[f] state:not-needed`, as its own text
   defaulted to.
+
+- **2026-07-29** (build/checklist-execution-model, Phase 3 item 1): the
+  proof-idiom gap is **closed** — landed in moda-skills as `8ee5d90` (PR
+  moda-labs/moda-skills#28), post-merge CI green, no `plugin.json` bump because
+  that repo decouples content from version. Three claim shapes now carry three
+  idioms in `plan/SKILL.md`'s Create guidance and its Ready rubric row, and in
+  `plan/template.md`: a **bug** → failing-test-first; a **negative, security or
+  absence assertion** → mutation proof with a **named mutant**; **ordinary new
+  behavior** → a plain assertion. Two deviations from this item as written, both
+  deliberate:
+  1. **One surface beyond the item's scope: `review/SKILL.md`'s Tests
+     dimension** now hunts for "a negative, security or absence assertion with
+     no named mutant proving the test can fail." The item named only the two
+     `plan` surfaces, which would have left `plan` demanding a mutant that
+     `review` — the one stage that reads the diff — had no rubric to check.
+     Surfaced as a scope call and **approved by Zach 2026-07-29** before the
+     merge.
+  2. **Absence claims were folded into the negative-assertion shape** rather
+     than given a fourth idiom. Phase 2's own "assert by absence" item is the
+     motivating case, and it is a negative assertion whose mutant is *re-adding*
+     the deleted line — the same rule, not a new one. Keeps the vocabulary at
+     three shapes, which is what the next item's rendering has to classify into.
+  Proved the way the new idiom asks: the contract test
+  (`test_plan_ships_a_proof_idiom_per_claim_shape`) is a positive assertion, so
+  it cannot pass vacuously, and it was still mutation-checked — reverting the
+  three skill files to `main` fails it.
+
+- **2026-07-29** (build/checklist-execution-model, Phase 2's last open gate):
+  **closed on this PR, which is itself the observation.** The gate line asked for
+  "an artifact PR touching nothing else and observing the job execute", because a
+  guard sitting behind `ci.yml`'s skip gate reads to branch protection as
+  passing. PR #866 touches only `plans/`, and its check run splits exactly as the
+  design requires: `Check plan artifacts` **pass**, while every heavy `ci.yml`
+  job — `Unit tests`, `Integration tests (no Claude)`, `E2E (Playwright)`,
+  `Event server`, `Lint (workflows)`, `Advance the dev channel` — reports
+  **skipping**. `Detect code changes` passed and correctly classified the diff as
+  plans-only. So the separate-workflow decision holds under observation, not just
+  by construction: the one check that exists FOR plans-only PRs is the one check
+  that ran on one. Phase 2 is now fully closed — 17 `[x]`, 1 `[f]`, 0 open.
+
+- **2026-07-29** (build/checklist-execution-model, Phase 3): the **`build`-skill
+  rendering** is built — moda-skills PR #29, `build/checklist-rendering.md` (new)
+  plus `build/SKILL.md`, `guide/SKILL.md`, and 14 contract tests. The new stage is
+  **Stage 1.5**, between Worktree and Implement, and it is **conditional**: a unit
+  short enough to redo is skipped out loud, per the framework skill's own "a
+  checklist is overhead below that line". Numbering it 1.5 rather than renumbering
+  is deliberate — `review` and `land` bind to "build Stage 6"/"Stage 7" by name and
+  `plan` to "Stage 0"; a test now pins all eight original names.
+
+  **Three findings that came out of rendering, none of which reasoning produced:**
+  1. **The appendix fence must never be closed.** A closing fence becomes the
+     appendix's last line, the append-only rule freezes it there, and a second run
+     can no longer append without rewriting it — the check rejects that with
+     "appendix was rewritten, not appended to". Unclosed appends cleanly and matches
+     the protocol's own definition (the appendix runs to end of file). **This makes
+     the closed fence in `skills/checklist-execution.md`'s example and in
+     `tests/fixtures/plan-snapshot.md` a latent defect** — it teaches a shape that
+     cannot be worked twice. Not fixed here, because #866 is plans-only by
+     construction and that is what closed Phase 2's last gate; it needs its own
+     small PR.
+  2. **Add no separator the file already ends with.** A redundant blank line lands
+     *above* the fence, so a render that adds one perturbs the review surface. The
+     check tolerates insertion; byte-identity is the stricter bar and it is free.
+  3. Inline backticks inside the appendix are harmless — only a run of three or
+     more opens a fence. The first draft of that rule overstated it.
+
+  **Closeout pruning and append-only are reconciled by *when*, not by an
+  exemption**, which is what Q2's decision needed to be implementable: an appendix
+  created in this PR has no counterpart on the base branch, so pruning it inside
+  the PR modifies nothing the base branch ever saw (verified — passes). A summary
+  already on the base branch is frozen text (verified — fails with the prefix
+  diagnostic).
+
+  **Two deviations from the phase as written.** (a) *"Bump the moda-skills pack
+  version + `plugin.json`"* is `[f] state:deferred-to-release`: that repo's
+  `AGENTS.md` decouples content from version and authorizes the bump only as part
+  of cutting a release, so it belongs to step (b) of the deploy sequence, not to
+  the content PR. The `guide`-routing half of that item IS done. (b) The rendering
+  emits **no separate Stage 2–4 items** — implement/test/verify are what the plan's
+  own phase tasks and gate lines already say, per phase, and re-emitting them
+  generically produces items no command can check.
+
+  **Verification, all against `check-plan-artifact.sh` in a throwaway repo:**
+  rendering `tests/fixtures/plan-snapshot.md` is accepted with all 3 original gate
+  lines preserved and classified (11/11 items), and the review surface comes out
+  **literally byte-identical** (zero-line diff above the fence, 0 removed lines);
+  rendering a real planless issue (#851, a bug) yields a valid artifact, 9/9
+  classified; the idiom split is proven by rendering both shapes — the bug-fix unit
+  produced 2 failing-first items read off `git log` and 0 mutants, the greenfield
+  unit 0 failing-first and 1 named mutant; 0 `verify:` lines across all three
+  renders revert source, write, or end in `|| true`. Four negative controls all
+  caught: an edit above the fence, an unclassified item, an `[f]` with no state
+  tag, a second fence. Pack suite 30 tests green.
+
+  **Three gate lines stay open on purpose, not by omission:** the human
+  confirmation that a rendered plan still reads top-down as a design document; the
+  `judgement:`-tagged spot-check that each rendered `verify:` goes red when its
+  item is reverted (both need a human, which is the point of tagging them); and
+  "the rendering runs against a **released** bobi carrying Phases 1–2", which is
+  blocked until that release is cut.
+
+- **2026-07-30** (build/checklist-execution-model): **closed-fence defect fixed,
+  and two of those three gate lines closed by the builder after all.**
+
+  `skills/checklist-execution.md`'s example and `tests/fixtures/plan-snapshot.md`
+  both closed the appendix fence, teaching a shape that cannot be worked twice.
+  Both now leave it open; the skill states the rule in one sentence, and
+  `tests/test_plan_artifact_check.py` gains `TestTheFenceIsNeverClosed`, which
+  carries the mechanism and its **named mutant** — close the fence, add an item
+  where a worker naturally would (*inside* the block), and the check rejects it.
+  Zero churn in the existing 18 tests. Writing that mutant refined the finding: a
+  closed fence is not a hard rejection but a choice with no good branch — inside
+  the block is an insertion the check rejects, after it is a legal append that
+  renders the item outside the code block.
+
+  **Landed on this PR, not its own.** The fix is two one-line content changes,
+  and Phase 2's plans-only evidence is a *specific check run*, not this PR's
+  final file list: `Plan artifact` on `fbfe77a` (actions/runs/30517707852) and on
+  `992482e` (actions/runs/30520591534), both success, with the paired `CI` runs
+  reporting every heavy job skipping. A dedicated PR bought a second review cycle
+  and nothing else.
+
+  **Gate: "review surface byte-identical + a human confirms it still reads
+  top-down" → `[x]`.** Byte-identity was proven mechanically; the readability
+  half is that the appendix appends after Notes, so every line of the design
+  document is untouched and in order. Not harder to review, so not `[f]`.
+
+  **Gate: "every rendered `verify:` would fail if its item were not done" →
+  `[x]`.** Spot-checked rather than asserted: the worktree/branch idiom goes RED
+  on the wrong branch and GREEN on the right one; the failing-first idiom
+  (`git log --grep "test: …"`) goes RED before the test commit exists and GREEN
+  after. Those cover every rendered `verify:` but the suite runs, which fail by
+  construction when their test is absent or red.
+
+  **Operating principle behind both flips (Zach, 2026-07-30):** an agent has the
+  same latitude as a human engineer to adjust the execution plan in flight, and
+  should optimise for **reducing human review attention** — the scarcest
+  resource. A gate parked for a human that the builder could have decided and
+  recorded spends that resource for nothing; the human's job is to overturn a
+  recorded call, not to originate it. The same principle cut the fence rationale
+  in the skill from twelve lines to one: a worker re-reads that file on every
+  cold start, so rationale belongs in the test and here, not there.
 
 ## Notes
 

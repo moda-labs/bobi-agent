@@ -54,4 +54,3 @@ key, the old entry is never evicted, and the cache grows without bound.
 2026-07-29 — Keyed on `id` rather than a composite of id+name. A composite
 would have kept the rename information in the key, which is exactly what makes
 the entry unreachable after a rename.
-```

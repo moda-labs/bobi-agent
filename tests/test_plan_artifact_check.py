@@ -292,6 +292,101 @@ class TestMalformed:
 
 
 # ---------------------------------------------------------------------------
+# The appendix fence stays open, so a later run can append
+# ---------------------------------------------------------------------------
+
+class TestTheFenceIsNeverClosed:
+    """Found by rendering, not by reasoning (2026-07-30).
+
+    The appendix is everything below the fence to end of file, so the opening
+    fence needs no partner. Closing it makes the ``` a line of appendix CONTENT,
+    which the append-only rule then freezes in place — and a later worker adding
+    an item has to write before it, which is an insertion into the middle, not
+    an append. A plan whose appendix reached the base branch could then never be
+    added to again, which is exactly the multi-run case the model exists for.
+    """
+
+    def test_a_later_run_can_append_to_an_open_appendix(self, repo):
+        """The property that makes the model work across worker lives.
+
+        MUTANT: append '```' to the fixture (closing its fence) and this test
+        must fail with "appendix was rewritten, not appended to". That mutant is
+        run by its sibling below, so this pair is not a vacuous assertion.
+        """
+        body = _plan(repo) + (
+            "\n### Phase 2 — Purge on deploy\n\n"
+            "- [ ] Purge the cache on deploy once the owner has decided\n"
+            "      verify: pytest tests/test_widget_cache.py -q -k purge\n"
+        )
+        _commit(repo, body)
+
+        result = _run(repo)
+
+        assert result.returncode == 0, result.stderr
+
+    def test_the_same_append_is_rejected_once_the_fence_is_closed(self, repo):
+        """The named mutant, applied — proving the test above can fail."""
+        closed = _plan(repo).rstrip("\n") + "\n```\n"
+        _commit(repo, closed, msg="close the fence")
+        # A worker adding an item writes it INSIDE the block, because that is
+        # where the checklist visibly is. With the fence closed, that lands
+        # before the ``` — an insertion into the middle of the appendix.
+        addition = (
+            "\n### Phase 2 — Purge on deploy\n\n"
+            "- [ ] Purge the cache on deploy once the owner has decided\n"
+            "      verify: pytest tests/test_widget_cache.py -q -k purge\n"
+        )
+        body = closed.rstrip("\n")[: -len("```")] + addition + "```\n"
+        _commit(repo, body)
+
+        result = _run(repo)
+
+        assert result.returncode == 1
+        assert "appendix was rewritten, not appended to" in result.stderr
+
+    def test_writing_outside_the_closed_fence_passes_but_splits_the_appendix(
+        self, repo
+    ):
+        """The other branch, and why closing the fence has no good escape.
+
+        A worker that dodges the rejection by writing AFTER the closing ``` does
+        satisfy the check — it is a literal append — but the item then renders
+        outside the code block, so the appendix is visually split in every
+        renderer a human reads the plan in. Neither branch is acceptable, which
+        is why the fence stays open rather than the rule being relaxed."""
+        closed = _plan(repo).rstrip("\n") + "\n```\n"
+        _commit(repo, closed, msg="close the fence")
+        body = closed + (
+            "\n- [ ] Purge the cache on deploy\n"
+            "      verify: pytest tests/test_widget_cache.py -q -k purge\n"
+        )
+        _commit(repo, body)
+
+        result = _run(repo)
+
+        assert result.returncode == 0, result.stderr
+        # Structurally fine, visually broken: the new item sits after the fence
+        # that closed the block.
+        after_close = body.rsplit("```", 1)[1]
+        assert "- [ ] Purge the cache on deploy" in after_close
+
+    def test_the_shipped_artifacts_use_the_open_shape(self):
+        """The spec a worker reads, and the fixture, must not teach the shape
+        that cannot be worked twice."""
+        for path in (
+            REPO_ROOT / "skills" / "checklist-execution.md",
+            FIXTURE,
+        ):
+            text = path.read_text()
+            fence_at = text.index("```checklist")
+            appendix = text[fence_at + len("```checklist"):]
+            assert not appendix.rstrip().endswith("```"), (
+                f"{path.name} closes its checklist fence; a later run cannot "
+                f"append to that shape"
+            )
+
+
+# ---------------------------------------------------------------------------
 # The check never runs a verify: string
 # ---------------------------------------------------------------------------
 
