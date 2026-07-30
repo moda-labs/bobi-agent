@@ -1297,6 +1297,64 @@ a lane turns out to need an inlined context slice.
   in the skill from twelve lines to one: a worker re-reads that file on every
   cold start, so rationale belongs in the test and here, not there.
 
+- **2026-07-30** (plan/checklist-execution-model): **the three-part deploy is
+  done — Phases 1–3 now run in production.** Named here because Phase 3's last
+  gate line asks for exactly that.
+
+  **(a) bobi `v0.50.0`** (`a199684`, tag `v0.50.0`), a MINOR bump: this release
+  carries features, not only fixes. Public train green — subscription-login
+  smoke, wheel build, PyPI publish, Homebrew formula + bottle smoke. Private
+  train green (`bobi-deploy` run 30576700522): event-server Worker deployed,
+  **fleet canary built from the published wheel and passed** — which is what
+  gates the GHCR publish — then `ghcr.io/moda-labs/bobi:0.50.0` published and
+  confirmed anonymously pullable for both arches.
+
+  **(b) moda-skills `v0.15.1`** (`ff2d855`, PR #29 → tag). This is the
+  `[f] state:deferred-to-release` pack bump, now discharged: `AGENTS.md`
+  authorizes the version move only as part of cutting a release, and the release
+  act is tagging with no GitHub Release object. PATCH, not minor — both content
+  PRs since `v0.15.0` are purely additive (two new files, nothing removed or
+  renamed).
+
+  **(c) the pin move** (`moda-agents` `f39fa80`): `BOBI_VERSION` and both
+  `lint.yml` pins 0.49.0 → 0.50.0; the moda-skills clone pin `v0.15.0`/`2bc03d0`
+  → `v0.15.1`/`ff2d855` — **tag AND commit together**, per the verify-and-pin
+  rule in `agent.yaml`, so a force-moved tag fails the image build loudly instead
+  of silently swapping skill text; and `moda-eng-team` 1.13.0 → 1.13.1, because
+  `agent.yaml` is packaged team content and without the pack bump exact-pin
+  consumers keep resolving the stale immutable tarball. `BOBI_DEPLOY_REF` was
+  already current. Fleet roll green on all four apps (baohua, basketbot,
+  eng-team, zachs-personal-assistant).
+
+  **Verified on the deployed eng-team box, both halves of the model present:**
+  the framework half ships inside the wheel at
+  `site-packages/bobi/skills/checklist-execution.md`, and the Moda half at
+  `/opt/moda-skills/plugins/moda/skills/build/checklist-rendering.md` with
+  `plugin.json` reading `0.15.1`. Health `ok`, director `running`. Slack E2E
+  passed with the runbook's exact identity fields (`user U0BCVME6Z60`,
+  `bot_id B0BCKMMQN1H`, `app_id A0BDLA833MW`).
+
+  **Phase 3's last gate line stays `[ ]`, deliberately.** The handoff expected
+  the deploy to discharge it; re-reading the line, it does not. It asks that the
+  rendering **runs** against a released bobi, and the rendering still has not
+  been driven by a real worker on real work — Phase 4's first rendered unit is
+  when that becomes true. The deploy satisfies the parenthetical (the release
+  and pin move are named above) and removes the blocker, so the line is now
+  waiting on Phase 4 rather than on a release. Recorded rather than flipped,
+  because a gate marked done on substrate evidence alone is exactly the stale
+  marker this plan's own CI check exists to prevent.
+
+  **Two flaws found while deploying, neither owned by this plan.** (i) The
+  Homebrew tap's `update-formula.yml` has a "Wait for PyPI availability" guard
+  that polls `pip index versions`, but the step that actually breaks is
+  `pip install` — so the guard went green and the very next line 404'd on
+  `bobi==0.50.0`, producing an empty formula, a vacuously "successful" bottle
+  build, and a failed publish. Re-dispatching the tag once PyPI had settled
+  cleared it. The guard should exercise the same command that fails. (ii)
+  moda-skills' `README.md:96` still says to bump `plugin.json` "on any content
+  change", contradicting its own `AGENTS.md` decoupling rule; `AGENTS.md` is
+  authoritative and the README line is stale.
+
 ## Notes
 
 - **Evidence base.** Session numbers come from the live `moda-eng-team` box on
