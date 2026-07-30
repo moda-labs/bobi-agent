@@ -111,7 +111,7 @@ def _require_build_node(
     node = shutil.which("node")
     if node is None:
         raise EventServerBuildError(
-            "Node.js 20 is required to build the embedded event server, "
+            "Node.js 20 or newer is required to build the embedded event server, "
             f"but `node` was not found on PATH while building {event_server_dir}"
         )
     npm = shutil.which("npm")
@@ -131,10 +131,16 @@ def _require_build_node(
         raise EventServerBuildError(
             f"could not parse Node.js version {node_version!r} from {node}"
         ) from exc
-    if node_major != 20:
+    # The bundle is esbuild's output, and esbuild is a pinned native binary that
+    # emits an explicit `--target=node20`, so the host Node major does not reach
+    # the bytes; `validate_artifact` anchors reproducibility on esbuild instead.
+    # Demanding major == 20 here contradicted the runtime, doctor, installer, and
+    # docs -- all of which say 20+ -- and blocked building on a Node 21+ host (#857).
+    if node_major < 20:
         raise EventServerBuildError(
-            "Node.js 20 is required to build the embedded event server; "
-            f"found {node_version!r} at {node}"
+            "Node.js 20 or newer is required to build the embedded event server; "
+            f"found {node_version!r} at {node}. Upgrade Node.js and ensure the "
+            "newer `node` is first on PATH, then rebuild."
         )
     npm_version = _run_command(
         [npm, "--version"],

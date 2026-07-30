@@ -12,6 +12,7 @@ wheel, not this one (#707).
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -453,7 +454,7 @@ def test_invalid_carried_artifact_reports_rebuild_failure(tmp_path, monkeypatch)
         _hook(tmp_path).initialize("standard", {})
 
 
-def test_build_node_must_be_exact_major_20(tmp_path, monkeypatch):
+def _stub_build_toolchain(monkeypatch, node_version: str) -> None:
     monkeypatch.setattr(
         hatch_build.shutil,
         "which",
@@ -462,12 +463,33 @@ def test_build_node_must_be_exact_major_20(tmp_path, monkeypatch):
     monkeypatch.setattr(
         hatch_build,
         "_run_command",
-        lambda args, **kwargs: "v21.1.0" if args[-1] == "--version" else "",
+        lambda args, **kwargs: node_version if args[0] == "/bin/node" else "10.9.2",
     )
+
+
+# The build gate used to demand major == 20, which contradicted the runtime
+# check, doctor, `scripts/install.sh`, and every doc -- all of which say 20+ --
+# and blocked git/sdist installs on a Node 21+ host (#857). The bundle is
+# esbuild's output (pinned native binary, explicit `--target=node20`), so the
+# host Node major cannot reach the bytes; `.github/workflows/ci.yml` pins that
+# invariant by rebuilding on a newer major and comparing digests.
+@pytest.mark.parametrize("node_version", ["v20.19.2", "v21.1.0", "v24.14.1"])
+def test_build_accepts_node_20_and_newer(tmp_path, monkeypatch, node_version):
+    _stub_build_toolchain(monkeypatch, node_version)
+
+    assert hatch_build._require_build_node(tmp_path, env={"PATH": "/bin"}) == (
+        node_version,
+        "10.9.2",
+    )
+
+
+@pytest.mark.parametrize("node_version", ["v18.20.4", "v19.9.0"])
+def test_build_rejects_node_older_than_20(tmp_path, monkeypatch, node_version):
+    _stub_build_toolchain(monkeypatch, node_version)
 
     with pytest.raises(
         hatch_build.EventServerBuildError,
-        match=r"Node\.js 20 is required.*v21\.1\.0",
+        match=rf"Node\.js 20 or newer.*{re.escape(node_version)}.*first on PATH",
     ):
         hatch_build._require_build_node(tmp_path, env={"PATH": "/bin"})
 
