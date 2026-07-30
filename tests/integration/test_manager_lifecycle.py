@@ -29,6 +29,11 @@ def cli_run(dual_brain_cli_run):
     return dual_brain_cli_run
 
 
+@pytest.fixture
+def cli_popen(dual_brain_cli_popen):
+    return dual_brain_cli_popen
+
+
 @pytest.mark.timeout(120)
 class TestManagerStartStop:
     def test_launch_team_service_starts_manager(self, bobi_env):
@@ -188,6 +193,49 @@ class TestManagerStartStop:
         cli_run("stop", timeout=15)
         _wait_for_exit_file(pid_file)
 
+    def test_restart_completes_when_the_caller_dies_with_the_manager(
+        self, bobi_env, cli_run, cli_popen
+    ):
+        """#859: the start phase must not depend on the caller surviving.
+
+        The manager hosts its own agent session in-process, so a restart
+        issued by that session's Bash tool is a descendant of the process the
+        stop phase kills: the caller dies mid-restart, the start never runs,
+        and the team stays down for good with nothing reported anywhere.
+
+        Reproduced here with the same causal chain, made deterministic - a
+        real `bobi agent <name> restart` subprocess, SIGKILLed the moment the
+        manager's pid stops answering. What has to survive that is the restart.
+        """
+        cli_run("start", timeout=45)
+        pid_file = bobi_env.state_dir / "manager.pid"
+        old_pid = _wait_for_pid(pid_file)
+
+        caller = cli_popen("restart")
+        try:
+            killed = _kill_when_pid_dies(caller, old_pid, timeout=30)
+        finally:
+            caller.kill()
+            caller.wait(timeout=10)
+        assert killed, (
+            "the caller outlived the manager, so this run never reproduced "
+            "the failure it is here to catch")
+
+        new_pid = _wait_for_pid(pid_file, timeout=60, other_than=old_pid)
+        assert new_pid != old_pid, (
+            "manager never came back: the caller died in the stop phase and "
+            "took the start phase with it")
+        os.kill(new_pid, 0)  # ProcessLookupError here means it died again
+
+        # The caller is gone, so the worker's log is the only account of what
+        # happened - it has to record both phases, not just the stop.
+        record = (bobi_env.state_dir / "restart.log").read_text()
+        assert "Restart worker" in record, record
+        assert "Restart worker finished." in record, record
+
+        cli_run("stop", timeout=30)
+        _wait_for_exit_file(pid_file)
+
 
 @pytest.mark.timeout(180)
 class TestManagerMessaging:
@@ -253,6 +301,40 @@ class TestManagerNotRunning:
 
         result = cli_run("ask", "should fail", timeout=5)
         assert result.returncode != 0
+
+
+def _wait_for_pid(pid_file, timeout: float = 15, other_than: int = 0) -> int:
+    """The live pid in *pid_file*, waiting for it to appear (or to change)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            pid = int(pid_file.read_text().strip())
+        except (ValueError, OSError):
+            pid = 0
+        if pid and pid != other_than:
+            return pid
+        time.sleep(0.3)
+    raise TimeoutError(f"{pid_file} never held a pid other than {other_than}")
+
+
+def _kill_when_pid_dies(proc, pid: int, timeout: float = 30) -> bool:
+    """SIGKILL *proc* the moment *pid* stops answering; True if it did.
+
+    Stands in for the runtime tearing down an agent's Bash tool when the
+    manager it descends from exits (#859) - same causal chain, deterministic.
+    False means the caller finished first, so nothing was reproduced.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            proc.kill()
+            return True
+        if proc.poll() is not None:
+            return False
+        time.sleep(0.05)
+    raise TimeoutError(f"manager pid {pid} never exited - restart never stopped it")
 
 
 def _wait_for_exit(pid: int, timeout: float = 10):

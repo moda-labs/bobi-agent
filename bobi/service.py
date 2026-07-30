@@ -9,7 +9,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from bobi import paths
 from bobi.__version__ import __version__
@@ -17,6 +17,16 @@ from bobi.sdk import SessionEntry
 
 
 log = logging.getLogger(__name__)
+
+# How long a caller waits on a detached restart before it stops waiting. Only
+# the waiting stops - the worker keeps going, which is the whole point (#859).
+# Generous on purpose: the stop grace is seconds, but the start phase runs
+# preflight, and hitting this means something is genuinely wrong.
+RESTART_TIMEOUT = 180.0
+# How long after the worker exits to wait for the new manager to claim the pid
+# file. The worker returns once the manager is spawned; the manager writes its
+# pid a moment later.
+MANAGER_PID_TIMEOUT = 30.0
 
 
 class ServiceError(Exception):
@@ -71,6 +81,24 @@ class MessageDeliveryError(ServiceError):
         super().__init__(message)
 
 
+class RestartFailed(ServiceError):
+    """A detached restart did not leave a manager running.
+
+    Carries the worker's log so a caller that did not stream it can still
+    say what happened - the formatted preflight report, the stop that never
+    landed, whatever the worker printed before it gave up.
+    """
+
+    def __init__(self, reason: str, log_file: Path, log_tail: str = "") -> None:
+        super().__init__(f"{reason} (see {log_file})")
+        self.reason = reason
+        self.log_file = Path(log_file)
+        self.log_tail = log_tail
+
+    def report(self) -> str:
+        return f"{self}\n{self.log_tail}" if self.log_tail else str(self)
+
+
 @dataclass(frozen=True)
 class StartupInfo:
     version: str
@@ -93,6 +121,21 @@ class SpawnResult:
     validation: object
     image_rotated: bool = False
     process: subprocess.Popen | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class RestartHandle:
+    """A detached restart in flight. The worker owns the outcome, not us."""
+    pid: int
+    log_file: Path
+    process: subprocess.Popen = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class RestartResult:
+    """A finished restart, as seen by a caller that lived to see it."""
+    pid: int
+    log_file: Path
 
 
 @dataclass(frozen=True)
@@ -276,6 +319,22 @@ def _validate_or_raise(project_path: Path):
     return validation
 
 
+def _cli_child_env(project_path: Path) -> dict[str, str]:
+    """The environment for a `python -m bobi.cli` child of this runtime.
+
+    `child_agent_env` stamps BOBI_ROOT so the child binds this installation;
+    the PATH prepends keep the child's tool lookup identical to ours.
+    """
+    from bobi.env import child_agent_env
+
+    env = child_agent_env(project_path)
+    venv_bin = str(Path(sys.executable).parent)
+    local_bin = str(Path.home() / ".local" / "bin")
+    env["PATH"] = f"{venv_bin}:{local_bin}:{env.get('PATH', '')}"
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
 def _read_pid(pid_path: Path) -> int:
     from bobi.sdk import read_pid
 
@@ -373,12 +432,7 @@ def spawn_team(
         )
 
     log_file = paths.state_dir(project_path) / "manager.log"
-    from bobi.env import child_agent_env
-    env = child_agent_env(project_path)
-    venv_bin = str(Path(sys.executable).parent)
-    local_bin = str(Path.home() / ".local" / "bin")
-    env["PATH"] = f"{venv_bin}:{local_bin}:{env.get('PATH', '')}"
-    env["PYTHONUNBUFFERED"] = "1"
+    env = _cli_child_env(project_path)
     cmd = [
         sys.executable,
         "-m",
@@ -706,14 +760,165 @@ def stop_team(project_path: Path, *, force: bool = False) -> StopResult:
     return StopResult(**result_kwargs)
 
 
+def spawn_restart(project_path: Path, *, fresh: bool = False) -> RestartHandle:
+    """Spawn the stop+start pair as a detached worker; return without waiting.
+
+    Nothing is stopped until the process that will do the starting is out of
+    the blast radius. A restart's caller is very often a descendant of the
+    manager it is restarting - the manager hosts its own agent session
+    in-process, so every tool that session runs is its child - and stopping
+    the manager from inside that tree kills the caller before it can start
+    anything (#859). The worker is a new session (`start_new_session=True`,
+    the same primitive the manager itself is spawned with), so the caller's
+    death is no longer the restart's death.
+
+    Its output goes to a FILE, never to a pipe we hold: a caller that dies
+    must not be able to stall the worker on a full pipe buffer, or kill it
+    with EPIPE. The file is truncated per run - one restart's record, which
+    is what anyone reading it after an outage wants.
+    """
+    project_path = Path(project_path)
+    log_file = paths.restart_log_path(project_path)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable,
+        "-m",
+        "bobi.cli",
+        "agent",
+        paths.agent_name_for_root(project_path),
+        "restart",
+        "--detached-worker",
+    ]
+    if fresh:
+        cmd.append("--fresh")
+
+    with open(log_file, "w") as lf:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=lf,
+            stderr=lf,
+            cwd=str(project_path),
+            env=_cli_child_env(project_path),
+            start_new_session=True,
+        )
+    return RestartHandle(pid=proc.pid, log_file=log_file, process=proc)
+
+
 def restart_team(
     project_path: Path,
     *,
     fresh: bool = False,
-    wait_timeout: float = 30,
-) -> LaunchResult:
-    stop_team(project_path)
-    return start_team(project_path, fresh=fresh, wait_timeout=wait_timeout)
+    timeout: float = RESTART_TIMEOUT,
+    on_output: Callable[[str], None] | None = None,
+) -> RestartResult:
+    """Restart the manager through a detached worker and report the outcome.
+
+    THE restart seam: every caller goes through here, so the detachment that
+    makes a restart survivable exists exactly once. A caller that lives gets a
+    synchronous answer - the worker's output as it lands when `on_output` is
+    given, then the new manager's pid. A caller that does not live changes
+    nothing: the worker finishes either way.
+
+    Raises `RestartFailed` if the worker fails, if it outlives *timeout* (it
+    keeps running - only our waiting stops), or if it finished without leaving
+    a DIFFERENT manager alive. That last one is not pedantry: `stop` reports a
+    manager that refused to die and still exits 0, and the `start` behind it
+    then hits AlreadyRunning and exits 0 too, so a pair of successful-looking
+    phases can leave the original process untouched. A restart that did not
+    replace the manager did not happen.
+    """
+    project_path = Path(project_path)
+    pid_path = paths.manager_pid_path(project_path)
+    before = _read_pid(pid_path)
+    handle = spawn_restart(project_path, fresh=fresh)
+    proc = handle.process
+    pos = 0
+    deadline = time.monotonic() + timeout
+
+    while True:
+        pos = _drain_log(handle.log_file, pos, on_output)
+        code = proc.poll()
+        if code is not None:
+            break
+        if time.monotonic() >= deadline:
+            raise RestartFailed(
+                f"restart has not finished after {timeout:g}s and is still "
+                f"running as pid {handle.pid}",
+                handle.log_file, _log_tail(handle.log_file))
+        time.sleep(0.1)
+    _drain_log(handle.log_file, pos, on_output, partial=True)
+
+    if code != 0:
+        raise RestartFailed(f"restart failed (worker exit {code})",
+                            handle.log_file, _log_tail(handle.log_file))
+
+    pid = _wait_for_manager_pid(pid_path, MANAGER_PID_TIMEOUT, other_than=before)
+    if not pid:
+        raise RestartFailed(
+            f"restart left manager pid {before} running - the stop phase "
+            "never landed" if before and _pid_alive(before)
+            else "restart finished but no manager is running",
+            handle.log_file, _log_tail(handle.log_file))
+    return RestartResult(pid=pid, log_file=handle.log_file)
+
+
+def _wait_for_manager_pid(pid_path: Path, timeout: float,
+                          *, other_than: int = 0) -> int:
+    """A live manager pid that is not *other_than*, or 0 if none arrives.
+
+    The pid file is absent between the stop and the new manager's first
+    write, so "not there yet" and "never coming" look identical until the
+    deadline; only the clock separates them.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        pid = _read_pid(pid_path)
+        if pid and pid != other_than and _pid_alive(pid):
+            return pid
+        if time.monotonic() >= deadline:
+            return 0
+        time.sleep(0.2)
+
+
+def _drain_log(
+    log_file: Path,
+    pos: int,
+    emit: Callable[[str], None] | None,
+    *,
+    partial: bool = False,
+) -> int:
+    """Emit whole lines appended to *log_file* since *pos*; return the new pos.
+
+    Byte offsets, not character offsets: the worker's output is arbitrary
+    text and a multibyte character must not desynchronize the follow. A
+    trailing partial line is left for the next pass unless *partial*, which
+    the final drain sets so nothing the worker wrote is dropped.
+    """
+    if emit is None:
+        return pos
+    try:
+        with open(log_file, "rb") as fh:
+            fh.seek(pos)
+            data = fh.read()
+    except OSError:
+        return pos
+    if not data:
+        return pos
+    cut = len(data) if partial else data.rfind(b"\n") + 1
+    if not cut:
+        return pos
+    for line in data[:cut].decode("utf-8", "replace").splitlines():
+        emit(line)
+    return pos + cut
+
+
+def _log_tail(log_file: Path, lines: int = 40) -> str:
+    try:
+        return "\n".join(
+            log_file.read_text(errors="replace").splitlines()[-lines:]
+        )
+    except OSError:
+        return ""
 
 
 def team_status(project_path: Path) -> TeamStatus:

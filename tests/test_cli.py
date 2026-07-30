@@ -2,8 +2,10 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 
 from bobi.__version__ import __version__
@@ -790,3 +792,103 @@ class TestMonitorAdd:
         result = self._add(bobi_install, ["x", "--at", "21:00", "--days", "funday"])
         assert result.exit_code != 0
         assert "weekday" in result.output.lower()
+
+
+class TestRestartCommand:
+    """#859: `restart` hands the stop+start pair to a detached worker.
+
+    The CLI is very often run from inside the runtime it is restarting - an
+    agent's Bash tool descends from the manager the stop phase kills - so the
+    command itself must not be the thing performing the restart.
+    """
+
+    def test_restart_delegates_to_the_detached_seam(self, bobi_install,
+                                                    monkeypatch):
+        from bobi import service
+
+        seen = {}
+
+        def fake_restart_team(project_path, *, fresh=False, on_output=None,
+                              **kw):
+            seen["project_path"] = project_path
+            seen["fresh"] = fresh
+            on_output("Stopped.")
+            return service.RestartResult(
+                pid=4242, log_file=bobi_install.state_dir / "restart.log")
+
+        monkeypatch.setattr(service, "restart_team", fake_restart_team)
+        monkeypatch.setattr("bobi.cli._has_systemd_service", lambda: False)
+        monkeypatch.setattr(
+            service, "stop_team",
+            lambda *a, **kw: pytest.fail("restart stopped the team in-process"))
+
+        result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "restart"])
+
+        assert result.exit_code == 0, result.output
+        assert seen["project_path"] == bobi_install.repo_path
+        assert seen["fresh"] is False
+        assert "Stopped." in result.output
+
+    def test_restart_fresh_passes_through(self, bobi_install, monkeypatch):
+        from bobi import service
+
+        seen = {}
+
+        def fake_restart_team(project_path, *, fresh=False, on_output=None,
+                              **kw):
+            seen["fresh"] = fresh
+            return service.RestartResult(pid=1, log_file=Path("restart.log"))
+
+        monkeypatch.setattr(service, "restart_team", fake_restart_team)
+        monkeypatch.setattr("bobi.cli._has_systemd_service", lambda: False)
+
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "restart", "--fresh"])
+
+        assert result.exit_code == 0, result.output
+        assert seen["fresh"] is True
+
+    def test_restart_reports_a_failed_worker(self, bobi_install, monkeypatch):
+        from bobi import service
+
+        def fake_restart_team(project_path, **kw):
+            raise service.RestartFailed(
+                "restart failed (worker exit 1)",
+                bobi_install.state_dir / "restart.log", "Preflight: nope")
+
+        monkeypatch.setattr(service, "restart_team", fake_restart_team)
+        monkeypatch.setattr("bobi.cli._has_systemd_service", lambda: False)
+
+        result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "restart"])
+
+        assert result.exit_code == 1
+        assert "worker exit 1" in result.output
+        assert "restart.log" in result.output
+
+    def test_detached_worker_runs_the_pair_in_process(self, bobi_install,
+                                                      monkeypatch):
+        """The worker IS the restart: it must not spawn another one."""
+        from bobi import service
+
+        calls = []
+        monkeypatch.setattr(
+            service, "stop_team",
+            lambda root, **kw: calls.append("stop") or service.StopResult(
+                pid=42, stopped=True))
+        monkeypatch.setattr(
+            service, "spawn_team",
+            lambda root, **kw: calls.append("start") or SimpleNamespace(
+                startup=SimpleNamespace(pid=43, log_file=Path("manager.log")),
+                validation=SimpleNamespace(ok=True, checks=[]),
+                image_rotated=False))
+        monkeypatch.setattr(
+            service, "spawn_restart",
+            lambda *a, **kw: pytest.fail("the worker spawned another worker"))
+        monkeypatch.setattr("bobi.events.server.health", lambda url: None)
+
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "restart", "--detached-worker"])
+
+        assert result.exit_code == 0, result.output
+        assert calls == ["stop", "start"]
+        assert "Restart worker" in result.output

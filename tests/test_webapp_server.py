@@ -4,6 +4,7 @@ calls and read a real (temp) BOBI_HOME via the bobi_install fixture;
 TestMultiAgentRealService runs the real service layer on purpose (#706)."""
 
 import json
+from pathlib import Path
 
 import pytest
 import yaml
@@ -842,17 +843,38 @@ class TestLifecycle:
         assert r.json()["ok"] is True
 
     def test_restart(self, bobi_install, monkeypatch):
-        calls = []
+        """#859: restart goes through the detached seam, never stop+spawn here.
+
+        In-container this app is hosted INSIDE the manager (BOBI_UI), so a
+        stop issued from this thread SIGTERMs its own process and the start
+        never happens.
+        """
+        seen = {}
+
+        def fake_restart(root, **kw):
+            seen["root"] = root
+            return service.RestartResult(pid=4242, log_file=Path("restart.log"))
+
+        monkeypatch.setattr(service, "restart_team", fake_restart)
         monkeypatch.setattr(
             service, "stop_team",
-            lambda root, **kw: calls.append("stop")
-            or service.StopResult(pid=42, stopped=True))
-        monkeypatch.setattr(
-            service, "spawn_team",
-            lambda root, **kw: calls.append("spawn") or _FakeSpawn())
+            lambda root, **kw: pytest.fail("restart stopped the team in-process"))
         r = _client().post(f"/api/agents/{bobi_install.agent_name}/restart")
         assert r.status_code == 200
-        assert calls == ["stop", "spawn"]
+        assert r.json() == {"ok": True, "pid": 4242}
+        assert seen["root"] == bobi_install.repo_path
+
+    def test_restart_failure_reports_the_worker_log(self, bobi_install,
+                                                    monkeypatch):
+        def fail(root, **kw):
+            raise service.RestartFailed(
+                "restart failed (worker exit 1)", Path("restart.log"),
+                "missing SLACK_BOT_TOKEN")
+
+        monkeypatch.setattr(service, "restart_team", fail)
+        r = _client().post(f"/api/agents/{bobi_install.agent_name}/restart")
+        assert r.status_code == 409
+        assert "SLACK_BOT_TOKEN" in r.json()["error"]
 
 
 class TestMultiAgentRealService:

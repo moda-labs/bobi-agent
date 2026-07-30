@@ -413,12 +413,15 @@ class LocalRuntime(TeamRuntime):
         from bobi import service
 
         root = self._resolve(name)
-        stop = service.stop_team(root)
-        if stop.still_running:
-            raise TeamDidNotStop(stop.pid)
-        # One spawn path: restart is stop + start, so a preflight failure
-        # carries the same structured report either way.
-        return self.start_team(name)
+        # Detached, not stop-then-start here: in-container this app is hosted
+        # INSIDE the manager (BOBI_UI), so stopping the team from this thread
+        # SIGTERMs our own process and the start never happens (#859). The
+        # worker owns both phases and outlives us.
+        try:
+            result = service.restart_team(root)
+        except service.RestartFailed as e:
+            raise TeamLifecycleError(e.report()) from e
+        return {"ok": True, "pid": result.pid}
 
     def subagents(self, name: str) -> list[dict]:
         from bobi import service

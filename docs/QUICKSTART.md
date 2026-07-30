@@ -416,6 +416,10 @@ Work through these in order:
    bobi agent my-agent restart
    ```
 
+   The restart runs in a detached worker, so it completes even from inside
+   the runtime (an agent restarting its own team). What it did is recorded in
+   `~/.bobi/agents/<name>/run/state/restart.log`.
+
 4. **Start fresh.** If a session is wedged, wipe it and start clean (your
    workspace files and credentials are kept):
 

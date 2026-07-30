@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import truststore
@@ -300,6 +301,11 @@ def agent(ctx, name):
         return
     root = _bind_agent_runtime(name)
     ctx.obj = {"agent": name, "root": root}
+
+
+def _stamp() -> str:
+    """A wall-clock stamp for a log line whose reader may arrive days later."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def _has_systemd_service() -> bool:
@@ -1042,13 +1048,32 @@ def stop(force):
 
 @main.command()
 @click.option("--fresh", is_flag=True, help="Wipe manager session and start clean")
-def restart(fresh):
+@click.option("--detached-worker", "detached_worker", is_flag=True, hidden=True,
+              help="Internal: perform the stop+start pair (see service.spawn_restart).")
+def restart(fresh, detached_worker):
     """Stop and restart the selected Bobi Agent.
+
+    The stop and the start run in a detached worker, so a restart completes
+    even when it kills the process that asked for it - which is the normal
+    case from inside the runtime, where the caller descends from the manager
+    being stopped (#859). This command follows that worker and reports what
+    it did; the worker's own record is in `state/restart.log`.
 
     Usage:
         bobi agent eng restart
         bobi agent eng restart --fresh   # fresh manager session
     """
+    if detached_worker:
+        # We ARE the detached worker: run the pair. Checked before systemd
+        # because only the local branch below spawns a worker, and a worker
+        # that re-delegated would restart nothing.
+        ctx = click.get_current_context()
+        click.echo(f"[{_stamp()}] Restart worker (pid {os.getpid()}) starting.")
+        ctx.invoke(stop)
+        ctx.invoke(start, fresh=fresh)
+        click.echo(f"[{_stamp()}] Restart worker finished.")
+        return
+
     if _has_systemd_service():
         # Resolve before touching systemd so a missing installation fails
         # here, not after the service has already been restarted.
@@ -1066,9 +1091,14 @@ def restart(fresh):
         click.echo(f"Bobi restarted (pid {pid}). Logs: {log_path}")
         return
 
-    ctx = click.get_current_context()
-    ctx.invoke(stop)
-    ctx.invoke(start, fresh=fresh)
+    from bobi.service import RestartFailed, restart_team
+
+    project_path = _ensure_root_bound()
+    try:
+        restart_team(project_path, fresh=fresh, on_output=click.echo)
+    except RestartFailed as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1)
 
 
 def _resolve_address(to: str | None) -> str | None:

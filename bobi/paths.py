@@ -226,6 +226,16 @@ def manager_pid_path(root: Path | None = None) -> Path:
     return state_path(root) / "manager.pid"
 
 
+def restart_log_path(root: Path | None = None) -> Path:
+    """Where a detached restart worker records what it did (#859).
+
+    Its own file, not `manager.log`: after a restart the manager log belongs
+    to a process that did not exist when the restart began, so the account of
+    the restart itself has to live somewhere that outlives both managers.
+    """
+    return state_path(root) / "restart.log"
+
+
 def long_term_memory_path(root: Path | None = None) -> Path:
     return state_path(root) / "long_term_memory.md"
 

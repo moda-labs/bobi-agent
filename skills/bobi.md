@@ -57,7 +57,7 @@ bobi build <team> --tag <ref> [--push]  # render a team into a ready-to-run
 ```bash
 bobi agent <name> start
 bobi agent <name> stop
-bobi agent <name> restart
+bobi agent <name> restart      # safe from inside the runtime (see below)
 bobi agent <name> start --fresh
 bobi agent <name> status
 bobi agent <name> doctor
@@ -88,6 +88,14 @@ bobi read-conversation <conversation> [-n 50] [--json-output]
 
 Use `bobi reply` and `bobi read-conversation` for Slack and any other
 chat channel delivered through the channel gateway.
+
+`restart` hands its stop and start phases to a detached worker, so it
+completes even when it kills the process that asked for it - which is the
+normal case from inside the runtime, where an agent's tool descends from the
+manager being stopped. The command follows that worker and reports what it
+did; the worker's own record survives it in `run/state/restart.log`. If the
+command itself is killed mid-restart, read that file: the restart still
+finished.
 
 ## Sub-Agents
 

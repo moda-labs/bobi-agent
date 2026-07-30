@@ -305,39 +305,66 @@ async def _drain(client):
     return text, result
 
 
+def _cli_argv(env_obj: BobiEnv, args) -> list[str]:
+    """The full ``python -m bobi.cli`` argv for *args* against *env_obj*."""
+    explicit_top_level = {
+        "agent", "agents", "deploy", "destroy", "version",
+        "create-slack-bot", "skill", "login-bootstrap",
+        "reply", "read-conversation",
+        # Removed top-level commands still belong here so removal
+        # regression tests assert the actual top-level CLI error instead
+        # of routing them through `bobi agent <name>`.
+        "supervise", "slack-reply", "slack-upload-file", "slack-read-thread",
+    }
+    argv = list(args)
+    if argv and argv[0] not in explicit_top_level:
+        argv = ["agent", env_obj.agent_name, *argv]
+    return [sys.executable, "-m", "bobi.cli", *argv]
+
+
+def _cli_env(env_obj: BobiEnv) -> dict:
+    """The environment a CLI subprocess needs to select *env_obj*.
+
+    Rebuilt from live ``os.environ`` on every call (so a test's monkeypatch is
+    honored), then layered with the env's fixed overrides - including the
+    stub-brain pins that make the subprocess select the stub.
+    """
+    env = {
+        **os.environ,
+        "BOBI_HOME": str(env_obj.home_dir),
+        "BOBI_EVENT_SERVER": env_obj.event_server_url,
+        "BOBI_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET,
+    }
+    for key in ("BOBI_BRAIN", "BOBI_STUB_BRAIN"):
+        if key in env_obj.env:
+            env[key] = env_obj.env[key]
+    return env
+
+
 def _make_cli_run(env_obj: BobiEnv):
     """Return a ``bobi`` CLI runner bound to *env_obj* (Claude or stub)."""
     def _run(*args, timeout=10):
-        explicit_top_level = {
-            "agent", "agents", "deploy", "destroy", "version",
-            "create-slack-bot", "skill", "login-bootstrap",
-            "reply", "read-conversation",
-            # Removed top-level commands still belong here so removal
-            # regression tests assert the actual top-level CLI error instead
-            # of routing them through `bobi agent <name>`.
-            "supervise", "slack-reply", "slack-upload-file", "slack-read-thread",
-        }
-        argv = list(args)
-        if argv and argv[0] not in explicit_top_level:
-            argv = ["agent", env_obj.agent_name, *argv]
-        # Rebuild from live os.environ each call (so a test's monkeypatch is
-        # honored), then layer the env's fixed overrides - including the
-        # stub-brain pins that make the subprocess select the stub.
-        env = {
-            **os.environ,
-            "BOBI_HOME": str(env_obj.home_dir),
-            "BOBI_EVENT_SERVER": env_obj.event_server_url,
-            "BOBI_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET,
-        }
-        for key in ("BOBI_BRAIN", "BOBI_STUB_BRAIN"):
-            if key in env_obj.env:
-                env[key] = env_obj.env[key]
         return subprocess.run(
-            [sys.executable, "-m", "bobi.cli", *argv],
+            _cli_argv(env_obj, args),
             capture_output=True, text=True, timeout=timeout,
-            cwd=str(env_obj.project_path), env=env,
+            cwd=str(env_obj.project_path), env=_cli_env(env_obj),
         )
     return _run
+
+
+def _make_cli_popen(env_obj: BobiEnv):
+    """Return a runner that starts a CLI command WITHOUT waiting for it.
+
+    For tests that have to do something to the command while it runs - kill
+    it, race it - rather than read its result.
+    """
+    def _popen(*args):
+        return subprocess.Popen(
+            _cli_argv(env_obj, args),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cwd=str(env_obj.project_path), env=_cli_env(env_obj),
+        )
+    return _popen
 
 
 @pytest.fixture
@@ -373,6 +400,12 @@ def dual_brain_env(request):
 def dual_brain_cli_run(dual_brain_env):
     """CLI runner bound to whichever brain ``dual_brain_env`` selected."""
     return _make_cli_run(dual_brain_env)
+
+
+@pytest.fixture
+def dual_brain_cli_popen(dual_brain_env):
+    """Non-blocking CLI runner bound to ``dual_brain_env``'s brain."""
+    return _make_cli_popen(dual_brain_env)
 
 
 @pytest.fixture

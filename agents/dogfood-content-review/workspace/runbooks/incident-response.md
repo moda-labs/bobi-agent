@@ -38,7 +38,10 @@
    ```bash
    bobi agent <name> restart
    ```
-   This preserves the session — the manager resumes where it left off.
+   This preserves the session — the manager resumes where it left off. Safe to
+   run from inside the runtime: the stop and start happen in a detached
+   worker, which finishes even if this command is killed with the manager.
+   Its record is `run/state/restart.log`.
 
 6. **Force restart (last resort)**
    ```bash
