@@ -1,7 +1,7 @@
 # Agentic fleet control: an MCP server on the event-server Worker
 
 > **Status:** Draft
-> **Tracking issue:** TBD (label `plan`) · **Created:** 2026-07-30 · **Last amended:** —
+> **Tracking issue:** none by decision (2026-07-30) · **Created:** 2026-07-30 · **Last amended:** —
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -23,6 +23,12 @@ This plan says the Worker should be that client's server. An MCP route on the Wo
 is a schema wrapper over functions it already calls in-process — and it lands in
 `event-server/`, which the reorg publishes anyway.
 
+**Scope of v1: full control, no new authorization.** The agent driving this is a
+human-operated interactive session, and it gets every command the console gets. The
+credential model stays exactly as it is (Q2, Q3, Q6). What that buys and what it costs
+is stated plainly under "The security posture" below, because it is the one thing about
+this plan a future reader must not have to reconstruct.
+
 ## Problem
 
 **There is no agent-shaped surface on the control plane.** `GET /fleet/status`,
@@ -42,35 +48,16 @@ private and the reorg moves it *deeper* into private (Movement 3, into `moda-age
 A public Python MCP server would have to drag an operator client out into the wheel —
 new public API, new version surface, cutting against the reorg mid-flight.
 
-**The credential model was sized for one trusted client.** `FLEET_OPERATOR_TOKEN`
-(`fleet.ts:429`) is one bearer for the whole control plane: every fleet, every
-instance, every command, and no actor recorded on the command record. That was
-proportionate when the only holder was moda's own console behind moda's own auth. It
-is not proportionate to a credential held by an agent whose context contains
-attacker-controllable text.
-
-**The injection surface is qualitatively worse here than anywhere else in bobi.**
-`docs/SECURITY.md:64` establishes that inbound event content is untrusted and layers
-defenses — scoped tokens, `await` gates, deterministic workflows, observability. An
-MCP client agent breaks the assumption those defenses rest on. It *reads transcripts*
-(`transcript`, `session_log`), which are a concentrated feed of exactly the
-attacker-controllable Slack/GitHub/email text the security model warns about, and it
-*holds lifecycle and chat tools* over other agents. `chat` is the sharp end: it is not
-a read or a restart, it injects operator-attributed text into another agent's turn.
-A single injected string in a transcript that reads as an instruction is a
-confused-deputy path from one team's inbox into another team's control plane.
-
 ## Solution
 
 ### The Worker serves MCP
 
-Add a `/mcp` route to `event-server/src/index.ts`, structurally identical to the
-`/fleet/*` block at `index.ts:414`: bearer auth first, then dispatch. It speaks MCP's
-Streamable HTTP transport in **stateless** mode — each `POST /mcp` carries one
-self-contained JSON-RPC message and returns `application/json`. No session, no SSE, no
-Durable Object. A tools-only server needs four methods (`initialize`,
-`notifications/initialized`, `tools/list`, `tools/call`) plus `ping`; `GET /mcp` returns
-405, which the spec permits for a server that never initiates a stream.
+Add a `/mcp` route to `event-server/src/index.ts`, positioned like the `/fleet/*` block
+at `index.ts:414`: bearer auth first, then dispatch. It is served by
+**`createMcpHandler`** from `agents/mcp/server` (Q1) — a stateless handler that builds
+one `McpServer` per request over a web-standards transport, with no Durable Object and
+no session state. Cloudflare's own guidance for it is to keep application state in KV
+rather than behind a session id, which is already how the fleet read model works.
 
 The tools call the same functions the HTTP routes call — `buildFleetStatus`,
 `buildInstanceDetail`, `buildCommandView`, and the publish-to-admin-topic path — as
@@ -79,8 +66,7 @@ no HTTP hop, one place where the command vocabulary lives.
 
 This resolves the language/repo problem outright: the MCP server is TypeScript in
 `event-server/`, which reorg Movement 1 publishes. Nothing about the reorg changes
-except its non-goal line ("external consumers build their own MCP client"), which
-becomes "the Worker is the MCP server."
+except its non-goal line, corrected on that plan's own PR.
 
 **Bobi teams can consume it with no framework change.** `mcp_servers` already accepts
 `type: http` with `url` and `headers` (`bobi/validate.py:493`,
@@ -97,61 +83,56 @@ is where the vocabulary gets shaped for a reader who has never seen the fleet:
 |---|---|---|
 | `bobi_fleet_status` | `buildFleetStatus` | The orienting read. Every instance, reachability, manager state, versions. One call, no arguments. |
 | `bobi_instance_detail` | `buildInstanceDetail` | Full heartbeat + lifecycle trail for one instance. |
-| `bobi_read_transcript` | `transcript` command | **Output is untrusted data** (Q3). Session defaults to the manager. |
-| `bobi_send_message` | `chat` command | Async by nature; returns a `command_id`. Description states plainly that no reply is returned and the reply is read back via `bobi_read_transcript`. |
-| `bobi_lifecycle` | `restart`/`stop`/`start` | One tool, an `action` enum, and a **required `reason`** string recorded on the command. Write scope. |
+| `bobi_read_transcript` | `transcript` command | Output is third-party content, framed as data (see the security posture). Session defaults to the manager. |
+| `bobi_send_message` | `chat` command | Async by nature; returns a `command_id`. Description states plainly that no reply is returned and the reply is read back via `bobi_read_transcript` (Q5). |
+| `bobi_lifecycle` | `restart`/`stop`/`start` | One tool, an `action` enum, and a **required `reason`** recorded on the command. The reason is an audit control, not an authorization one. |
 | `bobi_command_result` | `buildCommandView` | Poll a `command_id`. The escape hatch for anything the bounded wait didn't resolve. |
 
 `roster`, `spend`, and `session_log` fold into `bobi_instance_detail` or stay separate
 — a build-time call once the response sizes are measured against a real fleet.
 
-**Bounded server-side wait.** `tools/call` for a command waits up to ~5s for the fold
-before returning, so the fast cases — `transcript`, `roster`, `spend` all return
-sub-second in production — resolve in a single tool call instead of three. Slow cases
-return `{status: "pending", command_id}` and the agent polls `bobi_command_result`.
-The console already polls this exact read path at 0.5s intervals
+**Bounded server-side wait.** `tools/call` for a command waits up to **5s** (env-tunable,
+Q4) for the fold before returning, so the fast cases — `transcript`, `roster`, `spend`
+all return sub-second in production — resolve in a single tool call instead of three.
+Slow cases return `{status: "pending", command_id}` and the agent polls
+`bobi_command_result`. The console already polls this exact read path at 0.5s intervals
 (`webapp/runtime.py:COMMAND_POLL_INTERVAL`), so the KV read-after-write behavior is
-proven in practice; the Worker-internal loop uses the same read path, and Phase 3's
+proven in practice; the Worker-internal loop uses the same read path, and Phase 2's
 proof verifies it rather than assuming it.
 
-### Scoped operator credentials
+**Self-targeting is allowed** (Q6). An agent may restart the instance it is running on;
+the tool response says plainly that the caller is killing itself and will not receive
+a result. This keeps self-restart available as a self-heal primitive.
 
-Serving MCP changes *who holds the credential*, so the credential model has to change
-with it (Q2). Replace the single-token check with a principal lookup:
+### The security posture
 
-- A token record in KV: `{label, scopes: ["fleet:read" | "fleet:write" | "fleet:chat"], fleets: [...] | null}`.
-- `requireOperator` returns a **principal** rather than `null`-or-`Response`; every
-  route asserts a scope. The existing `FLEET_OPERATOR_TOKEN` env secret stays valid
-  and resolves to an all-scopes principal, so the console and every existing caller
-  keep working unchanged.
-- `FleetCommandRecord` gains an `actor` field (the principal's label). A `restart` in
-  the KV trail becomes attributable, which it is not today.
+v1 authenticates with the existing `FLEET_OPERATOR_TOKEN` (`fleet.ts:429`) and adds no
+scopes, no approval gates, and no per-principal attribution (Q2, Q3). Holding the token
+means full control of every instance in the fleet. This is a deliberate call, and the
+reasoning it rests on should be checked whenever the deployment posture changes:
 
-This is the difference between a guard and a boundary. A client-side allowlist in the
-MCP layer is bypassable by anyone holding the token with `curl`; a scope checked at
-the Worker is not. It is also the precondition for Q3: "this agent can read the fleet
-but cannot restart it" has to be enforceable, not documented.
+**What makes it acceptable now.** The intended holder is a human-operated interactive
+session — an operator's Claude Code, or a bobi team a person is talking to. A human is
+reading the tool calls as they happen, which is the same control that governs the
+hosted console today. The token is not new: it already grants exactly this, and the
+console already holds it. The MCP route widens the *interface*, not the authority.
 
-### The injection stance
+**What it costs, stated honestly.** An MCP client agent reads transcripts —
+`bobi_read_transcript` and `session_log` are a concentrated feed of the
+attacker-controllable Slack/GitHub/email text that `docs/SECURITY.md:64` warns about —
+while holding lifecycle and chat tools over other agents. `bobi_send_message` is the
+sharp end: it injects operator-attributed text into another agent's turn, reaching that
+agent's reasoning rather than just its process. Elsewhere in bobi a prompt-injected
+agent can do what its own scoped tokens allow; here the token is the fleet. The
+mitigations that remain are real but partial: transcript output is structurally framed
+as untrusted third-party content rather than instructions, `reason` is required on
+lifecycle so the KV command trail is readable after the fact, and a human is watching.
 
-Three controls, in decreasing order of how much they actually do:
-
-1. **Scopes are the structural control.** An agent whose job is monitoring gets
-   `fleet:read` and *cannot* restart anything, whatever its context says. `fleet:chat`
-   is separate from `fleet:write` because injecting text into another agent's turn is
-   a different risk from bouncing a process.
-2. **Transcript output is framed as data.** `bobi_read_transcript` returns messages in
-   a structure that names them as untrusted third-party content, and the tool
-   description says so. This is a mitigation, not a control — it raises the bar on a
-   naive injection and stops nothing determined.
-3. **`reason` is required on lifecycle.** Not a security control; an audit control.
-   It makes the KV trail readable after the fact and gives a human reviewing the trail
-   something to disbelieve.
-
-`docs/SECURITY.md` gains a section for this surface. The honest framing: bobi's
-existing stance assumes the agent reading untrusted text has narrowly scoped tokens.
-The MCP client agent is the first one where the *tokens themselves* are the fleet, so
-scoping them is the whole defense.
+**The trigger for revisiting.** The moment an *unattended* agent holds this credential —
+a monitor, a scheduled job, an autonomous remediation loop, anything where no human
+reads the tool calls in real time — the posture above no longer holds, and scoped
+credentials (Q2) become a prerequisite rather than a deferral. That is a specific,
+checkable condition, not a vague someday.
 
 ### What this does not add to the admin vocabulary
 
@@ -165,11 +146,13 @@ everywhere. New commands come after, each with a version gate.
 
 ## Non-goals
 
+- **No scoped credentials, approval gates, or actor attribution** (Q2, Q3). Deferred
+  with a named trigger, above — not forgotten.
+- **No OAuth and no claude.ai connector support** (Q7). Bearer covers both intended
+  consumers.
 - **No local MCP server.** A single dev box running against a local event server gets
   nothing here. A Python stdio `bobi mcp` over `LocalRuntime` is a different product
   for a different user; if it's wanted, it's a separate plan.
-- **No OAuth in v1** (Q7). Bearer covers Claude Code and bobi agents, which is the
-  whole intended audience. claude.ai custom connectors are a later phase.
 - **No new admin commands**, per above.
 - **No change to the bus, bubbles, or the sidecar.** The sidecar is untouched by this
   plan; every command already exists on it.
@@ -182,30 +165,28 @@ the Worker there. It is not strictly blocked: built before the move, it lands in
 `bobi-deploy/event-server/` and rides along with everything else. What it must not do
 is land in a *third* place.
 
-Two couplings to name:
+Two couplings, both already recorded on that plan's PR (#870):
 
-- **It strengthens the reorg's Q3** (how strong is the admin protocol's compatibility
-  promise). MCP tool schemas are a second binding to that contract, and a published
-  tool surface is harder to change than a published document. Q3 should be decided
-  knowing this exists.
-- **It corrected the reorg's non-goal.** That plan read "external consumers build
-  their own (MCP client, dashboards)"; it now records that the MCP server is a route
-  on the Worker it publishes. Edited in place, not amended — the reorg plan is still
-  Draft with no build started (PR #870, 2026-07-30).
+- **Its non-goal was corrected in place** — it read "external consumers build their own
+  (MCP client, dashboards)" and now records that the MCP server is a route on the
+  Worker it publishes. Edited, not amended: that plan is still Draft with no build
+  started.
+- **Its Q3** (how strong is the admin protocol's compatibility promise) now notes that
+  published tool schemas bind harder than a document, since a consumer's agent re-reads
+  them at every `tools/list`.
 
 ## Relevant files
 
 ### Existing (verified 2026-07-30)
 
 **Worker (`bobi-deploy/event-server/`, moving public):** `src/index.ts:414-534` (the
-`/fleet/*` route block — the structural model for `/mcp`); `src/fleet.ts:344-359`
+`/fleet/*` route block — the positional model for `/mcp`); `src/fleet.ts:344-359`
 (`ADMIN_COMMANDS`, `isAdminCommand`), `:381-419` (`buildCommandView`,
 `buildInstanceDetail`), `:313-328` (`buildFleetStatus`), `:429-441`
-(`requireOperator` — the scope refactor's target), `:92-208` (`FleetStorage` +
-`createFleetKVStorage` — where the token records go), `:72-90` (`FleetCommandRecord` —
-gains `actor`); `test/fleet.spec.ts`, `test/index.spec.ts` (the miniflare pool the MCP
-suite joins); `package.json` (one runtime dependency today — see Q1);
-`wrangler.jsonc`.
+(`requireOperator` — reused unchanged), `:92-208` (`FleetStorage` +
+`createFleetKVStorage`), `:72-90` (`FleetCommandRecord`); `test/fleet.spec.ts`,
+`test/index.spec.ts` (the miniflare pool the MCP suite joins); `package.json` (gains
+`agents`, `@modelcontextprotocol/server`, `zod`); `wrangler.jsonc`.
 
 **Sidecar (`bobi-deploy/.../supervisor/`, moving to `bobi/supervisor/`):**
 `admin.py:52-63` (the topic/vocabulary contract), `:175-222` (dispatch),
@@ -223,138 +204,129 @@ timeout constants the bounded wait should match).
 
 ### New
 
-- `event-server/src/mcp.ts` — transport (JSON-RPC framing, `initialize`, `tools/list`,
-  `tools/call`, error mapping) and the tool registry.
-- `event-server/src/operator-auth.ts` — principal resolution and scope assertion,
-  extracted from `requireOperator`.
+- `event-server/src/mcp.ts` — `createMcpHandler` wiring and the tool registry.
 - `event-server/test/mcp.spec.ts` — miniflare suite.
 - `docs/SECURITY.md` § agentic control surface.
 - MCP endpoint section in the admin protocol spec (reorg Lane C).
 
 ## Questionables
 
-### Q1 — Hand-rolled JSON-RPC, the MCP SDK, or Cloudflare's `agents`?
+All resolved 2026-07-30. Kept with their reasoning: the deferrals below are the ones a
+later reader will most want the "why" for.
 
-**Recommendation: hand-rolled, stateless.** A tools-only stateless server is four
-methods and a small error map. The Worker has exactly **one** runtime dependency today
-(`@moda-labs/bobi-events-core`) and the reorg is in the business of deleting npm
-bridges, not adding them. `@modelcontextprotocol/sdk`'s HTTP server transport is built
-for Node's `http` req/res, not a Workers `fetch` handler; Cloudflare's `agents`
-package (`McpAgent`) solves session state and SSE with a Durable Object, which a
-stateless tools server does not need. Revisit if v2 wants progress notifications,
-sampling, or resumable streams — those are the things the SDK earns its weight on.
+### Q1 — Hand-rolled JSON-RPC, the MCP SDK, or Cloudflare's `agents`? `[resolved]`
 
-**Risk to accept:** hand-rolled means we own spec conformance, including protocol
-version negotiation in `initialize`. Mitigation: the miniflare suite asserts against
-recorded real-client traffic (Phase 1 captures a Claude Code session), not against our
-own reading of the spec.
+**`createMcpHandler` from `agents/mcp/server`.** The original recommendation here was
+hand-rolled, on the premise that `agents` means DO-backed sessions and SSE we do not
+need. That premise was wrong: `createMcpHandler` is explicitly stateless — one
+`McpServer` per request, no Durable Object, web-standards transport — and its
+`authContext` parameter is a ready-made seam for the bearer check. Spec conformance
+(protocol version negotiation, error mapping, future revisions) is maintained upstream
+instead of by us, which is the failure mode hand-rolling was worst at: a client that
+mostly works.
 
-### Q2 — Scopes with the endpoint, or single token plus a blocker?
+Accepted cost: three npm dependencies (`agents`, `@modelcontextprotocol/server@2.0.0`,
+`zod`) in a Worker that has one today, and a release cadence coupled to theirs. Worth
+it against owning conformance forever.
 
-**Recommendation: scopes land with the endpoint (Phase 2, before any write tool).**
-The alternative — ship on the single token, file scoping as a blocker on agent-held
-deployments — is tempting and gets a human-operated server sooner. It fails on the
-first thing anyone will actually want to do with this, which is give a bobi ops team
-read access to the fleet. Under one god-token there is no such thing as read access.
+### Q2 — Scoped operator credentials? `[resolved: deferred]`
 
-The cheap version is genuinely cheap: a KV token record, a principal return type, a
-scope assert per route, an `actor` field. It is smaller than the MCP transport it
-guards.
+**Not in v1.** The single `FLEET_OPERATOR_TOKEN` stays and `requireOperator` is reused
+unchanged. The argument for scoping — that "read-only fleet access" cannot exist under
+one god-token — is real and unrefuted; it is outweighed for now by the fact that the
+intended holder is a human-operated interactive session with the same authority the
+console already has.
 
-### Q3 — What gates `chat` and lifecycle beyond a tool description?
+The trigger that flips this: an unattended agent holding the credential. See "The
+security posture". At that point the work is a KV token record, a principal return
+type from `requireOperator`, a scope assert per route, and an `actor` field on
+`FleetCommandRecord`.
 
-**Recommendation: scope separation (`fleet:read` / `fleet:write` / `fleet:chat`) is
-the control; everything else is mitigation.** Open sub-question worth deciding before
-Phase 3: does a lifecycle action from an agent-held principal require a human
-approval, and if so through what? bobi has an `await`-gate primitive
-(`docs/SECURITY.md:73`) but it lives in the workflow engine, on the *agent* side, not
-in the Worker — so using it would mean the controlling agent gates itself, which an
-injected agent will happily skip. A Worker-side approval queue is a real feature, not
-a checkbox. **Proposal: v1 ships no approval gate and no agent holds `fleet:write`;
-the human-operated principal does.** Autonomous lifecycle control gets its own plan.
+### Q3 — What gates `chat` and lifecycle? `[resolved]`
 
-### Q4 — How long is the bounded wait?
+**Nothing.** An agent gets full control, because the agents in scope are interactive
+and human-driven. The alternatives considered and rejected: a Worker-side approval
+queue (parked commands, out-of-band approve, expiry) is the only gate that actually
+binds — the existing `await` gate lives agent-side in the workflow engine, so an
+injected agent simply skips it — but it is a feature in its own right and it buys
+nothing while a human is reading every tool call. Gating lifecycle but not `chat` was
+also rejected: `chat` is arguably the more dangerous of the two, since it reaches
+another agent's reasoning rather than just its process, so a split that protects
+processes and not reasoning protects the wrong thing.
 
-**Recommendation: ~5s, configurable via env, matching the console's fail-fast
-constants** (`DEFAULT_FLEET_SPEND_COMMAND_TIMEOUT = 8.0`,
-`DEFAULT_SESSION_LOG_COMMAND_TIMEOUT = 8.0` — both deliberately shorter than the 30s
-default, so a wedged-but-addressable box drops fast). Too short and every read costs
-two round trips; too long and one wedged instance holds an agent's tool call while its
-client counts down. Verify against measured fold latency in Phase 3, not by taste.
+### Q4 — How long is the bounded wait? `[resolved]`
 
-### Q5 — Does `bobi_send_message` wait for the reply?
+**5s, env-tunable, validated by measurement in Phase 2.** Chosen to sit under the
+console's deliberate fail-fast constants (`DEFAULT_FLEET_SPEND_COMMAND_TIMEOUT` and
+`DEFAULT_SESSION_LOG_COMMAND_TIMEOUT`, both 8.0 against a 30s default, so a
+wedged-but-addressable box drops fast rather than holding a worker). Too short and
+every read costs two round trips; too long and one wedged instance holds an agent's
+tool call while its client counts down. Phase 2 measures real fold latency and moves
+the default if the data disagrees.
 
-**Recommendation: no, and say so loudly in the description.** `chat` runs on a
-detached thread in the sidecar and resolves its command as soon as `service.ask`
-returns (`admin.py:304-326`); the *reply* lands in the transcript minutes later. Any
-tool that appears to return a reply will be believed. The description states the
-two-step contract explicitly. The alternative — a `bobi_send_message_and_wait` that
-polls the transcript — is a v2 convenience that needs a reply-detection heuristic we
-do not have.
+### Q5 — Does `bobi_send_message` wait for the reply? `[resolved]`
 
-### Q6 — Self-targeting: what happens when an agent restarts its own instance?
+**No, and the tool description says so loudly.** `chat` runs on a detached thread in
+the sidecar and resolves its command as soon as `service.ask` returns
+(`admin.py:304-326`); the *reply* lands in the transcript minutes later. Any tool that
+appears to return a reply will be believed. A `bobi_send_message_and_wait` that polls
+the transcript is a v2 convenience needing a reply-detection heuristic we do not have.
 
-Unresolved. An ops team running *on* the fleet can restart the box it is running on:
-the manager dies mid-turn, the tool call never returns, and the command result is
-never read. With Q2's token records the Worker could know the caller's own instance
-(the principal's label) and refuse or loudly flag a self-targeted lifecycle action.
-**Proposal: Phase 2 records enough to detect it; Phase 4 decides refuse-vs-warn**,
-informed by whether anyone actually wants self-restart as a feature (it is a
-plausible self-heal primitive).
+### Q6 — Self-targeting: what happens when an agent restarts its own instance? `[resolved]`
 
-### Q7 — OAuth for claude.ai connectors?
+**Allowed, with the response saying plainly what is about to happen.** Refusing it
+would foreclose self-restart as a self-heal primitive — directly relevant to the
+dead-transport work, where a wedged box cannot fix itself from inside. Without
+per-principal identity (Q2) the Worker cannot reliably detect self-targeting anyway,
+so "allow and annotate" is also the only option that is honest about what v1 knows.
+The command trail is the evidence it happened.
 
-**Recommendation: not in v1.** Claude Code accepts a remote HTTP MCP server with a
-custom `Authorization` header, and bobi teams pass `headers` through `mcp_servers` —
-that covers both intended consumers. claude.ai custom connectors expect OAuth 2.1 with
-discovery metadata; Cloudflare publishes `workers-oauth-provider` for exactly this
-shape. **Verify current client behavior before committing either way** — this is the
-claim in the plan most likely to have drifted. If claude.ai access is wanted, it is a
-self-contained later phase, not a redesign.
+### Q7 — OAuth for claude.ai connectors? `[resolved: dropped]`
 
-### Q8 — Does this plan's approval change the reorg? `[resolved 2026-07-30]`
+**Bearer only; no claude.ai support, and the OAuth phase is deleted.** Verified rather
+than assumed: Claude Code accepts `--header "Authorization: Bearer ${VAR}"` with env
+interpolation, and bobi teams pass `headers` through `mcp_servers` — both intended
+consumers work today. claude.ai custom connectors are OAuth-only in the standard UI;
+a `static_headers` beta exists but shares one org-wide credential, which would collapse
+every browser user into a single principal. Controlling the fleet from a browser is not
+a goal, so neither path is worth carrying.
+
+*Known client risk:* two open Claude Code issues report configured headers not being
+attached in some versions/platforms (#50464, #29562). Phase 1's conformance capture
+against a real client is where that surfaces if it affects us.
+
+### Q8 — Does this plan's approval change the reorg? `[resolved]`
 
 Resolved by editing the reorg plan in place on its own open PR (#870), since it is
-still Draft with no build started: the non-goal now says the MCP server is a route on
-the Worker, and Q3 records that tool schemas bind the admin protocol harder than a
-document does. Nothing here gates a reorg lane, and nothing there gates a phase below
-— the two plans review independently.
+still Draft with no build started. Nothing here gates a reorg lane, and nothing there
+gates a phase below — the two plans review independently.
 
 ## Phases
 
-### Phase 1 — MCP transport + read-only tools (Lane A) `[ ]`
+### Phase 1 — MCP handler + read tools (Lane A) `[ ]`
 
-`src/mcp.ts`: stateless Streamable HTTP, `initialize` / `tools/list` / `tools/call` /
-`ping`, JSON-RPC error mapping, `GET /mcp` → 405. Tools: `bobi_fleet_status`,
-`bobi_instance_detail`, `bobi_command_result`. Bearer auth via the existing
-`requireOperator`, unchanged. Miniflare suite in the existing vitest pool. Capture a
-real Claude Code session's traffic as the conformance fixture.
+`src/mcp.ts`: `createMcpHandler` wired into the Worker's fetch dispatch behind
+`requireOperator`; tools `bobi_fleet_status`, `bobi_instance_detail`,
+`bobi_command_result` registered with zod schemas. `package.json` gains the three
+dependencies; bundle size checked against the Workers limit. Miniflare suite in the
+existing vitest pool. Capture a real Claude Code session's traffic as the conformance
+fixture — including whether the configured bearer header actually arrives (Q7).
 
-### Phase 2 — Scoped operator credentials (Lane B) `[ ]`
+### Phase 2 — Write tools + bounded wait (Lane B) `[ ]`
 
-Parallel with Phase 1; **required before Phase 3.** KV token records, `requireOperator`
-returns a principal, per-route scope asserts, `actor` on `FleetCommandRecord`, the
-env-secret compatibility path (existing token → all scopes). Record enough principal
-identity to detect self-targeting (Q6). Console and existing callers unchanged, proven
-by their suites.
+Depends on A. `bobi_read_transcript`, `bobi_send_message`, `bobi_lifecycle` (action
+enum + required `reason`). The bounded wait, with the 5s default validated against
+measured fold latency and the KV read-after-write behavior verified inside a single
+Worker invocation. Self-target annotation on lifecycle responses. Untrusted-data
+framing on transcript output.
 
-### Phase 3 — Write tools (Lane C) `[ ]`
+### Phase 3 — The agentic consumer + security stance (Lane C) `[ ]`
 
-Depends on A + B. `bobi_read_transcript`, `bobi_send_message`, `bobi_lifecycle`
-(action enum + required `reason`), each behind its scope. The bounded wait, with the
-window set from measured fold latency (Q4). Untrusted-data framing on transcript
-output.
-
-### Phase 4 — The agentic consumer (Lane D) `[ ]`
-
-Depends on C. An ops team's `agent.yaml` declares the endpoint with a read-scoped
-token and `bobi validate` proves the handshake. `docs/SECURITY.md` § agentic control
-surface. Self-targeting decision (Q6). The admin protocol spec gains its MCP section.
-
-### Phase 5 — OAuth for claude.ai connectors (Lane E) `[ ]` — deferred
-
-Only if wanted (Q7). `workers-oauth-provider`, discovery metadata, dynamic client
-registration. Self-contained; no earlier phase changes.
+Depends on B. An ops team's `agent.yaml` declares the endpoint and `bobi validate`
+proves the handshake. `docs/SECURITY.md` gains the agentic control surface section,
+carrying the posture and its trigger condition verbatim — this is the artifact that
+has to survive after the plan is archived. The admin protocol spec gains its MCP
+section.
 
 ## Proof of work
 
@@ -367,29 +339,29 @@ registration. Self-contained; no earlier phase changes.
   send a message, observe the reply appear on a follow-up transcript read, restart the
   instance, observe `restart_count` increment on the next heartbeat. This is the
   acceptance test.
-- **Scopes are a boundary, not a guard:** a `fleet:read` token is rejected on
-  `bobi_lifecycle` **at the Worker**, and the equivalent raw `POST .../commands` with
-  the same token is rejected identically. Proven by a failing-first test on the
-  Worker, not by the tool being absent from `tools/list`.
-- **Attribution:** a restart issued through MCP appears in the KV command record with
-  its principal label and its `reason`.
 - **Bounded wait:** measured fold latency for `transcript`/`roster`/`spend` against a
-  real instance justifies the chosen window; a deliberately wedged instance returns
-  `pending` within it rather than hanging the tool call.
+  real instance justifies the 5s default; a deliberately wedged instance returns
+  `pending` within the window rather than hanging the tool call.
+- **Self-restart:** an agent restarts its own instance, the tool call does not return,
+  and the command trail plus the next heartbeat show what happened.
+- **Auth is closed:** an unauthenticated and a wrong-token request to `/mcp` are both
+  rejected before any tool runs — proven by a failing-first test, since `/mcp` is a new
+  public route on a Worker that also serves the bus.
 - **Bobi-team consumption:** a team declaring the endpoint in `mcp_servers` passes
   `bobi validate`'s existing `initialize` probe with no framework change.
 - **No regression:** the console's suites and the existing `/fleet/*` route tests stay
-  green through the `requireOperator` refactor.
+  green.
 
 ## Lane map
 
 | Lane | Scope | Depends on | Parallel with |
 |---|---|---|---|
-| A | MCP transport + read-only tools | — | B |
-| B | Scoped credentials + actor attribution | — | A |
-| C | Write tools + bounded wait | A, B | — |
-| D | Agentic consumer + security doc + Q6 | C | — |
-| E | OAuth (deferred, optional) | A | — |
+| A | MCP handler + read-only tools | — | — |
+| B | Write tools + bounded wait | A | — |
+| C | Agentic consumer + security doc | B | — |
+
+Sequential by construction: the tool registry built in A is what B extends, and C
+documents what B establishes. Parallelism would cost more in conflicts than it saves.
 
 ## Amendments
 
@@ -407,11 +379,12 @@ need `EventBusRuntime` published into the wheel, exactly opposite the direction
 Movement 3 is pushing it. The Python `TeamRuntime` ABC remains the *shape* worth
 copying — it solved the sync/async split correctly — without being the implementation.
 
-### Why the injection risk is different here
+### What the descope actually removed
 
-Everywhere else in bobi, a prompt-injected agent can do what its own scoped tokens
-allow, against its own resources. An MCP client agent's tokens *are* the fleet, and
-its reading material is the concentrated output of every untrusted channel every team
-subscribes to. The plan's answer is not a better prompt: it is that the credential
-holding the power and the credential reading the untrusted text should be able to
-differ, which is what Q2 buys and why it is not deferrable.
+An earlier draft carried five phases, the extra two being scoped operator credentials
+and an OAuth server. Both were cut deliberately (Q2, Q7), not for schedule. The scoping
+work was cut because its beneficiary — an unattended agent — does not exist yet, and
+building an authorization model for a principal that has not been designed is how
+authorization models go wrong. The OAuth work was cut because browser-based fleet
+control is not a goal. Neither cut is load-bearing on anything below: v1's three phases
+are the same three phases they would have been.
