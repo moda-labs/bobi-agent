@@ -52,11 +52,13 @@ appendix, to end of file:
 
 2026-07-29 - keyed on id, not id+name: a composite keeps the rename
 information in the key, which is what makes the entry unreachable.
-```
 ````
 
 A file with no ```` ```checklist ```` line has no appendix and is not under
 checklist execution yet — it is an ordinary plan document.
+
+**Never close the fence.** The appendix runs to end of file, so a closing
+```` ``` ```` would just be appendix content that later appends cannot get past.
 
 **The review surface is append-only.** Above the fence you may change a marker
 inside an existing `- [ ]`, and you may ADD lines. You may never modify or delete

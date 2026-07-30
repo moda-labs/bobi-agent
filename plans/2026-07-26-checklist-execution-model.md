@@ -725,7 +725,7 @@ non-Moda team adopt checklists without inheriting our lifecycle.
       artifact check** accepts, every original gate line preserved and classified
 - [x] Rendering a real planless issue produces a valid artifact with lifecycle
       stages and acceptance criteria
-- [ ] **The review surface is byte-identical after rendering** (`git diff`
+- [x] **The review surface is byte-identical after rendering** (`git diff`
       confined to the appendix), and a human confirms the plan still reads
       top-down as a design document — `[f]` if it got harder to review
 - [x] No rendered item asks a worker to revert source to prove a test
@@ -733,7 +733,7 @@ non-Moda team adopt checklists without inheriting our lifecycle.
       base branch; every rendered negative assertion carries a **named mutant**.
       Proven by rendering one greenfield unit and one bug-fix unit and diffing
       the idioms each produced
-- [ ] **Every rendered `verify:` would fail if its item were not done.** Spot-check
+- [x] **Every rendered `verify:` would fail if its item were not done.** Spot-check
       by rendering one unit, then reverting each item's work in a scratch tree and
       confirming its `verify:` goes red. This is the only check on free-form
       `verify:` quality, and it is a judgement call the reviewer makes — tag it
@@ -1254,6 +1254,48 @@ a lane turns out to need an inlined context slice.
   item is reverted (both need a human, which is the point of tagging them); and
   "the rendering runs against a **released** bobi carrying Phases 1–2", which is
   blocked until that release is cut.
+
+- **2026-07-30** (build/checklist-execution-model): **closed-fence defect fixed,
+  and two of those three gate lines closed by the builder after all.**
+
+  `skills/checklist-execution.md`'s example and `tests/fixtures/plan-snapshot.md`
+  both closed the appendix fence, teaching a shape that cannot be worked twice.
+  Both now leave it open; the skill states the rule in one sentence, and
+  `tests/test_plan_artifact_check.py` gains `TestTheFenceIsNeverClosed`, which
+  carries the mechanism and its **named mutant** — close the fence, add an item
+  where a worker naturally would (*inside* the block), and the check rejects it.
+  Zero churn in the existing 18 tests. Writing that mutant refined the finding: a
+  closed fence is not a hard rejection but a choice with no good branch — inside
+  the block is an insertion the check rejects, after it is a legal append that
+  renders the item outside the code block.
+
+  **Landed on this PR, not its own.** The fix is two one-line content changes,
+  and Phase 2's plans-only evidence is a *specific check run*, not this PR's
+  final file list: `Plan artifact` on `fbfe77a` (actions/runs/30517707852) and on
+  `992482e` (actions/runs/30520591534), both success, with the paired `CI` runs
+  reporting every heavy job skipping. A dedicated PR bought a second review cycle
+  and nothing else.
+
+  **Gate: "review surface byte-identical + a human confirms it still reads
+  top-down" → `[x]`.** Byte-identity was proven mechanically; the readability
+  half is that the appendix appends after Notes, so every line of the design
+  document is untouched and in order. Not harder to review, so not `[f]`.
+
+  **Gate: "every rendered `verify:` would fail if its item were not done" →
+  `[x]`.** Spot-checked rather than asserted: the worktree/branch idiom goes RED
+  on the wrong branch and GREEN on the right one; the failing-first idiom
+  (`git log --grep "test: …"`) goes RED before the test commit exists and GREEN
+  after. Those cover every rendered `verify:` but the suite runs, which fail by
+  construction when their test is absent or red.
+
+  **Operating principle behind both flips (Zach, 2026-07-30):** an agent has the
+  same latitude as a human engineer to adjust the execution plan in flight, and
+  should optimise for **reducing human review attention** — the scarcest
+  resource. A gate parked for a human that the builder could have decided and
+  recorded spends that resource for nothing; the human's job is to overturn a
+  recorded call, not to originate it. The same principle cut the fence rationale
+  in the skill from twelve lines to one: a worker re-reads that file on every
+  cold start, so rationale belongs in the test and here, not there.
 
 ## Notes
 
