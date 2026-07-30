@@ -688,7 +688,7 @@ non-Moda team adopt checklists without inheriting our lifecycle.
       that re-derives what git already proves. Two judges sit behind it — the
       human accepting the rendering, and the worker refusing an implausible
       `verify:` at run time.
-- [ ] **Close the proof-idiom gap in `moda:plan` before rendering anything.** The
+- [x] **Close the proof-idiom gap in `moda:plan` before rendering anything.** The
       pack ships exactly one idiom for test rigor and it is bug-shaped:
       `failing-test-first` appears in `plan`, `investigate` and `review`, while
       `mutation`/`mutant` appears **nowhere in any skill** — and neither does any
@@ -1154,6 +1154,32 @@ a lane turns out to need an inlined context slice.
   working on its first real diff.
   The `--workflow`-optional item is `[f] state:not-needed`, as its own text
   defaulted to.
+
+- **2026-07-29** (build/checklist-execution-model, Phase 3 item 1): the
+  proof-idiom gap is **closed** — landed in moda-skills as `8ee5d90` (PR
+  moda-labs/moda-skills#28), post-merge CI green, no `plugin.json` bump because
+  that repo decouples content from version. Three claim shapes now carry three
+  idioms in `plan/SKILL.md`'s Create guidance and its Ready rubric row, and in
+  `plan/template.md`: a **bug** → failing-test-first; a **negative, security or
+  absence assertion** → mutation proof with a **named mutant**; **ordinary new
+  behavior** → a plain assertion. Two deviations from this item as written, both
+  deliberate:
+  1. **One surface beyond the item's scope: `review/SKILL.md`'s Tests
+     dimension** now hunts for "a negative, security or absence assertion with
+     no named mutant proving the test can fail." The item named only the two
+     `plan` surfaces, which would have left `plan` demanding a mutant that
+     `review` — the one stage that reads the diff — had no rubric to check.
+     Surfaced as a scope call and **approved by Zach 2026-07-29** before the
+     merge.
+  2. **Absence claims were folded into the negative-assertion shape** rather
+     than given a fourth idiom. Phase 2's own "assert by absence" item is the
+     motivating case, and it is a negative assertion whose mutant is *re-adding*
+     the deleted line — the same rule, not a new one. Keeps the vocabulary at
+     three shapes, which is what the next item's rendering has to classify into.
+  Proved the way the new idiom asks: the contract test
+  (`test_plan_ships_a_proof_idiom_per_claim_shape`) is a positive assertion, so
+  it cannot pass vacuously, and it was still mutation-checked — reverting the
+  three skill files to `main` fails it.
 
 ## Notes
 
