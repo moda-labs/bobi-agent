@@ -75,6 +75,44 @@ def test_ci_builds_and_runs_the_packaged_event_server_contract():
     assert '--timeout=180' in remaining["run"]
 
 
+def test_unit_tests_gate_is_a_stable_required_check_that_cannot_false_green():
+    """The required check standing in for the unit-test matrix.
+
+    A matrixed job whose job-level `if:` is false never expands its matrix -
+    GitHub publishes one check run named `Unit tests`, not `Unit tests (3.12)`
+    / `(3.13)`. Requiring the expanded names left every docs/plans-only PR
+    waiting on statuses that could not arrive. This gate is what branch
+    protection requires instead, so the properties that make it safe are
+    load-bearing and asserted here rather than left to a comment.
+    """
+    workflow = _ci_workflow()
+    job = workflow["jobs"]["unit-tests-gate"]
+
+    # No matrix: the whole point is a check name that is stable whether the
+    # suite runs or skips. A matrix here would reintroduce the original bug.
+    assert "strategy" not in job
+    assert job["name"] == "Unit tests (gate)"
+    assert job["needs"] == "unit-tests"
+
+    # `always()`, NOT the implicit form. GitHub skips dependents when a
+    # dependency FAILS, and branch protection reads a skipped required check
+    # as passing - so letting this job skip would report green on a genuinely
+    # failing unit suite, which is the exact bug class this gate exists to
+    # close. `!cancelled()` is also insufficient: it would skip (and so pass)
+    # a cancelled run.
+    assert job["if"] == "always()"
+
+    # Only success and skipped may pass; every other result - failure,
+    # cancelled - must exit non-zero.
+    run = "".join(step.get("run", "") for step in job["steps"])
+    assert "needs.unit-tests.result" in "".join(
+        str(step.get("env", "")) for step in job["steps"]
+    )
+    assert "success)" in run
+    assert "skipped)" in run
+    assert "exit 1" in run
+
+
 def test_promote_dev_advances_only_on_fully_green_main_push():
     """#740 Track A: `dev` is the pre-release channel the private deploy repo
     consumes, so it must only ever point at a main commit the WHOLE CI matrix

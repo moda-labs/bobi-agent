@@ -334,16 +334,7 @@ jobs:
     # becomes `dev` when the whole CI matrix proved it. `changes` is included
     # so a gate-job error on a push to main blocks promotion too (on push it
     # always reports code=true, so it never suppresses the heavy jobs here).
-    needs:
-      [
-        changes,
-        unit-tests,
-        unit-tests-gate,
-        lint,
-        event-server,
-        integration-fast,
-        e2e,
-      ]
+    needs: [changes, unit-tests, unit-tests-gate, lint, event-server, integration-fast, e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # Serialize promotions; the ancestor check below handles runs that
     # complete out of order.
