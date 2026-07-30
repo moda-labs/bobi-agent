@@ -91,6 +91,48 @@ jobs:
       - name: Run unit tests
         run: pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q
 
+  # The required check that stands in for the unit-test matrix.
+  #
+  # WHY THIS EXISTS. `unit-tests` is the only matrixed job here, and a matrix
+  # interacts badly with the docs/plans-only gate above. When a job's
+  # *job-level* `if:` is false, GitHub never expands its matrix: it publishes a
+  # single check run named `Unit tests`, not `Unit tests (3.12)` /
+  # `Unit tests (3.13)`. Branch protection required those two expanded
+  # contexts, so on a plans-only PR they were never reported at all and the PR
+  # sat at "Expected - waiting for status" forever. Every non-matrix job here
+  # skips under its own exact name, which protection reads as passing, so this
+  # was a matrix-only failure. Requiring THIS job instead - it has no matrix,
+  # so its name is stable whether it runs or skips - is what makes the fast
+  # path actually mergeable.
+  #
+  # WHY THE EXPLICIT RESULT CHECK. Do not be tempted to drop the `if:` and let
+  # this job skip when `unit-tests` skips. GitHub also skips dependents when a
+  # dependency *fails*, and protection reads a skipped required check as
+  # passing - so the implicit form would report green on a genuinely failing
+  # unit suite. `always()` (not `!cancelled()`) keeps this job running in every
+  # outcome, and only `success` and `skipped` are accepted below; `cancelled`
+  # deliberately fails rather than skipping into a false green.
+  #
+  # If another job here ever gains a matrix, it needs the same treatment.
+  unit-tests-gate:
+    name: Unit tests (gate)
+    needs: unit-tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report the matrix result under a stable check name
+        env:
+          RESULT: ${{ needs.unit-tests.result }}
+        run: |
+          set -euo pipefail
+          # A matrixed job's `result` is the aggregate: `success` only when
+          # every combination passed, `failure` if any one of them did not.
+          case "$RESULT" in
+            success) echo "unit tests passed on every Python version" ;;
+            skipped) echo "unit tests skipped (docs/plans-only change)" ;;
+            *) echo "unit tests reported '$RESULT'"; exit 1 ;;
+          esac
+
   lint:
     name: Lint (workflows)
     needs: changes
@@ -292,7 +334,7 @@ jobs:
     # becomes `dev` when the whole CI matrix proved it. `changes` is included
     # so a gate-job error on a push to main blocks promotion too (on push it
     # always reports code=true, so it never suppresses the heavy jobs here).
-    needs: [changes, unit-tests, lint, event-server, integration-fast, e2e]
+    needs: [changes, unit-tests, unit-tests-gate, lint, event-server, integration-fast, e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # Serialize promotions; the ancestor check below handles runs that
     # complete out of order.
