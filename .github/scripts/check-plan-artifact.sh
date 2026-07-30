@@ -46,6 +46,18 @@ appendix() {
   awk -v fence="$FENCE" 'seen { print } $0 == fence { seen = 1 }'
 }
 
+# The `**Status:**` VALUE, lowercased — up to the first `·`, so other metadata
+# sharing the line (`· **Created:** ...`) is ignored. Empty when the plan has no
+# status line at all.
+plan_status() {
+  grep -m1 -E '^[[:space:]]*>?[[:space:]]*\*\*Status:\*\*' \
+    | sed -E 's/^[[:space:]]*>?[[:space:]]*\*\*Status:\*\*[[:space:]]*//' \
+    | sed -E 's/·.*$//' \
+    | sed -E 's/[[:space:]]+$//' \
+    | tr '[:upper:]' '[:lower:]' \
+    || true
+}
+
 # Collapse the STATE fields of a plan to fixed tokens so a diff sees past them.
 # Everything else above the fence is approved prose and must survive verbatim.
 #
@@ -174,6 +186,31 @@ while IFS= read -r path; do
   fi
 
   base_body="$(git show "$BASE:$path")"
+
+  # A plan is frozen once it is approved AND merged — not before.
+  #
+  # Freezing a Draft makes drafting impossible: the whole point of the phase
+  # before approval is revising in place — renumbering, resequencing, folding
+  # review feedback back in. An earlier version of this check froze every plan
+  # unconditionally, which meant a draft could only ever be appended to, and
+  # rejected ordinary pre-approval revisions as if they were a worker rewriting
+  # its own spec. The reviewed-vs-built divergence this rule exists to prevent
+  # presupposes a review that has happened; before approval there is no
+  # reviewed text to diverge from.
+  #
+  # READ FROM BASE, NEVER HEAD, and that is the load-bearing half. The status
+  # line is deliberately mutable (normalize_markers lets a builder flip it), so
+  # a status read from HEAD could be unlocked by the very commit doing the
+  # rewriting: set `**Status:** Draft` and the freeze evaporates. Read from
+  # base, "approved on the base branch" is a fact about merged history that no
+  # pull request can edit.
+  #
+  # Fail-safe in the other direction too: ONLY the exact value `draft` unlocks.
+  # An unrecognized status, or a plan with no status line at all, stays frozen.
+  if [ "$(printf '%s\n' "$base_body" | plan_status)" = "draft" ]; then
+    note "$path: Draft in $BASE — review surface not frozen until approved"
+    continue
+  fi
 
   base_appendix="$(printf '%s\n' "$base_body" | appendix)"
 

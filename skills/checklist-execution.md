@@ -71,6 +71,13 @@ The rule is insertion-only rather than byte-frozen for a reason: it lets a human
 amend the plan — additively, dated — without the protocol having to guess whether
 a given change came from a worker or an author. Both can even arrive together.
 
+The freeze begins at approval, which is why the rationale above is phrased
+around approved text. A plan still marked `**Status:** Draft` on the base branch
+is revised in place — renumbered, resequenced, rewritten — because there is no
+reviewed version for the built one to diverge from yet. That never loosens
+anything for a worker: execution only ever runs against an approved plan, so by
+the time these instructions apply, the surface is frozen.
+
 Below the fence you **append**. Existing appendix text must survive; markers in
 it may change as work lands, but nothing already written gets rewritten, because
 a reader takes the round log as a chronology.
