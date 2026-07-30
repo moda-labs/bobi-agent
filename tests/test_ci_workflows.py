@@ -55,6 +55,38 @@ def test_ci_builds_and_runs_the_packaged_event_server_contract():
     assert bundle["working-directory"] == "event-server"
     assert bundle["run"] == "npm run build:local"
 
+    # The build gate accepts any Node 20+ host (#857) only because the bundle is
+    # esbuild's output and the host Node major cannot reach its bytes. That
+    # invariant is load-bearing, so the cross-major rebuild that proves it must
+    # not be quietly dropped: it records the release-major digest, then rebuilds
+    # on a newer major and compares. It runs after every other step, since it
+    # repoints the job's Node and reinstalls node_modules.
+    record_index, record = next(
+        (index, step)
+        for index, step in enumerate(event_steps)
+        if step.get("name") == "Record the Node 20 bundle digest"
+    )
+    newer_node_index, newer_node = next(
+        (index, step)
+        for index, step in enumerate(event_steps)
+        if step.get("uses", "").startswith("actions/setup-node")
+        and step["with"]["node-version"] != "20"
+    )
+    compare_index, compare = next(
+        (index, step)
+        for index, step in enumerate(event_steps)
+        if step.get("name")
+        == "Bundle is byte-identical when built on a newer Node major"
+    )
+    assert "$GITHUB_ENV" in record["run"]
+    assert newer_node["with"]["node-version"] == "24"
+    assert event_steps.index(bundle) < record_index < newer_node_index
+    assert newer_node_index < compare_index == len(event_steps) - 1
+    assert "npm ci --no-audit --no-fund" in compare["run"]
+    assert "npm run build:local" in compare["run"]
+    assert '"$rebuilt" != "$bundle_sha256"' in compare["run"]
+    assert "exit 1" in compare["run"]
+
     integration_steps = workflow["jobs"]["integration-fast"]["steps"]
     packaged = next(
         step

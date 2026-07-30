@@ -135,7 +135,7 @@ def _require_build_node(
     # emits an explicit `--target=node20`, so the host Node major does not reach
     # the bytes; `validate_artifact` anchors reproducibility on esbuild instead.
     # Demanding major == 20 here contradicted the runtime, doctor, installer, and
-    # docs -- all of which say 20+ -- and blocked building on a Node 21+ host (#857).
+    # docs - all of which say 20+ - and blocked building on a Node 21+ host (#857).
     if node_major < 20:
         raise EventServerBuildError(
             "Node.js 20 or newer is required to build the embedded event server; "

@@ -468,7 +468,7 @@ def _stub_build_toolchain(monkeypatch, node_version: str) -> None:
 
 
 # The build gate used to demand major == 20, which contradicted the runtime
-# check, doctor, `scripts/install.sh`, and every doc -- all of which say 20+ --
+# check, doctor, `scripts/install.sh`, and every doc - all of which say 20+ -
 # and blocked git/sdist installs on a Node 21+ host (#857). The bundle is
 # esbuild's output (pinned native binary, explicit `--target=node20`), so the
 # host Node major cannot reach the bytes; `.github/workflows/ci.yml` pins that

@@ -151,11 +151,21 @@ jobs:
         working-directory: event-server
         run: echo "bundle_sha256=$(sha256sum dist/local.js | cut -d' ' -f1)" >> "$GITHUB_ENV"
 
+      # The private worker adapter consumes events-core as a pinned published
+      # npm package after the repo split; this proves the publishable tarball
+      # (dist build + transformed manifest) works for a clean external
+      # consumer: plain-Node ESM imports of every subpath + d.ts typecheck.
+      - name: Events-core publish smoke (pack + scratch consumer)
+        working-directory: event-server
+        run: npm run smoke -w core
+
       # The build gate accepts any Node 20+ host (#857) because the bundle is
       # esbuild's output - a pinned native binary emitting an explicit
       # --target=node20 - so the host Node major must not change its bytes.
-      # Rebuild on a newer major and compare, so that invariant fails loudly
-      # here rather than silently drifting the artifact users install.
+      # Rebuild on a newer major and compare, so the invariant that licenses the
+      # open gate fails loudly here instead of silently drifting the artifact
+      # users install. Runs last: it repoints the job's Node and reinstalls
+      # node_modules, so every step above still runs on the release major.
       - uses: actions/setup-node@v5
         with:
           node-version: "24"
@@ -168,20 +178,12 @@ jobs:
           rebuilt="$(sha256sum dist/local.js | cut -d' ' -f1)"
           if [ "$rebuilt" != "$bundle_sha256" ]; then
             echo "Bundle digest depends on the host Node major:" >&2
-            echo "  node 20: $bundle_sha256" >&2
+            echo "  node 20: ${bundle_sha256:-<unrecorded>}" >&2
             echo "  node 24: $rebuilt" >&2
             echo "Either restore an exact-major build gate or fix the nondeterminism." >&2
             exit 1
           fi
           echo "Bundle is Node-major-independent: $rebuilt"
-
-      # The private worker adapter consumes events-core as a pinned published
-      # npm package after the repo split; this proves the publishable tarball
-      # (dist build + transformed manifest) works for a clean external
-      # consumer: plain-Node ESM imports of every subpath + d.ts typecheck.
-      - name: Events-core publish smoke (pack + scratch consumer)
-        working-directory: event-server
-        run: npm run smoke -w core
 
   e2e:
     name: E2E (Playwright)
