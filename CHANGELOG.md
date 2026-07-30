@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.50.0 - 2026-07-30
+
+Minor release: long agent jobs stop dying silently. A turn-cap kill now names
+itself instead of surfacing as `turn failed`, the cap is configurable and
+survivable rather than a hardcoded 200-turn wall, and a re-dispatched worker can
+start clean instead of resuming a dead transcript. Ships the generic
+checklist-execution worker protocol - the framework half of the checklist
+execution model (#852), which replaces an execution engine with a committed
+markdown checklist rather than adding one; the framework logic it required is
+four lines.
+
+### Added
+- **Configurable, resumable turn budget (#845, PR #847).** `max_turns` resolves
+  step override -> `roles.<role>.max_turns` -> `brain.max_turns` ->
+  `DEFAULT_MAX_TURNS` (1000, up from a hardcoded 200), applied at every site
+  that previously carried the literal (`spawn_adhoc`, `run_phase_blocking`,
+  `_run_agent_supervised`, and the orchestrator session). A step override now
+  actually wins on steps after the first - it previously no-opped silently while
+  documented as working. Hitting the cap no longer throws away the run: the
+  transcript survives, so the orchestrator restarts the step on the saved
+  session id with a fresh budget (bounded by `MAX_TURN_BUDGET_RESUMES`, 3),
+  reusing the existing native-resume path that already preserves conversational
+  continuity across a model/effort change. The final continuation tells the
+  agent to write its handoff now.
+- **`skills/checklist-execution.md` - the generic worker protocol (#852, PR
+  #865).** How an agent works a long job from a committed markdown checklist:
+  read once at session start, then one item at a time, verify, commit per item.
+  Persist-per-item is the durability primitive - there is no engine, no run
+  record, and no framework module behind it (pinned by
+  `tests/test_no_checklist_engine.py`). A `verify:` line is a proposed proof for
+  a human or an agent to run, never something the framework executes; the
+  security model and its standing tripwire are in `docs/SECURITY.md`.
+- **`--fresh` on agent dispatch (#852, PR #865).** Threaded through `Session` ->
+  `spawn_adhoc` -> `launch_agent` -> `run_workflow`, so a human can re-dispatch
+  a wedged worker without inheriting its dead transcript. The default is
+  unchanged: resuming a failed or stale run stays the documented retry contract.
+- **Plan-artifact CI check (#852, PR #865).** `.github/scripts/check-plan-artifact.sh`
+  plus its own workflow (deliberately not a job in `ci.yml`, whose docs/plans
+  skip gate would render it a silently-passing required check on exactly the
+  PRs it exists to check). It asserts the review-surface freeze, an append-only
+  appendix, `[f]` state tags, and gate-line classification - and never executes
+  a `verify:`, pinned by a canary test.
+
+### Fixed
+- **Honest turn errors (#845, PR #847).** `turn failed` was a literal fallback:
+  the brain had already diagnosed `max_turns_reached (max=..., turns=...)` into
+  `TurnResult.error_message`, but the workflow drain read only `result_text` -
+  empty on exactly that path - and substituted the literal, discarding the cause
+  of two real engineer-session deaths. One shared composition
+  (`bobi.brain.turn_error_text`) now backs the drain, `Session.last_error()` and
+  `_run_agent_supervised`, and the last resort names the error kind and API
+  status rather than `unknown error`. The session log's `stop` record carries
+  every terminal fact the brain reported, so no future diagnosis needs the
+  vendor CLI's transcript.
+- **A re-dispatch no longer collides by construction (#852, PR #865).**
+  `spawn_adhoc` derives its session name from `sha256(task)[:8]`, so
+  re-dispatching an identical task string - the checklist shape exactly, where
+  the task is a stable pointer to an artifact - reused the previous session.
+  Varying the name is not the fix: `orchestrator._setup_worktree` sets
+  `branch = session_name`, so it would fork a new git branch per dispatch and
+  break launch-admission dedupe and image rotation. The name stays stable and
+  the resume became optional (`--fresh`, above).
+
+### Changed
+- **Engineer role prompt and `--wait` docs (#845, PR #847).** The engineer role
+  gains "Parallel Work and Your Turn Budget": launch fan-out units backgrounded
+  and join them with a bare `wait` in the same Bash invocation, so a fan-out
+  costs two turns instead of one per poll - one observed session spent 79 of its
+  201 turns polling `tail -1`. `--wait`'s adhoc-only limit is now documented
+  where it is hit (flag help, runtime error, `skills/bobi.md`, role prompt)
+  rather than advertised as unqualified. eng-team pack 1.5.0 -> 1.5.1.
+
 ## 0.49.0 - 2026-07-24
 
 Minor release: the local event server now ships as a prebuilt immutable
