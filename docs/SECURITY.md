@@ -143,6 +143,15 @@ therefore runs untrusted-author code against your credentials.
   hard sandbox when the agent process owns the files because the same UID can
   deliberately restore write bits. Managed deployments that need a stronger
   boundary should use read-only mounts or split ownership.
+- Upgrading Bobi needs that guard off for a moment, because a package manager
+  replaces Bobi by deleting the tree the guard has made undeletable.
+  `bobi guard release` restores write bits on Bobi's own install and opens a
+  15-minute window during which agent launches skip re-locking it;
+  `bobi guard reapply` closes the window immediately, and it expires on its own
+  otherwise. The window is deliberately not a privilege boundary: an agent that
+  owns the files could always restore write bits directly, so this adds no
+  authority it did not already have. It covers only Bobi's own framework
+  install - the team package image under `run/package/` stays locked throughout.
 
 ## Deployed instances
 

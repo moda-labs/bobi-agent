@@ -232,6 +232,20 @@ jobs:
         # fastembed uses ONNX (no torch needed).
         run: pip install -e ".[dev,kb]"
 
+      # test_uv_upgrade_guard.py drives the real package manager: the #858
+      # failure is uv's removal semantics, and uv and pip disagree about them
+      # (uv aborts hard, pip renames the tree aside and exits 0). Without uv on
+      # the runner that regression skips itself and the coverage is silently
+      # lost. Pinned, with curl -f, for the same reason actionlint is: a
+      # transient CDN error page must fail loudly, not get piped into a shell.
+      - name: Install uv
+        env:
+          UV_VERSION: "0.12.0"
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Run packaged event-server regression
         run: >-
           pytest tests/integration/test_packaged_event_server.py

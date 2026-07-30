@@ -114,6 +114,39 @@ Install bobi using https://raw.githubusercontent.com/moda-labs/bobi-agent/main/s
 
 See [scripts/install.sh](scripts/install.sh) for what the installer does.
 
+### 3) Upgrading Bobi
+
+Bobi makes its own installed files read-only before it runs an agent, so an
+agent cannot quietly patch the framework it is running on. That also stops a
+package manager from deleting the tree it needs to replace, so release the
+guard first:
+
+```bash
+bobi guard release && uv tool install --force bobi
+```
+
+The guard stays off for 15 minutes and then re-applies itself. Stop your team
+first (`bobi agent <name> stop`) if you want the upgrade to land against a
+quiet machine. Homebrew and pipx work the same way - release, then
+`brew upgrade bobi` or `pipx upgrade bobi`.
+
+The installer one-liner does the release for you, so re-running it is always a
+safe upgrade:
+
+```bash
+curl -sL https://raw.githubusercontent.com/moda-labs/bobi-agent/main/scripts/install.sh | bash
+```
+
+**If an upgrade already failed** and `bobi` is now missing or refuses to start
+(`ModuleNotFoundError`), the installed tree is still locked and `bobi guard
+release` cannot run. Unlock it from the shell and reinstall:
+
+```bash
+chmod -R u+w "$(uv tool dir)/bobi"     # pipx: ~/.local/share/pipx/venvs/bobi
+uv tool install --force bobi           # --force is required: a plain install
+                                       # exits 0 without rebuilding
+```
+
 ## Quick Start
 
 `eng-team` is the ready-to-use engineering agent that ships with Bobi - install it

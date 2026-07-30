@@ -109,6 +109,27 @@ bobi --version
 Everything Bobi creates lives under one home directory, `~/.bobi` by default.
 You can inspect or delete it at any time without affecting anything else.
 
+### Upgrading later
+
+Bobi makes its own installed files read-only before it runs an agent, which also
+stops a package manager from replacing them. Release the guard first:
+
+```bash
+bobi guard release && uv tool install --force bobi
+```
+
+The guard re-applies itself after 15 minutes. Re-running the installer one-liner
+does the release for you.
+
+If an upgrade already failed and `bobi` is now missing or refuses to start, the
+tree is still locked and `bobi guard release` cannot run. Unlock it from the
+shell, then reinstall with `--force`:
+
+```bash
+chmod -R u+w "$(uv tool dir)/bobi"
+uv tool install --force bobi
+```
+
 ## Step 3: Create your agent team with the setup client
 
 ```bash

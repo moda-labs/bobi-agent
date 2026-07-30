@@ -47,7 +47,22 @@ bobi agents update <name>
 bobi agents add-registry <repo>
 bobi build <team> --tag <ref> [--push]  # render a team into a ready-to-run
                                         #   image (needs the bobi-deploy plugin)
+bobi guard release                    # unlock Bobi's own install before an upgrade
+bobi guard reapply                    # re-lock it now
+bobi guard status                     # which installed roots are locked
 ```
+
+Bobi makes its own installed files read-only before running an agent, which
+also stops a package manager from replacing them. Release the guard first, then
+upgrade:
+
+```bash
+bobi guard release && uv tool install --force bobi
+```
+
+The window closes after 15 minutes on its own. `scripts/install.sh` does this
+for you, and is the recovery path when an aborted upgrade has already left
+`bobi` unable to import.
 
 `<source>` can be a local source directory, local `.tar.gz`, public
 `.tar.gz` URL, or registry name.

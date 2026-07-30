@@ -3,18 +3,25 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import shutil
+import stat
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bobi import paths
+from bobi import paths, runtime_guard
 from bobi.runtime_guard import (
+    RELEASE_WINDOW,
     apply_runtime_write_policy,
     check_bobi_distribution_integrity,
     check_runtime_write_policy,
     protected_runtime_roots,
+    reapply_runtime_write_policy,
+    release_marker_path,
+    release_runtime_write_policy,
     with_mutable_runtime_package,
 )
 
@@ -228,6 +235,192 @@ class TestBobiDistributionIntegrity:
         result = check_bobi_distribution_integrity(dist)
 
         assert result.ok
+
+
+@pytest.fixture
+def uv_tool_install(tmp_path, monkeypatch):
+    """A realistic `uv tool install` layout, seen as Bobi's own installation.
+
+    Shaped like the real thing so the removal a package manager performs is the
+    real one: `<prefix>/lib/pythonX.Y/site-packages/{bobi,bobi-*.dist-info}`,
+    with the prefix and site-packages themselves writable. Only the two roots
+    the guard protects are ever locked.
+    """
+    prefix = tmp_path / "tools" / "bobi"
+    site = prefix / "lib" / "python3.12" / "site-packages"
+    package = site / "bobi"
+    dist_info = site / "bobi-1.0.dist-info"
+    (package / "brain").mkdir(parents=True)
+    (package / "__init__.py").write_text("__version__ = '1.0'\n")
+    (package / "cli.py").write_text("main = None\n")
+    (package / "brain" / "claude.py").write_text("x = 1\n")
+    dist_info.mkdir()
+    (dist_info / "RECORD").write_text("")
+    (site / "click").mkdir()
+    (site / "click" / "__init__.py").write_text("")
+
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("bobi.__file__", str(package / "__init__.py"))
+    monkeypatch.setattr(
+        runtime_guard, "_distribution",
+        lambda name="bobi": _FakeDist(site, [_FakeFile("bobi-1.0.dist-info/RECORD")]),
+    )
+    return SimpleNamespace(prefix=prefix, site=site, package=package,
+                           dist_info=dist_info)
+
+
+def _is_writable(path: Path) -> bool:
+    return bool(path.stat().st_mode & stat.S_IWUSR)
+
+
+class TestReleaseForPackageManagers:
+    """#858: the guard locked a tree whose lifecycle it does not own."""
+
+    def test_guarded_install_cannot_be_removed_until_released(self, uv_tool_install):
+        """The reported failure, at the syscall that produces it.
+
+        A package manager replaces Bobi by deleting its tree, and POSIX governs
+        unlink by the *directory's* write bit. uv removes site-packages entry by
+        entry and only fails when it reaches the locked package, by which point
+        the entrypoint and every dependency are already gone.
+        """
+        apply_runtime_write_policy(None)
+
+        with pytest.raises(PermissionError):
+            shutil.rmtree(uv_tool_install.prefix)
+
+        release_runtime_write_policy()
+
+        shutil.rmtree(uv_tool_install.prefix)
+        assert not uv_tool_install.prefix.exists()
+
+    def test_release_leaves_the_team_package_image_locked(self, uv_tool_install,
+                                                          tmp_path):
+        """Only the framework roots are package-manager-owned.
+
+        The team image has its own mutation window in
+        `with_mutable_runtime_package`; releasing it here would open a hole no
+        upgrade needs.
+        """
+        runtime = tmp_path / "runtime"
+        _write_runtime(runtime)
+        apply_runtime_write_policy(runtime)
+
+        release_runtime_write_policy()
+
+        assert not _is_writable(paths.agent_yaml_path(runtime))
+        assert _is_writable(uv_tool_install.package)
+
+    def test_release_survives_a_concurrent_agent_launch(self, uv_tool_install):
+        """The race that makes a bare unlock useless on a running host.
+
+        `prepare_brain_runtime()` re-applies the guard on every agent launch,
+        and the monitor scheduler ticks every 30s - far shorter than a package
+        manager needs to resolve, build, and swap the tree. Without a release
+        window the operator follows the documented steps and still bricks
+        themselves.
+        """
+        apply_runtime_write_policy(None)
+        release_runtime_write_policy()
+
+        apply_runtime_write_policy(None)
+
+        assert _is_writable(uv_tool_install.package)
+        assert _is_writable(uv_tool_install.dist_info)
+
+    def test_release_window_expires_and_the_guard_re_locks(self, uv_tool_install):
+        """A forgotten release must heal itself without operator action."""
+        release_runtime_write_policy()
+        stale = time.time() - RELEASE_WINDOW - 1
+        os.utime(release_marker_path(), (stale, stale))
+
+        apply_runtime_write_policy(None)
+
+        assert not _is_writable(uv_tool_install.package)
+
+    def test_reapply_re_locks_immediately(self, uv_tool_install):
+        apply_runtime_write_policy(None)
+        release_runtime_write_policy()
+
+        reapply_runtime_write_policy()
+
+        assert not _is_writable(uv_tool_install.package)
+        assert not release_marker_path().exists()
+
+    def test_release_is_best_effort_and_reports_what_it_could_not_unlock(
+        self, uv_tool_install, monkeypatch,
+    ):
+        """Unlike the mutation window, release has no re-lock to keep consistent.
+
+        Stopping at the first EPERM would leave a half-unlocked tree and no
+        report - the silent state that makes #858 unguessable.
+        """
+        apply_runtime_write_policy(None)
+        denied = uv_tool_install.package / "cli.py"
+        real_chmod = os.chmod
+
+        def chmod(path, mode, **kwargs):
+            if Path(path) == denied:
+                raise PermissionError(1, "Operation not permitted", str(path))
+            return real_chmod(path, mode, **kwargs)
+
+        monkeypatch.setattr(os, "chmod", chmod)
+
+        report = release_runtime_write_policy()
+
+        assert any("cli.py" in entry for entry in report.skipped)
+        assert _is_writable(uv_tool_install.package)
+
+    def test_release_on_a_source_checkout_reports_nothing_to_release(
+        self, tmp_path, monkeypatch,
+    ):
+        """A dev checkout has no protected framework roots.
+
+        Reporting a bare success there would tell an operator whose *other*
+        install is still locked that the upgrade is safe. Name the reason and
+        the install the release resolved to instead.
+        """
+        monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+        checkout = tmp_path / "src"
+        (checkout / ".git").mkdir(parents=True)
+        (checkout / "pyproject.toml").write_text("[project]\n")
+        (checkout / "bobi").mkdir()
+        (checkout / "bobi" / "__init__.py").write_text("")
+        monkeypatch.setattr("bobi.__file__", str(checkout / "bobi" / "__init__.py"))
+        monkeypatch.setattr(
+            runtime_guard, "_distribution",
+            lambda name="bobi": _FakeDist(
+                checkout, [_FakeFile("bobi-1.0.dist-info/RECORD")]),
+        )
+
+        report = release_runtime_write_policy()
+
+        assert report.released == []
+        assert report.reason == "source checkout"
+        assert report.install_path == checkout / "bobi"
+
+    def test_doctor_check_names_the_release_command_while_locked(
+        self, uv_tool_install,
+    ):
+        apply_runtime_write_policy(None)
+
+        result = check_runtime_write_policy(None)
+
+        assert result.ok, result.detail
+        assert "bobi guard release" in result.detail
+
+    def test_doctor_check_reports_an_open_window_instead_of_failing(
+        self, uv_tool_install,
+    ):
+        """Released framework roots are writable on purpose, not drift."""
+        apply_runtime_write_policy(None)
+        release_runtime_write_policy()
+
+        result = check_runtime_write_policy(None)
+
+        assert result.ok, result.detail
+        assert "released" in result.detail
+        assert "bobi guard reapply" in result.detail
 
 
 def test_session_prepares_runtime_before_brain_session():

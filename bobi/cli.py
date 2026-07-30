@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import truststore
@@ -3422,6 +3423,119 @@ def costs(group_by):
         return
 
     click.echo(format_costs(summary, group_by=group_by))
+
+# ---------------------------------------------------------------------------
+# guard commands
+# ---------------------------------------------------------------------------
+
+
+def _echo_guard_roots(roots) -> None:
+    width = max((len(r.kind) for r in roots), default=0)
+    for root in roots:
+        click.echo(f"  {root.kind.ljust(width)}  {root.path}")
+
+
+@main.group()
+def guard():
+    """Manage the write guard on Bobi's own installed files."""
+
+
+@guard.command("release")
+def guard_release():
+    """Unlock Bobi's install so a package manager can upgrade it.
+
+    Bobi makes its own installed files read-only before running an agent. That
+    also stops uv/pipx/brew from deleting the tree they must replace, so an
+    upgrade fails partway - after the entrypoint is already gone. Run this
+    first:
+
+        bobi guard release && uv tool install --force bobi
+
+    The guard stays off for 15 minutes, then re-applies on the next agent
+    launch. `bobi guard reapply` re-locks immediately.
+    """
+    from .runtime_guard import release_runtime_write_policy
+
+    report = release_runtime_write_policy()
+
+    if not report.released:
+        # Not a failure - but never a bare success either. An operator whose
+        # *other* install is still locked needs to see which one this resolved.
+        click.echo(f"Nothing to release: {report.reason}.")
+        click.echo(f"  bobi imported from {report.install_path}")
+        click.echo("If you meant a different installed bobi, unlock it "
+                   "directly with `chmod -R u+w <install prefix>`.")
+        return
+
+    if report.window_error:
+        click.echo(f"Released {len(report.released)} root(s), but could not "
+                   f"hold the guard off: {report.window_error}", err=True)
+        click.echo("Stop your team (`bobi agent <name> stop`) before "
+                   "upgrading - a running agent may re-lock the tree.",
+                   err=True)
+    else:
+        until = time.strftime("%H:%M", time.localtime(report.expires_at))
+        click.echo(f"Released {len(report.released)} root(s) - the write guard "
+                   f"is off until {until}.")
+    _echo_guard_roots(report.released)
+
+    if report.skipped:
+        click.echo(f"\n{len(report.skipped)} path(s) could not be unlocked:",
+                   err=True)
+        for entry in report.skipped[:5]:
+            click.echo(f"  {entry}", err=True)
+        click.echo("Upgrading will still fail on these. They are usually owned "
+                   "by another user - retry with that user or reinstall Bobi "
+                   "into a prefix you own.", err=True)
+        raise SystemExit(1)
+
+    click.echo("Upgrade now, e.g. `uv tool install --force bobi`.")
+
+
+@guard.command("reapply")
+def guard_reapply():
+    """Re-lock Bobi's install now, ending any release window."""
+    from .runtime_guard import reapply_runtime_write_policy
+
+    report = reapply_runtime_write_policy(paths.bound_root())
+
+    click.echo(f"Re-locked {len(report.protected)} protected root(s).")
+    _echo_guard_roots(report.protected)
+    if report.skipped:
+        click.echo(f"{len(report.skipped)} path(s) could not be locked.",
+                   err=True)
+        raise SystemExit(1)
+
+
+@guard.command("status")
+def guard_status():
+    """Show which of Bobi's installed roots are locked, and by whom."""
+    import bobi
+    from .runtime_guard import (
+        protected_runtime_roots, release_window_expires_at, root_write_failures,
+    )
+
+    click.echo(f"bobi imported from {Path(bobi.__file__).resolve().parent}")
+
+    expires = release_window_expires_at()
+    if expires:
+        until = time.strftime("%H:%M", time.localtime(expires))
+        click.echo(f"Release window: open until {until}")
+    else:
+        click.echo("Release window: closed")
+
+    roots = protected_runtime_roots(paths.bound_root())
+    if not roots:
+        click.echo("Protected roots: none (editable or source install)")
+        return
+
+    click.echo("Protected roots:")
+    width = max(len(r.kind) for r in roots)
+    for root in roots:
+        writable = root_write_failures(root)
+        state = f"unlocked ({len(writable)} writable path(s))" if writable \
+            else "locked"
+        click.echo(f"  {root.kind.ljust(width)}  {state:<32}  {root.path}")
 
 
 for _cmd_name in [

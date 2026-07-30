@@ -43,8 +43,72 @@ def test_top_level_help_is_machine_scoped():
     assert "agent" in result.output
     assert "agents" in result.output
     assert "setup" in result.output
+    # The write guard covers Bobi's own installation, not one agent runtime, so
+    # it has to stay reachable without selecting an agent - and after an
+    # aborted upgrade there may be no agent to select.
+    assert "guard" in result.output
     for removed in [" start", " stop", " status", " workflows", " monitors"]:
         assert removed not in result.output
+
+
+class TestGuardCommands:
+    """#858: releasing the write guard so a package manager can upgrade Bobi."""
+
+    def test_release_names_the_roots_and_the_window(self, monkeypatch):
+        from bobi.runtime_guard import ProtectedRoot, ReleaseReport
+
+        report = ReleaseReport(
+            released=[ProtectedRoot(path=Path("/opt/x/bobi"), kind="bobi-package")],
+            expires_at=0,
+            install_path=Path("/opt/x/bobi"),
+        )
+        monkeypatch.setattr("bobi.runtime_guard.release_runtime_write_policy",
+                            lambda: report)
+
+        result = CliRunner().invoke(main, ["guard", "release"])
+
+        assert result.exit_code == 0, result.output
+        assert "/opt/x/bobi" in result.output
+        assert "uv tool install --force bobi" in result.output
+
+    def test_release_reports_nothing_to_release_without_claiming_success(
+        self, monkeypatch,
+    ):
+        """An operator whose other install is still locked must see which one
+        this resolved, not a bare success they will misread."""
+        from bobi.runtime_guard import ReleaseReport
+
+        monkeypatch.setattr(
+            "bobi.runtime_guard.release_runtime_write_policy",
+            lambda: ReleaseReport(reason="source checkout",
+                                  install_path=Path("/src/bobi")),
+        )
+
+        result = CliRunner().invoke(main, ["guard", "release"])
+
+        assert result.exit_code == 0, result.output
+        assert "Nothing to release: source checkout" in result.output
+        assert "/src/bobi" in result.output
+
+    def test_release_fails_loudly_when_paths_stay_locked(self, monkeypatch):
+        """A partly-unlocked tree still breaks the upgrade, so it cannot exit 0."""
+        from bobi.runtime_guard import ProtectedRoot, ReleaseReport
+
+        monkeypatch.setattr(
+            "bobi.runtime_guard.release_runtime_write_policy",
+            lambda: ReleaseReport(
+                released=[ProtectedRoot(path=Path("/opt/x/bobi"),
+                                        kind="bobi-package")],
+                skipped=["/opt/x/bobi/cli.py: Operation not permitted"],
+                install_path=Path("/opt/x/bobi"),
+            ),
+        )
+
+        result = CliRunner().invoke(main, ["guard", "release"])
+
+        assert result.exit_code == 1
+        assert "could not be unlocked" in result.output
+        assert "cli.py" in result.output
 
 
 def test_agents_help_lists_machine_commands():
