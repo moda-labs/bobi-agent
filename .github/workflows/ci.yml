@@ -147,9 +147,13 @@ jobs:
         working-directory: event-server
         run: npm run build:local
 
-      - name: Record the Node 20 bundle digest
+      - name: Record the release-major bundle digest
+        id: release-bundle
         working-directory: event-server
-        run: echo "bundle_sha256=$(sha256sum dist/local.js | cut -d' ' -f1)" >> "$GITHUB_ENV"
+        run: |
+          set -euo pipefail
+          test -s dist/local.js
+          echo "sha256=$(sha256sum dist/local.js | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       # The private worker adapter consumes events-core as a pinned published
       # npm package after the repo split; this proves the publishable tarball
@@ -159,31 +163,49 @@ jobs:
         working-directory: event-server
         run: npm run smoke -w core
 
-      # The build gate accepts any Node 20+ host (#857) because the bundle is
-      # esbuild's output - a pinned native binary emitting an explicit
-      # --target=node20 - so the host Node major must not change its bytes.
-      # Rebuild on a newer major and compare, so the invariant that licenses the
-      # open gate fails loudly here instead of silently drifting the artifact
-      # users install. Runs last: it repoints the job's Node and reinstalls
-      # node_modules, so every step above still runs on the release major.
+      # The build gate accepts any Node 20+ host (#857). That is only sound
+      # because the bundle is esbuild's output - a pinned native binary emitting
+      # an explicit --target=node20 - so the host Node major cannot reach its
+      # bytes. Nothing enforces that at install time (the manifest records
+      # tools.node but never compares it), so it is enforced here, and it is
+      # enforced through a real wheel build rather than a bare esbuild run: that
+      # is the path #857 unblocked, and the only one that exercises the build
+      # gate, the sanitized child environment, and the metafile audit.
+      # Runs last, since it repoints the job's Node off the release major.
       - uses: actions/setup-node@v5
         with:
           node-version: "24"
+          cache: npm
+          cache-dependency-path: event-server/package-lock.json
 
-      - name: Bundle is byte-identical when built on a newer Node major
-        working-directory: event-server
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Wheel builds on a newer Node major and ships an identical bundle
+        env:
+          RELEASE_BUNDLE_SHA256: ${{ steps.release-bundle.outputs.sha256 }}
         run: |
-          npm ci --no-audit --no-fund
-          npm run build:local
-          rebuilt="$(sha256sum dist/local.js | cut -d' ' -f1)"
-          if [ "$rebuilt" != "$bundle_sha256" ]; then
-            echo "Bundle digest depends on the host Node major:" >&2
-            echo "  node 20: ${bundle_sha256:-<unrecorded>}" >&2
-            echo "  node 24: $rebuilt" >&2
+          set -euo pipefail
+          test -n "$RELEASE_BUNDLE_SHA256"
+          python -m pip install --quiet build
+          python -m build --wheel --outdir dist-node24
+          wheel="$(ls dist-node24/*.whl)"
+          shipped="$(python -c '
+          import hashlib, sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as wheel:
+              bundle = wheel.read("bobi/event-server/dist/local.js")
+          print(hashlib.sha256(bundle).hexdigest())
+          ' "$wheel")"
+          test -n "$shipped"
+          if [ "$shipped" != "$RELEASE_BUNDLE_SHA256" ]; then
+            echo "The shipped bundle depends on the host Node major:" >&2
+            echo "  node 20: $RELEASE_BUNDLE_SHA256" >&2
+            echo "  node 24: $shipped" >&2
             echo "Either restore an exact-major build gate or fix the nondeterminism." >&2
             exit 1
           fi
-          echo "Bundle is Node-major-independent: $rebuilt"
+          echo "Wheel built on Node 24 ships an identical bundle: $shipped"
 
   e2e:
     name: E2E (Playwright)

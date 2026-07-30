@@ -131,11 +131,11 @@ def _require_build_node(
         raise EventServerBuildError(
             f"could not parse Node.js version {node_version!r} from {node}"
         ) from exc
-    # The bundle is esbuild's output, and esbuild is a pinned native binary that
-    # emits an explicit `--target=node20`, so the host Node major does not reach
-    # the bytes; `validate_artifact` anchors reproducibility on esbuild instead.
-    # Demanding major == 20 here contradicted the runtime, doctor, installer, and
-    # docs - all of which say 20+ - and blocked building on a Node 21+ host (#857).
+    # 20+, not exactly 20: the bundle is esbuild's output, and esbuild is a
+    # pinned native binary emitting an explicit `--target=node20`, so the host
+    # Node major does not reach the bytes. Nothing revalidates that downstream -
+    # the manifest records `tools.node` but never compares it - so CI enforces it
+    # by building a wheel on a newer major and diffing the bundle it ships (#857).
     if node_major < 20:
         raise EventServerBuildError(
             "Node.js 20 or newer is required to build the embedded event server; "

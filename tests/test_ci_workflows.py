@@ -55,38 +55,6 @@ def test_ci_builds_and_runs_the_packaged_event_server_contract():
     assert bundle["working-directory"] == "event-server"
     assert bundle["run"] == "npm run build:local"
 
-    # The build gate accepts any Node 20+ host (#857) only because the bundle is
-    # esbuild's output and the host Node major cannot reach its bytes. That
-    # invariant is load-bearing, so the cross-major rebuild that proves it must
-    # not be quietly dropped: it records the release-major digest, then rebuilds
-    # on a newer major and compares. It runs after every other step, since it
-    # repoints the job's Node and reinstalls node_modules.
-    record_index, record = next(
-        (index, step)
-        for index, step in enumerate(event_steps)
-        if step.get("name") == "Record the Node 20 bundle digest"
-    )
-    newer_node_index, newer_node = next(
-        (index, step)
-        for index, step in enumerate(event_steps)
-        if step.get("uses", "").startswith("actions/setup-node")
-        and step["with"]["node-version"] != "20"
-    )
-    compare_index, compare = next(
-        (index, step)
-        for index, step in enumerate(event_steps)
-        if step.get("name")
-        == "Bundle is byte-identical when built on a newer Node major"
-    )
-    assert "$GITHUB_ENV" in record["run"]
-    assert newer_node["with"]["node-version"] == "24"
-    assert event_steps.index(bundle) < record_index < newer_node_index
-    assert newer_node_index < compare_index == len(event_steps) - 1
-    assert "npm ci --no-audit --no-fund" in compare["run"]
-    assert "npm run build:local" in compare["run"]
-    assert '"$rebuilt" != "$bundle_sha256"' in compare["run"]
-    assert "exit 1" in compare["run"]
-
     integration_steps = workflow["jobs"]["integration-fast"]["steps"]
     packaged = next(
         step
@@ -105,6 +73,54 @@ def test_ci_builds_and_runs_the_packaged_event_server_contract():
     )
     assert "--ignore=tests/integration/test_packaged_event_server.py" in remaining["run"]
     assert '--timeout=180' in remaining["run"]
+
+
+def test_ci_proves_the_shipped_bundle_survives_a_newer_node_major():
+    """#857 loosened the build gate to any Node 20+ host.
+
+    That is sound only because the host Node major cannot reach the bundle
+    bytes, and nothing revalidates it downstream, so this guard is the enforcing
+    control - it must not be quietly dropped or reduced to a bare esbuild run.
+    """
+    event_steps = _ci_workflow()["jobs"]["event-server"]["steps"]
+
+    def index_of(predicate):
+        return next(
+            index for index, step in enumerate(event_steps) if predicate(step)
+        )
+
+    bundle_index = index_of(
+        lambda step: step.get("name") == "Build embedded local-server artifact"
+    )
+    record_index = index_of(
+        lambda step: step.get("name") == "Record the release-major bundle digest"
+    )
+    newer_node_index = index_of(
+        lambda step: step.get("uses", "").startswith("actions/setup-node")
+        and str(step.get("with", {}).get("node-version")) != "20"
+    )
+    compare_index = index_of(
+        lambda step: step.get("name")
+        == "Wheel builds on a newer Node major and ships an identical bundle"
+    )
+    record = event_steps[record_index]
+    compare = event_steps[compare_index]
+
+    # The digest is captured while the job is still on the release major, and
+    # the newer major is only introduced afterwards.
+    assert bundle_index < record_index < newer_node_index < compare_index
+    assert str(event_steps[newer_node_index]["with"]["node-version"]) != "20"
+
+    # A missing or unhashable bundle must fail the step, not compare "" to "".
+    assert "set -euo pipefail" in record["run"]
+    assert "set -euo pipefail" in compare["run"]
+    assert "test -s dist/local.js" in record["run"]
+
+    # The guard has to exercise the real packaging path - a bare `npm run
+    # build:local` would skip the build gate this change touched.
+    assert "python -m build --wheel" in compare["run"]
+    assert "bobi/event-server/dist/local.js" in compare["run"]
+    assert "exit 1" in compare["run"]
 
 
 def test_promote_dev_advances_only_on_fully_green_main_push():

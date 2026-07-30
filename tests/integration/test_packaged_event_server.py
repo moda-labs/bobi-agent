@@ -735,7 +735,9 @@ def test_changed_source_archive_cannot_reuse_carried_artifact(
     assert result.returncode != 0
     diagnostic = result.stdout + result.stderr
     assert "carried source-archive artifact is invalid" in diagnostic
-    assert "Node.js 20" in diagnostic
+    # "or newer", not a bare "Node.js 20": the build floor is a minimum, and a
+    # substring match would keep passing if it silently became exact-major (#857).
+    assert "Node.js 20 or newer" in diagnostic
 
 
 def test_installed_wheel_starts_without_mutating_frozen_event_server(
