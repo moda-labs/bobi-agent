@@ -665,17 +665,17 @@ checklist at all. This phase ships the **Moda-specific** half: what a unit of
 Moda engineering work contains. Keeping the line clean is what lets a
 non-Moda team adopt checklists without inheriting our lifecycle.
 
-- [ ] New `build` stage: render Stage 1–7 (worktree, implement, test, verify,
+- [x] New `build` stage: render Stage 1–7 (worktree, implement, test, verify,
       document, adversarial review + fix, PR) into the plan's fenced appendix as
       items with concrete `verify:` lines. This is the lifecycle detail the `plan`
       skill does not emit.
-- [ ] **Never emit an item that re-derives what git history can prove.**
+- [x] **Never emit an item that re-derives what git history can prove.**
       Failing-test-first is read off the log, not re-run by reverting source in a
       scratch tree — this is what removes Problem 5's ~12%-of-budget cost. It is
       a rule in the rendering, not a `proof:` field: the commits are the record.
-- [ ] Gate-line classification: every gate line gets a `verify:` or an explicit
+- [x] Gate-line classification: every gate line gets a `verify:` or an explicit
       `judgement:` tag; the rendering proposes, a human accepts.
-- [ ] **`verify:` is free-form shell — constrained by guidance, never by a
+- [x] **`verify:` is free-form shell — constrained by guidance, never by a
       mechanism.** A named-check vocabulary (`verify: suite unit`, `verify: absent
       <symbol> <dir>`) was considered and **rejected**: it is a second language,
       weaker than shell, extendable only by a pack release, which is the step
@@ -701,35 +701,35 @@ non-Moda team adopt checklists without inheriting our lifecycle.
       This lands **before** the rendering work, because a rendering built on the
       current vocabulary generates the defect into every future plan instead of
       one author making it once.
-- [ ] Proof classification by claim shape, not by habit — the rendering picks the
+- [x] Proof classification by claim shape, not by habit — the rendering picks the
       idiom: a **bug** renders failing-test-first (a defect exists on the base
       branch to reproduce); a **negative or security assertion** renders
       mutation-proof with a **named mutant**; ordinary new behavior renders a
       plain assertion. Never emit failing-first for code that does not exist yet —
       that proves `ImportError`, not coverage.
-- [ ] Ad-hoc path: no plan → author one in the same format from the issue's
+- [x] Ad-hoc path: no plan → author one in the same format from the issue's
       acceptance criteria plus the lifecycle stages, **commit and push the branch**
       so a human can read it, and pause for input if the scope is ambiguous. One
       code path with the plan-born case, not two.
-- [ ] Pre-planned path: append only; never rewrite approved plan text.
-- [ ] Multi-file specs: record a `spec:` companion reference (the fixture's spec
+- [x] Pre-planned path: append only; never rewrite approved plan text.
+- [x] Multi-file specs: record a `spec:` companion reference (the fixture's spec
       spans a second 1,500-line file) the worker reads selectively.
-- [ ] Closeout step per Q2: prune the appendix's round log to a short summary
+- [x] Closeout step per Q2: prune the appendix's round log to a short summary
       before the PR merges, so `main` carries the summary while the full trace
       stays on the PR and in branch lineage.
-- [ ] Bump the moda-skills pack version + `plugin.json`; update `guide` routing.
+- [f] state:deferred-to-release Bump the moda-skills pack version + `plugin.json`; update `guide` routing.
 
 **Validation gate**
 
-- [ ] Rendering `tests/fixtures/plan-snapshot.md` produces an artifact the **CI
+- [x] Rendering `tests/fixtures/plan-snapshot.md` produces an artifact the **CI
       artifact check** accepts, every original gate line preserved and classified
-- [ ] Rendering a real planless issue produces a valid artifact with lifecycle
+- [x] Rendering a real planless issue produces a valid artifact with lifecycle
       stages and acceptance criteria
 - [ ] **The review surface is byte-identical after rendering** (`git diff`
       confined to the appendix), and a human confirms the plan still reads
       top-down as a design document — `[f]` if it got harder to review
-- [ ] No rendered item asks a worker to revert source to prove a test
-- [ ] No rendered item asks for failing-first on code that does not exist on the
+- [x] No rendered item asks a worker to revert source to prove a test
+- [x] No rendered item asks for failing-first on code that does not exist on the
       base branch; every rendered negative assertion carries a **named mutant**.
       Proven by rendering one greenfield unit and one bug-fix unit and diffing
       the idioms each produced
@@ -738,7 +738,7 @@ non-Moda team adopt checklists without inheriting our lifecycle.
       confirming its `verify:` goes red. This is the only check on free-form
       `verify:` quality, and it is a judgement call the reviewer makes — tag it
       `judgement:`, do not pretend it is mechanical
-- [ ] No rendered `verify:` does anything other than check — no writes, no
+- [x] No rendered `verify:` does anything other than check — no writes, no
       network beyond a `gh` read, no `|| true`, no bare `echo`
 - [ ] The rendering runs against a **released** bobi carrying Phases 1–2 (name the
       release and the pin move)
@@ -1193,6 +1193,67 @@ a lane turns out to need an inlined context slice.
   plans-only. So the separate-workflow decision holds under observation, not just
   by construction: the one check that exists FOR plans-only PRs is the one check
   that ran on one. Phase 2 is now fully closed — 17 `[x]`, 1 `[f]`, 0 open.
+
+- **2026-07-29** (build/checklist-execution-model, Phase 3): the **`build`-skill
+  rendering** is built — moda-skills PR #29, `build/checklist-rendering.md` (new)
+  plus `build/SKILL.md`, `guide/SKILL.md`, and 14 contract tests. The new stage is
+  **Stage 1.5**, between Worktree and Implement, and it is **conditional**: a unit
+  short enough to redo is skipped out loud, per the framework skill's own "a
+  checklist is overhead below that line". Numbering it 1.5 rather than renumbering
+  is deliberate — `review` and `land` bind to "build Stage 6"/"Stage 7" by name and
+  `plan` to "Stage 0"; a test now pins all eight original names.
+
+  **Three findings that came out of rendering, none of which reasoning produced:**
+  1. **The appendix fence must never be closed.** A closing fence becomes the
+     appendix's last line, the append-only rule freezes it there, and a second run
+     can no longer append without rewriting it — the check rejects that with
+     "appendix was rewritten, not appended to". Unclosed appends cleanly and matches
+     the protocol's own definition (the appendix runs to end of file). **This makes
+     the closed fence in `skills/checklist-execution.md`'s example and in
+     `tests/fixtures/plan-snapshot.md` a latent defect** — it teaches a shape that
+     cannot be worked twice. Not fixed here, because #866 is plans-only by
+     construction and that is what closed Phase 2's last gate; it needs its own
+     small PR.
+  2. **Add no separator the file already ends with.** A redundant blank line lands
+     *above* the fence, so a render that adds one perturbs the review surface. The
+     check tolerates insertion; byte-identity is the stricter bar and it is free.
+  3. Inline backticks inside the appendix are harmless — only a run of three or
+     more opens a fence. The first draft of that rule overstated it.
+
+  **Closeout pruning and append-only are reconciled by *when*, not by an
+  exemption**, which is what Q2's decision needed to be implementable: an appendix
+  created in this PR has no counterpart on the base branch, so pruning it inside
+  the PR modifies nothing the base branch ever saw (verified — passes). A summary
+  already on the base branch is frozen text (verified — fails with the prefix
+  diagnostic).
+
+  **Two deviations from the phase as written.** (a) *"Bump the moda-skills pack
+  version + `plugin.json`"* is `[f] state:deferred-to-release`: that repo's
+  `AGENTS.md` decouples content from version and authorizes the bump only as part
+  of cutting a release, so it belongs to step (b) of the deploy sequence, not to
+  the content PR. The `guide`-routing half of that item IS done. (b) The rendering
+  emits **no separate Stage 2–4 items** — implement/test/verify are what the plan's
+  own phase tasks and gate lines already say, per phase, and re-emitting them
+  generically produces items no command can check.
+
+  **Verification, all against `check-plan-artifact.sh` in a throwaway repo:**
+  rendering `tests/fixtures/plan-snapshot.md` is accepted with all 3 original gate
+  lines preserved and classified (11/11 items), and the review surface comes out
+  **literally byte-identical** (zero-line diff above the fence, 0 removed lines);
+  rendering a real planless issue (#851, a bug) yields a valid artifact, 9/9
+  classified; the idiom split is proven by rendering both shapes — the bug-fix unit
+  produced 2 failing-first items read off `git log` and 0 mutants, the greenfield
+  unit 0 failing-first and 1 named mutant; 0 `verify:` lines across all three
+  renders revert source, write, or end in `|| true`. Four negative controls all
+  caught: an edit above the fence, an unclassified item, an `[f]` with no state
+  tag, a second fence. Pack suite 30 tests green.
+
+  **Three gate lines stay open on purpose, not by omission:** the human
+  confirmation that a rendered plan still reads top-down as a design document; the
+  `judgement:`-tagged spot-check that each rendered `verify:` goes red when its
+  item is reverted (both need a human, which is the point of tagging them); and
+  "the rendering runs against a **released** bobi carrying Phases 1–2", which is
+  blocked until that release is cut.
 
 ## Notes
 
