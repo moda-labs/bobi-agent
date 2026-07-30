@@ -89,8 +89,8 @@ Movement 1's Worker/sidecar lanes and Movement 2 land first in `bobi-agent`. A p
 ### Non-goals
 
 - No restructuring of any component's internals; no change to the public/private boundary itself.
-- No new public UI — the hosted console stays private; external consumers build their own (MCP client, dashboards).
-- The MCP admin server is enabled by this work, not part of it.
+- No new public UI — the hosted console stays private; external consumers build their own dashboards.
+- The MCP admin server is enabled by this work, not part of it. It is **not** a client an external consumer writes against the spec: it lands as a route on the Worker this plan publishes (`plans/2026-07-30-mcp-fleet-control.md`), so the agentic control surface arrives with `event-server/` rather than after it. That plan is separately approved and does not gate any lane here — the only coupling is Q3 below.
 - No changes to how teams are authored, packaged, or installed.
 
 ## Relevant files
@@ -121,7 +121,9 @@ Ship it with a placeholder KV id and a loud comment (matching how the repo handl
 
 ### Q3 — Where does the protocol spec live, and how strong is the promise?
 
-New `docs/ADMIN_PROTOCOL.md` vs a section of `docs/EVENT_SERVER.md` (which already owns topics + security model). The harder half: once external consumers ship dashboards and an MCP client against it, the schema cannot change casually — decide whether `SUPERVISOR_VERSION` gates compatibility and what the deprecation window is.
+New `docs/ADMIN_PROTOCOL.md` vs a section of `docs/EVENT_SERVER.md` (which already owns topics + security model). The harder half: once external consumers ship dashboards against it, the schema cannot change casually — decide whether `SUPERVISOR_VERSION` gates compatibility and what the deprecation window is.
+
+Decide this knowing the MCP server (`plans/2026-07-30-mcp-fleet-control.md`) publishes tool schemas over the same contract. A tool schema is a harder binding than a document: a consumer's agent reads it at every `tools/list`, so a shape change is felt immediately rather than at the next read of a doc. That argues for the stronger end of whatever promise this question settles on.
 
 ### Q4 — Should `@moda-labs/bobi-events-core` ever be published again?
 
