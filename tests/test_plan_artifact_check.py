@@ -273,6 +273,36 @@ class TestTheFreezeStartsAtApproval:
         assert result.returncode == 1
         assert "existing review-surface text was modified or deleted" in result.stderr
 
+    def test_a_draft_is_still_checked_for_conflict_debris(self, repo):
+        """MUTATION-PROOF — mutant: move the draft exemption to the top of the
+        per-file loop, before checks 1-3.
+
+        Draft exempts ONLY the append-only rule. Malformedness is not a
+        workflow-stage question: a conflicted artifact is not a plan at any
+        status, and the tempting 'why compute anything for a draft?' shortcut
+        would silently strip these checks from every draft."""
+        self._as_draft(repo, _plan(repo))
+        body = _plan(repo).replace(
+            "## Problem",
+            "<<<<<<< HEAD\n## Problem\n=======\n## The Problem\n>>>>>>> other",
+        )
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 1
+        assert "unresolved merge-conflict markers" in result.stderr
+
+    def test_a_draft_is_still_checked_for_unclassified_appendix_gates(self, repo):
+        """The other half of the same mutant: an appendix item with neither a
+        verify: nor a judgement: is uncheckable whatever the plan's status."""
+        self._as_draft(repo, _plan(repo))
+        body = _plan(repo).rstrip("\n") + "\n- [ ] Something nobody can check\n"
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 1
+        assert "neither a verify: nor a judgement:" in result.stderr
+
     def test_draft_matching_ignores_case_and_trailing_metadata(self, repo):
         """The status line commonly carries `· **Created:** ...`, and the value
         is prose a human types. Neither should decide whether the freeze
