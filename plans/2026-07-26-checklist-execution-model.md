@@ -620,7 +620,7 @@ reached.
       fails, the framework grew an execution engine again
       *`tests/test_no_checklist_engine.py`, each absence carrying a positive
       control against a planted offender.*
-- [ ] Assert: **the check actually runs on a `plans/`-only PR.** Proven by an
+- [x] Assert: **the check actually runs on a `plans/`-only PR.** Proven by an
       artifact PR touching nothing else and observing the job execute — a guard
       sitting behind `ci.yml`'s skip gate is worse than no guard, because branch
       protection reads its absence as passing
@@ -1180,6 +1180,19 @@ a lane turns out to need an inlined context slice.
   (`test_plan_ships_a_proof_idiom_per_claim_shape`) is a positive assertion, so
   it cannot pass vacuously, and it was still mutation-checked — reverting the
   three skill files to `main` fails it.
+
+- **2026-07-29** (build/checklist-execution-model, Phase 2's last open gate):
+  **closed on this PR, which is itself the observation.** The gate line asked for
+  "an artifact PR touching nothing else and observing the job execute", because a
+  guard sitting behind `ci.yml`'s skip gate reads to branch protection as
+  passing. PR #866 touches only `plans/`, and its check run splits exactly as the
+  design requires: `Check plan artifacts` **pass**, while every heavy `ci.yml`
+  job — `Unit tests`, `Integration tests (no Claude)`, `E2E (Playwright)`,
+  `Event server`, `Lint (workflows)`, `Advance the dev channel` — reports
+  **skipping**. `Detect code changes` passed and correctly classified the diff as
+  plans-only. So the separate-workflow decision holds under observation, not just
+  by construction: the one check that exists FOR plans-only PRs is the one check
+  that ran on one. Phase 2 is now fully closed — 17 `[x]`, 1 `[f]`, 0 open.
 
 ## Notes
 
