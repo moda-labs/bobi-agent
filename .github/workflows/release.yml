@@ -119,6 +119,9 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
 
+      # Any Node 20+ host builds an identical bundle (#857), so this pin is a
+      # provenance choice - published artifacts come from one known major - not
+      # a correctness requirement. Bumping it is safe; ci.yml proves that.
       - uses: actions/setup-node@v5
         with:
           node-version: "20"
