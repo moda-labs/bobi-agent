@@ -197,12 +197,55 @@ def _default_publish(event: str, data: dict) -> bool:
     return post_event(event, data)
 
 
-def _append_manager_log(message: str) -> None:
+def _append_manager_log(message: str, level: str) -> None:
+    """Put *message* in manager.log even when this process's logger cannot.
+
+    The scheduler's own `log.error` reaches manager.log through a handler in
+    most deployments, but not all: as a container's PID 1 the stream goes to
+    the container log and `start --foreground` strips the file handler, so a
+    monitor failure would leave no trace in the file operators actually read.
+
+    Skipped whenever a root handler already reaches that file, by either
+    route - otherwise this is a second copy of a record already on disk, and
+    doubling lines inflates the counts an incident is read from (#851).
+    *level* mirrors the logger call beside it so both spellings of a line
+    match.
+    """
     try:
-        from bobi import paths
-        log_path = paths.state_dir() / "manager.log"
+        from bobi import logs, paths
+        log_path = paths.manager_log_path()
+        if logs.root_writes_to(log_path):
+            return
         with open(log_path, "a") as lf:
-            lf.write(message.rstrip() + "\n")
+            lf.write(logs.stamped(level, message.rstrip()) + "\n")
+    except Exception:
+        pass
+
+
+def _append_monitor_output(monitor_name: str, kind: str, out: str) -> None:
+    """Tee an agent's raw stdout into manager.log behind a dated header.
+
+    The output is a JSON result blob, written verbatim so it stays parseable.
+    The header is what dates it: without one these blobs sit in an
+    append-only log with no indication of when they arrived or what produced
+    them (#851).
+
+    Header and blob go out as ONE write: a waiter thread runs per spawned
+    monitor and they share this file with each other and with the manager's
+    stderr, so two writes could be interleaved by another thread's and leave
+    the blob filed under someone else's header.
+
+    Best effort, like `_append_manager_log`: this runs on the waiter thread
+    and a failure to tee must not cost the caller its monitor result.
+    """
+    try:
+        from bobi import logs, paths
+        log_path = paths.manager_log_path()
+        header = logs.stamped(
+            "INFO", f"Monitor {monitor_name}: {kind} output follows")
+        blob = out if out.endswith("\n") else out + "\n"
+        with open(log_path, "a") as lf:
+            lf.write(header + "\n" + blob)
     except Exception:
         pass
 
@@ -265,7 +308,7 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
     """
     from bobi import paths
     root = paths.bobi_root()
-    log_path = paths.state_dir() / "manager.log"
+    log_path = paths.manager_log_path()
 
     oversized = [(idx, len(str(arg).encode())) for idx, arg in enumerate(cmd)
                  if len(str(arg).encode()) > MAX_MONITOR_ARG_BYTES]
@@ -276,7 +319,7 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
         message = (f"Failed to spawn {kind} for monitor {monitor_name}: "
                    f"{detail}")
         log.error(message)
-        _append_manager_log(message)
+        _append_manager_log(message, "ERROR")
         if cleanup:
             cleanup()
         _publish_monitor_error(
@@ -296,7 +339,7 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
         detail = str(e)
         message = f"Failed to spawn {kind} for monitor {monitor_name}: {detail}"
         log.error(message)
-        _append_manager_log(message)
+        _append_manager_log(message, "ERROR")
         if cleanup:
             cleanup()
         _publish_monitor_error(
@@ -316,7 +359,7 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
             detail = f"exceeded {budget}s - killed"
             message = f"{kind.capitalize()} for monitor {monitor_name} {detail}"
             log.error(message)
-            _append_manager_log(message)
+            _append_manager_log(message, "ERROR")
             _publish_monitor_error(
                 monitor_name, kind, "timeout", detail, publish=publish)
             on_result(None)
@@ -325,17 +368,13 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
             if cleanup:
                 cleanup()
         if out:  # keep the agent's output observable in manager.log
-            try:
-                with open(log_path, "a") as lf:
-                    lf.write(out)
-            except OSError:
-                pass
+            _append_monitor_output(monitor_name, kind, out)
         result = parse(out)
         if result is None:
             detail = "subprocess output did not contain a parseable result"
             log.warning("Monitor %s: %s %s", monitor_name, kind, detail)
             _append_manager_log(
-                f"Monitor {monitor_name}: {kind} {detail}")
+                f"Monitor {monitor_name}: {kind} {detail}", "WARNING")
             _publish_monitor_error(
                 monitor_name, kind, "indeterminate-result", detail,
                 publish=publish)
@@ -1026,7 +1065,7 @@ class MonitorScheduler:
         URL/API check).
         """
         cwd = str(projects[0]) if projects else None
-        log.info(f"Monitor {monitor.name} due — spawning non-interactive check")
+        log.info(f"Monitor {monitor.name} due - spawning non-interactive check")
         self.spawn_check(monitor, cwd,
                          lambda verdict: self._on_check_verdict(monitor, verdict))
 

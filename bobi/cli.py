@@ -13,7 +13,7 @@ truststore.inject_into_ssl()
 
 import click
 
-from bobi import paths
+from bobi import logs, paths
 from bobi.install import (
     install_pack as _install_pack,
     write_install_gitignore as _write_install_gitignore,
@@ -201,15 +201,19 @@ def _pin_team_brain(root: Path) -> None:
 
 
 def _attach_runtime_log(root: Path) -> None:
-    state = _project_state_dir(root)
-    log_path = state / "manager.log"
-    logger = logging.getLogger()
-    if not any(
-        isinstance(h, logging.FileHandler)
-        and getattr(h, "baseFilename", "") == str(log_path)
-        for h in logger.handlers
-    ):
-        logger.addHandler(logging.FileHandler(log_path))
+    """Also send this process's logs to the runtime's manager.log.
+
+    Stands down when the root logger already reaches that file - either
+    because an earlier call attached this same handler, or because Bobi
+    spawned this process with its stderr redirected into manager.log, which
+    is how the manager and every monitor check are launched. A second writer
+    would put each record on disk twice, and a duplicated line inflates the
+    counts an operator reads back out of an incident (#851).
+    """
+    log_path = paths.manager_log_path(root)
+    if logs.root_writes_to(log_path):
+        return
+    logging.getLogger().addHandler(logs.file_handler(log_path))
 
 
 
@@ -272,12 +276,7 @@ class _PluginGroup(click.Group):
 @click.pass_context
 def main(ctx):
     """Bobi — build teams of event-driven AI agents."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-        handlers=[logging.StreamHandler()],
-    )
+    logs.configure_root()
     # Top-level commands are machine/repo scoped. Runtime identity is bound by
     # `bobi agent <name> ...` or inherited BOBI_ROOT in child processes.
     if ctx.invoked_subcommand is None:
@@ -990,7 +989,7 @@ def _find_pid_path() -> Path | None:
     """Find the PID file for the selected Bobi Agent's manager."""
     project_path = _detect_project_root()
     if project_path:
-        p = _project_state_dir(project_path) / "manager.pid"
+        p = paths.manager_pid_path(project_path)
         if p.exists():
             return p
     return None
@@ -1103,7 +1102,7 @@ def restart(fresh):
             capture_output=True, text=True, timeout=5,
         )
         pid = result.stdout.strip()
-        log_path = _project_state_dir(project_path) / "manager.log"
+        log_path = paths.manager_log_path(project_path)
         click.echo(f"Bobi restarted (pid {pid}). Logs: {log_path}")
         return
 

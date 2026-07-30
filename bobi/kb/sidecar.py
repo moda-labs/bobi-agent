@@ -16,6 +16,8 @@ from functools import partial
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
+from bobi import logs
+
 log = logging.getLogger(__name__)
 
 MODEL_NAME = "all-MiniLM-L6-v2"
@@ -112,10 +114,7 @@ def main():
     parser.add_argument("--project-root", required=True, type=Path)
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
+    logs.configure_root()
 
     from bobi import paths
     state_dir = paths.state_dir(args.project_root)
