@@ -169,6 +169,162 @@ class TestAccepts:
 # The check rejects what it should
 # ---------------------------------------------------------------------------
 
+class TestTheFreezeStartsAtApproval:
+    """A plan is frozen once approved AND merged, not before.
+
+    The fixture is `Status: Approved`, so every other test in this file already
+    covers the frozen side. These cover the boundary itself.
+    """
+
+    def _as_draft(self, repo, body: str) -> None:
+        """Rewrite BASE so the plan was Draft when it was merged."""
+        (repo / "plans" / "widget.md").write_text(
+            body.replace("**Status:** Approved", "**Status:** Draft")
+        )
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "--amend", "-m", "base")
+
+    def test_a_draft_can_be_revised_in_place(self, repo):
+        """The case this exists for: pre-approval revision — rewording an item,
+        resequencing, folding review feedback back in. Frozen unconditionally,
+        a draft could only be appended to, which makes drafting impossible."""
+        self._as_draft(repo, _plan(repo))
+        body = _plan(repo).replace(
+            "Move the key to the immutable id.",
+            "Move the key to the immutable id, keyed per tenant.",
+        )
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 0, result.stderr
+        assert "not frozen until approved" in result.stderr
+
+    def test_a_draft_may_also_rewrite_its_appendix(self, repo):
+        """MUTATION-PROOF — mutant: apply the draft exemption to 4b only,
+        leaving 4a's prefix rule in force.
+
+        The appendix is a chronology only once work has started; while the plan
+        is a draft there is no history to rewrite. Mutates text BELOW the fence
+        on purpose — an edit above it would exercise 4b again and pass whether
+        or not 4a was exempt."""
+        self._as_draft(repo, _plan(repo))
+        body = _plan(repo).replace(
+            "- [ ] Evict stale entries on first read",
+            "- [ ] Evict stale entries lazily, on first read after deploy",
+        )
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 0, result.stderr
+
+    def test_flipping_head_to_draft_does_NOT_unlock_an_approved_plan(self, repo):
+        """MUTATION-PROOF — mutant: read the status from head instead of base.
+
+        The status line is deliberately mutable so a builder can flip it, so a
+        head-derived status could be unlocked by the very commit doing the
+        rewriting. Approved-on-base is a fact about merged history that no pull
+        request can edit."""
+        body = _plan(repo).replace("**Status:** Approved", "**Status:** Draft").replace(
+            "Move the key to the immutable id.",
+            "Move the key to the immutable id, and also rewrite the eviction policy.",
+        )
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 1
+        assert "existing review-surface text was modified or deleted" in result.stderr
+
+    def test_a_plan_with_no_status_line_stays_frozen(self, repo):
+        """MUTATION-PROOF — mutant: unlock on an empty status instead of the
+        literal `draft`. Absent metadata must not be a skeleton key; one
+        shipped plan carries no status line at all."""
+        stripped = "\n".join(
+            line for line in _plan(repo).splitlines() if "**Status:**" not in line
+        )
+        (repo / "plans" / "widget.md").write_text(stripped + "\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "--amend", "-m", "base")
+
+        body = _plan(repo).replace(
+            "Move the key to the immutable id.", "Move the key somewhere else."
+        )
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 1
+        assert "existing review-surface text was modified or deleted" in result.stderr
+
+    def test_an_unrecognized_status_stays_frozen(self, repo):
+        """`Done` is a real value in this repo; so is `Approved (re-approved
+        ...)`. Only the exact value `draft` unlocks — everything else freezes,
+        so a new status word never silently opens the surface."""
+        (repo / "plans" / "widget.md").write_text(
+            _plan(repo).replace("**Status:** Approved", "**Status:** Done")
+        )
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "--amend", "-m", "base")
+
+        body = _plan(repo).replace(
+            "Move the key to the immutable id.", "Move the key somewhere else."
+        )
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 1
+        assert "existing review-surface text was modified or deleted" in result.stderr
+
+    def test_a_draft_is_still_checked_for_conflict_debris(self, repo):
+        """MUTATION-PROOF — mutant: move the draft exemption to the top of the
+        per-file loop, before checks 1-3.
+
+        Draft exempts ONLY the append-only rule. Malformedness is not a
+        workflow-stage question: a conflicted artifact is not a plan at any
+        status, and the tempting 'why compute anything for a draft?' shortcut
+        would silently strip these checks from every draft."""
+        self._as_draft(repo, _plan(repo))
+        body = _plan(repo).replace(
+            "## Problem",
+            "<<<<<<< HEAD\n## Problem\n=======\n## The Problem\n>>>>>>> other",
+        )
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 1
+        assert "unresolved merge-conflict markers" in result.stderr
+
+    def test_a_draft_is_still_checked_for_unclassified_appendix_gates(self, repo):
+        """The other half of the same mutant: an appendix item with neither a
+        verify: nor a judgement: is uncheckable whatever the plan's status."""
+        self._as_draft(repo, _plan(repo))
+        body = _plan(repo).rstrip("\n") + "\n- [ ] Something nobody can check\n"
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 1
+        assert "neither a verify: nor a judgement:" in result.stderr
+
+    def test_draft_matching_ignores_case_and_trailing_metadata(self, repo):
+        """The status line commonly carries `· **Created:** ...`, and the value
+        is prose a human types. Neither should decide whether the freeze
+        applies."""
+        (repo / "plans" / "widget.md").write_text(
+            _plan(repo).replace(
+                "**Status:** Approved · **Created:** 2026-07-29",
+                "**Status:** DRAFT   · **Created:** 2026-07-29",
+            )
+        )
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "--amend", "-m", "base")
+
+        body = _plan(repo).replace(
+            "Move the key to the immutable id.", "Move the key somewhere else."
+        )
+        _commit(repo, body)
+
+        result = _run(repo)
+        assert result.returncode == 0, result.stderr
+
+
 class TestRejects:
     def test_existing_prose_rewritten_above_the_fence(self, repo):
         """MUTATION-PROOF — mutant: drop the review-surface comparison (step
