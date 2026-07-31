@@ -417,7 +417,8 @@ the prompt-injection surface, and trusted team code. Event-bus internals:
 | Receive webhooks on your own infrastructure | [docs/SELF_HOSTED_EVENT_SERVER.md](docs/SELF_HOSTED_EVENT_SERVER.md) — tunnel or standalone server |
 | Understand the security model | [docs/SECURITY.md](docs/SECURITY.md) — trust, credentials, prompt-injection |
 | Connect Slack / Linear | [skills/slack-setup.md](skills/slack-setup.md) · [skills/linear-setup.md](skills/linear-setup.md) |
-| Deploy to production | [Cloud Deployment](#cloud-deployment) (private `bobi-deploy` package) |
+| Run Bobi in a container | [docs/REFERENCE_IMAGE.md](docs/REFERENCE_IMAGE.md) — `ghcr.io/moda-labs/bobi`, the published image |
+| Control a deployment remotely | [docs/ADMIN_PROTOCOL.md](docs/ADMIN_PROTOCOL.md) — the supervisor's wire contract |
 
 ## Development
 

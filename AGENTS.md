@@ -24,6 +24,9 @@ Bobi is an event-driven AI agent framework.
 - `docs/ADMIN_PROTOCOL.md`: the supervisor sidecar's wire contract (admin
   topics, the nine commands, heartbeat/lifecycle schemas, compatibility
   promise). Versioned by `SUPERVISOR_VERSION`; additive-only pre-1.0.
+- `docs/REFERENCE_IMAGE.md`: the published container image
+  (`ghcr.io/moda-labs/bobi`) - what it contains, the `--init` requirement, the
+  runtime env contract, the `TEAM_DEPS` bake hook, and how it is published.
 - `docs/MONITORS.md`: monitor scheduler and the `script_cache` token-saving runner.
 - `docs/WORKFLOW_ENGINE.md`: workflow state machine, step types, suspend/resume.
 - `docs/TOOL_LIBRARY.md`: unified dependency model - declaring tools/skills/MCP
