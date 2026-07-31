@@ -2,9 +2,11 @@
 
 The event server is bobi's pub/sub bus: it ingests webhooks and agent-emitted
 events, routes them by topic to subscribed agents over a WebSocket, and replays
-anything missed during downtime. It is **one TypeScript core that runs two ways** -
-a Cloudflare Worker in production, or an embedded local Node process for local
-runs - plus a Python client (`bobi/events/`) that every agent session uses.
+anything missed during downtime. It is **one TypeScript core with two runtime adapters** -
+a Cloudflare Worker for a durable deployment, or an embedded local Node process
+for local runs - plus a Python client (`bobi/events/`) that every agent session
+uses. Both adapters are in this repo; see
+[SELF_HOSTED_EVENT_SERVER.md](SELF_HOSTED_EVENT_SERVER.md) to run either.
 
 ## Mental model
 
@@ -42,7 +44,7 @@ else is shared.
 
 ### Remote: Cloudflare Worker + KV + Durable Object
 
-`event-server/src/index.ts` is the Worker entry. It implements `StorageAdapter`
+`event-server/worker/src/index.ts` is the Worker entry. It implements `StorageAdapter`
 over Workers KV (records keyed `deployments:<apiKey>`, `subscriptions:<key>`,
 `bubble:<id>`, `resource_grant:<svc>:<res>:<bubble>`, ...), routes by URL, and fans
 out through a **`DeploymentSession` Durable Object** (`deployment-session.ts`) -
@@ -507,17 +509,28 @@ serve over TLS and set all three provider webhook secrets (`WEBHOOK_SECRET`,
 
 ## Key files
 
-`event-server/` is an npm workspace. The runtime-agnostic protocol lives in the
-`event-server/core/` package (`@moda-labs/bobi-events-core`); both runtimes under
-`event-server/src/` consume it by package name, never by relative path (enforced
-by `tests/test_import_boundaries.py`).
+`event-server/` is an npm workspace of three packages. The runtime-agnostic
+protocol lives in `event-server/core/` (`@moda-labs/bobi-events-core`); the two
+leaf packages that consume it are the local Node variants (`event-server/src/`)
+and the Cloudflare Worker (`event-server/worker/`). Both consume core by package
+name, never by relative path, and neither leaf may import the other — all
+enforced by `tests/test_import_boundaries.py`.
+
+The Worker is a separate package rather than more files under `src/` because
+the two compile units are mutually exclusive: `src/` is Node-only
+(`@types/node`), while the Worker needs Cloudflare's globals, whose
+`fetch`/`Request`/`Response` declarations conflict with Node's. Each package
+carries its own `tsconfig.json` and `vitest.config.mts`.
 
 - `event-server/core/src/core.ts` - shared handlers, the unified webhook pipeline,
   routing, HMAC auth, grant filter.
 - `event-server/core/src/adapters/{github,slack,linear}.ts` - webhook normalizers.
-- `event-server/src/index.ts` - Cloudflare Worker entry (KV storage, DO fan-out).
+- `event-server/worker/src/index.ts` - Cloudflare Worker entry (KV storage, DO fan-out).
+- `event-server/worker/src/deployment-session.ts` - the per-deployment Durable Object.
+- `event-server/worker/src/fleet.ts` - fleet read model + operator query surface
+  (see [ADMIN_PROTOCOL.md](ADMIN_PROTOCOL.md)).
+- `event-server/worker/src/internal-auth.ts` - signs the Worker-to-DO hop.
 - `event-server/src/local.ts` - local Node entry (in-memory store, direct sockets).
-- `event-server/src/deployment-session.ts` - the per-deployment Durable Object.
 - `bobi/events/server.py` - local-server launcher + bubble mint / grant setup.
 - `bobi/events/client.py` - the WebSocket client (connect, replay, heartbeat).
 - `bobi/events/{subscriptions,adapters,drain,publish,signing}.py` - subscription
