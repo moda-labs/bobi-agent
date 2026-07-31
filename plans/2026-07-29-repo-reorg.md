@@ -238,6 +238,18 @@ Every lane is `concurrent` mode: each spans more than one repo, so plan markers 
 
 ## Amendments
 
+### 2026-07-31 — Gate R closed at 0.51.1; the roll surfaced a build-secret bug that took eng-team down
+
+Gate R needed a second cut. **0.51.1 is the version the fleet runs**; all five teams are on it, and the runbook's Slack E2E passed with the expected identities (`app_id A0BDLA833MW`, `user U0BCVME6Z60`, `bot_id B0BCKMMQN1H`). Lane 2 is unblocked.
+
+**What broke.** 0.51.0's fleet roll failed on eng-team with `required secrets missing from the environment: MODA_SKILLS_TOKEN`. Because the deploy pauses the old runtime before pushing, the box was left frozen — 18 SIGSTOP'd processes — rather than merely un-updated. Not a release regression: the box was still on its old image, `bobi/config.py` was untouched by 0.51.0, and the only `cli.py` change was the new `supervise` command. The code that failed was byte-identical to the code that had succeeded the day before.
+
+The cause was a misclassification. `bobi agents install --non-interactive` scanned `agent.yaml` with a flat regex, so a `${VAR}` used only by a `build:` step — an image-bake layer — counted as a required *runtime* secret. `bobi-deploy` already held the opposite contract (`BUILD_SECRET_NAMES`, excluded from `required` **and** `declared`, enforced host-side before a build), so the deploy deliberately withheld the token and the install deliberately demanded it. It had been masked for weeks by a stale copy in `run/.env`; this roll's `--env-file` reconcile replaced that file and exposed it. Fixed structurally in **#886** — a ref found only under top-level `build:` is `build_only` and excluded from the runtime gates — because `bobi/` stays generic and cannot carry a name list. Shipped as 0.51.1.
+
+**A workaround that failed, recorded so it is not retried.** Supplying the token as `ENG_TEAM__MODA_SKILLS_TOKEN` does not work: the deploy de-prefixes it and then drops it (`dropping undeclared secret 'MODA_SKILLS_TOKEN'`), because `declared` is the prune authority and `BUILD_SECRET_NAMES` is filtered out of it. The contract blocks the workaround by design. What worked was upgrading the box's own venv to 0.51.1 and re-running the job — the failing pre-flight is the *box's* bobi, and the image rebuild happens after it, so a box cannot adopt this fix on the roll that needs it. The manual upgrade is erased by the rebuild that follows.
+
+**Standing lesson for the remaining lanes.** A deploy that pauses before it validates converts a refused update into an outage. Lanes 2 and 3 both change the container path; whatever replaces this flow should validate before it pauses.
+
 ### 2026-07-31 — Gate R shipped as 0.51.0; the sdist question is closed, and the appendix's premise for it was wrong
 
 **Gate R is done.** `bobi 0.51.0` ships the wheel carrying `bobi/supervisor`: cut `2d8f443`, release [v0.51.0](https://github.com/moda-labs/bobi-agent/releases/tag/v0.51.0), public train green (subscription-login smoke, wheel build, PyPI publish, Homebrew formula + bottles). Lane 2 is unblocked.
