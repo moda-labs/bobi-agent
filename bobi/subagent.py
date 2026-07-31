@@ -228,8 +228,7 @@ def _emit_session_started(
     # (#849): forensics need the chain at the moment a run starts, which is
     # exactly what this event already carries to the bus, and keeping it out of
     # state.json keeps the guard clear of Session.start()'s re-registration.
-    from bobi.launch_lineage import current_lineage, render
-    lineage = current_lineage()
+    from bobi.launch_lineage import lineage_fields
     _emit_lifecycle_event("agent/session.started", {
         "run_key": run_key,
         "role": role,
@@ -238,8 +237,7 @@ def _emit_session_started(
         "session_id": session_id,
         "phase": phase,
         "requested_by": requested_by or None,
-        "lineage": render(lineage),
-        "depth": len(lineage),
+        **lineage_fields(),
         "text": f"{label} started working on {run_key}",
     })
 
@@ -1001,9 +999,14 @@ def _check_spend_governor(root: Path) -> None:
     cap = cfg.spend_cap or DEFAULT_CAP
     allowed, count = check_spend_cap(root, cap)
     if not allowed:
+        # Only when there IS a chain: render(()) is the literal "(root)", so
+        # passing it unconditionally would claim a chain for every rootless
+        # launch and invert the chain-vs-50-unrelated-launches distinction the
+        # field exists to draw.
         from bobi.launch_lineage import current_lineage, render
+        chain = current_lineage()
         emit_spend_cap_alert(root, count, cap,
-                             lineage=render(current_lineage()))
+                             lineage=render(chain) if chain else "")
         raise RuntimeError(
             f"Spend governor: {count} agent invocations in the last hour "
             f"(cap: {cap}). New launches are blocked until invocations "

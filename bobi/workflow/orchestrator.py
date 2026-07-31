@@ -564,8 +564,14 @@ async def _run_workflow_async(
             options=options,
         )
 
+    # Carries the launch chain for the same reason the adhoc emitter does
+    # (#849), through the same helper: this is the path a detached
+    # non-persistent launch takes, so leaving it out would blind forensics on
+    # the majority of runs.
+    from bobi.launch_lineage import lineage_fields
     _emit_lifecycle_event("agent/session.started", {
         "run_key": run_key, "role": role, "project": repo,
+        **lineage_fields(),
         "text": f"{role or 'Agent'} started working on {run_key}",
     })
 

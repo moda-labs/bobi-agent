@@ -562,7 +562,11 @@ class Config:
             build=build,
             spend_cap=int(raw.get("spend_cap", 0)),
             max_concurrent_agents=int(raw.get("max_concurrent_agents", 0)),
-            max_launch_depth=int(raw.get("max_launch_depth", 0)),
+            # `max_launch_depth:` with an empty value parses as None, and a
+            # bare int(None) would raise out of Config.load entirely - so a
+            # half-finished edit to this one key would stop the whole team
+            # booting with an error naming neither the key nor the file.
+            max_launch_depth=int(raw.get("max_launch_depth") or 0),
             launch_admission=cls._parse_launch_admission(raw.get("launch_admission", {})),
             brain=raw.get("brain", {}) if isinstance(raw.get("brain"), dict) else {},
             roles=raw.get("roles", {}) if isinstance(raw.get("roles"), dict) else {},

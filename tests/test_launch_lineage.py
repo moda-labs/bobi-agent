@@ -46,6 +46,16 @@ def _process_env(env):
         yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_dropped_dedup():
+    """``_DROPPED_SEEN`` is process-global, so one test's junk value would
+    otherwise silence the next test that uses the same one."""
+    import bobi.launch_lineage as mod
+    mod._DROPPED_SEEN.clear()
+    yield
+    mod._DROPPED_SEEN.clear()
+
+
 @pytest.fixture
 def project(tmp_path):
     """A minimal runtime root with package/agent.yaml and state/."""
@@ -88,6 +98,25 @@ class TestEncoding:
         with patch("bobi.events.publish.post_event") as post:
             decode(None, project_path=project)
         post.assert_not_called()
+
+    def test_dropped_event_is_emitted_once_per_bad_value(self, project):
+        """A corrupted chain is inherited fleet-wide and read on every launch
+        and every session start; emitting per read would flood the bus during
+        the very incident where the guard is failing open."""
+        with patch("bobi.events.publish.post_event") as post:
+            for _ in range(5):
+                decode("not json", project_path=project)
+        dropped = [c for c in post.call_args_list
+                   if c.args[0] == "system/launch.lineage.dropped"]
+        assert len(dropped) == 1
+
+    def test_a_different_bad_value_still_reports(self, project):
+        with patch("bobi.events.publish.post_event") as post:
+            decode("not json", project_path=project)
+            decode('{"other": "junk"}', project_path=project)
+        dropped = [c for c in post.call_args_list
+                   if c.args[0] == "system/launch.lineage.dropped"]
+        assert len(dropped) == 2
 
     def test_reads_from_environment(self):
         chain = (_link("director"),)
@@ -320,6 +349,79 @@ class TestNoPersistence:
         assert "SessionEntry" not in source
 
 
+class TestSessionStartedCarriesTheChain:
+    """Forensics ride this event instead of the registry, so BOTH emitters
+    must carry the chain.
+
+    There are two: ``subagent._emit_session_started`` (adhoc/persistent) and
+    the workflow orchestrator's own. A detached non-persistent launch - the
+    shape the incident was made of - takes the orchestrator's. Covering only
+    one would show chains on adhoc runs and roots on workflow runs, and an
+    operator would read the workflow runs as unrelated.
+    """
+
+    @pytest.fixture
+    def chain_env(self):
+        return {LINEAGE_ENV_VAR: encode((_link("director"), _link("child")))}
+
+    def test_adhoc_emitter_carries_the_chain(self, chain_env):
+        from bobi.subagent import _emit_session_started
+        with patch("bobi.subagent._emit_lifecycle_event") as emit:
+            with _process_env(chain_env):
+                _emit_session_started("rk", "proj", "task", "rk", phase="adhoc")
+        payload = emit.call_args[0][1]
+        assert payload["lineage"] == "director > child"
+        assert payload["depth"] == 2
+
+    @pytest.mark.parametrize("module_name", [
+        "bobi.subagent", "bobi.workflow.orchestrator",
+    ])
+    def test_every_session_started_emitter_splices_the_helper(self, module_name):
+        """Both emitters must splice ``**lineage_fields()`` into the payload.
+
+        Asserted on the AST of the actual ``agent/session.started`` call rather
+        than on the file's text: a substring check would pass on a comment, a
+        dead branch, or a call whose result is dropped, and the workflow half of
+        the forensics could go dark with the suite green.
+        """
+        import ast
+        import importlib
+
+        module = importlib.import_module(module_name)
+        tree = ast.parse(open(module.__file__, encoding="utf-8").read())
+
+        emitters = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "agent/session.started"
+        ]
+        assert emitters, f"{module_name} no longer emits agent/session.started"
+
+        for call in emitters:
+            payload = call.args[1]
+            assert isinstance(payload, ast.Dict)
+            spliced = [
+                value for key, value in zip(payload.keys, payload.values)
+                if key is None and isinstance(value, ast.Call)
+                and getattr(value.func, "id", "") == "lineage_fields"
+            ]
+            assert spliced, (
+                f"{module_name}'s agent/session.started payload does not splice "
+                "**lineage_fields(); forensics ride this event, so an emitter "
+                "that omits the chain blinds the runs it covers"
+            )
+
+    def test_root_session_reports_depth_zero(self):
+        from bobi.subagent import _emit_session_started
+        with patch("bobi.subagent._emit_lifecycle_event") as emit:
+            with _process_env({}):
+                _emit_session_started("rk", "proj", "task", "rk")
+        payload = emit.call_args[0][1]
+        assert payload["depth"] == 0
+
+
 class TestChildEnvStripsLineage:
     """``child_agent_env`` has four callers and only one is a launch.
 
@@ -469,3 +571,266 @@ class TestUnboundedAdhocChain:
                 return
             names.append(name)
         pytest.fail("chain was never refused")
+
+
+class TestConfiguredCapIsUsable:
+    """A cap that cannot serve as a cap must fall back, not refuse everything.
+
+    ``max_launch_depth: -1`` reads like the common "-1 means unlimited" idiom.
+    Taken literally it makes ``len(child) > -1`` true for every launch, so the
+    whole deployment is refused - and each refusal tells the blocked agent that
+    the fix is an operator edit to the key that caused it.
+    """
+
+    @pytest.mark.parametrize("raw", ["-1", "0", "", "not-a-number"])
+    def test_unusable_agent_yaml_value_falls_back(self, project, raw):
+        paths.agent_yaml_path(project).write_text(
+            f"entry_point: x\nmax_launch_depth: {raw}\n")
+        assert max_launch_depth(project) == DEFAULT_MAX_LAUNCH_DEPTH
+
+    def test_negative_cap_does_not_refuse_a_root_launch(self, project):
+        paths.agent_yaml_path(project).write_text(
+            "entry_point: x\nmax_launch_depth: -1\n")
+        assert extend((), _link("a"), max_depth=max_launch_depth(project))
+
+    def test_empty_key_does_not_break_config_load(self, project):
+        """The bug is wider than the guard: a bare int(None) raises out of
+        Config.load, so a half-finished edit stops the team booting."""
+        from bobi.config import Config
+        paths.agent_yaml_path(project).write_text(
+            "entry_point: x\nmax_launch_depth:\n")
+        assert Config.load(project).max_launch_depth == 0
+
+
+class TestEventPayloads:
+    """Every payload carries ``text``; the chat surface renders that, not JSON.
+
+    Asserted per event because a topic-name-only assertion passes on an empty
+    payload - verified: blanking both payloads left the suite green.
+    """
+
+    def test_depth_approaching_payload(self, project):
+        chain = tuple(_link(f"g{i}") for i in range(6))
+        with patch("bobi.events.publish.post_event") as post:
+            extend(chain, _link("g6"), max_depth=8, project_path=project)
+        payload = next(c.args[1] for c in post.call_args_list
+                       if c.args[0] == "system/launch.depth.approaching")
+        assert payload["depth"] == 7
+        assert payload["max_launch_depth"] == 8
+        assert payload["lineage"].endswith("g6")
+        assert "approaching" in payload["text"]
+
+    def test_lineage_dropped_payload(self, project):
+        with patch("bobi.events.publish.post_event") as post:
+            decode("not json", project_path=project)
+        payload = next(c.args[1] for c in post.call_args_list
+                       if c.args[0] == "system/launch.lineage.dropped")
+        assert payload["reason"]
+        assert payload["raw"] == "not json"
+        assert "chain root" in payload["text"]
+
+    def test_spend_cap_alert_carries_the_chain(self, project):
+        """The non-default branch of the changed spend-governor signature.
+
+        Its whole point is telling an operator the cap caught a CHAIN rather
+        than 50 unrelated launches; only the empty branch was covered.
+        """
+        from bobi.spend_governor import emit_spend_cap_alert
+        with patch("bobi.events.publish.post_event") as post:
+            emit_spend_cap_alert(project, count=50, cap=50,
+                                 lineage="director > adhoc-1 > adhoc-2")
+        payload = post.call_args.args[1]
+        assert payload["lineage"] == "director > adhoc-1 > adhoc-2"
+        assert "director > adhoc-1 > adhoc-2" in payload["text"]
+
+
+class TestGuardOrderingAndPlacement:
+    """Pins the two orderings the code documents as load-bearing.
+
+    Both were unpinned: swapping the guard past the spend governor, or moving
+    the manager's root stamp below the monitor scheduler, left the suite green.
+    """
+
+    def test_lineage_is_admitted_before_the_spend_governor(self, project):
+        """The governor is the classification-free backstop; this is the first
+        resort. Reversed, a runaway chain surfaces as spend.cap.breached with
+        the wrong cause instead of launch.blocked with the chain."""
+        calls: list[str] = []
+        registry = MagicMock(get=MagicMock(return_value=None))
+        with patch("bobi.launch_lineage.admit",
+                   side_effect=lambda *a, **k: calls.append("lineage") or ()), \
+             patch("bobi.subagent._check_spend_governor",
+                   side_effect=lambda *a: calls.append("spend")), \
+             patch("bobi.subagent.check_requires", return_value=[]), \
+             patch("bobi.subagent.get_registry", return_value=registry), \
+             patch("bobi.subagent._check_concurrency_semaphore"), \
+             patch("bobi.subagent._launch_detached", return_value=1), \
+             patch("bobi.sdk.check_image_rotation"):
+            from bobi.subagent import launch_agent
+            with _process_env({}):
+                launch_agent(task="t", cwd=str(project), workflow_name="adhoc")
+        assert calls == ["lineage", "spend"]
+
+    def test_manager_roots_its_chain_before_the_scheduler_starts(self):
+        """service.py's comment calls this ordering load-bearing: the monitor
+        scheduler's checks spawn from this process, so a stamp after it would
+        let those launches read as roots of their own."""
+        import ast
+        import bobi.service as service
+
+        tree = ast.parse(open(service.__file__, encoding="utf-8").read())
+        func = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef)
+                    and n.name == "run_manager_from_config")
+        stamp_lines = [n.lineno for n in ast.walk(func)
+                       if isinstance(n, ast.Call)
+                       and getattr(n.func, "id", "") == "stamp_root"]
+        sched_lines = [n.lineno for n in ast.walk(func)
+                       if isinstance(n, ast.Call)
+                       and getattr(n.func, "id", "") == "MonitorScheduler"]
+        assert stamp_lines, "the manager no longer roots its launch chain"
+        assert sched_lines, "test is stale: MonitorScheduler is gone"
+        assert max(stamp_lines) < min(sched_lines)
+
+
+class TestWaitPathIsGuarded:
+    """The second launch site, and the one most likely to run away.
+
+    ``-w adhoc --wait`` is the delegation idiom the role prompts teach, and
+    ``adhoc`` is exempt from the self-recursion rule, so depth is the ONLY
+    thing bounding it. It had no coverage: deleting its admit+stamp block left
+    the whole suite green while chains through it became unbounded.
+    """
+
+    def _run_wait(self, project, **kwargs):
+        from bobi.cli import _run_agent_wait
+        defaults = dict(
+            cwd=str(project), task="delegate this", workflow="adhoc",
+            role="engineer", run_key=None, timeout=60, requested_by=None,
+            interactive=True, persistent=False, subscribe=[],
+        )
+        defaults.update(kwargs)
+        with patch("bobi.cli._detect_project_root", return_value=project):
+            _run_agent_wait(**defaults)
+
+    def test_stamps_the_chain_into_its_own_environment(self, project):
+        """--wait runs the agent IN THIS PROCESS, so the chain must land in
+        os.environ - that is what a `bobi` call from the agent's shell reads."""
+        seen: dict = {}
+
+        def _spawn(**kwargs):
+            seen["chain"] = current_lineage()
+            return MagicMock(final_text="", success=True, error="")
+
+        with patch("bobi.subagent.spawn_adhoc", side_effect=_spawn):
+            with _process_env({}):
+                self._run_wait(project)
+        assert len(seen["chain"]) == 1
+
+    def test_stamped_name_is_the_name_spawn_adhoc_registers(self, project):
+        """The lineage invariant on this path: both derive it from the shared
+        adhoc_session_name(), so a link can never name a session that never
+        exists."""
+        from bobi.subagent import adhoc_session_name
+        seen: dict = {}
+
+        def _spawn(**kwargs):
+            seen["chain"] = current_lineage()
+            seen["name"] = adhoc_session_name(kwargs["task"], kwargs["name"])
+            return MagicMock(final_text="", success=True, error="")
+
+        with patch("bobi.subagent.spawn_adhoc", side_effect=_spawn):
+            with _process_env({}):
+                self._run_wait(project, task="delegate this")
+        assert seen["chain"][-1].session == seen["name"]
+
+    def test_a_deep_chain_is_refused_and_nothing_spawns(self, project):
+        deep = encode(tuple(_link(f"g{i}") for i in range(8)))
+        with patch("bobi.subagent.spawn_adhoc") as spawn:
+            with _process_env({LINEAGE_ENV_VAR: deep}):
+                with pytest.raises(LaunchBlockedError) as exc:
+                    self._run_wait(project)
+        assert exc.value.rule == "depth"
+        spawn.assert_not_called()
+
+    def test_chain_grows_across_wait_generations(self, project):
+        """The incident shape through the second site: each generation
+        inherits the previous one's environment."""
+        depths = []
+
+        def _spawn(**kwargs):
+            depths.append(len(current_lineage()))
+            return MagicMock(final_text="", success=True, error="")
+
+        env: dict = {}
+        with patch("bobi.subagent.spawn_adhoc", side_effect=_spawn):
+            for generation in range(3):
+                with _process_env(dict(env)):
+                    self._run_wait(project, task=f"gen {generation}")
+                    env = dict(os.environ)
+        assert depths == [1, 2, 3]
+
+
+class TestRefusalReachesTheAgent:
+    """The refusal CONTENT is asserted 13 ways; that is dead weight unless the
+    message is actually delivered.
+
+    Verified gap: replacing the handler with a bare ``raise`` left the suite
+    green, restoring the traceback the wrapper exists to prevent.
+    """
+
+    def _launch(self, install, chain):
+        from click.testing import CliRunner
+        from bobi.cli import main
+        with patch.dict(os.environ, {LINEAGE_ENV_VAR: chain}):
+            return CliRunner().invoke(main, [
+                "agent", install.agent_name, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--task", "go",
+            ])
+
+    def test_blocked_launch_exits_1_with_one_readable_line(self, bobi_install):
+        deep = encode(tuple(_link(f"g{i}") for i in range(8)))
+        result = self._launch(bobi_install, deep)
+
+        assert result.exit_code == 1
+        assert "Launch blocked: depth." in result.output
+        assert "deterministic" in result.output
+        assert "Traceback" not in result.output
+        assert not isinstance(result.exception, LaunchBlockedError), (
+            "the refusal escaped as an exception; an LLM reads a traceback as "
+            "a transient crash and retries, which is the launch storm"
+        )
+
+    def test_refusal_does_not_name_the_bypass(self, bobi_install):
+        deep = encode(tuple(_link(f"g{i}") for i in range(8)))
+        result = self._launch(bobi_install, deep)
+        assert LINEAGE_ENV_VAR not in result.output
+        assert MAX_DEPTH_ENV_VAR not in result.output
+
+
+class TestSpendAlertChainOnlyWhenThereIsOne:
+    """``render(())`` is the literal ``"(root)"``, never ``""``.
+
+    Passing it through unconditionally would claim a chain for every rootless
+    launch, inverting the chain-vs-50-unrelated-launches distinction the field
+    was added to draw.
+    """
+
+    def _alert_kwargs(self, project, env):
+        from bobi.spend_governor import DEFAULT_CAP, _save_state, _state_path
+        import time
+        _save_state(_state_path(project), [time.time() for _ in range(DEFAULT_CAP)])
+        with patch("bobi.spend_governor.emit_spend_cap_alert") as alert:
+            from bobi.subagent import _check_spend_governor
+            with _process_env(env):
+                with pytest.raises(RuntimeError, match="Spend governor"):
+                    _check_spend_governor(project)
+        return alert.call_args.kwargs
+
+    def test_rootless_launch_reports_no_chain(self, project):
+        assert self._alert_kwargs(project, {})["lineage"] == ""
+
+    def test_chained_launch_reports_the_chain(self, project):
+        chain = (_link("director"), _link("adhoc-1"))
+        kwargs = self._alert_kwargs(project, {LINEAGE_ENV_VAR: encode(chain)})
+        assert kwargs["lineage"] == "director > adhoc-1"

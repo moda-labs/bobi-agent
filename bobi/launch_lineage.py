@@ -54,6 +54,23 @@ that shape belongs to the event-server circuit breaker.
 One more window is inherent: a process that started before this code existed
 carries no chain, so its launches read as roots until it ends. The mitigation
 is the precedent already in the tree - restart the manager after upgrading.
+
+## What the guard does not cover yet
+
+Stated because a guard whose blind spots are undocumented is worse than one
+whose are known. Each of these starts an agent without appending its own link,
+so a chain passing through it renders with that hop missing and the run below
+it gets one free level of headroom:
+
+- ``--as-check`` / the monitor runners (``run_check_blocking``,
+  ``run_gate_blocking``, ``run_curator_blocking``). Leaf agents today.
+- ``workflows resume``: a suspended run resumes in a new process, which
+  re-establishes no link, so an await step launders the chain.
+- ``bobi.events.reactor``'s auto-dispatch catches ``RuntimeError`` and records
+  the event as dispatched, so a refusal there is not visible as a refusal.
+
+None of these is a regression - they were unguarded before this module existed
+too - and each wants its own change rather than a wider blast radius here.
 """
 
 from __future__ import annotations
@@ -90,6 +107,10 @@ MAX_DEPTH_ENV_VAR = "BOBI_MAX_LAUNCH_DEPTH"
 DEFAULT_MAX_LAUNCH_DEPTH = 8
 
 _ROOT_LABEL = "(root)"
+
+#: Bad chain values already reported this process, so a corrupted variable
+#: inherited fleet-wide reports once rather than on every read.
+_DROPPED_SEEN: set[str] = set()
 
 
 @dataclass(frozen=True)
@@ -224,7 +245,30 @@ def max_launch_depth(root: Path) -> int:
     except Exception:
         log.debug("Could not read max_launch_depth; using default", exc_info=True)
         return DEFAULT_MAX_LAUNCH_DEPTH
-    return configured or DEFAULT_MAX_LAUNCH_DEPTH
+    return _usable_depth(configured, f"agent.yaml max_launch_depth={configured!r}")
+
+
+def _usable_depth(value: object, source: str) -> int:
+    """*value* as a cap, or the default when it cannot serve as one.
+
+    Both configured forms go through this. A non-positive cap is the dangerous
+    input: ``max_launch_depth: -1`` reads like the common "-1 means unlimited"
+    idiom but would make ``len(child) > -1`` true for every launch, refusing
+    ALL work team-wide - and the refusal text would tell each blocked agent
+    that the fix is an operator edit to the very key that caused it. Falling
+    back loudly is the only safe reading.
+    """
+    try:
+        depth = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        log.warning("Ignoring unreadable %s; using %d", source, DEFAULT_MAX_LAUNCH_DEPTH)
+        return DEFAULT_MAX_LAUNCH_DEPTH
+    if depth == 0:
+        return DEFAULT_MAX_LAUNCH_DEPTH  # the repo's "0 = use default" idiom
+    if depth < 1:
+        log.warning("Ignoring non-positive %s; using %d", source, DEFAULT_MAX_LAUNCH_DEPTH)
+        return DEFAULT_MAX_LAUNCH_DEPTH
+    return depth
 
 
 def _depth_from_env() -> int:
@@ -247,6 +291,20 @@ def _depth_from_env() -> int:
         log.warning("Ignoring non-positive %s=%r", MAX_DEPTH_ENV_VAR, raw)
         return 0
     return value
+
+
+def lineage_fields(env: dict[str, str] | None = None) -> dict:
+    """The chain fields every ``agent/session.started`` payload carries.
+
+    One helper for both emitters - ``subagent._emit_session_started`` (the
+    adhoc/persistent path) and the workflow orchestrator's own - because
+    forensics covering one of the two launch paths are worse than none: an
+    operator reading the event log would see chains on adhoc runs and roots on
+    workflow runs, and conclude the workflow runs were unrelated. That is
+    precisely the misreading this ticket is about.
+    """
+    chain = current_lineage(env)
+    return {"lineage": render(chain), "depth": len(chain)}
 
 
 def admit(
@@ -400,7 +458,17 @@ def _emit_depth_approaching(
 
 
 def _emit_lineage_dropped(raw: str, reason: str, project_path: Path | None) -> None:
-    """Named for what the guard did, which is the operator's actual question."""
+    """Named for what the guard did, which is the operator's actual question.
+
+    Emitted at most once per distinct bad value per process. A corrupted
+    ``BOBI_LAUNCH_LINEAGE`` is inherited by every descendant and read on every
+    launch AND every session start, so an unbounded emit would flood the bus
+    operators are watching - during precisely the incident where the guard is
+    failing open. Once is the signal; the rest is noise.
+    """
+    if raw in _DROPPED_SEEN:
+        return
+    _DROPPED_SEEN.add(raw)
     _post("system/launch.lineage.dropped", {
         "reason": reason,
         "raw": raw[:200],
@@ -412,7 +480,19 @@ def _emit_lineage_dropped(raw: str, reason: str, project_path: Path | None) -> N
 
 
 def _post(topic: str, payload: dict, project_path: Path | None) -> None:
-    """Best-effort emit. A failed alert must never change an admission decision."""
+    """Best-effort emit. A failed alert must never change an admission decision.
+
+    Synchronous, like every sibling guard's alert (``emit_spend_cap_alert``,
+    ``emit_concurrency_cap_alert``, ``emit_launch_admission_alert``). A daemon
+    thread was tried and is wrong here: all three of these fire from
+    short-lived ``bobi ... subagents launch`` processes that exit within
+    milliseconds, so the thread is killed at interpreter shutdown with its POST
+    in flight and the event is simply lost. Visibility IS the feature - an
+    unsent ``lineage.dropped`` reproduces this ticket's failure mode exactly, a
+    guard that is not there with nothing visible to say so - so a bounded
+    latency is the right trade, and the dedup in :func:`_emit_lineage_dropped`
+    keeps a corrupted variable from turning that latency into a flood.
+    """
     try:
         from bobi.events.publish import post_event
         post_event(topic, payload, project_path=project_path)
