@@ -104,9 +104,24 @@ def _review_surface(body: str) -> str:
 
 
 def _normalize_markers(text: str) -> str:
-    return re.sub(
+    """Mirror of `normalize_markers` in .github/scripts/check-plan-artifact.sh.
+
+    Two forms, and they must stay in step with that script: the list-item
+    marker, and the heading marker the plan template uses for phase state
+    (`### Phase 3 — … `[x]``, optionally with a dash-introduced note). A
+    heading marker is recognized ONLY when it terminates the line that way -
+    plan prose discusses markers constantly, and normalizing those would make
+    a rewrite inside a sentence invisible here exactly as it would there.
+    """
+    text = re.sub(
         r"^(\s*)- \[(x| |wip|f)\](\s+state:[a-z][a-z0-9-]*)?",
         r"\1- [@]",
+        text,
+        flags=re.M,
+    )
+    return re.sub(
+        r"^(#+ .*)`\[(x| |wip|f)\]`(\s*(?:[—-][^`]*)?)$",
+        r"\1`[@]`\3",
         text,
         flags=re.M,
     )
