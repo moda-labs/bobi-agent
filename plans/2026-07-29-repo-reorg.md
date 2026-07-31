@@ -238,6 +238,18 @@ Every lane is `concurrent` mode: each spans more than one repo, so plan markers 
 
 ## Amendments
 
+### 2026-07-31 — Gate R shipped as 0.51.0; the sdist question is closed, and the appendix's premise for it was wrong
+
+**Gate R is done.** `bobi 0.51.0` ships the wheel carrying `bobi/supervisor`: cut `2d8f443`, release [v0.51.0](https://github.com/moda-labs/bobi-agent/releases/tag/v0.51.0), public train green (subscription-login smoke, wheel build, PyPI publish, Homebrew formula + bottles). Lane 2 is unblocked.
+
+**The sdist question (Phase 5's "decide explicitly at the release") is resolved: exclude, explicitly.** `event-server/worker` is now a declared sdist `exclude` in `pyproject.toml`, pinned by `tests/test_sdist_contents.py`.
+
+The reasoning changed on contact, because **appendix item 3's factual claim is false in practice**. It says `pyproject.toml:87` includes `event-server` as a whole directory "so the **sdist ships the Worker by default**", and recommended leaving that asymmetry. The include list does select those files — `include_spec.match_file('event-server/worker/src/index.ts')` is `True` — but they never reached the archive. Hatch's `safe_walk` (`hatchling/builders/utils.py:22`) walks with `followlinks=True` and dedupes directories by `(st_dev, st_ino)`; `skip_excluded_dirs` is `False`, so it still descends into `node_modules`, where `npm ci` has left the workspace symlink `bobi-events-worker -> ../worker`. The real `worker` inode is therefore already `seen` when the walk reaches it, and the whole subtree is dropped. `core` survives only because `core` sorts ahead of `node_modules`. Measured on the release tree: 191 files / 0 worker with the symlink present, 205 / 14 with it removed.
+
+So the sdist's contents depended on whether `npm ci` had run. `release.yml` runs `npm ci` before `python -m build`, which is why every published sdist has been worker-free — the decision recorded here changes **no published bytes**, it just makes the outcome a stated property instead of an artifact of build-time filesystem state. Excluding rather than including is the right side of that coin: nothing in the Python distribution builds or runs the Worker, and its documented deploy path is a git clone plus `wrangler deploy`. Confirmed downstream — the Homebrew formula builds from the *sdist*, and its bottle build went green against this one.
+
+**Decision (2026-07-31, Zach): the Worker is frozen until Lane 3 lands.** Publication creates a two-copy window — `bobi-agent/event-server/worker/` is canonical, but `bobi-deploy/release-fleet.yml:68` still deploys production from `bobi-deploy/event-server/`, so a fix landed in the public copy does not reach production. No changes will be made to the Cloudflare Worker until `bobi-deploy` is dismantled and its remainder moved into `moda-agents`. That converts the divergence risk from something to be managed into something that cannot occur, and it removes any need for a sync mechanism in the interim. Lane 3 still has to settle who deploys the Worker afterwards; the freeze buys the time, it does not answer the question.
+
 ### 2026-07-31 — Lane 1 landed; the marker-vocabulary finding is fixed
 
 Lane 1 merged: `bobi-agent#880` (main `8830751`) and `bobi-deploy#47` (`bbf39e7`), post-merge CI green on both, `dev` advanced to `8830751`.
