@@ -123,6 +123,32 @@ inline (an explicit team `requires:` / `build:` / `host:` wins).
   `mcp_servers:` dict (leaf-wins per server name), rendered per brain at runtime
   (see below).
 
+### `${VAR}` in an `install:` step is a BUILD secret
+
+Where a variable is used decides when it is required. An `install:` step lands
+under `build:`, which bakes an image layer, so its `${VAR}` refs are resolved by
+the builder's shell at image-build time - not read to run an agent. A ref that
+appears only under `build:` is therefore **not** required at install or startup:
+`bobi agents install --non-interactive` will not refuse an agent because a build
+secret is absent, since the layer that needed it is already in the image.
+
+```yaml
+tool_library:
+  - name: house-skills
+    success: test -f /opt/house-skills/SKILL.md
+    install:
+      run_root:
+        # ${CLONE_TOKEN} expands in the BUILDER, from the build environment.
+        # Never required to run the agent; never persisted into run/.env.
+        - git clone https://x-access-token:${CLONE_TOKEN}@github.com/acme/skills /opt/house-skills
+```
+
+The same name used anywhere outside `build:` stays a runtime requirement - the
+runtime use is real and wins. Supply build secrets where the build runs (CI
+secret, or the invoking environment); the deploy side is what enforces their
+presence before a build starts, and deliberately keeps them out of the runtime
+credential surface.
+
 ## Cookbook: agent.yaml recipes
 
 Every recipe below is the `tool_library:` an author writes on a team's

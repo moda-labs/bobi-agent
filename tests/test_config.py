@@ -822,3 +822,91 @@ def test_scan_declared_vars_keeps_optional_refs(tmp_path):
     y = tmp_path / "agent.yaml"
     y.write_text("a: ${REQUIRED}\nb: ${OPTIONAL:-x}\nc: ${REQUIRED}\n")
     assert scan_declared_vars(y) == ["REQUIRED", "OPTIONAL"]
+
+
+# --- build-time-only ${VAR} refs ---------------------------------------------
+# Regression: a token referenced only by a `build:` step (the image-bake layer)
+# was classified a required RUNTIME secret, so `bobi agents install
+# --non-interactive` refused to install an agent whose dependency was already
+# baked into the image. It took eng-team's fleet roll down on 2026-07-31: the
+# deploy side deliberately withholds build secrets from the runtime env-file
+# (bobi-deploy's BUILD_SECRET_NAMES, "must never be required as, backfilled
+# into, or persisted as runtime Fly secrets"), and this side demanded one.
+
+def test_build_only_ref_is_not_required_to_run(tmp_path):
+    """A ${VAR} used only by a build step is build_only, so it never gates a
+    runtime. This is eng-team's exact shape: a private clone in build.run_root."""
+    _write_agent_yaml(tmp_path, """
+        name: eng-team
+        build:
+          run_root:
+            - git clone https://x-access-token:${MODA_SKILLS_TOKEN}@github.com/acme/skills /opt/skills
+    """)
+
+    by_name = {r.name: r for r in find_env_var_refs(tmp_path)}
+    assert by_name["MODA_SKILLS_TOKEN"].build_only
+    # Still a bare ref, so still "required" in the ${VAR} sense...
+    assert by_name["MODA_SKILLS_TOKEN"].required
+    # ...but not required to RUN, which is what the install gate reads.
+    assert find_required_env_vars(tmp_path) == []
+
+
+def test_runtime_ref_is_still_required(tmp_path):
+    """The guard against over-correcting. An exclusion broad enough to swallow
+    ordinary runtime credentials would pass the test above and fail this one."""
+    _write_agent_yaml(tmp_path, """
+        services:
+          - name: slack
+            credentials:
+              bot_token: ${SLACK_BOT_TOKEN}
+        build:
+          run_root:
+            - git clone https://x-access-token:${MODA_SKILLS_TOKEN}@github.com/acme/skills /opt/skills
+    """)
+
+    assert find_required_env_vars(tmp_path) == ["SLACK_BOT_TOKEN"]
+
+
+def test_a_name_used_both_places_stays_required(tmp_path):
+    """Build use does not launder a runtime requirement: the runtime use is
+    real, so the name is required even though `build:` also mentions it."""
+    _write_agent_yaml(tmp_path, """
+        services:
+          - name: gh
+            credentials:
+              token: ${GH_TOKEN}
+        build:
+          run_root:
+            - git clone https://x-access-token:${GH_TOKEN}@github.com/acme/x /opt/x
+    """)
+
+    by_name = {r.name: r for r in find_env_var_refs(tmp_path)}
+    assert not by_name["GH_TOKEN"].build_only
+    assert find_required_env_vars(tmp_path) == ["GH_TOKEN"]
+
+
+def test_unparseable_agent_yaml_keeps_every_ref_required(tmp_path):
+    """Fail SAFE. If the document will not parse we cannot prove a ref is
+    build-only, so nothing is downgraded and the previous behaviour stands."""
+    config_dir = tmp_path / "package"
+    config_dir.mkdir()
+    (config_dir / "agent.yaml").write_text(
+        "build:\n  run_root:\n    - clone ${BUILD_TOKEN}\n  bad: [unclosed\n")
+
+    by_name = {r.name: r for r in find_env_var_refs(tmp_path)}
+    assert not by_name["BUILD_TOKEN"].build_only
+    assert find_required_env_vars(tmp_path) == ["BUILD_TOKEN"]
+
+
+def test_build_only_applies_to_every_build_step_kind(tmp_path):
+    """apt/npm/run/run_root are all image-bake steps, not runtime reads."""
+    _write_agent_yaml(tmp_path, """
+        build:
+          apt: ["${APT_VAR}"]
+          npm: ["${NPM_VAR}"]
+          run: ["echo ${RUN_VAR}"]
+          run_root: ["echo ${RUN_ROOT_VAR}"]
+    """)
+
+    assert find_required_env_vars(tmp_path) == []
+    assert all(r.build_only for r in find_env_var_refs(tmp_path))

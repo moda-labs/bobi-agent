@@ -768,7 +768,15 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
             # secrets so a container entrypoint (`install --non-interactive
             # && start`) never marches into a broken start with empty
             # credentials.
-            required_missing = [r.name for r in missing if r.required]
+            #
+            # build_only names are excluded: they appear only under `build:`,
+            # which bakes an image layer, and nothing reads them to run an
+            # agent. Requiring them here blocked an install whose dependency
+            # was ALREADY materialized in the image — the deploy side
+            # deliberately withholds build secrets from the runtime env-file,
+            # so demanding them here made the two halves contradict.
+            required_missing = [r.name for r in missing
+                                if r.required and not r.build_only]
             optional_missing = [r.name for r in missing if not r.required]
             if required_missing:
                 click.echo(
