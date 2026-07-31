@@ -15,12 +15,12 @@
      elevation scale) from tokens.css. Marketing surfaces never get it. -->
 <body class="bobi-app">
   <div class="app">
-    <div class="titlebar">
-      <div class="tdots"><i></i><i></i><i></i></div>
-      <div class="addr">
-        <svg class="lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
-        127.0.0.1 / setup
-      </div>
+    <!-- Real app chrome, full-bleed: the browser IS the window, so there is no
+         simulated title bar, traffic lights, or address chip. `.addr` is a nav
+         slot — when setup is hosted inside `bobi app` it becomes the
+         back-to-dashboard link (see app.js). -->
+    <header class="titlebar">
+      <div class="addr"></div>
       <div class="spacer"></div>
       <!-- The lockup always travels with the BY MODA LABS byline. -->
       <div class="lockup">
@@ -30,7 +30,7 @@
         </button>
         <a class="byline" href="https://buildmoda.ai" target="_blank" rel="noopener noreferrer">by moda labs <span aria-hidden="true">&#8599;</span></a>
       </div>
-    </div>
+    </header>
     <div class="panes" id="panes">
       <div id="main" style="display:contents"></div>
     </div>

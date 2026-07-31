@@ -376,20 +376,22 @@
     drawIntro();
     loadTemplates();
   }
-  // A consistent header for the full-screen pages: an optional Back button sits
-  // to the LEFT of the eyebrow, title below — so back navigation is always in
-  // the same place. `back` is {attr, label} or null, where `attr` is the bare
-  // data-* the click delegation listens for ("data-back" / "data-introback").
+  // A consistent header for the full-screen pages: the Back affordance sits on
+  // its own line directly above the title and shares its left edge, so back
+  // navigation is always in the same place and the title reads as the page
+  // header rather than as a second label competing with a kicker.
+  // `back` is {attr, label} or null, where `attr` is the bare data-* the click
+  // delegation listens for ("data-back" / "data-introback").
   // `title` is trusted HTML (the caller escapes any interpolated value).
-  function pageHead(eyebrow, title, back) {
+  function pageHead(title, back) {
     const top = back
-      ? `<div class="phead-top"><button class="backbtn" ${back.attr}>← ${esc(back.label || "Back")}</button><span class="eyebrow">${esc(eyebrow)}</span></div>`
-      : `<div class="eyebrow">${esc(eyebrow)}</div>`;
+      ? `<div class="phead-top"><button class="backbtn" ${back.attr}>← ${esc(back.label || "Back")}</button></div>`
+      : "";
     return `<div class="phead">${top}<h1>${title}</h1></div>`;
   }
   function drawIntro() {
     $("#main").innerHTML = `<main class="node narrow intro">
-      ${pageHead("Setup", "Build an agent team", { attr: "data-introback", label: "Back" })}
+      ${pageHead("Build an agent team", { attr: "data-introback", label: "back" })}
       <p class="lede">bobi manages entire teams of agents that collaborate to solve problems and automate your work. Some of our favorites are engineering, support, and marketing teams.</p>
 
       <section class="isec">
@@ -554,7 +556,7 @@
     // Two grid items (the wrapper #main is display:contents): chat | panel.
     $("#main").innerHTML = `
       <section class="chat sketch uni-chat">
-        <div class="sketch-top"><span class="st-group"><button class="backbtn" data-back>← Back</button><span class="sketch-eyebrow">bobi · build your team</span></span></div>
+        <div class="sketch-top"><span class="st-group"><button class="backbtn" data-back>← back</button><span class="sketch-eyebrow">bobi · build your team</span></span></div>
         <div class="ch-body" id="chbody"></div>
         <div class="cue" id="cue"></div>
         <div class="ch-input"><textarea id="chinput" rows="1" placeholder="Tell bobi what you want to build…" autocomplete="off"></textarea><button class="btn primary" id="chsend" style="padding:9px 14px">↑</button></div>
@@ -1496,7 +1498,7 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
   function renderGenerating() {
     setPanes("1fr");
     $("#main").innerHTML = `<main class="node narrow">
-      ${pageHead("Building", `Building ${esc(S.team_name || "your team")}`, { attr: "data-back", label: "Back to editing" })}
+      ${pageHead(`Building ${esc(S.team_name || "your team")}`, { attr: "data-back", label: "back to editing" })}
       <p class="lede" id="genmsg">Writing the pack, checking it, and installing — sit back.</p>
       <div class="genbar"><div class="genbar-fill" id="genfill"></div></div>
       <ul class="genfiles" id="genfiles"></ul>
@@ -1603,7 +1605,7 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
     const counts = `${spec.roles.length || 1} role(s) · ${spec.autonomous.length} automation(s) · ${spec.services.length} service(s)`;
     $("#main").innerHTML = `<main class="filesdone">
       <header class="fd-head">
-        <button class="backbtn" data-back>← Keep editing</button>
+        <button class="backbtn" data-back>← keep editing</button>
         <div class="fd-title">
           <div class="eyebrow">Preview · here's what bobi built</div>
           <h1>${esc(S.team_name || "your team")}</h1>

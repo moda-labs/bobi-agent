@@ -58,35 +58,47 @@ code,pre,kbd{font-family:var(--font-mono);}
 .bobi-tnum,.counter,.up-meter,.hcard-path,.locbox-path{font-variant-numeric:tabular-nums;}
 
 /* THE RETRO LAYER, re-expressed in the brand's own language: the architect's
-   faded engineering grid-paper (80px major + 16px minor, dissolving downward)
-   instead of CRT scanlines. Nothing in this system glows. */
-html[data-retro="on"] body{
+   faded engineering grid-paper (80px major + 16px minor) instead of CRT
+   scanlines. Nothing in this system glows.
+
+   It is a masked layer at the TOP of the page that dissolves downward, not a
+   tiled wallpaper — the paper should feel like a drawing board under the first
+   screenful, then get out of the way. Content sits above it on z-index 1. */
+html[data-retro="on"] .app::before{
+  content:"";position:absolute;left:0;right:0;top:0;height:340px;
+  pointer-events:none;z-index:0;
   background-image:
-    linear-gradient(to right, rgba(54,46,37,.07) 0 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(54,46,37,.07) 0 1px, transparent 1px),
-    repeating-linear-gradient(to right, rgba(54,46,37,.035) 0 1px, transparent 1px 16px),
-    repeating-linear-gradient(to bottom, rgba(54,46,37,.035) 0 1px, transparent 1px 16px);
+    linear-gradient(to right, rgba(54,46,37,.08) 0 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(54,46,37,.08) 0 1px, transparent 1px),
+    repeating-linear-gradient(to right, rgba(54,46,37,.04) 0 1px, transparent 1px 16px),
+    repeating-linear-gradient(to bottom, rgba(54,46,37,.04) 0 1px, transparent 1px 16px);
   background-size:80px 80px,80px 80px,auto,auto;
+  -webkit-mask-image:linear-gradient(to bottom, rgba(0,0,0,.9) 0%, rgba(0,0,0,.25) 45%, transparent 85%);
+  mask-image:linear-gradient(to bottom, rgba(0,0,0,.9) 0%, rgba(0,0,0,.25) 45%, transparent 85%);
 }
 
-/* ---------------------------------------------------------------- frame -- */
+/* ---------------------------------------------------------------- frame --
+   Full-bleed: the browser window IS the app window. No simulated chrome —
+   no traffic lights, no fake address bar, no floating card with a drop
+   shadow. A page in a browser should look like a page in a browser. */
 .app{
-  width:min(1240px,96vw);height:min(800px,94vh);margin:2.6vh auto;
-  background:var(--surface-card);
-  border:1px solid var(--border-card);
-  border-radius:var(--radius-xl);
-  box-shadow:var(--elev-4);
+  width:100%;height:100%;margin:0;position:relative;
+  background:transparent;border:0;border-radius:0;box-shadow:none;
   display:flex;flex-direction:column;overflow:hidden;
 }
+/* Real app chrome: transparent so the grid-paper reads through it, separated
+   by a hairline rather than a filled bar. */
 .titlebar{
-  height:44px;flex:0 0 44px;display:flex;align-items:center;gap:12px;
-  padding:0 14px;background:var(--surface-card);
+  position:relative;z-index:1;
+  height:52px;flex:0 0 52px;display:flex;align-items:center;gap:12px;
+  padding:0 24px;
+  background:transparent;
   border-bottom:1px solid var(--border-hairline);
 }
-.tdots{display:flex;gap:7px;}
-.tdots i{width:10px;height:10px;border-radius:50%;display:block;background:var(--surface-inset);border:1px solid var(--border-hairline);}
-.addr{font-family:var(--font-mono);font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:7px;}
-.addr .lock{width:12px;height:12px;color:var(--text-faint);}
+/* A nav slot, not a URL bar. Empty standalone; `bobi app` fills it with the
+   back-to-dashboard link. */
+.addr{font-size:13px;color:var(--text-secondary);display:flex;align-items:center;gap:7px;}
+.addr:empty{display:none;}
 .addr-back{color:var(--text-secondary);text-decoration:none;transition:color var(--dur-fast) var(--ease);}
 .addr-back:hover{color:var(--text-highlight);}
 .spacer{flex:1;}
@@ -118,7 +130,7 @@ html[data-retro="on"] body{
 
 /* minmax(0,1fr) pins the row to the frame height so tall panes scroll their
    own inner body instead of growing past the bottom of the app. */
-.panes{flex:1;display:grid;min-height:0;grid-template-columns:216px 1fr;grid-template-rows:minmax(0,1fr);}
+.panes{position:relative;z-index:1;flex:1;display:grid;min-height:0;grid-template-columns:216px 1fr;grid-template-rows:minmax(0,1fr);}
 
 /* ----------------------------------------------------------------- rail -- */
 .rail{background:var(--surface-band);border-right:1px solid var(--border-hairline);padding:20px 14px;display:flex;flex-direction:column;}
@@ -155,14 +167,14 @@ html[data-retro="on"] body{
    fills the pane (so the scrollbar sits at the screen edge and the WHOLE
    screen scrolls), and symmetric auto side-padding holds content to ~680px. */
 .node.narrow{max-width:none;padding-inline:max(40px,calc((100% - 680px) / 2));}
-/* The signature eyebrow: a 10px accent square, then mono at tight tracking.
-   The square is the ONE violet detail — the label itself stays muted. */
+/* A quiet kicker above a heading. The design system's accent-square eyebrow is
+   a MARKETING signature; product chrome uses a plain sentence-case label, and
+   violet is reserved for state — a square that decorates a word is exactly the
+   decorative use the system forbids. */
 .eyebrow{
-  display:flex;align-items:center;font-family:var(--font-mono);font-size:12px;
-  letter-spacing:var(--track-tightest);text-transform:none;
-  color:var(--text-secondary);font-weight:var(--weight-medium);
+  display:block;font-size:12.5px;color:var(--text-secondary);
+  font-weight:var(--weight-medium);
 }
-.eyebrow::before{content:"";display:inline-block;width:10px;height:10px;background:var(--accent);margin-right:8px;flex-shrink:0;}
 .node h1{font-size:27px;line-height:1.16;margin:12px 0 8px;}
 .node .lede{color:var(--text-secondary);max-width:56ch;margin:0 0 22px;font-size:14px;line-height:1.625;}
 
@@ -338,10 +350,11 @@ textarea.answer:focus,input.answer:focus{outline:none;border-color:var(--accent)
 .backbtn{font-family:var(--font-sans);font-size:12.5px;color:var(--text-secondary);background:none;border:none;cursor:pointer;padding:4px 2px;transition:color var(--dur-fast) var(--ease);}
 .backbtn:hover{color:var(--text-primary);}
 .st-group{display:flex;align-items:center;gap:14px;}
-.phead{margin-bottom:14px;}
-.phead-top{display:flex;align-items:center;gap:12px;margin-bottom:2px;}
-.phead-top .eyebrow{margin:0;}
-.phead h1{margin:8px 0 0;}
+/* The page header: back on its own line, then the title. Both share one left
+   edge so the block reads as a single header. */
+.phead{margin-bottom:18px;}
+.phead-top{display:flex;align-items:center;gap:12px;margin-bottom:10px;}
+.phead h1{margin:0;}
 .fd-head .backbtn{align-self:flex-start;margin-top:2px;}
 /* intro — two numbered sections */
 .isec{margin-top:24px;}
