@@ -238,6 +238,22 @@ Every lane is `concurrent` mode: each spans more than one repo, so plan markers 
 
 ## Amendments
 
+### 2026-07-31 — Lane 3's open design question settled: `moda-agents` deploys the production Worker from public source
+
+Phase 7 never said who deploys the production Worker once `bobi-deploy` is archived. Settled by Zach, 2026-07-31, on two grounds: **`moda-agents` deploys it**, because moda's fleet is its only consumer; and it deploys **from the public `bobi-agent` source**, because that is the path an external consumer (a design partner such as Barndoor) would follow, so moda dogfoods the published path rather than maintaining a private fork of it.
+
+Consequences for Phase 7, in order of execution:
+
+1. **The vendored `event-server/` that arrives with the subtree merge is deprecated and deleted** in the merged tree, alongside the other post-merge leftovers. It is not a second source of truth. The two copies have already drifted once (a header comment), and the only substantive delta is a single field — verified: `bobi-deploy/event-server/wrangler.jsonc` and `bobi-agent/event-server/worker/wrangler.jsonc` differ **only** in that comment block and the `EVENTS` KV namespace `id` (`e84e897a6ee0421b891494f02ded6562` in private; `REPLACE_WITH_YOUR_KV_NAMESPACE_ID` in public). Worker name, DO bindings, migrations, and the release-metadata placeholders are identical.
+2. **`release-fleet.yml`'s `deploy-event-server` job migrates and is repointed** at a `bobi-agent` checkout at the release `source-sha`. Public `event-server/package-lock.json` already covers `worker` as a workspace member, so `npm ci` at `event-server/` resolves it; `wrangler`'s working directory becomes `event-server/worker`.
+3. **`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` must be added to `moda-agents`.** They exist in `bobi-deploy` and `moda-agents` holds neither (it has only `BOBI_DEPLOY_TOKEN`, `FLY_API_TOKEN`, `MODA_SKILLS_TOKEN`). Secret values are not readable through the API, so this is a manual re-add and a hard prerequisite for the first post-merge Worker deploy.
+
+**Correction to the mechanism, verified against Wrangler 4.116:** production config cannot be supplied to Wrangler as an environment variable. Wrangler has **no `${VAR}` interpolation in `wrangler.jsonc`** (undocumented in the configuration reference; the config schema types `kv_namespaces[].id` as a plain string), and `wrangler deploy --var` injects only `vars`, never binding ids. So "customize with environment variables" is realized one level up, in CI: the deploy job **materializes the prod config at deploy time** from a repository secret. This is not a workaround invented for moda — the job **already** rewrites `wrangler.jsonc` in place for `BOBI_RELEASE_VERSION`/`BOBI_RELEASE_SHA` via a Python step that hard-fails on a missing placeholder. Injecting the KV id is one more entry in that step's `replacements` dict, inheriting the same fail-loud guard, and it is exactly the shape a consumer with CI would copy.
+
+The rejected alternative was a consumer-owned `wrangler.jsonc` in `moda-agents` selected with `wrangler deploy -c`. Wrangler bindings are **not inheritable**, so that private config would have to restate the DO bindings, migrations, and vars in full — re-creating the two-copy drift this amendment deletes, to override one field.
+
+**Trap, recorded so nobody simplifies into it:** omitting the `id` entirely is a supported Wrangler feature (it auto-provisions the resource and writes the id back to the config), and it is the right answer for a *first-time* consumer setup. It is the wrong answer here. Against the production Worker it would silently create a **new, empty** KV namespace and cut the live fleet over to it. The id must be injected, never inferred.
+
 ### 2026-07-31 — Lane 2 built: four scope corrections, and the private-side deletion narrowed to protect the fleet
 
 Lane 2 is built and in review: `bobi-agent#898` (reference image to public) and `bobi-deploy#49` (engine decoupled from the recipe). Gates (a) and (c) are closed; gate (b) is not, for two reasons recorded below.
