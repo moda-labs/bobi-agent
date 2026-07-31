@@ -885,6 +885,15 @@ class TestDependencyTreeProblemTriage:
         assert any(p.startswith("missing:") for p in fatal)
         assert any(p.startswith("invalid:") for p in fatal)
 
+    def test_unknown_problem_wording_is_fatal_by_default(self):
+        """Default-deny. An earlier version enumerated the FATAL prefixes, so
+        `peer dep missing:` - a genuinely absent dependency - slipped through
+        because it does not start with `missing:`. Anything npm invents next
+        must fail loudly rather than be silently waved past."""
+        assert es._fatal_tree_problems(["peer dep missing: react@18, required by x"])
+        assert es._fatal_tree_problems(["ELSPROBLEMS"])
+        assert es._fatal_tree_problems(["some wording npm has not shipped yet"])
+
     def test_no_problems_is_empty(self):
         assert es._fatal_tree_problems(None) == []
         assert es._fatal_tree_problems([]) == []

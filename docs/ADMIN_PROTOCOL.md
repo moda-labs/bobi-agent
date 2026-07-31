@@ -82,12 +82,20 @@ Two consequences worth stating plainly:
 
 ## Topics
 
-| Topic | Direction | Global? | Carries |
-|---|---|---|---|
-| `fleet/heartbeat` | supervisor → server | yes | tier-1 snapshot, latest-value fold |
-| `fleet/lifecycle` | supervisor → server | yes | tier-2 lifecycle edges, bounded 48h trail |
-| `fleet/admin/<fleet>/<instance>` | server → supervisor | **no** | one operator command |
-| `fleet/command_result` | supervisor → server | yes | one command's reply |
+| Topic | Direction | Carries |
+|---|---|---|
+| `fleet/heartbeat` | supervisor → server | tier-1 snapshot, latest-value fold |
+| `fleet/lifecycle` | supervisor → server | tier-2 lifecycle edges, bounded 48h trail |
+| `fleet/admin/<fleet>/<instance>` | server → supervisor | one operator command |
+| `fleet/command_result` | supervisor → server | one command's reply |
+
+**All four are bubble-scoped.** None is a global topic: `isGlobalTopic`
+(`event-server/core/src/core.ts`) treats only the inbound webhook prefixes
+(`github:`, `linear:`, `slack:`, `whatsapp:`, `discord:`) as global, and
+`fleet/*` matches none of them. So every topic here is keyed
+`<bubble>:<topic>`, and a deployment's heartbeats, lifecycle edges, and command
+replies are readable only within its own bubble — they do not fan out across
+tenants.
 
 The admin topic string is built identically on both sides — `adminTopic(fleet,
 instance)` in `fleet.ts` and `admin_topic(fleet, instance)` in `admin.py`. They
@@ -194,7 +202,7 @@ renders.
   "deployment":  { "fleet": "...", "instance": "...", "platform": "..." },
   "supervisor":  { "pid": 1, "uptime_s": 1043.2, "version": "0.1.0" },
   "manager": {
-    "status": "healthy" | "idle" | "wedged" | "dead" | "stopped" | "starting",
+    "status": "running" | "idle" | "starting" | "wedged" | "down" | "stopped",
     "pid": 42,
     "healthy": true,
     "idle_seconds": 12,
@@ -212,9 +220,23 @@ renders.
 ```
 
 `manager.status` is a **derived** verdict, not a raw probe reading — it folds
-the health file, process liveness, and status-file age. Treat it as the single
+the health file, process liveness, and status-file age
+(`bobi/supervisor/probe.py::derive_manager_status`). Treat it as the single
 authoritative answer to "is this deployment working"; the raw inputs beside it
 are for diagnosis, not for re-deriving your own verdict.
+
+| Value | Means |
+|---|---|
+| `running` | alive and working a turn |
+| `idle` | alive, no work in flight |
+| `starting` | booting, or never yet addressable — an unreachable probe here is not a wedge |
+| `wedged` | a process is alive but not making progress (stalled turn, stale status file, or healthy-then-silent) |
+| `down` | nothing alive: the supervised child exited AND the manager pid is gone |
+| `stopped` | operator-stopped, so intentionally down — never a probe verdict, and it does not open a failure episode |
+
+Note `status` is the verdict and `healthy` is a separate raw boolean; they are
+not the same field. There is no `"healthy"` or `"dead"` status value — switch on
+`running`/`idle` and on `down`.
 
 `expectations` is what the deployment *should* be running (its configured
 subscriptions and monitors), which is what makes a "configured but not running"

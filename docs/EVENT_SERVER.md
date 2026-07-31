@@ -8,6 +8,14 @@ for local runs - plus a Python client (`bobi/events/`) that every agent session
 uses. Both adapters are in this repo; see
 [SELF_HOSTED_EVENT_SERVER.md](SELF_HOSTED_EVENT_SERVER.md) to run either.
 
+One family of topics on this bus is a **versioned contract of its own**: the
+`fleet/*` topics that carry a deployment's heartbeats, lifecycle edges, and
+operator commands between the supervisor sidecar and any monitoring or control
+surface. If you are writing a dashboard or an admin client, that contract —
+topics, all nine command schemas, the heartbeat/snapshot shape, and the
+compatibility promise — is [ADMIN_PROTOCOL.md](ADMIN_PROTOCOL.md), not this
+document.
+
 ## Mental model
 
 ```

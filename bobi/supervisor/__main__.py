@@ -43,14 +43,20 @@ def _resolve_run_root() -> Path:
 
 
 def _configure_logging() -> None:
-    # Container/foreground mode: log to stdout/stderr only (mirror `bobi start`
-    # / `bobi supervise`). Strip any file handlers a library may have added.
-    root = logging.getLogger()
-    root.handlers = [h for h in root.handlers
-                     if not isinstance(h, logging.FileHandler)]
+    # Container/foreground mode: log to stdout ONLY (mirror `bobi start`).
+    #
+    # `force=True` is load-bearing, not tidiness. basicConfig is a no-op when
+    # the root logger already has ANY handler, so the previous strip-then-
+    # basicConfig shape silently did nothing whenever something other than a
+    # FileHandler was attached - leaving the supervisor logging wherever it
+    # inherited, which on the `bobi agent <name> supervise` path is
+    # <state>/manager.log inside the container. force=True drops every
+    # inherited handler and installs the stdout one unconditionally, which is
+    # the only outcome an orchestrator can read.
     logging.basicConfig(
         level=logging.INFO, stream=sys.stdout,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
     )
 
 
@@ -58,7 +64,6 @@ def main(argv: list[str] | None = None) -> int:
     """``python -m bobi.supervisor`` entry: resolve the root from the
     environment, then run."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    _configure_logging()
     return run(_resolve_run_root(), argv)
 
 
@@ -69,6 +74,16 @@ def run(root: Path, argv: list[str]) -> int:
     name before calling this; ``main()`` binds it from ``BOBI_ROOT``. Passing
     it in keeps that the only difference between the two entry points.
     """
+    # Configure logging HERE, not in the callers, because this function is the
+    # terminal process on every path into it and stdout is the only channel a
+    # container orchestrator reads. The CLI path in particular arrives with a
+    # FileHandler already attached: `bobi agent <name> ...` binds the runtime
+    # first, and that binding calls _attach_runtime_log(), which points the
+    # root logger at <state>/manager.log. Supervising through a file inside the
+    # container is invisible to `docker logs` / `kubectl logs` / Fly, so
+    # _configure_logging's handler strip has to run after that, on both paths.
+    _configure_logging()
+
     # click consumes the `--` separator when the CLI parses it; strip any that
     # survives so `... supervise -- --foreground` and `... supervise
     # --foreground` behave identically on both paths.

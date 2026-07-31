@@ -110,15 +110,32 @@ def _wrangler_es_dir() -> Path:
     return Path(override) if override else PACKAGE_ROOT / "event-server" / "worker"
 
 
+def _bounded_parents(es_dir: Path) -> list[Path]:
+    """*es_dir* and its ancestors, stopping at the repo root.
+
+    Walking to the filesystem root would let a wrangler install or a
+    package-lock.json ABOVE the checkout win, which is a confusing failure to
+    debug and not what npm resolution inside a repo should reach.
+    """
+    chain = [es_dir]
+    for parent in es_dir.parents:
+        chain.append(parent)
+        if parent == PACKAGE_ROOT:
+            break
+    return chain
+
+
 def _wrangler_bin(es_dir: Path) -> Path:
     """Locate the wrangler executable for *es_dir*.
 
     npm workspaces HOIST dependencies to the workspace root, so the worker
     package's own node_modules/.bin is usually empty and wrangler lands in
     event-server/node_modules/.bin. Check the package first (a standalone
-    checkout pointed at by BOBI_TEST_ES_DIR installs locally), then walk up.
+    checkout pointed at by BOBI_TEST_ES_DIR installs locally), then walk up -
+    but only as far as the repo, so a stray wrangler in some ancestor of the
+    checkout can never be selected.
     """
-    for base in (es_dir, *es_dir.parents):
+    for base in _bounded_parents(es_dir):
         candidate = base / "node_modules" / ".bin" / "wrangler"
         if candidate.exists():
             return candidate
@@ -241,7 +258,7 @@ def _start_wrangler_server():
     # workspace member that has no lock of its own fails outright.
     if not _wrangler_bin(es_dir).exists():
         install_dir = next(
-            (d for d in (es_dir, *es_dir.parents) if (d / "package-lock.json").is_file()),
+            (d for d in _bounded_parents(es_dir) if (d / "package-lock.json").is_file()),
             es_dir,
         )
         subprocess.run(

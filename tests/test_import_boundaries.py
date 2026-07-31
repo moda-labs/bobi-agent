@@ -41,6 +41,8 @@ import os
 import re
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOBI_PACKAGE = REPO_ROOT / "bobi"
@@ -191,7 +193,7 @@ def _container_cli_invocations(tree: ast.AST) -> list[tuple[int, str]]:
     """
     found = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not node.args:
+        if not isinstance(node, ast.Call):
             continue
         func = node.func
         attr = func.attr if isinstance(func, ast.Attribute) else (
@@ -199,15 +201,26 @@ def _container_cli_invocations(tree: ast.AST) -> list[tuple[int, str]]:
         )
         if attr not in _INVOKING_CALLS:
             continue
-        first = node.args[0]
-        if isinstance(first, (ast.List, ast.Tuple)):
-            first = first.elts[0] if first.elts else None
-        if (
-            isinstance(first, ast.Constant)
-            and isinstance(first.value, str)
-            and Path(first.value).name in _CONTAINER_CLIS
-        ):
-            found.append((node.lineno, Path(first.value).name))
+        # The command may arrive positionally OR as `args=`/`cmd=` - checking
+        # only node.args[0] let `subprocess.run(args=["docker", "build"])`
+        # through.
+        candidates = list(node.args[:1])
+        candidates += [
+            kw.value for kw in node.keywords if kw.arg in {"args", "cmd", "command"}
+        ]
+        for first in candidates:
+            if isinstance(first, (ast.List, ast.Tuple)):
+                first = first.elts[0] if first.elts else None
+            if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+                continue
+            # A shell=True call passes the whole command line as one string
+            # ("docker run x"), so the CLI is the first token, not the whole
+            # value. Path().name strips any directory the caller spelled out.
+            token = first.value.strip().split()[0] if first.value.strip() else ""
+            name = Path(token).name
+            if name in _CONTAINER_CLIS:
+                found.append((node.lineno, name))
+                break
     return found
 
 
@@ -532,3 +545,118 @@ class TestEventsCorePackageBoundary:
             "events-core imports packages its own manifest does not declare "
             f"(declared: {sorted(declared)}):\n" + "\n".join(offenders)
         )
+
+
+# ---------------------------------------------------------------------------
+# Non-vacuity: the guards above must FAIL on code that genuinely violates them.
+#
+# A boundary guard that passes because it scans the wrong tree is worse than no
+# guard, because it reads as proof. That is not hypothetical here: this file's
+# previous incarnation stayed green when the Worker package landed, purely
+# because every scan was scoped to src/ and core/ and never saw worker/.
+#
+# Each test plants a real violation in the real tree, asserts the specific
+# guard rejects it, and removes it. The fixture's teardown is what guarantees
+# removal even when an assertion fails mid-test.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def planted():
+    """Write files into the repo for one test, then remove them."""
+    written: list[Path] = []
+
+    def _plant(rel: str, body: str) -> Path:
+        path = REPO_ROOT / rel
+        assert not path.exists(), f"{rel} already exists - pick another mutant path"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        written.append(path)
+        return path
+
+    yield _plant
+    for path in written:
+        path.unlink(missing_ok=True)
+
+
+def _rejects(check, *args):
+    """The guard raised AssertionError - i.e. it caught the mutant."""
+    with pytest.raises(AssertionError):
+        check(*args)
+
+
+class TestBoundaryGuardsAreNonVacuous:
+    def test_unclassified_worker_module_is_rejected(self, planted):
+        planted("event-server/worker/src/_mutant.ts", "export const x = 1;\n")
+        _rejects(TestLeafPackagesNeverImportEachOther().test_worker_modules_fully_classified)
+
+    def test_unclassified_local_module_is_rejected(self, planted):
+        planted("event-server/src/_mutant.ts", "export const x = 1;\n")
+        _rejects(TestLeafPackagesNeverImportEachOther().test_src_modules_fully_classified)
+
+    def test_worker_reaching_into_core_by_relative_path_is_rejected(self, planted):
+        planted(
+            "event-server/worker/src/_mutant.ts",
+            'import { x } from "../../core/src/core";\nexport const y = x;\n',
+        )
+        _rejects(TestEventsCorePackageBoundary().test_no_relative_import_into_core)
+
+    def test_local_variant_importing_the_worker_is_rejected(self, planted):
+        planted(
+            "event-server/src/_mutant.ts",
+            'import { f } from "../worker/src/fleet";\nexport const y = f;\n',
+        )
+        _rejects(TestLeafPackagesNeverImportEachOther().test_local_variants_never_import_the_worker)
+
+    def test_worker_importing_a_local_variant_is_rejected(self, planted):
+        planted(
+            "event-server/worker/src/_mutant.ts",
+            'import { s } from "../../src/socket-driver-common";\nexport const y = s;\n',
+        )
+        _rejects(TestLeafPackagesNeverImportEachOther().test_worker_never_imports_the_local_variants)
+
+    def test_tsconfig_path_alias_is_rejected(self, planted):
+        planted(
+            "event-server/worker/tsconfig.mutant.json",
+            '{"compilerOptions": {"baseUrl": "."}}\n',
+        )
+        _rejects(TestLeafPackagesNeverImportEachOther().test_no_path_aliases)
+
+
+class TestContainerGuardIsNonVacuous:
+    """The container guard's two halves, proven in BOTH directions: it catches
+    real build/invoke code, and it does NOT catch merely naming a runtime -
+    which is what the supervisor legitimately does (identity.py returns the
+    literal "docker" as a platform label)."""
+
+    @pytest.mark.parametrize("body", [
+        'import subprocess\ndef b(c):\n    subprocess.run(["docker", "build", "-t", "x", c])\n',
+        'import subprocess\ndef b(c):\n    subprocess.run(args=["docker", "build", c])\n',
+        'import subprocess\ndef b():\n    subprocess.run("docker run x", shell=True)\n',
+        'import shutil\ndef h():\n    return shutil.which("flyctl") is not None\n',
+    ], ids=["argv-list", "args-keyword", "shell-string", "which"])
+    def test_invoking_a_container_cli_is_rejected(self, planted, body):
+        planted("bobi/_mutant_probe.py", body)
+        _rejects(TestNoContainerBuildInPublicPackage().test_no_container_cli_invocation)
+
+    def test_assembling_a_build_context_is_rejected(self, planted):
+        planted("bobi/_mutant_probe.py", 'def s(c):\n    (c / "Dockerfile").write_text("FROM scratch\\n")\n')
+        _rejects(TestNoContainerBuildInPublicPackage().test_no_build_context_assembly)
+
+    def test_a_non_python_file_cannot_dodge_the_scan(self, planted):
+        planted("bobi/_mutant_probe.sh", '#!/bin/sh\nflyctl deploy --app "$1"\n')
+        _rejects(TestNoContainerBuildInPublicPackage().test_no_build_context_assembly)
+
+    def test_merely_naming_a_runtime_is_ALLOWED(self, planted):
+        """The other direction, and the reason the guard was restated rather
+        than exception-listed: this is the supervisor's own pattern and it must
+        stay legal, or the guard is just a word ban with a longer allowlist."""
+        planted(
+            "bobi/_mutant_probe.py",
+            'def platform_name():\n'
+            '    # A container without either signal: plain `docker run` under an\n'
+            '    # unknown runtime. See docker-entrypoint.sh for the root choice.\n'
+            '    return "docker"\n',
+        )
+        TestNoContainerBuildInPublicPackage().test_no_build_context_assembly()
+        TestNoContainerBuildInPublicPackage().test_no_container_cli_invocation()

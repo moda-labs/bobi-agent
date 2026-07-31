@@ -270,3 +270,63 @@ class TestTelemetryHeartbeat:
         assert lifecycle[0]["reason"] == "wedge"
         assert lifecycle[0]["restart_count"] == 2
         assert lifecycle[1]["event"] == "budget_exhausted"
+
+
+class TestSupervisorLoggingIsStdoutOnly:
+    """The sidecar is the terminal process; stdout is the only channel an
+    orchestrator reads.
+
+    Regression guard for the repo reorg (Lane 1). `bobi agent <name>
+    supervise` reaches run() through the `agent` group, whose runtime binding
+    calls _attach_runtime_log() and points the root logger at
+    <state>/manager.log. run() must strip that: a supervisor logging into a
+    file inside the container it supervises is invisible to `docker logs`,
+    `kubectl logs`, and Fly.
+    """
+
+    def _run_with_file_handler_attached(self, tmp_path, monkeypatch):
+        import logging
+        from bobi.supervisor import __main__ as sm
+
+        log_file = tmp_path / "manager.log"
+        handler = logging.FileHandler(log_file)
+        root = logging.getLogger()
+        root.addHandler(handler)
+
+        # Stop run() before it does any supervising - the logging setup is
+        # what is under test, and it happens first.
+        class _Stop(Exception):
+            pass
+
+        def _boom(*a, **k):
+            raise _Stop()
+
+        monkeypatch.setattr(sm.SupervisorConfig, "from_env", staticmethod(_boom))
+        try:
+            with pytest.raises(_Stop):
+                sm.run(tmp_path, ["--foreground"])
+        finally:
+            root.removeHandler(handler)
+            handler.close()
+        return root
+
+    def test_run_strips_an_inherited_file_handler(self, tmp_path, monkeypatch):
+        import logging
+
+        root = self._run_with_file_handler_attached(tmp_path, monkeypatch)
+        assert not [h for h in root.handlers if isinstance(h, logging.FileHandler)], (
+            "run() left a FileHandler attached - supervisor output would go to a "
+            "file inside the container instead of stdout"
+        )
+
+    def test_run_logs_to_stdout(self, tmp_path, monkeypatch):
+        import logging
+        import sys
+
+        root = self._run_with_file_handler_attached(tmp_path, monkeypatch)
+        streams = [
+            h.stream for h in root.handlers if isinstance(h, logging.StreamHandler)
+        ]
+        assert any(s is sys.stdout for s in streams), (
+            f"run() did not attach a stdout handler (streams: {streams})"
+        )

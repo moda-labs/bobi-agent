@@ -140,24 +140,29 @@ def _read_dependency_stamp(es_dir: Path) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-# `npm ls` problem classes that actually mean the tree cannot build.
+# `npm ls` problem classes that do NOT block a source build.
 #
-# EXTRANEOUS IS DELIBERATELY NOT ONE OF THEM. It means "installed but not
-# reachable from the lockfile graph" - a superset of what is needed, which no
-# build can trip over. It also is not stable across npm versions: npm 10.8.2
-# (the npm bundled with Node 20, which CI runs) reports the Worker workspace's
-# OPTIONAL dev dependencies - `@emnapi/runtime`, `tslib` - as extraneous from
-# the same lockfile that npm 11 reports as clean. Treating that as fatal made
-# the embedded local server unlaunchable on Node 20 for a reason unrelated to
-# the local server, which pulls in none of those packages.
+# DEFAULT-DENY: every problem npm reports is fatal unless it is listed here.
+# The inverse (list the fatal ones) was tried first and was wrong - it let
+# `peer dep missing: ...` through, because that string does not start with
+# `missing:`, so a genuinely absent dependency read as harmless. Any wording
+# npm adds in future would slip through the same hole. Enumerating the
+# harmless class instead means an unrecognized problem fails loudly and gets
+# classified deliberately.
 #
-# `missing` and `invalid` stay fatal: those are the states where a build
-# genuinely reaches for something that is not there or is the wrong version.
-_FATAL_TREE_PROBLEM_PREFIXES = ("missing:", "invalid:")
+# `extraneous` is harmless by construction: it means "installed but not
+# reachable from the lockfile graph" - a SUPERSET of what the build needs,
+# which nothing can trip over. It is also not stable across npm versions:
+# npm 10.8.2 (bundled with Node 20, which CI runs) reports the Worker
+# workspace's OPTIONAL dev dependencies - `@emnapi/runtime`, `tslib` - as
+# extraneous from the very lockfile npm 11 calls clean. Treating that as fatal
+# made the embedded LOCAL server unlaunchable on Node 20 over packages it
+# never loads.
+_NON_FATAL_TREE_PROBLEM_PREFIXES = ("extraneous:",)
 
 
 def _fatal_tree_problems(problems: object) -> list[str]:
-    """The subset of `npm ls` problems that must block a source build."""
+    """The `npm ls` problems that must block a source build (default-deny)."""
     if not problems:
         return []
     if isinstance(problems, str):
@@ -169,7 +174,7 @@ def _fatal_tree_problems(problems: object) -> list[str]:
     return [
         p for p in problems
         if not isinstance(p, str)
-        or p.strip().lower().startswith(_FATAL_TREE_PROBLEM_PREFIXES)
+        or not p.strip().lower().startswith(_NON_FATAL_TREE_PROBLEM_PREFIXES)
     ]
 
 
