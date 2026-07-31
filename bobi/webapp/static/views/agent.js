@@ -28,7 +28,7 @@ export function mountAgent(el, { api, name }) {
       <div class="attention-panel" data-el="attentionPanel" hidden></div>
       <div class="health-panel" data-el="healthPanel" hidden></div>
       <div class="spend-panel" data-el="spendPanel" hidden></div>
-      <div class="side-head mono"><a class="side-back" href="#/">&larr; agents</a> · subagents</div>
+      <div class="side-head">subagents</div>
       <div class="cards" data-el="cards"></div>
       <p class="empty" data-el="empty" hidden>No active subagents. Press Start
         above to bring the team up.</p>

@@ -54,6 +54,14 @@ export function setSubtitle(text) {
   document.getElementById("subtitle").textContent = text;
 }
 
+/** Fill the top bar's back slot for the current route, or clear it.
+    Back navigation lives in the global bar on every surface (chrome.css), so
+    it is always in the same place rather than moving per view. */
+export function setNavBack(html) {
+  const el = document.getElementById("navback");
+  if (el) el.innerHTML = html || "";
+}
+
 // Spend formatting, shared by the dashboard and agent views (#733):
 // "$1.23" for dollars, "$0.0042" for cents-and-under; "" when there is no
 // recorded spend, so a fresh install stays uncluttered. One home for the
@@ -162,10 +170,12 @@ async function route() {
   if (teardown) { teardown(); teardown = null; }
   const el = document.getElementById("view");
   const r = parseRoute();
+  setNavBack("");
   if (r.view === "agent") {
     const mod = await import("./views/agent.js").catch(() => null);
     if (mod) {
       setSubtitle(r.name);
+      setNavBack('<a class="navback-link" href="#/">&larr; agents</a>');
       teardown = mod.mountAgent(el, { api, name: r.name });
       return;
     }

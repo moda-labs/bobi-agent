@@ -8,29 +8,37 @@
   <link rel="icon" type="image/svg+xml" href="/static/bobi-mark.svg">
   <link rel="stylesheet" href="/static/fonts.css">
   <link rel="stylesheet" href="/static/tokens.css">
+  <link rel="stylesheet" href="/static/chrome.css">
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <!-- .bobi-app switches on the product surface ramp (sunken page, white cards,
      elevation scale) from tokens.css. Marketing surfaces never get it. -->
 <body class="bobi-app">
   <div class="app">
+  <!-- The global top bar. Structure and styling are shared with `bobi setup`
+       via chrome.css so the top level of the UI never changes shape as you
+       move around: back + page name on the left, lockup + byline on the
+       right. #navback is filled per route (see shell.js setNavBack). -->
   <header class="bar">
-    <!-- The lockup always travels with the BY MODA LABS byline. -->
-    <a class="mark home-link" href="#/" aria-label="Dashboard">
-      <!-- On light chrome the mark is ink with a violet probe dot; the
-           paper-on-void variant is for dark surfaces only. -->
-      <svg viewBox="0 0 32 32" width="20" height="20" aria-hidden="true">
-        <circle cx="14" cy="18" r="6" fill="var(--bobi-ink)"></circle>
-        <circle cx="14" cy="18" r="12.5" fill="none" stroke="var(--bobi-ink)"
-                stroke-width="1.2" stroke-dasharray="2 4" opacity="0.6"></circle>
-        <circle cx="23.5" cy="9.5" r="3" fill="var(--bobi-acc)"></circle>
-      </svg>
-    </a>
-    <span class="title">bobi</span>
-    <a class="byline" href="https://buildmoda.ai" target="_blank" rel="noopener noreferrer">by moda labs <span aria-hidden="true">&#8599;</span></a>
-    <span class="sub" id="subtitle">agents</span>
+    <div class="navleft">
+      <div class="navback" id="navback"></div>
+      <span class="page-name" id="subtitle">agents</span>
+    </div>
     <span class="spacer"></span>
     <span class="dot" id="health" title="connection"></span>
+    <!-- The lockup always travels with the BY MODA LABS byline. -->
+    <div class="lockup">
+      <a class="brand home-link" href="#/" aria-label="Dashboard">
+        <span class="mk"><svg viewBox="0 0 32 32" aria-hidden="true">
+          <circle cx="14" cy="18" r="6" fill="var(--bobi-paper)"></circle>
+          <circle cx="14" cy="18" r="12.5" fill="none" stroke="var(--bobi-paper)"
+                  stroke-width="1.2" stroke-dasharray="2 4" opacity="0.6"></circle>
+          <circle cx="23.5" cy="9.5" r="3" fill="var(--bobi-acc-bright)"></circle>
+        </svg></span>
+        <b>bobi</b>
+      </a>
+      <a class="byline" href="https://buildmoda.ai" target="_blank" rel="noopener noreferrer">by moda labs <span aria-hidden="true">&#8599;</span></a>
+    </div>
   </header>
 
   <main id="view" class="view"></main>

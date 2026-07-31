@@ -187,10 +187,19 @@
     }
     render();
   }
-  // Hosted titlebar: the address chip becomes the way back to the dashboard.
+  // Back navigation lives in the GLOBAL top bar on every Bobi surface
+  // (chrome.css), so it is always in the same place instead of moving per
+  // screen. `hostedBack` is the app-level fallback — the way out to the
+  // dashboard when setup is hosted inside `bobi app`; a screen's own
+  // step-back takes precedence over it while that screen is up.
+  let hostedBack = "";
+  function setNavBack(html) {
+    const slot = document.getElementById("navback");
+    if (slot) slot.innerHTML = html || hostedBack;
+  }
   function hostedChrome() {
-    const addr = document.querySelector(".titlebar .addr");
-    if (addr) addr.innerHTML = '<a class="addr-back" href="/#/">&larr; dashboard</a>';
+    hostedBack = '<a class="navback-link" href="/#/">&larr; dashboard</a>';
+    setNavBack("");
   }
   async function go(stage) {
     const r = await postJSON("/api/advance", { to: stage });
@@ -384,10 +393,10 @@
   // delegation listens for ("data-back" / "data-introback").
   // `title` is trusted HTML (the caller escapes any interpolated value).
   function pageHead(title, back) {
-    const top = back
-      ? `<div class="phead-top"><button class="backbtn" ${back.attr}>← ${esc(back.label || "Back")}</button></div>`
-      : "";
-    return `<div class="phead">${top}<h1>${title}</h1></div>`;
+    setNavBack(back
+      ? `<button class="navback-link backbtn" ${back.attr}>&larr; ${esc(back.label || "back")}</button>`
+      : "");
+    return `<div class="phead"><h1>${title}</h1></div>`;
   }
   function drawIntro() {
     $("#main").innerHTML = `<main class="node narrow intro">
@@ -552,11 +561,12 @@
 
   // --- the one screen: chat + the team materializing as cards ------------
   function renderUnified() {
-    setPanes("1fr 380px");
+    setPanes("1fr 424px");
+    setNavBack('<button class="navback-link backbtn" data-back>&larr; back</button>');
     // Two grid items (the wrapper #main is display:contents): chat | panel.
     $("#main").innerHTML = `
       <section class="chat sketch uni-chat">
-        <div class="sketch-top"><span class="st-group"><button class="backbtn" data-back>← back</button><span class="sketch-eyebrow">bobi · build your team</span></span></div>
+        <div class="sketch-top"><span class="sketch-eyebrow">bobi · build your team</span></div>
         <div class="ch-body" id="chbody"></div>
         <div class="cue" id="cue"></div>
         <div class="ch-input"><textarea id="chinput" rows="1" placeholder="Tell bobi what you want to build…" autocomplete="off"></textarea><button class="btn primary" id="chsend" style="padding:9px 14px">↑</button></div>
@@ -2252,6 +2262,7 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
   }
   // --- top-level render + events ----------------------------------------
   function render() {
+    setNavBack("");
     if (atHome) { renderHome(); return; }   // the team hub overlays any stage
     const st = S.stage;
     if (st === "start") { welcomed ? renderIntro() : renderWelcome(); return; }

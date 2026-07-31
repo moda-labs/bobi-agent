@@ -24,7 +24,7 @@ html, body { height: 100%; }
 body {
   margin: 0;
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.55;
   color: var(--text-primary);
   background: var(--surface-page);
@@ -93,45 +93,8 @@ code, pre, kbd { font-family: var(--font-mono); }
 /* `.mono` is a real mono run; it is NOT a shouting device. */
 .mono { font-family: var(--font-mono); }
 
-/* --- plane 1: global chrome --- */
-.bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 20px;
-  height: 52px;
-  background: var(--surface-card);
-  border-bottom: 1px solid var(--border-hairline);
-  flex: none;
-  position: relative;
-  z-index: 2;
-}
-.bar .mark { display: inline-flex; }
-.bar .home-link { text-decoration: none; border-radius: var(--radius-sm); }
-.bar .title {
-  font-family: var(--font-display);
-  font-size: 15px;
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--track-wordmark);
-}
-/* A corner mark, not chrome — one of the two sanctioned uppercase exceptions. */
-.byline {
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
-  color: var(--text-faint);
-  text-decoration: none;
-  padding-left: 10px;
-  border-left: 1px solid var(--border-hairline);
-  transition: color var(--dur-fast) var(--ease);
-}
-.byline:hover { color: var(--text-highlight); }
-.bar .sub {
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-.bar .spacer { flex: 1; }
+/* Plane 1 (the global top bar) lives in the shared chrome.css so the web app
+   and setup cannot drift apart. */
 
 /* connection health. Connected is LIVE (violet); a stale link is waiting
    (clay); a dead one has failed (brick). */
@@ -156,7 +119,7 @@ code, pre, kbd { font-family: var(--font-mono); }
 /* --- dashboard page --- */
 .page {
   width: 100%;
-  max-width: 860px;
+  max-width: 1040px;
   margin: 0 auto;
   padding: 28px 24px 48px;
 }
@@ -169,7 +132,7 @@ code, pre, kbd { font-family: var(--font-mono); }
 /* Page titles are lowercase: Bobi's whole vocabulary is lowercase, so the
    chrome speaks in the product's own voice. */
 .page-head h1 {
-  font-size: 20px;
+  font-size: 22px;
   text-transform: lowercase;
   margin: 0;
   flex: 1;
@@ -177,7 +140,7 @@ code, pre, kbd { font-family: var(--font-mono); }
 
 .btn {
   font-family: var(--font-sans);
-  font-size: 13.5px;
+  font-size: 14.5px;
   font-weight: var(--weight-medium);
   letter-spacing: var(--track-button);
   color: var(--text-primary);
@@ -236,7 +199,7 @@ code, pre, kbd { font-family: var(--font-mono); }
 /* An agent name is an identifier you type into the CLI — that is data. */
 .agent-name {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: var(--weight-medium);
   color: var(--text-primary);
   word-break: break-all;
@@ -244,7 +207,7 @@ code, pre, kbd { font-family: var(--font-mono); }
 }
 .agent-desc {
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.5;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -261,19 +224,19 @@ code, pre, kbd { font-family: var(--font-mono); }
 }
 .agent-go {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-faint);
   transition: color var(--dur-fast) var(--ease);
 }
 .agent-tile:hover .agent-go { color: var(--hi); }
 .tile-spend {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 .fleet-spend {
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: var(--text-secondary);
 }
 /* An empty slot is an invitation, not a state: dashed edge, clay glyph. */
@@ -287,12 +250,12 @@ code, pre, kbd { font-family: var(--font-mono); }
 /* The create tile reuses .agent-name for structure, but "Create a new agent"
    is a label, not an identifier — so it takes sans, not the mono of a real
    agent name. */
-.agent-tile.create .agent-name { font-family: var(--font-sans); font-size: 14px; }
+.agent-tile.create .agent-name { font-family: var(--font-sans); font-size: 15px; }
 .create-glyph {
   width: 30px; height: 30px;
   display: inline-flex; align-items: center; justify-content: center;
   font-family: var(--font-mono);
-  font-size: 19px;
+  font-size: 20.5px;
   color: var(--hi);
   border: 1px solid var(--hi-ring);
   background: var(--hi-soft);
@@ -314,18 +277,18 @@ code, pre, kbd { font-family: var(--font-mono); }
 }
 .agent-ctl-name {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: var(--weight-medium);
 }
 .ctl-spacer { flex: 1; }
 .agent-ctl-actions { display: flex; gap: 8px; }
-.agent-ctl .btn { padding: 5px 12px; font-size: 13px; }
+.agent-ctl .btn { padding: 5px 12px; font-size: 14px; }
 
 /* Status is a LABEL: sans, sentence case, quiet unless it is active.
    The badge carries a dot; only live states tint it. */
 .status {
   display: inline-flex; align-items: center; gap: 5px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-secondary);
   /* The JS supplies raw lowercase tokens ("running"). Badges are sentence
      case — "Running", never "RUNNING". */
@@ -359,13 +322,13 @@ code, pre, kbd { font-family: var(--font-mono); }
   color: var(--status-failed);
   border-radius: var(--radius-md);
   padding: 9px 12px;
-  font-size: 13px;
+  font-size: 14px;
   margin-bottom: 12px;
   white-space: pre-wrap;
 }
 
 /* An empty state says what is true, not "you're all caught up!". */
-.empty { color: var(--text-secondary); font-size: 13.5px; }
+.empty { color: var(--text-secondary); font-size: 14.5px; }
 
 /* stub views (routes that land in a later build) */
 .stub {
@@ -374,15 +337,15 @@ code, pre, kbd { font-family: var(--font-mono); }
   color: var(--text-secondary);
   padding: 40px 24px;
 }
-.stub h2 { font-size: 17px; color: var(--text-primary); margin: 0 0 6px; }
-.stub p { margin: 0; font-size: 14px; }
+.stub h2 { font-size: 18px; color: var(--text-primary); margin: 0 0 6px; }
+.stub p { margin: 0; font-size: 15px; }
 .stub code { font-family: var(--font-mono); font-size: 0.9em; }
 
 /* --- agent view: subagent roster + chat --- */
 .shell { flex: 1; min-height: 0; display: flex; }
 
 .sidebar {
-  width: 300px;
+  width: 324px;
   flex: none;
   border-right: 1px solid var(--border-hairline);
   background: var(--surface-page);
@@ -392,7 +355,7 @@ code, pre, kbd { font-family: var(--font-mono); }
 }
 /* A group label sits above its cards, outside the border, sentence case. */
 .side-head {
-  font-size: 12.5px;
+  font-size: 13.5px;
   color: var(--text-secondary);
   padding: 14px 16px 8px;
 }
@@ -416,13 +379,13 @@ code, pre, kbd { font-family: var(--font-mono); }
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
-  font-size: 12.5px;
+  font-size: 13.5px;
   color: var(--text-secondary);
 }
 .sessions-head > span:first-child { white-space: nowrap; }
 .spend-sub, .health-sub {
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11.5px;
   color: var(--text-faint);
 }
 .spend-sub  { margin: 2px 0 6px; }
@@ -432,7 +395,7 @@ code, pre, kbd { font-family: var(--font-mono); }
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
-  font-size: 12px;
+  font-size: 13px;
   padding: 1px 0;
 }
 .health-row:first-of-type { margin-top: 6px; }
@@ -455,7 +418,7 @@ code, pre, kbd { font-family: var(--font-mono); }
 .health-event.bad::before  { background: var(--status-failed); }
 .health-when { font-family: var(--font-mono); color: var(--text-faint); flex: none; }
 
-.sessions-counts { font-size: 10.5px; color: var(--text-faint); text-align: right; }
+.sessions-counts { font-size: 11.5px; color: var(--text-faint); text-align: right; }
 .session-row, .attention-row {
   display: block;
   width: 100%;
@@ -483,15 +446,15 @@ code, pre, kbd { font-family: var(--font-mono); }
 }
 .session-name, .attention-label {
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.session-meta { font-size: 10.5px; color: var(--text-faint); margin-top: 1px; }
+.session-meta { font-size: 11.5px; color: var(--text-faint); margin-top: 1px; }
 .session-error, .attention-detail {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--status-failed);
   margin-top: 2px;
   overflow: hidden;
@@ -499,7 +462,7 @@ code, pre, kbd { font-family: var(--font-mono); }
   white-space: nowrap;
 }
 .session-more, .attention-more {
-  font-size: 10.5px;
+  font-size: 11.5px;
   color: var(--text-faint);
   padding-top: 4px;
 }
@@ -507,7 +470,7 @@ code, pre, kbd { font-family: var(--font-mono); }
 /* needs attention — the alarm fold at the top of the sidebar. The brick count
    is the one alarm accent, so a healthy sidebar stays calm. */
 .attention-count {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: var(--weight-semibold);
   color: var(--status-failed);
 }
@@ -518,8 +481,8 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   gap: 6px;
   overflow: hidden;
 }
-.attention-what .health-event { font-size: 11.5px; }
-.attention-when { font-size: 10.5px; color: var(--text-faint); flex: none; }
+.attention-what .health-event { font-size: 12.5px; }
+.attention-when { font-size: 11.5px; color: var(--text-faint); flex: none; }
 
 /* read-only note where the composer sits for an ended session */
 .chat-ended {
@@ -527,10 +490,10 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   padding: 10px 4px 4px;
   border-top: 1px solid var(--border-hairline);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 13px;
 }
 
-.spend-total { color: var(--text-primary); font-size: 13px; }
+.spend-total { color: var(--text-primary); font-size: 14px; }
 .spend-label {
   font-family: var(--font-mono);
   color: var(--text-secondary);
@@ -539,7 +502,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   white-space: nowrap;
 }
 .spend-amt { font-family: var(--font-mono); color: var(--text-primary); flex: none; }
-.card-cost { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); }
+.card-cost { margin-left: auto; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
 .side-back { color: var(--text-primary); text-decoration: none; transition: color var(--dur-fast) var(--ease); }
 .side-back:hover { color: var(--text-highlight); }
 .cards { display: flex; flex-direction: column; gap: 2px; padding: 0 8px 12px; }
@@ -570,7 +533,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 .card-top { display: flex; align-items: center; gap: 6px; }
 .card-name {
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 13.5px;
   font-weight: var(--weight-medium);
   word-break: break-all;
   flex: 1;
@@ -578,7 +541,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 /* A badge is an object: soft tint plus a matching border. */
 .badge {
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: 10.5px;
   letter-spacing: var(--track-caps-sm);
   color: var(--accent);
   background: var(--status-live-soft);
@@ -589,7 +552,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 }
 .card-title {
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: 13.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -600,7 +563,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   gap: 5px;
   font-family: var(--font-mono);
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: 11.5px;
 }
 .card-meta code { font-family: var(--font-mono); font-size: 0.9em; }
 
@@ -630,17 +593,17 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   background: var(--surface-card);
   flex: none;
 }
-.chat-name { font-family: var(--font-mono); font-weight: var(--weight-medium); font-size: 13px; }
+.chat-name { font-family: var(--font-mono); font-weight: var(--weight-medium); font-size: 14px; }
 .chip {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
   background: var(--surface-inset);
   border: 1px solid var(--border-hairline);
   border-radius: var(--radius-sm);
   padding: 1px 7px;
 }
-.agent-hint { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
+.agent-hint { font-family: var(--font-mono); font-size: 12px; color: var(--text-faint); }
 
 /* The transcript slab — the one cool surface in the system, where the machine
    writes. A document: square-cornered and flat. */
@@ -658,7 +621,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 .msg { max-width: 760px; }
 .msg .who {
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11.5px;
   color: var(--slab-muted);
   margin-bottom: 4px;
 }
@@ -724,7 +687,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   flex: 1;
   resize: none;
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: 15px;
   color: var(--text-primary);
   background: var(--surface-card);
   border: 1px solid var(--border-strong);
@@ -736,7 +699,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 .composer textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .composer button {
   font-family: var(--font-sans);
-  font-size: 13.5px;
+  font-size: 14.5px;
   font-weight: var(--weight-medium);
   letter-spacing: var(--track-button);
   color: var(--bobi-paper);
@@ -762,7 +725,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   background: color-mix(in srgb, var(--surface-page) 86%, transparent);
   display: flex; align-items: center; justify-content: center;
   color: var(--text-secondary);
-  font-size: 13.5px;
+  font-size: 14.5px;
 }
 .gone code { font-family: var(--font-mono); color: var(--text-primary); }
 

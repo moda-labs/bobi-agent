@@ -20,9 +20,11 @@ TOKENS_CSS = ROOT / "bobi" / "webui_common" / "static" / "tokens.css"
 FONTS_CSS = ROOT / "bobi" / "webui_common" / "static" / "fonts.css"
 FONTS_DIR = ROOT / "bobi" / "webui_common" / "static" / "fonts"
 DESIGN_SYSTEM = ROOT / ".claude" / "skills" / "bobi-design" / "tokens"
+CHROME_CSS = ROOT / "bobi" / "webui_common" / "static" / "chrome.css"
 APP_CSS = [
     ROOT / "bobi" / "setup" / "webui" / "static" / "app.css",
     ROOT / "bobi" / "webapp" / "static" / "app.css",
+    CHROME_CSS,
 ]
 
 # Bobi is a sub-brand of Moda Labs and changes exactly one thing: the accent.

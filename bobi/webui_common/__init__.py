@@ -3,7 +3,7 @@
 from pathlib import Path
 
 STATIC_DIR = Path(__file__).parent / "static"
-SHARED_ASSET_NAMES = {"tokens.css", "fonts.css"}
+SHARED_ASSET_NAMES = {"tokens.css", "fonts.css", "chrome.css"}
 # The vendored brand faces both UIs load via fonts.css. Shared as a prefix
 # rather than by name so adding a subset needs no code change.
 SHARED_ASSET_PREFIXES = ("fonts/",)

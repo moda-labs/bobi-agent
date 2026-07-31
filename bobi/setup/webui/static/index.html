@@ -9,18 +9,23 @@
   <link rel="icon" type="image/svg+xml" href="{{BASE}}/static/bobi-mark.svg" />
   <link rel="stylesheet" href="{{BASE}}/static/fonts.css" />
   <link rel="stylesheet" href="{{BASE}}/static/tokens.css" />
+  <link rel="stylesheet" href="{{BASE}}/static/chrome.css" />
   <link rel="stylesheet" href="{{BASE}}/static/app.css" />
 </head>
 <!-- .bobi-app switches on the product surface ramp (sunken page, white cards,
      elevation scale) from tokens.css. Marketing surfaces never get it. -->
 <body class="bobi-app">
   <div class="app">
-    <!-- Real app chrome, full-bleed: the browser IS the window, so there is no
-         simulated title bar, traffic lights, or address chip. `.addr` is a nav
-         slot — when setup is hosted inside `bobi app` it becomes the
-         back-to-dashboard link (see app.js). -->
+    <!-- The global top bar. Structure and styling are shared with the web app
+         via chrome.css so the top level of the UI never changes shape as you
+         move around: back + page name on the left, lockup + byline on the
+         right. #navback is filled per screen by app.js (setNavBack), falling
+         back to the dashboard link when hosted inside `bobi app`. -->
     <header class="titlebar">
-      <div class="addr"></div>
+      <div class="navleft">
+        <div class="navback" id="navback"></div>
+        <span class="page-name">setup</span>
+      </div>
       <div class="spacer"></div>
       <!-- The lockup always travels with the BY MODA LABS byline. -->
       <div class="lockup">
