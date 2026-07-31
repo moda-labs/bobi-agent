@@ -62,6 +62,13 @@ bobi agent <name> start --fresh
 bobi agent <name> status
 bobi agent <name> doctor
 
+# Supervise the manager as the terminal process (containers, pod specs).
+# Spawns + probes the manager, publishes heartbeat/lifecycle telemetry, and
+# listens on the admin topic so a wedged manager can still be restarted.
+# Everything after `--` forwards to the manager's start command.
+# This is what a container entrypoint runs as PID 1 - not for interactive use.
+bobi agent <name> supervise -- --foreground
+
 bobi agent <name> ask "question"
 bobi agent <name> message "text"
 bobi agent <name> compact

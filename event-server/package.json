@@ -3,7 +3,8 @@
 	"version": "0.0.0",
 	"private": true,
 	"workspaces": [
-		"core"
+		"core",
+		"worker"
 	],
 	"scripts": {
 		"build:local": "esbuild src/local.ts --bundle --platform=node --target=node20 --outfile=dist/local.js --metafile=dist/local.meta.json --legal-comments=eof",

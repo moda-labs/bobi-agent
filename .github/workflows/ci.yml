@@ -83,9 +83,7 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
-        # Public product only - the bobi_deploy plugin's suite (and the
-        # two-wheel install smoke) run in the private deploy repo's CI
-        # (repo split).
+        # The deploy engine's own suite runs in its repo, not here.
         run: pip install -e ".[dev,kb]"
 
       - name: Run unit tests
@@ -157,6 +155,9 @@ jobs:
           ./actionlint -color
 
   event-server:
+    # The name stays as-is even though this job now also builds and tests the
+    # Worker package: it is a REQUIRED check context, and a renamed context
+    # never reports, leaving every PR waiting on a check that cannot arrive.
     name: Event server (events-core + local)
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
@@ -177,25 +178,31 @@ jobs:
       # vitest never imports local.ts, so typecheck the complete workspace
       # before producing the embedded artifact. Otherwise a dangling import
       # across the events-core package boundary could reach main unnoticed.
-      - name: Typecheck (all workspace sources)
+      #
+      # This covers the NODE compile unit (src/ + core/src/). The Worker is a
+      # separate package with a conflicting lib/types set, so it typechecks
+      # and tests as its own steps below - widening these two would not work.
+      - name: Typecheck (Node workspace sources)
         working-directory: event-server
         run: npx tsc --noEmit
 
-      - name: Run event-server tests
+      - name: Run event-server tests (Node)
         working-directory: event-server
+        run: npx vitest run
+
+      - name: Typecheck (Cloudflare Worker)
+        working-directory: event-server/worker
+        run: npx tsc --noEmit
+
+      # Runs under @cloudflare/vitest-pool-workers (miniflare). No Cloudflare
+      # credentials are involved - the pool spins a local workerd.
+      - name: Run Worker tests (workers pool)
+        working-directory: event-server/worker
         run: npx vitest run
 
       - name: Build embedded local-server artifact
         working-directory: event-server
         run: npm run build:local
-
-      # The private worker adapter consumes events-core as a pinned published
-      # npm package after the repo split; this proves the publishable tarball
-      # (dist build + transformed manifest) works for a clean external
-      # consumer: plain-Node ESM imports of every subpath + d.ts typecheck.
-      - name: Events-core publish smoke (pack + scratch consumer)
-        working-directory: event-server
-        run: npm run smoke -w core
 
   e2e:
     name: E2E (Playwright)
@@ -316,10 +323,58 @@ jobs:
           --ignore=tests/integration/test_packaged_event_server.py
           --timeout=180 -v
 
-  # NOTE: the wrangler-dev integration job (Worker adapter under a real
-  # `wrangler dev`) lives in the private deploy repo (repo split), which runs
-  # this repo's tests/integration/test_event_server.py against its worker via
-  # BOBI_TEST_ES_DIR as the protocol-compatibility gate.
+  # The protocol-compatibility gate: the SAME suite the local backend runs,
+  # driven against the Cloudflare Worker under a real `wrangler dev`. This is
+  # what keeps the two adapters interchangeable at the protocol level, so it
+  # is a required gate rather than a nightly.
+  #
+  # `wrangler dev` runs in local mode (workerd on this machine), so NO
+  # Cloudflare credentials or account are involved.
+  wrangler:
+    name: Worker protocol suite (wrangler dev)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # NODE 22 HERE, 20 EVERYWHERE ELSE - deliberate, do not "align" it.
+      # wrangler refuses to start on anything below v22, while the embedded
+      # local-server artifact build requires EXACTLY 20
+      # (hatch_build.py::_require_build_node). The two cannot share a job.
+      # This one gets away with 22 because it never builds that artifact: an
+      # editable install returns early from the build hook (hatch_build.py:245,
+      # `target_name == "wheel" and version == "editable"`), and this job runs
+      # only the wrangler-parametrized tests.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: event-server/package-lock.json
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      # Installs the whole workspace, which is what puts wrangler on disk for
+      # the worker package. npm workspaces hoist it to the root's
+      # node_modules/.bin, which is where the suite looks for it.
+      - name: Install event-server workspace
+        working-directory: event-server
+        run: npm ci --no-audit --no-fund
+
+      - name: Run the protocol suite against the Worker
+        env:
+          BOBI_TEST_WRANGLER: "1"
+        run: >-
+          pytest tests/integration/test_event_server.py -k wrangler
+          --timeout=300 -v
 
   # --------------------------------------------------------------------------
   # Dev channel (#740 Track A). When every gate above is green on a push to
@@ -334,7 +389,7 @@ jobs:
     # becomes `dev` when the whole CI matrix proved it. `changes` is included
     # so a gate-job error on a push to main blocks promotion too (on push it
     # always reports code=true, so it never suppresses the heavy jobs here).
-    needs: [changes, unit-tests, unit-tests-gate, lint, event-server, integration-fast, e2e]
+    needs: [changes, unit-tests, unit-tests-gate, lint, event-server, wrangler, integration-fast, e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # Serialize promotions; the ancestor check below handles runs that
     # complete out of order.

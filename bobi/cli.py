@@ -377,6 +377,38 @@ def _run_from_config(project_path: Path, cfg: "Config",
     )
 
 
+@main.command(context_settings={"ignore_unknown_options": True})
+@click.argument("start_args", nargs=-1, type=click.UNPROCESSED)
+@click.pass_context
+def supervise(ctx, start_args):
+    """Supervise this agent's manager as the terminal process.
+
+    Spawns the manager, probes it from outside, publishes heartbeat and
+    lifecycle telemetry onto the event bus, and listens on the deployment's
+    admin topic so an operator can restart a manager that has wedged.
+
+    Everything after `--` is forwarded verbatim to the manager's start
+    command; `--foreground` keeps it a supervisable child. This is the
+    process a container entrypoint or pod spec runs as PID 1.
+
+    Usage:
+        bobi agent eng supervise -- --foreground
+        bobi agent eng supervise -- --foreground --subscribe linear:MOD
+    """
+    from bobi.supervisor.__main__ import run
+
+    # The `agent` group already bound the runtime root from the agent name;
+    # hand it straight to the sidecar rather than letting it re-resolve from
+    # BOBI_ROOT, which would silently win over the name the operator typed.
+    root = (ctx.obj or {}).get("root")
+    if root is None:
+        raise click.UsageError(
+            "`supervise` runs against an installed agent: "
+            "bobi agent <name> supervise -- --foreground"
+        )
+    raise SystemExit(run(root, list(start_args)))
+
+
 @main.command()
 @click.option("--foreground", "-f", is_flag=True, help="Run in the foreground (default: daemonize)")
 @click.option("--fresh", is_flag=True, help="Wipe session and start clean")
@@ -3427,6 +3459,7 @@ def costs(group_by):
 for _cmd_name in [
     "start", "stop", "restart", "status", "ui", "message", "ask", "compact",
     "events", "costs", "doctor", "login-bootstrap", "recall-memory",
+    "supervise",
 ]:
     if _cmd_name in main.commands:
         agent.add_command(main.commands[_cmd_name])
@@ -3442,7 +3475,7 @@ for _cmd_name in ["install"]:
 for _old_top_level in [
     "start", "stop", "restart", "status", "ui", "message", "ask", "compact",
     "events", "costs", "doctor", "transcript", "workflows", "roles", "monitors", "kb",
-    "event-server", "login-bootstrap", "recall-memory", "install",
+    "event-server", "login-bootstrap", "recall-memory", "install", "supervise",
 ]:
     main.commands.pop(_old_top_level, None)
 

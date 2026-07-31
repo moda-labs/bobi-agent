@@ -256,8 +256,9 @@ If you already run the local event server behind a Cloudflare tunnel, use the
 quick tunnel option; the wizard does not replace that topology, it validates and
 persists the tunnel URL for webhook-backed services.
 
-To run that ingress yourself - a tunnel in front of the embedded server, or a
-standalone event server on a box you manage - follow
+To run that ingress yourself - a tunnel in front of the embedded server, a
+standalone event server on a box you manage, or the Cloudflare Worker variant
+when you need registrations and replay to survive a restart - follow
 [docs/SELF_HOSTED_EVENT_SERVER.md](docs/SELF_HOSTED_EVENT_SERVER.md).
 
 ### Talk to your agent from Slack (optional)

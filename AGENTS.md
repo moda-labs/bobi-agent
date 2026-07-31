@@ -19,8 +19,11 @@ Bobi is an event-driven AI agent framework.
 - `skills/discord-setup.md`: Discord bot integration setup (Gateway, local server).
 - `skills/linear-setup.md`: Linear integration setup.
 - `docs/EVENT_SERVER.md`: event-server architecture, topics, and security model.
-- `docs/SELF_HOSTED_EVENT_SERVER.md`: running your own webhook ingress - tunnel
-  or standalone Node event server.
+- `docs/SELF_HOSTED_EVENT_SERVER.md`: running your own webhook ingress - tunnel,
+  standalone Node event server, or the durable Cloudflare Worker.
+- `docs/ADMIN_PROTOCOL.md`: the supervisor sidecar's wire contract (admin
+  topics, the nine commands, heartbeat/lifecycle schemas, compatibility
+  promise). Versioned by `SUPERVISOR_VERSION`; additive-only pre-1.0.
 - `docs/MONITORS.md`: monitor scheduler and the `script_cache` token-saving runner.
 - `docs/WORKFLOW_ENGINE.md`: workflow state machine, step types, suspend/resume.
 - `docs/TOOL_LIBRARY.md`: unified dependency model - declaring tools/skills/MCP

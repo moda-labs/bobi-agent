@@ -140,6 +140,44 @@ def _read_dependency_stamp(es_dir: Path) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+# `npm ls` problem classes that do NOT block a source build.
+#
+# DEFAULT-DENY: every problem npm reports is fatal unless it is listed here.
+# The inverse (list the fatal ones) was tried first and was wrong - it let
+# `peer dep missing: ...` through, because that string does not start with
+# `missing:`, so a genuinely absent dependency read as harmless. Any wording
+# npm adds in future would slip through the same hole. Enumerating the
+# harmless class instead means an unrecognized problem fails loudly and gets
+# classified deliberately.
+#
+# `extraneous` is harmless by construction: it means "installed but not
+# reachable from the lockfile graph" - a SUPERSET of what the build needs,
+# which nothing can trip over. It is also not stable across npm versions:
+# npm 10.8.2 (bundled with Node 20, which CI runs) reports the Worker
+# workspace's OPTIONAL dev dependencies - `@emnapi/runtime`, `tslib` - as
+# extraneous from the very lockfile npm 11 calls clean. Treating that as fatal
+# made the embedded LOCAL server unlaunchable on Node 20 over packages it
+# never loads.
+_NON_FATAL_TREE_PROBLEM_PREFIXES = ("extraneous:",)
+
+
+def _fatal_tree_problems(problems: object) -> list[str]:
+    """The `npm ls` problems that must block a source build (default-deny)."""
+    if not problems:
+        return []
+    if isinstance(problems, str):
+        problems = [problems]
+    if not isinstance(problems, (list, tuple)):
+        # An unrecognized shape is not something to reason about - fail loudly
+        # rather than silently treating an unknown report as "no problems".
+        return [f"unrecognized npm ls problems payload: {problems!r}"]
+    return [
+        p for p in problems
+        if not isinstance(p, str)
+        or not p.strip().lower().startswith(_NON_FATAL_TREE_PROBLEM_PREFIXES)
+    ]
+
+
 def _dependency_tree(es_dir: Path) -> dict:
     result = _run_npm(["npm", "ls", "--all", "--json", "--offline"], es_dir)
     try:
@@ -150,7 +188,7 @@ def _dependency_tree(es_dir: Path) -> dict:
         ) from exc
     if not isinstance(tree, dict):
         raise RuntimeError(f"npm ls returned a non-object dependency tree in {es_dir}")
-    problems = tree.get("problems")
+    problems = _fatal_tree_problems(tree.get("problems"))
     if problems:
         raise RuntimeError(f"npm dependency tree is invalid in {es_dir}: {problems}")
     return tree
