@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.51.1 - 2026-07-31
+
+Patch release: an agent no longer needs a build-time secret in order to run.
+
+### Fixed
+- **Build-time-only `${VAR}` refs stop gating a runtime (#886).** A variable
+  referenced only by a `build:` step was classified a required *runtime* secret,
+  so `bobi agents install --non-interactive` refused to install an agent whose
+  dependency was already baked into its image. It took a team down during the
+  0.51.0 fleet roll: the deploy side deliberately withholds build secrets from
+  the runtime env-file (and enforces them host-side before a build instead),
+  while this side refused to proceed without one — and because the deploy pauses
+  the old runtime before pushing, the box was left frozen rather than merely
+  un-updated. The dependency the secret would have installed was already
+  present, and its `success` check passed.
+
+  The fix is structural rather than a name list: a ref found only under
+  top-level `build:` — the `apt`/`npm`/`run_root`/`run` image layer — is marked
+  `build_only` and excluded from the install and startup gates. A name used both
+  under `build:` and anywhere else stays required, because the runtime use is
+  real. An unparseable `agent.yaml` yields no build-only names at all, so a
+  classification bug over-requires a secret rather than quietly ceasing to
+  require one. `docs/TOOL_LIBRARY.md` now states the rule where dependency
+  authors will meet it.
+
 ## 0.51.0 - 2026-07-31
 
 Minor release: the product surface goes public. The Cloudflare event-server
