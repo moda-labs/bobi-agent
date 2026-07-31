@@ -1,7 +1,7 @@
 # Repo reorg: publish the product surface, consolidate the ops surface
 
 > **Status:** Approved
-> **Tracking issue:** none by decision (2026-07-29) · **Created:** 2026-07-29 · **Reviewed:** 2026-07-30 · **Last amended:** —
+> **Tracking issue:** none by decision (2026-07-29) · **Created:** 2026-07-29 · **Reviewed:** 2026-07-30 · **Last amended:** 2026-07-30
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -234,9 +234,13 @@ Every lane is `concurrent` mode: each spans more than one repo, so plan markers 
 
 **Interface locks to relay.** Lane 1 → Lane 2: the exact `bobi agent <name> supervise` invocation and flag set the entrypoint must call (Lane 2 cannot write the exec line against an assumption of it). Lane 2 → Lane 3: the published base image's tag shape and what the `FROM`-the-base overlay may rely on already being present.
 
+**Dispatch (decided 2026-07-30, Zach): no dispatch issues.** Split cut none. Lane 1 is worked directly in an interactive session against this plan, which is the spec; Lanes 2 and 3 are cut only once their predecessor lands. The reason not to file them ahead: filing an issue in `bobi-agent` or `moda-agents` dispatches the eng-team bot, and Lane 2's real blocker is **Gate R — a hand-run public release with no issue number**, so a `depends on #N` line cannot express it and the bot's Ready gate would bounce the issue on a dependency it can't see. Marker mode is unchanged (`concurrent`, since Lane 1 spans two repos): markers flip as status-only commits to `bobi-agent`'s main referencing the code PR, never inside the feature branch.
+
 ## Amendments
 
-_None yet._
+### 2026-07-30 — Split: three lanes confirmed, no dispatch issues cut
+
+Split ran against the reviewed Lane map and changed nothing about the topology — three stacked cross-repo lanes, all `concurrent` marker mode, stand as reviewed. What it settled is dispatch: **no dispatch issues** (Zach, 2026-07-30). Lane 1 is built in an interactive session against this plan rather than routed through a filed issue; Lanes 2 and 3 are cut only when their predecessors land. Rationale recorded in the Lane map. No change to scope, phases, gates, or proof of work.
 
 ## Notes
 
