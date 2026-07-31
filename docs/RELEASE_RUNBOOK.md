@@ -177,11 +177,23 @@ gh run list --repo moda-labs/moda-agents --workflow "Deploy agent teams" \
 gh run watch <run-id> --repo moda-labs/moda-agents --interval 20
 ```
 
-The deploy run should show green jobs for:
+The deploy run should show a green job for every team the `plan` job lists as
+"Deployments to reconcile" — read that line rather than trusting this list,
+which goes stale as the fleet grows. As of 2026-07-31 it is five:
 
+- `baohua`
 - `basketbot`
 - `eng-team`
+- `roadmap-pm`
 - `zachs-personal-assistant`
+
+A team can fail here while the release artifacts are perfectly good. Note that
+`bobi deploy` **pauses the old runtime before it validates the new one**, so a
+refused update leaves that box frozen rather than merely un-updated: its
+processes are SIGSTOP'd and it stops answering. Restore service first with a
+`SIGCONT` over `fly ssh` (walk `/proc` for state `T`) — that brings the agent
+back without completing the deploy — then fix the reported error and re-run the
+failed job.
 
 ## 4. Inspect Fly startup
 
