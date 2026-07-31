@@ -563,7 +563,17 @@ class TestEventsCorePackageBoundary:
 
 @pytest.fixture
 def planted():
-    """Write files into the repo for one test, then remove them."""
+    """Write files into the repo for one test, then remove them.
+
+    These plant into the REAL tree because that is what makes the proof
+    meaningful - the guards scan the repo, so a synthetic tree would prove
+    something about a fixture rather than about the boundary. The suite runs
+    sequentially today (no pytest-xdist, no `-n` in ci.yml), which is what
+    makes that safe. If this repo ever adopts parallel test execution, these
+    tests must be pinned to one worker or rewritten against a temp tree: a
+    mutant visible to another worker mid-scan would fail an unrelated test in
+    a thoroughly confusing way.
+    """
     written: list[Path] = []
 
     def _plant(rel: str, body: str) -> Path:
