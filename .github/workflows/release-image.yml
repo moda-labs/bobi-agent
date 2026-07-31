@@ -1,0 +1,202 @@
+name: Release base image
+
+# The GHCR base-image half of the release pipeline. It publishes the REFERENCE
+# IMAGE: the artifact a self-hoster runs or `FROM`s without vendoring our
+# Dockerfile or needing a grant on any private repo. Kept separate from the
+# fleet gate so an image-publish failure can never block the PyPI publish.
+#
+# The image installs bobi in PYPI MODE (bobi==<version> from PyPI) even though
+# this repo now HAS the source tree. That is deliberate and should stay: the
+# published image must contain the exact bytes PyPI serves — the ones the
+# release gate exercised — not a separately source-rebuilt wheel that merely
+# claims the same version. So this still runs AFTER the public release is live
+# on PyPI. That also makes it the hotfix path: dispatching with any released
+# version re-publishes that version's image from the current Dockerfile.
+#
+# A release orchestrator calls it via `workflow_call` and should gate on a
+# canary that actually RAN, because GHCR auth is the always-present
+# GITHUB_TOKEN (no external backstop like PyPI's trusted-publisher config).
+# `workflow_dispatch` covers manual runs and the dry-run proof.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Release version (from the wheel filename)"
+        required: true
+        type: string
+      claude-version:
+        description: "Exact claude CLI version resolved once by build-wheel"
+        required: true
+        type: string
+      source-sha:
+        description: "moda-labs/bobi-agent release commit (metadata only: stamped into OCI labels; pypi mode installs the published wheel)"
+        required: false
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (must be live on PyPI)"
+        required: true
+        type: string
+      claude-version:
+        description: "Exact claude CLI version the release resolved"
+        required: true
+        type: string
+      source-sha:
+        description: "moda-labs/bobi-agent release commit (metadata only: pypi mode installs the published wheel)"
+        required: false
+        type: string
+
+env:
+  # The ONE automation-side definition of the published base-image name
+  # (docs necessarily repeat it for consumers).
+  IMAGE: ghcr.io/moda-labs/bobi
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Publish the base image to GHCR (#609), per arch. Built in pypi mode
+  # (BOBI_BUILD=pypi): pip installs bobi==<version> from PyPI - the same
+  # published bytes the fleet gate proved - with the SAME resolved claude pin,
+  # so ghcr.io/moda-labs/bobi:<version> is the artifact the gate exercised: a
+  # consumer on their own orchestrator can `docker run` it or `FROM` it without
+  # vendoring our Dockerfile.
+  #
+  # Each arch builds NATIVELY (arm64 on ubuntu-24.04-arm, free for public
+  # repos) - never under QEMU: the runtime stage executes the fetched binaries
+  # (`claude --version` et al), and the Bun-compiled claude binary is known to
+  # segfault under qemu-user emulation. The legs push per-arch tags
+  # (:<version>-amd64/-arm64); publish-manifest stitches them into the public
+  # multi-arch tag.
+  publish-image:
+    name: Build base image (${{ matrix.platform }})
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            # Free arm runners exist only for PUBLIC repos. In private
+            # bobi-deploy this label required a paid GitHub larger-runner
+            # configured with this exact name, and was carried as an open
+            # cut-aftermath item; publishing the image resolves it, because
+            # this repo is public and `ubuntu-24.04-arm` is a standard free
+            # runner here.
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    # Zero-cost until the repo's `release` environment gets required reviewers; then dispatch-path publishes need approval.
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      # Checked out at the invoking ref for the image MECHANICS only (Dockerfile
+      # + docker/). The image CONTENTS are pinned by BOBI_VERSION=<version>
+      # straight from PyPI, so the tag and the bytes it names are consistent by
+      # construction — no ref/version assert and no staged wheel artifact.
+      #
+      # Worth stating now that the source IS in this repo: do not "simplify"
+      # this to a source or wheel build off the checkout. The ref and the
+      # version are independent inputs here (the hotfix path dispatches an old
+      # version against a current Dockerfile), so building from the checkout
+      # would let the tag and its contents disagree.
+      - uses: actions/checkout@v5
+
+      # The arm64 leg runs on a GitHub larger runner with the Arm-partner
+      # Ubuntu image, which ships WITHOUT a Docker daemon (setup-buildx dies
+      # on the missing /var/run/docker.sock). Install and start one when
+      # absent; a no-op everywhere Docker is preinstalled.
+      - name: Ensure a Docker daemon
+        run: |
+          set -euo pipefail
+          if docker info >/dev/null 2>&1; then
+            echo "docker daemon already available"
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y docker.io
+          sudo systemctl start docker
+          # The runner user's fresh group membership can't apply to this
+          # already-running session; the socket is ephemeral to this VM.
+          sudo chmod 666 /var/run/docker.sock
+          docker info >/dev/null
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push the ${{ matrix.platform }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          build-args: |
+            BOBI_BUILD=pypi
+            BOBI_VERSION=${{ inputs.version }}
+            CLAUDE_VERSION=${{ inputs.claude-version }}
+          # Keep the runtime layers warm across releases (the Dockerfile
+          # orders layers stable→volatile precisely for this).
+          cache-from: type=gha,scope=base-image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=base-image-${{ matrix.arch }}
+          # No provenance attestation: it adds unknown/unknown manifest entries
+          # that confuse `docker run` UIs and downstream FROM digest pinning.
+          provenance: false
+          # OCI provenance labels: the public release commit + source repo.
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source-sha }}
+            org.opencontainers.image.source=https://github.com/moda-labs/bobi-agent
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}-${{ matrix.arch }}
+
+  # --------------------------------------------------------------------------
+  # Stitch the per-arch images into the public multi-arch tags. :latest moves
+  # only when the version being published IS the repo's latest non-prerelease
+  # release (GitHub's releases/latest), which is correct by construction:
+  # prerelease publishes and re-runs of an OLD release's run can never move
+  # it, and a workflow_dispatch re-push of the newest tag restores it after a
+  # transient failure.
+  publish-manifest:
+    name: Publish base image manifest to GHCR
+    needs: [publish-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Zero-cost until the repo's `release` environment gets required reviewers; then dispatch-path publishes need approval.
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create the multi-arch manifest (+ :latest when newest release)
+        run: |
+          set -euo pipefail
+          tags=(-t "${IMAGE}:${VERSION}")
+          # This repo's releases ARE the bobi version line, so ask it directly
+          # rather than by hardcoded name.
+          latest_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          if [ "$latest_release" = "v${VERSION}" ]; then
+            tags+=(-t "${IMAGE}:latest")
+          else
+            echo "::notice::v${VERSION} is not the latest release (latest: ${latest_release:-none}); :latest not moved"
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            "${IMAGE}:${VERSION}-amd64" "${IMAGE}:${VERSION}-arm64"
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
