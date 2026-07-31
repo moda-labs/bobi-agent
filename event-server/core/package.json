@@ -11,9 +11,7 @@
 		"directory": "event-server/core"
 	},
 	"scripts": {
-		"build": "tsc -p tsconfig.json",
-		"pack:publish": "node scripts/pack.mjs",
-		"smoke": "node scripts/smoke.mjs"
+		"build": "tsc -p tsconfig.json"
 	},
 	"exports": {
 		".": "./src/core.ts",

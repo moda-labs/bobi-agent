@@ -1,7 +1,10 @@
 {
-	// Dist build for the publishable tarball only (scripts/pack.mjs). The
-	// repo consumes this package straight from src/ via the workspace
-	// exports map; nothing in-repo depends on dist/.
+	// Standalone compile config for this package alone (`npm run build -w
+	// core`). The repo consumes core straight from src/ via the workspace
+	// exports map, so nothing in-repo depends on dist/ - what this config is
+	// for is proving core still compiles on its own, which is the
+	// publishability property tests/test_import_boundaries.py guards. It is
+	// also a declared wheel build input (bobi/events/artifact.py).
 	"compilerOptions": {
 		"target": "es2022",
 		// No runtime pin: core is runtime-agnostic (Node local server +

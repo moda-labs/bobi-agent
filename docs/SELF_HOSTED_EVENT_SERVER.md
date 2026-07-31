@@ -3,7 +3,7 @@
 The event server is bobi's pub/sub bus: provider events land on it, and agents receive them over an outbound WebSocket (architecture, topics, and the security model live in [EVENT_SERVER.md](EVENT_SERVER.md)).
 GitHub, Linear, WhatsApp, and Slack's default HTTP Events API deliver webhooks only to a public HTTPS URL, so those paths need public ingress in front of an event server you run.
 Slack Socket Mode is the exception: the local Node event server dials out to Slack and needs no public Request URL.
-This guide covers both transport choices and two self-hosted server shapes:
+This guide covers both transport choices and three self-hosted server shapes:
 
 - **Tunnel** - everything on one machine. The embedded local server that
   `bobi agent <name> start` launches automatically, plus a public tunnel
@@ -13,12 +13,19 @@ This guide covers both transport choices and two self-hosted server shapes:
   behind TLS; agents on any machine point at it. Right when agent machines
   lack stable ingress (laptops), when more than one machine runs agents, or
   when you want webhook ingress to outlive any one agent host.
+- **Worker** - the Cloudflare Worker variant
+  (`event-server/worker/`), with sessions in Durable Objects and replay in
+  KV. Right when you need registrations and cursors to survive a restart, or
+  webhook ingress at a scale one box should not carry. See
+  [Deploying the Worker](#deploying-the-worker-durable-tier).
 
-Both run the same single-node Node server (`event-server/src/local.ts`) with
-the same webhook verification as any production deployment. The trade against
-a managed/durable tier is operational: state is in memory, so a server
-restart drops registrations and buffered replay (see
-[What a restart means](#what-a-restart-means)).
+The first two run the same single-node Node server
+(`event-server/src/local.ts`) with the same webhook verification as any
+production deployment; their state is in memory, so a restart drops
+registrations and buffered replay (see
+[What a restart means](#what-a-restart-means)). The Worker is the durable
+answer to exactly that trade-off, and it is self-hosted like the others — you
+run it on your own Cloudflare account.
 
 ## Slack Socket Mode: no public ingress
 
@@ -244,8 +251,105 @@ buffer of the last 10,000 events per deployment) lives in process memory.
   the event server, restart the agents pointed at it.** Events delivered to
   the server between those two restarts are dropped.
 
-If you need durable replay across server restarts, that is the managed
-deployment tier, not this one.
+If you need durable replay across server restarts, run the **Cloudflare Worker
+variant** instead — it is a self-host option like the rest, not a paid tier.
+It keeps sessions in Durable Objects and replay in KV, so registrations and
+cursors survive a restart and the rule above does not apply. See
+[Deploying the Worker](#deploying-the-worker-durable-tier) below.
+
+What is *not* free about it: it is Cloudflare-specific and needs a Workers Paid
+plan for SQLite-backed Durable Objects. The in-process server here needs
+nothing but Node. Pick on durability, not on price.
+
+## Deploying the Worker (durable tier)
+
+The Cloudflare Worker variant lives at `event-server/worker/`. It speaks the
+same protocol as the Node variants — same webhook verification, same bubble
+model, same topics — but keeps per-deployment sessions in Durable Objects and
+replay in KV, so a restart loses nothing.
+
+**Prerequisites.** A Cloudflare account on the **Workers Paid** plan: the
+Durable Objects here are SQLite-backed (`new_sqlite_classes` in the `v1`
+migration), which the free plan does not offer. Node 20+ and `npm` locally.
+
+```bash
+git clone https://github.com/moda-labs/bobi-agent
+cd bobi-agent/event-server
+npm install                      # links the workspace, incl. events-core
+cd worker
+npx wrangler login
+```
+
+**1. Create the KV namespace.** `wrangler.jsonc` ships with a placeholder id
+and will fail loudly until you replace it — deliberately, so a fresh clone
+cannot silently deploy against someone else's namespace:
+
+```bash
+npx wrangler kv namespace create EVENTS
+```
+
+Copy the printed id into `kv_namespaces[0].id` in `wrangler.jsonc`. The
+worker's `name` (`bobi-events`) is a default, not a reserved name; rename it
+freely if you run more than one.
+
+**2. Set the secrets.** Only `INTERNAL_DO_SECRET` is required — it signs the
+Worker↔Durable Object hop. Each webhook secret you omit admits that provider
+**unverified** (counted on `/health` as `webhook_unverified`); WhatsApp is the
+exception and fails closed instead. Set all of them on any shared or public
+server:
+
+```bash
+npx wrangler secret put INTERNAL_DO_SECRET        # required
+npx wrangler secret put WEBHOOK_SECRET            # GitHub X-Hub-Signature-256
+npx wrangler secret put SLACK_SIGNING_SECRET      # global fallback
+npx wrangler secret put LINEAR_WEBHOOK_SECRET     # Linear-Signature
+npx wrangler secret put WHATSAPP_APP_SECRET       # Meta X-Hub-Signature-256
+npx wrangler secret put WHATSAPP_VERIFY_TOKEN     # Meta GET subscribe handshake
+```
+
+To use the fleet query surface (the admin read model — see
+[ADMIN_PROTOCOL.md](ADMIN_PROTOCOL.md)), also set `FLEET_OPERATOR_TOKEN`. It
+gates every fleet read; without it those routes stay closed.
+
+**3. Deploy and verify.**
+
+```bash
+npx wrangler deploy
+curl -s https://<your-worker-host>/health | jq
+```
+
+`/health` reports the release version, per-provider verification status, and
+Durable Object reachability. The `v1` migration applies on first deploy.
+
+**4. Point agents at it.** Exactly as for the standalone server — set the
+event-server URL in the agent's runtime `.env` (see
+[Point agents at it](#point-agents-at-it)); nothing about the agent side is
+Worker-specific.
+
+**Running the tests locally** needs no Cloudflare credentials at all — the
+suite runs under miniflare:
+
+```bash
+cd event-server/worker && npx vitest run   # workers-pool suite
+npx tsc --noEmit                           # Worker compile unit
+```
+
+### `/__test/resource-grants` is not a bypass
+
+The Worker carries a `/__test/resource-grants` route used by the protocol
+suite. It is **fail-closed three ways over**, and worth understanding rather
+than worrying about:
+
+- The route **does not exist** unless `TEST_GRANTS_SECRET` is set. The binding
+  is part of the route's own match condition, so on a normal deployment the
+  path 404s like any unknown route.
+- Even with the secret set, a request must present it in `x-moda-test-secret`
+  or it 404s.
+- On top of that the route is bubble-authed like any other write path — it
+  cannot reach across into another bubble's grants.
+
+Do not set `TEST_GRANTS_SECRET` on a production deployment. There is no reason
+to, and leaving it unset is what keeps the route absent.
 
 ## Security notes for a public server
 
