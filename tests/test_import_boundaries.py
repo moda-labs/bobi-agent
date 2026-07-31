@@ -487,8 +487,9 @@ class TestEventsCorePackageBoundary:
     def test_consumer_specifiers_match_core_manifest(self):
         """Every import of the events-core package must use the exact name
         the manifest declares and a subpath its exports map serves - a typo
-        or stale subpath resolves nowhere at the next npm install, and after
-        the phase-2 cut the private repo's pinned install fails the same way."""
+        or stale subpath resolves nowhere at the next npm install. The
+        workspace is forgiving enough to hide this until an install runs, so
+        it is asserted rather than waited for."""
         manifest = _core_manifest()
         name, exports = manifest["name"], manifest["exports"]
         offenders, core_imports = [], 0

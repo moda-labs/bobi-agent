@@ -1,11 +1,12 @@
 """Supervision core — a faithful port of the public self-heal watchdog.
 
-This is a byte-for-byte behavioral port of ``bobi/watchdog.py``'s
-``Supervisor`` / ``RestartBudget`` / ``is_wedged`` (issue #464), lifted into the
-private deploy repo because the public watchdog is deleted in Phase C (issue
-#5). The restart/wedge/crash/backoff/exit-70 state machine is unchanged; the
-public unit + acceptance tests travel with it (ported into
-``bobi_deploy/tests/``). The one behavioral addition since the port: a
+This is a byte-for-byte behavioral port of the deleted ``bobi/watchdog.py``'s
+``Supervisor`` / ``RestartBudget`` / ``is_wedged`` (issue #464). It was lifted
+out to the private deploy repo when the public watchdog was deleted (issue #5)
+and returned here with the sidecar by the repo reorg. The
+restart/wedge/crash/backoff/exit-70 state machine is unchanged, and the unit +
+acceptance tests have travelled with it the whole way (now back in
+``tests/test_supervision*.py``). The one behavioral addition since the port: a
 positively-dead director (``status=error``, invisible to every ported recovery
 path) restarts immediately through the same budget/backoff machine (#12,
 :data:`DEAD_STATES`).

@@ -8,7 +8,10 @@ Fly-hosted agents.
 > Homebrew). The deploy side - `bobi-deploy` package, container image, Fly
 > fleet canary, Cloudflare Worker deploy - lives in the private
 > `moda-labs/bobi-deploy` repo and releases through ITS train, pinned to the
-> public release. `bobi-deploy` is never published to PyPI (the name is held
+> public release. Note the Worker's SOURCES are public here
+> (`event-server/worker/`, repo-reorg Lane 1); it is only the deploy of
+> moda's own instance that is private, and that moves in Lane 3 - at which
+> point this whole notice is rewritten for a two-repo train. `bobi-deploy` is never published to PyPI (the name is held
 > by a defensive stub that fails loudly at install); distribution is the
 > private channel only. A `uv tool install bobi` has no `bobi deploy`; that
 > is the product line. Before the first private-channel bobi-deploy release:
