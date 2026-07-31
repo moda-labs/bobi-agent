@@ -41,12 +41,14 @@ export function mountAgent(el, { api, name }) {
     <section class="pane">
       <div class="placeholder" data-el="placeholder">
         <span class="mark big" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="34" height="34" fill="none"
-               stroke="currentColor" stroke-width="1.4" stroke-linecap="round"
-               stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3.2"></circle>
-            <path d="M12 2.4v3M12 18.6v3M2.4 12h3M18.6 12h3"></path>
-            <path d="M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1"></path>
+          <!-- The probe mark doubles as the director's icon — the one place
+               branding and iconography deliberately overlap. Canonical 32x32
+               geometry; do not redraw or re-proportion. -->
+          <svg viewBox="0 0 32 32" width="40" height="40">
+            <circle cx="14" cy="18" r="6" fill="currentColor"></circle>
+            <circle cx="14" cy="18" r="12.5" fill="none" stroke="currentColor"
+                    stroke-width="1.2" stroke-dasharray="2 4" opacity="0.6"></circle>
+            <circle cx="23.5" cy="9.5" r="3" fill="var(--bobi-acc)"></circle>
           </svg>
         </span>
         <p>Select a subagent to start chatting.</p>

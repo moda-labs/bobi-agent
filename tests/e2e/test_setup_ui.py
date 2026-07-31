@@ -42,7 +42,7 @@ def test_shows_chat_and_team_panel(page, bobi_url):
     expect(page.locator(".uni-panel .up-title")).to_have_text("Your team")
     # Six cards: goal, roles, workflows (optional), automations, connections, chat.
     expect(page.locator(".ucard")).to_have_count(6)
-    expect(page.locator(".ucard", has_text="Workflows")).to_contain_text("optional")
+    expect(page.locator(".ucard", has_text="Workflows")).to_contain_text("Optional")
     expect(page.locator("#uni-meter")).to_have_text("0/5 gathered")
     # Finish is a soft gate — always present, never grayed out.
     expect(page.locator("#uni-finish")).to_be_enabled()

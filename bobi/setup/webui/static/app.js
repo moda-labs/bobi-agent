@@ -29,9 +29,9 @@
   // GitOps). Points at the GitHub blob so the finalization screen's link
   // works without a docs site.
   const DOCS_CLOUD_URL = "https://github.com/moda-labs/bobi-agent/blob/main/README.md#cloud-deployment";
-  const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4"><path d="M5 12l5 5L19 7"/></svg>';
-  const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7"/></svg>';
-  const HELP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.2a2.8 2.8 0 0 1 5.4 1c0 1.9-2.7 2.5-2.7 2.5"/><circle cx="12" cy="16.7" r="0.6" fill="currentColor" stroke="none"/></svg>';
+  const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L19 7"/></svg>';
+  const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7"/></svg>';
+  const HELP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.2a2.8 2.8 0 0 1 5.4 1c0 1.9-2.7 2.5-2.7 2.5"/><circle cx="12" cy="16.7" r="0.6" fill="currentColor" stroke="none"/></svg>';
   const STATUS_LABEL = { connected: "connected", missing: "connect", unknown: "needs check" };
   // Day-to-day channels for the Chat card.
   const CHANNELS = [
@@ -245,25 +245,31 @@
   // first-run on-ramp).
   let introFrom = "welcome";
   // Vertical recast of the event-driven flow diagram from buildmoda.ai/bobi:
-  // event → team → workflow → gate → outcome. Geometric inline-SVG glyphs
-  // (offline; no images), accent reserved for the final checkmark.
+  // event → team → workflow → gate → outcome. Glyphs are Bobi's own hand-drawn
+  // set (24x24, 1.5 ink stroke, round caps/joins, at most ONE violet detail);
+  // see .claude/skills/bobi-design/components/icons/Icon.jsx. Offline, so they
+  // are inline SVG — never an icon pack, never emoji. The semantic pairings are
+  // the design system's own: checklist→a workflow, human→a human gate,
+  // checkCircle→shipped.
   const FLOW_NODES = [
     { label: "Event", eg: "a ticket lands",
       svg: '<path d="M12 3.5l8.5 8.5-8.5 8.5-8.5-8.5z"/>' },
     { label: "Team", eg: "manager + agents",
       svg: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="8.5" y="13.5" width="7" height="7" rx="1.2"/>' },
     { label: "Workflow", eg: "a YAML workflow",
-      svg: '<path d="M5 7h14M5 12h14M5 17h9"/>' },
+      svg: '<path d="M4 6h2M4 12h2M4 18h2M9 6h11M9 12h11M9 18h7"/>' },
+    // A gate is sacred: the violet rotated square is its signature, and it is
+    // the one violet detail this glyph is allowed.
     { label: "Gate", eg: "human approval",
-      svg: '<circle cx="12" cy="12" r="8.5"/><path d="M8.4 12.2l2.4 2.4 4.6-5"/>' },
+      svg: '<circle cx="11" cy="8.5" r="3.2"/><path d="M4.5 19.5a6.5 6.5 0 0 1 13 0"/><rect x="16.4" y="3.4" width="4.2" height="4.2" transform="rotate(45 18.5 5.5)" stroke="var(--bobi-acc)"/>' },
     { label: "Outcome", eg: "shipped", accent: true,
-      svg: '<path d="M4.5 12.5l4.5 4.5L19.5 6.5"/>' },
+      svg: '<circle cx="12" cy="12" r="8.5"/><path d="M8.5 12.5l2.4 2.4 4.6-5.4"/>' },
   ];
   function flowDiagramHTML() {
     // --i drives both the staggered fade-in and the looping flow pulse (CSS).
     const nodes = FLOW_NODES.map((n, i) =>
       `<li class="wfnode" style="--i:${i}">
-        <span class="wfglyph${n.accent ? " wfg-accent" : ""}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${n.svg}</svg></span>
+        <span class="wfglyph${n.accent ? " wfg-accent" : ""}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${n.svg}</svg></span>
         <span class="wftext"><span class="wflabel">${esc(n.label)}</span><span class="wfeg">${esc(n.eg)}</span></span>
       </li>`).join("");
     return `<aside class="wflow-side">
@@ -420,7 +426,7 @@
     // the (scrollable) list, not a separate button, and sticky so it keeps
     // popping even when many templates push it past the fold.
     const custom = `<button class="tmpl tmpl-custom" data-newteam>
-      <span class="tmpl-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>
+      <span class="tmpl-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>
       <span class="tmpl-text"><b>Customize my own agent team</b><span>Start from scratch — describe it and bobi designs it with you.</span></span>
       <span class="tmpl-go">New →</span>
     </button>`;
@@ -428,8 +434,8 @@
     // registry) carry a badge so they read as trusted, not third-party.
     const row = (t) =>
       `<button class="tmpl" data-template="${esc(t.name)}">
-        <span class="tmpl-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="8.5" y="13.5" width="7" height="7" rx="1.2"/></svg></span>
-        <span class="tmpl-text"><b>${esc(t.name)}${t.official ? `<span class="tmpl-badge">official</span>` : ""}</b><span>${esc(t.description || t.registry || "Agent team template")}</span></span>
+        <span class="tmpl-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="8.5" y="13.5" width="7" height="7" rx="1.2"/></svg></span>
+        <span class="tmpl-text"><b>${esc(t.name)}${t.official ? `<span class="tmpl-badge">Official</span>` : ""}</b><span>${esc(t.description || t.registry || "Agent team template")}</span></span>
         <span class="tmpl-go">Use →</span>
       </button>`;
     let rest = "";
@@ -789,14 +795,14 @@
           const hitl = (w.steps || []).some(s => s && s.hitl);
           const n = (w.steps || []).length;
           return `<div class="urole click" data-wfopen="${i}">
-            <div class="urow"><b>${esc(w.name || "workflow")}</b>${hitl ? `<span class="wf-hitl" title="pauses for human approval">human gate</span>` : ""}</div>
+            <div class="urow"><b>${esc(w.name || "workflow")}</b>${hitl ? `<span class="wf-hitl" title="pauses for human approval">Human gate</span>` : ""}</div>
             <span>${esc(w.trigger || w.description || "")}${n ? ` · ${n} step${n === 1 ? "" : "s"}` : ""}</span></div>`;
         }).join("")
       : (sp.workflows_confirmed
           ? `<span class="ph">no set flows — bobi handles work ad hoc</span>`
           : `<span class="ph">bobi proposes repeatable flows once the roles are set</span>`);
     return `<div class="ucard ${settled ? "filled" : "empty"}">
-      <div class="ut">Workflows <span class="ut-opt">optional</span></div>
+      <div class="ut">Workflows <span class="ut-opt">Optional</span></div>
       <div class="ud">${body}</div>
       <div class="uadd"><button class="lnk add" data-addwf>+ add a workflow</button></div></div>`;
   }
@@ -1762,7 +1768,7 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
     const where = S.source_dir || "$BOBI_HOME/agents/" + agentCommandName() + "/src";
     $("#main").innerHTML = `<main class="done-wrap">
       <div class="done-head">
-        <div class="seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L19 7"/></svg></div>
+        <div class="seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L19 7"/></svg></div>
         <div class="done-head-copy"><div class="eyebrow">All set</div>
           <h1>${esc(S.team_name || "your team")} is ready</h1></div>
       </div>
@@ -1844,7 +1850,7 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
     setPanes("1fr");
     $("#main").innerHTML = `<main class="done-wrap ns-bye">
       <div class="done-head">
-        <div class="seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L19 7"/></svg></div>
+        <div class="seal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L19 7"/></svg></div>
         <div class="done-head-copy"><div class="eyebrow">Setup ended</div>
           <h1>${esc(S.team_name || "Your team")} is installed</h1></div>
       </div>
@@ -1868,7 +1874,7 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
     const data = await getJSON("/api/home");
     const teams = data.teams || [];
     homeLibrary = data.library || homeLibrary;   // cached for import (below)
-    const teamGlyph = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="8.5" y="13.5" width="7" height="7" rx="1.2"/></svg>';
+    const teamGlyph = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.2"/><rect x="8.5" y="13.5" width="7" height="7" rx="1.2"/></svg>';
     const cards = teams.map(t =>
       `<button class="hcard" data-openteam="${esc(t.path)}" title="${esc(t.path)}">
         <span class="hcard-glyph">${teamGlyph}</span>
@@ -1878,7 +1884,7 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
         <span class="hcard-foot">Open →</span>
       </button>`).join("");
     const add = `<button class="hcard hcard-add" data-addteam>
-      <span class="hcard-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>
+      <span class="hcard-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>
       <b>Add an agent team</b>
       <span class="hcard-foot">New setup →</span>
     </button>`;
