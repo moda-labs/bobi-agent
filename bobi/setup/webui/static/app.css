@@ -57,25 +57,22 @@ code,pre,kbd{font-family:var(--font-mono);}
 /* Any column of numbers, ids, or timestamps gets tabular figures. */
 .bobi-tnum,.counter,.up-meter,.hcard-path,.locbox-path{font-variant-numeric:tabular-nums;}
 
-/* THE RETRO LAYER, re-expressed in the brand's own language: the architect's
-   faded engineering grid-paper (80px major + 16px minor) instead of CRT
-   scanlines. Nothing in this system glows.
+/* ============================================================================
+   INFORMATION ARCHITECTURE — distinct planes, and nothing bleeds across them.
 
-   It is a masked layer at the TOP of the page that dissolves downward, not a
-   tiled wallpaper — the paper should feel like a drawing board under the first
-   screenful, then get out of the way. Content sits above it on z-index 1. */
-html[data-retro="on"] .app::before{
-  content:"";position:absolute;left:0;right:0;top:0;height:340px;
-  pointer-events:none;z-index:0;
-  background-image:
-    linear-gradient(to right, rgba(54,46,37,.08) 0 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(54,46,37,.08) 0 1px, transparent 1px),
-    repeating-linear-gradient(to right, rgba(54,46,37,.04) 0 1px, transparent 1px 16px),
-    repeating-linear-gradient(to bottom, rgba(54,46,37,.04) 0 1px, transparent 1px 16px);
-  background-size:80px 80px,80px 80px,auto,auto;
-  -webkit-mask-image:linear-gradient(to bottom, rgba(0,0,0,.9) 0%, rgba(0,0,0,.25) 45%, transparent 85%);
-  mask-image:linear-gradient(to bottom, rgba(0,0,0,.9) 0%, rgba(0,0,0,.25) 45%, transparent 85%);
-}
+     1. GLOBAL CHROME (.titlebar)  solid white, hairline base. Never textured.
+     2. WORKSPACE     (.panes)     the SUNKEN page; content sits on it, and
+                                   cards lift off it.
+     3. PANELS        (.rail, .uni-panel, .tree)  the band surface, sealed off
+                                   with a hairline seam.
+
+   The architect grid-paper that used to run behind all of this is gone. It is
+   a marketing device from the design system's figure language: run across a
+   dense operational screen it ignores region boundaries, so the top-level nav
+   and the workspace read as one continuous plane and the IA stops being
+   legible. `data-retro` is inert on product surfaces — the retro lean lives
+   in the terminal slab, which is a real region with a real job.
+   ========================================================================= */
 
 /* ---------------------------------------------------------------- frame --
    Full-bleed: the browser window IS the app window. No simulated chrome —
@@ -86,13 +83,14 @@ html[data-retro="on"] .app::before{
   background:transparent;border:0;border-radius:0;box-shadow:none;
   display:flex;flex-direction:column;overflow:hidden;
 }
-/* Real app chrome: transparent so the grid-paper reads through it, separated
-   by a hairline rather than a filled bar. */
+/* Plane 1: global chrome. A solid surface, NOT the workspace showing through
+   — the boundary between "where I am" and "what I am working in" has to be
+   unmissable. It sits above the workspace so the seam survives scrolling. */
 .titlebar{
-  position:relative;z-index:1;
+  position:relative;z-index:2;
   height:52px;flex:0 0 52px;display:flex;align-items:center;gap:12px;
   padding:0 24px;
-  background:transparent;
+  background:var(--surface-card);
   border-bottom:1px solid var(--border-hairline);
 }
 /* A nav slot, not a URL bar. Empty standalone; `bobi app` fills it with the
@@ -130,7 +128,9 @@ html[data-retro="on"] .app::before{
 
 /* minmax(0,1fr) pins the row to the frame height so tall panes scroll their
    own inner body instead of growing past the bottom of the app. */
-.panes{position:relative;z-index:1;flex:1;display:grid;min-height:0;grid-template-columns:216px 1fr;grid-template-rows:minmax(0,1fr);}
+/* Plane 2: the workspace. Sunken, so the white cards inside it read as
+   objects lifted off a surface rather than outlines drawn on one. */
+.panes{position:relative;z-index:1;flex:1;display:grid;min-height:0;background:var(--surface-page);grid-template-columns:216px 1fr;grid-template-rows:minmax(0,1fr);}
 
 /* ----------------------------------------------------------------- rail -- */
 .rail{background:var(--surface-band);border-right:1px solid var(--border-hairline);padding:20px 14px;display:flex;flex-direction:column;}

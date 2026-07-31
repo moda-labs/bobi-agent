@@ -53,27 +53,38 @@ code, pre, kbd { font-family: var(--font-mono); }
   font-variant-numeric: tabular-nums;
 }
 
-/* The architect's faded engineering grid-paper, in place of the old CRT
-   grid. Nothing in this system glows. */
-html[data-retro="on"] body {
-  background-image:
-    linear-gradient(to right, rgba(54,46,37,.07) 0 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(54,46,37,.07) 0 1px, transparent 1px),
-    repeating-linear-gradient(to right, rgba(54,46,37,.035) 0 1px, transparent 1px 16px),
-    repeating-linear-gradient(to bottom, rgba(54,46,37,.035) 0 1px, transparent 1px 16px);
-  background-size: 80px 80px, 80px 80px, auto, auto;
-}
+/* ============================================================================
+   INFORMATION ARCHITECTURE — three planes, and nothing bleeds across them.
 
-/* The framed app window — same treatment as the setup flow, so moving
-   between the shell and the hosted editor reads as one app. */
+     1. GLOBAL CHROME  (.bar)        solid white, hairline base. Who/where you
+                                     are. Never textured.
+     2. CONTEXT CHROME (.agent-ctl)  solid white, hairline base. What you are
+                                     acting on, and the run controls for it.
+     3. WORKSPACE      (.view)       the SUNKEN page. Content lives here, on
+                                     white cards that lift off it.
+
+   The reason chrome is white and the workspace is sunken (rather than the
+   reverse, or all one surface): the eye reads the recessed plane as "the
+   thing I am working in" and the raised plane as "the thing I am working
+   with". Collapsing them — or running a texture across the boundary — is
+   what makes an app feel like an undifferentiated wall of UI.
+
+   The architect grid-paper is deliberately NOT used here. It is a marketing
+   device from the design system's figure language; on a dense operational
+   screen it crosses region boundaries and destroys exactly the separation
+   above. `data-retro` is inert on product surfaces.
+   ========================================================================= */
+
+/* Full-bleed: the browser window IS the app window. No floating card, no
+   simulated chrome. */
 .app {
-  width: min(1240px, 96vw);
-  height: min(800px, 94vh);
-  margin: 2.6vh auto;
-  background: var(--surface-card);
-  border: 1px solid var(--border-card);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--elev-4);
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -82,15 +93,18 @@ html[data-retro="on"] body {
 /* `.mono` is a real mono run; it is NOT a shouting device. */
 .mono { font-family: var(--font-mono); }
 
-/* --- top bar --- */
+/* --- plane 1: global chrome --- */
 .bar {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 18px;
+  padding: 0 20px;
+  height: 52px;
   background: var(--surface-card);
   border-bottom: 1px solid var(--border-hairline);
   flex: none;
+  position: relative;
+  z-index: 2;
 }
 .bar .mark { display: inline-flex; }
 .bar .home-link { text-decoration: none; border-radius: var(--radius-sm); }
@@ -129,7 +143,7 @@ html[data-retro="on"] body {
 .dot.stale { background: var(--status-waiting); box-shadow: 0 0 0 3px var(--status-waiting-soft); }
 .dot.down  { background: var(--status-failed); box-shadow: 0 0 0 3px var(--status-failed-soft); }
 
-/* --- view container --- */
+/* --- plane 3: the workspace (sunken; cards lift off it) --- */
 .view {
   flex: 1;
   min-height: 0;
@@ -285,15 +299,18 @@ html[data-retro="on"] body {
   border-radius: var(--radius-lg);
 }
 
-/* per-agent dashboard: run-control header */
+/* --- plane 2: context chrome (what you are acting on) --- */
 .agent-ctl {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 18px;
+  padding: 0 20px;
+  height: 48px;
   background: var(--surface-card);
   border-bottom: 1px solid var(--border-hairline);
   flex: none;
+  position: relative;
+  z-index: 1;
 }
 .agent-ctl-name {
   font-family: var(--font-mono);
@@ -368,7 +385,7 @@ html[data-retro="on"] body {
   width: 300px;
   flex: none;
   border-right: 1px solid var(--border-hairline);
-  background: var(--surface-band);
+  background: var(--surface-page);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
