@@ -137,49 +137,175 @@ never present as a bill.
 - *No approval Approve/Reject UX, no workflow-trigger pause* — cut with
   their flows; Resume on a stalled run is the only workflow action.
 
-## Work plan
+**Design deltas from the implementation audit (2026-07-31, pre-approval):**
 
-Phase 1 — **run model + `GET /api/agents/{name}/runs`** (the enabler)
-- [ ] Persist a run record per monitor firing from the scheduler tick:
-      monitor name, started/ended, outcome (`notified` | `quiet` |
-      `failed` + reason), runner session ref when one was spawned. This is
-      the only new runtime write in the plan; today's single overwritten
-      `last_run` timestamp cannot back the table.
-- [ ] Server-side merge of sessions + workflow runs + monitor runs into one
-      run shape (`status`, `title`, `origin`, `started_at`, `duration`,
-      `tokens`, `est_cost`, `error`), newest first, with a status filter
-      param and an explicit cap + `truncated` flag.
-- [ ] Surface per-run token totals and est cost from `model_usage` (stop
-      dropping it in the projections).
+- **Session-less runs open a Details slab, not a Transcript.** Cached
+  script-cache monitor ticks and spawn-failed monitor runs have no session
+  and therefore no transcript. Their row action is **Details**: the run
+  record (outcome, reason, timings) plus the monitor definition, in the
+  dark slab. The prototype already hints at this ("Details" on the
+  spawn-failed row); it is now the rule: rows with a session get
+  Transcript, rows without get Details.
+- **Start-failure state.** `POST .../start` can 409 with a preflight
+  report. The strip renders that report inline under the STOPPED band
+  (mono, error hue) instead of failing silently. (Not in the prototype;
+  build to the strip's existing visual grammar.)
+- **Resume confirms.** `workflows resume` force-resumes the suspended
+  step — on an `await: approval` gate that proceeds as if approved.
+  Resume therefore asks a one-line native confirm naming the awaited
+  event before firing.
+- **Edit design is an action, not a static href.** It calls
+  `POST /api/setup/open` for the team and navigates to the returned URL
+  (the setup mount is per-session; a hardcoded `/setup/<slot>` link is
+  not guaranteed to resolve).
+- **The PROTO state pill is prototype-only chrome** and is not built.
 
-Phase 2 — **state band backend**
-- [ ] Proxy the manager health probe into `LocalRuntime.health_summary`
-      (read `run/state/manager-health.port`, call `/health`, fall back to
-      the pidfile view) → tri-state `running` / `stopped` /
-      `not_responding` with a human-readable detail line.
+## Interaction validity audit (2026-07-31)
 
-Phase 3 — **the page** (replaces the current agent view panels + chat)
-- [ ] Status band with in-band recovery actions (start/stop/restart
-      endpoints already exist).
-- [ ] Identity header with SAVED and ABOUT popovers (needs a small
-      `GET .../overview` from `Config.load` + `discover_roles` +
-      `agent.md`).
-- [ ] Runs table with tabs, origin sub-lines, error notes, per-run actions.
-- [ ] Transcript slab fed by an enriched transcript source (timestamps +
-      tool-call lines; the CLI `transcript show` path / `history.db`
-      already have them — `/messages`' role+text projection does not).
+Every interaction on the page, audited against the working tree. Rule:
+an interaction ships only if its backing is **exists** or **planned
+below**; anything else was cut (see Design deltas above and Non-goals).
 
-Phase 4 — **savings**
-- [ ] SAVED chip + popover from `CostSummary` (recorded, estimated,
-      `tokens_by_model`) + aggregated script-cache savings from
-      `run/state/scripts/*.state.json`.
+| # | Interaction | Backing | Verdict |
+|---|---|---|---|
+| 1 | Stop / Restart (strip, running) | `POST .../stop` / `.../restart` exist (`webapp/server.py:183,187`) | **valid** |
+| 2 | Start agent (stopped strip) | `POST .../start` exists; 409 → preflight report | **valid** — must render the 409 report (Design deltas) |
+| 3 | NOT RESPONDING state + detail | manager health probe exists (`manager_health.py`), not proxied | **valid** — U3 builds the proxy |
+| 4 | Strip telemetry segments | registry `SessionEntry` (`started_at`, `last_activity`), pidfile; stopped-state SINCE/EXIT/WAS UP from the last manager terminal record | **valid, best-effort** — a segment with no data is omitted, never faked |
+| 5 | SAVED hover popover | `GET .../spend` exists (recorded + estimated + `tokens_by_model`); script-cache savings needs a small fold | **valid** — U4 extends |
+| 6 | ABOUT hover popover | `Config.load` / `discover_roles` / `agent.md` on disk; no endpoint | **valid** — U4 adds `GET .../overview` |
+| 7 | Edit design | `POST /api/setup/open` exists, returns URL | **valid** — wired as an action (Design deltas) |
+| 8 | Tabs ALL/RUNNING/FAILED + counts | `GET .../runs` (U2) | **valid** |
+| 9 | Row click → Transcript (session-backed runs) | session transcripts exist (`chat_history.py`, `history.db`); need timestamps + tool lines | **valid** — U5 enriches |
+| 10 | Open (live run) → live transcript | same source, polled | **valid** |
+| 11 | Row click → Details (session-less runs) | monitor run record (U1) + `MonitorRegistry` definition | **valid** — replaces Transcript for these rows |
+| 12 | Resume (stalled workflow run) | `workflows resume` logic exists in CLI; no endpoint | **valid** — U6 adds `POST .../workflows/runs/{id}/resume` + confirm |
+| 13 | PROTO state pill | prototype-only | **cut** — not built |
+| 14 | Hover popovers on touch | hover-only is dead on touch | **valid** — tap toggles too (CSS `:hover` + click handler) |
 
-Verification: this is admin/read-model surface — brain-agnostic, so the
-stub-brain e2e suffices per the repo's two-brains criterion; a claude leg is
-not required. Frontend changes follow `docs/FRONTEND_QA.md`. Exercise the
-real flow with an isolated `BOBI_HOME`: seed sessions/workflow runs/monitor
-state, kill the health probe to see `NOT RESPONDING`, stop the agent to see
-`STOPPED` + start recovery.
+## Work plan — stacked units
+
+**Branch strategy.** The plan PR (`plan/single-agent-view` → `main`) lands
+first. Implementation stacks on an integration branch
+**`feat/single-agent-view`** cut fresh from `main`:
+
+- Each unit below is one dispatch issue (`[single-agent-view] U<n> — …`)
+  and one PR **into the integration branch** (small, reviewable, CI-green
+  at every step; unit branches `feat/single-agent-view-u<n>`).
+- Units are ordered so each is testable the moment it lands: backend
+  reads first, page after, wiring last. Rebase the integration branch on
+  `main` between units as needed.
+- When U8 lands, the integration branch IS the finished page: run the
+  Manual QA script below against it. The final
+  `feat/single-agent-view` → `main` PR carries the already-reviewed
+  commits plus the recorded QA evidence.
+- Execution follows `skills/checklist-execution.md`: this section is the
+  committed checklist; flip markers per unit inside its PR.
+
+**U1 — monitor run records** *(Phase 1 enabler; the only new runtime write)*
+- [ ] Scheduler persists a run record per firing: monitor name,
+      started/ended, outcome (`notified` | `quiet` | `failed` + reason),
+      script-cache mode, runner session ref when one spawned. Failed
+      publishes (`pending_publish`) count as not-yet-`notified`.
+- [ ] Bounded retention (cap per monitor); unit tests over the fold.
+- Testable: records appear under `run/state/` for a live monitor tick.
+
+**U2 — unified runs read model + `GET /api/agents/{name}/runs`** *(Phase 1)*
+- [ ] Merge sessions + workflow runs + U1 monitor records into one run
+      shape: `status` (`running|idle|done|failed|crashed|stalled`),
+      `title`, `origin`, `started_at`, `duration`, `tokens`, `est_cost`,
+      `error`, `session_id?`, `run_id?`. Newest first; `status=` filter;
+      explicit cap + `truncated`.
+- [ ] `stalled` = suspended past threshold (default 24h, constant).
+- [ ] Per-run tokens/est cost surfaced from `model_usage`.
+- Testable: `curl` returns the merged list for a seeded home.
+
+**U3 — health tri-state + strip telemetry** *(Phase 2)*
+- [ ] `LocalRuntime.health_summary` proxies the manager probe
+      (`run/state/manager-health.port` → `GET /health`, fall back to
+      pidfile view) → `running` / `stopped` / `not_responding` + detail
+      + segments (uptime, live count, last activity; stopped:
+      since/exit/was-up).
+- Testable: `curl .../health` while stopping the agent / SIGSTOPping the
+  manager shows all three states.
+
+**U4 — overview + savings reads** *(Phases 3+4 data)*
+- [ ] `GET .../overview`: description, roles, chat channel, services,
+      automation counts, brain/model, spend cap (`Config.load`,
+      `discover_roles`, `agent.md`).
+- [ ] Spend payload gains aggregated script-cache savings
+      (`run/state/scripts/*.state.json`).
+- Testable: `curl` both; values match `agent.yaml` / `bobi agent costs`.
+
+**U5 — transcript + details reads** *(Phase 3 data)*
+- [ ] Transcript endpoint variant with timestamps + tool-call lines
+      (reuse the `transcript show` / `history.db` path; keep `/messages`
+      untouched for chat compatibility).
+- [ ] Details payload for session-less runs: run record + monitor
+      definition YAML.
+- Testable: `curl` a session transcript and a cached-tick's details.
+
+**U6 — runs write action** *(Phase 3 data)*
+- [ ] `POST .../workflows/runs/{run_id}/resume` (reuse CLI resume logic;
+      single-winner claim semantics preserved; 409 when not resumable).
+- Testable: resume a seeded suspended run via `curl`; status flips.
+
+**U7 — the page** *(Phase 3 UI — replaces the current agent view)*
+- [ ] Status strip (three states, glow semantics, preflight-report
+      failure state) + start/stop/restart wiring.
+- [ ] Identity header: SAVED + ABOUT popovers (hover + tap), Edit design
+      via `/api/setup/open`.
+- [ ] Runs table: tabs + counts, origin sub-lines, outcome/error notes,
+      polling (reuse existing 4s/10s + backoff pattern).
+- [ ] Transcript/Details dark slab (row click; Esc closes).
+- [ ] Resume button + confirm.
+- [ ] Remove the replaced panels (needs-attention, health, spend, roster,
+      session log, chat column) and their dead endpoints' UI callers.
+- Testable: the full page against a live seeded agent.
+
+**U8 — QA seed + docs + polish** *(acceptance enabler)*
+- [ ] A dev seed script that populates an isolated `BOBI_HOME` with every
+      state the page renders: completed/failed/crashed sessions, a live
+      run, completed + stalled workflow runs, monitor records in all
+      three outcomes, script-cache state, spend history.
+- [ ] Docs updated in-PR: `README.md` (agent page description),
+      `docs/MONITORS.md` (run records), `DESIGN.md` (agent view section
+      supersedes the old panel description).
+- [ ] Empty states: zero runs, zero failures, fresh agent.
+- Testable: the Manual QA script passes end-to-end.
+
+Verification bar: brain-agnostic admin/read-model surface — stub-brain
+e2e suffices per the repo's two-brains criterion. Frontend work follows
+`docs/FRONTEND_QA.md`.
+
+## Manual QA script (final acceptance, run on `feat/single-agent-view`)
+
+Seed via the U8 script into an isolated `BOBI_HOME`, start the agent and
+`bobi app`, then verify every audited interaction:
+
+1. **State machine:** page shows RUNNING with real uptime/pid/live-count/
+   last-activity → Stop → STOPPED strip (hollow lamp, no amber edge,
+   SINCE/EXIT/WAS UP) → Start → RUNNING again → `kill -STOP` the manager
+   → NOT RESPONDING (red, probe detail) → Restart recovers.
+2. **Preflight failure:** break a required credential → Start → the 409
+   report renders under the strip; fix → Start succeeds.
+3. **Tabs:** ALL/RUNNING/FAILED counts match the seed; FAILED contains
+   the crashed session, the failed monitor run, and the stalled workflow.
+4. **Drill-downs:** completed session row → transcript slab with
+   timestamps + tool lines; cached monitor row → Details slab
+   (definition + outcome); spawn-failed row → Details with reason; live
+   row → Open shows a growing transcript.
+5. **Resume:** stalled run → Resume → confirm names the awaited event →
+   run leaves FAILED, completes or re-waits; a second Resume 409s
+   gracefully.
+6. **Popovers:** SAVED matches `bobi agent costs` (+ script-cache line);
+   ABOUT matches `agent.yaml`/roles; both open on hover and on tap.
+7. **Edit design:** lands in the setup editor for this team; Back
+   returns to a live page.
+8. **Empty states:** fresh agent renders sanely (no runs, no failures).
+9. **Polling:** leave the page open through a monitor tick — the new run
+   appears without reload; stop the app daemon — the page surfaces the
+   disconnect rather than freezing silently.
 
 ## Non-goals
 
