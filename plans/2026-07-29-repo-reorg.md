@@ -189,7 +189,7 @@ Depends on A. **Two repos.** Public: repoint the Worker's core dependency to `"*
 
 **→ Gate R: cut a public release carrying Phases 1–2** (the wheel now ships `bobi/supervisor`). Release work follows the runbook as always — this plan just marks the dependency. **Open question for the release lane:** whether the wheel/sdist should also carry the Worker sources. The draft asserted they would, but the wheel's event-server payload is an explicit force-include list (`pyproject.toml:70-73` + `hatch_build.py`) built to ship the *embedded local server*, and nothing in the product runs the Worker from `site-packages` — a self-hoster deploys it with `wrangler` from a clone. Default to NOT adding them (smaller wheel, no new build-hook surface); the runbook points at the repo. Decide explicitly at the release, either way.
 
-### Phase 6 — Reference image to public (Lane 2) `[ ]`
+### Phase 6 — Reference image to public (Lane 2) `[wip]`
 
 Gated on R. **Two repos.** Public: move Dockerfile + `docker/` + `release-image.yml` + `container.yml`; delete the `BOBI_SUPERVISOR_SRC` machinery and rewrite the entrypoint's exec + guard lines onto `bobi agent <name> supervise`; keep the `TEAM_DEPS` hook (D6); migrate the generic container-contract docs; write the reference-image runbook (PID-1 `--init` documented). Private: delete the orphaned force-includes (`bobi_deploy/pyproject.toml:50-62`) and retire `resolve_assets`' context staging + its source-checkout branch (D7). Grant the public repo write access to the `ghcr.io/moda-labs/bobi` package, then prove the new home with a dispatch dry-run.
 
@@ -237,6 +237,33 @@ Every lane is `concurrent` mode: each spans more than one repo, so plan markers 
 **Dispatch (decided 2026-07-30, Zach): no dispatch issues.** Split cut none. Lane 1 is worked directly in an interactive session against this plan, which is the spec; Lanes 2 and 3 are cut only once their predecessor lands. The reason not to file them ahead: filing an issue in `bobi-agent` or `moda-agents` dispatches the eng-team bot, and Lane 2's real blocker is **Gate R — a hand-run public release with no issue number**, so a `depends on #N` line cannot express it and the bot's Ready gate would bounce the issue on a dependency it can't see. Marker mode is unchanged (`concurrent`, since Lane 1 spans two repos): markers flip as status-only commits to `bobi-agent`'s main referencing the code PR, never inside the feature branch.
 
 ## Amendments
+
+### 2026-07-31 — Lane 2 built: four scope corrections, and the private-side deletion narrowed to protect the fleet
+
+Lane 2 is built and in review: `bobi-agent#898` (reference image to public) and `bobi-deploy#49` (engine decoupled from the recipe). Gates (a) and (c) are closed; gate (b) is not, for two reasons recorded below.
+
+**Gate (a) — the deploy wheel still builds.** Verified: it builds after the force-include deletion, and its `_deploy` payload now carries the three Fly scripts and zero `Dockerfile`/`docker` entries. This is the failure D7 exists to prevent, so it was checked rather than assumed.
+
+**Gate (c) — a supervised container.** Verified locally rather than against a published tag (see gate (b)): a wheel-mode image built from the new layout, run with `docker run --init`, produces the tree `docker-init`(pid 1) → `bobi agent smoke supervise`(7) → manager(98) → `claude`(126), with no `bobi-supervisor` shim anywhere in the image. SIGTERM shuts it down through `service.py`'s handler, exit 0 in 0.66s. The 14 container contract tests pass against that image.
+
+**Gate (b) — the dispatch dry-run is blocked twice over, and one blocker was misdiagnosed.** `workflow_dispatch` only registers from the default branch, so the dry-run cannot run until `#898` lands. Separately, the GHCR grant recorded in the Solution section is **still outstanding**: the `ghcr.io/moda-labs/bobi` package's `repository` field now reads `moda-labs/bobi-agent`, which looks like the grant but is not — it comes from the `org.opencontainers.image.source` label `release-image.yml` already sets. The label links a package to a repo for display; it confers no write access. Do not read that field as evidence the prerequisite is met.
+
+**Four corrections to the approved text, each verified against the real trees.**
+
+1. **`docker/webapp.Dockerfile` does not move.** Phase 6 says "move `docker/`". Taken literally that publishes the hosted fleet-admin image, which `COPY`s private `bobi_deploy` (not on PyPI), and breaks `fly.webapp.toml`, `deploy-webapp.yml`, `docs/HOSTED_WEBAPP_DEPLOY.md`, and `bobi_deploy/tests/test_webapp_deploy.py`. The end-state table already puts the hosted console in `moda-agents`; it moves in Phase 7.
+
+2. **`container.yml` drags files Phase 6 never names, and one of them must not go public.** The workflow depends on `tests/integration/test_container_image.py` (629 lines, stdlib-only — moved), `tests/integration/test_dep_bootstrap_e2e.py`, `scripts/build-team-images.sh`, and `bobi_deploy/tests/integration/test_bobi_build.py`. The last three stay private: `build-team-images.sh` is `registry.fly.io`/`flyctl` mechanics, the e2e hard-depends on it, and the `bobi build` integration drives the private engine. Same class of omission as Lane 1's finding 2 (the supervisor's tests).
+
+3. **`container.yml` was RED, not inert.** It had failed nightly since at least 2026-07-28 on `EventServerBuildError: Node.js 20 is required … found 'v22.23.1'` — the job has no `setup-node`. `bobi-deploy#48` fixed exactly this in `deploy-package.yml` and `worker-ci.yml` on 2026-07-31 and missed `container.yml`. Fixed in the move (decision 2026-07-31, Zach) so the workflow's first public run is green and the move's own CI is unambiguous.
+
+4. **`BOBI_BUILD=source` cannot build in either repo, and never could.** The Dockerfile advertises it as the default and `container.yml` lint-checked it, but `.dockerignore` excludes both `.git` and `event-server/dist`, so `hatch_build.py`'s `initialize` finds neither a VCS checkout nor a prebuilt artifact and takes the rebuild path — which needs Node inside `python:3.11-slim`, where there is none. `docker build --check` never exposed it because `--check` resolves the stage graph without executing RUN steps. CI and `docs/REFERENCE_IMAGE.md` now use `wheel`/`pypi` explicitly and the runbook says plainly that `source` is unsupported. Left broken rather than fixed: adding Node to the builder stage is a redesign this plan forbids in flight. Worth a follow-up, since the Dockerfile header still advertises it to a reader.
+
+**The private-side deletion is narrower than the plan says, to avoid stranding the fleet between lanes.** Phase 6 as written deletes `bobi_deploy/pyproject.toml:50-62` wholesale and retires `resolve_assets`' context staging *and* its source-checkout branch. Executing that literally breaks moda's fleet: `moda-agents/deploy-agent-teams.yml` checks `bobi-deploy` out at `BOBI_DEPLOY_REF` and resolves **source mode**, and the replacement for it — the three-line `FROM ghcr.io/moda-labs/bobi:<version>` overlay — does not land until Phase 7. The mechanism would be removed one lane before its replacement exists. So Lane 2 deletes only the five recipe force-includes (`../Dockerfile`, the three `../docker/*.sh`, `src/bobi_deploy/supervisor`) and the binary-mode staging; the three `../scripts/*.sh` force-includes and the source-checkout branch stay, along with `bobi-deploy`'s own `Dockerfile`, until Phase 7 retires them together. The pinned `BOBI_DEPLOY_REF` insulates the fleet from Lane 2 regardless, so this is belt-and-braces, not a live save.
+
+The cost is a two-copy window on the Dockerfile — `bobi-deploy`'s copy still carries the shim and still builds the fleet, while the public copy is canonical — the same shape as the Worker freeze recorded above. Phase 7 closes it. Unlike the Worker, no freeze is needed: the private copy is pinned and the public one is not yet consumed by anything.
+
+**Also noted, not acted on.** `bobi-agent` has no `release` environment (only `pypi`), which `release-image.yml` references; GitHub will auto-create it unprotected on first run, so the "zero-cost until required reviewers" comment holds but the reviewers are not there. And publishing the image resolves a standing `bobi-deploy` cut-aftermath item for free: `ubuntu-24.04-arm` is a free standard runner on public repos, where in the private repo it required a paid larger-runner.
+
 
 ### 2026-07-31 — Gate R closed at 0.51.1; the roll surfaced a build-secret bug that took eng-team down
 
