@@ -1,0 +1,62 @@
+/* Bobi motion. One easing curve for the entire system. Motion is slow,
+   confident, and diegetic: things arrive, wires draw, signals travel a path.
+   Nothing bounces, nothing springs, nothing spins as a loader for decoration.
+
+   Every animation below MUST be disabled under prefers-reduced-motion, and
+   motion-only elements (ping rings, traveling dots, wire flows) are HIDDEN at
+   rest rather than frozen — a parked glowing dot reads as a rendering bug. */
+
+:root {
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 200ms;    /* hover, color, press */
+  --dur-mid: 300ms;     /* card lift, rotate, tab switch */
+  --dur-slow: 600ms;    /* node arrival */
+  --dur-draw: 700ms;    /* wire draw */
+  --dur-reveal: 1050ms; /* scroll reveal */
+  --dur-rise: 800ms;    /* hero entrance */
+
+  --stagger-node: 300ms;  /* between figure nodes in a sequence */
+  --stagger-card: 80ms;   /* between sibling cards in a grid */
+  --stagger-faq: 60ms;
+}
+
+/* hero entrance cascade — stagger siblings with inline animation-delay */
+@keyframes bobi-rise { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: none; } }
+.bobi-rise { animation: bobi-rise var(--dur-rise) var(--ease) both; }
+
+/* figure node arrival */
+@keyframes bobi-node-in { from { opacity: 0; transform: translateY(12px) scale(0.97); } to { opacity: 1; transform: none; } }
+
+/* the violet dashed flow streaming along an active wire */
+@keyframes bobi-dash-flow { to { stroke-dashoffset: -12; } }
+
+/* a solid live dot breathing — constant scale, opacity 0.55 → 1. Ported from
+   the source's mds-glow. Use this for status dots; bobi-ping is for RINGS only
+   (it scales from 0.25 and fades to 0, which erases a solid dot). */
+@keyframes bobi-glow { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+
+/* ping ring radiating off a live node — expanding + fading, rings only */
+@keyframes bobi-ping { 0% { transform: scale(0.25); opacity: 0.8; } 75%, 100% { transform: scale(1); opacity: 0; } }
+
+/* a signal traveling an offset-path */
+@keyframes bobi-travel {
+  0% { offset-distance: 0%; opacity: 0; }
+  8% { opacity: 1; }
+  88% { opacity: 1; }
+  100% { offset-distance: 100%; opacity: 0; }
+}
+
+/* slow ambient drift for the hero constellation */
+@keyframes bobi-drift { from { transform: translate(0, 0); } to { transform: translate(-10px, 6px); } }
+
+/* accordion answer reveal (close is instant — native details) */
+@keyframes bobi-open { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .bobi-rise { animation: none; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

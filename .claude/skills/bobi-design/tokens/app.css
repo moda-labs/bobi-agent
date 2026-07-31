@@ -1,0 +1,128 @@
+/* ============================================================================
+   BOBI APP LAYER — interaction states, type ladder, and density for product UI.
+
+   Why this file exists: components style layout inline, but :hover,
+   :focus-visible, and :active CANNOT be expressed inline. Without them a dense
+   app feels dead under the cursor and is unusable by keyboard — the two fastest
+   ways an interface reads unfinished. Every interactive primitive in
+   components/product and components/core hooks into a class here.
+
+   Scoped to .bobi-app so marketing surfaces are untouched.
+   ========================================================================= */
+
+.bobi-app {
+  /* ---- type ladder. Seven steps, no half-pixels, each with a job. ---- */
+  --app-11: 11px;    /* column headers, meta, key hints */
+  --app-12: 12px;    /* mono data: ids, paths, timestamps */
+  --app-13: 13px;    /* secondary body, card copy */
+  --app-14: 14px;    /* default UI text, nav, row titles, inputs */
+  --app-16: 16px;    /* card headings */
+  --app-20: 20px;    /* page title */
+  --app-26: 26px;    /* metric value */
+
+  /* ---- density: 4px grid ---- */
+  --app-gap-1: 4px;
+  --app-gap-2: 8px;
+  --app-gap-3: 12px;
+  --app-gap-4: 16px;
+  --app-gap-5: 20px;
+  --app-gap-6: 24px;
+  --app-row-h: 44px;      /* table row + nav item hit height */
+  --app-control-h: 36px;  /* input, button, icon button */
+}
+
+/* ---------------------------------------------------------------- focus
+   One visible focus treatment for the whole app. :focus-visible only, so mouse
+   users never see a ring but keyboard users always do. */
+.bobi-app :focus-visible,
+.bobi-app .bobi-focus:focus-visible {
+  outline: 2px solid var(--bobi-acc);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* ---------------------------------------------------------------- rows */
+.bobi-app .bobi-row {
+  background: transparent;
+  transition: background var(--dur-fast) ease-out;
+}
+.bobi-app .bobi-row:hover { background: var(--surface-hover); }
+.bobi-app .bobi-row[data-selected="true"] {
+  background: var(--surface-selected);
+  box-shadow: inset 2px 0 0 var(--bobi-acc);
+}
+.bobi-app .bobi-row[data-selected="true"]:hover {
+  background: color-mix(in srgb, var(--bobi-acc) 9%, var(--bobi-white));
+}
+/* the chevron that appears on row hover — an affordance, not decoration */
+.bobi-app .bobi-row .bobi-row-go { opacity: 0; transition: opacity var(--dur-fast) ease-out; }
+.bobi-app .bobi-row:hover .bobi-row-go,
+.bobi-app .bobi-row:focus-visible .bobi-row-go { opacity: 1; }
+
+/* ---------------------------------------------------------------- nav */
+.bobi-app .bobi-nav-item {
+  transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
+}
+.bobi-app .bobi-nav-item:hover { background: var(--surface-hover); color: var(--bobi-ink); }
+.bobi-app .bobi-nav-item[aria-current="page"] { background: var(--surface-inset); color: var(--bobi-ink); }
+.bobi-app .bobi-nav-item[aria-current="page"]:hover { background: var(--surface-inset); }
+
+/* ---------------------------------------------------------------- buttons
+   Real pseudo-states replace the JS transform hack. */
+.bobi-btn {
+  transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out,
+              box-shadow var(--dur-fast) ease-out, transform var(--dur-fast) ease-out;
+}
+.bobi-btn:not(:disabled):hover { filter: brightness(0.96); }
+.bobi-btn:not(:disabled):active { transform: scale(0.98); }
+.bobi-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+/* ghost/quiet lift on hover instead of darkening */
+.bobi-btn[data-variant="ghost"]:not(:disabled):hover,
+.bobi-btn[data-variant="quiet"]:not(:disabled):hover {
+  filter: none;
+  background: var(--surface-inset);
+  border-color: var(--border-strong);
+}
+.bobi-app .bobi-icon-btn:hover { background: var(--surface-inset); }
+
+/* ---------------------------------------------------------------- tabs */
+.bobi-app .bobi-tab {
+  box-shadow: inset 0 -2px 0 transparent;
+  transition: color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
+}
+.bobi-app .bobi-tab:hover { color: var(--bobi-ink); box-shadow: inset 0 -2px 0 var(--border-strong); }
+.bobi-app .bobi-tab[aria-selected="true"] { color: var(--bobi-ink); box-shadow: inset 0 -2px 0 var(--bobi-acc); }
+
+/* ---------------------------------------------------------------- fields
+   The whole field lights up, not just the inner <input>. */
+.bobi-app .bobi-field {
+  transition: border-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
+}
+.bobi-app .bobi-field:hover { border-color: var(--border-strong); }
+.bobi-app .bobi-field:focus-within {
+  border-color: var(--bobi-acc);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bobi-acc) 14%, transparent);
+}
+.bobi-app .bobi-field:focus-within :focus-visible { outline: none; }
+
+/* ---------------------------------------------------------------- cards */
+.bobi-app .bobi-card-interactive {
+  transition: box-shadow var(--dur-mid) ease-out, border-color var(--dur-mid) ease-out;
+}
+.bobi-app .bobi-card-interactive:hover {
+  box-shadow: var(--elev-3);
+  border-color: var(--border-strong);
+}
+
+/* ---------------------------------------------------------------- file rows */
+.bobi-app .bobi-file-row { transition: background var(--dur-fast) ease-out; }
+.bobi-app .bobi-file-row:hover { background: var(--surface-hover); }
+.bobi-app .bobi-file-row[data-current="true"] { background: var(--surface-inset); }
+
+/* ---------------------------------------------------------------- switch */
+.bobi-app .bobi-switch { transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out; }
+.bobi-app .bobi-switch:hover { border-color: var(--bobi-acc); }
+
+@media (prefers-reduced-motion: reduce) {
+  .bobi-app *, .bobi-btn { transition: none !important; }
+}
