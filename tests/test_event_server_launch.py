@@ -855,3 +855,42 @@ def test_slack_registration_never_logs_app_token_on_failure(
 
     assert result == []
     assert app_token not in caplog.text
+
+
+class TestDependencyTreeProblemTriage:
+    """`npm ls` problem triage: only states that can actually break a build
+    block one.
+
+    Regression guard for the repo reorg (Lane 1). Adding the Cloudflare Worker
+    as a third workspace put its OPTIONAL dev dependencies in the tree, and npm
+    10.8.2 - the npm bundled with Node 20, which CI runs - reports them as
+    `extraneous` from the very same lockfile npm 11 calls clean. That made the
+    embedded local server unlaunchable on Node 20 over packages it never loads.
+    """
+
+    def test_extraneous_is_not_fatal(self):
+        assert es._fatal_tree_problems([
+            "extraneous: @emnapi/runtime@1.11.3 /es/node_modules/@emnapi/runtime",
+            "extraneous: tslib@2.8.1 /es/node_modules/tslib",
+        ]) == []
+
+    def test_missing_and_invalid_stay_fatal(self):
+        """The half that must keep biting - a build really does break here."""
+        fatal = es._fatal_tree_problems([
+            "extraneous: tslib@2.8.1 /es/node_modules/tslib",
+            "missing: esbuild@0.25.0, required by event-server@0.0.0",
+            "invalid: ws@1.0.0 /es/node_modules/ws",
+        ])
+        assert len(fatal) == 2
+        assert any(p.startswith("missing:") for p in fatal)
+        assert any(p.startswith("invalid:") for p in fatal)
+
+    def test_no_problems_is_empty(self):
+        assert es._fatal_tree_problems(None) == []
+        assert es._fatal_tree_problems([]) == []
+
+    def test_unrecognized_payload_is_reported_not_swallowed(self):
+        """An unknown shape must not read as 'no problems' - that would be a
+        guard that silently stops guarding if npm changes its output."""
+        assert es._fatal_tree_problems({"weird": True})
+        assert es._fatal_tree_problems([{"not": "a string"}])

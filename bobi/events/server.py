@@ -140,6 +140,39 @@ def _read_dependency_stamp(es_dir: Path) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+# `npm ls` problem classes that actually mean the tree cannot build.
+#
+# EXTRANEOUS IS DELIBERATELY NOT ONE OF THEM. It means "installed but not
+# reachable from the lockfile graph" - a superset of what is needed, which no
+# build can trip over. It also is not stable across npm versions: npm 10.8.2
+# (the npm bundled with Node 20, which CI runs) reports the Worker workspace's
+# OPTIONAL dev dependencies - `@emnapi/runtime`, `tslib` - as extraneous from
+# the same lockfile that npm 11 reports as clean. Treating that as fatal made
+# the embedded local server unlaunchable on Node 20 for a reason unrelated to
+# the local server, which pulls in none of those packages.
+#
+# `missing` and `invalid` stay fatal: those are the states where a build
+# genuinely reaches for something that is not there or is the wrong version.
+_FATAL_TREE_PROBLEM_PREFIXES = ("missing:", "invalid:")
+
+
+def _fatal_tree_problems(problems: object) -> list[str]:
+    """The subset of `npm ls` problems that must block a source build."""
+    if not problems:
+        return []
+    if isinstance(problems, str):
+        problems = [problems]
+    if not isinstance(problems, (list, tuple)):
+        # An unrecognized shape is not something to reason about - fail loudly
+        # rather than silently treating an unknown report as "no problems".
+        return [f"unrecognized npm ls problems payload: {problems!r}"]
+    return [
+        p for p in problems
+        if not isinstance(p, str)
+        or p.strip().lower().startswith(_FATAL_TREE_PROBLEM_PREFIXES)
+    ]
+
+
 def _dependency_tree(es_dir: Path) -> dict:
     result = _run_npm(["npm", "ls", "--all", "--json", "--offline"], es_dir)
     try:
@@ -150,7 +183,7 @@ def _dependency_tree(es_dir: Path) -> dict:
         ) from exc
     if not isinstance(tree, dict):
         raise RuntimeError(f"npm ls returned a non-object dependency tree in {es_dir}")
-    problems = tree.get("problems")
+    problems = _fatal_tree_problems(tree.get("problems"))
     if problems:
         raise RuntimeError(f"npm dependency tree is invalid in {es_dir}: {problems}")
     return tree
