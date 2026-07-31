@@ -128,10 +128,46 @@ class TestBobiNeverImportsBobiDeploy:
         )
 
 
-# Container-build tooling tokens that mark deploy IP. The scan is over EVERY
-# file under bobi/ (not just .py) so a shell script or template cannot dodge
-# it. Each allowlisted file carries the dual-use reason that keeps it public.
-_CONTAINER_TOKEN_RE = re.compile(r"\b(docker|dockerfile|flyctl)\b", re.IGNORECASE)
+# Container-build ACTIONS. Restated by the repo reorg (Lane 1, Phase 2).
+#
+# This guard used to ban the words `docker|dockerfile|flyctl` anywhere under
+# bobi/. That encoded #707's premise - "the image engine is deploy IP; the
+# public product builds no docker images" - which the reorg reverses: the
+# reference image recipe becomes public and the supervisor sidecar ships in
+# this package, naming container runtimes as ordinary runtime values
+# (`identity.py` returns the literal "docker" as a platform label, and several
+# comments describe how docker-entrypoint.sh behaves).
+#
+# Bolting exceptions onto a word-ban would have hollowed it out, so the guard
+# is restated to ban what actually matters: code that ASSEMBLES A BUILD CONTEXT
+# OR INVOKES a container/deploy CLI. Merely naming a runtime is permitted. That
+# is a narrower literal match but a stronger property - `subprocess.run(
+# ["docker", "build", ...])` was never caught by the old prose regex at all,
+# and is caught now by the AST pass below.
+#
+# The regex scan is over EVERY file under bobi/ (not just .py) so a shell
+# script or template cannot dodge it; the AST pass adds call-shape detection
+# that no regex over split argv lists could do.
+_CONTAINER_BUILD_RE = re.compile(
+    r"""
+      \bdockerfile\b                                        # names a build recipe
+    | \bdocker\s+(?:build|buildx|push|compose|image|save|load)\b
+    | \bbuildx\b
+    | \bflyctl\b
+    | \bfly\s+deploy\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# argv[0] values that mean "a container/deploy CLI is being invoked".
+_CONTAINER_CLIS = {"docker", "podman", "nerdctl", "buildah", "flyctl"}
+
+# Call targets whose first argument is a command (or an argv list).
+_INVOKING_CALLS = {
+    "run", "Popen", "call", "check_call", "check_output",
+    "which", "execvp", "execv", "execvpe", "spawnvp",
+}
+
 CONTAINER_TOKEN_ALLOWLIST = {
     # Renders the team-deps hook script per the container contract (the
     # guide-dep bootstrap runs `python -m bobi.dep_bootstrap` INSIDE the
@@ -144,12 +180,44 @@ CONTAINER_TOKEN_ALLOWLIST = {
 }
 
 
+def _container_cli_invocations(tree: ast.AST) -> list[tuple[int, str]]:
+    """(lineno, cli) for every call that runs a container/deploy CLI.
+
+    Catches both argument shapes a build would use: a bare command
+    (``shutil.which("docker")``) and an argv list
+    (``subprocess.run(["docker", "build", ...])``). A string literal that is
+    merely a value - ``return "docker"`` as a platform label - is not a call
+    and is deliberately not flagged.
+    """
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        attr = func.attr if isinstance(func, ast.Attribute) else (
+            func.id if isinstance(func, ast.Name) else None
+        )
+        if attr not in _INVOKING_CALLS:
+            continue
+        first = node.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)):
+            first = first.elts[0] if first.elts else None
+        if (
+            isinstance(first, ast.Constant)
+            and isinstance(first.value, str)
+            and Path(first.value).name in _CONTAINER_CLIS
+        ):
+            found.append((node.lineno, Path(first.value).name))
+    return found
+
+
 class TestNoContainerBuildInPublicPackage:
-    """The image engine is deploy IP (#707): everything that assembles a
-    docker build context or invokes docker lives in the deploy plugin. New
-    container-build code cannot silently land public - either it belongs in
-    bobi_deploy/, or it is genuinely dual-use and gets an explicit allowlist
-    entry here with its reason."""
+    """The public package may NAME a container runtime; it may not BUILD for
+    one. Everything that assembles a build context or shells out to
+    docker/flyctl belongs in the deploy engine, whose job that is. New
+    container-build code cannot silently land here - either it moves to the
+    engine, or it is genuinely dual-use and gets an explicit allowlist entry
+    with its reason."""
 
     def _files(self):
         files = [f for f in sorted(BOBI_PACKAGE.rglob("*"))
@@ -157,7 +225,7 @@ class TestNoContainerBuildInPublicPackage:
         assert files, f"no files found under {BOBI_PACKAGE}"
         return files
 
-    def test_no_container_build_tokens(self):
+    def test_no_build_context_assembly(self):
         offenders = []
         for f in self._files():
             rel = str(f.relative_to(REPO_ROOT))
@@ -165,24 +233,41 @@ class TestNoContainerBuildInPublicPackage:
                 continue
             text = f.read_text(encoding="utf-8", errors="ignore")
             for lineno, line in enumerate(text.splitlines(), 1):
-                if _CONTAINER_TOKEN_RE.search(line):
+                if _CONTAINER_BUILD_RE.search(line):
                     offenders.append(f"{rel}:{lineno}: {line.strip()}")
         assert not offenders, (
-            "container-build tokens in the public package - move the code to "
-            "bobi_deploy/, or allowlist the file here with its dual-use "
-            "reason:\n" + "\n".join(offenders)
+            "the public package assembles a container build context - move it "
+            "to the deploy engine, or allowlist the file here with its "
+            "dual-use reason:\n" + "\n".join(offenders)
+        )
+
+    def test_no_container_cli_invocation(self):
+        """The half a regex cannot see: an argv list whose first element is a
+        container CLI. `subprocess.run(["docker", "build", "."])` splits the
+        command across list elements, so the line never contains the string
+        "docker build" that the scan above looks for."""
+        offenders = []
+        for py, tree in _parsed_bobi_modules():
+            rel = str(py.relative_to(REPO_ROOT))
+            if rel in CONTAINER_TOKEN_ALLOWLIST:
+                continue
+            for lineno, cli in _container_cli_invocations(tree):
+                offenders.append(f"{rel}:{lineno}: invokes {cli!r}")
+        assert not offenders, (
+            "the public package shells out to a container/deploy CLI - that is "
+            "the deploy engine's job:\n" + "\n".join(offenders)
         )
 
     def test_allowlist_entries_stay_justified(self):
         """Keep the allowlist honest in both directions: every entry must
-        still exist AND still contain a token - a stale entry is a hole the
-        next offender hides in."""
+        still exist AND still trip the scan - a stale entry is a hole the next
+        offender hides in."""
         for rel in sorted(CONTAINER_TOKEN_ALLOWLIST):
             f = REPO_ROOT / rel
             assert f.is_file(), f"allowlisted {rel} no longer exists - remove it"
-            assert _CONTAINER_TOKEN_RE.search(
+            assert _CONTAINER_BUILD_RE.search(
                 f.read_text(encoding="utf-8", errors="ignore")
-            ), f"allowlisted {rel} has no container tokens left - remove it"
+            ), f"allowlisted {rel} no longer assembles a build context - remove it"
 
 
 # Every compile unit wrangler/tsc would accept from src/ (allowJs + jsx are
