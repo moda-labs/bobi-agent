@@ -17,12 +17,12 @@
 > ## AMENDMENT 2026-07-31 — reskinned onto the Bobi design system
 >
 > The setup UI and the `bobi app` web UI were both reskinned onto the **Bobi
-> design system** (`.claude/skills/bobi-design/`), which was derived from the
+> design system** (`docs/design-system/`), which was derived from the
 > shipping `buildmoda.ai/bobi` surface. Bobi now has one visual language across
 > marketing, product, and docs, and this file is no longer the origin of the
 > visual tokens — it records the setup UI's **UX** and the local deltas.
 >
-> **The visual source of truth is now `.claude/skills/bobi-design/README.md`.**
+> **The visual source of truth is now `docs/design-system/README.md`.**
 > Tokens live in `bobi/webui_common/static/tokens.css`, a vanilla-CSS port of
 > that system.
 >
@@ -124,7 +124,7 @@ problem (how fast/smart the reflection is) — see the digestion-prompt section.
 ## Color
 
 **Revised 2026-07-31.** The hexes below are the live values, ported from
-`.claude/skills/bobi-design/tokens/colors.css`. The named tokens are unchanged,
+`docs/design-system/tokens/colors.css`. The named tokens are unchanged,
 so `--bg` / `--surface` / `--text` still resolve — they now point at the brand
 palette. The full ramp lives in `bobi/webui_common/static/tokens.css`.
 
@@ -164,7 +164,7 @@ decoration. Decorative highlights — eyebrows, indices, add-affordances, hover
 warmth — are **clay**.
 
 ```css
-/* the live values; canonical source is .claude/skills/bobi-design/tokens/colors.css */
+/* the live values; canonical source is docs/design-system/tokens/colors.css */
 --bobi-acc: oklch(0.53 0.17 285);         /* on light surfaces */
 --bobi-acc-bright: oklch(0.70 0.14 285);  /* on dark surfaces, glyph dots */
 --bobi-clay: #D67B55;                     /* decoration, indices, highlights */
@@ -607,7 +607,7 @@ during the transition.
 | 2026-06-16 | **Real Venn catalog via the `venn` CLI** (CLI-first, REST fallback); non-Venn services → custom + authored `tools/*.md` | stop guessing what Venn supports; give custom services a real usage guide |
 | 2026-06-16 | **Auto-name from goal; rename moves the folder + updates `agent:`** | the name has to actually stick on disk |
 | 2026-06-16 | **OS system trust store (truststore) for Venn TLS** | works behind Zscaler-style inspecting proxies; certifi alone fails |
-| 2026-07-31 | **Reskin onto the Bobi design system**; `.claude/skills/bobi-design/` becomes the visual source of truth | one visual language across marketing, product, and docs; this file keeps the UX, not the tokens |
+| 2026-07-31 | **Reskin onto the Bobi design system**; `docs/design-system/` becomes the visual source of truth | one visual language across marketing, product, and docs; this file keeps the UX, not the tokens |
 | 2026-07-31 | **Accent: amber → dusk violet, and violet means STATE only** | the shipping brand accent; decoration moved to clay so the accent never sends a mixed signal |
 | 2026-07-31 | **Vendor Geist / Geist Mono / Inter as local woff2** | brand typography without breaking the offline constraint — no CDN, no build step |
 | 2026-07-31 | **Drop green; connected = live = violet** | the palette has no green, and a connected integration is a live state like any other |

@@ -256,7 +256,7 @@
   // Vertical recast of the event-driven flow diagram from buildmoda.ai/bobi:
   // event → team → workflow → gate → outcome. Glyphs are Bobi's own hand-drawn
   // set (24x24, 1.5 ink stroke, round caps/joins, at most ONE violet detail);
-  // see .claude/skills/bobi-design/components/icons/Icon.jsx. Offline, so they
+  // see docs/design-system/components/icons/Icon.jsx. Offline, so they
   // are inline SVG — never an icon pack, never emoji. The semantic pairings are
   // the design system's own: checklist→a workflow, human→a human gate,
   // checkCircle→shipped.

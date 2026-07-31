@@ -32,7 +32,7 @@ Bobi is an event-driven AI agent framework.
 - `docs/TICKETING_POLICY.md`: Linear/GitHub ticketing conventions.
 - `docs/RELEASE_RUNBOOK.md`: release process and checklist.
 - `docs/FRONTEND_QA.md`: local frontend QA guidance for Bobi's vanilla web UIs.
-- `.claude/skills/bobi-design/`: the Bobi design system - source of truth for
+- `docs/design-system/`: the Bobi design system - source of truth for
   anything visual on any Bobi surface (palette, type, icon set, components).
 - `DESIGN.md`: source of truth for `bobi setup` UX and its offline constraints;
   its visual tokens were superseded by the design system on 2026-07-31.
@@ -147,7 +147,7 @@ For any frontend change, read `docs/FRONTEND_QA.md` before deciding how to test 
 
 ## Design System
 
-`.claude/skills/bobi-design/` is the **Bobi design system** and the source of
+`docs/design-system/` is the **Bobi design system** and the source of
 truth for anything **visual** on any Bobi surface. Read its `README.md` before
 making a visual decision; `SKILL.md` lists the non-negotiables. It is also
 invocable as `/bobi-design`.

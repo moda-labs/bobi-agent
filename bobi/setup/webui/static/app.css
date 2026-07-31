@@ -1,7 +1,7 @@
 /* bobi setup — the Bobi design system, ported to offline vanilla CSS.
 
    Token source: bobi/webui_common/static/tokens.css, itself a port of
-   .claude/skills/bobi-design/tokens/. Read DESIGN.md before changing UX;
+   docs/design-system/tokens/. Read DESIGN.md before changing UX;
    read the design system's README.md before changing anything visual.
 
    The rules this file is built on:

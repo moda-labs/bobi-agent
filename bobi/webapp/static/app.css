@@ -1,7 +1,7 @@
 /* bobi app — unified dashboard shell, in the Bobi design system.
 
    Token source: bobi/webui_common/static/tokens.css, itself a port of
-   .claude/skills/bobi-design/tokens/. Same rules as the setup UI:
+   docs/design-system/tokens/. Same rules as the setup UI:
 
      1. Violet (--accent) is STATE — live, running, selected, focused.
         Decoration is CLAY (--hi). Terminal states (stopped, completed, idle)

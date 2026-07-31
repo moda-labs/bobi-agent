@@ -1,7 +1,7 @@
 /* Bobi design tokens — shared by `bobi setup` and the `bobi` web app.
 
    Source of truth for the values here is the Bobi design system in
-   .claude/skills/bobi-design/ (tokens/*.css). This file is the offline,
+   docs/design-system/ (tokens/*.css). This file is the offline,
    vanilla-CSS port of it: same palette, type ramp, spacing, radii, shadows,
    and motion, with the brand faces vendored locally (see fonts.css) instead
    of pulled from Google Fonts.

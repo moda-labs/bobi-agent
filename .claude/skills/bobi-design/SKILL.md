@@ -4,64 +4,54 @@ description: Use this skill to generate well-branded interfaces and assets for B
 user-invocable: true
 ---
 
-Read the README.md file within this skill, and explore the other available files.
+# Bobi design system
 
-If creating visual artifacts (slides, mocks, throwaway prototypes, etc), copy assets out and create static HTML files for the user to view. If working on production code, you can copy assets and read the rules here to become an expert in designing with this brand.
+**The system itself lives at `docs/design-system/` in this repo, not here.**
 
-If the user invokes this skill without any other guidance, ask them what they want to build or design, ask some questions, and act as an expert designer who outputs HTML artifacts _or_ production code, depending on the need.
+This file is only the entry point that makes it invocable as `/bobi-design`.
+The assets are a product artifact — the source of truth for anything visual on
+any Bobi surface — so they live under `docs/` where anyone can find them,
+whether or not they use Claude Code. `.claude/` is tooling config; a design
+system is not.
 
-## Fast orientation
+## Start here
 
-- `readme.md` — the design guide: sources, content fundamentals, visual foundations, iconography, and the four rules that matter most. **Read this first.**
-- `styles.css` — link this single file to inherit every token.
-- `components/*/` — each has `<Name>.jsx`, `<Name>.d.ts` (props + adherence rules), `<Name>.prompt.md` (what/when + example).
-- `ui_kits/control-plane/index.html` — open this to see the product surface assembled.
-- `guidelines/*.card.html` — foundation specimens.
+1. Read `docs/design-system/README.md` — the design guide: sources, content
+   fundamentals, visual foundations, iconography, the enterprise app layer, and
+   the four rules that matter most. **Read this first.**
+2. Read `docs/design-system/SKILL.md` for the fast orientation and the
+   non-negotiables.
+3. Then explore what you need:
+   - `docs/design-system/styles.css` — link this one file to inherit every token.
+   - `docs/design-system/tokens/` — colors, typography, spacing, surfaces, motion.
+   - `docs/design-system/components/*/` — each has `<Name>.jsx`, `<Name>.d.ts`
+     (props + adherence rules), `<Name>.prompt.md` (what/when + example).
+   - `docs/design-system/ui_kits/control-plane/index.html` — open this to see
+     the product surface assembled.
+   - `docs/design-system/guidelines/*.card.html` — foundation specimens.
 
-## Non-negotiables
+## The four rules that matter most
 
-1. Violet (`--bobi-acc`) means **state**: live, enforced, gated, focused. Never decorative.
-2. Human approval gates always render with the violet left rail + 4% wash + rotated-square glyph, and always name the workflow and step. Never a toast.
-3. Show real config — filenames in `FileChip`, YAML in `CodeCard`, shell in `Terminal`.
-4. The Bobi lockup always travels with the "BY MODA LABS ↗" byline.
-5. Moda Labs' red `#FD4235` never appears on a Bobi surface.
-6. Product chrome is lowercase (page titles, tabs, nav, agent names, files); no uppercase except figure-plate headers and corner marks. Mono is for data (paths, ids, crons, code) — sans for chrome.
-7. One easing curve: `cubic-bezier(0.16, 1, 0.3, 1)`. All motion disables under `prefers-reduced-motion`.
-8. Bobi's own hand-drawn icon set only — never Lucide, Heroicons, or emoji.
+1. **Violet is state, not decoration.** Live, enforced, gated, focused. If it
+   isn't one of those, it's clay, ink, or muted.
+2. **Gates are sacred.** A human approval step always renders with the violet
+   left rail + 4% wash + rotated-square glyph, and always names the workflow
+   and step that stopped. Never a toast.
+3. **Config is the interface.** Show real filenames, real YAML, real shell.
+4. **The Moda Labs byline travels with the lockup.** Always.
 
-## Installing this skill
+Also load-bearing: mono is for **data** (paths, ids, crons, code) and sans for
+chrome; product chrome is **lowercase**, with uppercase only on document plate
+labels and corner marks; Bobi's own hand-drawn icon set only — never Lucide,
+Heroicons, or emoji; Moda Labs' red `#FD4235` never appears on a Bobi surface.
 
-Copy this whole folder to one of:
+## Working in this repo
 
-- `~/.claude/skills/bobi-design/` — available in every project
-- `<your-repo>/.claude/skills/bobi-design/` — shared with the team via git
+Bobi's own web UIs (`bobi setup`, `bobi app`) already consume a vanilla-CSS
+port of this system at `bobi/webui_common/static/tokens.css`, with the brand
+faces vendored under `bobi/webui_common/static/fonts/`. Those UIs are offline
+and build-step-free, so use the ported tokens there rather than the JSX
+components. `tests/test_webui_tokens.py` fails if the port drifts from
+`docs/design-system/tokens/colors.css`.
 
-Then invoke it with `/bobi-design`, or just ask for Bobi UI and Claude Code will
-load it. Verify with `/skills`.
-
-## Using it in a real Next.js app (the modalabswebsite repo)
-
-The components here are plain JSX authored for a bundler-less browser. In the app:
-
-1. **Tokens** — copy `tokens/*.css` in and `@import` them from your global CSS,
-   or lift the values into `tailwind.config.ts` (the repo already maps
-   `bobi` / `bobiBright` / `void`; `.bobi-app` and `tokens/app.css` are new).
-2. **`tokens/app.css` is required for product UI** — it carries every
-   `:hover` / `:focus-visible` / `:active` state. Components style layout
-   inline and cannot express pseudo-states themselves.
-3. **Components** — port each `.jsx` to a typed `.tsx` in
-   `src/components/bobi/`. The `.d.ts` beside each one is the props contract;
-   the `.prompt.md` explains when to use it and the rules that must hold.
-4. **Wrap product routes in `className="bobi-app"`** to pick up the surface
-   ramp, elevation scale, and interaction states. Marketing routes keep
-   `.bobi-page` and must NOT get `.bobi-app`.
-5. **Do not copy `ui_kits/control-plane/component-shim.jsx`** — it is a
-   generated bundler-less shim. Import the real components instead.
-
-## Regenerating the kit shim
-
-If you edit a component and want the static kit to reflect it, the shim is
-assembled from `components/**/<Name>.jsx` with `import`/`export` stripped and
-each file wrapped in an IIFE. Bump the `?v=` query params in
-`ui_kits/control-plane/index.html` afterwards or the browser will serve the old
-scripts.
+For UX (not visual) decisions on `bobi setup`, read `DESIGN.md`.

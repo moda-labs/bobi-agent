@@ -2,7 +2,7 @@
 """Vendor Bobi's brand typefaces as local woff2 subsets.
 
 bobi setup and the bobi web app are offline surfaces (DESIGN.md): no CDN, no
-network at runtime. The design system under .claude/skills/bobi-design links
+network at runtime. The design system under docs/design-system links
 Geist / Geist Mono / Inter from Google Fonts; this script downloads the latin
 and latin-ext subsets instead so the brand type survives with no outbound
 request.

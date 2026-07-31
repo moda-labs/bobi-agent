@@ -1,7 +1,7 @@
 """The shared web-UI tokens must stay in sync with the Bobi design system.
 
 `bobi/webui_common/static/tokens.css` is a hand-maintained, offline, vanilla-CSS
-port of `.claude/skills/bobi-design/tokens/`. Nothing regenerates it, so without
+port of `docs/design-system/tokens/`. Nothing regenerates it, so without
 a guard the two drift silently and the local UIs slowly stop looking like the
 product. These tests pin the port to the source.
 """
@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TOKENS_CSS = ROOT / "bobi" / "webui_common" / "static" / "tokens.css"
 FONTS_CSS = ROOT / "bobi" / "webui_common" / "static" / "fonts.css"
 FONTS_DIR = ROOT / "bobi" / "webui_common" / "static" / "fonts"
-DESIGN_SYSTEM = ROOT / ".claude" / "skills" / "bobi-design" / "tokens"
+DESIGN_SYSTEM = ROOT / "docs" / "design-system" / "tokens"
 CHROME_CSS = ROOT / "bobi" / "webui_common" / "static" / "chrome.css"
 APP_CSS = [
     ROOT / "bobi" / "setup" / "webui" / "static" / "app.css",
