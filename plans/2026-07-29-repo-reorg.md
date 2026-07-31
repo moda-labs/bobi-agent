@@ -262,6 +262,10 @@ Lane 2 is built and in review: `bobi-agent#898` (reference image to public) and 
 
 The cost is a two-copy window on the Dockerfile — `bobi-deploy`'s copy still carries the shim and still builds the fleet, while the public copy is canonical — the same shape as the Worker freeze recorded above. Phase 7 closes it. Unlike the Worker, no freeze is needed: the private copy is pinned and the public one is not yet consumed by anything.
 
+**Correction, same day: the GHCR grant is already in place.** Zach confirmed `bobi-agent` holds **admin** on the `ghcr.io/moda-labs/bobi` package, which subsumes the write access `release-image.yml` needs. The paragraph above is right that the package's `repository` field proves nothing — it does come from the OCI `source` label — but wrong to conclude from that the prerequisite was outstanding. It was satisfied independently. **Gate (b) is therefore blocked on one thing only: landing `#898`**, because `workflow_dispatch` does not register until the workflow exists on the default branch. Do not re-request the grant.
+
+Note for Lane 3: `bobi-deploy` must KEEP its own package access until Phase 7. Lane 2 copied `release-image.yml` rather than moving it, so both repos carry it, and bobi-deploy's "Release train" is what published `0.51.1`. Phase 7 deletes that copy and revokes the access together.
+
 **Also noted, not acted on.** `bobi-agent` has no `release` environment (only `pypi`), which `release-image.yml` references; GitHub will auto-create it unprotected on first run, so the "zero-cost until required reviewers" comment holds but the reviewers are not there. And publishing the image resolves a standing `bobi-deploy` cut-aftermath item for free: `ubuntu-24.04-arm` is a free standard runner on public repos, where in the private repo it required a paid larger-runner.
 
 
