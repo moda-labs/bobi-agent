@@ -1,14 +1,16 @@
 """Integration tests for the event server - the protocol suite.
 
-Parametrized over TWO backends:
-1. **local** — the Node.js local.ts server started via ``ensure_running``;
-   the backend this public repo runs in CI.
-2. **wrangler** — a Cloudflare Worker via ``wrangler dev`` (local mode, no
-   CF credentials needed). The worker adapter lives in the private deploy
-   repo (repo split); point ``BOBI_TEST_ES_DIR`` at a checkout of its
-   ``event-server/`` to run this same suite against it - that run is the
-   protocol-compatibility gate between the two repos. Without a worker dir
-   (no wrangler.jsonc at the target) the backend is skipped.
+Parametrized over TWO backends, both in this repo:
+1. **local** — the Node.js local.ts server started via ``ensure_running``.
+2. **wrangler** — the Cloudflare Worker (``event-server/worker/``) under a
+   real ``wrangler dev`` in local mode, which needs NO Cloudflare
+   credentials. Opt in with ``BOBI_TEST_WRANGLER=1`` (CI runs a dedicated
+   job); ``BOBI_TEST_ES_DIR`` can repoint it at a Worker checkout elsewhere.
+   Without a worker dir (no wrangler.jsonc at the target) it is skipped.
+
+Running the SAME assertions against both backends is the point: it is what
+keeps the two adapters protocol-compatible, and it is why this file is
+parametrized rather than split in two.
 
 Starts the event server, sends webhook payloads, and verifies events are
 delivered via the WebSocket subscription API.  All state is isolated to
@@ -100,18 +102,32 @@ def _post_event_signed(base_url: str, topic: str, body_dict: dict,
 def _wrangler_es_dir() -> Path:
     """Worker-adapter directory for the wrangler backend.
 
-    Defaults to the in-repo event-server/. The private deploy repo owns the
-    Cloudflare Worker adapter (repo split) and points BOBI_TEST_ES_DIR at its
-    own event-server/ to run this same suite as the protocol-compatibility
-    gate between the pinned public bobi and its worker.
+    Defaults to the in-repo event-server/worker/ package, which is where the
+    Cloudflare Worker adapter lives. BOBI_TEST_ES_DIR overrides it so this
+    same suite can be pointed at a Worker checkout elsewhere.
     """
     override = os.environ.get("BOBI_TEST_ES_DIR")
-    return Path(override) if override else PACKAGE_ROOT / "event-server"
+    return Path(override) if override else PACKAGE_ROOT / "event-server" / "worker"
+
+
+def _wrangler_bin(es_dir: Path) -> Path:
+    """Locate the wrangler executable for *es_dir*.
+
+    npm workspaces HOIST dependencies to the workspace root, so the worker
+    package's own node_modules/.bin is usually empty and wrangler lands in
+    event-server/node_modules/.bin. Check the package first (a standalone
+    checkout pointed at by BOBI_TEST_ES_DIR installs locally), then walk up.
+    """
+    for base in (es_dir, *es_dir.parents):
+        candidate = base / "node_modules" / ".bin" / "wrangler"
+        if candidate.exists():
+            return candidate
+    return es_dir / "node_modules" / ".bin" / "wrangler"
 
 
 def _has_wrangler() -> bool:
     """Check whether wrangler is installed and runnable for this platform."""
-    wrangler = _wrangler_es_dir() / "node_modules" / ".bin" / "wrangler"
+    wrangler = _wrangler_bin(_wrangler_es_dir())
     if not wrangler.exists():
         return False
     try:
@@ -152,11 +168,10 @@ def _event_server_backends():
     if _node_major() >= 20:
         backends.append("local")
     # wrangler backend is opt-in via the BOBI_TEST_WRANGLER env var or when
-    # wrangler is already installed in the target dir - but only where a
-    # worker actually lives (wrangler.jsonc). The public repo has none post
-    # repo-split, so without BOBI_TEST_ES_DIR this skips instead of launching
-    # `wrangler dev` in a configless directory (stale pre-split node_modules
-    # would otherwise hard-fail every wrangler-parametrized test).
+    # wrangler is already installed in the target dir - and only where a
+    # worker actually lives (wrangler.jsonc), so a checkout that has not run
+    # `npm install` skips instead of launching `wrangler dev` in a configless
+    # directory. CI sets BOBI_TEST_WRANGLER=1 for the dedicated job.
     wants_wrangler = os.environ.get("BOBI_TEST_WRANGLER") == "1" or _has_wrangler()
     if wants_wrangler and (_wrangler_es_dir() / "wrangler.jsonc").exists():
         backends.append("wrangler")
@@ -281,7 +296,7 @@ def _start_wrangler_server():
 
         proc = subprocess.Popen(
             [
-                str(es_dir / "node_modules" / ".bin" / "wrangler"),
+                str(_wrangler_bin(es_dir)),
                 "dev",
                 f"--port={port}",
             ],

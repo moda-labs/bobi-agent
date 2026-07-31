@@ -2,7 +2,7 @@
 	"name": "bobi-events-worker",
 	"version": "0.0.0",
 	"private": true,
-	"description": "Cloudflare Worker adapter of the Bobi event server: durable sessions (Durable Objects), KV-backed replay, webhook ingress at scale. Consumes the public event protocol as a pinned @moda-labs/bobi-events-core dependency.",
+	"description": "Cloudflare Worker adapter of the Bobi event server: durable sessions (Durable Objects), KV-backed replay, webhook ingress at scale. Consumes the shared event protocol from the @moda-labs/bobi-events-core workspace package.",
 	"scripts": {
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
@@ -12,7 +12,7 @@
 		"cf-typegen": "wrangler types"
 	},
 	"dependencies": {
-		"@moda-labs/bobi-events-core": "0.1.0"
+		"@moda-labs/bobi-events-core": "*"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.12.4",
