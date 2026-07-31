@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>content-review — bobi</title>
+<style>
+  :root{
+    --bg:#F4F1EA; --surface:#FBFAF6; --raised:#FFFDF9;
+    --text:#1F1B16; --muted:#7A7062; --faint:#A89E90;
+    --border:#E2DCD0; --border-strong:#D6CCBD;
+    --slab-bg:#181410; --slab-surface:#1E1A15; --slab-text:#E8E2D6;
+    --slab-muted:#948A7B; --slab-border:#2A241D;
+    --accent:#C8612B; --accent-2:#D86E33; --slab-accent:#E0843F;
+    --ok:#177B52; --ok-soft:#E7F0E9; --ok-border:#C7DCCB;
+    --err:#A82333; --err-soft:#F6E7E4; --err-border:#E5C9C2;
+    --syn-key:#AFC0D2; --syn-str:#CBBA8B; --syn-punc:#7E776B; --syn-com:#6E6354;
+    --slab-ok:#29A36A; --slab-err:#E0574A;
+    --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+                 "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, "Cascadia Mono",
+                 "Segoe UI Mono", Consolas, "Liberation Mono", monospace;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html{background:var(--bg);}
+  body{
+    font-family:var(--font-sans); font-size:15px; line-height:1.5;
+    color:var(--text); background:var(--bg);
+    background-image:
+      repeating-linear-gradient(0deg, rgba(31,27,22,.014) 0 1px, transparent 1px 32px),
+      repeating-linear-gradient(90deg, rgba(31,27,22,.014) 0 1px, transparent 1px 32px);
+    min-height:100vh;
+  }
+  .mono{font-family:var(--font-mono);}
+  .eyebrow{
+    font-family:var(--font-mono); font-size:11px; letter-spacing:.08em;
+    text-transform:uppercase; color:var(--muted); font-weight:500;
+  }
+
+  /* ---------- app titlebar ---------- */
+  .titlebar{
+    display:flex; align-items:center; gap:10px;
+    padding:10px 24px; border-bottom:1px solid var(--border);
+    background:var(--surface);
+  }
+  .titlebar svg{display:block; color:var(--muted);}
+  .brand{font-family:var(--font-mono); font-size:13px; letter-spacing:.06em; font-weight:600;}
+  .crumbs{font-family:var(--font-mono); font-size:12px; color:var(--faint); letter-spacing:.04em;}
+  .crumbs b{color:var(--text); font-weight:500;}
+
+  .page{max-width:1080px; margin:0 auto; padding:24px;}
+
+  /* ---------- header card + status band ---------- */
+  .agent-header{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    margin-bottom:16px; overflow:visible;
+  }
+  /* the ship's-computer instrument strip — the one dark surface family */
+  .status-band{
+    display:none; align-items:center;
+    padding:12px 20px; background:var(--slab-bg);
+    background-image:repeating-linear-gradient(0deg,
+      rgba(232,226,214,.03) 0 1px, transparent 1px 3px);
+    border-top:2px solid var(--slab-accent);
+    border-radius:11px 11px 0 0;
+  }
+  .status-band .lamp{
+    width:10px; height:10px; border-radius:50%; flex:none; margin-right:10px;
+  }
+  .status-band .state{
+    font-family:var(--font-mono); font-size:15px; font-weight:700;
+    letter-spacing:.12em; margin-right:22px; white-space:nowrap;
+  }
+  .status-band .seg{
+    display:flex; flex-direction:column; gap:2px;
+    padding:2px 18px; border-left:1px solid var(--slab-border);
+  }
+  .status-band .seg .lbl{
+    font-family:var(--font-mono); font-size:8.5px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--slab-muted);
+  }
+  .status-band .seg .val{
+    font-family:var(--font-mono); font-size:12.5px; color:var(--slab-text);
+    font-variant-numeric:tabular-nums; white-space:nowrap;
+  }
+  .status-band .band-actions{margin-left:auto; display:flex; gap:8px; padding-left:16px;}
+  .status-band .btn{
+    background:transparent; border-color:var(--slab-border); color:var(--slab-text);
+  }
+  .status-band .btn:hover{border-color:var(--slab-muted);}
+  .status-band .btn.primary{
+    background:var(--accent); border-color:var(--accent); color:#FFF8EF;
+  }
+  .status-band .btn.primary:hover{background:var(--accent-2);}
+
+  body.state-running .status-band.band-running{display:flex;}
+  .band-running .lamp{background:var(--slab-ok); box-shadow:0 0 10px rgba(41,163,106,.75);}
+  .band-running .state{color:var(--slab-ok); text-shadow:0 0 14px rgba(41,163,106,.4);}
+
+  body.state-stopped .status-band.band-stopped{display:flex;}
+  .band-stopped{border-top-color:var(--slab-border);}
+  .band-stopped .lamp{background:transparent; border:2px solid var(--slab-muted); width:9px; height:9px;}
+  .band-stopped .state{color:var(--slab-muted);}
+
+  body.state-error .status-band.band-error{display:flex;}
+  .band-error .lamp{background:var(--slab-err); box-shadow:0 0 10px rgba(224,87,74,.75);}
+  .band-error .state{color:var(--slab-err); text-shadow:0 0 14px rgba(224,87,74,.4);}
+
+  .ah-body{display:flex; align-items:flex-start; gap:16px; flex-wrap:wrap; padding:18px 20px 20px;}
+  .ah-name h1{font-size:22px; font-weight:650; letter-spacing:-.01em; line-height:1.2;}
+  .ah-name .desc{color:var(--muted); font-size:14px; margin-top:4px; max-width:52ch;}
+  .ah-right{margin-left:auto; display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end;}
+
+  .chip{
+    display:inline-flex; align-items:center; gap:7px;
+    font-family:var(--font-mono); font-size:11.5px; letter-spacing:.05em;
+    padding:5px 10px; border:1px solid var(--border-strong); border-radius:999px;
+    background:var(--raised); color:var(--muted); white-space:nowrap;
+    font-variant-numeric:tabular-nums;
+  }
+  .stat-popover{position:relative;}
+  .stat-popover .chip{cursor:default;}
+  .stat-popover:hover .chip{border-color:var(--accent); color:var(--text);}
+  .popover{
+    display:none; position:absolute; right:0; top:100%; z-index:60;
+    width:320px; padding-top:8px;
+  }
+  .stat-popover:hover .popover{display:block;}
+  .pop-card{
+    background:var(--raised); border:1px solid var(--border-strong);
+    border-radius:12px; padding:14px 16px; box-shadow:0 8px 28px rgba(31,27,22,.12);
+  }
+  .pop-card .eyebrow{margin-bottom:8px;}
+  .kv{display:flex; justify-content:space-between; gap:12px; padding:3px 0; font-size:13px;}
+  .kv .k{color:var(--muted);}
+  .kv .v{font-family:var(--font-mono); font-size:12px; font-variant-numeric:tabular-nums;}
+  .kv .v.strong{color:var(--ok); font-weight:600;}
+  .pop-card .note{font-size:12px; color:var(--faint); margin-top:8px;}
+  .pop-card hr{border:0; border-top:1px solid var(--border); margin:10px 0;}
+
+  a.btn{display:inline-flex; align-items:center; text-decoration:none;}
+  .btn{
+    font-family:var(--font-sans); font-size:13.5px; font-weight:550;
+    height:34px; padding:0 14px; border-radius:8px; cursor:pointer;
+    border:1px solid var(--border-strong); background:var(--raised); color:var(--text);
+  }
+  .btn:hover{border-color:var(--faint);}
+  .btn.small{height:26px; padding:0 10px; font-size:12.5px; border-radius:7px;}
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:#FFF8EF;}
+  .btn.primary:hover{background:var(--accent-2);}
+  .btn.big{height:38px; padding:0 18px; font-size:14px;}
+  .btn.quiet{border-color:transparent; background:transparent; color:var(--muted);}
+  .btn.quiet:hover{color:var(--text);}
+
+  .panel{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    margin-bottom:16px; overflow:hidden;
+  }
+  .panel-head{display:flex; align-items:center; gap:10px; padding:14px 20px 0; flex-wrap:wrap;}
+  .panel-head .count{
+    font-family:var(--font-mono); font-size:11px; color:var(--faint);
+    font-variant-numeric:tabular-nums; letter-spacing:.05em;
+  }
+
+  /* ---------- runs table ---------- */
+  .tabs{display:flex; gap:6px; margin-left:auto;}
+  .tab{
+    font-family:var(--font-mono); font-size:11px; letter-spacing:.05em;
+    padding:5px 12px; border-radius:999px; cursor:pointer;
+    border:1px solid var(--border-strong); background:var(--raised); color:var(--muted);
+    font-variant-numeric:tabular-nums;
+  }
+  .tab.active{border-color:var(--accent); color:var(--accent); background:#FBF1E9;}
+
+  table.runs{width:100%; border-collapse:collapse; margin-top:12px;}
+  .runs th{
+    text-align:left; font-family:var(--font-mono); font-size:10.5px;
+    letter-spacing:.08em; text-transform:uppercase; font-weight:500;
+    color:var(--faint); padding:6px 14px; border-bottom:1px solid var(--border);
+  }
+  .runs td{
+    padding:11px 14px; border-bottom:1px solid var(--border);
+    font-size:13.5px; vertical-align:middle;
+  }
+  .runs tr:last-child td{border-bottom:0;}
+  .runs tbody tr{cursor:pointer;}
+  .runs tbody tr:hover td{background:var(--raised);}
+  .runs tr.hidden{display:none;}
+
+  .rstat{
+    display:inline-flex; align-items:center; gap:7px;
+    font-family:var(--font-mono); font-size:10.5px; letter-spacing:.07em; white-space:nowrap;
+  }
+  .rdot{width:8px; height:8px; border-radius:50%; flex:none; background:var(--faint);}
+  .rstat.running{color:var(--ok);}
+  .rstat.running .rdot{background:var(--ok); box-shadow:0 0 0 3px var(--ok-soft);}
+  .rstat.done{color:var(--muted);}
+  .rstat.failed{color:var(--err);}
+  .rstat.failed .rdot{background:var(--err);}
+  .rstat.stalled{color:var(--err);}
+  .rstat.stalled .rdot{background:transparent; border:2px solid var(--err); width:7px; height:7px;}
+
+  .runs .r-title{font-weight:550;}
+  .runs .r-title .mono{font-size:12px; font-weight:400;}
+  .runs .r-origin{
+    font-family:var(--font-mono); font-size:11px; color:var(--faint);
+    letter-spacing:.03em; margin-top:2px;
+  }
+  .runs .r-origin code{color:var(--muted);}
+  .runs .r-note{font-size:12px; color:var(--muted); margin-top:1px;}
+  .runs .r-note.bad{color:var(--err);}
+  .r-when,.r-tok{
+    font-family:var(--font-mono); font-size:12px; color:var(--muted);
+    font-variant-numeric:tabular-nums; white-space:nowrap;
+  }
+  .r-when .dur{color:var(--faint);}
+  .r-tok{text-align:right;}
+  .runs td.r-act{text-align:right; white-space:nowrap;}
+
+  .no-live{display:none; color:var(--faint); font-size:12.5px; padding:14px 20px;}
+  body.state-stopped .live-row{display:none;}
+  body.state-error .live-row{display:none;}
+  body.state-stopped .no-live.on, body.state-error .no-live.on{display:block;}
+
+  /* ---------- transcript slab modal ---------- */
+  .modal-backdrop{
+    position:fixed; inset:0; background:rgba(31,27,22,.35); z-index:80;
+    display:none; align-items:flex-start; justify-content:center; padding:8vh 24px;
+  }
+  .modal-backdrop.open{display:flex;}
+  .modal{
+    width:min(760px, 100%); background:var(--slab-bg);
+    border-top:2px solid var(--slab-accent); border-radius:10px; overflow:hidden;
+    box-shadow:0 20px 60px rgba(24,20,16,.45);
+  }
+  .modal-head{
+    display:flex; align-items:center; gap:10px;
+    padding:12px 18px; border-bottom:1px solid var(--slab-border); background:var(--slab-surface);
+  }
+  .modal-head .eyebrow{color:var(--slab-muted);}
+  .modal-head .path{font-family:var(--font-mono); font-size:12px; color:var(--slab-text);}
+  .modal-head .meta{font-family:var(--font-mono); font-size:11px; color:var(--slab-muted); font-variant-numeric:tabular-nums;}
+  .modal-head .btn{margin-left:auto; background:transparent; border-color:var(--slab-border); color:var(--slab-muted);}
+  .transcript{padding:18px; font-family:var(--font-mono); font-size:12.5px; line-height:1.7; overflow-x:auto;}
+  .tr-line{display:flex; gap:14px; white-space:nowrap;}
+  .tr-line .ts{color:var(--syn-com); flex:none;}
+  .tr-line .who{flex:none; width:52px; letter-spacing:.05em; font-size:10.5px; text-transform:uppercase; padding-top:1px;}
+  .tr-line .who.user{color:var(--slab-muted);}
+  .tr-line .who.agent{color:var(--slab-accent);}
+  .tr-line .who.tool{color:var(--syn-key);}
+  .tr-line .txt{color:var(--slab-text); white-space:normal;}
+  .tr-line .txt code{color:var(--syn-str);}
+
+  footer.pagefoot{
+    padding:18px 24px 28px; color:var(--faint);
+    font-family:var(--font-mono); font-size:11px; letter-spacing:.05em;
+  }
+
+  /* ---------- prototype state switcher ---------- */
+  .proto-switch{
+    position:fixed; right:16px; bottom:16px; z-index:90;
+    display:flex; align-items:center; gap:6px;
+    background:var(--slab-bg); border-radius:999px; padding:6px 8px 6px 14px;
+    box-shadow:0 8px 24px rgba(24,20,16,.35);
+  }
+  .proto-switch .lbl{
+    font-family:var(--font-mono); font-size:9.5px; letter-spacing:.1em;
+    color:var(--slab-muted); text-transform:uppercase;
+  }
+  .proto-switch button{
+    font-family:var(--font-mono); font-size:10.5px; letter-spacing:.06em;
+    padding:4px 10px; border-radius:999px; cursor:pointer;
+    border:1px solid var(--slab-border); background:transparent; color:var(--slab-muted);
+  }
+  .proto-switch button.on{border-color:var(--slab-accent); color:var(--slab-accent);}
+</style>
+</head>
+<body class="state-running">
+
+<div class="titlebar">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+    <rect x="9" y="9" width="6" height="6" rx="1.2"/>
+    <path d="M9 12H4.5M19.5 12H15M12 9V6M12 18v-3"/>
+    <path d="M2.5 9.5v5M21.5 9.5v5"/>
+  </svg>
+  <span class="brand">bobi</span>
+  <span class="crumbs">/ agents / <b>content-review</b></span>
+</div>
+
+<div class="page">
+
+  <!-- ============ header: instrument strip first ============ -->
+  <header class="agent-header">
+
+    <div class="status-band band-running">
+      <span class="lamp"></span>
+      <span class="state">RUNNING</span>
+      <span class="seg"><span class="lbl">Uptime</span><span class="val">2d 4h</span></span>
+      <span class="seg"><span class="lbl">Manager pid</span><span class="val">48213</span></span>
+      <span class="seg"><span class="lbl">Live runs</span><span class="val">2</span></span>
+      <span class="seg"><span class="lbl">Last activity</span><span class="val">14:21</span></span>
+      <span class="band-actions">
+        <button class="btn">Restart</button>
+        <button class="btn">Stop</button>
+      </span>
+    </div>
+
+    <div class="status-band band-stopped">
+      <span class="lamp"></span>
+      <span class="state">STOPPED</span>
+      <span class="seg"><span class="lbl">Since</span><span class="val">today 10:12</span></span>
+      <span class="seg"><span class="lbl">Exit</span><span class="val">clean</span></span>
+      <span class="seg"><span class="lbl">Was up</span><span class="val">6d 2h</span></span>
+      <span class="band-actions">
+        <button class="btn primary big">▸ Start agent</button>
+      </span>
+    </div>
+
+    <div class="status-band band-error">
+      <span class="lamp"></span>
+      <span class="state">NOT RESPONDING</span>
+      <span class="seg"><span class="lbl">Manager pid</span><span class="val">48213 · alive</span></span>
+      <span class="seg"><span class="lbl">Health probe</span><span class="val">failing 12m</span></span>
+      <span class="seg"><span class="lbl">Last activity</span><span class="val">14:02</span></span>
+      <span class="band-actions">
+        <button class="btn primary big">Restart agent</button>
+      </span>
+    </div>
+
+    <div class="ah-body">
+      <div class="ah-name">
+        <h1>content-review</h1>
+        <div class="desc">Reviews inbound content drafts, triages review requests from Slack, and keeps the editorial pipeline moving.</div>
+      </div>
+
+      <div class="ah-right">
+        <div class="stat-popover">
+          <span class="chip">SAVED ⌁ ~$51 · 214 RUNS</span>
+          <div class="popover"><div class="pop-card">
+            <div class="eyebrow">What this team's work would cost</div>
+            <div class="kv"><span class="k">Est. API value of tokens used</span><span class="v">$47.85</span></div>
+            <div class="kv"><span class="k">Paid via your subscription</span><span class="v">$0.00</span></div>
+            <div class="kv"><span class="k">script-cache runner savings</span><span class="v">+$3.20</span></div>
+            <div class="kv"><span class="k">Saved so far</span><span class="v strong">~$51.05</span></div>
+            <hr>
+            <div class="kv"><span class="k">claude · sonnet-5</span><span class="v">14.1M tok · $38.90</span></div>
+            <div class="kv"><span class="k">claude · haiku-4-5</span><span class="v">6.3M tok · $8.95</span></div>
+            <div class="kv"><span class="k">tokens</span><span class="v">18.4M in · 2.1M out · 11.2M cached</span></div>
+            <div class="note">Estimated at Claude API list price for the tokens this team actually used. Lifetime, over runs still on disk.</div>
+          </div></div>
+        </div>
+
+        <div class="stat-popover">
+          <span class="chip">ABOUT</span>
+          <div class="popover"><div class="pop-card">
+            <div class="eyebrow">Roles</div>
+            <div class="kv"><span class="k">manager</span><span class="v">dispatch + chat</span></div>
+            <div class="kv"><span class="k">review-worker</span><span class="v">copy-edit, triage</span></div>
+            <hr>
+            <div class="eyebrow">Reaches</div>
+            <div class="kv"><span class="k">chat</span><span class="v">slack · #editorial</span></div>
+            <div class="kv"><span class="k">services</span><span class="v">slack · linear · gmail</span></div>
+            <hr>
+            <div class="eyebrow">Automations</div>
+            <div class="kv"><span class="k">scheduled</span><span class="v">5 monitors</span></div>
+            <div class="kv"><span class="k">event-triggered</span><span class="v">2 workflows</span></div>
+            <hr>
+            <div class="eyebrow">Brain</div>
+            <div class="kv"><span class="k">claude · sonnet-5</span><span class="v">max 40 turns</span></div>
+            <div class="kv"><span class="k">spend cap</span><span class="v">40 inv/hr</span></div>
+            <div class="note">Composition is read-only here — change it in <b>Edit design</b>.</div>
+          </div></div>
+        </div>
+
+        <a class="btn quiet" href="/setup/content-review" title="Open this team in the setup editor">Edit design</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============ runs ============ -->
+  <section class="panel">
+    <div class="panel-head">
+      <span class="eyebrow">Runs</span>
+      <span class="count">⌁ 148 today</span>
+      <div class="tabs">
+        <button class="tab active" data-tab="all">ALL</button>
+        <button class="tab" data-tab="running">RUNNING · 2</button>
+        <button class="tab" data-tab="failed">FAILED · 3</button>
+      </div>
+    </div>
+
+    <div class="no-live">No live runs — the agent is not running.</div>
+
+    <table class="runs">
+      <thead>
+        <tr>
+          <th>Status</th><th>Run</th><th>When</th>
+          <th style="text-align:right">Tokens · Est cost</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+
+        <tr class="live-row" data-status="running">
+          <td><span class="rstat running"><span class="rdot"></span>RUNNING</span></td>
+          <td>
+            <div class="r-title">Triage: Slack review request from #editorial</div>
+            <div class="r-origin">review-worker · dispatched by manager</div>
+          </td>
+          <td class="r-when">14:02 <span class="dur">· 31m so far</span></td>
+          <td class="r-tok">12k · ~$0.07</td>
+          <td class="r-act"><button class="btn small quiet">Open</button></td>
+        </tr>
+
+        <tr class="live-row" data-status="running">
+          <td><span class="rstat running"><span class="rdot"></span>IDLE</span></td>
+          <td>
+            <div class="r-title">manager</div>
+            <div class="r-origin">long-lived · watching events, dispatching work</div>
+          </td>
+          <td class="r-when">since 09:41</td>
+          <td class="r-tok"></td>
+          <td class="r-act"><button class="btn small quiet">Open</button></td>
+        </tr>
+
+        <tr data-status="done">
+          <td><span class="rstat done"><span class="rdot"></span>DONE</span></td>
+          <td>
+            <div class="r-title">stale-pr-nudge</div>
+            <div class="r-origin">monitor · every 15m</div>
+            <div class="r-note">2 stale PRs, nudged #editorial</div>
+          </td>
+          <td class="r-when">14:21 <span class="dur">· &lt;1m</span></td>
+          <td class="r-tok">cached · 0</td>
+          <td class="r-act"></td>
+        </tr>
+
+        <tr data-status="done">
+          <td><span class="rstat done"><span class="rdot"></span>DONE</span></td>
+          <td>
+            <div class="r-title">Copy-edit pass: “Q3 launch post”</div>
+            <div class="r-origin">review-worker · dispatched by manager</div>
+          </td>
+          <td class="r-when">13:47 <span class="dur">· 6m</span></td>
+          <td class="r-tok">96k · ~$0.22</td>
+          <td class="r-act"><button class="btn small quiet">Transcript</button></td>
+        </tr>
+
+        <tr data-status="failed">
+          <td><span class="rstat failed"><span class="rdot"></span>FAILED</span></td>
+          <td>
+            <div class="r-title">mailbox-sweep</div>
+            <div class="r-origin">monitor · every 30m</div>
+            <div class="r-note bad">spawn-failed: claude CLI exited before first turn · retries next tick</div>
+          </td>
+          <td class="r-when">12:24</td>
+          <td class="r-tok">0</td>
+          <td class="r-act"><button class="btn small">Details</button></td>
+        </tr>
+
+        <tr data-status="done">
+          <td><span class="rstat done"><span class="rdot"></span>DONE</span></td>
+          <td>
+            <div class="r-title">morning-digest</div>
+            <div class="r-origin">monitor · weekdays 09:00 PT</div>
+            <div class="r-note">posted digest to #editorial</div>
+          </td>
+          <td class="r-when">09:00 <span class="dur">· 3m</span></td>
+          <td class="r-tok">134k · ~$0.31</td>
+          <td class="r-act"><button class="btn small quiet">Transcript</button></td>
+        </tr>
+
+        <tr data-status="done">
+          <td><span class="rstat done"><span class="rdot"></span>DONE</span></td>
+          <td>
+            <div class="r-title">issue-triage <span class="mono">#f7e2a9b1</span></div>
+            <div class="r-origin">workflow · on <code>github/issue.opened</code></div>
+            <div class="r-note">labeled + assigned #512</div>
+          </td>
+          <td class="r-when">Jul 30 18:40 <span class="dur">· 2m</span></td>
+          <td class="r-tok">54k · ~$0.12</td>
+          <td class="r-act"><button class="btn small quiet">Transcript</button></td>
+        </tr>
+
+        <tr data-status="failed">
+          <td><span class="rstat stalled"><span class="rdot"></span>STALLED</span></td>
+          <td>
+            <div class="r-title">publish-approval <span class="mono">#a1b2c3d4</span></div>
+            <div class="r-origin">workflow · on <code>linear/issue.labeled</code></div>
+            <div class="r-note bad">awaiting <span class="mono">approval</span> at step 3 · 26h</div>
+          </td>
+          <td class="r-when">Jul 30 12:30</td>
+          <td class="r-tok">12k · ~$0.04</td>
+          <td class="r-act"><button class="btn small">Resume</button></td>
+        </tr>
+
+        <tr data-status="failed">
+          <td><span class="rstat failed"><span class="rdot"></span>CRASHED</span></td>
+          <td>
+            <div class="r-title">Draft scan: October batch</div>
+            <div class="r-origin">review-worker · dispatched by manager</div>
+            <div class="r-note bad">exit 137 (killed — likely out of memory)</div>
+          </td>
+          <td class="r-when">Jul 30 11:03 <span class="dur">· 18m</span></td>
+          <td class="r-tok">41k · ~$0.09</td>
+          <td class="r-act"><button class="btn small">Transcript</button></td>
+        </tr>
+
+        <tr data-status="done">
+          <td><span class="rstat done"><span class="rdot"></span>DONE</span></td>
+          <td>
+            <div class="r-title">weekly-retro</div>
+            <div class="r-origin">monitor · Fri 16:00 PT</div>
+            <div class="r-note">quiet — nothing to do</div>
+          </td>
+          <td class="r-when">Jul 24 16:00 <span class="dur">· 1m</span></td>
+          <td class="r-tok">8k · ~$0.02</td>
+          <td class="r-act"></td>
+        </tr>
+
+      </tbody>
+    </table>
+  </section>
+
+</div>
+
+<footer class="pagefoot">BOBI APP · LOCAL · 127.0.0.1:8642 · PROTOTYPE — STATIC DATA</footer>
+
+<!-- ============ transcript slab modal ============ -->
+<div class="modal-backdrop" id="modal">
+  <div class="modal">
+    <div class="modal-head">
+      <span class="eyebrow">Transcript</span>
+      <span class="path">Copy-edit pass: “Q3 launch post”</span>
+      <span class="meta">13:47 · 6m · 96k tok · ~$0.22</span>
+      <button class="btn small" id="modal-close">Close · esc</button>
+    </div>
+    <div class="transcript">
+      <div class="tr-line"><span class="ts">13:47:11</span><span class="who user">event</span><span class="txt"><code>slack/message</code> #editorial — “can someone give the Q3 launch post a copy-edit pass?”</span></div>
+      <div class="tr-line"><span class="ts">13:47:14</span><span class="who agent">agent</span><span class="txt">Picking this up. Reading the draft and the style guide…</span></div>
+      <div class="tr-line"><span class="ts">13:47:31</span><span class="who tool">tool</span><span class="txt">Read · <code>drafts/q3-launch-post.md</code></span></div>
+      <div class="tr-line"><span class="ts">13:48:02</span><span class="who tool">tool</span><span class="txt">Read · <code>context/style-guide.md</code></span></div>
+      <div class="tr-line"><span class="ts">13:51:48</span><span class="who tool">tool</span><span class="txt">Edit · <code>drafts/q3-launch-post.md</code> · 14 suggestions</span></div>
+      <div class="tr-line"><span class="ts">13:52:59</span><span class="who agent">agent</span><span class="txt">Done — tightened the intro, fixed headline case, flagged two unverified claims for the author. Posted the marked-up draft back to #editorial.</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- prototype-only: preview the three agent states -->
+<div class="proto-switch">
+  <span class="lbl">Proto · state</span>
+  <button data-state="state-running" class="on">RUNNING</button>
+  <button data-state="state-stopped">STOPPED</button>
+  <button data-state="state-error">ERROR</button>
+</div>
+
+<script>
+  // status tabs
+  const tabs = document.querySelectorAll('.tab');
+  const rows = document.querySelectorAll('.runs tbody tr');
+  let current = 'all';
+  function apply(){
+    rows.forEach(r => {
+      const s = r.dataset.status;
+      r.classList.toggle('hidden', !(current === 'all' || current === s));
+    });
+  }
+  tabs.forEach(t => t.addEventListener('click', () => {
+    tabs.forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    current = t.dataset.tab;
+    apply();
+  }));
+
+  // transcript slab on row click
+  const modal = document.getElementById('modal');
+  rows.forEach(tr => {
+    tr.addEventListener('click', e => {
+      if (e.target.closest('button')) return;
+      modal.classList.add('open');
+    });
+  });
+  document.getElementById('modal-close').addEventListener('click', () => modal.classList.remove('open'));
+  modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('open'); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') modal.classList.remove('open'); });
+
+  // prototype state switcher
+  const noLive = document.querySelector('.no-live');
+  document.querySelectorAll('.proto-switch button').forEach(b => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('.proto-switch button').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+      document.body.className = b.dataset.state;
+      noLive.classList.toggle('on', b.dataset.state !== 'state-running');
+    });
+  });
+</script>
+</body>
+</html>
