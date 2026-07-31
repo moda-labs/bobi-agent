@@ -19,6 +19,16 @@
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 
+/* Buttons and fields otherwise fall back to the UA's 13.333px system font in
+   pure black — a size that is in no scale here, and an ink that is not in the
+   palette. Inherit first; components override. */
+button, input, select, textarea {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
 html, body { height: 100%; }
 
 body {
@@ -147,11 +157,15 @@ code, pre, kbd { font-family: var(--font-mono); }
   background: var(--surface-card);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
-  padding: 7px 14px;
+  height: 34px;
+  padding: 0 15px;
   cursor: pointer;
   text-decoration: none;
+  white-space: nowrap;
+  flex: none;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   transition: background var(--dur-fast) var(--ease),
               border-color var(--dur-fast) var(--ease),
               opacity var(--dur-fast) var(--ease),
@@ -706,7 +720,11 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   background: var(--accent);
   border: none;
   border-radius: var(--radius-sm);
-  padding: 0 18px;
+  height: 38px;
+  padding: 0 20px;
+  align-self: flex-end;
+  white-space: nowrap;
+  flex: none;
   cursor: pointer;
   transition: opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
 }

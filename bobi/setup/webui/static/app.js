@@ -569,7 +569,7 @@
         <div class="sketch-top"><span class="sketch-eyebrow">bobi · build your team</span></div>
         <div class="ch-body" id="chbody"></div>
         <div class="cue" id="cue"></div>
-        <div class="ch-input"><textarea id="chinput" rows="1" placeholder="Tell bobi what you want to build…" autocomplete="off"></textarea><button class="btn primary" id="chsend" style="padding:9px 14px">↑</button></div>
+        <div class="ch-input"><textarea id="chinput" rows="1" placeholder="Tell bobi what you want to build…" autocomplete="off"></textarea><button class="btn primary" id="chsend" aria-label="Send">↑</button></div>
       </section>
       <aside class="uni-panel">
         <div class="uni-head">
