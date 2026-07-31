@@ -234,11 +234,19 @@ def _start_wrangler_server():
 
     es_dir = _wrangler_es_dir()
 
-    # Ensure node_modules exist
-    if not (es_dir / "node_modules").exists():
+    # Ensure wrangler is installed. Guard on the BINARY, not on a node_modules
+    # directory: npm workspaces hoist, so the worker package's own
+    # node_modules is typically absent or empty even when everything is
+    # installed. Install from wherever the lockfile is - `npm ci` in a
+    # workspace member that has no lock of its own fails outright.
+    if not _wrangler_bin(es_dir).exists():
+        install_dir = next(
+            (d for d in (es_dir, *es_dir.parents) if (d / "package-lock.json").is_file()),
+            es_dir,
+        )
         subprocess.run(
             ["npm", "ci", "--no-audit", "--no-fund"],
-            cwd=str(es_dir), check=True, capture_output=True, timeout=120,
+            cwd=str(install_dir), check=True, capture_output=True, timeout=300,
         )
 
     lock_path = es_dir / ".dev.vars.test.lock"

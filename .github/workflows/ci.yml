@@ -345,9 +345,17 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      # NODE 22 HERE, 20 EVERYWHERE ELSE - deliberate, do not "align" it.
+      # wrangler refuses to start on anything below v22, while the embedded
+      # local-server artifact build requires EXACTLY 20
+      # (hatch_build.py::_require_build_node). The two cannot share a job.
+      # This one gets away with 22 because it never builds that artifact: an
+      # editable install returns early from the build hook (hatch_build.py:245,
+      # `target_name == "wheel" and version == "editable"`), and this job runs
+      # only the wrangler-parametrized tests.
       - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: event-server/package-lock.json
 
@@ -355,7 +363,8 @@ jobs:
         run: pip install -e ".[dev]"
 
       # Installs the whole workspace, which is what puts wrangler on disk for
-      # the worker package.
+      # the worker package. npm workspaces hoist it to the root's
+      # node_modules/.bin, which is where the suite looks for it.
       - name: Install event-server workspace
         working-directory: event-server
         run: npm ci --no-audit --no-fund
