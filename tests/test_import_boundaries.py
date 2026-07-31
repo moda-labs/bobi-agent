@@ -1,24 +1,35 @@
-"""Import-direction guard for the public/private split (#690 phase 1).
+"""Import-direction guard for the event-server package boundaries.
 
-The dependency rule is one-way: private code imports and pins public code,
-never the reverse. Concretely:
+Re-aimed by the repo reorg (``plans/2026-07-29-repo-reorg.md``, Lane 1), which
+brought the Cloudflare Worker adapter back into this repo as a third workspace
+package. The guard previously encoded the repo split itself - "the worker
+adapter is not here" - which the reorg makes false. What replaces it is the
+boundary that actually earns its keep, and it is stricter, not weaker: three
+sibling packages under ``event-server/`` with a one-way dependency rule.
 
 1. The public ``bobi`` package must never import ``bobi_deploy`` - the deploy
    plugin reaches into ``bobi`` (``bobi.build``, ``bobi.config``, the
    ``bobi.commands`` entry points), not the other way around.
-2. The event server's public surfaces must never import the worker adapter
-   (``index.ts`` / ``deployment-session.ts`` / ``internal-auth.ts`` under
-   ``event-server/src/``).
-3. The events-core package (``event-server/core/``) is a real package
-   boundary: everything outside it consumes it by its package name
-   (``@moda-labs/bobi-events-core``), never by relative path, and its own
-   sources never reach outside the package by relative path. This is what
-   lets the worker adapter move to the private repo consuming a pinned
-   published events-core.
+2. ``event-server/`` holds three packages and the dependency arrows run one
+   way only::
 
-All boundaries are clean today; this test keeps them that way, and survives
-the repo split as the public repo's permanent guard (the private-side files it
-names simply stop existing, but nothing public may ever import those names).
+       src/     (local runtime variants)  ─┐
+                                           ├─> core/  (runtime-agnostic protocol)
+       worker/  (Cloudflare adapter)      ─┘
+
+   Neither leaf may import the other: the local variants must never import the
+   Worker adapter, and the Worker must never import the local variants. Their
+   only shared vocabulary is ``core``.
+3. The events-core package (``event-server/core/``) is a real package boundary:
+   everything outside it consumes it by its package name
+   (``@moda-labs/bobi-events-core``), never by relative path, and its own
+   sources never reach outside the package by relative path. That is what keeps
+   core independently publishable - the property the Worker relied on while it
+   lived in the private repo, and which must survive its return.
+
+Both leaf packages are classified default-deny: every module under ``src/`` and
+under ``worker/src/`` must appear in its package's expected set, so a new file
+cannot silently land on the wrong side of the boundary.
 """
 
 from __future__ import annotations
@@ -38,19 +49,23 @@ EVENT_SERVER_SRC = EVENT_SERVER / "src"
 EVENT_SERVER_CORE = EVENT_SERVER / "core"
 EVENT_SERVER_CORE_SRC = EVENT_SERVER_CORE / "src"
 EVENT_SERVER_TEST = EVENT_SERVER / "test"
+EVENT_SERVER_WORKER = EVENT_SERVER / "worker"
+EVENT_SERVER_WORKER_SRC = EVENT_SERVER_WORKER / "src"
+EVENT_SERVER_WORKER_TEST = EVENT_SERVER_WORKER / "test"
 
-# The worker adapter moved to the private deploy repo at the phase-2 cut
-# (index.ts, deployment-session.ts, internal-auth.ts + wrangler.jsonc). The
-# module names stay guarded here so a copy of the adapter reappearing under
-# src/ is rejected as unclassified-private rather than silently public.
-WORKER_ADAPTER_MODULES = {"index", "deployment-session", "internal-auth"}
+# The Cloudflare Worker adapter's modules, which live in their own workspace
+# package (event-server/worker/) and nowhere else. Two properties are asserted
+# against this set: worker/src/ contains exactly these
+# (test_worker_modules_fully_classified), and none of them may reappear under
+# src/, where they would be running in the local Node server that has no
+# Cloudflare runtime (test_src_modules_fully_classified).
+WORKER_ADAPTER_MODULES = {"index", "deployment-session", "internal-auth", "fleet"}
 
-# The only src/ modules allowed in the public repo. Together with
-# WORKER_ADAPTER_MODULES this bounds src/ - every module present must be in
-# one of the two sets and the worker set must stay ABSENT
-# (test_src_modules_fully_classified), so new files cannot silently default
-# to public. The two gateway drivers and their shared socket scaffolding are
-# local-runtime Node modules with no Cloudflare knowledge.
+# The only src/ modules allowed - the local runtime variants. Every module
+# present must be in this exact set (test_src_modules_fully_classified), so a
+# new file cannot silently default into the local server. The two gateway
+# drivers and their shared socket scaffolding are local-runtime Node modules
+# with no Cloudflare knowledge.
 PUBLIC_LOCAL_MODULES = {
     "local",
     "discord-gateway-local",
@@ -183,15 +198,24 @@ _TS_IMPORT_RE = re.compile(r"""\b(?:import|from)\s*\(?\s*["']([^"']+)["']""")
 _TS_EXTENSION_RE = re.compile(r"\.(?:d\.ts|tsx?|mts|mjs|jsx?)$")
 
 
-def _src_module(path: Path) -> str | None:
-    """Module name relative to ``event-server/src/``, extension stripped;
-    ``None`` when the path lives outside src/ (and so cannot be the worker
-    adapter)."""
+def _module_under(path: Path, root: Path) -> str | None:
+    """Module name relative to *root*, extension stripped; ``None`` when the
+    path lives outside *root*."""
     resolved = path.resolve()
-    src = EVENT_SERVER_SRC.resolve()
-    if not resolved.is_relative_to(src):
+    root = root.resolve()
+    if not resolved.is_relative_to(root):
         return None
-    return _TS_EXTENSION_RE.sub("", resolved.relative_to(src).as_posix())
+    return _TS_EXTENSION_RE.sub("", resolved.relative_to(root).as_posix())
+
+
+def _src_module(path: Path) -> str | None:
+    """Module name relative to ``event-server/src/`` (the local variants)."""
+    return _module_under(path, EVENT_SERVER_SRC)
+
+
+def _worker_module(path: Path) -> str | None:
+    """Module name relative to ``event-server/worker/src/`` (the adapter)."""
+    return _module_under(path, EVENT_SERVER_WORKER_SRC)
 
 
 def _ts_import_targets(ts_file: Path) -> list[tuple[int, str, Path]]:
@@ -257,19 +281,37 @@ def _core_manifest() -> dict:
     return json.loads((EVENT_SERVER_CORE / "package.json").read_text(encoding="utf-8"))
 
 
-class TestEventServerCoreNeverImportsWorkerAdapter:
-    def test_no_public_source_imports_worker_adapter(self):
-        files = [
-            ts
-            for ts in _ts_sources(EVENT_SERVER_SRC, EVENT_SERVER_CORE_SRC)
-            if _src_module(ts) not in WORKER_ADAPTER_MODULES
-        ]
+class TestLeafPackagesNeverImportEachOther:
+    """``src/`` (local variants) and ``worker/`` (Cloudflare adapter) are
+    sibling leaves over the same core. Neither may reach into the other: the
+    local server has no Cloudflare runtime (no Durable Objects, no KV, no
+    ``cloudflare:`` modules), and the Worker has no Node runtime. An import
+    either way typechecks in its own compile unit and fails at runtime in the
+    other, so it has to be caught here."""
+
+    def test_local_variants_never_import_the_worker(self):
+        worker_root = EVENT_SERVER_WORKER.resolve()
         offenders = _import_offenders(
-            files, lambda target: _src_module(target) in WORKER_ADAPTER_MODULES
+            _ts_sources(EVENT_SERVER_SRC, EVENT_SERVER_CORE_SRC, EVENT_SERVER_TEST),
+            lambda target: target.is_relative_to(worker_root),
         )
         assert not offenders, (
-            "event-server core/local surfaces must never import the worker "
-            "adapter (index.ts / deployment-session.ts / internal-auth.ts):\n"
+            "event-server core/local surfaces must never import the Cloudflare "
+            "Worker adapter under event-server/worker/ - they share `core`, "
+            "nothing else:\n" + "\n".join(offenders)
+        )
+
+    def test_worker_never_imports_the_local_variants(self):
+        src_root = EVENT_SERVER_SRC.resolve()
+        test_root = EVENT_SERVER_TEST.resolve()
+        offenders = _import_offenders(
+            _ts_sources(EVENT_SERVER_WORKER_SRC, EVENT_SERVER_WORKER_TEST),
+            lambda target: target.is_relative_to(src_root)
+            or target.is_relative_to(test_root),
+        )
+        assert not offenders, (
+            "the Worker adapter must never import the local runtime variants "
+            "under event-server/src/ - they share `core`, nothing else:\n"
             + "\n".join(offenders)
         )
 
@@ -294,29 +336,50 @@ class TestEventServerCoreNeverImportsWorkerAdapter:
                 )
 
     def test_src_modules_fully_classified(self):
-        """Default-deny for new files under src/: post-cut, src/ holds
-        exactly the public local runtime modules. A worker-adapter module
-        reappearing here, or any unclassified new module, fails loudly
-        instead of silently landing in the public repo."""
+        """Default-deny for new files under src/: it holds exactly the local
+        runtime variants. A Worker-adapter module appearing here means code
+        written against the Cloudflare runtime has landed in the Node server,
+        which fails at runtime rather than at build."""
         modules = {_src_module(ts) for ts in _ts_sources(EVENT_SERVER_SRC)}
         assert modules == PUBLIC_LOCAL_MODULES, (
-            "unexpected module under event-server/src/ - the worker adapter "
-            "lives in the private deploy repo; a genuinely public module "
-            "must be added to PUBLIC_LOCAL_MODULES in this test"
+            "unexpected module under event-server/src/ - the Worker adapter "
+            "belongs in event-server/worker/src/; a genuinely local-runtime "
+            f"module must be added to PUBLIC_LOCAL_MODULES (found: {sorted(modules)})"
+        )
+
+    def test_worker_modules_fully_classified(self):
+        """The same default-deny on the other leaf. Without this, the Worker
+        package is an unscanned hole: every other assertion in this file is
+        scoped to src/ or core/, so a module dropped into worker/src/ would be
+        invisible to all of them."""
+        modules = {_worker_module(ts) for ts in _ts_sources(EVENT_SERVER_WORKER_SRC)}
+        assert modules == WORKER_ADAPTER_MODULES, (
+            "unexpected module under event-server/worker/src/ - a genuinely "
+            "Cloudflare-runtime module must be added to WORKER_ADAPTER_MODULES "
+            f"in this test (found: {sorted(modules)})"
         )
 
 
 class TestEventsCorePackageBoundary:
     """The events-core package boundary is real in both directions: consumers
     reach it only by package name, and it reaches nothing outside itself.
-    Either direction of relative-path leakage would silently break the phase-2
-    cut, where the worker adapter consumes a pinned published events-core from
-    the private repo."""
+
+    This is the property that let the Worker adapter live in a separate repo
+    consuming a published events-core, and it does not relax now that the
+    Worker is a sibling workspace. Sharing a repo makes a relative path into
+    ``core/`` resolve where it previously could not - which is exactly why the
+    Worker's sources are scanned here alongside the local variants. Core stays
+    independently publishable or it is not a package."""
 
     def test_no_relative_import_into_core(self):
         core = EVENT_SERVER_CORE.resolve()
         offenders = _import_offenders(
-            _ts_sources(EVENT_SERVER_SRC, EVENT_SERVER_TEST),
+            _ts_sources(
+                EVENT_SERVER_SRC,
+                EVENT_SERVER_TEST,
+                EVENT_SERVER_WORKER_SRC,
+                EVENT_SERVER_WORKER_TEST,
+            ),
             lambda target: target.is_relative_to(core),
         )
         assert not offenders, (
@@ -344,7 +407,12 @@ class TestEventsCorePackageBoundary:
         manifest = _core_manifest()
         name, exports = manifest["name"], manifest["exports"]
         offenders, core_imports = [], 0
-        for ts in _ts_sources(EVENT_SERVER_SRC, EVENT_SERVER_TEST):
+        for ts in _ts_sources(
+            EVENT_SERVER_SRC,
+            EVENT_SERVER_TEST,
+            EVENT_SERVER_WORKER_SRC,
+            EVENT_SERVER_WORKER_TEST,
+        ):
             for lineno, spec in _ts_bare_specifiers(ts):
                 if not spec.startswith("@moda-labs/"):
                     continue
