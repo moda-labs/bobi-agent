@@ -566,3 +566,74 @@ class TestNeverExecutesVerify:
         # And it still passed structurally: judging a verify: is the worker's
         # job, not this script's. The script only asks whether a tag is present.
         assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Heading-style phase markers
+#
+# The plan template puts a phase's state in its heading, backticked:
+#     ### Phase 3 — Admin protocol contract (Lane 1) `[x]`
+# Recognizing only the list-item form made those unflippable after approval -
+# the flip read as an edit to frozen prose - so the check rejected exactly the
+# bookkeeping the Execution contract tells builders to do.
+#
+# The pair that matters is accept-the-flip / still-reject-the-prose-edit: plan
+# prose discusses markers constantly ("nine items stay `[f]`"), so a rule loose
+# enough to normalize those would let someone rewrite a marker mid-sentence and
+# be waved through.
+# ---------------------------------------------------------------------------
+
+_HEADING = "### Phase 1 — Key on the id"
+
+
+class TestHeadingMarkers:
+    def _bodies(self, repo, first: str, second: str, suffix: str = ""):
+        """Two bodies built from the SAME pristine text, differing only in the
+        heading marker - so the diff under test is the flip and nothing else."""
+        base = _plan(repo)
+        return (
+            base.replace(_HEADING, f"{_HEADING} `[{first}]`{suffix}"),
+            base.replace(_HEADING, f"{_HEADING} `[{second}]`{suffix}"),
+        )
+
+    def test_a_heading_marker_flip_is_state_not_an_edit(self, repo):
+        idle, done = self._bodies(repo, " ", "x")
+        _commit(repo, idle, "idle")
+        _commit(repo, done, "done")
+
+        result = _run(repo)
+        assert result.returncode == 0, result.stderr
+
+    def test_a_heading_marker_with_a_trailing_note_still_flips(self, repo):
+        """`... `[ ]` — deferred` is a real shape in live plans."""
+        idle, blocked = self._bodies(repo, " ", "f", suffix=" — deferred")
+        _commit(repo, idle, "idle")
+        _commit(repo, blocked, "blocked")
+
+        result = _run(repo)
+        assert result.returncode == 0, result.stderr
+
+    def test_rewriting_a_marker_inside_prose_is_still_rejected(self, repo):
+        """The half that keeps the rule honest. A backticked marker in a
+        SENTENCE is prose, not state - normalizing it would make silent edits
+        to approved text invisible."""
+        base = _plan(repo).replace(
+            "## Notes", "## Notes\n\nNine items stay `[f]`: frozen means frozen.\n"
+        )
+        _commit(repo, base, "prose")
+        _commit(repo, base.replace("stay `[f]`:", "stay `[x]`:"), "silent rewrite")
+
+        result = _run(repo)
+        assert result.returncode == 1
+        assert "review-surface text was modified" in result.stderr
+
+    def test_editing_the_marker_legend_is_still_rejected(self, repo):
+        """The legend line carries all four markers; it is documentation of the
+        vocabulary, not an instance of it."""
+        base = _plan(repo)
+        _commit(repo, base + "\nAn appended line, so this commit is not empty.\n", "pad")
+        _commit(repo, base.replace("`[x]` done", "`[x]` finished"), "legend edit")
+
+        result = _run(repo)
+        assert result.returncode == 1
+        assert "review-surface text was modified" in result.stderr

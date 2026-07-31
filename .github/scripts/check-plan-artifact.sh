@@ -61,17 +61,32 @@ plan_status() {
 # Collapse the STATE fields of a plan to fixed tokens so a diff sees past them.
 # Everything else above the fence is approved prose and must survive verbatim.
 #
-# Two things count as state rather than prose:
+# Three things count as state rather than prose:
 #
 #  - A checklist marker. `- [ ]` / `- [wip]` / `- [x]` / `- [f] state:<tag>` all
 #    become `- [@]`, which is what makes this comparison marker-AWARE rather
 #    than a plain diff. The optional state tag rides along because tagging an
 #    [f] is the one marker transition that legitimately adds text.
+#  - A HEADING marker: `### Phase 3 — Admin protocol contract (Lane 1) `[x]``.
+#    The plan template puts a phase's state in its heading, backticked, and
+#    that is the marker a builder flips as the phase lands. Recognizing only
+#    the list-item form made those unflippable: the flip read as an edit to
+#    frozen approved prose, so the check rejected exactly the bookkeeping the
+#    Execution contract instructs builders to do, and completion had to be
+#    described in an amendment instead of shown where readers look.
 #  - The `**Status:**` line. Every plan transitions Draft -> Approved -> done,
 #    and a builder flipping it is doing the same bookkeeping as flipping a
 #    marker. Freezing it would make the check unusable on the exact PRs that
 #    advance a plan. Only the status VALUE is normalized — up to the first `·` —
 #    so other metadata sharing that line (`· **Created:** ...`) stays frozen.
+#
+# The heading rule is deliberately narrow, because backticked markers are ALL
+# OVER plan prose - live plans discuss them at length ("nine items stay `[f]`:
+# frozen means frozen"). Normalizing every backticked marker would let someone
+# silently rewrite one inside a sentence and have this check wave it through.
+# So it matches only a marker that TERMINATES a heading line, optionally
+# followed by a backtick-free note (`... `[ ]` — deferred`) - the shape the
+# template actually uses, and one no prose mention takes.
 #
 # Deliberately NOT normalized: anything else. A stale line reference, an item's
 # wording, a gate command that turned out to be wrong — those are corrected by a
@@ -80,6 +95,7 @@ plan_status() {
 normalize_markers() {
   sed -E \
     -e 's/^([[:space:]]*)- \[(x| |wip|f)\]([[:space:]]+state:[a-z][a-z0-9-]*)?/\1- [@]/' \
+    -e 's/^(#+ .*)`\[(x| |wip|f)\]`([^`]*)$/\1`[@]`\3/' \
     -e 's/^(>?[[:space:]]*\*\*Status:\*\*)[^·]*/\1 [@]/'
 }
 
