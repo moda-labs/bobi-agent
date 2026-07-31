@@ -335,6 +335,12 @@ keeps full context. The engine drains exactly one turn per prompt
 (`_drain_response`) and saves the returned session ID so a resumed run can pick
 the same conversation back up.
 
+A launch is admitted before any of this runs. `max_launch_depth` bounds how
+deep a chain of runs launching runs can go, and a run launching a named
+workflow already in its own chain is refused outright - see **Launch caps** in
+`BUILDING_AGENT_TEAMS.md`. The cap is not workflow-specific: it sits on the
+launch pipeline, alongside `max_concurrent_agents` and `spend_cap`.
+
 ## Suspend and resume
 
 Await steps make workflows durable across long waits (a human approval, a CI

@@ -136,15 +136,30 @@ def child_agent_env(root: Path, base: dict[str, str] | None = None) -> dict[str,
       and runtime tool lookup identical;
     - pin identity with the current installation ``BOBI_ROOT``;
     - override stale parent ``BOBI_BRAIN`` with the installed team's
-      configured ``brain.kind`` when present.
+      configured ``brain.kind`` when present;
+    - strip any inherited ``BOBI_LAUNCH_LINEAGE``.
 
-    Stale parent identity values are never inherited: ``BOBI_ROOT`` is
-    always rewritten to *root*, and ``BOBI_BRAIN`` is rewritten when the
-    installed team declares a brain.
+    Stale parent identity values are never inherited: ``BOBI_ROOT`` is always
+    rewritten to *root*, ``BOBI_BRAIN`` is rewritten when the installed team
+    declares a brain, and the launch chain is removed.
+
+    The chain is stripped rather than propagated because this helper has four
+    callers and only one is an agent launch (``subagent.launch_agent``; the
+    others are the manager daemon spawn, dependency install, and the MCP
+    probe). Stamping here would mean an agent running the routine ``bobi agent
+    <x> restart`` copies its own chain into the new manager daemon, which then
+    lives for days at depth N, so every launch it makes starts at N+1 and
+    legitimate work is refused team-wide with no visible cause. Stripping makes
+    a manager spawn a chain root for free, with no per-caller clearing to
+    forget; ``launch_agent`` stamps the chain into the dict this returns,
+    immediately before spawning.
     """
+    from bobi.launch_lineage import strip as strip_launch_lineage
+
     resolved_root = root.resolve()
     env = agent_spawn_env(base)
     _load_dotenv_into(env, resolved_root)
     env["BOBI_ROOT"] = str(resolved_root)
+    strip_launch_lineage(env)
     pin_brain_from_root(resolved_root, env)
     return env

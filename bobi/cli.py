@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import truststore
@@ -2931,11 +2932,12 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
         raise SystemExit(1)
 
     if wait:
-        _run_agent_wait(cwd=cwd, task=task, workflow=workflow, role=role,
-                        run_key=run_key, timeout=timeout,
-                        requested_by=requested_by, interactive=interactive,
-                        persistent=persistent, subscribe=subscribe or [],
-                        model=model, effort=effort, fresh=fresh)
+        with _launch_refusal_is_readable():
+            _run_agent_wait(cwd=cwd, task=task, workflow=workflow, role=role,
+                            run_key=run_key, timeout=timeout,
+                            requested_by=requested_by, interactive=interactive,
+                            persistent=persistent, subscribe=subscribe or [],
+                            model=model, effort=effort, fresh=fresh)
         return
 
     requester: dict = {}
@@ -2952,19 +2954,39 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
             raise SystemExit(1)
 
     from .subagent import launch_agent
-    session_name = launch_agent(
-        task=task, cwd=cwd, workflow_name=workflow,
-        timeout=timeout, requested_by=requester,
-        interactive=interactive,
-        role=role,
-        persistent=persistent,
-        subscribe=subscribe or [],
-        run_key=run_key,
-        model=model,
-        effort=effort,
-        fresh=fresh,
-    )
+    with _launch_refusal_is_readable():
+        session_name = launch_agent(
+            task=task, cwd=cwd, workflow_name=workflow,
+            timeout=timeout, requested_by=requester,
+            interactive=interactive,
+            role=role,
+            persistent=persistent,
+            subscribe=subscribe or [],
+            run_key=run_key,
+            model=model,
+            effort=effort,
+            fresh=fresh,
+        )
     click.echo(f"Agent started: {session_name}")
+
+
+@contextmanager
+def _launch_refusal_is_readable():
+    """Surface a blocked launch as one line on stderr, never a traceback.
+
+    The highest-stakes surface in the lineage guard, because the reader is an
+    LLM. A raw traceback reads as a transient crash, and the natural recovery
+    is to retry with a fresh run key or ``-w adhoc`` - turning one refusal into
+    the launch storm the guard exists to stop. The message itself (built in
+    ``bobi/launch_lineage.py``) says the block is deterministic and names each
+    retry vector; all this does is make sure the agent sees it and nothing else.
+    """
+    from .launch_lineage import LaunchBlockedError
+    try:
+        yield
+    except LaunchBlockedError as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1) from None
 
 
 
@@ -3005,7 +3027,20 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
             click.echo("--requested-by must be valid JSON", err=True)
             raise SystemExit(1)
 
-    from .subagent import spawn_adhoc
+    # --wait runs the agent IN THIS PROCESS, so there is no child env to stamp:
+    # the chain goes into our own environment, which is what any `bobi` command
+    # the agent runs from its shell inherits. Admission happens here for the
+    # same reason it does in launch_agent - this path chains just as deeply,
+    # and `-w adhoc --wait` is the delegation idiom the role prompts teach, so
+    # it is the shape most likely to run away.
+    from .launch_lineage import ADHOC_WORKFLOW, admit, stamp
+    from .subagent import adhoc_session_name, spawn_adhoc
+    session_name = adhoc_session_name(task, run_key)
+    stamp(os.environ, admit(
+        _detect_project_root(), session=session_name,
+        workflow=ADHOC_WORKFLOW, run_key=session_name,
+    ))
+
     result = spawn_adhoc(
         cwd=cwd, task=task, timeout=timeout, name=run_key,
         requested_by=requester, persistent=False, role=role,

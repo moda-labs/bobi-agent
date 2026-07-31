@@ -224,6 +224,12 @@ def _emit_session_started(
     requested_by: dict | None = None, role: str = "",
 ) -> None:
     label = role or "Agent"
+    # The launch chain rides the event log rather than the session registry
+    # (#849): forensics need the chain at the moment a run starts, which is
+    # exactly what this event already carries to the bus, and keeping it out of
+    # state.json keeps the guard clear of Session.start()'s re-registration.
+    from bobi.launch_lineage import current_lineage, render
+    lineage = current_lineage()
     _emit_lifecycle_event("agent/session.started", {
         "run_key": run_key,
         "role": role,
@@ -232,6 +238,8 @@ def _emit_session_started(
         "session_id": session_id,
         "phase": phase,
         "requested_by": requested_by or None,
+        "lineage": render(lineage),
+        "depth": len(lineage),
         "text": f"{label} started working on {run_key}",
     })
 
@@ -682,6 +690,22 @@ def _load_policy_prompt() -> str:
     return _load_long_term_memory_prompt()
 
 
+def adhoc_session_name(task: str, name: str | None = None) -> str:
+    """The session name :func:`spawn_adhoc` will use for this task.
+
+    Extracted so a caller that must know the name BEFORE spawning - the
+    ``--wait`` path, which stamps the launch chain into its own environment -
+    shares one derivation with ``spawn_adhoc`` instead of recomputing it. A
+    recomputed name that drifts would stamp a link naming a session that never
+    exists, which is the lineage invariant (see ``bobi/launch_lineage.py``).
+    """
+    import hashlib
+
+    if name:
+        return name
+    return f"adhoc-{hashlib.sha256(task.encode()).hexdigest()[:8]}"
+
+
 def spawn_adhoc(
     cwd: str,
     task: str,
@@ -719,11 +743,9 @@ def spawn_adhoc(
     from durable state (a committed checklist, the branch's commits) wants the
     stable name and a clean transcript, which is exactly this flag.
     """
-    import hashlib
     from bobi.session import Session
 
-    short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
-    run_key = name or f"adhoc-{short_hash}"
+    run_key = adhoc_session_name(task, name)
     project = _resolve_project_name(cwd)
     requested_by = requested_by or {}
 
@@ -979,7 +1001,9 @@ def _check_spend_governor(root: Path) -> None:
     cap = cfg.spend_cap or DEFAULT_CAP
     allowed, count = check_spend_cap(root, cap)
     if not allowed:
-        emit_spend_cap_alert(root, count, cap)
+        from bobi.launch_lineage import current_lineage, render
+        emit_spend_cap_alert(root, count, cap,
+                             lineage=render(current_lineage()))
         raise RuntimeError(
             f"Spend governor: {count} agent invocations in the last hour "
             f"(cap: {cap}). New launches are blocked until invocations "
@@ -1052,6 +1076,16 @@ def launch_agent(
             f"Run `bobi agent <name> doctor` for details and fix commands."
         )
 
+    # Preflight: launch lineage - refuse a self-recursive or too-deep chain.
+    # Ahead of the spend governor deliberately: the governor's own docstring
+    # calls it a classification-free backstop, and in the reported incident it
+    # was the only resort. This is the first one, and it refuses on shape.
+    # ``session_name`` is the name registered below, never a recomputed one.
+    from bobi.launch_lineage import admit as admit_launch_lineage
+    child_lineage = admit_launch_lineage(
+        root, session=session_name, workflow=workflow_name, run_key=run_key,
+    )
+
     # Preflight: spend governor — cap agent invocations per rolling hour
     _check_spend_governor(root)
 
@@ -1111,8 +1145,12 @@ def launch_agent(
     log_file = session_log_path(session_name)
     # child_agent_env() is the single parent-to-child propagation contract:
     # identity, brain selection, tool PATH, and credential material all flow
-    # through one helper instead of one-off launch-site patches.
+    # through one helper instead of one-off launch-site patches. It strips the
+    # launch chain (see its docstring); this launch site - the only caller that
+    # is an agent launch - stamps the child's own chain back in.
     child_env = child_agent_env(root)
+    from bobi.launch_lineage import stamp as stamp_launch_lineage
+    stamp_launch_lineage(child_env, child_lineage)
     try:
         pid = _launch_detached(script, [args_json], log_file, env=child_env)
     except Exception as exc:
