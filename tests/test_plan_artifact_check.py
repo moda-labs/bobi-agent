@@ -637,3 +637,18 @@ class TestHeadingMarkers:
         result = _run(repo)
         assert result.returncode == 1
         assert "review-surface text was modified" in result.stderr
+
+    def test_a_heading_that_merely_discusses_a_marker_is_still_frozen(self, repo):
+        """The narrow-rule boundary. A heading can talk ABOUT a marker without
+        carrying one; only a marker that terminates the heading (or is followed
+        by a dash-introduced note) is state. Without this, `### What `[f]`
+        means` would normalize and an edit inside it would be invisible."""
+        base = _plan(repo).replace(
+            "## Notes", "### What `[f]` means for a stalled phase\n\n## Notes"
+        )
+        _commit(repo, base, "prose heading")
+        _commit(repo, base.replace("What `[f]` means", "What `[x]` means"), "rewrite")
+
+        result = _run(repo)
+        assert result.returncode == 1
+        assert "review-surface text was modified" in result.stderr

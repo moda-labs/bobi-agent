@@ -85,8 +85,11 @@ plan_status() {
 # frozen means frozen"). Normalizing every backticked marker would let someone
 # silently rewrite one inside a sentence and have this check wave it through.
 # So it matches only a marker that TERMINATES a heading line, optionally
-# followed by a backtick-free note (`... `[ ]` — deferred`) - the shape the
-# template actually uses, and one no prose mention takes.
+# followed by a DASH-INTRODUCED note (`... `[ ]` — deferred`, a shape live
+# plans use). The dash requirement is what keeps a heading that merely
+# discusses a marker - `### What `[f]` means for a stalled phase` - out of
+# scope; an earlier draft allowed any trailing text and would have normalized
+# that heading, re-opening the silent-edit hole one level up.
 #
 # Deliberately NOT normalized: anything else. A stale line reference, an item's
 # wording, a gate command that turned out to be wrong — those are corrected by a
@@ -95,7 +98,7 @@ plan_status() {
 normalize_markers() {
   sed -E \
     -e 's/^([[:space:]]*)- \[(x| |wip|f)\]([[:space:]]+state:[a-z][a-z0-9-]*)?/\1- [@]/' \
-    -e 's/^(#+ .*)`\[(x| |wip|f)\]`([^`]*)$/\1`[@]`\3/' \
+    -e 's/^(#+ .*)`\[(x| |wip|f)\]`([[:space:]]*((—|-)[^`]*)?)$/\1`[@]`\3/' \
     -e 's/^(>?[[:space:]]*\*\*Status:\*\*)[^·]*/\1 [@]/'
 }
 
