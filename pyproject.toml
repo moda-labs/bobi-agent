@@ -1,6 +1,6 @@
 [project]
 name = "bobi"
-version = "0.50.0"
+version = "0.51.0"
 description = "Build teams of event-driven AI agents"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -86,9 +86,19 @@ packages = ["bobi"]
 # force-include note above).
 include = ["bobi", "event-server", "skills", "README.md", "CHANGELOG.md",
            "hatch_build.py"]
+# The Cloudflare Worker workspace is deliberately NOT in the sdist. Nothing in
+# the Python distribution builds or runs it - the wheel's event-server inputs
+# are src/ + core/ only (bobi/events/artifact.py) - and its documented deploy
+# path is a git clone plus `wrangler deploy`, never PyPI. Stating it here also
+# makes the outcome DETERMINISTIC: without this line the sdist's contents
+# depend on whether `npm ci` has run, because Hatch's safe_walk follows the
+# node_modules workspace symlink (`bobi-events-worker -> ../worker`) first and
+# then prunes the real directory as already-visited. `core` escapes that only
+# by sorting ahead of `node_modules`. Pinned by tests/test_sdist_contents.py.
 exclude = ["**/node_modules", "**/.npm-cache",
            "event-server/dist", "event-server/core/dist",
-           "event-server/core/*.tgz", "**/__pycache__"]
+           "event-server/core/*.tgz", "event-server/worker",
+           "**/__pycache__"]
 
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"

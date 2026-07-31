@@ -1,5 +1,99 @@
 # Changelog
 
+## 0.51.0 - 2026-07-31
+
+Minor release: the product surface goes public. The Cloudflare event-server
+Worker and the admin sidecar were previously reachable only through a grant on
+the private deploy repo; both now ship in this repo, and the admin wire format
+they speak is a documented, versioned contract rather than an internal
+agreement between two halves of one team's infrastructure. Self-hosting the
+durable event tier no longer requires anything private. This is Lane 1 of the
+repo reorg (`plans/2026-07-29-repo-reorg.md`, Phases 1-5); the reference
+container image and the ops-repo consolidation follow in later releases.
+
+### Added
+- **The Cloudflare Worker event server is public (#880).** `event-server/worker/`
+  is a third npm workspace package alongside `src/` (local) and `core/`. It is
+  the durable variant of the same protocol the Node servers speak - same webhook
+  verification, same bubble model, same topics - with per-deployment sessions in
+  Durable Objects and replay in KV, so registrations and cursors survive a
+  restart. It lands as its own workspace rather than more files under
+  `event-server/src/` because the two compile units are mutually exclusive: the
+  local unit is Node-only (`lib es2024` + `@types/node`), the Worker needs
+  Cloudflare's globals and `worker-configuration.d.ts`, and their vitest configs
+  are node-environment vs. `defineWorkersConfig`. `wrangler.jsonc` ships with a
+  placeholder KV namespace id that fails loudly at `wrangler deploy` - a fresh
+  clone cannot silently deploy against someone else's namespace. Deployment
+  walkthrough in `docs/SELF_HOSTED_EVENT_SERVER.md` ("Deploying the Worker").
+  Requires a Workers Paid plan, because the Durable Objects are SQLite-backed.
+- **`bobi agent <name> supervise` (#880).** The admin sidecar, restored as a
+  first-class public CLI surface. It spawns and probes the manager, publishes
+  heartbeat and lifecycle telemetry, and listens on the admin topic so a wedged
+  manager can still be restarted from outside the box. Everything after `--`
+  forwards to the manager's start command
+  (`bobi agent <name> supervise -- --foreground`). This is what a container
+  entrypoint runs as PID 1, not an interactive command. The agent name is a CLI
+  positional; the private `bobi-supervisor` shim that read it from `BOBI_ROOT`
+  is gone.
+- **`docs/ADMIN_PROTOCOL.md` (#880).** The admin channel as a documented,
+  versioned contract - topics, envelopes, command and telemetry schemas, and the
+  auth model. This, not the code move, is what an external consumer binds to.
+  `bobi/supervisor/admin.py` binds the two sides byte-for-byte, so the server
+  half of a documented contract cannot stay private.
+
+### Changed
+- **Positioning: the Worker is a self-host option, not a paid tier (#880).**
+  `README.md` and `docs/SELF_HOSTED_EVENT_SERVER.md` now present three
+  self-hosted shapes - tunnel, standalone Node, Worker - and tell you to pick on
+  durability rather than on price. The in-memory restart caveat carries an
+  explicit pointer to the durable answer.
+- **Packaging: neither the wheel nor the sdist carries the Worker sources, and
+  now that is stated rather than incidental.** The wheel's event-server inputs
+  are declared as `src/**/*.ts` + `core/src/**/*.ts` (`bobi/events/artifact.py`),
+  which cannot match `worker/`. The sdist takes `event-server` as a whole
+  directory, so the Worker workspace *was* in scope and fell out only by
+  accident: Hatch's `safe_walk` follows the npm workspace symlink
+  `node_modules/bobi-events-worker -> ../worker` and then prunes the real
+  directory as an already-visited inode, which made the sdist's contents depend
+  on whether `npm ci` had run (`core` escaped only by sorting ahead of
+  `node_modules`). `event-server/worker` is now an explicit sdist `exclude`,
+  pinned by `tests/test_sdist_contents.py`. No published bytes change - this is
+  what the release workflow already emitted - but the result is now
+  deterministic. Nothing in the Python distribution builds or runs the Worker;
+  its deploy path is a git clone plus `wrangler deploy`.
+- **The event-server npm tree audit is default-deny (#880).** Only `extraneous:`
+  is treated as non-fatal in `bobi/events/server.py`; everything else blocks.
+  npm 10.8.2 (bundled with Node 20) reports the Worker's optional dev deps as
+  extraneous from a lockfile npm 11 calls clean, and the audit must not be
+  loosened wholesale to absorb that.
+
+### Removed
+- **The repo-split bridges (#880).** The npm publish path for
+  `@moda-labs/bobi-events-core` (`core/scripts/{pack,smoke}.mjs`) and the
+  `worker-integration.yml` cross-repo CI existed only to carry code across the
+  private/public boundary. With the Worker home, they dissolve.
+
+### Fixed
+- **`validate_team` no longer invalidates its own hash (#873).** Finalizing a
+  team could land in a state where install was permanently unreachable -
+  "the team source changed since validate_team last passed" - and re-running
+  `validate_team` re-armed the same trap. When the setup's `run/` directory sits
+  inside the source tree, saving `run/state/setup.json` rewrites a file the
+  freshness hash just covered, so the frozen digest is stale the instant it is
+  recorded. `source_tree_hash` gains an `exclude` set and both call sites pass
+  the setup state file. Two guards close the way in: create mode now applies the
+  same empty-target bar the registry branch enforced, and the `run/` containment
+  check rejects a location that *encloses* `run/` (the agents root) and not only
+  one nested inside it.
+- **Plan-artifact CI reads heading-style phase markers (#885).** The check
+  recognized list-style markers only, so a plan whose phases are headings passed
+  vacuously.
+- **The unit-test matrix reports under a stable required check (#877).** A
+  skipped matrix job never expands its matrix, so required `Unit tests (3.12)`
+  contexts never reported and the PR hung forever. A non-matrix gate job now
+  checks the matrix result explicitly.
+- **A plan's review surface freezes at approval, not before (#878).**
+
 ## 0.50.0 - 2026-07-30
 
 Minor release: long agent jobs stop dying silently. A turn-cap kill now names
