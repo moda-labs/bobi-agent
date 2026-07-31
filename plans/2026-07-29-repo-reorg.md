@@ -161,27 +161,27 @@ Paths are repo-root-relative. The draft wrote several `event-server/`-internal p
 
 ## Phases
 
-### Phase 1 — Worker to public (Lane 1) `[ ]`
+### Phase 1 — Worker to public (Lane 1) `[x]`
 
 Move sources/config/tests into `event-server/worker/` as a third workspace package (NOT merged into the Node compile unit); add it to `workspaces`; parameterize the KV id; delete `fleet.ts`'s superseded private header (D8); no header renames (D9); re-aim the three import-boundary guard families so the suite is green on the new boundary; write the Worker deploy runbook.
 
 **Gate:** `pytest tests/test_import_boundaries.py` green *and* non-vacuous — the re-aimed guards must still fail when a genuinely-private module is planted under either package (prove it with a deliberate mutant, per the house negative-claim idiom). `npx tsc --noEmit` green for BOTH compile units; both vitest suites green.
 
-### Phase 2 — Sidecar to public (Lane 1) `[ ]`
+### Phase 2 — Sidecar to public (Lane 1) `[x]`
 
 Move the 11 modules to `bobi/supervisor/`; add the `bobi agent <name> supervise` entry point; restate the container-token guard so it bans build-context assembly rather than the word "docker". No packaging edit needed (`packages = ["bobi"]` covers subpackages) and no private-side import to update (the console reads heartbeats off the bus, not the API).
 
 **Gate:** `pytest tests/test_import_boundaries.py` green with a planted-mutant check that the restated token guard still catches real build-context code; `bobi agent <name> supervise --help` resolves from a built wheel in a clean venv.
 
-### Phase 3 — Admin protocol contract (Lane 1) `[ ]`
+### Phase 3 — Admin protocol contract (Lane 1) `[x]`
 
 Depends on B's placement. `docs/ADMIN_PROTOCOL.md`: topics, all nine command schemas, heartbeat/snapshot schema, the additive-only `SUPERVISOR_VERSION` promise, the bubble-security note.
 
-### Phase 4 — Positioning and docs sweep (Lane 1) `[ ]`
+### Phase 4 — Positioning and docs sweep (Lane 1) `[x]`
 
 Depends on A. Rewrite the "managed deployment tier" line per D5; enumerate the Worker as the fourth variant; sweep README + EVENT_SERVER.
 
-### Phase 5 — Retire the repo-split bridges (Lane 1) `[ ]`
+### Phase 5 — Retire the repo-split bridges (Lane 1) `[x]`
 
 Depends on A. **Two repos.** Public: repoint the Worker's core dependency to `"*"`; delete the npm publish path (`pack:publish`, `smoke`, both scripts, the `ci.yml:196-198` step) and the now-purposeless `.gitignore:26` tgz line; add the Worker's typecheck + workers-pool vitest as their own steps in the `event-server` job; add the wrangler-dev protocol job, deleting the `ci.yml:319-321` NOTE and the `:87`/`:327` private-CI notes; leave `0.1.0` published, frozen. Private `bobi-deploy`: delete `worker-integration.yml` and `tests/test_worker_integration_workflow.py`.
 
@@ -237,6 +237,14 @@ Every lane is `concurrent` mode: each spans more than one repo, so plan markers 
 **Dispatch (decided 2026-07-30, Zach): no dispatch issues.** Split cut none. Lane 1 is worked directly in an interactive session against this plan, which is the spec; Lanes 2 and 3 are cut only once their predecessor lands. The reason not to file them ahead: filing an issue in `bobi-agent` or `moda-agents` dispatches the eng-team bot, and Lane 2's real blocker is **Gate R — a hand-run public release with no issue number**, so a `depends on #N` line cannot express it and the bot's Ready gate would bounce the issue on a dependency it can't see. Marker mode is unchanged (`concurrent`, since Lane 1 spans two repos): markers flip as status-only commits to `bobi-agent`'s main referencing the code PR, never inside the feature branch.
 
 ## Amendments
+
+### 2026-07-31 — Lane 1 landed; the marker-vocabulary finding is fixed
+
+Lane 1 merged: `bobi-agent#880` (main `8830751`) and `bobi-deploy#47` (`bbf39e7`), post-merge CI green on both, `dev` advanced to `8830751`.
+
+The marker-vocabulary conflict recorded in the entry below is **closed**: `.github/scripts/check-plan-artifact.sh` now normalizes heading-style markers, so the Phase 1-5 markers above are flipped to `[x]` in the same PR as that fix rather than described here. The note below saying completion "is recorded in these amendments" was true when written and is now superseded — read the markers.
+
+Next: **Gate R**, a public release carrying `bobi/supervisor`, which Lane 2 is gated on.
 
 ### 2026-07-30 — Lane 1 built: Phases 1-5 complete
 
