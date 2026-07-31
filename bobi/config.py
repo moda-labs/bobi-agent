@@ -8,7 +8,7 @@ path/source defaults and is not parsed here.
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import yaml
@@ -32,11 +32,19 @@ class EnvVarRef:
 
     A bare ``${VAR}`` is a required secret; ``${VAR:-default}`` carries its
     own fallback and is optional.
+
+    ``build_only`` marks a name referenced ONLY under the top-level ``build:``
+    block — apt/npm/run_root/run steps that bake an image layer. Those run at
+    image-build time and nothing reads them to RUN an agent, so requiring them
+    at install or startup blocks a runtime that needs nothing. A name used
+    both under ``build:`` and anywhere else is not build_only: the runtime use
+    is real and wins.
     """
 
     name: str
     default: str = ""
     required: bool = True
+    build_only: bool = False
 
 
 def parse_env_ref(token: str) -> EnvVarRef:
@@ -105,20 +113,76 @@ def find_env_var_refs(project_path: Path) -> list[EnvVarRef]:
     """Scan package/agent.yaml for ${VAR} references.
 
     De-duped by name, order preserved; a required reference wins over an
-    optional one to the same name.
+    optional one to the same name. Each ref carries ``build_only`` (see
+    EnvVarRef) so callers gating a RUNTIME can skip build-time-only names.
     """
     from bobi import paths
+    agent_yaml = paths.agent_yaml_path(project_path)
+    build_only_names = _build_only_names(agent_yaml)
     refs: dict[str, EnvVarRef] = {}
-    for ref in _scan_env_refs(paths.agent_yaml_path(project_path)):
+    for ref in _scan_env_refs(agent_yaml):
         prior = refs.get(ref.name)
         if prior is None or (ref.required and not prior.required):
-            refs[ref.name] = ref
+            refs[ref.name] = replace(
+                ref, build_only=ref.name in build_only_names)
     return list(refs.values())
 
 
 def find_required_env_vars(project_path: Path) -> list[str]:
-    """The bare ${VAR} names agent.yaml requires (${VAR:-default} excluded)."""
-    return [r.name for r in find_env_var_refs(project_path) if r.required]
+    """The bare ${VAR} names an agent needs to RUN.
+
+    ${VAR:-default} carries its own fallback and is excluded, as is a
+    build-time-only name (EnvVarRef.build_only) — nothing reads those to run
+    an agent, and the image build enforces them where they are actually used.
+    """
+    return [r.name for r in find_env_var_refs(project_path)
+            if r.required and not r.build_only]
+
+
+def _build_only_names(agent_yaml: Path) -> frozenset[str]:
+    """Names referenced under top-level ``build:`` and nowhere else.
+
+    Structural, not a name list: which variables are build-time is a property
+    of where a package uses them, and deriving it from the document cannot
+    drift the way a maintained allowlist does. (`bobi-deploy` carries the same
+    contract for its own deploy-side surface, but as a hardcoded
+    BUILD_SECRET_NAMES tuple — a name list can't live in `bobi/`, which stays
+    generic.)
+
+    Fails SAFE: any parse problem yields the empty set, so every ref stays
+    runtime-required exactly as before. A classification bug must over-require
+    a secret, never quietly stop requiring one.
+    """
+    try:
+        doc = yaml.safe_load(agent_yaml.read_text())
+    except (OSError, yaml.YAMLError):
+        return frozenset()
+    if not isinstance(doc, dict):
+        return frozenset()
+    build = doc.get("build")
+    if build is None:
+        return frozenset()
+    in_build = _refs_in(build)
+    elsewhere: set[str] = set()
+    for key, value in doc.items():
+        if key != "build":
+            elsewhere |= _refs_in(value)
+    return frozenset(in_build - elsewhere)
+
+
+def _refs_in(node) -> set[str]:
+    """Every ${VAR} name anywhere in a parsed YAML subtree."""
+    found: set[str] = set()
+    if isinstance(node, str):
+        found |= {parse_env_ref(t).name for t in _ENV_VAR_RE.findall(node)}
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            found |= _refs_in(key)
+            found |= _refs_in(value)
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            found |= _refs_in(item)
+    return found
 
 
 def _scan_env_refs(agent_yaml: Path) -> list[EnvVarRef]:

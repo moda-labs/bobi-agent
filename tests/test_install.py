@@ -405,6 +405,47 @@ class TestNonInteractiveInstall:
         env = parse_env_file(home / "agents" / "opt-team" / "run" / ".env")
         assert env["BOBI_EVENT_SERVER"] == "wss://events.example.com"
 
+    def test_missing_build_only_secret_does_not_block_install(
+            self, tmp_path, monkeypatch):
+        """A ${VAR} used ONLY by a `build:` step bakes an image layer; nothing
+        reads it to run the agent, so its absence must not fail the install.
+
+        Regression (2026-07-31): it did, and took eng-team's roll down. The
+        deploy side deliberately withholds build secrets from the runtime
+        env-file, so requiring one here made the two halves contradict — and
+        the dependency it would have installed was already in the image.
+        """
+        pack_dir = tmp_path / "agents" / "baked-team"
+        (pack_dir / "roles" / "manager").mkdir(parents=True)
+        (pack_dir / "roles" / "manager" / "ROLE.md").write_text("# Manager\n")
+        pack_dir.joinpath("agent.yaml").write_text(
+            "version: '1.0'\n"
+            "entry_point: manager\n"
+            "event_server: ${BOBI_EVENT_SERVER}\n"
+            "build:\n"
+            "  run_root:\n"
+            "    - git clone https://x-access-token:${PRIVATE_CLONE_TOKEN}@example.com/x /opt/x\n"
+        )
+        pack_dir.joinpath("agent.md").write_text("# baked-team\n")
+
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        monkeypatch.setenv("BOBI_EVENT_SERVER", "wss://events.example.com")
+        monkeypatch.delenv("PRIVATE_CLONE_TOKEN", raising=False)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["agents", "install", str(pack_dir), "--non-interactive"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        assert "required secrets missing" not in result.output
+        # Absent, not blank: a build secret must not be persisted as a runtime
+        # value that a later reader could mistake for a real credential.
+        env = parse_env_file(home / "agents" / "baked-team" / "run" / ".env")
+        assert "PRIVATE_CLONE_TOKEN" not in env
+
     def test_existing_env_file_preserved(self, pack_with_creds, tmp_path, monkeypatch):
         """Vars already in .env are kept; env vars supplement them."""
         home = tmp_path / "home"
