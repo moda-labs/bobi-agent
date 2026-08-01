@@ -136,8 +136,8 @@ jobs:
           python scripts/render_worker_ci_config.py \
             --name "$CI_WORKER_NAME" \
             --kv-namespace-id "$CI_SMOKE_KV_NAMESPACE_ID" \
-            --release-version "ci-smoke-${{ github.run_id }}" \
-            --release-sha "${{ github.sha }}" \
+            --release-version "ci-smoke-${GITHUB_RUN_ID}" \
+            --release-sha "${GITHUB_SHA}" \
             --out event-server/worker/wrangler.ci.jsonc
 
       - name: Deploy the ci-smoke Worker
@@ -149,10 +149,15 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          npx wrangler deploy --config wrangler.ci.jsonc 2>&1 | tee deploy.log
+          log="$RUNNER_TEMP/wrangler-deploy.log"
+          # `--no-install` so this can only use the wrangler pinned in
+          # package-lock.json; without it npx would silently fetch a different
+          # version if workspace resolution ever broke, and the deploy under
+          # test would stop being the deploy we ship.
+          npx --no-install wrangler deploy --config wrangler.ci.jsonc 2>&1 | tee "$log"
           # The workers.dev URL is the smoke target. Parse it rather than
           # assembling it: the account subdomain is not known to this repo.
-          url="$(grep -oE 'https://[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev' deploy.log | head -1)"
+          url="$(grep -oE 'https://[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev' "$log" | head -1)"
           if [ -z "$url" ]; then
             echo "::error::wrangler deploy printed no workers.dev URL — cannot smoke the deployment" >&2
             exit 1
@@ -173,7 +178,7 @@ jobs:
         run: |
           set -euo pipefail
           openssl rand -hex 32 \
-            | npx wrangler secret put INTERNAL_DO_SECRET --config wrangler.ci.jsonc
+            | npx --no-install wrangler secret put INTERNAL_DO_SECRET --config wrangler.ci.jsonc
 
       - name: Smoke the DEPLOYED Worker
         if: steps.live.outputs.run == 'true'

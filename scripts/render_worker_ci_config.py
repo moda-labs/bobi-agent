@@ -106,11 +106,12 @@ def load_jsonc(path: Path) -> dict:
     return json.loads(strip_jsonc_comments(path.read_text()))
 
 
-def _source_kv_id(config: dict) -> str:
+def _events_kv_id(config: dict) -> str:
+    """The EVENTS binding's namespace id, from either the source or a render."""
     for binding in config.get("kv_namespaces", []):
         if binding.get("binding") == "EVENTS":
             return str(binding.get("id", ""))
-    raise ConfigError("source wrangler.jsonc has no EVENTS kv_namespaces binding")
+    raise ConfigError("wrangler config has no EVENTS kv_namespaces binding")
 
 
 def render(
@@ -142,7 +143,7 @@ def render(
             f"--kv-namespace-id is still the {KV_PLACEHOLDER} placeholder; "
             "supply the CI namespace id from CI configuration"
         )
-    if kv_namespace_id == _source_kv_id(source):
+    if kv_namespace_id == _events_kv_id(source):
         raise ConfigError(
             "--kv-namespace-id matches the id hardcoded in the shipped "
             "wrangler.jsonc; the CI Worker needs its own namespace, supplied "
@@ -205,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     args.out.write_text(json.dumps(config, indent=2) + "\n")
-    kv_id = _source_kv_id(config)
+    kv_id = _events_kv_id(config)
     print(
         f"rendered {args.out}: name={config['name']} "
         f"EVENTS={kv_id[:8]}… (isolated from {PRODUCTION_WORKER_NAME})"
