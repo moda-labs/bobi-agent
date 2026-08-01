@@ -230,10 +230,10 @@ first. Implementation stacks on an integration branch
   manager shows all three states.
 
 **U4 — overview + savings reads** *(Phases 3+4 data)*
-- [ ] `GET .../overview`: description, roles, chat channel, services,
+- [x] `GET .../overview`: description, roles, chat channel, services,
       automation counts, brain/model, spend cap (`Config.load`,
       `discover_roles`, `agent.md`).
-- [ ] Spend payload gains aggregated script-cache savings
+- [x] Spend payload gains aggregated script-cache savings
       (`run/state/scripts/*.state.json`).
 - Testable: `curl` both; values match `agent.yaml` / `bobi agent costs`.
 
@@ -329,3 +329,20 @@ comparison (dashboard's job) · RBAC/audit.
 ## Amendments
 
 — none yet.
+
+*(The line above and the header's `Last amended` are frozen review surface —
+the plan-artifact check is insertion-only, so amendments land beneath the
+placeholder rather than replacing it. Last amended: **2026-08-01**.)*
+
+- **2026-08-01** (U4 build session): **script-cache savings are priced per
+  monitor, and not priced at all without a basis.** The Savings framing
+  above lists "script-cache runner savings" without saying how it is
+  computed; the built fold uses each monitor's own arithmetic (its cached
+  ticks × what its own agent ticks cost on average), never a fleet-wide
+  blend, which would price a cheap monitor's savings with an expensive
+  one's bill. Where a monitor has never paid for an agent tick — the normal
+  case under subscription auth, where a tick records $0 — no dollar figure
+  is estimated at all, and the payload carries `priced_monitors` so a
+  caller can tell "$0 saved" from "nothing could be priced". The cached-run
+  count always tells the true story. Contract documented in
+  `docs/AGENT_OVERVIEW.md`.
