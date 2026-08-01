@@ -195,7 +195,7 @@ Gated on R. **Two repos.** Public: move Dockerfile + `docker/` + `release-image.
 
 **Gate:** the deploy wheel still builds after the force-include deletion (`pip wheel` / `hatch build` green — this is the failure D7 exists to prevent); the dispatch dry-run pushes multi-arch tags from `bobi-agent`; a `docker run --init` of the published tag stands up an agent under supervision with no `bobi-supervisor` shim present.
 
-### Phase 7 — Consolidate into moda-agents (Lane 3) `[ ]`
+### Phase 7 — Consolidate into moda-agents (Lane 3) `[x]`
 
 Gated on F and R. Subtree-merge the `bobi-deploy` remainder into `moda-agents` (history preserved); add the three-line team Dockerfile (D7) and cut `deploy-agent-teams.yml` over to it; drop `BOBI_DEPLOY_REF` + the `.bobi-deploy` checkout; migrate open issues and repoint the eng-team bot; rewrite the README identity paragraph and `docs/RELEASE_RUNBOOK.md` (two-repo train); roll the fleet from the merged repo; **only after a green fleet roll**, archive `bobi-deploy` read-only.
 
