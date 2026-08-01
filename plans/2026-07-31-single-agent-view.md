@@ -221,7 +221,7 @@ first. Implementation stacks on an integration branch
 - Testable: `curl` returns the merged list for a seeded home.
 
 **U3 — health tri-state + strip telemetry** *(Phase 2)*
-- [ ] `LocalRuntime.health_summary` proxies the manager probe
+- [x] `LocalRuntime.health_summary` proxies the manager probe
       (`run/state/manager-health.port` → `GET /health`, fall back to
       pidfile view) → `running` / `stopped` / `not_responding` + detail
       + segments (uptime, live count, last activity; stopped:
@@ -329,3 +329,18 @@ comparison (dashboard's job) · RBAC/audit.
 ## Amendments
 
 — none yet.
+
+*(The line above and the header's `Last amended` are frozen review surface —
+the plan-artifact check is insertion-only, so amendments land beneath the
+placeholder rather than replacing it. Last amended: **2026-08-01**.)*
+
+- **2026-08-01** (U3 build session): **the NOT RESPONDING strip's
+  `Health probe: failing 12m` is not built.** The prototype is the visual
+  spec, so this is a deliberate deviation, not an omission. A failure
+  *duration* requires remembering when the probe first failed; the webapp
+  answers each request from disk and holds nothing between them, so any
+  number there would start whenever the browser happened to poll — a
+  fabricated figure in the one place the page is asked to be precise. The
+  segment stays qualitative (`no answer on :<port>`) and LAST ACTIVITY, a
+  real recorded fact, carries the "how long has this been wrong" signal.
+  Contract documented in `docs/AGENT_STATE.md`.

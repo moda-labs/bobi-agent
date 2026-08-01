@@ -160,9 +160,13 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
 
     # System health (#733 vertical 2): manager liveness + session statuses;
     # a hosted runtime adds reachability and the sidecar's lifecycle trail.
+    # Normalized on the way out so the state keys the strip reads are present
+    # whatever runtime answered — including one that predates them.
     @app.get("/api/agents/{name}/health")
     def agent_health(name: str) -> JSONResponse:
-        return JSONResponse(rt.health_summary(name))
+        from bobi.webapp.health import normalize
+
+        return JSONResponse(normalize(rt.health_summary(name)))
 
     # Session logs (#733 vertical 3): the full session history with honest
     # terminal outcomes; transcripts drill in via the messages route below.
