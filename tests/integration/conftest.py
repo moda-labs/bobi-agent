@@ -245,6 +245,18 @@ def _bind_bobi_env_for_test(request):
     Binds whichever isolated home the test requested - the default Claude
     ``bobi_env`` or the ``stub_bobi_env`` - so in-process code (``paths``,
     ``set_project_root``) resolves the same run root the subprocesses use.
+
+    ``BOBI_HOME`` is pinned here, per test, and NOT left to the fixtures'
+    own save/restore. The two envs have different lifetimes - ``stub_bobi_env``
+    is module-scoped, ``claude_bobi_env`` is session-scoped - and both
+    save/restore the same process-global. On a dual-brain module the stub leg
+    runs first, so it captures ``BOBI_HOME=None``, and its MODULE teardown then
+    pops the variable while the session-scoped Claude env is still live. Every
+    later test that spawns a subprocess inherited an unset ``BOBI_HOME`` and
+    resolved the developer's real ``~/.bobi`` instead of the isolated one -
+    silently, because the child failed with "agent not installed" and the
+    parent only saw an unparseable result. Pinning per test makes the binding
+    independent of fixture teardown order.
     """
     fixture = next((f for f in ("bobi_env", "stub_bobi_env")
                     if f in request.fixturenames), None)
@@ -258,13 +270,19 @@ def _bind_bobi_env_for_test(request):
     env = request.getfixturevalue(fixture)
     paths.bind_root(env.project_path)
     set_project_root(env.project_path)
-    # For the stub env, pin the brain in os.environ too so BOTH in-process
-    # resolution and any manager the test spawns (which inherits os.environ)
-    # select the gated stub brain. Saved/restored around the test.
-    brain_pins = {k: env.env[k] for k in ("BOBI_BRAIN", "BOBI_STUB_BRAIN")
-                  if k in env.env}
-    saved = {k: os.environ.get(k) for k in brain_pins}
-    os.environ.update(brain_pins)
+    # Pin the selected home, and (for the stub env) the brain, in os.environ so
+    # BOTH in-process resolution and any subprocess the test spawns (which
+    # inherits os.environ) land on THIS isolated env. Saved/restored around the
+    # test - see the note above on why BOBI_HOME cannot be left to the
+    # fixtures' own teardown.
+    pins = {k: env.env[k]
+            for k in ("BOBI_HOME", "BOBI_BRAIN", "BOBI_STUB_BRAIN")
+            if k in env.env}
+    saved = {k: os.environ.get(k) for k in pins}
+    os.environ.update(pins)
+    # BOBI_ROOT needs no handling here: `paths.bind_root` above already wrote
+    # this env's run root into it, and `paths.bind_root(None)` in the finally
+    # clears it - so it is rebound per test either way.
     try:
         yield
     finally:
