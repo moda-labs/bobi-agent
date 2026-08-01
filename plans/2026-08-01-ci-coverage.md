@@ -201,7 +201,7 @@ Split the proof by what each repo owns.
 
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
-| A | #909 | 1-3 | bobi-agent: both brains against the real image, real Worker deploy on dedicated infra, anti-rot guards | concurrent | open |
+| A | #909 | 1-3 | bobi-agent: both brains against the real image, real Worker deploy on dedicated infra, anti-rot guards | concurrent | **landed** (PR #911, 2026-08-01) |
 | B | #TBD (moda-agents) | 4-5 | moda-agents: repair the canary, collapse to one, gate fleet rolls on a proven version | concurrent | open |
 
 **Lanes:** Two lanes because the work spans two repos, which forces separate PRs — no same-repo parallel cut is made or needed. Topology is **STACKED by landing, parallel by build**: Lane B may be built as soon as Lane A's shape is known, but it **lands after** Lane A, because dropping `ci-codex-smoke` is only safe once Codex coverage genuinely exists in bobi-agent. That is "lands after", not "depends on" — it does not block dispatch. Both lanes are `concurrent` marker mode (cross-repo): flip markers as status-only commits to bobi-agent's `main` referencing the code PR, never inside a feature branch.
@@ -212,6 +212,13 @@ Split the proof by what each repo owns.
 - [ ] Convergence gate — *fuse-runnable*: bobi-agent full unit suite + both TS suites + both typechecks + `tests/integration -m "not claude and not docker"` green on a locally merged preview of both lanes.
 
 ## Amendments
+
+- **2026-08-01** (Lane A landing): the Lane map's `concurrent` marker mode
+  assumes status-only commits straight to `main`. That is not possible in this
+  repo — `main` carries a `pull_request` rule, so every marker flip needs a PR.
+  Lane A's phase markers rode PR #911; this row flip is a separate one. Lane B
+  should fold its own status flip into a single PR at the end rather than
+  opening one per marker.
 
 - **2026-08-01** (session "repo-reorg"): plan created from the CI review in that session.
 - **2026-08-01** (session "repo-reorg"): Q1-Q5 resolved with Zach and written back; no questionables remain open.
