@@ -51,9 +51,13 @@ class TestBrainCrossModelResume:
         session_id = result.session_id
         assert session_id
 
-        # system_prompt=None keeps the Claude Code preset, whose system prompt
-        # names the running model - the ground truth for "did the switch
-        # actually happen" rather than just which model usage was reported.
+        # system_prompt=None keeps the Claude Code preset. The reply is still
+        # asked for the model name (it makes a failure readable), but the
+        # ASSERTION below keys on the SDK's per-model usage breakdown, not on
+        # the model's self-report. Self-report is not a reliable oracle: the
+        # preset does not always name a version, and a run that answered
+        # "MODEL=Claude (specific version not stated in system prompt)" failed
+        # this test while the switch had in fact happened correctly.
         second = brain.make_session(
             cwd="/tmp",
             system_prompt=None,
@@ -76,8 +80,17 @@ class TestBrainCrossModelResume:
             f"transcript lost across the model switch: {text!r}"
         )
         # The turn must actually have run on the NEW model, not silently kept
-        # the old one.
-        assert "sonnet" in text.lower(), text
+        # the old one. `TurnResult.costs` carries the SDK's per-model usage
+        # breakdown for the turn, so the model that actually billed it is a
+        # fact rather than something the model says about itself.
+        billed = [c.model.lower() for c in result.costs]
+        assert billed, "no per-model usage reported for the resumed turn"
+        assert any("sonnet" in m for m in billed), (
+            f"resumed turn did not run on the new model; billed: {billed}")
+        assert not any("haiku" in m for m in billed), (
+            f"resumed turn still billed the ORIGINAL model; billed: {billed}")
+        # Keep the self-report check in its non-flaky direction only: naming
+        # the old model is a real failure, declining to name one is not.
         assert "haiku" not in text.lower(), text
 
 
