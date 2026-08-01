@@ -48,6 +48,9 @@ def _step(steps: list[dict], name: str) -> dict:
 
 
 def _index(steps: list[dict], name: str) -> int:
+    # Via _step so a renamed step reports which step is gone, rather than
+    # surfacing a bare StopIteration.
+    _step(steps, name)
     return next(i for i, s in enumerate(steps) if s.get("name") == name)
 
 

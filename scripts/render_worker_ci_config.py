@@ -123,7 +123,10 @@ def render(
     release_sha: str,
 ) -> dict:
     """Return the CI Worker config, or raise ConfigError if it is unsafe."""
-    if not name.strip():
+    # Strip BEFORE comparing: an unstripped "bobi-events " would slip past both
+    # production-name guards below and still deploy over production's name.
+    name = name.strip()
+    if not name:
         raise ConfigError("--name is required")
     if name == PRODUCTION_WORKER_NAME:
         raise ConfigError(

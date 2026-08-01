@@ -157,7 +157,13 @@ jobs:
           npx --no-install wrangler deploy --config wrangler.ci.jsonc 2>&1 | tee "$log"
           # The workers.dev URL is the smoke target. Parse it rather than
           # assembling it: the account subdomain is not known to this repo.
-          url="$(grep -oE 'https://[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev' "$log" | head -1)"
+          #
+          # `|| true` is load-bearing. Under `set -euo pipefail` a grep that
+          # matches nothing (or a SIGPIPE from `head`) makes the ASSIGNMENT
+          # non-zero, so the step would die here and the explicit error below
+          # would never print — the exact silent-failure shape this whole
+          # initiative is about.
+          url="$(grep -oE 'https://[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev' "$log" | head -1 || true)"
           if [ -z "$url" ]; then
             echo "::error::wrangler deploy printed no workers.dev URL — cannot smoke the deployment" >&2
             exit 1

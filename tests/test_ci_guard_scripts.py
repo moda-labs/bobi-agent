@@ -204,3 +204,9 @@ def test_render_cli_exits_nonzero_on_an_unsafe_config(tmp_path):
     )
     assert rc == 1
     assert not out.exists(), "an unsafe config must never be written to disk"
+
+
+def test_render_refuses_a_padded_production_name(shipped):
+    """`"bobi-events "` must not slip past the name guards on whitespace."""
+    with pytest.raises(render_worker_ci_config.ConfigError, match="bobi-events"):
+        _render(shipped, name=" bobi-events ")
