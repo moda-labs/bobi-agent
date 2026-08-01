@@ -262,7 +262,8 @@ class TestSubagents:
         assert spawn.call_args.kwargs["role"] == "engineer"
 
     def test_as_check_runs_check(self, bobi_install):
-        check = CheckResult(success=True, finding=False)
+        check = CheckResult(success=True, finding=False,
+                            session="monitor-check-abc-check")
         with patch("bobi.subagent.run_check_blocking", return_value=check) as run_check, \
              patch("bobi.subagent.spawn_adhoc") as spawn:
             result = CliRunner().invoke(main, [
@@ -276,6 +277,9 @@ class TestSubagents:
             "finding": False,
             "summary": "",
             "details": {},
+            # The monitor scheduler records this on the run so a check's row
+            # can open its transcript.
+            "session": "monitor-check-abc-check",
         }
         run_check.assert_called_once()
         spawn.assert_not_called()

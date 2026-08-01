@@ -193,6 +193,45 @@ reconcile path (`scheduler.py`):
 Scheduler-owned state (last-run times, active condition keys) lives in
 `run/state/monitor_state.json`, rewritten wholesale each tick.
 
+## Run records: what each firing actually did
+
+`monitor_state.json` answers "when did this last run" and "what is currently
+active". It cannot answer "did the 09:15 tick post anything, or did it fail?" -
+`last_run` is overwritten every tick and `system/monitor.error` is an ephemeral
+bus event. Run records (`run_records.py`) close that gap: **one record per
+firing**, written when the firing finishes.
+
+Each record carries `monitor`, `started_at` / `ended_at`, `flavor`
+(`notify` · `command` · `check:<name>` · `sleep_cycle` · `description`), and:
+
+- **`outcome`** - `notified` (published at least one event), `quiet`
+  (completed, nothing new to say), or `failed`. A firing whose finding did not
+  reach the event server is `failed`, not `notified`: the payload is parked for
+  a mechanical retry and nobody has heard about it yet.
+- **`reason`** - why it failed, in the same words as the `system/monitor.error`
+  event (`spawn-failed: ...`, `command exited 3: ...`, `check agent returned no
+  usable verdict`). The first reason recorded wins - it is the one nearest the
+  root cause.
+- **`published`** - how many events actually landed.
+- **`script_cache_mode`** - for script-cache monitors, whether this tick ran
+  the $0 cached script or paid an agent (`cached` · `first_gen` ·
+  `fallback_regen`).
+- **`session_ref`** - the session an out-of-band firing ran under, when there
+  was one, so a run can be traced to its transcript.
+
+Out-of-band flavors (description checks, relevance gates, the sleep cycle) are
+recorded when their verdict lands, not when they were dispatched - a spawned
+run that is still working has no record yet, and is visible through its session
+instead. A manager that dies mid-firing therefore leaves no record for that
+firing, which is the intended trade: nothing is ever stranded as permanently
+"running".
+
+Records live one file per monitor under `run/state/monitor_runs/<name>.json`,
+newest first, capped at `RETENTION_PER_MONITOR` (50) per monitor. The cap is
+the whole retention policy - this is a debugging ledger, not an audit log.
+Recording is best-effort: a ledger write that fails is logged and never breaks
+the firing.
+
 ---
 
 # Script cache: paying once for a check, then running it free

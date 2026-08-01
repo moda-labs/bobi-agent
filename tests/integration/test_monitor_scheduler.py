@@ -424,3 +424,64 @@ class TestRelevanceGateFlow:
         assert [c.key for c in gates[1][1]] == ["m3"]
         gates[1][2]({"success": True, "relevant": ["m3"]})
         assert [f["data"]["finding_key"] for f in fired] == ["m3"]
+
+
+class TestMonitorRunRecordsOnDisk:
+    """A live tick leaves an outcome record under the runtime state dir.
+
+    The unit tests cover the fold; this covers the wiring that makes a record
+    land in a real BOBI_HOME — where the runs read model will look for it.
+    """
+
+    def _scheduler(self, bobi_install, monitors, publish=None):
+        from bobi.monitors.scheduler import MonitorScheduler
+
+        class FakeRegistry:
+            def effective_monitors(self):
+                return monitors
+
+            def projects_for(self, _m):
+                return []
+
+        return MonitorScheduler(
+            publish=publish or (lambda event, data: True),
+            state_path=bobi_install.state_dir / "monitor_state.json",
+            now=lambda: datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc),
+            registry_loader=lambda **kw: FakeRegistry(),
+            spawn_check=lambda _m, _c, _cb: None,
+        )
+
+    def test_a_tick_writes_a_record_under_run_state(self, bobi_install):
+        from bobi.monitors import run_records
+
+        m = Monitor(name="inbox", event="monitor/inbox", interval="5m",
+                    command="echo '[{\"id\": \"e1\"}]'")
+        self._scheduler(bobi_install, [m]).tick()
+
+        record_file = bobi_install.state_dir / "monitor_runs" / "inbox.json"
+        assert record_file.exists()
+        data = json.loads(record_file.read_text())
+        assert data["monitor"] == "inbox"
+        assert len(data["runs"]) == 1
+        assert data["runs"][0]["outcome"] == run_records.NOTIFIED
+        assert data["runs"][0]["published"] == 1
+        assert data["runs"][0]["flavor"] == "command"
+
+    def test_three_outcomes_are_told_apart_after_the_fact(self, bobi_install):
+        from bobi.monitors import run_records
+
+        notified = Monitor(name="notified-one", event="monitor/a", interval="5m",
+                           command="echo '[{\"id\": \"e1\"}]'")
+        quiet = Monitor(name="quiet-one", event="monitor/b", interval="5m",
+                        command="echo '[]'")
+        failed = Monitor(name="failed-one", event="monitor/c", interval="5m",
+                         command="exit 2")
+        self._scheduler(bobi_install, [notified, quiet, failed]).tick()
+
+        outcomes = {r.monitor: r.outcome for r in run_records.load_all()}
+        assert outcomes == {
+            "notified-one": run_records.NOTIFIED,
+            "quiet-one": run_records.QUIET,
+            "failed-one": run_records.FAILED,
+        }
+        assert "exited 2" in run_records.load("failed-one")[0].reason
