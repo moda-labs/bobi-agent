@@ -136,6 +136,44 @@ remote (or, when the project root is not a git repo, from each immediate
 child repo — the director-at-`~/dev` layout), slack workspace from the
 bot token, linear teams from the API key.
 
+### Launch caps
+
+Three independent caps bound how much a team can spawn. They stack, and each
+answers a different question:
+
+| Field | Bounds | Default |
+|---|---|---|
+| `max_launch_depth` | how *deep* a chain of launches can go | 8 |
+| `max_concurrent_agents` | how many agents run at once | 2 |
+| `spend_cap` | agent invocations per rolling hour, deployment-wide | 50 |
+
+All three follow the `0 = use default` idiom.
+
+`max_launch_depth` is the first resort in front of `spend_cap`. Every launch
+carries the ordered chain of runs that led to it in `BOBI_LAUNCH_LINEAGE`, and
+a launch is refused before any process is spawned when either shape appears:
+
+- **self-recursion** - a run launching a named workflow already in its own
+  chain. `adhoc` is exempt, since `-w adhoc --wait` delegation is ordinary
+  work; depth governs that instead.
+- **depth** - a chain deeper than the cap.
+
+Set the cap in `agent.yaml`, or override it per deployment with the
+`BOBI_MAX_LAUNCH_DEPTH` environment variable (which wins, so an operator can
+move the ceiling on a running fleet without rebuilding the team image).
+
+Refusals emit `system/launch.blocked` carrying the rendered chain and which
+rule fired; `system/launch.depth.approaching` warns one level below the cap.
+
+**Known limits.** This is a rail against accidental recursion, not a security
+boundary: both variables live in the agent's own shell, so an agent that clears
+the chain or raises the cap defeats it - the spend governor stays the backstop.
+It sees direct launches only; a cycle mediated by the event bus attributes the
+new run to the manager, which is the event-server circuit breaker's shape. And
+a process that started before an upgrade carries no chain, so restart the
+manager after upgrading. Lineage is deliberately **not** persisted to the
+session registry - forensics ride the `agent/session.started` event instead.
+
 Blocks like `task_tracking`, `verify`, and `context` are not parsed by
 the framework — they are advisory config your roles read from the
 installed agent.yaml. Use them to give the manager judgment guidance

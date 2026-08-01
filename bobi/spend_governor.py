@@ -89,22 +89,34 @@ def record_invocation(project_path: Path) -> None:
     _save_state(state_file, timestamps)
 
 
-def emit_spend_cap_alert(project_path: Path, count: int, cap: int) -> None:
+def emit_spend_cap_alert(
+    project_path: Path, count: int, cap: int, lineage: str = "",
+) -> None:
     """Emit a system/spend.cap.breached event to the event bus.
 
-    Best-effort — a failed alert must never block the governor decision.
+    ``lineage`` is the rendered launch chain of the blocked launch, when there
+    is one. It is what tells an operator whether the cap caught a *chain* or 50
+    unrelated launches - the distinction this governor is blind to on its own
+    (it is deployment-wide and classification-free), and the one that made the
+    #849 incident take 50 session dirs to reconstruct by hand.
+
+    Best-effort - a failed alert must never block the governor decision.
     """
     try:
         from bobi.events.publish import post_event
+        text = (
+            f"Spend governor triggered: {count} agent invocations in the "
+            f"last {WINDOW_SECONDS // 60} minutes (cap: {cap}). "
+            f"New agent launches are blocked until invocations age out."
+        )
+        if lineage:
+            text += f" Blocked launch's chain: {lineage}."
         post_event("system/spend.cap.breached", {
             "count": count,
             "cap": cap,
             "window_seconds": WINDOW_SECONDS,
-            "text": (
-                f"Spend governor triggered: {count} agent invocations in the "
-                f"last {WINDOW_SECONDS // 60} minutes (cap: {cap}). "
-                f"New agent launches are blocked until invocations age out."
-            ),
+            "lineage": lineage,
+            "text": text,
         }, project_path=project_path)
     except Exception:
         log.warning("Failed to emit spend cap alert", exc_info=True)

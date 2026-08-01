@@ -608,6 +608,19 @@ def run_manager_from_config(
         role,
     )
 
+    session_name = manager_session_name(project_path, role)
+
+    # Root the launch chain (#849) BEFORE anything can launch. The manager is
+    # a chain root by construction - it boots its own session, and inheriting
+    # whatever agent ran `bobi agent <x> restart` would park this daemon at
+    # depth N for days. Ordering is load-bearing: the monitor scheduler starts
+    # just below and its checks spawn from this process, so a stamp after it
+    # would let those launches read as roots of their own.
+    from bobi.launch_lineage import LineageLink, stamp_root
+    stamp_root(os.environ, LineageLink(
+        session=session_name, workflow="", run_key=session_name,
+    ))
+
     has_monitors = paths.monitors_dir(project_path).is_dir() or cfg.monitors
     if has_monitors:
         from bobi.monitors.scheduler import MonitorScheduler
@@ -619,7 +632,6 @@ def run_manager_from_config(
     from bobi.prompts.resolver import build_startup_prompt
     from bobi.subagent import spawn_adhoc
 
-    session_name = manager_session_name(project_path, role)
     task = build_startup_prompt(
         role, project_path, agent_name=agent_name, session_name=session_name
     )

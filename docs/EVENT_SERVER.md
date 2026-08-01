@@ -278,6 +278,9 @@ prefixed by the subscriber's bubble id for tenant isolation (see Security).
 | `reply/<uuid>` | transient ask-reply channel | `reply/9f3a...` |
 | `<type>` and `<source>/<type>` | monitors / agent publishes | `support.email`, `monitor/support.email` |
 | `agent/session.completed` (+ bare `session.completed`) | sub-agent lifecycle | |
+| `system/launch.blocked` | launch lineage guard refused a launch (`rule`: `depth` \| `recursion`) | |
+| `system/launch.depth.approaching` | chain one level below `max_launch_depth` | |
+| `system/launch.lineage.dropped` | an unparseable chain was tolerated as a root | |
 
 `github:`, `linear:`, `slack:`, `whatsapp:`, and `discord:` are **global** topics (cross-bubble, gated by
 resource grants). Everything else is **bubble-scoped**. Monitors and lifecycle
