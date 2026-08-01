@@ -14,6 +14,7 @@ Set BOBI_TEST_IMAGE=<tag> to reuse an already-built image and skip the build.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -627,3 +628,250 @@ def test_image_codex_ask_roundtrip(image: str, tmp_path: Path):
     finally:
         _run("docker", "rm", "-f", name)
         stop_wrangler()
+
+
+# --- installed-team identity guards ------------------------------------------
+# These verify that the entrypoint refuses to boot when the identity stamped on
+# the VOLUME disagrees with the team actually installed on it. They arrived here
+# in the repo reorg (Lane 3): the coverage existed only in the private deploy
+# repo, where it was asserted by grepping a COPY of docker-entrypoint.sh — and
+# after Phase 6 published the real file, that copy went stale while its tests
+# kept passing (two of them still demanded the pre-0.51.0 `bobi-supervisor`
+# shim). Re-homed as behaviour against the real image, next to the file, so the
+# two can no longer drift apart silently.
+
+
+def _boot_failure(image: str, team_dir: Path, **env: str) -> str:
+    """Run the image to its first fatal and return the combined output.
+
+    The container is expected to REFUSE, so `--rm` and a synchronous run are
+    enough — no log polling. The event server is deliberately unreachable: every
+    guard here must fire before anything on the network is needed.
+    """
+    args = [
+        "docker", "run", "--rm",
+        "-e", "BOBI_AGENT=pytest",
+        "-e", "BOBI_EVENT_SERVER=http://127.0.0.1:9",
+        "-e", "BOBI_TEAM=/mnt/team",
+    ]
+    for key, value in env.items():
+        args += ["-e", f"{key}={value}"]
+    args += ["-v", f"{team_dir}:/mnt/team:ro", image]
+    proc = _run(*args, timeout=180)
+    assert proc.returncode != 0, (
+        f"expected the entrypoint to refuse, but it exited 0:\n"
+        f"{proc.stdout}\n{proc.stderr}"
+    )
+    return proc.stdout + proc.stderr
+
+
+def _gateway_team(tmp_path: Path, *, kind: str = "claude",
+                  base_url: str = "https://gateway-b.test") -> Path:
+    team = tmp_path / "team"
+    shutil.copytree(REPO_ROOT / "tests" / "fixtures" / "claude-smoke", team)
+    agent_yaml = team / "agent.yaml"
+    agent_yaml.write_text(
+        agent_yaml.read_text()
+        + f"\nbrain:\n  kind: {kind}\n  base_url: {base_url}\n"
+    )
+    return team
+
+
+@requires_docker
+@pytest.mark.timeout(240)
+def test_changed_gateway_endpoint_is_rejected(image: str, tmp_path: Path):
+    """A volume stamped for gateway A must not silently boot against gateway B.
+
+    The stamp is the deploy-time fingerprint of the endpoint the instance was
+    authorized for; the installed team is what it would actually talk to. If
+    those disagree the credentials on the volume are being pointed somewhere
+    they were never issued for, so the entrypoint fails closed rather than
+    choose one.
+    """
+    team = _gateway_team(tmp_path)
+    text = _boot_failure(
+        image, team,
+        BOBI_AUTH="api_key",
+        ANTHROPIC_AUTH_TOKEN="gateway-test-token",
+        BOBI_GATEWAY="1",
+        # Any well-formed digest that is not sha256("https://gateway-b.test").
+        BOBI_GATEWAY_ENDPOINT_SHA256="a" * 64,
+    )
+    assert "conflicts with the installed team's gateway endpoint" in text
+
+
+@requires_docker
+@pytest.mark.timeout(240)
+def test_matching_gateway_endpoint_is_accepted(image: str, tmp_path: Path):
+    """The positive control for the guard above.
+
+    Without this, that test passes for any refusal at all — an unrelated fatal
+    on the same boot would read as the endpoint guard firing. Same team, same
+    stamp mechanism, only the digest now matches: the conflict must not appear
+    and the container must reach the supervisor handoff.
+    """
+    import time
+
+    team = _gateway_team(tmp_path)
+    # sha256("https://gateway-b.test"), the endpoint the team declares.
+    digest = hashlib.sha256(b"https://gateway-b.test").hexdigest()
+    name = "bobi-gateway-endpoint-match"
+    _run("docker", "rm", "-f", name)
+    try:
+        up = _run(
+            "docker", "run", "-d", "--name", name,
+            "-e", "BOBI_AUTH=api_key",
+            "-e", "BOBI_AGENT=claude-smoke",
+            "-e", "ANTHROPIC_AUTH_TOKEN=gateway-test-token",
+            "-e", "BOBI_EVENT_SERVER=http://127.0.0.1:9",
+            "-e", "BOBI_TEAM=/mnt/team",
+            "-e", "BOBI_GATEWAY=1",
+            "-e", f"BOBI_GATEWAY_ENDPOINT_SHA256={digest}",
+            "-v", f"{team}:/mnt/team:ro", image,
+        )
+        assert up.returncode == 0, up.stderr
+        deadline = time.time() + 60
+        text = ""
+        while time.time() < deadline:
+            logs = _run("docker", "logs", name)
+            text = logs.stdout + logs.stderr
+            if ("Starting manager under the supervisor sidecar" in text
+                    or "FATAL:" in text):
+                break
+            time.sleep(1)
+        assert "conflicts with the installed team's gateway endpoint" not in text
+        assert "Starting manager under the supervisor sidecar" in text, text
+    finally:
+        _run("docker", "rm", "-f", name)
+
+
+@requires_docker
+@pytest.mark.timeout(240)
+def test_delimiter_injected_brain_identity_is_rejected(image: str,
+                                                       tmp_path: Path):
+    """A team cannot forge its own gateway identity through its `kind` string.
+
+    The entrypoint reads four identity fields out of one python invocation. A
+    `kind` carrying newlines is an attempt to supply the remaining fields — to
+    claim, from inside the team package, whatever gateway stamp would satisfy
+    the check above. Base64 framing makes that structurally impossible now, and
+    the charset guard is the second line: assert the refusal, so a future
+    refactor to a plainer framing cannot quietly reopen the vector.
+    """
+    stamp = "a" * 64
+    team = _gateway_team(tmp_path, kind=f'"claude\\n1\\n{stamp}"')
+    text = _boot_failure(
+        image, team,
+        BOBI_AUTH="api_key",
+        ANTHROPIC_AUTH_TOKEN="gateway-test-token",
+        BOBI_GATEWAY="1",
+        BOBI_GATEWAY_ENDPOINT_SHA256=stamp,
+    )
+    assert "invalid installed team brain identity" in text.lower(), text
+
+
+@requires_docker
+@pytest.mark.timeout(240)
+def test_unparseable_team_fails_closed(image: str, tmp_path: Path):
+    """A team package that cannot be read is a refusal, never a fallback.
+
+    Downstream of this the entrypoint validates the volume's stamped gateway
+    identity against the installed team. With no readable team there is nothing
+    to validate against, so booting on defaults would authenticate against an
+    unverified endpoint. It must stop instead.
+
+    The private original reached the deeper guard — `Config.load` raising after
+    a SUCCESSFUL install — by injecting a broken `bobi.config` over PYTHONPATH.
+    That is a unit-level fault injection, not something a real container can be
+    put into, so this asserts the reachable half: an unreadable package never
+    gets past install.
+    """
+    team = tmp_path / "team"
+    shutil.copytree(REPO_ROOT / "tests" / "fixtures" / "claude-smoke", team)
+    (team / "agent.yaml").write_text("agent: [this is not\n  valid: yaml\n")
+    text = _boot_failure(image, team, BOBI_AUTH="api_key",
+                         ANTHROPIC_API_KEY="sk-test")
+    assert "couldn't install team" in text, text
+    assert "could not parse" in text.lower(), text
+
+
+# --- Codex api-key auth materialization --------------------------------------
+# Codex does not read OPENAI_API_KEY the way Claude reads ANTHROPIC_API_KEY; it
+# expects ~/.codex/auth.json. The entrypoint writes that file, and WHEN it
+# declines to write it is the security-relevant half.
+
+
+def _codex_auth_json(image: str, team_dir: Path, **env: str) -> tuple[str, str]:
+    """Boot a codex team and return (auth.json contents, octal mode).
+
+    Returns ("", "") when the file is absent — the expected result whenever the
+    entrypoint is supposed to decline to materialize it.
+    """
+    import time
+
+    name = "bobi-codex-auth"
+    _run("docker", "rm", "-f", name)
+    args = [
+        "docker", "run", "-d", "--name", name,
+        "-e", "BOBI_AGENT=codex-smoke",
+        "-e", "BOBI_EVENT_SERVER=http://127.0.0.1:9",
+        "-e", "BOBI_TEAM=/mnt/team",
+    ]
+    for key, value in env.items():
+        args += ["-e", f"{key}={value}"]
+    args += ["-v", f"{team_dir}:/mnt/team:ro", image]
+    try:
+        up = _run(*args)
+        assert up.returncode == 0, up.stderr
+        # The file is written before the manager starts, so wait for either the
+        # handoff line or a fatal rather than for a healthy agent — no live
+        # OpenAI credential is involved.
+        deadline = time.time() + 120
+        text = ""
+        while time.time() < deadline:
+            logs = _run("docker", "logs", name)
+            text = logs.stdout + logs.stderr
+            if ("Starting manager under the supervisor sidecar" in text
+                    or "FATAL:" in text):
+                break
+            time.sleep(1)
+        assert "FATAL:" not in text, text
+        probe = _run(
+            "docker", "exec", name, "sh", "-c",
+            'f=/home/bobi/.codex/auth.json; '
+            '[ -f "$f" ] && printf "%s|%s" "$(cat "$f")" "$(stat -c %a "$f")" '
+            '|| printf "|"',
+        )
+        contents, _, mode = probe.stdout.partition("|")
+        return contents, mode
+    finally:
+        _run("docker", "rm", "-f", name)
+
+
+@requires_docker
+@pytest.mark.timeout(300)
+def test_codex_api_key_auth_file_is_materialized(image: str):
+    """api_key mode turns OPENAI_API_KEY into the auth.json Codex reads."""
+    team = REPO_ROOT / "tests" / "fixtures" / "codex-smoke"
+    contents, mode = _codex_auth_json(
+        image, team, BOBI_AUTH="api_key", OPENAI_API_KEY="sk-materialize-test")
+    assert "sk-materialize-test" in contents, contents
+    # Private to the agent user: it holds a provider credential.
+    assert mode == "600", f"auth.json mode is {mode!r}, expected 600"
+
+
+# NOT re-homed: "subscription mode removes the codex api-key auth file".
+#
+# The private original called `materialize_codex_api_key_auth` directly and
+# asserted the `BOBI_AUTH=subscription` branch declines to write. Through a real
+# boot that branch is unreachable: an earlier guard refuses the container
+# outright when subscription mode sees a provider key in the environment
+# ("overrides subscription auth"), which fires before materialization is
+# reached — verified against 0.51.1, where the branch's own log line never
+# appears. The reachable invariant is the refusal, and
+# `test_subscription_mode_rejects_api_key` above already covers it.
+#
+# Worth recording rather than quietly dropping: a test that only passes because
+# it bypasses the code path that would have stopped it is not coverage of the
+# shipped behaviour. That is the same failure mode as the stale-copy problem
+# these tests came here to escape, one level down.
