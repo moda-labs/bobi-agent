@@ -281,7 +281,7 @@ class AdminListener:
         shows a dead session as running. This originally shipped as an
         inlined copy of the fold (repo-boundary sequencing: this repo merged
         before the helpers reached the ``dev`` channel); collapsed onto the
-        public helpers per bobi-deploy#22's follow-up note.
+        public helpers per the consumer repo's follow-up note.
         """
         from bobi import service
         from bobi.sdk import SessionRegistry

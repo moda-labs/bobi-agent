@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 WEBUI_TOKEN_HEADER = "x-bobi-webui-token"
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
-# A hosted deployment (the fleet admin webapp - private bobi-deploy) serves the
+# A hosted deployment (a private fleet admin webapp) serves the
 # same `build_app` behind an auth gate + reverse proxy, so its inbound `Host` is
 # a public domain the loopback default rejects. The operator names that host(s)
 # here, comma-separated. Unset in the local product, so local behavior (loopback

@@ -155,12 +155,14 @@ def test_finish_builds_to_file_browser(page, bobi_url):
     # Step 1: try it in the terminal — start/status/ask commands, copyable.
     expect(page.locator(".ns-step h2")).to_contain_text("terminal")
     expect(page.locator(".ns-step .cmd-text").first).to_contain_text("bobi agent")
-    # Step 2: deploy — local always-on and Fly.io, each with an agent prompt.
+    # Step 2: deploy — local always-on and any container host, each with an
+    # agent prompt. The cloud option must point at the PUBLIC reference image,
+    # not a private distribution a reader cannot obtain.
     page.click("#ns-next")
     expect(page.locator(".deploy-opt", has_text="Local")).to_contain_text(
         "always-on service")
     expect(page.locator(".deploy-opt", has_text="Cloud")).to_contain_text(
-        "bobi-deploy")
+        "ghcr.io/moda-labs/bobi")
     # The last step's Next becomes Done and goes to the team hub.
     expect(page.locator("#ns-next")).to_have_text("Done →")
     page.click("#ns-next")

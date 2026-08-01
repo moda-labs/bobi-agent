@@ -52,8 +52,9 @@ agents you can build:
 - Node.js 20 or newer for the embedded local event server.
   For current releases, install Node separately and ensure `node` is on `PATH`, including when installing Bobi with Homebrew.
   A companion Homebrew formula update will automate this prerequisite once it ships.
-- For cloud deployment (optional): a [Fly.io](https://fly.io) account and a Fly
-  API token. Only needed if you run `bobi deploy` - see [Cloud Deployment](#cloud-deployment).
+- For cloud deployment (optional): somewhere to run a container - a VM with
+  Docker, a Kubernetes cluster, or any container host. See
+  [Cloud Deployment](#cloud-deployment).
 
 You don't clone this repo to run Bobi - it's a published package. Install the CLI
 and go.
@@ -342,53 +343,58 @@ agent works when your laptop is open; in the cloud, it works **24/7** - reacting
 a PR at 2am or a support ticket on the weekend without you in the loop. That
 always-on shift is the real productivity unlock, and Bobi makes it one command.
 
-`bobi deploy` packages your agent into an immutable container image and runs it as
-an always-on instance on a cloud VM - no Dockerfile to write, no server to
-configure.
+Bobi publishes a reference container image so you can run an always-on agent on
+whatever hosts containers already - a VM, Docker on a box, Kubernetes, or your
+own orchestrator. Nothing about the runtime is tied to a particular cloud.
 
-**Prerequisites.** The deploy commands ship in the separate `bobi-deploy`
-package - installing it alongside `bobi` adds
-`build`/`deploy`/`deploy-init`/`destroy` to the CLI. `bobi-deploy` is
-distributed privately as part of the managed/enterprise offering; reach out
-via an issue or zach@modalabs.ai if you want access. Cloud deployment targets
-[Fly](https://fly.io) Machines, so you also need a Fly.io account and a Fly
-API token (`flyctl` authenticated via `fly auth login`). First time on Fly?
-`bobi deploy` preflights your setup and prints exactly what to do - install
-`flyctl`, sign up or log in, and clear the one-time new-org unlock.
+**The image.** `ghcr.io/moda-labs/bobi:<version>` is public and multi-arch. It
+carries the framework, the pinned agent runtimes, and the supervisor. Run it
+with `--init` (the container expects a real PID 1) and point it at your event
+server:
 
 ```bash
-bobi deploy eng-team
+docker run --init -v bobi-eng:/data \
+  -e BOBI_INSTANCE=eng \
+  -e BOBI_TEAM=eng-team \
+  -e BOBI_AUTH=api_key \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e BOBI_EVENT_SERVER=https://events.example.com \
+  ghcr.io/moda-labs/bobi:<version>
 ```
 
-The command provisions the machine, ships the image, and starts the agent; run it
-again and it updates the instance in place. Behind it:
+The volume at `/data` is the agent's identity and its only durable state -
+reuse it and the agent resumes, discard it and you get a fresh agent.
+
+`docs/REFERENCE_IMAGE.md` documents what the image contains, the runtime env
+contract, and the `TEAM_DEPS` hook for baking your team's own dependencies into
+a derived image. `docs/SELF_HOSTED_EVENT_SERVER.md` covers standing up the
+event server the instance connects out to.
+
+**Managed fleets.** Provisioning, GitOps reconciliation of a whole fleet, and
+the hosted admin control plane are part of Moda's managed/enterprise offering
+rather than this package - reach out via an issue or zach@modalabs.ai. The
+mechanics below describe how a deployed instance behaves either way:
 
 - **Immutable image.** The framework and pinned agent runtimes are baked into one
   image - the image is the unit of update. The embedding model downloads on first
   KB use into the durable volume cache.
 - **Durable state.** Credentials and session transcripts live on a mounted volume,
   so they survive image updates and the agent resumes where it left off.
-- **Self-managing.** A machine restart policy plus a control-plane supervisor keep the
-  agent alive without babysitting.
-- **GitOps for fleets.** `bobi deploy-init` scaffolds a GitHub Action that
-  reconciles `deployments/*.yaml` against running instances on every release - git
-  is the desired state, `bobi deploy` closes the gap, one instance at a time.
-- **Bring your own image.** Want to fully pre-bake the agent runtime? Point a
-  deployment at a prebuilt container with `image: <ref>` in
-  `deployments/<name>.yaml` and `bobi deploy` ships it by reference, skipping the
-  build entirely - useful for custom runtimes, enterprise registries, or fast
-  CI-built images.
+- **Self-managing.** Your orchestrator's restart policy plus the built-in
+  supervisor sidecar (`bobi agent <name> supervise`) keep the agent alive
+  without babysitting. The supervisor's wire contract is documented in
+  `docs/ADMIN_PROTOCOL.md`, so an external control plane can monitor and drive
+  instances over the event bus.
+- **Bake your own dependencies.** The image exposes a `TEAM_DEPS` hook: derive
+  from the published base, layer in whatever your team's tools need, and the
+  hook verifies its own `requires` gate at build time - useful for custom
+  runtimes, enterprise registries, or fast CI-built images.
 
-Bobi runs agents on Fly Machines for their fast VM wake-up and scale-to-zero
-model, which pair naturally with the external event server. Today each agent runs
-as a single always-on Machine with no
-public ingress: it holds an outbound WebSocket to the event server and acts on
-events as they arrive, kept alive by Fly's restart policy plus the deployment's
-control-plane supervisor. Because Fly Machines are Firecracker microVMs that suspend and resume in
-well under a second, near-term work will let an idle agent scale to zero and wake
-on the next event - making it very affordable to run a fleet of always-available
-agents without paying for idle VMs. It works from the installed CLIs alone - no
-framework checkout.
+An instance needs **no public ingress**. It holds an outbound WebSocket to the
+event server and acts on events as they arrive, which is what makes it
+deployable behind a firewall, in a private subnet, or on a cluster with no
+inbound path. It works from the published image and the installed CLIs alone -
+no framework checkout.
 
 ## Security
 

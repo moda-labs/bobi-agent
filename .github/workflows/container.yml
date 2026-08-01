@@ -7,7 +7,7 @@ name: Container image
 # (the claude.ai installer, the python:3.11-slim base, apt/pip indexes) even
 # when no file in the repo changed.
 #
-# This workflow came from the private bobi-deploy repo with the image itself
+# This workflow came from the private deploy repo with the image itself
 # (repo reorg, Phase 6). Two things fell away in the move, both because the
 # image recipe now lives in the same repo as the source it installs:
 #   * the `setup-public-bobi` composite action — a sibling checkout of this
@@ -91,7 +91,7 @@ jobs:
       # job anywhere — see the Worker protocol suite in ci.yml, which pins 22.
       #
       # Absent this pin the job fails on a green tree, which is what it did
-      # nightly in bobi-deploy from 2026-07-28 until this move.
+      # nightly in the private deploy repo from 2026-07-28 until this move.
       - uses: actions/setup-node@v4
         with:
           node-version: "20"

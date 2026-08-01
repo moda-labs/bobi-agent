@@ -182,9 +182,11 @@ def test_force_included_template_paths_exist_on_disk():
 
 
 def test_no_deploy_assets_in_public_wheel():
-    """The public wheel ships no container-build assets (#707): no bobi/_deploy
-    force-includes, no root Dockerfile/docker/scripts in the sdist. Their home
-    is the bobi-deploy wheel (bobi_deploy/tests/test_packaging.py guards it)."""
+    """The published distribution ships no container-build assets (#707): no
+    bobi/_deploy force-includes, no root Dockerfile/docker/scripts in the
+    sdist. The container recipe LIVES in this repo (it is the source of the
+    reference image) but is deliberately not shipped to PyPI consumers; the
+    deploy engine's own assets belong to the private plugin wheel."""
     cfg = _config()
     targets = cfg["tool"]["hatch"]["build"]["targets"]
     offenders = [
@@ -198,7 +200,7 @@ def test_no_deploy_assets_in_public_wheel():
     ]
     assert not offenders, (
         "container-build assets crept back into the public distribution "
-        "(they belong in the bobi-deploy wheel, #707): " + ", ".join(offenders)
+        "(they are built from the repo, not shipped to consumers, #707): " + ", ".join(offenders)
     )
 
 

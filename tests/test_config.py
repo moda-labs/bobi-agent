@@ -830,8 +830,8 @@ def test_scan_declared_vars_keeps_optional_refs(tmp_path):
 # --non-interactive` refused to install an agent whose dependency was already
 # baked into the image. It took eng-team's fleet roll down on 2026-07-31: the
 # deploy side deliberately withholds build secrets from the runtime env-file
-# (bobi-deploy's BUILD_SECRET_NAMES, "must never be required as, backfilled
-# into, or persisted as runtime Fly secrets"), and this side demanded one.
+# (the deploy plugin's BUILD_SECRET_NAMES, "must never be required as,
+# backfilled into, or persisted as runtime secrets"), and this side demanded one.
 
 def test_build_only_ref_is_not_required_to_run(tmp_path):
     """A ${VAR} used only by a build step is build_only, so it never gates a
