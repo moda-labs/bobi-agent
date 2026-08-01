@@ -1,0 +1,237 @@
+name: Worker deploy smoke
+
+# Proves what `wrangler dev` cannot: that `wrangler deploy` produces a WORKING
+# Worker. ci.yml's `wrangler` job runs the full protocol suite against the
+# Worker's code in local mode, which needs no Cloudflare account — so the KV
+# binding, the `v1` `new_sqlite_classes` Durable Object migration, and
+# account-side provisioning were exercised nowhere, and the only real
+# `wrangler deploy` in existence was moda-agents' deploy straight to
+# production. See plans/2026-08-01-ci-coverage.md, Phase 2.
+#
+# ISOLATION. This deploys to a DEDICATED `ci-smoke` Worker with its own KV
+# namespace — never the environment moda-agents runs production on. Sharing
+# production's KV would let smoke traffic write live event state.
+# `scripts/render_worker_ci_config.py` enforces that on properties this public
+# repo owns (production's KV id lives in a private repo and must never be
+# learned here): the name must differ from the shipped `bobi-events`, and the
+# KV id must come from CI configuration rather than the shipped literal or the
+# `REPLACE_WITH_...` placeholder.
+#
+# WHY A SEPARATE FILE. It is the only workflow here that holds a Cloudflare
+# deploy credential. Keeping it out of ci.yml makes the fork boundary
+# reviewable at the top of one file instead of buried in a job `if:`.
+# `pull_request_target` is never used here or anywhere in this repo — that
+# trigger is what would hand a fork's code these secrets.
+on:
+  pull_request:
+    branches: [main]
+    # `labeled`/`unlabeled` so adding `ci:live` triggers a run, matching
+    # container.yml's live lane.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - "event-server/**"
+      - "scripts/render_worker_ci_config.py"
+      - "tests/integration/test_worker_deploy_smoke.py"
+      - ".github/workflows/worker-deploy-smoke.yml"
+  schedule:
+    - cron: "30 6 * * *"  # nightly, after container.yml's 6am live lane
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  # The dedicated CI Worker. Deliberately NOT `bobi-events` (production's
+  # name); the renderer refuses that name outright.
+  CI_WORKER_NAME: bobi-events-ci-smoke
+
+jobs:
+  deploy-smoke:
+    name: Deploy the ci-smoke Worker and smoke it
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Decide whether the live lane runs
+        id: live
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+          HAS_LIVE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:live') }}
+        run: |
+          set -euo pipefail
+          run=false
+          case "$EVENT_NAME" in
+            schedule|workflow_dispatch)
+              run=true ;;
+            pull_request)
+              if [ "$PR_HEAD_REPO" != "$THIS_REPO" ]; then
+                echo "fork PR ($PR_HEAD_REPO) — deploy lane is inert"
+              elif [ "$HAS_LIVE_LABEL" = "true" ]; then
+                run=true
+              else
+                echo "no ci:live label — deploy lane is inert"
+              fi ;;
+          esac
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "deploy lane runs: $run (event=$EVENT_NAME)"
+
+      - name: Fail fast when the Cloudflare configuration is missing
+        # Ran-assertion, layer (i): the smoke tests skip without a URL, so an
+        # absent credential would otherwise skip to green.
+        if: steps.live.outputs.run == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CI_SMOKE_KV_NAMESPACE_ID: ${{ secrets.CI_SMOKE_KV_NAMESPACE_ID }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || missing="$missing CLOUDFLARE_API_TOKEN"
+          [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] || missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          [ -n "${CI_SMOKE_KV_NAMESPACE_ID:-}" ] || missing="$missing CI_SMOKE_KV_NAMESPACE_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::deploy lane cannot run — missing repo secret(s):$missing" >&2
+            exit 1
+          fi
+          echo "Cloudflare configuration is present"
+
+      # NODE 22 — wrangler refuses anything lower. Safe here because nothing in
+      # this job builds a non-editable wheel (hatch_build.py requires exactly
+      # 20 for that); the editable install below returns early from the hook.
+      - uses: actions/setup-node@v4
+        if: steps.live.outputs.run == 'true'
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: event-server/package-lock.json
+
+      - uses: actions/setup-python@v6
+        if: steps.live.outputs.run == 'true'
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the smoke runner
+        if: steps.live.outputs.run == 'true'
+        run: pip install -e ".[dev]"
+
+      - name: Install the event-server workspace
+        if: steps.live.outputs.run == 'true'
+        working-directory: event-server
+        run: npm ci --no-audit --no-fund
+
+      - name: Render the ci-smoke Worker config
+        # Derived from the shipped wrangler.jsonc so the compatibility date, the
+        # DO binding and the `v1` migration stay identical to what production
+        # deploys. The isolation guards live in the renderer and abort here,
+        # BEFORE any credential is used.
+        if: steps.live.outputs.run == 'true'
+        env:
+          CI_SMOKE_KV_NAMESPACE_ID: ${{ secrets.CI_SMOKE_KV_NAMESPACE_ID }}
+        run: |
+          python scripts/render_worker_ci_config.py \
+            --name "$CI_WORKER_NAME" \
+            --kv-namespace-id "$CI_SMOKE_KV_NAMESPACE_ID" \
+            --release-version "ci-smoke-${GITHUB_RUN_ID}" \
+            --release-sha "${GITHUB_SHA}" \
+            --out event-server/worker/wrangler.ci.jsonc
+
+      - name: Deploy the ci-smoke Worker
+        id: deploy
+        if: steps.live.outputs.run == 'true'
+        working-directory: event-server/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/wrangler-deploy.log"
+          # `--no-install` so this can only use the wrangler pinned in
+          # package-lock.json; without it npx would silently fetch a different
+          # version if workspace resolution ever broke, and the deploy under
+          # test would stop being the deploy we ship.
+          npx --no-install wrangler deploy --config wrangler.ci.jsonc 2>&1 | tee "$log"
+          # The workers.dev URL is the smoke target. Parse it rather than
+          # assembling it: the account subdomain is not known to this repo.
+          #
+          # `|| true` is load-bearing. Under `set -euo pipefail` a grep that
+          # matches nothing (or a SIGPIPE from `head`) makes the ASSIGNMENT
+          # non-zero, so the step would die here and the explicit error below
+          # would never print — the exact silent-failure shape this whole
+          # initiative is about.
+          url="$(grep -oE 'https://[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev' "$log" | head -1 || true)"
+          if [ -z "$url" ]; then
+            echo "::error::wrangler deploy printed no workers.dev URL — cannot smoke the deployment" >&2
+            exit 1
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "deployed: $url"
+
+      - name: Set the Durable Object internal secret
+        # The DO rejects unauthenticated internal fetches, so the WebSocket
+        # subscribe (and therefore the round-trip below) needs this set on the
+        # deployed script. Rotated every run — it authenticates Worker→DO calls
+        # within this one deployment and nothing else.
+        if: steps.live.outputs.run == 'true'
+        working-directory: event-server/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          openssl rand -hex 32 \
+            | npx --no-install wrangler secret put INTERNAL_DO_SECRET --config wrangler.ci.jsonc
+
+      - name: Wait for the deployment to serve this commit
+        # A deploy is not instantly live. `wrangler secret put` above publishes
+        # ANOTHER version, and requests during that rollover can 500 — the
+        # first real run of this lane hit exactly that, failing registration
+        # with a 500 two seconds after the secret was set, while the same
+        # Worker served the same request correctly moments later.
+        #
+        # This is a readiness gate, not a retry-until-green: it demands HTTP
+        # 200 AND the release sha of the commit under test, so a genuinely
+        # broken or stale deploy never becomes "ready" and the step fails loud
+        # with the last response it saw.
+        if: steps.live.outputs.run == 'true'
+        env:
+          SMOKE_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          set -uo pipefail
+          deadline=$(( SECONDS + 120 ))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            body="$(curl -fsS --max-time 10 "$SMOKE_URL/health" 2>/dev/null || true)"
+            case "$body" in
+              *"\"sha\":\"$GITHUB_SHA\""*)
+                echo "deployment is serving $GITHUB_SHA"
+                exit 0 ;;
+            esac
+            sleep 5
+          done
+          echo "::error::$SMOKE_URL never served release sha $GITHUB_SHA within 120s" >&2
+          echo "last response: ${body:-<none>}" >&2
+          exit 1
+
+      - name: Smoke the DEPLOYED Worker
+        if: steps.live.outputs.run == 'true'
+        env:
+          BOBI_SMOKE_EVENT_SERVER_URL: ${{ steps.deploy.outputs.url }}
+          BOBI_SMOKE_EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          pytest tests/integration/test_worker_deploy_smoke.py \
+            -m live -v --timeout=180 \
+            --junitxml=worker-deploy-smoke.xml
+
+      - name: Assert the deploy smoke actually ran
+        # Ran-assertion, layer (ii): both tests skipif on an absent URL, so a
+        # deploy step that silently produced no URL would otherwise skip green.
+        if: steps.live.outputs.run == 'true'
+        run: |
+          python scripts/assert_junit_ran.py worker-deploy-smoke.xml \
+            --expect-passed 2 \
+            --require test_deployed_worker_health \
+            --require test_deployed_worker_publish_subscribe_roundtrip

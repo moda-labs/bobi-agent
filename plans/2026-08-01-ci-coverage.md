@@ -1,7 +1,7 @@
 # CI proves the product: both brains, a real Worker deploy, and one fleet canary that gates version rolls
 
 > **Status:** Draft
-> **Tracking issue:** moda-labs/bobi-agent#909 · **Created:** 2026-08-01 · **Last amended:** — (see Amendments)
+> **Tracking issue:** moda-labs/bobi-agent#909 · **Created:** 2026-08-01 · **Last amended:** 2026-08-01 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -106,45 +106,62 @@ Split the proof by what each repo owns.
 - **Q5:** How are the new secrets scoped in a **public** repo? bobi-agent today holds one secret (`HOMEBREW_TAP_TOKEN`) and two environments (`pypi`, `release`); this adds `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. Options: (a) repo secrets, relying on GitHub never passing secrets to fork-PR workflows; (b) a dedicated `ci-live` environment with required reviewers, so even a same-repo PR needs an approval click to spend credentials. Recommendation: **(b)** for the Cloudflare pair (a deploy credential is the higher-blast-radius one) and **(a)** for the two model keys, gated on the `ci:live` label so cost stays deliberate. Non-negotiable either way: `pull_request_target` is never used, and the live lane must be provably inert on fork PRs.
   **Decision (2026-08-01, Zach):** (a) all four as repo secrets — keeping the nightly lanes fully unattended (a gated environment would stall a cron run waiting for a reviewer, losing the rot-detection the nightly exists for). The compensating controls therefore carry more weight and are REQUIRED, not optional: no `pull_request_target` anywhere, a proven-inert-on-fork-PRs check in Phase 1's gate, the `ci:live` label for cost, and a Cloudflare token scoped to the `ci-smoke` Worker alone so it cannot touch production.
 
+- **Q5 follow-on (raised during Lane A's build, 2026-08-01):** the decision's
+  fourth compensating control — *"a Cloudflare token scoped to the `ci-smoke`
+  Worker alone so it cannot touch production"* — **is not implementable as
+  written.** Cloudflare's `Workers Scripts` and `Workers KV Storage`
+  permissions are granted at ACCOUNT scope only; there is no per-script or
+  per-namespace resource restriction (verified against Cloudflare's permissions
+  reference, and empirically: the existing token lists and can edit production
+  `bobi-events` and its `EVENTS` namespace). Isolation therefore has to move up
+  a level. Options: (a) a separate Cloudflare account holding only the
+  `ci-smoke` Worker and its KV, with an account-scoped token that consequently
+  reaches nothing production; (b) one account, accepting that a public repo
+  holds a credential able to overwrite the production event bus.
+  **Decision (2026-08-01, Zach):** (a) — a separate Cloudflare account. The
+  control survives in substance; only its mechanism changed.
+
 ## Phases
 
-### Phase 1 — bobi-agent: both brains run, against the real image `[ ]`
+### Phase 1 — bobi-agent: both brains run, against the real image `[x]`
 
-- [ ] Add `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` as repo secrets (Q5).
-- [ ] Add an `npm ci` step in `event-server/` to `container.yml`'s `container-image` job so `_start_wrangler_server` is available.
-- [ ] Add the live step to `container-image`, gated `schedule || workflow_dispatch || contains(labels, 'ci:live')`, running `pytest tests/integration/test_container_image.py -m "docker and live"` with `BOBI_TEST_IMAGE: bobi:ci`.
-- [ ] Make the step **fail if the round-trips did not run**. Both tests `skipif` on a missing key, so a misnamed secret skips both and exits 0. Two layers, because one is not enough: (i) fail the step up front when either key is empty — cheap, and catches the common case loudly; (ii) run with `--junitxml` and assert exactly 2 passed / 0 skipped, which also catches a skip from the Linux/`--network host` guard or an unavailable wrangler harness. Do not parse `-rA` prose.
-- [ ] Confirm the lane is inert on fork PRs and never uses `pull_request_target`.
-
-**Validation gate**
-
-- [ ] `gh workflow run container.yml` → the live step runs and **both** `test_image_ask_roundtrip` and `test_image_codex_ask_roundtrip` PASS.
-- [ ] Non-vacuity: a run with `ANTHROPIC_API_KEY` deliberately unset **fails** the ran-assertion rather than reporting green.
-- [ ] A PR without the `ci:live` label does not run the step, and its check set is unchanged.
-
-### Phase 2 — bobi-agent: a real Worker deploy, on its own infrastructure `[ ]`
-
-- [ ] Provision the dedicated `ci-smoke` Worker (Q2): its own name, its own KV namespace, its own Durable Object. **It must not reference moda-agents' production `bobi-events` Worker or its `EVENTS` namespace.**
-- [ ] Add `.github/workflows/worker-deploy-smoke.yml`: materialize the CI KV id into the Worker config (fail loudly if absent — never let wrangler auto-provision), `wrangler deploy`, then assert `/health` and one publish→subscribe round-trip through the deployed Worker.
-- [ ] Add `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` as repo secrets (Q5), with the token scoped to the `ci-smoke` Worker ALONE — it must not be able to reach production `bobi-events`.
-- [ ] Add an isolation guard. **It cannot compare against the production KV id** — that id lives in private `moda-agents` and public `bobi-agent` must never learn it. Assert instead on properties bobi-agent owns: the CI Worker's `name` is not `bobi-events`, its KV id comes from CI configuration rather than a hardcoded literal, and the placeholder `REPLACE_WITH_YOUR_KV_NAMESPACE_ID` never reaches a deploy.
+- [x] Add `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` as repo secrets (Q5).
+- [x] Add an `npm ci` step in `event-server/` to `container.yml`'s `container-image` job so `_start_wrangler_server` is available. **Needed a Node 22 swap too** — the job pins 20 because `hatch_build.py` requires exactly 20 for a non-editable wheel, and wrangler refuses anything below 22. The swap goes after the wheel build; nothing after it builds a wheel.
+- [x] Add the live step to `container-image`, gated `schedule || workflow_dispatch || contains(labels, 'ci:live')`, running `pytest tests/integration/test_container_image.py -m "docker and live"` with `BOBI_TEST_IMAGE: bobi:ci`.
+- [x] Make the step **fail if the round-trips did not run**. Both tests `skipif` on a missing key, so a misnamed secret skips both and exits 0. Two layers, because one is not enough: (i) fail the step up front when either key is empty — cheap, and catches the common case loudly; (ii) run with `--junitxml` and assert exactly 2 passed / 0 skipped, which also catches a skip from the Linux/`--network host` guard or an unavailable wrangler harness. Do not parse `-rA` prose. Layer (ii) is `scripts/assert_junit_ran.py`, whose every rejection path is unit-tested in `tests/test_ci_guard_scripts.py`.
+- [x] Confirm the lane is inert on fork PRs and never uses `pull_request_target`. Inertness is by IDENTITY (`head.repo.full_name != github.repository`), not by relying on GitHub withholding secrets — failing a contributor's PR for a credential they cannot have is its own bug. `test_no_workflow_uses_pull_request_target` enforces the absence across every workflow.
 
 **Validation gate**
 
-- [ ] The workflow deploys and `/health` returns 200 with the expected version metadata.
-- [ ] A publish→subscribe round-trip succeeds against the **deployed** Worker (not `wrangler dev`).
-- [ ] The `v1` `new_sqlite_classes` migration applies on a first deploy to a clean Worker.
-- [ ] Guard proves non-vacuous: a config naming `bobi-events`, or carrying the placeholder KV id, fails the run.
+- [x] `gh workflow run container.yml` → the live step runs and **both** `test_image_ask_roundtrip` and `test_image_codex_ask_roundtrip` PASS. Run [30718916924](https://github.com/moda-labs/bobi-agent/actions/runs/30718916924), 2026-08-01: `2 passed, 19 deselected in 40.50s`, and the ran-assertion printed `live lane ran: 2 passed, 0 skipped`. **First time a real brain of either kind has executed in this repo's CI.**
+- [x] Non-vacuity: a run with `ANTHROPIC_API_KEY` deliberately unset **fails** rather than reporting green. Run [30719047118](https://github.com/moda-labs/bobi-agent/actions/runs/30719047118) with the secret deleted: RED at the fail-fast step, round-trips skipped, never reported green. Secret restored immediately after. Layer (ii)'s own rejection paths (skip / empty selection / renamed test / missing report) are proven in `tests/test_ci_guard_scripts.py` rather than by deliberately breaking CI a second time.
+- [x] A PR without the `ci:live` label does not run the step, and its check set is unchanged — the `container.yml` run on this lane's own PR shows steps 9-14 skipped with the job name unchanged.
 
-### Phase 3 — bobi-agent: make the coverage un-disableable and documented `[ ]`
+### Phase 2 — bobi-agent: a real Worker deploy, on its own infrastructure `[x]`
 
-- [ ] `tests/test_ci_live_wiring.py`: assert `container.yml` still carries the `ci:live` trigger types, the live step, and the ran-assertion; assert `pyproject.toml` still defines the `live` marker. This is the same class of protection as `release-fleet.yml`'s `smoked` output — a lane that silently stops running is worse than one that never existed.
-- [ ] Document both lanes in `AGENTS.md` (how to trigger, what they cost, what they prove).
+- [x] Provision the dedicated `ci-smoke` Worker (Q2) — `bobi-events-ci-smoke` in a SEPARATE Cloudflare account (`71403a72…`, not production's `6db47dd2…`), with its own `EVENTS-ci-smoke` KV namespace and its own DO: its own name, its own KV namespace, its own Durable Object. **It must not reference moda-agents' production `bobi-events` Worker or its `EVENTS` namespace.**
+- [x] Add `.github/workflows/worker-deploy-smoke.yml`: materialize the CI KV id into the Worker config (fail loudly if absent — never let wrangler auto-provision), `wrangler deploy`, then assert `/health` and one publish→subscribe round-trip through the deployed Worker.
+- [x] Add `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `CI_SMOKE_KV_NAMESPACE_ID` as repo secrets (Q5). **The stated scoping is not implementable** — see the 2026-08-01 Q5 amendment; isolation moves to the account level.
+- [x] Add an isolation guard — `scripts/render_worker_ci_config.py`, which derives the CI config from the shipped `wrangler.jsonc` (so the migration, DO binding and compatibility date cannot drift from what production deploys) and refuses to render an unsafe one. **It cannot compare against the production KV id** — that id lives in private `moda-agents` and public `bobi-agent` must never learn it. Assert instead on properties bobi-agent owns: the CI Worker's `name` is not `bobi-events`, its KV id comes from CI configuration rather than a hardcoded literal, and the placeholder `REPLACE_WITH_YOUR_KV_NAMESPACE_ID` never reaches a deploy.
 
 **Validation gate**
 
-- [ ] `pytest tests/test_ci_live_wiring.py` passes, and fails when the live step is deleted from `container.yml`.
-- [ ] Full unit suite green: `pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q`.
+- [x] The workflow deploys and `/health` returns 200 with the expected version metadata. Run [30721331250](https://github.com/moda-labs/bobi-agent/actions/runs/30721331250), 2026-08-01: `deployment is serving 571d0a65…`, both tests PASS, ran-assertion `2 passed, 0 skipped`.
+- [x] A publish→subscribe round-trip succeeds against the **deployed** Worker (not `wrangler dev`) — same run.
+- [x] The `v1` `new_sqlite_classes` migration applies on a first deploy to a clean Worker. The account and the Worker did not exist before this lane; the first-ever deploy created both, and the DO-backed WebSocket round-trip proves the migration took effect.
+
+**Isolation verified, not assumed** (2026-08-01): the CI token is rejected with `Authentication error` on production's account for BOTH `workers/scripts` and `storage/kv/namespaces`, while succeeding on the CI account — which held zero Workers and zero KV namespaces before this lane created them.
+- [x] Guard proves non-vacuous: a config naming `bobi-events`, or carrying the placeholder KV id, fails the run — every rejection path exercised in `tests/test_ci_guard_scripts.py`, including the CLI writing no file at all when the config is unsafe.
+
+### Phase 3 — bobi-agent: make the coverage un-disableable and documented `[x]`
+
+- [x] `tests/test_ci_live_wiring.py`: assert `container.yml` still carries the `ci:live` trigger types, the live step, and the ran-assertion; assert `pyproject.toml` still defines the `live` marker. This is the same class of protection as `release-fleet.yml`'s `smoked` output — a lane that silently stops running is worse than one that never existed.
+- [x] Document both lanes in `AGENTS.md` (how to trigger, what they cost, what they prove) — new "Live CI Lanes" section. `CLAUDE.md` is a symlink to it, so one edit covers both.
+
+**Validation gate**
+
+- [x] `pytest tests/test_ci_live_wiring.py` passes, and fails when the live step is deleted from `container.yml` — verified 2026-08-01 by deleting the step: `test_live_brain_roundtrips_still_run_on_both_brains` FAILED, 14 passed.
+- [x] Full unit suite green: 3799 passed, 1 skipped (2026-08-01).
 
 ### Phase 4 — moda-agents: repair the canary so it can run at all `[ ]`
 
@@ -184,8 +201,8 @@ Split the proof by what each repo owns.
 
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
-| A | #TBD | 1-3 | bobi-agent: both brains against the real image, real Worker deploy on dedicated infra, anti-rot guards | concurrent | open |
-| B | #TBD | 4-5 | moda-agents: repair the canary, collapse to one, gate fleet rolls on a proven version | concurrent | open |
+| A | #909 | 1-3 | bobi-agent: both brains against the real image, real Worker deploy on dedicated infra, anti-rot guards | concurrent | open |
+| B | #TBD (moda-agents) | 4-5 | moda-agents: repair the canary, collapse to one, gate fleet rolls on a proven version | concurrent | open |
 
 **Lanes:** Two lanes because the work spans two repos, which forces separate PRs — no same-repo parallel cut is made or needed. Topology is **STACKED by landing, parallel by build**: Lane B may be built as soon as Lane A's shape is known, but it **lands after** Lane A, because dropping `ci-codex-smoke` is only safe once Codex coverage genuinely exists in bobi-agent. That is "lands after", not "depends on" — it does not block dispatch. Both lanes are `concurrent` marker mode (cross-repo): flip markers as status-only commits to bobi-agent's `main` referencing the code PR, never inside a feature branch.
 
@@ -198,6 +215,32 @@ Split the proof by what each repo owns.
 
 - **2026-08-01** (session "repo-reorg"): plan created from the CI review in that session.
 - **2026-08-01** (session "repo-reorg"): Q1-Q5 resolved with Zach and written back; no questionables remain open.
+- **2026-08-01** (Lane A build, #909): three plan claims did not survive
+  implementation, all recorded above rather than silently worked around.
+  (1) Q5's per-Worker token scoping is impossible on Cloudflare — isolation
+  moved to the account level. (2) Phase 2's health check was to lean on
+  `CF_VERSION_METADATA` as the "really deployed" signal; `wrangler dev`
+  populates `version_id` and `version_timestamp` too, so the check now
+  discriminates on the release sha, which only the rendered CI config carries.
+  (3) Phase 1's `npm ci` item needed a Node 22 swap alongside it — the job pins
+  20 for the wheel build and wrangler refuses anything below 22.
+- **2026-08-01** (Lane A build, #909): the first real deploy immediately earned
+  its keep by exposing two failures invisible to `wrangler dev`, both now fixed
+  and guarded. (1) Cloudflare's edge answers **403 to the default
+  `Python-urllib` User-Agent**, so every smoke request failed against the
+  deployed Worker while the same code passed against dev; the smoke now sends
+  an explicit UA. Scope is the smoke module only — the shipped client posts via
+  httpx, which is not blocked. (2) `wrangler secret put` publishes another
+  Worker version, and requests during that rollover **500**; the lane now gates
+  on the deployment serving the commit's own release sha before smoking, which
+  is a readiness gate rather than a retry-until-green (a stale or broken deploy
+  never becomes ready).
+- **2026-08-01** (Lane A build, #909): Lane A's marker flips ride its own PR
+  rather than status-only commits to `main`, a deliberate deviation from the
+  `concurrent` marker mode in the Lane map. Lane A is the only lane touching
+  this repo, so there is no concurrent writer to collide with, and the
+  falsified claims above are things a reviewer needs to see in the same diff
+  that acts on them.
 - **2026-08-01** (session "repo-reorg"): self-review (red-team / staff-engineer / implementer lenses) folded back three findings — the prod-KV guard was unimplementable across the public/private boundary and is re-specified against properties bobi-agent owns; the ran-assertion got a concrete two-layer mechanism; and Phase 4's dockerfile repair was superseded by Q1(c), which retires the full-recipe build in moda-agents entirely.
 
 ## Notes
