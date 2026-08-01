@@ -1,0 +1,137 @@
+/* The global top bar — shared verbatim by `bobi setup` and the `bobi` web app.
+
+   These are separate pages (`#/setup` hands the browser off to the hosted
+   setup flow), so without a shared sheet their nav drifts apart and the top
+   level of the UI changes depending on where you are. It lives here, once, so
+   consistency is structural rather than maintained by hand.
+
+   The contract, on every surface:
+
+     LEFT   back affordance (if the page has one), then the PAGE NAME
+     RIGHT  status (if any), then the bobi lockup + its Moda Labs byline
+
+   The bar is plane 1 of the information architecture: a solid raised surface
+   over the sunken workspace, separated by a hairline. Never textured, never
+   transparent — the boundary between "where I am" and "what I am working in"
+   has to be unmissable. */
+
+.bar,
+.titlebar {
+  height: 58px;
+  flex: 0 0 58px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 22px;
+  background: var(--surface-card);
+  border-bottom: 1px solid var(--border-hairline);
+  position: relative;
+  z-index: 2;
+}
+
+/* ---- left: back, then the page name ---- */
+.navleft {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* The page name is a name the system owns, so it is lowercase — same voice as
+   the wordmark, the agent names, and the CLI verbs. */
+.page-name {
+  font-size: 16px;
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  text-transform: lowercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.navback:empty { display: none; }
+.navback a,
+.addr-back,
+.navback-link {
+  font-size: 15px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease);
+}
+.navback a:hover,
+.addr-back:hover,
+.navback-link:hover { color: var(--text-highlight); }
+
+/* A hairline divider between the back affordance and the page name, so the
+   two read as a trail rather than two loose labels. */
+.navsep {
+  width: 1px;
+  height: 18px;
+  background: var(--border-hairline);
+  flex: none;
+}
+
+.spacer { flex: 1; }
+
+/* ---- right: the lockup, always with its byline ---- */
+.lockup {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  flex: none;
+}
+.lockup .brand,
+.bar .brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 7px;
+  margin: 0 -7px;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-decoration: none;
+  transition: background var(--dur-fast) var(--ease),
+              transform var(--dur-fast) var(--ease);
+}
+.lockup .brand:hover { background: var(--surface-hover); }
+.lockup .brand:active { transform: scale(.97); }
+.lockup .mk {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-dark);
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.lockup .mk svg { width: 17px; height: 17px; }
+.lockup b {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--track-wordmark);
+}
+
+/* A corner mark, not chrome — one of the two sanctioned uppercase exceptions. */
+.byline {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-faint);
+  text-decoration: none;
+  padding-left: 11px;
+  border-left: 1px solid var(--border-hairline);
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease);
+}
+.byline:hover { color: var(--text-highlight); }
+
+@media (max-width: 720px) {
+  .byline { display: none; }
+}

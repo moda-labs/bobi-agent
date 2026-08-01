@@ -35,7 +35,10 @@ Bobi is an event-driven AI agent framework.
 - `docs/TICKETING_POLICY.md`: Linear/GitHub ticketing conventions.
 - `docs/RELEASE_RUNBOOK.md`: release process and checklist.
 - `docs/FRONTEND_QA.md`: local frontend QA guidance for Bobi's vanilla web UIs.
-- `DESIGN.md`: source of truth for `bobi setup` web UI visual and UX decisions.
+- `docs/design-system/`: the Bobi design system - source of truth for
+  anything visual on any Bobi surface (palette, type, icon set, components).
+- `DESIGN.md`: source of truth for `bobi setup` UX and its offline constraints;
+  its visual tokens were superseded by the design system on 2026-07-31.
 
 ## First Principles
 
@@ -147,8 +150,39 @@ For any frontend change, read `docs/FRONTEND_QA.md` before deciding how to test 
 
 ## Design System
 
-Before any visual or UX decision on the `bobi setup` web UI, read `DESIGN.md`.
-It supersedes older setup UI design assumptions elsewhere in the repo.
+`docs/design-system/` is the **Bobi design system** and the source of
+truth for anything **visual** on any Bobi surface. Read its `README.md` before
+making a visual decision; `SKILL.md` lists the non-negotiables. It is also
+invocable as `/bobi-design`.
+
+The four rules that matter most:
+
+1. **Violet is state, not decoration** — live, enforced, gated, focused.
+   Anything decorative is clay. Moda's red never appears on a Bobi surface.
+2. **Gates are sacred** — a human approval step always renders with the violet
+   rail + rotated-square glyph and names the workflow and step. Never a toast.
+3. **Config is the interface** — show real filenames, real YAML, real shell.
+4. **The lockup always travels with the "BY MODA LABS ↗" byline.**
+
+Also load-bearing: mono is for **data** (paths, ids, crons, code), sans for
+chrome; product chrome is **lowercase**, with uppercase only on document plate
+labels and corner marks; Bobi's own hand-drawn icon set only — never Lucide,
+Heroicons, or emoji.
+
+`DESIGN.md` remains the source of truth for the **UX** of the `bobi setup`
+wizard (its flow, pacing, and the digestion-prompt philosophy) and for its
+local hard constraints: fully offline, vanilla HTML/CSS/JS, no build step,
+inline SVG only. As of the 2026-07-31 amendment it is **no longer** the origin
+of the visual tokens — both local web UIs were reskinned onto the design
+system.
+
+The ported tokens live in `bobi/webui_common/static/tokens.css`, shared by
+`bobi setup` and `bobi app`. It is hand-maintained, so
+`tests/test_webui_tokens.py` pins it to the design system and fails on drift.
+The brand faces (Geist, Geist Mono, Inter) are vendored as woff2 under
+`bobi/webui_common/static/fonts/` — never a CDN, so the UIs stay offline.
+Refresh them with `python3 scripts/fetch_brand_fonts.py
+bobi/webui_common/static/fonts`.
 
 ## Release Rules
 

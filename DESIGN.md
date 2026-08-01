@@ -11,6 +11,41 @@
 > motion, retro, the digestion-prompt philosophy) is unchanged from the
 > 2026-06-13 agreement; the **UX architecture** section is the current model and
 > supersedes any "stage rail" description elsewhere.
+>
+> ---
+>
+> ## AMENDMENT 2026-07-31 — reskinned onto the Bobi design system
+>
+> The setup UI and the `bobi app` web UI were both reskinned onto the **Bobi
+> design system** (`docs/design-system/`), which was derived from the
+> shipping `buildmoda.ai/bobi` surface. Bobi now has one visual language across
+> marketing, product, and docs, and this file is no longer the origin of the
+> visual tokens — it records the setup UI's **UX** and the local deltas.
+>
+> **The visual source of truth is now `docs/design-system/README.md`.**
+> Tokens live in `bobi/webui_common/static/tokens.css`, a vanilla-CSS port of
+> that system.
+>
+> Four locked 2026-06-13 decisions are **superseded**. They are struck through
+> in place below rather than deleted, so the reasoning stays legible:
+>
+> | Superseded | Now | Why |
+> |---|---|---|
+> | Accent LOCKED: amber `#C8612B` | **Dusk violet** `oklch(0.53 0.17 285)` | Bobi's shipping brand accent. Amber was chosen before a brand existed. |
+> | "Avoid purple/violet entirely (the generic-AI-builder tell)" | Violet is **the** accent | The tell is *decorative* violet. Here it is strictly semantic — live, enforced, gated, focused — and never decoration. |
+> | Accent = primary action + progress + selection | Accent = **state only**; decoration is **clay** `#D67B55` | The design system's first rule. Eyebrows, indices, and add-affordances moved to clay. |
+> | System fonts only / "no web fonts" | **Geist, Geist Mono, Inter**, vendored as local woff2 | The offline constraint is intact — the faces ship in the wheel (`bobi/webui_common/static/fonts/`), so there is still no CDN and no network at runtime. |
+>
+> Also changed: success states no longer use green. The palette has no green,
+> and a connected integration is a *live* state, so it reads violet like every
+> other live thing; failure borrows Moda's brick `#9E3A28`. The CRT phosphor
+> layer (scanlines, glow, corner marks) was replaced by the system's own
+> **architect grid-paper** — nothing in this system glows. Uppercase survives
+> only on document plate labels and the "BY MODA LABS ↗" corner byline.
+>
+> Unchanged by this amendment: everything in **UX architecture**, the pacing
+> and digestion-prompt philosophy, the density gradient, and the offline /
+> vanilla / no-build-step constraints.
 
 ## Product context
 - **What:** a local web wizard a developer runs (`bobi setup`, served on
@@ -21,8 +56,9 @@
   a frozen image into that agent's `run/package/`.
 - **Who:** developers/engineers comfortable in IDEs and terminals. v1 of this
   product was a terminal REPL.
-- **Hard constraints:** fully **offline** — system fonts only, no CDN, no web
-  fonts; vanilla HTML/CSS/JS, no build step; inline SVG only.
+- **Hard constraints:** fully **offline** — no CDN and no network at runtime
+  (the brand faces are vendored locally, see Typography); vanilla HTML/CSS/JS,
+  no build step; inline SVG only.
 - **Brand:** ships as **bobi** for now. A rebrand to **bobbi** ("team
   bobbi", "we are legion") — after the Bobiverse novels, one engineer's mind
   forking into a legion of autonomous copies, which is the product's pitch — is
@@ -87,63 +123,101 @@ problem (how fast/smart the reflection is) — see the digestion-prompt section.
 
 ## Color
 
-Light chrome (primary):
+**Revised 2026-07-31.** The hexes below are the live values, ported from
+`docs/design-system/tokens/colors.css`. The named tokens are unchanged,
+so `--bg` / `--surface` / `--text` still resolve — they now point at the brand
+palette. The full ramp lives in `bobi/webui_common/static/tokens.css`.
+
+Paper and ink (the marketing base):
 ```css
---bg:            #F4F1EA;  /* warm bone/paper — the "approachable" promise */
---surface:       #FBFAF6;  /* panels */
---raised:        #FFFDF9;  /* cards, inputs */
---text:          #1F1B16;  /* near-black, brown bias — never #000 */
---muted:         #7A7062;
---faint:         #A89E90;
---border:        #E2DCD0;
---border-strong: #D6CCBD;
+--bobi-paper:     #FAF7EE;  /* default canvas */
+--bobi-paper-alt: #EAE4D1;  /* alternating band, chip fill */
+--bobi-ink:       #362E25;  /* primary text — never #000 */
+--bobi-muted:     #84725B;
+--bobi-rule:      #E5DED6;  /* soft hairline */
+--bobi-clay:      #D67B55;  /* decoration, indices, highlights */
+--bobi-void:      #221C15;  /* warm near-black: dark chrome */
 ```
 
-Dark slab (the one dark surface):
+The product surface ramp (`.bobi-app` — both web UIs set it on `<body>`). A
+dense operational screen needs hierarchy the flat marketing canvas doesn't
+provide, so the page goes *sunken*, cards go white, and elevation separates:
 ```css
---slab-bg:      #181410;   /* warm near-black, not blue-black */
---slab-surface: #1E1A15;
---slab-text:    #E8E2D6;   /* paper color inverted */
---slab-muted:   #948A7B;
---slab-border:  #2A241D;
+--surface-page: #F4F2ED;  /* sunken, warm but LOW-chroma */
+--surface-card: #FFFFFF;  /* data reads cleanest on white */
+--text-secondary: #6B6459; /* warmth kept, chroma dropped, 4.9:1 on white */
+--elev-1 … --elev-4;       /* 1px contact edge + wide soft ambient, warm ink */
 ```
 
-Restrained syntax tints (never the accent):
+The terminal — the single **cool** surface, for real shell/code/config output:
 ```css
---syn-key: #AFC0D2;  --syn-str: #CBBA8B;  --syn-punc: #7E776B;  --syn-com: #6E6354;
+--bobi-term-bg:  #0F1226;   /* was #181410 (warm); now the system's terminal */
+--bobi-term-fg:  rgba(250, 247, 238, 0.88);
+--bobi-term-dim: rgba(250, 247, 238, 0.45);
+--bobi-term-ok:  oklch(0.78 0.10 65);   /* warm amber: success output */
 ```
 
-**Accent — ONE color (LOCKED: amber, 2026-06-13), used only on:** the primary
-button, the active selection, the slab top-edge, slot check-marks, and the
-streaming caret.
-```css
-/* amber phosphor — LOCKED */
---accent:#C8612B; --accent-2:#D86E33; --slab-accent:#E0843F;
-/* green — considered, not chosen (classic-terminal but cooler against the paper):
-   --accent:#177B52; --accent-2:#1E8E60; --slab-accent:#29A36A; */
-```
-Amber skews "warning", so amber is **reserved for the brand accent only**
-(progress, primary action, active selection, streaming) — success and error
-states get their own distinct hues so the accent never sends a mixed signal.
-Avoid purple/violet entirely (the generic-AI-builder tell).
+~~**Accent — ONE color (LOCKED: amber, 2026-06-13)**~~ — **SUPERSEDED
+2026-07-31.** The accent is now Bobi's **dusk violet**, and its meaning changed
+with it: violet is **state** (live, enforced, gated, focused), never
+decoration. Decorative highlights — eyebrows, indices, add-affordances, hover
+warmth — are **clay**.
 
-## Typography — system fonts only
 ```css
---font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-             "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
---font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, "Cascadia Mono",
-             "Segoe UI Mono", Consolas, "Liberation Mono", monospace;
+/* the live values; canonical source is docs/design-system/tokens/colors.css */
+--bobi-acc: oklch(0.53 0.17 285);         /* on light surfaces */
+--bobi-acc-bright: oklch(0.70 0.14 285);  /* on dark surfaces, glyph dots */
+--bobi-clay: #D67B55;                     /* decoration, indices, highlights */
+/* superseded: --accent:#C8612B; --accent-2:#D86E33; --slab-accent:#E0843F; */
 ```
-**Mono-accented, not mono-led.** Personality comes from the *contrast* between
-engraved mono and conversational sans — free with system fonts:
-- **Mono** (uppercase, tracked, small): card labels, file paths, status,
-  eyebrows, numerals/counters (`tabular-nums`). The "instrument" voice.
-- **Sans** (generous, 15–16px): body, questions, helper copy, chat. The
-  conversational voice. This is the *only* sans and it stays quiet.
-- **Mono** again for code in the slab.
 
-`system-ui` as the body face is normally the "gave up on typography" tell; here
-it's a hard offline constraint, countered by giving mono the identity role.
+The retired reasoning, kept for the record: *"Amber skews warning, so amber is
+reserved for the brand accent only… Avoid purple/violet entirely (the
+generic-AI-builder tell)."* That concern was about **decorative** violet —
+gradients and aurora blobs. Bobi's violet is load-bearing: if a thing is not
+live, enforced, gated, or focused, it is not violet.
+
+There is no green in the palette. A connected integration is a *live* state, so
+it reads violet; failure uses Moda's brick `#9E3A28`; waiting uses clay.
+
+## Typography — the brand faces, vendored locally
+
+~~System fonts only~~ — **SUPERSEDED 2026-07-31.** The UI now sets Bobi's real
+typefaces. They are vendored as `woff2` in `bobi/webui_common/static/fonts/`
+and declared in `fonts.css`, so the offline constraint is fully intact: no CDN,
+no network at runtime, no build step. System stacks remain as fallbacks.
+
+```css
+--font-display: "Geist", ui-sans-serif, system-ui, …;   /* every heading */
+--font-sans:    "Inter", ui-sans-serif, system-ui, …;   /* body, buttons */
+--font-mono:    "Geist Mono", ui-monospace, …;          /* data */
+```
+
+Three families, one tracking signature: **-0.03em** on display headings, and
+**-0.045em** on the `bobi` wordmark alone.
+
+**Mono earns its place on DATA, not chrome.** Setting a CLI-adjacent product in
+monospace reads as terminal cosplay and is the clearest tell of a generated
+interface. The line:
+
+| Mono | Sans |
+|---|---|
+| File paths, filenames, agent names | Nav labels, buttons, tabs |
+| Event/run ids, cron expressions | Page titles, headings |
+| Shell commands, YAML, code | Status words, badges, form labels |
+| Plate labels, corner marks | Card copy, hints, prose |
+
+Numbers stay sans but take `tabular-nums`.
+
+**Product chrome is lowercase.** The pre-reskin sheet had five competing caps
+treatments; when everything is emphasized, nothing is. Uppercase now survives
+in exactly two places — document plate labels (the terminal's `PREVIEW`) and
+the `BY MODA LABS ↗` corner byline. Badges and status are sentence case:
+"Running", never `RUNNING`.
+
+Licensing: Geist, Geist Mono, and Inter are SIL OFL 1.1; the license travels
+with the binaries in `fonts/LICENSE.md`. Refresh them with
+`python3 scripts/fetch_brand_fonts.py bobi/webui_common/static/fonts`.
 
 ## Spacing & density
 - 8px base. **Density gradient across the panes:** breathable conversation →
@@ -158,23 +232,37 @@ it's a hard offline constraint, countered by giving mono the identity role.
   the chat reply types out char-by-char. Short, ease-out, reassuring.
 - All motion respects `prefers-reduced-motion`.
 
-## Space-retro layer (static)
-A *slight* retro-futurist lean (Bobiverse / Apollo / Nostromo / phosphor CRT),
-concentrated where it belongs and **static** — no animation (a sweeping scan
-beam and flicker were tried and removed as distracting).
-- **The dark slab is the ship's computer:** a glowing accent top-edge and code
-  pulled toward **phosphor** (syntax tinted toward the accent — amber-cream).
-- **Chrome gets a whisper:** faint instrument texture behind the paper, a mono
-  telemetry prefix on counters.
-- **No web fonts** — retro is CSS treatment over system mono, never a pixel
-  typeface. The light chrome stays clean so "approachable" survives.
-- Brand mark: a small inline-SVG satellite/probe in the titlebar.
+## ~~Space-retro layer~~ → the architect layer (static)
+
+**SUPERSEDED 2026-07-31.** The phosphor-CRT lean (glowing slab edge, scanlines,
+corner marks, amber-cream syntax) is retired. **Nothing in this system glows.**
+The `data-retro="on"` attribute is kept and now drives the design system's own
+signature backdrop instead:
+
+- **Faded engineering grid-paper** behind the chrome — an 80px major grid plus
+  a 16px minor grid, dissolving downward. The architect's drawing board, not a
+  CRT.
+- **The dark slab is the terminal** — the single *cool* surface in an otherwise
+  warm system (`#0F1226`), reserved for real shell, code, and config output. A
+  document: square-cornered and flat, with no top-edge glow.
+- **The dashed rule** (2px on, 4px gap) replaces solid connectors on figures.
+- Brand mark: the inline-SVG probe — ink body, dashed orbit, one violet dot.
+  It doubles as the director's icon.
+
+The retired reasoning is still sound about *approachability*; only the CRT
+vocabulary changed.
 
 ## Anti-slop (hard no)
-Purple/violet gradients, aurora blobs, centered hero composition, 3-column
-icon-card grids inside the wizard, gradient CTA buttons, glassmorphism, "AI
-sparkle" iconography, oversized empty cards. Left-aligned workflow, real forms
-and artifacts on screen, buttons that look like tools.
+~~Purple/violet gradients~~ (violet is now the accent — but see the rule: it is
+**state**, never decoration, and never a gradient), aurora blobs, centered hero
+composition, 3-column icon-card grids inside the wizard, gradient CTA buttons,
+glassmorphism, "AI sparkle" iconography, oversized empty cards. Left-aligned
+workflow, real forms and artifacts on screen, buttons that look like tools.
+
+Added 2026-07-31: no third-party icon packs (Lucide, Heroicons, Feather,
+Material) and **no emoji as iconography** — Bobi's own hand-drawn set only,
+24×24 at a 1.5 ink stroke with round caps, at most one violet detail per glyph.
+No ambient shadows; elevation encodes altitude, not importance. No green.
 
 ---
 
@@ -443,7 +531,8 @@ inspecting proxies (Zscaler, etc.) whose root is in the keychain but not certifi
 ---
 
 ## Open decisions
-1. ~~Phosphor accent~~ — **RESOLVED: amber** (2026-06-13).
+1. ~~Phosphor accent~~ — ~~RESOLVED: amber (2026-06-13)~~ — **superseded by dusk
+   violet, 2026-07-31** (see the amendment at the top).
 2. ~~Stage names / is the rail right~~ — **RESOLVED: no rail** (2026-06-15). The
    8-stage rail collapsed into one screen; the stage enum survives only as the
    build/install pipeline.
@@ -462,8 +551,8 @@ that agent directly. The chat is **blocking request/response** — a message goe
 out via `inbox.deliver(wait=True)` and the agent's full reply comes back as one
 block; there's no token-streaming surface to expose. It **reuses this design
 language verbatim**: warm light chrome for the roster + composer, the single dark
-CRT slab for the chat transcript (the machine writes in the dark), amber accent,
-mono labels, system fonts, no build step.
+Terminal slab for the chat transcript (the machine writes in the dark), violet
+accent, mono on data only, vendored brand faces, no build step.
 
 - **Local UI, remote control-plane administration.** Local
   `bobi agent <name> ui` binds `127.0.0.1` + a per-launch token and opens a
@@ -494,7 +583,7 @@ port 8642) serving a shell with a hash router:
   unchanged). In hosted mode Finish installs, **launches**, and returns to
   `#/agents/<name>` instead of printing a start command.
 
-Same design language verbatim: tokens.css, warm chrome, one dark slab, amber
+Same design language verbatim: tokens.css, warm chrome, one dark slab, violet
 accent. The standalone `bobi setup` and container `ui` surfaces keep working
 during the transition.
 
@@ -518,6 +607,11 @@ during the transition.
 | 2026-06-16 | **Real Venn catalog via the `venn` CLI** (CLI-first, REST fallback); non-Venn services → custom + authored `tools/*.md` | stop guessing what Venn supports; give custom services a real usage guide |
 | 2026-06-16 | **Auto-name from goal; rename moves the folder + updates `agent:`** | the name has to actually stick on disk |
 | 2026-06-16 | **OS system trust store (truststore) for Venn TLS** | works behind Zscaler-style inspecting proxies; certifi alone fails |
+| 2026-07-31 | **Reskin onto the Bobi design system**; `docs/design-system/` becomes the visual source of truth | one visual language across marketing, product, and docs; this file keeps the UX, not the tokens |
+| 2026-07-31 | **Accent: amber → dusk violet, and violet means STATE only** | the shipping brand accent; decoration moved to clay so the accent never sends a mixed signal |
+| 2026-07-31 | **Vendor Geist / Geist Mono / Inter as local woff2** | brand typography without breaking the offline constraint — no CDN, no build step |
+| 2026-07-31 | **Drop green; connected = live = violet** | the palette has no green, and a connected integration is a live state like any other |
+| 2026-07-31 | **CRT phosphor → architect grid-paper; lowercase chrome** | nothing in this system glows; five competing caps treatments meant nothing was emphasized |
 | 2026-06-16 | Default team folder `bobi/` everywhere; later superseded by named-agent `src/` + `run/` slots | one consistent, obvious location |
 | 2026-06-16 | **Editable source → machine-wide library**; later superseded by `$BOBI_HOME/agents/<name>/src/` | a team isn't tied to where it installs; stop littering the cwd |
 | 2026-06-16 | **Modify asks which folder to scan** (`/api/teams`); tab always enabled; folder picker re-rooted at `$HOME`, absolute paths | teams can live anywhere; pick the scan dir even when the library is empty |

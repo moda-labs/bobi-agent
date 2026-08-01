@@ -14,6 +14,8 @@ MEDIA_TYPES = {
     ".css": "text/css",
     ".js": "text/javascript",
     ".svg": "image/svg+xml",
+    ".woff2": "font/woff2",
+    ".png": "image/png",
 }
 
 

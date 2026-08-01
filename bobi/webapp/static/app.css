@@ -1,97 +1,135 @@
-/* bobi app — unified dashboard shell. Warm light chrome + the one dark
-   slab (chat transcripts). System fonts only, no build step. Tokens from
-   DESIGN.md via tokens.css. */
+/* bobi app — unified dashboard shell, in the Bobi design system.
+
+   Token source: bobi/webui_common/static/tokens.css, itself a port of
+   docs/design-system/tokens/. Same rules as the setup UI:
+
+     1. Violet (--accent) is STATE — live, running, selected, focused.
+        Decoration is CLAY (--hi). Terminal states (stopped, completed, idle)
+        are QUIET: a table of forty finished sessions should read as calm
+        gray, not a wall of confetti. Color in a list means "look here".
+     2. Mono is for DATA (agent names, ids, paths, costs, timestamps); sans
+        is for chrome (nav, buttons, headings, status words). A status is a
+        LABEL, not data — so it reads "Running", never "RUNNING".
+     3. No uppercase in product chrome. The pre-reskin sheet had five
+        competing caps treatments; when everything is emphasized, nothing is.
+        Uppercase survives only on plate labels and the corner byline.
+     4. One easing curve (--ease). Motion disables under prefers-reduced-motion,
+        and motion-only elements hide rather than freeze. */
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 
+/* Buttons and fields otherwise fall back to the UA's 13.333px system font in
+   pure black — a size that is in no scale here, and an ink that is not in the
+   palette. Inherit first; components override. */
+button, input, select, textarea {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
 html, body { height: 100%; }
 
-/* The framed app window — same treatment as the setup flow, so moving
-   between the shell and the hosted editor reads as one app. */
 body {
   margin: 0;
   font-family: var(--font-sans);
   font-size: 15px;
-  line-height: 1.5;
-  color: var(--text);
-  background: radial-gradient(1200px 600px at 80% -10%, #FAF7F0 0%, var(--bg) 55%);
+  line-height: 1.55;
+  color: var(--text-primary);
+  background: var(--surface-page);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   display: flex;
   flex-direction: column;
 }
-html[data-retro="on"] body {
-  background:
-    radial-gradient(1200px 600px at 80% -10%, #FAF7F0 0%, var(--bg) 55%),
-    repeating-linear-gradient(90deg, rgba(120, 100, 70, .045) 0 1px, transparent 1px 24px),
-    repeating-linear-gradient(0deg, rgba(120, 100, 70, .045) 0 1px, transparent 1px 24px);
+::selection { background: var(--bobi-paper-alt); color: var(--text-primary); }
+
+h1, h2, h3, h4, h5 {
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--track-tightest);
+  color: var(--text-primary);
+  margin: 0;
 }
+code, pre, kbd { font-family: var(--font-mono); }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Every column of numbers, ids, and timestamps gets tabular figures —
+   misaligned digits are the fastest way to make a dense table look sloppy. */
+.tile-spend, .fleet-spend, .spend-amt, .spend-total, .card-cost,
+.session-meta, .attention-when, .health-when, .sessions-counts {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================================
+   INFORMATION ARCHITECTURE — three planes, and nothing bleeds across them.
+
+     1. GLOBAL CHROME  (.bar)        solid white, hairline base. Who/where you
+                                     are. Never textured.
+     2. CONTEXT CHROME (.agent-ctl)  solid white, hairline base. What you are
+                                     acting on, and the run controls for it.
+     3. WORKSPACE      (.view)       the SUNKEN page. Content lives here, on
+                                     white cards that lift off it.
+
+   The reason chrome is white and the workspace is sunken (rather than the
+   reverse, or all one surface): the eye reads the recessed plane as "the
+   thing I am working in" and the raised plane as "the thing I am working
+   with". Collapsing them — or running a texture across the boundary — is
+   what makes an app feel like an undifferentiated wall of UI.
+
+   The architect grid-paper is deliberately NOT used here. It is a marketing
+   device from the design system's figure language; on a dense operational
+   screen it crosses region boundaries and destroys exactly the separation
+   above. `data-retro` is inert on product surfaces.
+   ========================================================================= */
+
+/* Full-bleed: the browser window IS the app window. No floating card, no
+   simulated chrome. */
 .app {
-  width: min(1240px, 96vw);
-  height: min(800px, 94vh);
-  margin: 2.6vh auto;
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: 14px;
-  box-shadow: 0 1px 0 #fff inset, 0 18px 50px -24px rgba(40, 30, 16, .35);
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
-.mono, .chip, .side-head, .card-meta, .status, .agent-hint {
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 11px;
-}
+/* `.mono` is a real mono run; it is NOT a shouting device. */
+.mono { font-family: var(--font-mono); }
 
-/* --- top bar --- */
-.bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 18px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  flex: none;
-}
-.bar .mark { color: var(--accent); display: inline-flex; }
-.bar .home-link { text-decoration: none; }
-.bar .title {
-  font-family: var(--font-mono);
-  letter-spacing: 0.08em;
-  font-weight: 600;
-}
-.bar .sub {
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 11px;
-  color: var(--muted);
-}
-.bar .spacer { flex: 1; }
+/* Plane 1 (the global top bar) lives in the shared chrome.css so the web app
+   and setup cannot drift apart. */
+
+/* connection health. Connected is LIVE (violet); a stale link is waiting
+   (clay); a dead one has failed (brick). */
 .dot {
   width: 9px; height: 9px; border-radius: 50%;
-  background: var(--ok);
-  box-shadow: 0 0 0 3px rgba(30, 142, 96, 0.15);
+  background: var(--status-live);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
-.dot.stale { background: var(--faint); box-shadow: none; }
-.dot.down  { background: var(--err); box-shadow: 0 0 0 3px rgba(181, 64, 46, 0.15); }
+.dot.stale { background: var(--status-waiting); box-shadow: 0 0 0 3px var(--status-waiting-soft); }
+.dot.down  { background: var(--status-failed); box-shadow: 0 0 0 3px var(--status-failed-soft); }
 
-/* --- view container --- */
+/* --- plane 3: the workspace (sunken; cards lift off it) --- */
 .view {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow-y: auto;
-  background: var(--bg);
+  background: var(--surface-page);
 }
 
 /* --- dashboard page --- */
 .page {
   width: 100%;
-  max-width: 860px;
+  max-width: 1040px;
   margin: 0 auto;
   padding: 28px 24px 48px;
 }
@@ -101,36 +139,48 @@ html[data-retro="on"] body {
   gap: 16px;
   margin-bottom: 18px;
 }
+/* Page titles are lowercase: Bobi's whole vocabulary is lowercase, so the
+   chrome speaks in the product's own voice. */
 .page-head h1 {
-  font-size: 19px;
-  font-weight: 650;
+  font-size: 22px;
+  text-transform: lowercase;
   margin: 0;
   flex: 1;
 }
 
 .btn {
-  font: inherit;
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--text);
-  background: var(--raised);
+  font-family: var(--font-sans);
+  font-size: 14.5px;
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--track-button);
+  color: var(--text-primary);
+  background: var(--surface-card);
   border: 1px solid var(--border-strong);
-  border-radius: 9px;
-  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  height: 34px;
+  padding: 0 15px;
   cursor: pointer;
   text-decoration: none;
+  white-space: nowrap;
+  flex: none;
   display: inline-flex;
   align-items: center;
-  transition: background 0.12s ease, border-color 0.12s ease;
+  justify-content: center;
+  transition: background var(--dur-fast) var(--ease),
+              border-color var(--dur-fast) var(--ease),
+              opacity var(--dur-fast) var(--ease),
+              transform var(--dur-fast) var(--ease);
 }
-.btn:hover { border-color: var(--accent); }
-.btn:disabled { color: var(--faint); cursor: default; border-color: var(--border); }
+.btn:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--text-secondary); }
+/* Press is scale(0.97) — the one universal press signal. */
+.btn:active:not(:disabled) { transform: scale(.97); }
+.btn:disabled { opacity: .45; cursor: default; }
 .btn.primary {
-  color: #fff;
+  color: var(--bobi-paper);
   background: var(--accent);
   border-color: var(--accent);
 }
-.btn.primary:hover { background: var(--accent-2); border-color: var(--accent-2); }
+.btn.primary:hover:not(:disabled) { opacity: .9; background: var(--accent); border-color: var(--accent); }
 
 /* agent card grid (home) */
 .agent-grid {
@@ -147,28 +197,32 @@ html[data-retro="on"] body {
   text-align: left;
   font: inherit;
   color: inherit;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  background: var(--surface-card);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-xl);
   padding: 16px;
   cursor: pointer;
-  transition: border-color 0.12s ease, background 0.12s ease;
+  box-shadow: var(--elev-1);
+  transition: border-color var(--dur-mid) var(--ease),
+              box-shadow var(--dur-mid) var(--ease),
+              transform var(--dur-mid) var(--ease);
 }
-.agent-tile:hover { border-color: var(--accent); background: var(--raised); }
-.agent-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Hover lifts; it does not recolor. */
+.agent-tile:hover { border-color: var(--border-strong); box-shadow: var(--elev-3); transform: translateY(-2px); }
 .agent-top { display: flex; align-items: center; gap: 10px; width: 100%; }
+/* An agent name is an identifier you type into the CLI — that is data. */
 .agent-name {
   font-family: var(--font-mono);
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--text);
+  font-size: 14px;
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
   word-break: break-all;
   flex: 1;
 }
 .agent-desc {
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.45;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.5;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -184,142 +238,169 @@ html[data-retro="on"] body {
 }
 .agent-go {
   font-family: var(--font-mono);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--faint);
+  font-size: 12px;
+  color: var(--text-faint);
+  transition: color var(--dur-fast) var(--ease);
 }
-.agent-tile:hover .agent-go { color: var(--accent); }
+.agent-tile:hover .agent-go { color: var(--hi); }
 .tile-spend {
   font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  color: var(--muted);
+  font-size: 12px;
+  color: var(--text-secondary);
 }
-
-/* dashboard fleet-spend readout (page head, right of the title) */
 .fleet-spend {
   font-family: var(--font-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 11px;
-  color: var(--muted);
+  font-size: 12.5px;
+  color: var(--text-secondary);
 }
+/* An empty slot is an invitation, not a state: dashed edge, clay glyph. */
 .agent-tile.create {
   border-style: dashed;
   border-color: var(--border-strong);
   background: none;
+  box-shadow: none;
 }
-.agent-tile.create:hover { border-color: var(--accent); background: var(--raised); }
+.agent-tile.create:hover { border-color: var(--hi-ring); }
+/* The create tile reuses .agent-name for structure, but "Create a new agent"
+   is a label, not an identifier — so it takes sans, not the mono of a real
+   agent name. */
+.agent-tile.create .agent-name { font-family: var(--font-sans); font-size: 15px; }
 .create-glyph {
   width: 30px; height: 30px;
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: 19px;
-  color: var(--accent);
-  border: 1px solid var(--accent);
-  border-radius: 9px;
+  font-family: var(--font-mono);
+  font-size: 20.5px;
+  color: var(--hi);
+  border: 1px solid var(--hi-ring);
+  background: var(--hi-soft);
+  border-radius: var(--radius-lg);
 }
 
-/* per-agent dashboard: run-control header */
+/* --- plane 2: context chrome (what you are acting on) --- */
 .agent-ctl {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 18px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  padding: 0 20px;
+  height: 48px;
+  background: var(--surface-card);
+  border-bottom: 1px solid var(--border-hairline);
   flex: none;
+  position: relative;
+  z-index: 1;
 }
 .agent-ctl-name {
   font-family: var(--font-mono);
-  font-size: 13.5px;
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: var(--weight-medium);
 }
 .ctl-spacer { flex: 1; }
 .agent-ctl-actions { display: flex; gap: 8px; }
-.agent-ctl .btn { padding: 5px 12px; font-size: 13px; }
+.agent-ctl .btn { padding: 5px 12px; font-size: 14px; }
 
+/* Status is a LABEL: sans, sentence case, quiet unless it is active.
+   The badge carries a dot; only live states tint it. */
 .status {
   display: inline-flex; align-items: center; gap: 5px;
-  font-size: 10px;
-  color: var(--muted);
+  font-size: 13px;
+  color: var(--text-secondary);
+  /* The JS supplies raw lowercase tokens ("running"). Badges are sentence
+     case — "Running", never "RUNNING". */
+  text-transform: capitalize;
 }
 .status::before {
   content: ""; width: 7px; height: 7px; border-radius: 50%;
-  background: var(--faint); flex: none;
+  background: var(--status-idle); flex: none;
 }
-.status.running::before  { background: var(--ok); }
-.status.stopped::before  { background: var(--faint); }
-.status.starting::before, .status.stopping::before { background: var(--accent); }
-.status.design::before   { background: var(--border-strong); }
-/* health badge states (#733): degraded reachability + wedged manager */
-.status.stale::before    { background: var(--warn); }
-.status.unreachable::before, .status.wedged::before { background: var(--err); }
-/* terminal outcomes (#733 vertical 3, MDS-65 vocabulary); legacy "done"
-   records render through the completed class (agent.js chipClass) */
-.status.completed::before { background: var(--ok); }
-.status.failed::before, .status.crashed::before { background: var(--err); }
+/* live / in-flight — the only states that earn violet */
+.status.running::before { background: var(--status-live); }
+.status.starting::before, .status.stopping::before {
+  background: var(--status-live);
+  animation: bobi-glow 1.6s ease-in-out infinite;
+}
+/* terminal + quiet states: no color, by design */
+.status.stopped::before   { background: var(--status-idle); }
+.status.design::before    { background: var(--status-idle); }
+.status.completed::before { background: var(--status-done); }
+.status.idle::before      { background: var(--status-idle); }
+/* trouble */
+.status.stale::before { background: var(--status-waiting); }
+.status.unreachable::before, .status.wedged::before,
+.status.failed::before, .status.crashed::before { background: var(--status-failed); }
+
+@keyframes bobi-glow { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
 
 .action-error {
-  background: rgba(181, 70, 43, 0.08);
-  border: 1px solid rgba(181, 70, 43, 0.35);
-  color: var(--err);
-  border-radius: var(--radius-sm);
+  background: var(--status-failed-soft);
+  border: 1px solid var(--status-failed-edge);
+  color: var(--status-failed);
+  border-radius: var(--radius-md);
   padding: 9px 12px;
-  font-size: 13px;
+  font-size: 14px;
   margin-bottom: 12px;
   white-space: pre-wrap;
 }
 
-.empty { color: var(--muted); font-size: 13.5px; }
+/* An empty state says what is true, not "you're all caught up!". */
+.empty { color: var(--text-secondary); font-size: 14.5px; }
 
 /* stub views (routes that land in a later build) */
 .stub {
   margin: auto;
   text-align: center;
-  color: var(--muted);
+  color: var(--text-secondary);
   padding: 40px 24px;
 }
-.stub h2 { font-size: 17px; font-weight: 650; color: var(--text); margin: 0 0 6px; }
-.stub p { margin: 0; font-size: 14px; }
+.stub h2 { font-size: 18px; color: var(--text-primary); margin: 0 0 6px; }
+.stub p { margin: 0; font-size: 15px; }
 .stub code { font-family: var(--font-mono); font-size: 0.9em; }
 
-/* --- agent view: subagent roster + chat (ported from agentui) --- */
+/* --- agent view: subagent roster + chat --- */
 .shell { flex: 1; min-height: 0; display: flex; }
 
 .sidebar {
-  width: 300px;
+  width: 324px;
   flex: none;
-  border-right: 1px solid var(--border);
-  background: var(--surface);
+  border-right: 1px solid var(--border-hairline);
+  background: var(--surface-page);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
 }
-.side-head { color: var(--muted); padding: 14px 16px 8px; }
+/* A group label sits above its cards, outside the border, sentence case. */
+.side-head {
+  font-size: 13.5px;
+  color: var(--text-secondary);
+  padding: 14px 16px 8px;
+}
 
-/* sidebar panels - the read-only observability folds at the top of the
-   roster (#733): health (manager liveness + lifecycle trail) and spend.
-   One shared shell so the stacked panels always match. */
-.spend-panel, .health-panel, .attention-panel {
+/* sidebar panels — the read-only observability folds at the top of the
+   roster: health (manager liveness + lifecycle trail) and spend. One shared
+   shell so the stacked panels always match. */
+.spend-panel, .health-panel, .attention-panel, .sessions-panel {
   padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--raised);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-xl);
+  background: var(--surface-card);
+  box-shadow: var(--elev-1);
 }
 .health-panel    { margin: 12px 12px 0; }
 .spend-panel     { margin: 12px 12px 4px; }
 .attention-panel { margin: 12px 12px 0; }
-.spend-head, .health-head, .attention-head {
+.sessions-panel  { margin: 4px 12px 12px; }
+.spend-head, .health-head, .attention-head, .sessions-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  color: var(--muted);
+  gap: 8px;
+  font-size: 13.5px;
+  color: var(--text-secondary);
 }
+.sessions-head > span:first-child { white-space: nowrap; }
 .spend-sub, .health-sub {
   font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--faint);
+  font-size: 11.5px;
+  color: var(--text-faint);
 }
 .spend-sub  { margin: 2px 0 6px; }
 .health-sub { margin: 2px 0 0; }
@@ -328,13 +409,13 @@ html[data-retro="on"] body {
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
-  font-size: 11.5px;
+  font-size: 13px;
   padding: 1px 0;
 }
 .health-row:first-of-type { margin-top: 6px; }
 .health-event {
   font-family: var(--font-mono);
-  color: var(--muted);
+  color: var(--text-secondary);
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -344,50 +425,33 @@ html[data-retro="on"] body {
 }
 .health-event::before {
   content: ""; width: 6px; height: 6px; border-radius: 50%;
-  background: var(--faint); flex: none;
+  background: var(--status-idle); flex: none;
 }
-.health-event.ok::before   { background: var(--ok); }
-.health-event.warn::before { background: var(--warn); }
-.health-event.bad::before  { background: var(--err); }
-.health-when { font-family: var(--font-mono); color: var(--faint); flex: none; }
+.health-event.ok::before   { background: var(--status-live); }
+.health-event.warn::before { background: var(--status-waiting); }
+.health-event.bad::before  { background: var(--status-failed); }
+.health-when { font-family: var(--font-mono); color: var(--text-faint); flex: none; }
 
-/* session log (#733 vertical 3) - terminal outcomes under the roster.
-   Same raised-panel shell as spend/health so the sidebar stack matches. */
-.sessions-panel {
-  margin: 4px 12px 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--raised);
-}
-.sessions-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  color: var(--muted);
-}
-.sessions-head > span:first-child { white-space: nowrap; }
-.sessions-counts { font-size: 10px; color: var(--faint); text-align: right; }
+.sessions-counts { font-size: 11.5px; color: var(--text-faint); text-align: right; }
 .session-row, .attention-row {
   display: block;
   width: 100%;
   text-align: left;
   background: none;
   border: 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-hairline);
   padding: 6px 0;
   font: inherit;
   color: inherit;
 }
 .session-row, button.attention-row { cursor: pointer; }
 .session-row:first-of-type { border-top: 0; margin-top: 6px; }
-/* Attention rows mix <button> (session) and <div> (lifecycle) siblings of
-   the head div, so :first-of-type cannot single out the first ROW - key the
+/* Attention rows mix <button> (session) and <div> (lifecycle) siblings of the
+   head div, so :first-of-type cannot single out the first ROW — key the
    header gap off adjacency to the head instead. */
 .attention-head + .attention-row { border-top: 0; margin-top: 6px; }
 .session-row.active .session-name,
-.attention-row.active .attention-label { color: var(--text); font-weight: 600; }
+.attention-row.active .attention-label { color: var(--text-primary); font-weight: var(--weight-medium); }
 .session-top, .attention-top {
   display: flex;
   align-items: baseline;
@@ -396,69 +460,65 @@ html[data-retro="on"] body {
 }
 .session-name, .attention-label {
   font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--muted);
+  font-size: 12.5px;
+  color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.session-meta { font-size: 10px; color: var(--faint); margin-top: 1px; }
+.session-meta { font-size: 11.5px; color: var(--text-faint); margin-top: 1px; }
 .session-error, .attention-detail {
-  font-size: 10.5px;
-  color: var(--err);
+  font-size: 12px;
+  color: var(--status-failed);
   margin-top: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .session-more, .attention-more {
-  font-size: 10px;
-  color: var(--faint);
+  font-size: 11.5px;
+  color: var(--text-faint);
   padding-top: 4px;
 }
 
-/* needs attention (#733 vertical 4) - the alarm fold at the top of the
-   sidebar: trouble lifecycle events + recent failed/crashed sessions,
-   hidden when all is well. The shell/head/row/label/detail styles join the
-   shared groups above so the stacked panels always match; below are only
-   the attention-specific accents - the red count is the one alarm accent,
-   so a healthy sidebar stays calm. */
+/* needs attention — the alarm fold at the top of the sidebar. The brick count
+   is the one alarm accent, so a healthy sidebar stays calm. */
 .attention-count {
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--err);
+  font-size: 12px;
+  font-weight: var(--weight-semibold);
+  color: var(--status-failed);
 }
-button.attention-row:hover .attention-label { color: var(--text); }
+button.attention-row:hover .attention-label { color: var(--text-primary); }
 .attention-what {
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
   overflow: hidden;
 }
-.attention-what .health-event { font-size: 11.5px; }
-.attention-when { font-size: 10px; color: var(--faint); flex: none; }
+.attention-what .health-event { font-size: 12.5px; }
+.attention-when { font-size: 11.5px; color: var(--text-faint); flex: none; }
 
 /* read-only note where the composer sits for an ended session */
 .chat-ended {
   margin: 0;
   padding: 10px 4px 4px;
-  border-top: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 11px;
+  border-top: 1px solid var(--border-hairline);
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 
-.spend-total { color: var(--text); font-size: 13px; letter-spacing: 0.02em; }
+.spend-total { color: var(--text-primary); font-size: 14px; }
 .spend-label {
   font-family: var(--font-mono);
-  color: var(--muted);
+  color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.spend-amt { font-family: var(--font-mono); color: var(--text); flex: none; }
-.card-cost { margin-left: auto; font-family: var(--font-mono); color: var(--muted); }
-.side-back { color: var(--muted); text-decoration: none; }
-.side-back:hover { color: var(--accent); }
+.spend-amt { font-family: var(--font-mono); color: var(--text-primary); flex: none; }
+.card-cost { margin-left: auto; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
+.side-back { color: var(--text-primary); text-decoration: none; transition: color var(--dur-fast) var(--ease); }
+.side-back:hover { color: var(--text-highlight); }
 .cards { display: flex; flex-direction: column; gap: 2px; padding: 0 8px 12px; }
 
 /* compact list card */
@@ -466,7 +526,7 @@ button.attention-row:hover .attention-label { color: var(--text); }
   text-align: left;
   background: none;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 10px 11px;
   cursor: pointer;
   font: inherit;
@@ -474,38 +534,39 @@ button.attention-row:hover .attention-label { color: var(--text); }
   display: flex;
   flex-direction: column;
   gap: 5px;
-  transition: background 0.12s ease, border-color 0.12s ease;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
-.card:hover { background: var(--raised); border-color: var(--border); }
-.card:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.card:hover { background: var(--surface-hover); }
+/* Selection gets a violet rail, not a colored outline. */
 .card.active {
-  background: var(--accent-soft);
-  border-color: var(--border-strong);
+  background: var(--surface-selected);
+  border-color: transparent;
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .card-top { display: flex; align-items: center; gap: 6px; }
 .card-name {
   font-family: var(--font-mono);
-  font-size: 12.5px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
+  font-size: 13.5px;
+  font-weight: var(--weight-medium);
   word-break: break-all;
   flex: 1;
 }
+/* A badge is an object: soft tint plus a matching border. */
 .badge {
   font-family: var(--font-mono);
-  font-size: 8.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  font-size: 10.5px;
+  letter-spacing: var(--track-caps-sm);
   color: var(--accent);
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  padding: 1px 4px;
+  background: var(--status-live-soft);
+  border: 1px solid var(--status-live-edge);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
   flex: none;
 }
 .card-title {
-  color: var(--muted);
-  font-size: 12.5px;
+  color: var(--text-secondary);
+  font-size: 13.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -514,11 +575,11 @@ button.attention-row:hover .attention-label { color: var(--text); }
   display: flex;
   align-items: center;
   gap: 5px;
-  color: var(--faint);
-  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+  font-size: 11.5px;
 }
 .card-meta code { font-family: var(--font-mono); font-size: 0.9em; }
-.status.idle::before { background: var(--warn); }
 
 .sidebar .empty { padding: 8px 16px; }
 
@@ -532,36 +593,40 @@ button.attention-row:hover .attention-label { color: var(--text); }
   align-items: center;
   justify-content: center;
   gap: 12px;
-  color: var(--faint);
+  color: var(--text-faint);
 }
 .placeholder .mark.big { color: var(--border-strong); }
-.placeholder p { margin: 0; color: var(--muted); }
+.placeholder p { margin: 0; color: var(--text-secondary); }
 
 /* --- chat --- */
 .chat { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .chat-head {
   display: flex; align-items: center; gap: 10px;
   padding: 12px 18px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
+  border-bottom: 1px solid var(--border-hairline);
+  background: var(--surface-card);
   flex: none;
 }
-.chat-name { font-family: var(--font-mono); font-weight: 600; font-size: 13px; }
+.chat-name { font-family: var(--font-mono); font-weight: var(--weight-medium); font-size: 14px; }
 .chip {
-  color: var(--muted);
-  border: 1px solid var(--border-strong);
-  border-radius: 4px;
-  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  padding: 1px 7px;
 }
+.agent-hint { font-family: var(--font-mono); font-size: 12px; color: var(--text-faint); }
 
-/* the one dark slab — the machine writes in the dark */
+/* The transcript slab — the one cool surface in the system, where the machine
+   writes. A document: square-cornered and flat. */
 .slab {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  background: var(--slab-bg);
+  background: var(--surface-terminal);
   color: var(--slab-text);
-  border-top: 2px solid var(--slab-accent);
   padding: 18px;
   display: flex;
   flex-direction: column;
@@ -570,9 +635,7 @@ button.attention-row:hover .attention-label { color: var(--text); }
 .msg { max-width: 760px; }
 .msg .who {
   font-family: var(--font-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 10px;
+  font-size: 11.5px;
   color: var(--slab-muted);
   margin-bottom: 4px;
 }
@@ -584,20 +647,23 @@ button.attention-row:hover .attention-label { color: var(--text); }
 .msg .body ul, .msg .body ol { margin: 6px 0; padding-left: 20px; }
 .msg .body li { margin: 2px 0; }
 .msg .body li > p { margin: 0; }
-.msg .body strong { font-weight: 650; color: #F4ECDD; }
+.msg .body strong { font-weight: var(--weight-semibold); color: var(--bobi-paper); }
 .msg .body em { font-style: italic; }
-.msg .body a { color: var(--slab-accent); text-decoration: underline; }
+.msg .body a { color: var(--bobi-acc-bright); text-decoration: underline; }
 .msg .body h3, .msg .body h4, .msg .body h5, .msg .body h6 {
-  font-size: 1.0em; font-weight: 650; margin: 12px 0 4px; color: #F4ECDD;
+  font-family: var(--font-display);
+  font-size: 1.0em; font-weight: var(--weight-semibold);
+  letter-spacing: var(--track-tightest);
+  margin: 12px 0 4px; color: var(--bobi-paper);
 }
 .msg .body code {
   font-family: var(--font-mono); font-size: 0.86em;
   background: var(--slab-surface); border: 1px solid var(--slab-border);
-  border-radius: 4px; padding: 1px 5px; color: #CBBA8B;
+  border-radius: var(--radius-sm); padding: 1px 5px; color: var(--bobi-term-ok);
 }
 .msg .body pre {
   background: var(--slab-surface); border: 1px solid var(--slab-border);
-  border-radius: 8px; padding: 10px 12px; overflow-x: auto; margin: 8px 0;
+  border-radius: var(--radius-sm); padding: 10px 12px; overflow-x: auto; margin: 8px 0;
 }
 .msg .body pre code {
   background: none; border: none; padding: 0; color: var(--slab-text);
@@ -609,15 +675,15 @@ button.attention-row:hover .attention-label { color: var(--text); }
 }
 .msg .body hr { border: none; border-top: 1px solid var(--slab-border); margin: 10px 0; }
 .msg.user { align-self: flex-end; text-align: right; }
-.msg.user .who { color: var(--slab-accent); }
-.msg.user .body { color: #F1E7D6; }
+.msg.user .who { color: var(--bobi-acc-bright); }
+.msg.user .body { color: var(--bobi-paper); }
 .msg.agent .body { color: var(--slab-text); }
-.msg.error .who { color: #E08A6E; }
-.msg.error .body { color: #E8B7A6; }
+.msg.error .who { color: var(--bobi-clay); }
+.msg.error .body { color: color-mix(in srgb, var(--bobi-clay) 70%, var(--bobi-paper)); }
 
 .pending .body::after {
-  content: "▋";
-  color: var(--slab-accent);
+  content: "\258B";
+  color: var(--bobi-acc-bright);
   animation: blink 1s steps(2, start) infinite;
 }
 @keyframes blink { to { visibility: hidden; } }
@@ -627,34 +693,44 @@ button.attention-row:hover .attention-label { color: var(--text); }
   display: flex;
   gap: 10px;
   padding: 12px 14px;
-  border-top: 1px solid var(--border);
-  background: var(--surface);
+  border-top: 1px solid var(--border-hairline);
+  background: var(--surface-card);
   flex: none;
 }
 .composer textarea {
   flex: 1;
   resize: none;
-  font: inherit;
-  color: var(--text);
-  background: var(--raised);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  color: var(--text-primary);
+  background: var(--surface-card);
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 9px 12px;
   max-height: 160px;
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
-.composer textarea:focus { outline: none; border-color: var(--accent); }
+.composer textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .composer button {
-  font: inherit;
-  font-weight: 600;
-  color: #fff;
+  font-family: var(--font-sans);
+  font-size: 14.5px;
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--track-button);
+  color: var(--bobi-paper);
   background: var(--accent);
   border: none;
-  border-radius: 10px;
-  padding: 0 18px;
+  border-radius: var(--radius-sm);
+  height: 38px;
+  padding: 0 20px;
+  align-self: flex-end;
+  white-space: nowrap;
+  flex: none;
   cursor: pointer;
+  transition: opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
 }
-.composer button:hover { background: var(--accent-2); }
-.composer button:disabled { background: var(--faint); cursor: default; }
+.composer button:hover:not(:disabled) { opacity: .9; }
+.composer button:active:not(:disabled) { transform: scale(.97); }
+.composer button:disabled { opacity: .45; cursor: default; }
 
 @media (max-width: 620px) {
   .sidebar { width: 168px; }
@@ -664,17 +740,23 @@ button.attention-row:hover .attention-label { color: var(--text); }
 /* server-gone overlay */
 .gone {
   position: fixed; inset: 0;
-  background: rgba(244, 241, 234, 0.86);
+  background: color-mix(in srgb, var(--surface-page) 86%, transparent);
   display: flex; align-items: center; justify-content: center;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 12px;
+  color: var(--text-secondary);
+  font-size: 14.5px;
 }
-.gone code { font-family: inherit; color: var(--text); }
+.gone code { font-family: var(--font-mono); color: var(--text-primary); }
 
+/* ============================================================================
+   REDUCED MOTION — non-negotiable. Motion-only elements HIDE rather than
+   freeze: a parked blinking cursor reads as a rendering bug.
+   ========================================================================= */
 @media (prefers-reduced-motion: reduce) {
-  .btn, .card { transition: none; }
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
   .pending .body::after { animation: none; }
+  .status.starting::before, .status.stopping::before { animation: none; opacity: 1; }
 }
