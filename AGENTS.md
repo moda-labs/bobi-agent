@@ -116,11 +116,22 @@ unit suites and includes the knowledge-base dependencies imported during test
 collection. Use `.[dev]` only for focused e2e work that does not collect the
 KB test surface.
 
-Deployment (containers, Fly fleet, the Cloudflare Worker event tier) lives in
-the private `moda-labs/bobi-deploy` repo, which installs this repo from a
-side-by-side checkout. Nothing in `bobi/` may import from it: private
-imports/pins public, never the reverse (`tests/test_import_boundaries.py`
-enforces this).
+The container recipe (`Dockerfile`, `docker/`) and the Cloudflare Worker event
+tier (`event-server/worker/`) live in THIS repo and are public, alongside the
+three local event-server variants. Moda's own deployment surface - the Fly
+deploy engine, the hosted console, the fleet workflows - is private, in
+`moda-labs/moda-agents` under `bobi-deploy/`, and consumes this repo as a
+RELEASED PyPI version (`pip install bobi==<pin>`), never a checkout. The former
+`moda-labs/bobi-deploy` repo is archived; nothing builds or releases from it.
+
+Two rules survive that move, both enforced by
+`tests/test_import_boundaries.py`: private imports/pins public, never the
+reverse; and the public/private line itself, encoded as literal allowlists
+(`WORKER_ADAPTER_MODULES` vs `PUBLIC_LOCAL_MODULES`, plus a container-token
+scan over `bobi/`) so a module that lands on the wrong side fails CI rather
+than drifting silently. A fleet repo must never gate this repo's tip-of-main:
+`bobi-agent` owns the machinery that keeps its releases from breaking
+consumers.
 
 ## Worktree Policy
 
