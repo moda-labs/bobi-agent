@@ -418,7 +418,7 @@ framing, not "monitors": *"anything bobi should do on its own?"* Maps to
   "All set" **on one line** plus a plain statement of where the team lives,
   then a **carousel — one full card per step**, cycled forward/back: (1) test
   it locally in the terminal (start / status / ask / task / watch / restart,
-  all copyable); (2) deploy — local always-on or Fly.io, each with a
+  all copyable); (2) deploy — local always-on or a cloud container, each with a
   paste-into-Claude-Code/Codex prompt; (3) when chat is Slack, finalize Slack —
   the scopes on-screen, the api.slack.com walkthrough, and a live channel
   input + **Send a test message** button (`/api/slack/channel`,

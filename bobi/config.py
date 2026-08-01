@@ -144,8 +144,8 @@ def _build_only_names(agent_yaml: Path) -> frozenset[str]:
 
     Structural, not a name list: which variables are build-time is a property
     of where a package uses them, and deriving it from the document cannot
-    drift the way a maintained allowlist does. (`bobi-deploy` carries the same
-    contract for its own deploy-side surface, but as a hardcoded
+    drift the way a maintained allowlist does. (The private deploy plugin carries
+    the same contract for its own deploy-side surface, but as a hardcoded
     BUILD_SECRET_NAMES tuple — a name list can't live in `bobi/`, which stays
     generic.)
 

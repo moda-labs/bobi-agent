@@ -66,8 +66,8 @@ team into an isolated `BOBI_HOME`, starts the runtime by name, boots a real
 manager/Claude session, and drives the same event-server registration and
 delivery paths a deployed instance uses.
 
-It is not, by itself, a Fly machine rollout. To emulate production deployment
-fully, also run the container/Fly sections:
+It is not, by itself, a container rollout. To emulate production deployment
+fully, also run the container sections:
 
 - Worker parity: run `pytest tests/integration/test_event_server.py` when
   wrangler is installed.

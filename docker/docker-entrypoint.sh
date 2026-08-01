@@ -428,7 +428,8 @@ as_app() {
 # operator pushes the team over `fly ssh` (sftp the tarball + `bobi agents install`),
 # which lands run/package/agent.yaml on the volume; we poll for it, then start.
 # This is the single-developer "I built it, ship it — no hosting" path, and it
-# keeps PID 1 alive so the Fly machine stays "started" while we wait.
+# keeps PID 1 alive so the orchestrator still sees the container running
+# while we wait.
 if [ ! -f "${PACKAGE_DIR}/agent.yaml" ]; then
   if [ -n "${BOBI_TEAM_URL:-}" ]; then
     log "First boot: installing team from URL ${BOBI_TEAM_URL} (non-interactive)"

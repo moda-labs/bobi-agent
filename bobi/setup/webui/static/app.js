@@ -1734,10 +1734,10 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
             ${promptRow(`Help me run my bobi agent team "${name}" as an always-on service on this machine: configure its event server so it can receive webhooks, and make "bobi agent ${name} start" survive reboots. The framework docs are at https://github.com/moda-labs/bobi-agent (see docs/EVENT_SERVER.md).`)}
           </div>
           <div class="deploy-opt">
-            <div class="deploy-head"><span class="deploy-tag">Cloud</span><span class="deploy-sub">always-on, on Fly.io</span></div>
+            <div class="deploy-head"><span class="deploy-tag">Cloud</span><span class="deploy-sub">always-on, on any container host</span></div>
             <p class="deploy-lede">A dedicated container + volume + secrets; the instance needs its own <span class="mono">ANTHROPIC_API_KEY</span>.</p>
-            ${promptRow(`I have the bobi-deploy package installed alongside bobi. Read the CONTAINERIZED_DEPLOYMENT.md runbook from my bobi-deploy distribution and deploy my bobi agent team "${teamSlug}" to Fly.io with "bobi deploy". Walk me through the env file and secrets it needs.`)}
-            <p class="deploy-note">Needs the private <span class="mono">bobi-deploy</span> package — <a class="exlink" href="${DOCS_CLOUD_URL}" target="_blank" rel="noopener">how to get access →</a></p>
+            ${promptRow(`Deploy my bobi agent team "${teamSlug}" as an always-on container using the published image ghcr.io/moda-labs/bobi. Read https://github.com/moda-labs/bobi-agent/blob/main/docs/REFERENCE_IMAGE.md for the runtime env contract (it must run with --init and a durable volume at /data), and docs/SELF_HOSTED_EVENT_SERVER.md for the event server it connects out to. Walk me through the env vars and secrets it needs.`)}
+            <p class="deploy-note">Runs anywhere containers do — <a class="exlink" href="${DOCS_CLOUD_URL}" target="_blank" rel="noopener">cloud deployment docs →</a></p>
           </div>
         </div>`,
     }];
