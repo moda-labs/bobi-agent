@@ -29,6 +29,8 @@ Bobi is an event-driven AI agent framework.
   runtime env contract, the `TEAM_DEPS` bake hook, and how it is published.
 - `docs/MONITORS.md`: monitor scheduler and the `script_cache` token-saving runner.
 - `docs/WORKFLOW_ENGINE.md`: workflow state machine, step types, suspend/resume.
+- `docs/RUN_RESUME.md`: resuming a stalled workflow run from the agent page -
+  why it spawns a process, and where the single-winner claim lives.
 - `docs/TOOL_LIBRARY.md`: unified dependency model - declaring tools/skills/MCP
   deps (pinned `install:` vs guide-only), the catalog, and how they bake + verify.
 - `docs/SECURITY.md`: overall security model (trust, credentials, prompt-injection).

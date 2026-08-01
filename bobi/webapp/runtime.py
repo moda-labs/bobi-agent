@@ -40,6 +40,18 @@ class UnknownTeam(TeamRuntimeError):
         super().__init__(f"unknown agent '{name}'")
 
 
+class UnknownRun(TeamRuntimeError):
+    """No run with that id under this team - a 404, not a lifecycle failure.
+
+    Separate from ``UnknownTeam`` because the team resolved fine; it is the
+    run inside it that is gone.
+    """
+
+    def __init__(self, run_id: str) -> None:
+        self.run_id = run_id
+        super().__init__(f"unknown run '{run_id}'")
+
+
 class TeamAlreadyRunning(TeamRuntimeError):
     def __init__(self, pid: int) -> None:
         self.pid = pid
@@ -239,6 +251,24 @@ class TeamRuntime(ABC):
         the hosted runtime implements it.
         """
         raise TeamLifecycleError("runs are not available on this runtime")
+
+    def resume_run(self, name: str, run_id: str) -> dict:
+        """Resume one suspended workflow run.
+
+        Returns ``{"ok", "accepted", "run_id", "workflow", "await_event"}``.
+        ``accepted`` is the honest word: a workflow run takes as long as it
+        takes, so this returns once the resume is under way and the caller
+        watches ``runs`` for the status to move - the same submit-then-poll
+        discipline chat uses. No request is ever held open for a workflow.
+
+        Raises ``UnknownRun`` when no run carries that id, and
+        ``TeamLifecycleError`` (409) when the run is not in a resumable
+        state. Resuming is single-winner: exactly one resume of a given run
+        proceeds even if two arrive together.
+
+        NOT abstract, per this class's sequencing rule.
+        """
+        raise TeamLifecycleError("resume is not available on this runtime")
 
 
 # --- Local implementation ----------------------------------------------------
@@ -622,6 +652,48 @@ class LocalRuntime(TeamRuntime):
             "counts": session_outcome_counts(entries),
             "truncated": False,
         }
+
+    def resume_run(self, name: str, run_id: str) -> dict:
+        """Resume a suspended workflow run by spawning the CLI resume.
+
+        A SPAWN, not a thread, and the orchestrator says why in its own words
+        (``try_resume_for_event``): ``resume_workflow`` re-stamps the session
+        registry entry with ``os.getpid()`` and the resume timeout, which
+        assumes a dedicated per-run process. Resuming inside this long-lived
+        process would stamp the WEB APP's pid - a reconciler timeout or a
+        ``subagents cancel`` would then signal the web app itself. It would
+        also need a bound runtime root, which this process deliberately does
+        not have.
+
+        The claim lives in the spawned command, not here: a claim held by a
+        caller that then fails to spawn strands the run. This checks the
+        status so the ordinary "not resumable" case is a clean 409 rather
+        than a child that exits in the dark.
+        """
+        import subprocess
+        import sys
+
+        from bobi.workflow.state import WorkflowRun
+
+        root = self._resolve(name)
+        run = next((r for r in WorkflowRun.list_runs(root=root)
+                    if r.run_id == run_id), None)
+        if run is None:
+            raise UnknownRun(run_id)
+        if run.status != "waiting":
+            raise TeamLifecycleError(
+                f"run {run_id} is '{run.status}', not 'waiting'")
+
+        cmd = [sys.executable, "-m", "bobi.cli", "agent",
+               paths.agent_name_for_root(root), "workflows", "resume", run_id]
+        subprocess.Popen(cmd, cwd=str(root), start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Accepted, not finished. A workflow run takes as long as it takes;
+        # the page watches the runs table for the status to move, the same
+        # submit-then-poll discipline chat uses.
+        return {"ok": True, "accepted": True, "run_id": run_id,
+                "workflow": run.workflow_name,
+                "await_event": run.await_event}
 
     def runs(self, name: str, *, status: str = "",
              limit: int | None = None) -> dict:

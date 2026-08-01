@@ -246,7 +246,7 @@ first. Implementation stacks on an integration branch
 - Testable: `curl` a session transcript and a cached-tick's details.
 
 **U6 — runs write action** *(Phase 3 data)*
-- [ ] `POST .../workflows/runs/{run_id}/resume` (reuse CLI resume logic;
+- [x] `POST .../workflows/runs/{run_id}/resume` (reuse CLI resume logic;
       single-winner claim semantics preserved; 409 when not resumable).
 - Testable: resume a seeded suspended run via `curl`; status flips.
 
@@ -329,3 +329,22 @@ comparison (dashboard's job) · RBAC/audit.
 ## Amendments
 
 — none yet.
+
+*(The line above and the header's `Last amended` are frozen review surface —
+the plan-artifact check is insertion-only, so amendments land beneath the
+placeholder rather than replacing it. Last amended: **2026-08-01**.)*
+
+- **2026-08-01** (U6 build session): **resume SPAWNS the CLI command rather
+  than reusing its logic in-process, and the claim moved into that
+  command.** U6 says "reuse CLI resume logic; single-winner claim semantics
+  preserved"; the orchestrator's own docstring rules out the in-process
+  reading — `resume_workflow` stamps the registry entry with `os.getpid()`
+  and assumes a dedicated per-run process, so resuming inside the web app
+  would stamp the web app's pid (and the web app binds no runtime root).
+  The endpoint therefore spawns `bobi agent <name> workflows resume
+  <run_id>` detached and returns `accepted`, with the page polling the runs
+  table. The claim went into the spawned command because a claim held by a
+  caller that then fails to spawn strands the run — which also closed a
+  real gap: the CLI resume never claimed at all, so two concurrent
+  invocations both ran the same run. Contract documented in
+  `docs/RUN_RESUME.md`.
