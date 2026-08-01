@@ -182,9 +182,13 @@ skip, any wrong count, and any missing named test. `tests/test_ci_live_wiring.py
 asserts the wiring itself is still in place, and fails if a live step is deleted.
 
 **The Worker lane is isolated by construction.** It deploys to a dedicated
-`bobi-events-ci-smoke` Worker with its own KV namespace — never the environment
-the fleet runs production on, because sharing production's KV would let smoke
-traffic write live event state. `scripts/render_worker_ci_config.py` derives the
+`bobi-events-ci-smoke` Worker with its own KV namespace, in a **separate
+Cloudflare account** from the one the fleet runs production on — sharing
+production's KV would let smoke traffic write live event state. The separate
+account is what makes the isolation real: Cloudflare grants Workers and KV
+permissions at ACCOUNT scope only, with no per-script or per-namespace
+restriction, so a token confined to a CI-only account is the strongest
+boundary available. `scripts/render_worker_ci_config.py` derives the
 CI config from the shipped `wrangler.jsonc` (so the migration and compatibility
 date stay identical to what production deploys) and refuses to render a config
 that names `bobi-events`, that carries the `REPLACE_WITH_YOUR_KV_NAMESPACE_ID`

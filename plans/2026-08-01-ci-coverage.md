@@ -137,18 +137,20 @@ Split the proof by what each repo owns.
 - [x] Non-vacuity: a run with `ANTHROPIC_API_KEY` deliberately unset **fails** rather than reporting green. Run [30719047118](https://github.com/moda-labs/bobi-agent/actions/runs/30719047118) with the secret deleted: RED at the fail-fast step, round-trips skipped, never reported green. Secret restored immediately after. Layer (ii)'s own rejection paths (skip / empty selection / renamed test / missing report) are proven in `tests/test_ci_guard_scripts.py` rather than by deliberately breaking CI a second time.
 - [x] A PR without the `ci:live` label does not run the step, and its check set is unchanged — the `container.yml` run on this lane's own PR shows steps 9-14 skipped with the job name unchanged.
 
-### Phase 2 — bobi-agent: a real Worker deploy, on its own infrastructure `[wip]`
+### Phase 2 — bobi-agent: a real Worker deploy, on its own infrastructure `[x]`
 
-- [ ] **BLOCKED on a Cloudflare account** (see the 2026-08-01 Q5 amendment). Provision the dedicated `ci-smoke` Worker (Q2): its own name, its own KV namespace, its own Durable Object. **It must not reference moda-agents' production `bobi-events` Worker or its `EVENTS` namespace.**
+- [x] Provision the dedicated `ci-smoke` Worker (Q2) — `bobi-events-ci-smoke` in a SEPARATE Cloudflare account (`71403a72…`, not production's `6db47dd2…`), with its own `EVENTS-ci-smoke` KV namespace and its own DO: its own name, its own KV namespace, its own Durable Object. **It must not reference moda-agents' production `bobi-events` Worker or its `EVENTS` namespace.**
 - [x] Add `.github/workflows/worker-deploy-smoke.yml`: materialize the CI KV id into the Worker config (fail loudly if absent — never let wrangler auto-provision), `wrangler deploy`, then assert `/health` and one publish→subscribe round-trip through the deployed Worker.
-- [ ] Add `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `CI_SMOKE_KV_NAMESPACE_ID` as repo secrets (Q5). **The stated scoping is not implementable** — see the 2026-08-01 Q5 amendment; isolation moves to the account level.
+- [x] Add `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `CI_SMOKE_KV_NAMESPACE_ID` as repo secrets (Q5). **The stated scoping is not implementable** — see the 2026-08-01 Q5 amendment; isolation moves to the account level.
 - [x] Add an isolation guard — `scripts/render_worker_ci_config.py`, which derives the CI config from the shipped `wrangler.jsonc` (so the migration, DO binding and compatibility date cannot drift from what production deploys) and refuses to render an unsafe one. **It cannot compare against the production KV id** — that id lives in private `moda-agents` and public `bobi-agent` must never learn it. Assert instead on properties bobi-agent owns: the CI Worker's `name` is not `bobi-events`, its KV id comes from CI configuration rather than a hardcoded literal, and the placeholder `REPLACE_WITH_YOUR_KV_NAMESPACE_ID` never reaches a deploy.
 
 **Validation gate**
 
-- [ ] The workflow deploys and `/health` returns 200 with the expected version metadata. **Blocked on provisioning.** The two smoke tests themselves are verified green against `wrangler dev` (2026-08-01), so what remains unproven is the deploy, not the assertions.
-- [ ] A publish→subscribe round-trip succeeds against the **deployed** Worker (not `wrangler dev`). Verified against `wrangler dev`; blocked on provisioning for the deployed leg.
-- [ ] The `v1` `new_sqlite_classes` migration applies on a first deploy to a clean Worker. **Blocked on provisioning.**
+- [x] The workflow deploys and `/health` returns 200 with the expected version metadata. Run [30721331250](https://github.com/moda-labs/bobi-agent/actions/runs/30721331250), 2026-08-01: `deployment is serving 571d0a65…`, both tests PASS, ran-assertion `2 passed, 0 skipped`.
+- [x] A publish→subscribe round-trip succeeds against the **deployed** Worker (not `wrangler dev`) — same run.
+- [x] The `v1` `new_sqlite_classes` migration applies on a first deploy to a clean Worker. The account and the Worker did not exist before this lane; the first-ever deploy created both, and the DO-backed WebSocket round-trip proves the migration took effect.
+
+**Isolation verified, not assumed** (2026-08-01): the CI token is rejected with `Authentication error` on production's account for BOTH `workers/scripts` and `storage/kv/namespaces`, while succeeding on the CI account — which held zero Workers and zero KV namespaces before this lane created them.
 - [x] Guard proves non-vacuous: a config naming `bobi-events`, or carrying the placeholder KV id, fails the run — every rejection path exercised in `tests/test_ci_guard_scripts.py`, including the CLI writing no file at all when the config is unsafe.
 
 ### Phase 3 — bobi-agent: make the coverage un-disableable and documented `[x]`
@@ -222,6 +224,17 @@ Split the proof by what each repo owns.
   discriminates on the release sha, which only the rendered CI config carries.
   (3) Phase 1's `npm ci` item needed a Node 22 swap alongside it — the job pins
   20 for the wheel build and wrangler refuses anything below 22.
+- **2026-08-01** (Lane A build, #909): the first real deploy immediately earned
+  its keep by exposing two failures invisible to `wrangler dev`, both now fixed
+  and guarded. (1) Cloudflare's edge answers **403 to the default
+  `Python-urllib` User-Agent**, so every smoke request failed against the
+  deployed Worker while the same code passed against dev; the smoke now sends
+  an explicit UA. Scope is the smoke module only — the shipped client posts via
+  httpx, which is not blocked. (2) `wrangler secret put` publishes another
+  Worker version, and requests during that rollover **500**; the lane now gates
+  on the deployment serving the commit's own release sha before smoking, which
+  is a readiness gate rather than a retry-until-green (a stale or broken deploy
+  never becomes ready).
 - **2026-08-01** (Lane A build, #909): Lane A's marker flips ride its own PR
   rather than status-only commits to `main`, a deliberate deviation from the
   `concurrent` marker mode in the Lane map. Lane A is the only lane touching
