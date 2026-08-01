@@ -238,10 +238,10 @@ first. Implementation stacks on an integration branch
 - Testable: `curl` both; values match `agent.yaml` / `bobi agent costs`.
 
 **U5 — transcript + details reads** *(Phase 3 data)*
-- [ ] Transcript endpoint variant with timestamps + tool-call lines
+- [x] Transcript endpoint variant with timestamps + tool-call lines
       (reuse the `transcript show` / `history.db` path; keep `/messages`
       untouched for chat compatibility).
-- [ ] Details payload for session-less runs: run record + monitor
+- [x] Details payload for session-less runs: run record + monitor
       definition YAML.
 - Testable: `curl` a session transcript and a cached-tick's details.
 
@@ -329,3 +329,15 @@ comparison (dashboard's job) · RBAC/audit.
 ## Amendments
 
 — none yet.
+
+*(The line above and the header's `Last amended` are frozen review surface —
+the plan-artifact check is insertion-only, so amendments land beneath the
+placeholder rather than replacing it. Last amended: **2026-08-01**.)*
+
+- **2026-08-01** (U5 build session): **the Details slab shows a CURATED
+  monitor definition, not the whole one.** U5 says "run record + monitor
+  definition YAML"; the built payload omits `command`, because a monitor's
+  command can carry credentials interpolated into it and this is a
+  debugging view, not a config dump. Everything else identifying the
+  monitor's intent (schedule, event, description, check, relevance,
+  id_field) is carried. Contract documented in `docs/RUN_DRILLDOWNS.md`.

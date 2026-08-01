@@ -40,6 +40,19 @@ class UnknownTeam(TeamRuntimeError):
         super().__init__(f"unknown agent '{name}'")
 
 
+class UnknownRun(TeamRuntimeError):
+    """No run with that id under this team - a 404, not a lifecycle failure.
+
+    Separate from ``UnknownTeam`` because the team resolved fine; it is the
+    run inside it that is gone, which is the ordinary case once a record ages
+    past the retention cap while a browser still holds its row.
+    """
+
+    def __init__(self, run_id: str) -> None:
+        self.run_id = run_id
+        super().__init__(f"unknown run '{run_id}'")
+
+
 class TeamAlreadyRunning(TeamRuntimeError):
     def __init__(self, pid: int) -> None:
         self.pid = pid
@@ -112,6 +125,57 @@ class TeamRuntime(ABC):
     @abstractmethod
     def messages(self, name: str, session: str) -> list[dict]:
         """A session's transcript messages (chat-log fallback)."""
+
+    def transcript(self, name: str, session: str) -> dict:
+        """A session's transcript as a DEBUGGING view: timestamped lines,
+        tool calls included.
+
+        Shape::
+
+            {"session": str,
+             "entries": [{"kind",     # message | tool | tool_result
+                          "role",     # user | agent
+                          "text", "at",        # ISO 8601, "" if unrecorded
+                          "tool",              # "" unless a tool line
+                          "truncated",         # a clipped tool result
+                          "is_error"}, ...],
+             "usage": {"started_at", "ended_at", "tokens", "cost_usd",
+                       "status"}}
+
+        Distinct from ``messages`` on purpose, and ``messages`` is unchanged:
+        that is the CHAT view (two roles, prose only), which is what a
+        conversation panel wants. Debugging a run wants when each turn
+        happened and what the agent DID between saying things. Both read the
+        same transcript; they differ in what they discard.
+
+        ``at`` is empty where the on-disk format records no per-entry
+        timestamp (Codex rollouts), rather than synthesized. ``usage`` feeds
+        the slab header.
+
+        NOT abstract, per this class's sequencing rule.
+        """
+        raise TeamLifecycleError("transcripts are not available on this runtime")
+
+    def run_details(self, name: str, run_id: str) -> dict:
+        """What to show for a run that has no transcript to open.
+
+        Shape (see ``bobi.webapp.details.build_details``)::
+
+            {"kind": "monitor",
+             "run": {...},          # the run record, whole
+             "definition": {...},   # the monitor's definition, {} if gone
+             "session_id": str}     # "" when the firing spawned nothing
+
+        A `$0` cached monitor tick and a firing that failed before its agent
+        started both have a record and no session. They get the record plus
+        the definition of the monitor that produced it - what happened, beside
+        what it was asked to do.
+
+        Raises ``UnknownRun`` when no record carries that id.
+
+        NOT abstract, per this class's sequencing rule.
+        """
+        raise TeamLifecycleError("run details are not available on this runtime")
 
     @abstractmethod
     def chat_submit(self, name: str, session: str, text: str) -> str:
@@ -477,6 +541,51 @@ class LocalRuntime(TeamRuntime):
         if not messages:
             messages = read_chat(root, session)
         return messages
+
+    def transcript(self, name: str, session: str) -> dict:
+        """The debugging view of the same transcript ``messages`` reads."""
+        from bobi.chat_history import read_transcript_detail
+        from bobi.sdk import load_session_brain, load_session_id
+
+        root = self._resolve(name)
+        entries = read_transcript_detail(
+            load_session_id(session, root=root),
+            brain=load_session_brain(session, root=root),
+        )
+        return {"session": session, "entries": entries,
+                "usage": self._session_usage(root, session)}
+
+    @staticmethod
+    def _session_usage(root: Path, session: str) -> dict:
+        """The slab header's duration/tokens/cost for one session."""
+        from bobi.sdk import SessionRegistry
+
+        entry = SessionRegistry(root).get(session)
+        if entry is None:
+            return {"started_at": 0.0, "ended_at": 0.0, "tokens": 0,
+                    "cost_usd": 0.0, "status": ""}
+        return {
+            "started_at": entry.started_at or 0.0,
+            "ended_at": entry.terminal_at or 0.0,
+            "tokens": sum(
+                int(u.get("input_tokens", 0) or 0)
+                + int(u.get("output_tokens", 0) or 0)
+                for u in (entry.model_usage or {}).values()
+                if isinstance(u, dict)),
+            "cost_usd": round(entry.total_cost_usd or 0.0, 6),
+            "status": entry.status,
+        }
+
+    def run_details(self, name: str, run_id: str) -> dict:
+        """The Details slab for a run with no transcript to open."""
+        from bobi.webapp.details import UnknownRun as DetailsUnknownRun
+        from bobi.webapp.details import build_details
+
+        root = self._resolve(name)
+        try:
+            return build_details(root, run_id)
+        except DetailsUnknownRun:
+            raise UnknownRun(run_id) from None
 
     def _prune_jobs(self) -> None:
         # Caller holds _chat_lock.

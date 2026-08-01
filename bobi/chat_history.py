@@ -158,6 +158,121 @@ def _read_claude_transcript_messages(session_id: str,
     return out[-limit:]
 
 
+# --- Debugging view: the same transcript, with time and tool calls ---------
+#
+# `read_transcript_messages` is the CHAT view: two roles, prose only, which is
+# what a conversation panel wants. Debugging a run wants the other thing —
+# when each turn happened and what the agent actually DID between saying
+# things. Both read the same file; they differ in what they throw away, so
+# this is a sibling reader rather than an option on that one. `/messages` and
+# every chat caller keep their existing shape untouched.
+
+# One entry per line rendered in the slab.
+KIND_MESSAGE = "message"
+KIND_TOOL = "tool"
+KIND_TOOL_RESULT = "tool_result"
+
+# A tool result can be an entire file. The slab shows enough to recognize
+# what came back; the transcript on disk stays the place to read it whole.
+TOOL_RESULT_PREVIEW = 400
+
+
+def _entry(kind: str, role: str, text: str, at: str, tool: str = "",
+           truncated: bool = False, is_error: bool = False) -> dict:
+    """One rendered line. Every key on every entry, so the slab branches on
+    value and never on key presence."""
+    return {"kind": kind, "role": role, "text": text, "at": at, "tool": tool,
+            "truncated": truncated, "is_error": is_error}
+
+
+def _tool_blocks(content, *, role: str, at: str) -> list[dict]:
+    """Tool calls and results in one message's content, in order."""
+    if not isinstance(content, list):
+        return []
+    blocks = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "tool_use":
+            blocks.append(_entry(
+                KIND_TOOL, role, _tool_input_summary(block.get("input")), at,
+                tool=str(block.get("name", "") or "")))
+        elif btype == "tool_result":
+            text = _extract_text(block.get("content", "")).strip()
+            blocks.append(_entry(
+                KIND_TOOL_RESULT, role, text[:TOOL_RESULT_PREVIEW], at,
+                truncated=len(text) > TOOL_RESULT_PREVIEW,
+                is_error=bool(block.get("is_error"))))
+    return blocks
+
+
+def _tool_input_summary(payload) -> str:
+    """A one-line gist of a tool call's input.
+
+    Deliberately lossy: the slab wants "which file, which command", not a
+    pretty-printed argument dump. The common single-value keys are named
+    outright; anything else falls back to the key list, which at least says
+    what shape the call had.
+    """
+    if isinstance(payload, str):
+        return payload[:200]
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("command", "file_path", "path", "pattern", "query", "url",
+                "description", "prompt"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:200]
+    return ", ".join(sorted(payload)[:6])
+
+
+def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
+                           *, brain: str | None = None) -> list[dict]:
+    """The transcript as timestamped lines, tool calls included.
+
+    Each entry is ``{"kind", "role", "text", "at", "tool"}``; ``at`` is the
+    transcript's own ISO timestamp (``""`` when it recorded none) and ``tool``
+    names the tool on a ``tool``/``tool_result`` line. Newest last, capped at
+    *limit* entries from the end - the tail is what a debugger reads.
+
+    Claude transcripts only. A Codex rollout does not record per-entry
+    timestamps in the same shape, so rather than synthesize them this returns
+    the chat view's entries with an empty ``at``: fewer columns, no invented
+    ones. The caller renders what is there.
+    """
+    def _from_codex() -> list[dict]:
+        return [_entry(KIND_MESSAGE, m["role"], m["text"], "")
+                for m in read_codex_transcript_messages(session_id, limit)]
+
+    if brain in ("codex", "gateway-openai"):
+        return _from_codex()
+
+    path = _transcript_path(session_id)
+    if not path:
+        # No Claude transcript: fall back the same way the chat reader does,
+        # so an unrecorded-brain session still renders something.
+        return _from_codex() if brain in (None, "") else []
+
+    out: list[dict] = []
+    for line in path.read_text().splitlines():
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if obj.get("type") not in ("human", "user", "assistant"):
+            continue
+        at = str(obj.get("timestamp", "") or "")
+        role = "agent" if obj.get("type") == "assistant" else "user"
+        content = obj.get("message", {}).get("content", "")
+
+        text = _extract_text(content).strip()
+        if text:
+            out.append(_entry(KIND_MESSAGE, role, text, at))
+        out.extend(_tool_blocks(content, role=role, at=at))
+    return out[-limit:]
+
+
 # --- Codex rollout replay ------------------------------------------------
 
 def _codex_rollout_path(session_id: str) -> Path | None:
