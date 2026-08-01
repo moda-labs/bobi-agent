@@ -424,7 +424,12 @@ jobs:
 
   # NOTE: the real-Claude integration suite (test_agent_launch / manager_lifecycle
   # / manager_sdk / e2e_event_flow / messaging / setup_flow) ran on a self-hosted
-  # EC2 runner. That box was retired when eng-team moved to Fly (C24, #368). These
-  # tests still run locally (`pytest tests/`); a GitHub-hosted replacement (real
-  # Claude on ubuntu-latest with an ANTHROPIC_API_KEY secret, like container.yml's
-  # live `ask`) is a follow-up if we want them gating CI again.
+  # EC2 runner. That box was retired when eng-team moved to Fly (C24, #368) and
+  # these tests still run only locally (`pytest tests/`).
+  #
+  # PARTIALLY ADDRESSED (#909): a real brain now executes in CI — container.yml's
+  # live lane drives one Claude and one Codex ask round-trip through the actual
+  # image, nightly and on the `ci:live` label. That covers the product claim
+  # ("an agent runs on each brain"); it does NOT restore the six suites above,
+  # which exercise session orchestration in much more detail. Porting those to a
+  # GitHub-hosted runner remains a follow-up.

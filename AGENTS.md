@@ -159,6 +159,48 @@ Integration tests drive real Claude Code sessions. Run them before pushing when
 the change touches runtime behavior, session orchestration, workflows, monitors,
 or event delivery.
 
+## Live CI Lanes
+
+Two workflows spend real money to prove the things the rest of CI cannot.
+Both are **off by default**: they run nightly, on manual dispatch, or on a PR
+carrying the **`ci:live`** label. Neither runs on a fork PR at all.
+
+| Lane | Workflow | Proves | Cost per run |
+|---|---|---|---|
+| Brains | `container.yml` (`container-image` job) | The reference image completes one real ask round-trip on a **Claude** brain and one on a **Codex** brain, against an ephemeral event server started from the real Worker sources | Two model calls (a few cents) |
+| Worker deploy | `worker-deploy-smoke.yml` | `wrangler deploy` produces a **working** Worker — the KV binding resolves, the `v1` `new_sqlite_classes` Durable Object migration applies, and a publish→subscribe round-trip completes against the deployed URL | One Cloudflare deploy |
+
+Trigger either on a PR with `gh pr edit <n> --add-label ci:live`, or standalone
+with `gh workflow run container.yml` / `gh workflow run worker-deploy-smoke.yml`.
+
+**They must prove they RAN.** Every test in both lanes carries a `skipif`, so a
+renamed secret or an unavailable harness would skip to green — which is exactly
+how this repo shipped four green-but-vacuous lanes before #909. Each lane
+therefore has two guards: a fail-fast step when a credential is empty, and
+`scripts/assert_junit_ran.py`, which reads the junit report and rejects any
+skip, any wrong count, and any missing named test. `tests/test_ci_live_wiring.py`
+asserts the wiring itself is still in place, and fails if a live step is deleted.
+
+**The Worker lane is isolated by construction.** It deploys to a dedicated
+`bobi-events-ci-smoke` Worker with its own KV namespace — never the environment
+the fleet runs production on, because sharing production's KV would let smoke
+traffic write live event state. `scripts/render_worker_ci_config.py` derives the
+CI config from the shipped `wrangler.jsonc` (so the migration and compatibility
+date stay identical to what production deploys) and refuses to render a config
+that names `bobi-events`, that carries the `REPLACE_WITH_YOUR_KV_NAMESPACE_ID`
+placeholder, or whose KV id did not come from CI configuration.
+
+Required repo secrets: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` (brains);
+`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CI_SMOKE_KV_NAMESPACE_ID`
+(Worker deploy). `pull_request_target` is never used in this repo — it is the
+one trigger that would hand a fork's code these secrets, and a test enforces
+its absence.
+
+**Known blind spot:** no canary exercises `auth: subscription`, the mode most
+fleet teams run, because a fresh subscription volume triggers a device login
+that blocks on a human. Tracked separately; see
+`plans/2026-08-01-ci-coverage.md` Q3.
+
 ## Frontend QA
 
 For any frontend change, read `docs/FRONTEND_QA.md` before deciding how to test it.
