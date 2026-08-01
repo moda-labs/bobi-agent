@@ -186,6 +186,36 @@ jobs:
           openssl rand -hex 32 \
             | npx --no-install wrangler secret put INTERNAL_DO_SECRET --config wrangler.ci.jsonc
 
+      - name: Wait for the deployment to serve this commit
+        # A deploy is not instantly live. `wrangler secret put` above publishes
+        # ANOTHER version, and requests during that rollover can 500 — the
+        # first real run of this lane hit exactly that, failing registration
+        # with a 500 two seconds after the secret was set, while the same
+        # Worker served the same request correctly moments later.
+        #
+        # This is a readiness gate, not a retry-until-green: it demands HTTP
+        # 200 AND the release sha of the commit under test, so a genuinely
+        # broken or stale deploy never becomes "ready" and the step fails loud
+        # with the last response it saw.
+        if: steps.live.outputs.run == 'true'
+        env:
+          SMOKE_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          set -uo pipefail
+          deadline=$(( SECONDS + 120 ))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            body="$(curl -fsS --max-time 10 "$SMOKE_URL/health" 2>/dev/null || true)"
+            case "$body" in
+              *"\"sha\":\"$GITHUB_SHA\""*)
+                echo "deployment is serving $GITHUB_SHA"
+                exit 0 ;;
+            esac
+            sleep 5
+          done
+          echo "::error::$SMOKE_URL never served release sha $GITHUB_SHA within 120s" >&2
+          echo "last response: ${body:-<none>}" >&2
+          exit 1
+
       - name: Smoke the DEPLOYED Worker
         if: steps.live.outputs.run == 'true'
         env:

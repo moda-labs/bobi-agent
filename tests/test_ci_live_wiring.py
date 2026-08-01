@@ -270,3 +270,28 @@ def test_worker_deploy_smokes_the_deployed_url_not_a_dev_server():
         "without the expected sha the health check cannot tell this deploy "
         "from a stale one"
     )
+
+
+def test_worker_deploy_waits_for_the_deployment_before_smoking():
+    """The readiness gate must stay, and must stay a GATE.
+
+    The first real run of this lane failed on a rollover race — `wrangler
+    secret put` publishes another version and requests during the swap 500.
+    A plain sleep, or a retry that accepts any 200, would paper over a stale
+    or broken deploy; this one requires the commit's own release sha.
+    """
+    steps = _steps("worker-deploy-smoke.yml", "deploy-smoke")
+    wait = _step(steps, "Wait for the deployment to serve this commit")
+    # Backslashes are literal: `run: |` is a block scalar, so the shell's
+    # own quoting survives into the parsed string.
+    assert r'\"sha\":\"$GITHUB_SHA\"' in wait["run"], (
+        "the readiness gate no longer pins the deployed sha — it would accept "
+        "a stale Worker"
+    )
+    assert "exit 1" in wait["run"]
+    assert _index(steps, "Set the Durable Object internal secret") < _index(
+        steps, "Wait for the deployment to serve this commit"
+    ), "the wait must come after the LAST step that publishes a new version"
+    assert _index(steps, "Wait for the deployment to serve this commit") < _index(
+        steps, "Smoke the DEPLOYED Worker"
+    )
