@@ -27,7 +27,13 @@ Use this structure consistently in both systems:
 ### 1a) Plan-born initiatives (`plans/` convention)
 - Initiative-sized work designed as a plan artifact `plans/<slug>.md` in the
   implementation repo (see `AGENTS.md`, Development Lifecycle), with a
-  GitHub tracking issue labeled `plan`.
+  GitHub tracking issue.
+- **The tracking issue is the feature request, not bookkeeping.** It takes no
+  `plan` label and no `[plan]` prefix — the bracket prefixes in rule 2a are
+  reserved for Linear keys and for dispatch issues, and a tracking issue is
+  neither. Its title follows rule 2a's task shape and its body states the gap
+  and the desired outcome as prose a reader can act on, closing with a link to
+  the plan file. "Plan tracking. Discussion here." is not a body.
 - The Linear epic points at the plan: link the plan file on `main` and the
   GitHub tracking issue in the epic description — do not duplicate the design
   into Linear or into GitHub issue bodies. The plan file is the technical
@@ -70,6 +76,19 @@ Use this structure consistently in both systems:
      - an explicit close/retire decision with reason.
 
 2a. **Title and backlink convention (required)**
+   - **Title shape.** A work item's title outlines the **task to be
+     accomplished** — lead with the verb and name what it delivers, e.g.
+     `"Add CI gates to prove claude/codex brains, the CF Worker deploys, and
+     validate on fly before fleet deployments"`. Not a state ("CI proves X"),
+     not a catalogue of the gap ("CI proves neither X nor Y"): a reader should
+     finish the title knowing what work exists.
+   - **Bugs are the exception, and take the opposite shape.** A bug title
+     outlines the **shortcoming the bug is causing**, clearly and in as few
+     words as possible — the impact, not the fix and not the mechanism.
+     `"A tokens-blanked credential wedges the instance permanently"`, not
+     `"Fix the entrypoint's credential-validity gate"` and not
+     `"Entrypoint gates login-bootstrap on credential file presence, not
+     validity"`. Mechanism and root cause belong in the body.
    - Linked GH<->Linear pairs must use this GitHub issue title prefix pattern:
      - `"[MOD-212] <descriptive title>"` where the bracketed token is the Linear
        ticket key.
