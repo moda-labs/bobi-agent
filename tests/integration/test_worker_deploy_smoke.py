@@ -42,6 +42,14 @@ pytestmark = pytest.mark.live
 
 SMOKE_URL_ENV = "BOBI_SMOKE_EVENT_SERVER_URL"
 
+#: Every request below sends this explicitly, and it is load-bearing against a
+#: DEPLOYED Worker in a way it never was against `wrangler dev`: Cloudflare's
+#: managed bot rules answer 403 to the default `Python-urllib/x.y` User-Agent
+#: at the edge. Verified 2026-08-01 against the deployed ci-smoke Worker —
+#: `Python-urllib/3.13` got 403 while `python-httpx`, `curl` and this string
+#: all got 200. Only this module is affected; the shipped client uses httpx.
+SMOKE_USER_AGENT = "bobi-ci-smoke/1"
+
 requires_deployment = pytest.mark.skipif(
     not os.environ.get(SMOKE_URL_ENV),
     reason=f"deployed-Worker smoke needs {SMOKE_URL_ENV} (set by worker-deploy-smoke.yml)",
@@ -60,7 +68,8 @@ def smoke_url() -> str:
 
 
 def _get_json(url: str, timeout: float = 15) -> dict:
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
+    req = urllib.request.Request(url, headers={"User-Agent": SMOKE_USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         assert resp.status == 200, f"{url} -> HTTP {resp.status}"
         return json.loads(resp.read())
 
@@ -73,7 +82,10 @@ def _register(base_url: str, name: str, subscriptions: list[str]) -> dict:
     req = urllib.request.Request(
         f"{base_url}/deployments",
         data=body.encode(),
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": SMOKE_USER_AGENT,
+        },
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read())
@@ -85,7 +97,10 @@ def _publish(base_url: str, topic: str, payload: dict, bubble_id: str, bubble_ke
 
     body = serialize_body(payload)
     path = f"/events/{topic}"
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": SMOKE_USER_AGENT,
+    }
     headers.update(sign_headers(bubble_id, bubble_key, "POST", path, body))
     req = urllib.request.Request(base_url + path, data=body.encode(), headers=headers)
     with urllib.request.urlopen(req, timeout=15) as resp:
@@ -118,7 +133,10 @@ def _subscribe_then_publish(
         try:
             ws = websocket.create_connection(
                 _ws_url(base_url, deployment_id),
-                header=[f"Authorization: Bearer {api_key}"],
+                header=[
+                    f"Authorization: Bearer {api_key}",
+                    f"User-Agent: {SMOKE_USER_AGENT}",
+                ],
                 timeout=timeout,
                 sslopt={"cert_reqs": ssl.CERT_REQUIRED},
             )
