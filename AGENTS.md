@@ -80,8 +80,12 @@ conventions that hold regardless of how the stages are tooled:
 
 - **Plans**: initiative-sized work (multiple coherent deliverables) gets
   a plan artifact `plans/<slug>.md`, merged and amended via PR, with a
-  lightweight GitHub tracking issue labeled `plan` (the issue holds
-  discussion and labels; the plan file is the source of truth). Builders
+  lightweight GitHub tracking issue (the issue holds discussion; the plan
+  file is the source of truth). That issue is the feature request itself —
+  no `plan` label, no `[plan]` prefix, a title that outlines the task to be
+  accomplished, and a body someone can act on. Bug titles take the opposite
+  shape: the shortcoming caused, in as few words as possible. See
+  `docs/TICKETING_POLICY.md` §1a and §2a. Builders
   flip the plan's status markers (`[ ]` / `[wip]` / `[x]` / `[f]`)
   inside their PRs; post-approval changes are dated amendments, never
   silent rewrites. Single-unit work skips the plan and writes its design
