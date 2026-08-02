@@ -814,7 +814,13 @@ button.attention-row:hover .attention-label { color: var(--text); }
 }
 .stat-popover:hover .popover,
 .stat-popover.open .popover { display: block; }
+/* `display` first, and not incidentally: the card is a <span> (it sits
+   inside the chip's inline run) holding block-level .kv rows. Left inline,
+   those rows escape its box and the background, border and padding paint on
+   an empty sliver instead of behind the content - the popover renders as
+   loose text over whatever is under it. */
 .pop-card {
+  display: block;
   background: var(--raised); border: 1px solid var(--border-strong);
   border-radius: 12px; padding: 14px 16px;
   box-shadow: 0 8px 28px rgba(31, 27, 22, .12);
