@@ -192,6 +192,16 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def agent_runs(name: str, status: str = "", limit: int = 0) -> JSONResponse:
         return JSONResponse(rt.runs(name, status=status, limit=limit or None))
 
+    # The runs table's one write action. Resume force-continues a suspended
+    # step, so the page confirms first (naming the awaited event) — see the
+    # plan's design deltas. Sync `def`: FastAPI threadpools it, and the work
+    # here is a spawn, never the workflow itself.
+    @app.post("/api/agents/{name}/workflows/runs/{run_id}/resume")
+    def resume_workflow_run(name: str, run_id: str) -> JSONResponse:
+        if not safe_name(run_id):
+            return JSONResponse({"error": "unknown run"}, status_code=404)
+        return JSONResponse(rt.resume_run(name, run_id))
+
     @app.get("/api/agents/{name}/status")
     def agent_status(name: str) -> JSONResponse:
         return JSONResponse(rt.team_status(name))
