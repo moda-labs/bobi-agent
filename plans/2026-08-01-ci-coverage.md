@@ -182,9 +182,9 @@ Split the proof by what each repo owns.
 - [x] `smoked=true` is emitted — the gate genuinely ran, not merely succeeded.
   `Set output 'smoked'` in the run log. The same run also proved the skipped-`deploy-event-server` path does not skip the gate (`deploy-worker: false`).
 
-### Phase 5 — moda-agents: one canary, and a version gate in front of the fleet `[wip]`
+### Phase 5 — moda-agents: one canary, and a version gate in front of the fleet `[x]`
 
-Code complete in moda-agents PR #80; two gates cannot run until it merges (see below).
+Landed as moda-agents PR #80 (`cada0a49`); both merge-blocked gates discharged 2026-08-02.
 
 - [x] Collapse the `canaries=(…)` loop to the single brain-agnostic `ci-canary`; delete `bobi-deploy/deployments/codex-smoke.yaml`, destroy the `ci-codex-smoke` Fly app, and remove `CODEX_SMOKE__OPENAI_API_KEY`.
   App destroyed 2026-08-01 (Zach's call to do it immediately rather than after merge). `CODEX_SMOKE__OPENAI_API_KEY` needed no removal from GitHub — it never existed there; the key lived only as a Fly secret on the app and went with it.
@@ -196,10 +196,10 @@ Code complete in moda-agents PR #80; two gates cannot run until it merges (see b
 
 **Validation gate**
 
-- [ ] `version-gate.yml` dispatched against the current pin (0.51.1) goes green.
-  **Blocked until PR #80 merges** — `workflow_dispatch` only offers a workflow that exists on the default branch, so a brand-new workflow cannot be dispatched from its own branch. Partially discharged already: its `prove` job is `release-fleet.yml`, which WAS dispatched from the branch and went green, and the pin-rewrite script was extracted from the shipped YAML and executed under GNU sed in an Ubuntu container.
-- [ ] Dispatched against a deliberately bad version, it **fails** and does not bump the pin.
-  **Blocked on the same merge.** The rewrite half is already proven red on a bad input (`'main' is not a version number`, exit 1) and on an un-rewritten pin (a planted fifth pin failed the stale scan, exit 1).
+- [x] `version-gate.yml` dispatched against the current pin (0.51.1) goes green.
+  Run [30756274258](https://github.com/moda-labs/moda-agents/actions/runs/30756274258): canary deployed FROM `ghcr.io/moda-labs/bobi:0.51.1`, answered `CANARY-OK` on attempt 1, verdict `0.51.1 is proven`. It also proved the SELF-HEALING credential path end-to-end — with `CANARY__ANTHROPIC_API_KEY` now set, the fallback warning is gone — and the bump correctly no-opped (`already pinned to 0.51.1`) without opening a PR.
+- [x] Dispatched against a deliberately bad version, it **fails** and does not bump the pin.
+  Run [30756439165](https://github.com/moda-labs/moda-agents/actions/runs/30756439165) against `0.99.99`: `prove` FAILED at the pip pin (`No matching distribution`), the verdict job reported `the fleet must not roll onto it`, and `bump` was **skipped**. All four pins still read `0.51.1` on `main` and no `version-gate/*` branch was created. The verdict job's `always()` is what makes a red gate report rather than silently skip.
 - [x] `ci-codex-smoke` no longer exists in `fly apps list`, and `release-fleet.yml` contains no reference to it.
   Both confirmed: `fly apps list` shows `ci-canary` alone, and `test_release_smokes_exactly_one_brain_agnostic_canary` fails if any codex reference returns.
 
@@ -216,14 +216,15 @@ Code complete in moda-agents PR #80; two gates cannot run until it merges (see b
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
 | A | #909 | 1-3 | bobi-agent: both brains against the real image, real Worker deploy on dedicated infra, anti-rot guards | concurrent | **landed** (PR #911, 2026-08-01) |
-| B | none — built in-session | 4-5 | moda-agents: repair the canary, collapse to one, gate fleet rolls on a proven version | concurrent | **in review** (moda-agents PR #80) |
+| B | none — built in-session | 4-5 | moda-agents: repair the canary, collapse to one, gate fleet rolls on a proven version | concurrent | **landed** (moda-agents PR #80, 2026-08-02) |
 
 **Lanes:** Two lanes because the work spans two repos, which forces separate PRs — no same-repo parallel cut is made or needed. Topology is **STACKED by landing, parallel by build**: Lane B may be built as soon as Lane A's shape is known, but it **lands after** Lane A, because dropping `ci-codex-smoke` is only safe once Codex coverage genuinely exists in bobi-agent. That is "lands after", not "depends on" — it does not block dispatch. Both lanes are `concurrent` marker mode (cross-repo): flip markers as status-only commits to bobi-agent's `main` referencing the code PR, never inside a feature branch.
 
 **Interface lock to relay (A → B):** the exact published base-image tag shape and what the `team.Dockerfile` overlay may rely on already being present — Lane B's canary rebuild is written against that, and must not assume it.
 
 - [ ] Convergence gate — *deferred* (needs the real sequence, not a merged preview): one release cut under the rewritten runbook in which bobi-agent's live lanes ran green, moda-agents' repaired canary gated it, and the fleet rolled onto a version the version-gate had already proven.
-- [ ] Convergence gate — *fuse-runnable*: bobi-agent full unit suite + both TS suites + both typechecks + `tests/integration -m "not claude and not docker"` green on a locally merged preview of both lanes.
+- [x] Convergence gate — *fuse-runnable*: bobi-agent full unit suite + both TS suites + both typechecks + `tests/integration -m "not claude and not docker"` green on a locally merged preview of both lanes.
+  Run 2026-08-02 against `main` at `55402c4` — with both lanes landed, main IS the merged preview. Unit **3801 passed, 1 skipped**; integration (not claude, not docker) **305 passed, 9 skipped**; events-core **402 passed**; Worker **104 passed**; both typechecks clean. One caveat worth stating rather than burying: `test_packaged_event_server.py` errored 6 times on the first pass purely because the local shell had Node v24 — `hatch_build` requires exactly Node 20 to build the embedded event server. Re-run under Node 20: **9 passed**. Not a regression; CI pins 20 for this.
 
 ## Amendments
 
