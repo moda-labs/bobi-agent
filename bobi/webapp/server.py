@@ -36,6 +36,7 @@ from bobi.webapp.runtime import (
     TeamLifecycleError,
     TeamPreflightFailed,
     TeamRuntime,
+    UnknownRun,
     UnknownTeam,
 )
 from bobi.webui_common.security import (
@@ -120,6 +121,10 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     @app.exception_handler(UnknownTeam)
     def _unknown_team(request, exc) -> JSONResponse:
         return JSONResponse({"error": "unknown agent"}, status_code=404)
+
+    @app.exception_handler(UnknownRun)
+    def _unknown_run(request, exc) -> JSONResponse:
+        return JSONResponse({"error": "unknown run"}, status_code=404)
 
     @app.exception_handler(TeamAlreadyRunning)
     def _already_running(request, exc) -> JSONResponse:
@@ -320,6 +325,22 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
         if not safe_name(session):
             return JSONResponse({"error": "unknown agent"}, status_code=404)
         return JSONResponse({"messages": rt.messages(name, session)})
+
+    # The debugging view of the same transcript: timestamps and tool calls.
+    # `/messages` above is the chat view and stays exactly as it was.
+    @app.get("/api/agents/{name}/subagents/{session}/transcript")
+    def subagent_transcript(name: str, session: str) -> JSONResponse:
+        if not safe_name(session):
+            return JSONResponse({"error": "unknown agent"}, status_code=404)
+        return JSONResponse(rt.transcript(name, session))
+
+    # What a session-less run shows instead of a transcript: the run record
+    # plus the definition of the monitor that produced it.
+    @app.get("/api/agents/{name}/runs/{run_id}/details")
+    def run_details(name: str, run_id: str) -> JSONResponse:
+        if not safe_name(run_id):
+            return JSONResponse({"error": "unknown run"}, status_code=404)
+        return JSONResponse(rt.run_details(name, run_id))
 
     # Submit-then-poll chat: the POST returns a message id immediately and
     # the deliver runs in the background — no request is held open for the
