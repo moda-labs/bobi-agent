@@ -158,6 +158,12 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def agent_spend(name: str) -> JSONResponse:
         return JSONResponse(rt.spend_summary(name))
 
+    # The identity header's read-only view of the team's composition:
+    # description, roles, reach, automation counts, brain, spend cap.
+    @app.get("/api/agents/{name}/overview")
+    def agent_overview(name: str) -> JSONResponse:
+        return JSONResponse(rt.overview(name))
+
     # System health (#733 vertical 2): manager liveness + session statuses;
     # a hosted runtime adds reachability and the sidecar's lifecycle trail.
     # Normalized on the way out so the state keys the strip reads are present
