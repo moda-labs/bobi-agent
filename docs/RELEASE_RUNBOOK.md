@@ -19,13 +19,24 @@ Fly-hosted agents.
 > the recipe, so a released image tag is a hard dependency of every deploy,
 > not just of a first install.
 >
-> **The canary no longer gates the image publish, and you must sequence it by
-> hand.** Pre-reorg, `release.yml` had an `image` job gated on the private
-> fleet canary's `smoked` output. The split removed that coupling — the
-> canary lives in `moda-agents` and this repo cannot see its result without a
-> cross-repo `repository_dispatch`. Until that exists: publish the image, run
-> the fleet canary from `moda-agents`, and **do not roll the fleet until it
-> is green**. A bad image tag is adopted by every team's next deploy.
+> **The canary gates the fleet ROLL, not the publish — and that is now
+> structural, not a gap awaiting repair.** Pre-reorg, `release.yml` had an
+> `image` job gated on the private fleet canary's `smoked` output. The split
+> removed that coupling, and D7 settled it the other way: the canary builds
+> `FROM ghcr.io/moda-labs/bobi:<version>`, the same base the fleet deploys, so
+> **the image must exist before the canary can run at all**. A gate cannot
+> precede the artifact it consumes.
+>
+> So the sequence is: publish the wheel, publish the image, run the fleet gate
+> from `moda-agents`, and **do not roll the fleet until it is green**. A bad
+> image tag is adopted by every team's next deploy. Since 2026-08-01 that last
+> step is mechanical rather than a matter of remembering — `version-gate.yml`
+> in `moda-agents` proves a candidate version on `ci-canary` and only then opens
+> the `BOBI_VERSION` bump PR.
+>
+> PyPI keeps its own external backstop (trusted publishing). GHCR is ungated,
+> which is the accepted cost of the split; re-coupling it would need a
+> cross-repo `repository_dispatch` into this repo's `release-image.yml`.
 
 > **Dev channel (#740 Track A):** every fully-green push to `main`
 > fast-forwards the `dev` branch (the `promote-dev` job in `ci.yml`). This is
@@ -83,9 +94,9 @@ git commit -m "chore(release): cut <version>"
 git push origin main
 ```
 
-Publish the GitHub Release. This tag/release event is the gate that builds the
-wheel, runs canary, publishes to PyPI, deploys the event server, and rolls the
-release-owned fleet.
+Publish the GitHub Release. This tag/release event builds the wheel, publishes
+to PyPI, and bumps Homebrew. It does NOT run a canary, deploy the event server,
+or roll any fleet — those are the private train's, dispatched by hand below.
 
 ```bash
 gh release create v<version> --target main --title "v<version>" --notes-file -
@@ -113,12 +124,19 @@ non-prerelease release. It installs `bobi==<version>` from PyPI, so it must run
 after the publish above.
 
 Then run the fleet train in `moda-labs/moda-agents` (its own workflows):
-event-server Worker deploy + identity check, then the fleet canary build/smoke
-against the just-published wheel. **Sequence this by hand — the canary no longer
-gates the image publish** (see the notice at the top). Do not continue to the
-Moda fleet pin until both are green: the public train alone carries no
-functional fleet proof, and the image is now on the path of every team deploy,
-not just first installs.
+dispatch `release.yml` there with the version. It verifies the wheel and the
+image are both actually published, deploys the event-server Worker and waits for
+`/health` to report that exact version@sha, then deploys `ci-canary` from the
+just-published base image and asserts it answers `CANARY-OK`. **Sequence this by
+hand, and note the direction: the canary runs AFTER the image publish because it
+consumes it** (see the notice at the top). Do not continue to the Moda fleet pin
+until it is green: the public train alone carries no functional fleet proof, and
+the image is now on the path of every team deploy, not just first installs.
+
+The pin bump itself is then `version-gate.yml` in `moda-agents`, dispatched with
+the version — it re-proves the canary and opens the `BOBI_VERSION` PR only on a
+gate that genuinely RAN (`smoked=true`, not merely a green job). Merging that PR
+does not roll the fleet; a `deploy-*` tag or a `rebuild: true` dispatch does.
 
 Two hazards worth re-reading before dispatching `release-image.yml`:
 

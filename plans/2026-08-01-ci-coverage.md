@@ -163,31 +163,45 @@ Split the proof by what each repo owns.
 - [x] `pytest tests/test_ci_live_wiring.py` passes, and fails when the live step is deleted from `container.yml` — verified 2026-08-01 by deleting the step: `test_live_brain_roundtrips_still_run_on_both_brains` FAILED, 14 passed.
 - [x] Full unit suite green: 3799 passed, 1 skipped (2026-08-01).
 
-### Phase 4 — moda-agents: repair the canary so it can run at all `[ ]`
+### Phase 4 — moda-agents: repair the canary so it can run at all `[x]`
 
-- [ ] Re-aim `build-canary` onto the fleet's real build path per **Q1(c)**: published base + `bobi-deploy/docker/team.Dockerfile` overlay, `BASE_IMAGE_REPO`/`BOBI_VERSION` build-args, `TEAM_DEPS` pointed at the rendered hook.
+- [x] Re-aim `build-canary` onto the fleet's real build path per **Q1(c)**: published base + `bobi-deploy/docker/team.Dockerfile` overlay, `BASE_IMAGE_REPO`/`BOBI_VERSION` build-args, `TEAM_DEPS` pointed at the rendered hook.
+  **DONE differently, and better:** rather than re-spelling the build-args in YAML, `build-canary` now runs `bobi deploy canary --rebuild` — the same primitive `deploy-agent-teams.yml` uses. The engine picks `team.Dockerfile` and passes `BOBI_VERSION`/`TEAM_DEPS` itself, so the workflow holds no second copy of the build recipe to drift. Proven in the run: `--dockerfile /tmp/.../team.Dockerfile --build-arg BOBI_VERSION=0.51.1`.
   **NOTE — this supersedes the obvious repair.** The naive fix is to re-point `--dockerfile` at the checked-out public repo (`$PWD/bobi-agent/Dockerfile`) so `COPY docker/docker-entrypoint.sh` resolves. Do NOT do that: Q1(c) moves wheel→image proof to bobi-agent, so the canary must stop building the full recipe entirely. Both the `--dockerfile` path AND `--build-arg BOBI_BUILD=wheel` go away with it.
-- [ ] Re-evaluate whether `Checkout public bobi-agent (sibling layout)` and `Stage the public pyproject.toml (image deps-layer key)` are still needed. Under base+overlay the canary consumes a published image, so it may need neither — delete what is genuinely dead rather than leaving inert steps.
-- [ ] Verify `scripts/canary-smoke.sh` and `bobi-deploy/deployments/*.yaml` still resolve under `working-directory: bobi-deploy` (they do today: `fleet: ci` → `ci-canary`).
-- [ ] Record the release-ordering consequence of Q1(c) in `docs/RELEASE_RUNBOOK.md` in the same PR: the canary now consumes a PUBLISHED base, so it can no longer gate the GHCR publish.
+- [x] Re-evaluate whether `Checkout public bobi-agent (sibling layout)` and `Stage the public pyproject.toml (image deps-layer key)` are still needed. Under base+overlay the canary consumes a published image, so it may need neither — delete what is genuinely dead rather than leaving inert steps.
+  Both deleted, along with the wheel staging/rebuild steps and the `claude-version` + `use-dist-artifact` inputs they served. `release.yml` updated to match, and a test asserts the canary checks out no other repo.
+- [x] Verify `scripts/canary-smoke.sh` and `bobi-deploy/deployments/*.yaml` still resolve under `working-directory: bobi-deploy` (they do today: `fleet: ci` → `ci-canary`).
+  Confirmed by the live run. Its message was also corrected — it claimed to have smoked "the wheel".
+- [x] Record the release-ordering consequence of Q1(c) in `docs/RELEASE_RUNBOOK.md` in the same PR: the canary now consumes a PUBLISHED base, so it can no longer gate the GHCR publish.
+  `docs/RELEASE_RUNBOOK.md` lives in THIS repo, so "the same PR" was cross-repo-impossible; it is recorded here instead, in the PR that flips these markers. The moda-agents side (`release.yml`'s and `CONTAINERIZED_DEPLOYMENT.md`'s statements of the old ordering) was corrected in that PR.
 
 **Validation gate**
 
-- [ ] `gh workflow run release-fleet.yml` (dispatch) completes and `ci-canary` answers `CANARY-OK`.
-- [ ] `smoked=true` is emitted — the gate genuinely ran, not merely succeeded.
+- [x] `gh workflow run release-fleet.yml` (dispatch) completes and `ci-canary` answers `CANARY-OK`.
+  Run [30723965286](https://github.com/moda-labs/moda-agents/actions/runs/30723965286), the FIRST ever run of this workflow in its new home, green on the first attempt: `Canary builds FROM ghcr.io/moda-labs/bobi:0.51.1` → overlay build → `ci-canary answered CANARY-OK (attempt 1)`.
+- [x] `smoked=true` is emitted — the gate genuinely ran, not merely succeeded.
+  `Set output 'smoked'` in the run log. The same run also proved the skipped-`deploy-event-server` path does not skip the gate (`deploy-worker: false`).
 
-### Phase 5 — moda-agents: one canary, and a version gate in front of the fleet `[ ]`
+### Phase 5 — moda-agents: one canary, and a version gate in front of the fleet `[wip]`
 
-- [ ] Collapse the `canaries=(…)` loop to the single brain-agnostic `ci-canary`; delete `bobi-deploy/deployments/codex-smoke.yaml`, destroy the `ci-codex-smoke` Fly app, and remove `CODEX_SMOKE__OPENAI_API_KEY`.
-- [ ] Remove the now-dead `bootstrap` policy branch and its comment.
-- [ ] Add `version-gate.yml` per Q4: canary a candidate `BOBI_VERSION`, and only on green allow/open the pin bump.
-- [ ] Record the Q3 subscription-auth blind spot as an issue and reference it in `deployments/README.md`.
+Code complete in moda-agents PR #80; two gates cannot run until it merges (see below).
+
+- [x] Collapse the `canaries=(…)` loop to the single brain-agnostic `ci-canary`; delete `bobi-deploy/deployments/codex-smoke.yaml`, destroy the `ci-codex-smoke` Fly app, and remove `CODEX_SMOKE__OPENAI_API_KEY`.
+  App destroyed 2026-08-01 (Zach's call to do it immediately rather than after merge). `CODEX_SMOKE__OPENAI_API_KEY` needed no removal from GitHub — it never existed there; the key lived only as a Fly secret on the app and went with it.
+- [x] Remove the now-dead `bootstrap` policy branch and its comment.
+- [x] Add `version-gate.yml` per Q4: canary a candidate `BOBI_VERSION`, and only on green allow/open the pin bump.
+  It also moves every pin at once. The version is pinned in FOUR places (`deploy-agent-teams.yml`, `team-images.yml`, and twice in `lint.yml`), previously kept in sync by a comment; a test now discovers the pin set rather than hard-coding it, so a fifth pin fails CI instead of going stale.
+- [x] Record the Q3 subscription-auth blind spot as an issue and reference it in `deployments/README.md`.
+  moda-agents#81, referenced from `deployments/README.md`.
 
 **Validation gate**
 
 - [ ] `version-gate.yml` dispatched against the current pin (0.51.1) goes green.
+  **Blocked until PR #80 merges** — `workflow_dispatch` only offers a workflow that exists on the default branch, so a brand-new workflow cannot be dispatched from its own branch. Partially discharged already: its `prove` job is `release-fleet.yml`, which WAS dispatched from the branch and went green, and the pin-rewrite script was extracted from the shipped YAML and executed under GNU sed in an Ubuntu container.
 - [ ] Dispatched against a deliberately bad version, it **fails** and does not bump the pin.
-- [ ] `ci-codex-smoke` no longer exists in `fly apps list`, and `release-fleet.yml` contains no reference to it.
+  **Blocked on the same merge.** The rewrite half is already proven red on a bad input (`'main' is not a version number`, exit 1) and on an un-rewritten pin (a planted fifth pin failed the stale scan, exit 1).
+- [x] `ci-codex-smoke` no longer exists in `fly apps list`, and `release-fleet.yml` contains no reference to it.
+  Both confirmed: `fly apps list` shows `ci-canary` alone, and `test_release_smokes_exactly_one_brain_agnostic_canary` fails if any codex reference returns.
 
 ## Proof of work
 
@@ -202,7 +216,7 @@ Split the proof by what each repo owns.
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
 | A | #909 | 1-3 | bobi-agent: both brains against the real image, real Worker deploy on dedicated infra, anti-rot guards | concurrent | **landed** (PR #911, 2026-08-01) |
-| B | #TBD (moda-agents) | 4-5 | moda-agents: repair the canary, collapse to one, gate fleet rolls on a proven version | concurrent | open |
+| B | none — built in-session | 4-5 | moda-agents: repair the canary, collapse to one, gate fleet rolls on a proven version | concurrent | **in review** (moda-agents PR #80) |
 
 **Lanes:** Two lanes because the work spans two repos, which forces separate PRs — no same-repo parallel cut is made or needed. Topology is **STACKED by landing, parallel by build**: Lane B may be built as soon as Lane A's shape is known, but it **lands after** Lane A, because dropping `ci-codex-smoke` is only safe once Codex coverage genuinely exists in bobi-agent. That is "lands after", not "depends on" — it does not block dispatch. Both lanes are `concurrent` marker mode (cross-repo): flip markers as status-only commits to bobi-agent's `main` referencing the code PR, never inside a feature branch.
 
@@ -212,6 +226,34 @@ Split the proof by what each repo owns.
 - [ ] Convergence gate — *fuse-runnable*: bobi-agent full unit suite + both TS suites + both typechecks + `tests/integration -m "not claude and not docker"` green on a locally merged preview of both lanes.
 
 ## Amendments
+
+- **2026-08-01** (Lane B build): **Lane B was built without a dispatch issue**,
+  by Zach's decision — filing one in `moda-agents` routes an event to the
+  eng-team bot, and the work involved a never-before-run release workflow plus
+  destroying a Fly app, which is not where a PR-latency debug loop belongs. The
+  Lane map row records "none — built in-session" rather than carrying a stale
+  `#TBD`.
+
+- **2026-08-01** (Lane B build): three things the plan did not anticipate, all
+  found by executing rather than reading.
+  1. **Phase 4's prescribed mechanism was superseded by a simpler one.** The plan
+     said to re-spell `BASE_IMAGE_REPO`/`BOBI_VERSION`/`TEAM_DEPS` as build-args
+     in the workflow. But "the fleet's real build path" IS `bobi deploy` — the
+     engine already selects `team.Dockerfile` and passes those args. Hand-copying
+     them into YAML would have recreated the drift seam the reorg removed. The
+     canary now runs the same primitive the fleet does.
+  2. **A second, independent piece of reorg breakage.** The `canary` GitHub
+     Environment (`CANARY__*`) never survived the move out of the archived
+     bobi-deploy repo. `deployments/canary.yaml` documented an Environment that
+     did not exist; the canary kept working only because a `team-url` deployment
+     prunes nothing, so the live Fly secret survived every image swap. Recreated
+     and wired, so the gate can now re-credential a recreated app.
+  3. **`smoked` gates the ROLL, not the publish — and the old note was
+     impossible.** `release.yml` carried a Lane 3 instruction to "run this fleet
+     gate FIRST, publish the image only once `smoked` is true". Under Q1(c) the
+     canary consumes the published base, so the image must exist before the gate
+     can run at all. Deleted rather than left as an instruction nobody can follow.
+
 
 - **2026-08-01** (Lane A landing): the Lane map's `concurrent` marker mode
   assumes status-only commits straight to `main`. That is not possible in this
