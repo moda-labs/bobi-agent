@@ -211,12 +211,12 @@ first. Implementation stacks on an integration branch
 - Testable: records appear under `run/state/` for a live monitor tick.
 
 **U2 — unified runs read model + `GET /api/agents/{name}/runs`** *(Phase 1)*
-- [ ] Merge sessions + workflow runs + U1 monitor records into one run
+- [x] Merge sessions + workflow runs + U1 monitor records into one run
       shape: `status` (`running|idle|done|failed|crashed|stalled`),
       `title`, `origin`, `started_at`, `duration`, `tokens`, `est_cost`,
       `error`, `session_id?`, `run_id?`. Newest first; `status=` filter;
       explicit cap + `truncated`.
-- [ ] `stalled` = suspended past threshold (default 24h, constant).
+- [x] `stalled` = suspended past threshold (default 24h, constant).
 - [ ] Per-run tokens/est cost surfaced from `model_usage`.
 - Testable: `curl` returns the merged list for a seeded home.
 
@@ -348,6 +348,27 @@ placeholder rather than replacing it. Last amended: **2026-08-01**.)*
 the plan-artifact check is insertion-only, so amendments land beneath the
 placeholder rather than replacing it. Last amended: **2026-08-01**.)*
 
+- **2026-08-01** (QA session on the integration branch): **one piece of work
+  produces one row — the run record claims its session.** U2 says "merge
+  sessions + workflow runs + monitor records into one run shape" and the
+  built fold merged them without deduplicating, so a monitor firing that
+  spawned a check agent, and a workflow run that ran through a session,
+  each produced TWO rows: the run's and the session's. They listed the same
+  seconds twice, offered the same transcript from two rows, and printed the
+  same tokens and estimated cost twice in a column a reader totals by eye —
+  exactly the "panels triple-listed the same objects" this design cut. The
+  run record now claims its session and the session row is dropped, with the
+  claimed session still able to hand up a failure or a still-running status
+  its record can be wrong about. Found by reading the seeded table in a
+  browser. Contract documented in `docs/RUNS_VIEW.md`.
+- **2026-08-01** (QA session on the integration branch): **`stopped` is a
+  clean exit, and the shutdown path now stamps when it happened.** The
+  STOPPED strip's SINCE · EXIT · WAS UP never rendered: the manager's
+  teardown wrote `status="stopped"` with no `terminal_at`, and the strip
+  treated that status as non-terminal. Every unit test had seeded
+  `completed`, a status that path never writes, so the suite stayed green
+  while one of the three specified states was empty in practice. Contract
+  documented in `docs/AGENT_STATE.md`.
 - **2026-08-01** (U3 build session): **the NOT RESPONDING strip's
   `Health probe: failing 12m` is not built.** The prototype is the visual
   spec, so this is a deliberate deviation, not an omission. A failure

@@ -33,6 +33,9 @@ Bobi is an event-driven AI agent framework.
 - `docs/AGENT_OVERVIEW.md`: the agent page's read-only composition view
   (`GET .../overview`) and the `script_cache` savings block in the spend
   payload - how automations are counted and how savings are priced.
+- `docs/RUNS_VIEW.md`: the unified runs read model behind the agent page's one
+  table (`GET .../runs`) - the status vocabulary, the stalled threshold, and
+  the rule that one piece of work produces one row.
 - `docs/RUN_DRILLDOWNS.md`: opening a run - the debugging transcript view
   (timestamps + tool calls, distinct from `/messages`) and the Details
   payload for runs that have no transcript.

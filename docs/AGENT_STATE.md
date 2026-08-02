@@ -82,6 +82,13 @@ whose registry record was never closed still reads `idle`. Rendering that as
 confident wrong reading these segments exist to avoid, so the segment is
 dropped instead.
 
+`stopped` is the exception, and it reads `Exit: clean`. Only the manager's own
+shutdown path writes that status, so it means the process wound down rather
+than died — and that path stamps `terminal_at` and clears the pid as it goes,
+which is what gives Since and Was up something to report. It did neither until
+QA drove a live Stop and watched the whole strip come back empty; every unit
+test had seeded `completed`, a status that path never writes.
+
 Values go out raw and the browser formats them. It knows the viewer's timezone;
 the server may not share it, and in hosted mode it usually does not.
 

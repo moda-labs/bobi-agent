@@ -287,6 +287,51 @@ def _monitor_rows(root: Path, *, usage_by_session: dict) -> list[dict]:
 
 # --- the fold ---------------------------------------------------------------
 
+def _claim_sessions(rows: list[dict]) -> list[dict]:
+    """One piece of work, one row.
+
+    A monitor firing that spawned a check agent, and a workflow run that ran
+    through a session, each leave TWO records on disk: the run's own, and the
+    session's. Emitting both listed the same twelve seconds twice, offered the
+    same transcript from two rows, and — because the session's usage is
+    attributed to whichever row points at it — printed the same tokens and
+    the same estimated cost twice in a column read as a running total.
+
+    The run record wins: it knows what the work WAS (a monitor's outcome, a
+    workflow's step), where the session only knows that a process ran. The
+    session row is dropped, and the claiming row keeps `session_id` so the
+    transcript is still one click away.
+
+    Nothing is dropped silently, though. A record closes when the run's own
+    bookkeeping finished, which is not the same moment its session ended, so
+    the session still gets to say two things the record can be wrong about:
+    that the work FAILED (a monitor record saying `notified` while its agent
+    crashed on the way out must not read as a clean run), and that it is
+    still RUNNING (dropping a live session would take a live row off the page
+    and out of the RUNNING tab).
+    """
+    claimed: dict[str, dict] = {}
+    for row in rows:
+        if row["kind"] != "session" and row["session_id"]:
+            claimed.setdefault(row["session_id"], row)
+
+    kept = []
+    for row in rows:
+        owner = claimed.get(row["session_id"]) if row["kind"] == "session" \
+            else None
+        if owner is None:
+            kept.append(row)
+            continue
+        if row["status"] in FAILED_STATUSES and \
+                owner["status"] not in FAILED_STATUSES:
+            owner["status"] = row["status"]
+            owner["error"] = owner["error"] or row["error"]
+        elif row["status"] in LIVE_STATUSES and \
+                owner["status"] not in LIVE_STATUSES + FAILED_STATUSES:
+            owner["status"] = row["status"]
+    return kept
+
+
 def _matches(row: dict, status: str) -> bool:
     """`status=failed` is the FAILED TAB — everything needing a human, not
     just rows literally marked failed. Any other value matches exactly."""
@@ -318,6 +363,9 @@ def build_runs(root: Path, *, manager_name: str = "", status: str = "",
                          usage_by_session=usage_by_session)
     rows += _workflow_rows(root, now=now, usage_by_session=usage_by_session)
     rows += _monitor_rows(root, usage_by_session=usage_by_session)
+
+    # Before anything counts or sorts them: one piece of work, one row.
+    rows = _claim_sessions(rows)
 
     # Live first, then newest first — a running job is what you came for.
     rows.sort(key=lambda r: (0 if r["status"] in LIVE_STATUSES else 1,
