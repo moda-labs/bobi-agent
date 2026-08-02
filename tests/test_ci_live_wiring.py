@@ -18,6 +18,7 @@ Two things are covered here:
    isolation guard are proven non-vacuous here rather than trusted.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -294,4 +295,64 @@ def test_worker_deploy_waits_for_the_deployment_before_smoking():
     ), "the wait must come after the LAST step that publishes a new version"
     assert _index(steps, "Wait for the deployment to serve this commit") < _index(
         steps, "Smoke the DEPLOYED Worker"
+    )
+
+
+def test_readiness_gate_requires_consecutive_matches_not_one():
+    """The gate must clear on a RUN of matches, never a single observation.
+
+    Run 30740272285 — the first SCHEDULED run of this lane — passed the gate on
+    one match and was then smoked against the PREVIOUS run's version.
+    Cloudflare's rollover is not atomic, so while propagation finishes,
+    successive requests to the same URL can land on either version; one match
+    predicts nothing about the next request.
+
+    Asserted structurally rather than by substring: a streak is only a streak if
+    a non-match RESETS it, so this pins the reset, the threshold comparison, and
+    the fact that success is reached through the threshold — not merely that the
+    word "streak" appears somewhere.
+    """
+    wait = _step(
+        _steps("worker-deploy-smoke.yml", "deploy-smoke"),
+        "Wait for the deployment to serve this commit",
+    )
+    run = wait["run"]
+    assert 'streak=$(( streak + 1 ))' in run, "nothing counts consecutive matches"
+    assert '[ "$streak" -ge "$needed" ]' in run, (
+        "success is not gated on reaching the consecutive-match threshold"
+    )
+
+    # The THRESHOLD VALUE, not merely that a threshold is declared. `needed=1`
+    # satisfies "needed= appears" while being exactly the bug this test exists
+    # to prevent.
+    declared = re.search(r"^\s*needed=(\d+)", run, re.MULTILINE)
+    assert declared, "the gate declares no consecutive-match threshold"
+    assert int(declared.group(1)) >= 2, (
+        f"the gate clears on {declared.group(1)} observation(s) — a single match "
+        "is the original bug (run 30740272285)"
+    )
+
+    # THE load-bearing line: the reset must live in the MISMATCH branch. Testing
+    # for `streak=0` anywhere also matches the initializer at the top, so
+    # deleting the reset entirely would still pass. Scope it to the default case.
+    #
+    # Matched by regex, not by splitting on a literal indent: `run` is a YAML
+    # block scalar, so it comes back DEDENTED and any hard-coded leading
+    # whitespace would never match — the assertion would then fail for the wrong
+    # reason and "catch" mutants it is not actually testing for.
+    default_case = re.search(r"^[ \t]*\*\)[ \t]*$(.*?)^[ \t]*;;", run,
+                             re.MULTILINE | re.DOTALL)
+    assert default_case, (
+        "the gate has no default (non-matching) case — nothing can reset the streak"
+    )
+    assert "streak=0" in default_case.group(1), (
+        "a non-matching response does not reset the streak — the count would be "
+        "cumulative rather than consecutive, and a flapping rollover would still "
+        "clear the gate"
+    )
+    # And the only `exit 0` must sit behind that threshold, so no earlier path
+    # can short-circuit to ready.
+    ready = run.split('[ "$streak" -ge "$needed" ]', 1)[0]
+    assert "exit 0" not in ready, (
+        "the gate can exit ready before the consecutive-match threshold"
     )
