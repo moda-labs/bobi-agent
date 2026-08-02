@@ -53,6 +53,11 @@ def _definition(root: Path, monitor_name: str) -> dict:
         value = getattr(monitor, field, None)
         if value not in (None, "", [], {}):
             out[field] = value
+    # `interval` carries the registry's default even for an `at:`-scheduled
+    # monitor, which never uses it. Printing both makes the slab contradict
+    # itself — and contradict the run row, whose origin says "at 09:00".
+    if out.get("at"):
+        out.pop("interval", None)
     return out
 
 

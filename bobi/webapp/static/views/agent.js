@@ -149,12 +149,37 @@ export function mountAgent(el, { api, name }) {
 
   els.title.textContent = name;
 
+  let timers = [];
   let health = null;
   let overview = null;
   let runs = null;
   let spend = null;
   let tab = "all";          // all | running | failed
   let busyVerb = null;
+  let runsError = "";       // why the table is empty, when it is not "no runs"
+
+  /* --- the agent that isn't there ----------------------------------- */
+
+  /** Every read 404s when the route names an agent this machine does not
+      have (a stale bookmark, a deleted team, a typo). Rendering the page
+      shell anyway offers a Start button for nothing and leaves the table
+      saying "Loading…" forever, so say the true thing instead. */
+  let missing = false;
+  function showMissing() {
+    if (missing) return;
+    missing = true;
+    timers.forEach(clearInterval);
+    timers = [];
+    page.innerHTML = "";
+    const wrap = mk("div", "stub");
+    wrap.appendChild(mk("h2", null, name));
+    wrap.appendChild(mk("p", null,
+      "No agent by that name is installed on this machine."));
+    const back = mk("a", "btn quiet", "All agents");
+    back.href = "#/";
+    wrap.appendChild(back);
+    page.appendChild(wrap);
+  }
 
   /* --- 1. status strip --------------------------------------------- */
 
@@ -218,7 +243,8 @@ export function mountAgent(el, { api, name }) {
       renderBand();
       // A failed start carries a preflight report. Render it under the
       // strip in the strip's own grammar rather than dropping it.
-      showReport((data && (data.report || data.error)) || verb + " failed");
+      showReport(verb + " failed",
+                 (data && (data.report || data.error)) || "");
       return;
     }
     const wantRunning = verb !== "stop";
@@ -232,10 +258,14 @@ export function mountAgent(el, { api, name }) {
     pollRuns();
   }
 
-  function showReport(text) {
+  /** The strip's inline failure band. `head` names WHICH action failed:
+      three different actions report here (start/stop/restart, Edit design,
+      Resume) and labelling a failed Edit design "start failed" sends the
+      reader to diagnose the wrong thing. */
+  function showReport(head, text) {
     els.report.innerHTML = "";
-    els.report.appendChild(mk("span", "rep-head", "start failed"));
-    els.report.appendChild(document.createTextNode(text));
+    els.report.appendChild(mk("span", "rep-head", head));
+    els.report.appendChild(document.createTextNode(text || ""));
     els.report.hidden = false;
   }
 
@@ -374,7 +404,7 @@ export function mountAgent(el, { api, name }) {
   // so a hardcoded /setup/<slot> link is not guaranteed to resolve.
   els.edit.addEventListener("click", async () => {
     const err = await openSetup({ name, mode: "open" });
-    if (err) showReport(err);
+    if (err) showReport("couldn't open the editor", err);
   });
 
   /* --- 3. runs table ------------------------------------------------ */
@@ -389,7 +419,9 @@ export function mountAgent(el, { api, name }) {
     const counts = (runs && runs.counts) || {};
     els.tabs.innerHTML = "";
     for (const t of TABS) {
-      const n = counts[t.key];
+      // ALL stays bare: the panel head's "⌁ N runs" IS the all-count, and
+      // printing it again one gap to the right reads as two facts.
+      const n = t.key === "all" ? null : counts[t.key];
       const b = mk("button", "tab" + (tab === t.key ? " active" : ""),
                    n == null ? t.label : `${t.label} · ${n}`);
       b.type = "button";
@@ -421,7 +453,7 @@ export function mountAgent(el, { api, name }) {
     if (!rows.length) {
       els.runsEmpty.hidden = false;
       els.runsEmpty.textContent = !runs
-        ? "Loading…"
+        ? (runsError || "Loading…")
         : tab === "failed"
           ? "Nothing needs a human — no failed, crashed, or stalled runs."
           : tab === "running"
@@ -511,7 +543,7 @@ export function mountAgent(el, { api, name }) {
       `${base}/workflows/runs/${encodeURIComponent(row.run_id)}/resume`,
       { method: "POST", body: "{}" });
     if (!sent) {
-      showReport((data && data.error) || "resume failed");
+      showReport("resume failed", (data && data.error) || "");
       return;
     }
     pollRuns();
@@ -612,11 +644,17 @@ export function mountAgent(el, { api, name }) {
       slabLine("ran for", fmtDur(row.duration_seconds));
     }
     slabLine("origin", row.origin);
-    slabLine("step", d.suspended_at_step >= 0 ? d.suspended_at_step : "");
+    const step = d.suspended_at_step >= 0 ? d.suspended_at_step : "";
+    slabLine("step", step);
     slabLine("awaiting", d.await_event);
     slabLine("run key", d.run_key);
     slabLine("repo", d.repo);
-    if (row.error) slabLine("why", row.error);
+    // A stalled run's `error` IS its step and awaited event restated as a
+    // sentence ("suspended at step 3 awaiting pr.merged") — the two lines
+    // above already say it, in this slab's own label/value grammar. Any
+    // other row's error is news, so it still prints.
+    const restated = row.status === "stalled" && step !== "" && d.await_event;
+    if (row.error && !restated) slabLine("why", row.error);
     if (d.resumable) {
       els.slabBody.appendChild(mk("div", "tr-empty",
         "Resume continues from this step as if the awaited event arrived."));
@@ -661,12 +699,20 @@ export function mountAgent(el, { api, name }) {
   /* --- polling ------------------------------------------------------- */
 
   async function pollHealth() {
-    const { ok, data } = await api(base + "/health");
+    const { ok, status, data } = await api(base + "/health");
+    if (status === 404) return showMissing();
     if (ok && data) { health = data; renderBand(); }
   }
   async function pollRuns() {
-    const { ok, data } = await api(base + "/runs");
-    if (ok && data) { runs = data; renderTabs(); renderRuns(); }
+    const { ok, status, data } = await api(base + "/runs");
+    if (status === 404) return showMissing();
+    if (ok && data) { runs = data; renderTabs(); renderRuns(); return; }
+    // A read that failed is not a read that is still running. Left saying
+    // "Loading…" the table claims work is coming that never will.
+    runsError = status === 0
+      ? "Lost the app server — the table stopped updating."
+      : "Could not read this agent's runs.";
+    renderRuns();
   }
   async function pollOverview() {
     const { ok, data } = await api(base + "/overview");
@@ -687,7 +733,7 @@ export function mountAgent(el, { api, name }) {
 
   // The strip and the runs table are the live surfaces. Composition only
   // changes in setup, and spend moves slowly, so both poll far slower.
-  const timers = [
+  timers = [
     setInterval(pollHealth, 4000),
     setInterval(pollRuns, 4000),
     setInterval(pollSpend, 10000),

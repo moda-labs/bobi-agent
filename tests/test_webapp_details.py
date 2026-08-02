@@ -232,6 +232,21 @@ class TestRunDetails:
         assert "command" not in body["definition"]
         assert "sk-secret" not in json.dumps(body)
 
+    def test_clock_scheduled_monitor_omits_the_unused_interval(
+            self, bobi_install):
+        # The registry fills `interval` with its default even for an `at:`
+        # monitor, which never uses it. Printed alongside `at`, the slab
+        # contradicts itself AND the run row, whose origin says "at 09:00".
+        (paths.package_dir(bobi_install.repo_path) / "monitors.yaml").write_text(
+            yaml.dump({"monitors": [{
+                "name": "inbox-watch", "at": ["09:00"],
+                "description": "watch", "command": "true",
+            }]}))
+        run = _seed_monitor_run()
+        body = build_details(bobi_install.repo_path, run.run_id)
+        assert "interval" not in body["definition"]
+        assert body["definition"]["at"] == ["09:00"]
+
     def test_unknown_run_id(self, bobi_install):
         with pytest.raises(UnknownRun):
             build_details(bobi_install.repo_path, "no-such-run")
