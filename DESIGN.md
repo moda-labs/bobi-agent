@@ -485,9 +485,20 @@ port 8642) serving a shell with a hash router:
 - **`#/` Dashboard** - every agent slot on the machine (running / stopped /
   design-only) with start/stop/open actions. Subsumes the "two homes" problem:
   the setup hub's design library and the runtime roster share this one home.
-- **`#/agents/<name>`** - the Agent UI above, as a route; endpoints are
-  team-scoped (`/api/agents/<name>/subagents`, `.../chat`) and resolve the
-  runtime per request. Chat is submit-then-poll (no held-open request).
+- **`#/agents/<name>`** - the single-agent view (#887, 2026-08-01,
+  supersedes the roster+chat page this route used to render): a dark
+  instrument **status strip** (RUNNING / STOPPED / NOT RESPONDING, telemetry
+  segments, the recovery action), an **identity header** (description, SAVED
+  and ABOUT hover-or-tap popovers, Edit design), and **one runs table**
+  folding sessions, workflow runs and monitor runs with ALL / RUNNING /
+  FAILED tabs. A row opens the dark slab: a transcript when it has a
+  session, details when it does not. State is carried by green/red/neutral
+  so amber stays the accent; the STOPPED strip drops the amber top edge
+  because the screen is powered down. Endpoints are team-scoped
+  (`/api/agents/<name>/health`, `.../runs`, `.../overview`) and resolve the
+  runtime per request. The five panels it replaced (needs-attention, health,
+  spend, roster, session log) and the chat column are gone - Slack and the
+  CLI are the chat surfaces; this page observes and recovers.
 - **`#/setup`** - a create-team form that hands off to the full setup app,
   mounted unmodified under `/setup/` (the SPA prefixes URLs with a `{{BASE}}`
   mount prefix; standalone `bobi setup` passes an empty prefix and is

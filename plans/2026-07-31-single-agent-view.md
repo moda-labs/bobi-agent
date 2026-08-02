@@ -251,20 +251,20 @@ first. Implementation stacks on an integration branch
 - Testable: resume a seeded suspended run via `curl`; status flips.
 
 **U7 — the page** *(Phase 3 UI — replaces the current agent view)*
-- [ ] Status strip (three states, glow semantics, preflight-report
+- [x] Status strip (three states, glow semantics, preflight-report
       failure state) + start/stop/restart wiring.
-- [ ] Identity header: SAVED + ABOUT popovers (hover + tap), Edit design
+- [x] Identity header: SAVED + ABOUT popovers (hover + tap), Edit design
       via `/api/setup/open`.
-- [ ] Runs table: tabs + counts, origin sub-lines, outcome/error notes,
+- [x] Runs table: tabs + counts, origin sub-lines, outcome/error notes,
       polling (reuse existing 4s/10s + backoff pattern).
-- [ ] Transcript/Details dark slab (row click; Esc closes).
-- [ ] Resume button + confirm.
-- [ ] Remove the replaced panels (needs-attention, health, spend, roster,
+- [x] Transcript/Details dark slab (row click; Esc closes).
+- [x] Resume button + confirm.
+- [x] Remove the replaced panels (needs-attention, health, spend, roster,
       session log, chat column) and their dead endpoints' UI callers.
 - Testable: the full page against a live seeded agent.
 
 **U8 — QA seed + docs + polish** *(acceptance enabler)*
-- [ ] A dev seed script that populates an isolated `BOBI_HOME` with every
+- [x] A dev seed script that populates an isolated `BOBI_HOME` with every
       state the page renders: completed/failed/crashed sessions, a live
       run, completed + stalled workflow runs, monitor records in all
       three outcomes, script-cache state, spend history.
@@ -329,6 +329,20 @@ comparison (dashboard's job) · RBAC/audit.
 ## Amendments
 
 — none yet.
+
+*(The line above and the header's `Last amended` are frozen review surface —
+the plan-artifact check is insertion-only, so amendments land beneath the
+placeholder rather than replacing it. Last amended: **2026-08-01**.)*
+
+- **2026-08-01** (U7 build session): **a session-less WORKFLOW row renders
+  its Details slab from the row itself, with no fetch.** The design delta
+  "rows with a session get Transcript, rows without get Details" was
+  written with monitor rows in mind, and U5's details endpoint serves
+  monitor run records only — so a stalled workflow run, which is exactly
+  the session-less row a human most needs to open, 404'd. Its row already
+  carries the whole story (`await_event`, `suspended_at_step`, `run_key`,
+  `repo`, the error), so the slab renders from that. Found by driving the
+  real page in a browser, not by a unit test.
 
 *(The line above and the header's `Last amended` are frozen review surface —
 the plan-artifact check is insertion-only, so amendments land beneath the
