@@ -661,9 +661,13 @@ export function mountAgent(el, { api, name }) {
     }
   }
 
+  /** One `label  value` row in the Details slab. It borrows the transcript's
+      line, but NOT its speaker column: these labels are data (a monitor
+      definition's own keys), so the column has to be sized for them and has
+      to wrap rather than paint over the value — hence `field`. */
   function slabLine(label, value) {
     if (value === "" || value == null) return;
-    const l = mk("div", "tr-line");
+    const l = mk("div", "tr-line field");
     l.appendChild(mk("span", "who tool", label));
     l.appendChild(mk("span", "txt", String(value)));
     els.slabBody.appendChild(l);

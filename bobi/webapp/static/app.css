@@ -954,6 +954,15 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
 .tr-line .who.user { color: var(--slab-muted); }
 .tr-line .who.agent { color: var(--slab-accent); }
 .tr-line .who.tool { color: var(--syn-key); }
+/* The Details slab reuses .tr-line as a label/value grid. Its labels are the
+   run record's and the monitor definition's own keys - `description`,
+   `published`, `relevance` - none of which fit the 52px speaker column, and
+   any of which could be longer still since the definition's keys are data.
+   A wider column, and one that WRAPS: a label that outgrows even this must
+   take a second line, never paint over the value beside it. */
+.tr-line.field .who {
+  width: 96px; word-break: break-word; text-transform: uppercase;
+}
 .tr-line .txt { color: var(--slab-text); white-space: pre-wrap; word-break: break-word; }
 .tr-line.tool .txt { color: var(--syn-str); }
 .tr-line.err .txt { color: var(--slab-err); }
