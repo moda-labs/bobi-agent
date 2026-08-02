@@ -50,21 +50,8 @@ function noteFailure() {
   }
 }
 
-const LOCK = `<svg class="lock" viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" stroke-width="2.4"><rect x="5" y="11" width="14"
-    height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>`;
-
-/** The titlebar's address chip. On the dashboard it reads as an address,
-    the way setup's does; one level down it becomes the way back, which is
-    the same move setup makes when it is hosted here (`.addr-back`). */
-export function setAddress(here) {
-  const el = document.getElementById("addr");
-  el.innerHTML = here
-    ? `<a class="addr-back" href="#/">← dashboard</a>
-       <span aria-hidden="true">/</span><span class="here"></span>`
-    : `${LOCK}<span>127.0.0.1 / dashboard</span>`;
-  if (here) el.querySelector(".here").textContent = here;
-  document.title = here ? `bobi · ${here}` : "bobi";
+export function setSubtitle(text) {
+  document.getElementById("subtitle").textContent = text;
 }
 
 // Spend formatting, shared by the dashboard and agent views (#733):
@@ -178,7 +165,7 @@ async function route() {
   if (r.view === "agent") {
     const mod = await import("./views/agent.js").catch(() => null);
     if (mod) {
-      setAddress(r.name);
+      setSubtitle(r.name);
       teardown = mod.mountAgent(el, { api, name: r.name });
       return;
     }
@@ -186,11 +173,11 @@ async function route() {
     return;
   }
   if (r.view === "setup") {
-    setAddress("setup");
+    setSubtitle("setup");
     mountSetupEntry(el, r);
     return;
   }
-  setAddress("");
+  setSubtitle("agents");
   teardown = mountDashboard(el, { api });
 }
 
