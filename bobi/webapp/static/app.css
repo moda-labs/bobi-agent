@@ -45,31 +45,51 @@ html[data-retro="on"] body {
   font-size: 11px;
 }
 
-/* --- top bar --- */
-.bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 18px;
-  background: var(--surface);
+/* --- titlebar ---
+   Ported from the setup app rather than re-invented, and deliberately not
+   "close enough": the setup SPA mounts under /setup/ as a real page, so a
+   user crossing into Edit design sees ITS titlebar. Two titlebars that
+   differ in mark or layout make one product read as two. Keep these rules
+   and setup's in step; the mark itself is a shared asset so it cannot
+   drift. */
+.titlebar {
+  height: 42px; flex: 0 0 42px;
+  display: flex; align-items: center; gap: 12px; padding: 0 14px;
+  background: linear-gradient(var(--raised), var(--surface));
   border-bottom: 1px solid var(--border);
-  flex: none;
 }
-.bar .mark { color: var(--accent); display: inline-flex; }
-.bar .home-link { text-decoration: none; }
-.bar .title {
-  font-family: var(--font-mono);
-  letter-spacing: 0.08em;
-  font-weight: 600;
+.tdots { display: flex; gap: 7px; }
+.tdots i {
+  width: 11px; height: 11px; border-radius: 50%; display: block;
+  background: #D9CFC0;
 }
-.bar .sub {
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 11px;
-  color: var(--muted);
+.tdots i:nth-child(1) { background: #E0A89A; }
+.tdots i:nth-child(2) { background: #E6CE9C; }
+.tdots i:nth-child(3) { background: #B9D6AE; }
+.addr {
+  font-family: var(--font-mono); font-size: 12px; color: var(--muted);
+  display: flex; align-items: center; gap: 7px; min-width: 0;
 }
-.bar .spacer { flex: 1; }
+.addr .lock { width: 11px; height: 11px; color: var(--accent); flex: none; }
+.addr .here { color: var(--text); }
+/* Mirrors setup's own `.addr-back`: on any route below the dashboard the
+   address chip IS the way back home. */
+.addr .addr-back { color: var(--muted); text-decoration: none; }
+.addr .addr-back:hover { color: var(--accent); }
+.titlebar .spacer { flex: 1; }
+.titlebar .brand {
+  display: flex; align-items: center; gap: 8px; padding: 3px 7px;
+  margin: 0 -7px; border-radius: 8px; text-decoration: none;
+  color: inherit; transition: background .15s;
+}
+.titlebar .brand:hover { background: var(--raised); }
+.titlebar .brand:active { transform: translateY(.5px); }
+.titlebar .brand .mk {
+  width: 22px; height: 22px; border-radius: 6px; background: #201A14;
+  display: grid; place-items: center;
+}
+.titlebar .brand .mk svg { width: 16px; height: 16px; }
+.titlebar .brand b { font-size: 13px; }
 .dot {
   width: 9px; height: 9px; border-radius: 50%;
   background: var(--ok);

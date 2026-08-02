@@ -509,6 +509,24 @@ Same design language verbatim: tokens.css, warm chrome, one dark slab, amber
 accent. The standalone `bobi setup` and container `ui` surfaces keep working
 during the transition.
 
+**One titlebar, one mark** (2026-08-01). The shell wears the *same* titlebar
+setup does — window dots, the address chip, the probe mark and wordmark on the
+right — because setup mounts under `/setup/` as a real page, never an iframe.
+Crossing into Edit design therefore swaps the whole document, and a chrome that
+differs in mark or layout makes one product read as two. The shell had grown
+its own bar with a different glyph (a sun/rays asterisk, not the probe mark)
+and everything left-aligned; that is gone.
+
+- The address chip is the breadcrumb: `127.0.0.1 / dashboard` at the root,
+  `← dashboard / <name>` one level down — the same move setup already made
+  when hosted here (its `.addr-back`).
+- `bobi-mark.svg` is a **shared asset** (`webui_common/static/`, listed in
+  `SHARED_ASSET_NAMES`) rather than a copy per surface. A second copy of a
+  logo becomes a second logo the first time one is edited.
+- Content width is per-view and deliberately not unified: setup is a wizard
+  and reads in a narrow column; the dashboard and the runs table are working
+  surfaces and use the frame.
+
 ## Decisions log
 | date | decision | rationale |
 |---|---|---|
