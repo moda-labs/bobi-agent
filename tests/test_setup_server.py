@@ -117,8 +117,11 @@ class TestSecurity:
         r = c.get("/static/tokens.css")
         assert r.status_code == 200
         assert "text/css" in r.headers["content-type"]
-        assert "--bg: #F4F1EA;" in r.text
-        assert "--accent: #C8612B;" in r.text
+        # The shared sheet defines both the brand palette and the legacy
+        # aliases the app stylesheets still consume. Exact values are pinned
+        # against the design system in tests/test_webui_tokens.py.
+        assert "--bobi-acc:" in r.text
+        assert "--bg: var(--surface-page);" in r.text
 
     def test_app_css_does_not_define_design_tokens(self, project):
         app = server.build_app(SetupState(), project, nonce=NONCE)

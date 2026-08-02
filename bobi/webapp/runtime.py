@@ -86,8 +86,8 @@ class TeamRuntime(ABC):
     outcome lands on the job) so no request is held open for a minutes-long
     agent reply regardless of what transport an implementation uses.
 
-    Widening this ABC: an out-of-tree subclass lives in the private
-    bobi-deploy repo (``EventBusRuntime``), whose CI tracks this repo's
+    Widening this ABC: an out-of-tree subclass lives in a private consumer
+    repo (``EventBusRuntime``), whose CI tracks this repo's
     ``dev`` channel (auto-advanced to every green main push, #740). Adding
     an ``@abstractmethod`` here therefore breaks that repo's CI the moment
     this repo merges - Python rejects instantiating the subclass until it

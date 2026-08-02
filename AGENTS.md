@@ -49,7 +49,10 @@ Bobi is an event-driven AI agent framework.
 - `docs/TICKETING_POLICY.md`: Linear/GitHub ticketing conventions.
 - `docs/RELEASE_RUNBOOK.md`: release process and checklist.
 - `docs/FRONTEND_QA.md`: local frontend QA guidance for Bobi's vanilla web UIs.
-- `DESIGN.md`: source of truth for `bobi setup` web UI visual and UX decisions.
+- `docs/design-system/`: the Bobi design system - source of truth for
+  anything visual on any Bobi surface (palette, type, icon set, components).
+- `DESIGN.md`: source of truth for `bobi setup` UX and its offline constraints;
+  its visual tokens were superseded by the design system on 2026-07-31.
 
 ## First Principles
 
@@ -91,8 +94,12 @@ conventions that hold regardless of how the stages are tooled:
 
 - **Plans**: initiative-sized work (multiple coherent deliverables) gets
   a plan artifact `plans/<slug>.md`, merged and amended via PR, with a
-  lightweight GitHub tracking issue labeled `plan` (the issue holds
-  discussion and labels; the plan file is the source of truth). Builders
+  lightweight GitHub tracking issue (the issue holds discussion; the plan
+  file is the source of truth). That issue is the feature request itself —
+  no `plan` label, no `[plan]` prefix, a title that outlines the task to be
+  accomplished, and a body someone can act on. Bug titles take the opposite
+  shape: the shortcoming caused, in as few words as possible. See
+  `docs/TICKETING_POLICY.md` §1a and §2a. Builders
   flip the plan's status markers (`[ ]` / `[wip]` / `[x]` / `[f]`)
   inside their PRs; post-approval changes are dated amendments, never
   silent rewrites. Single-unit work skips the plan and writes its design
@@ -127,11 +134,22 @@ unit suites and includes the knowledge-base dependencies imported during test
 collection. Use `.[dev]` only for focused e2e work that does not collect the
 KB test surface.
 
-Deployment (containers, Fly fleet, the Cloudflare Worker event tier) lives in
-the private `moda-labs/bobi-deploy` repo, which installs this repo from a
-side-by-side checkout. Nothing in `bobi/` may import from it: private
-imports/pins public, never the reverse (`tests/test_import_boundaries.py`
-enforces this).
+The container recipe (`Dockerfile`, `docker/`) and the Cloudflare Worker event
+tier (`event-server/worker/`) live in THIS repo and are public, alongside the
+three local event-server variants. Moda's own deployment surface - the Fly
+deploy engine, the hosted console, the fleet workflows - is private, in
+`moda-labs/moda-agents` under `bobi-deploy/`, and consumes this repo as a
+RELEASED PyPI version (`pip install bobi==<pin>`), never a checkout. The former
+`moda-labs/bobi-deploy` repo is archived; nothing builds or releases from it.
+
+Two rules survive that move, both enforced by
+`tests/test_import_boundaries.py`: private imports/pins public, never the
+reverse; and the public/private line itself, encoded as literal allowlists
+(`WORKER_ADAPTER_MODULES` vs `PUBLIC_LOCAL_MODULES`, plus a container-token
+scan over `bobi/`) so a module that lands on the wrong side fails CI rather
+than drifting silently. A fleet repo must never gate this repo's tip-of-main:
+`bobi-agent` owns the machinery that keeps its releases from breaking
+consumers.
 
 ## Worktree Policy
 
@@ -155,14 +173,91 @@ Integration tests drive real Claude Code sessions. Run them before pushing when
 the change touches runtime behavior, session orchestration, workflows, monitors,
 or event delivery.
 
+## Live CI Lanes
+
+Two workflows spend real money to prove the things the rest of CI cannot.
+Both are **off by default**: they run nightly, on manual dispatch, or on a PR
+carrying the **`ci:live`** label. Neither runs on a fork PR at all.
+
+| Lane | Workflow | Proves | Cost per run |
+|---|---|---|---|
+| Brains | `container.yml` (`container-image` job) | The reference image completes one real ask round-trip on a **Claude** brain and one on a **Codex** brain, against an ephemeral event server started from the real Worker sources | Two model calls (a few cents) |
+| Worker deploy | `worker-deploy-smoke.yml` | `wrangler deploy` produces a **working** Worker — the KV binding resolves, the `v1` `new_sqlite_classes` Durable Object migration applies, and a publish→subscribe round-trip completes against the deployed URL | One Cloudflare deploy |
+
+Trigger either on a PR with `gh pr edit <n> --add-label ci:live`, or standalone
+with `gh workflow run container.yml` / `gh workflow run worker-deploy-smoke.yml`.
+
+**They must prove they RAN.** Every test in both lanes carries a `skipif`, so a
+renamed secret or an unavailable harness would skip to green — which is exactly
+how this repo shipped four green-but-vacuous lanes before #909. Each lane
+therefore has two guards: a fail-fast step when a credential is empty, and
+`scripts/assert_junit_ran.py`, which reads the junit report and rejects any
+skip, any wrong count, and any missing named test. `tests/test_ci_live_wiring.py`
+asserts the wiring itself is still in place, and fails if a live step is deleted.
+
+**The Worker lane is isolated by construction.** It deploys to a dedicated
+`bobi-events-ci-smoke` Worker with its own KV namespace, in a **separate
+Cloudflare account** from the one the fleet runs production on — sharing
+production's KV would let smoke traffic write live event state. The separate
+account is what makes the isolation real: Cloudflare grants Workers and KV
+permissions at ACCOUNT scope only, with no per-script or per-namespace
+restriction, so a token confined to a CI-only account is the strongest
+boundary available. `scripts/render_worker_ci_config.py` derives the
+CI config from the shipped `wrangler.jsonc` (so the migration and compatibility
+date stay identical to what production deploys) and refuses to render a config
+that names `bobi-events`, that carries the `REPLACE_WITH_YOUR_KV_NAMESPACE_ID`
+placeholder, or whose KV id did not come from CI configuration.
+
+Required repo secrets: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` (brains);
+`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CI_SMOKE_KV_NAMESPACE_ID`
+(Worker deploy). `pull_request_target` is never used in this repo — it is the
+one trigger that would hand a fork's code these secrets, and a test enforces
+its absence.
+
+**Known blind spot:** no canary exercises `auth: subscription`, the mode most
+fleet teams run, because a fresh subscription volume triggers a device login
+that blocks on a human. Tracked separately; see
+`plans/2026-08-01-ci-coverage.md` Q3.
+
 ## Frontend QA
 
 For any frontend change, read `docs/FRONTEND_QA.md` before deciding how to test it.
 
 ## Design System
 
-Before any visual or UX decision on the `bobi setup` web UI, read `DESIGN.md`.
-It supersedes older setup UI design assumptions elsewhere in the repo.
+`docs/design-system/` is the **Bobi design system** and the source of
+truth for anything **visual** on any Bobi surface. Read its `README.md` before
+making a visual decision; `SKILL.md` lists the non-negotiables. It is also
+invocable as `/bobi-design`.
+
+The four rules that matter most:
+
+1. **Violet is state, not decoration** — live, enforced, gated, focused.
+   Anything decorative is clay. Moda's red never appears on a Bobi surface.
+2. **Gates are sacred** — a human approval step always renders with the violet
+   rail + rotated-square glyph and names the workflow and step. Never a toast.
+3. **Config is the interface** — show real filenames, real YAML, real shell.
+4. **The lockup always travels with the "BY MODA LABS ↗" byline.**
+
+Also load-bearing: mono is for **data** (paths, ids, crons, code), sans for
+chrome; product chrome is **lowercase**, with uppercase only on document plate
+labels and corner marks; Bobi's own hand-drawn icon set only — never Lucide,
+Heroicons, or emoji.
+
+`DESIGN.md` remains the source of truth for the **UX** of the `bobi setup`
+wizard (its flow, pacing, and the digestion-prompt philosophy) and for its
+local hard constraints: fully offline, vanilla HTML/CSS/JS, no build step,
+inline SVG only. As of the 2026-07-31 amendment it is **no longer** the origin
+of the visual tokens — both local web UIs were reskinned onto the design
+system.
+
+The ported tokens live in `bobi/webui_common/static/tokens.css`, shared by
+`bobi setup` and `bobi app`. It is hand-maintained, so
+`tests/test_webui_tokens.py` pins it to the design system and fails on drift.
+The brand faces (Geist, Geist Mono, Inter) are vendored as woff2 under
+`bobi/webui_common/static/fonts/` — never a CDN, so the UIs stay offline.
+Refresh them with `python3 scripts/fetch_brand_fonts.py
+bobi/webui_common/static/fonts`.
 
 ## Release Rules
 

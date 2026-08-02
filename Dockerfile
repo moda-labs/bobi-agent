@@ -154,9 +154,11 @@ ENV PYTHONUNBUFFERED=1 \
 #   ripgrep, bubblewrap   — the Codex CLI's runtime helpers (code search + its
 #                           sandbox). The standalone codex binary uses these from
 #                           PATH; distro packages keep the image Node-free.
-# NB: no tini. Fly Machines (the deploy target) inject their own PID-1 init that
-# reaps zombies + forwards signals, and layering tini on top is a documented
-# cause of "failed to spawn ... No such file or directory" boot failures there.
+# NB: no tini. Some container platforms inject their own PID-1 init that reaps
+# zombies + forwards signals, and layering tini on top is a documented cause of
+# "failed to spawn ... No such file or directory" boot failures on those.
+# Callers on runtimes without one supply it themselves (`docker run --init`);
+# see docs/REFERENCE_IMAGE.md for the per-runtime table.
 # For other container runtimes, run with an init (e.g. `docker run --init`).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -281,7 +283,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/healthcheck.sh
 VOLUME ["/data"]
 # WORKDIR must NOT be under /data: a volume mounted there shadows the
 # build-time dir, so the container's cwd ceases to exist at runtime and the
-# platform init (e.g. Fly Machines) fails to spawn the entrypoint with ENOENT.
+# platform init fails to spawn the entrypoint with ENOENT.
 # The entrypoint binds BOBI_ROOT to the selected agent run directory.
 WORKDIR /
 

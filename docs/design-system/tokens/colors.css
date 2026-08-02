@@ -1,0 +1,115 @@
+/* Bobi color system.
+   Bobi inherits the Moda Labs "warm editorial print" palette wholesale and
+   swaps the one thing that makes it Bobi: the accent. Moda's signature red
+   (#FD4235) is REPLACED by dusk violet — never use red in a Bobi surface. */
+
+:root {
+  /* ---- paper / ink base (identical to Moda Labs) ---- */
+  --bobi-paper: #FAF7EE;        /* default canvas */
+  --bobi-paper-alt: #EAE4D1;    /* alternating section band, chip fill */
+  --bobi-ink: #362E25;          /* primary text, line-art strokes */
+  --bobi-muted: #84725B;        /* secondary text, mono labels */
+  --bobi-rule: #E5DED6;         /* soft solid hairline */
+  --bobi-clay: #D67B55;         /* terracotta: highlight clause, indices, riso offset */
+  --bobi-sky: #7DAABD;          /* rare supporting blue */
+  --bobi-void: #221C15;         /* warm near-black: footer, dark surface */
+  --bobi-white: #FFFDF8;        /* warm white — the raised app surface */
+
+  /* ---- the Bobi accent: dusk violet ----
+     sRGB fallbacks are declared first so browsers without oklch() still get a
+     working accent; oklch re-declarations win where supported. */
+  --bobi-acc: #6556c8;
+  --bobi-acc-bright: #9690f1;
+  --bobi-acc: oklch(0.53 0.17 285);         /* on light surfaces */
+  --bobi-acc-bright: oklch(0.70 0.14 285);  /* on dark surfaces, glyph dots */
+
+  /* violet washes — always via color-mix, never an /opacity modifier on the var */
+  --bobi-acc-wash: color-mix(in srgb, var(--bobi-acc) 5%, transparent);
+  --bobi-acc-wash-strong: color-mix(in srgb, var(--bobi-acc) 12%, transparent);
+  --bobi-acc-border: color-mix(in srgb, var(--bobi-acc) 55%, transparent);
+
+  /* ---- terminal surface (the product's dark inset) ---- */
+  --bobi-term-bg: #0F1226;
+  --bobi-term-fg: rgba(250, 247, 238, 0.88);
+  --bobi-term-dim: rgba(250, 247, 238, 0.45);
+  --bobi-term-ok: oklch(0.78 0.10 65);      /* warm amber: success output, hero highlight */
+
+  /* ---- hero night sky (the dusk print scrim) ---- */
+  --bobi-night: #1A1D33;
+  --bobi-night-scrim: rgba(15, 18, 38, 0.92);
+
+  /* ---- semantic aliases: use THESE in product UI ---- */
+  --text-primary: var(--bobi-ink);
+  --text-secondary: var(--bobi-muted);
+  --text-highlight: var(--bobi-clay);
+  --text-accent: var(--bobi-acc);
+  --text-on-dark: var(--bobi-paper);
+
+  --surface-page: var(--bobi-paper);
+  --surface-band: var(--bobi-paper-alt);
+  --surface-card: var(--bobi-paper);
+  --surface-inset: rgba(234, 228, 209, 0.6);   /* fig-chip / icon tile fill */
+  --surface-dark: var(--bobi-void);
+  --surface-terminal: var(--bobi-term-bg);
+
+  --border-hairline: var(--bobi-rule);
+  --border-card: rgba(54, 46, 37, 0.15);       /* the figure/plate border */
+  --border-node: rgba(54, 46, 37, 0.12);       /* fig-node card border */
+  --border-strong: rgba(54, 46, 37, 0.25);     /* file chip, input border */
+  --border-dashed: rgba(132, 114, 91, 0.55);   /* architect dashed rule */
+  --border-gate: var(--bobi-acc-border);
+
+  /* ---- soft status fills (bordered badges) ----
+     Each status gets a 10% tint and a 35% border so a badge reads as an object
+     rather than loose text. Enterprise density needs the edge. */
+  --status-live-soft: color-mix(in srgb, var(--bobi-acc) 9%, var(--bobi-white));
+  --status-live-edge: color-mix(in srgb, var(--bobi-acc) 32%, transparent);
+  --status-waiting-soft: color-mix(in srgb, var(--bobi-clay) 12%, var(--bobi-white));
+  --status-waiting-edge: color-mix(in srgb, var(--bobi-clay) 38%, transparent);
+  --status-done-soft: color-mix(in srgb, var(--bobi-ink) 6%, var(--bobi-white));
+  --status-done-edge: color-mix(in srgb, var(--bobi-ink) 20%, transparent);
+  --status-idle-soft: color-mix(in srgb, var(--bobi-muted) 8%, var(--bobi-white));
+  --status-idle-edge: color-mix(in srgb, var(--bobi-muted) 26%, transparent);
+  --status-failed-soft: color-mix(in srgb, #9E3A28 8%, var(--bobi-white));
+  --status-failed-edge: color-mix(in srgb, #9E3A28 32%, transparent);
+
+  /* ---- run/agent status (product UI) ----
+     Bobi's marketing source encodes status only as violet (live/enforced/gate),
+     clay (label/index), and muted (idle). The product needs failure too; it
+     borrows Moda's brick rather than inventing a new red. */
+  --status-live: var(--bobi-acc);
+  --status-done: var(--bobi-ink);
+  --status-waiting: var(--bobi-clay);
+  --status-idle: var(--bobi-muted);
+  --status-failed: #9E3A28;
+}
+
+
+/* ============================================================================
+   APP SURFACE RAMP — product UI only.
+   Marketing surfaces stay deliberately flat: one cream canvas, hairlines, no
+   elevation. An enterprise app needs hierarchy instead, so scoping the ramp to
+   .bobi-app gives dense screens a sunken page, near-white cards, and a real
+   elevation scale WITHOUT touching the marketing language.
+   ========================================================================= */
+.bobi-app {
+  /* Warm but LOW-CHROMA. The marketing cream (#FAF7EE) is beautiful full-bleed
+     and turns beige-pink when it tiles a dense screen, so the app pulls most of
+     the chroma out while keeping the warm hue. Same family, less saturation. */
+  --surface-page: #F4F2ED;      /* sunken page — warm, nearly neutral */
+  --surface-card: #FFFFFF;      /* cards are white: data reads cleanest on white */
+  --surface-raised: #FFFFFF;
+  --surface-band: #EDEBE5;
+  --surface-inset: rgba(54, 46, 37, 0.04);
+  --surface-hover: rgba(54, 46, 37, 0.025);
+  --surface-selected: color-mix(in srgb, var(--bobi-acc) 5%, #FFFFFF);
+
+  /* Secondary text: the marketing muted (#84725B) is a saturated brown that
+     reads dated in bulk UI. This keeps the warmth, drops the chroma, and gains
+     contrast (4.9:1 on white). */
+  --text-secondary: #6B6459;
+
+  --border-hairline: rgba(54, 46, 37, 0.09);
+  --border-card: rgba(54, 46, 37, 0.10);
+  --border-strong: rgba(54, 46, 37, 0.17);
+}

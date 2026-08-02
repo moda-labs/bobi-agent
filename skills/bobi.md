@@ -46,7 +46,7 @@ bobi agents browse
 bobi agents update <name>
 bobi agents add-registry <repo>
 bobi build <team> --tag <ref> [--push]  # render a team into a ready-to-run
-                                        #   image (needs the bobi-deploy plugin)
+                                        #   image (needs the deploy plugin)
 ```
 
 `<source>` can be a local source directory, local `.tar.gz`, public

@@ -7,23 +7,35 @@
   <meta name="bobi-base" content="{{BASE}}" />
   <title>bobi setup</title>
   <link rel="icon" type="image/svg+xml" href="{{BASE}}/static/bobi-mark.svg" />
+  <link rel="stylesheet" href="{{BASE}}/static/fonts.css" />
   <link rel="stylesheet" href="{{BASE}}/static/tokens.css" />
+  <link rel="stylesheet" href="{{BASE}}/static/chrome.css" />
   <link rel="stylesheet" href="{{BASE}}/static/app.css" />
 </head>
-<body>
+<!-- .bobi-app switches on the product surface ramp (sunken page, white cards,
+     elevation scale) from tokens.css. Marketing surfaces never get it. -->
+<body class="bobi-app">
   <div class="app">
-    <div class="titlebar">
-      <div class="tdots"><i></i><i></i><i></i></div>
-      <div class="addr">
-        <svg class="lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
-        127.0.0.1 / setup
+    <!-- The global top bar. Structure and styling are shared with the web app
+         via chrome.css so the top level of the UI never changes shape as you
+         move around: back + page name on the left, lockup + byline on the
+         right. #navback is filled per screen by app.js (setNavBack), falling
+         back to the dashboard link when hosted inside `bobi app`. -->
+    <header class="titlebar">
+      <div class="navleft">
+        <div class="navback" id="navback"></div>
+        <span class="page-name">setup</span>
       </div>
       <div class="spacer"></div>
-      <button class="brand" type="button" data-home title="Go to homepage" aria-label="Go to homepage">
-        <span class="mk"><svg viewBox="0 0 32 32" aria-hidden="true"><g transform="translate(2,-2)"><circle cx="14" cy="18" r="6" fill="#FAF7EE"/><circle cx="14" cy="18" r="12.5" fill="none" stroke="#FAF7EE" stroke-width="1.2" stroke-dasharray="2 4" opacity="0.6"/><circle cx="23.5" cy="9.5" r="3" fill="#9690F1"/></g></svg></span>
-        <b>bobi</b>
-      </button>
-    </div>
+      <!-- The lockup always travels with the BY MODA LABS byline. -->
+      <div class="lockup">
+        <button class="brand" type="button" data-home title="Go to homepage" aria-label="Go to homepage">
+          <span class="mk"><svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="14" cy="18" r="6" fill="var(--bobi-paper)"/><circle cx="14" cy="18" r="12.5" fill="none" stroke="var(--bobi-paper)" stroke-width="1.2" stroke-dasharray="2 4" opacity="0.6"/><circle cx="23.5" cy="9.5" r="3" fill="var(--bobi-acc-bright)"/></svg></span>
+          <b>bobi</b>
+        </button>
+        <a class="byline" href="https://buildmoda.ai" target="_blank" rel="noopener noreferrer">by moda labs <span aria-hidden="true">&#8599;</span></a>
+      </div>
+    </header>
     <div class="panes" id="panes">
       <div id="main" style="display:contents"></div>
     </div>

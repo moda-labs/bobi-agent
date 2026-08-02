@@ -1,0 +1,64 @@
+/* Bobi base layer — the minimum a Bobi surface needs. Scoped mostly to
+   element defaults so it composes with Tailwind or plain CSS alike. */
+
+html, body {
+  background: var(--surface-page);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: var(--text-body-lh);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection { background: var(--bobi-acc); color: var(--bobi-paper); }
+
+h1, h2, h3, h4, h5 {
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--track-tightest);
+  color: var(--text-primary);
+  margin: 0;
+}
+h1 { font-size: var(--text-h1); line-height: var(--text-h1-lh); }
+h2 { font-size: var(--text-h2); line-height: var(--text-h2-lh); }
+h3 { font-size: var(--text-h3); line-height: var(--text-h3-lh); }
+h4 { font-size: var(--text-h4); line-height: var(--text-h4-lh); }
+h5 { font-size: var(--text-h5); line-height: var(--text-h5-lh); }
+
+p { margin: 0; color: var(--text-secondary); line-height: var(--text-body-lh); }
+code, pre, kbd { font-family: var(--font-mono); }
+
+/* Links: Bobi links are ink that warms to clay — never browser blue, and never
+   the violet accent (violet is reserved for state: live, gate, enforced). */
+a { color: var(--text-primary); text-decoration: none; transition: color var(--dur-fast) ease-out; }
+a:hover { color: var(--text-highlight); }
+
+/* focus is always the violet accent, offset from the element */
+:focus-visible {
+  outline: 2px solid var(--bobi-acc);
+  outline-offset: 2px;
+}
+
+/* the recurring 10px accent square before a mono eyebrow */
+.bobi-eyebrow {
+  display: flex; align-items: center; margin: 0 0 var(--stack-eyebrow-heading);
+  font-family: var(--font-mono); font-size: var(--text-eyebrow);
+  font-weight: var(--weight-medium); letter-spacing: var(--track-tightest);
+  color: var(--text-secondary);
+}
+.bobi-eyebrow::before {
+  content: ""; display: inline-block; width: 10px; height: 10px;
+  background: var(--bobi-acc); margin-right: 8px; flex-shrink: 0;
+}
+
+/* the highlight clause inside a heading */
+.bobi-hi { color: var(--text-highlight); }
+.bobi-acc { color: var(--text-accent); }
+
+/* uppercase mono plate label (figure headers, table headers, corner marks) */
+.bobi-plate-label {
+  font-family: var(--font-mono); font-size: var(--text-plate);
+  letter-spacing: var(--track-label); text-transform: uppercase;
+  color: var(--text-secondary);
+}

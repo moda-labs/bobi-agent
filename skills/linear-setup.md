@@ -56,12 +56,12 @@ LINEAR_API_KEY=lin_api_... LINEAR_WEBHOOK_SECRET=... \
   bobi agents install <source> --name <name> --non-interactive
 ```
 
-For a Cloudflare Worker event server (the worker ships with the private
-bobi-deploy distribution), store the same signing secret on the Worker from
-its checkout:
+For a Cloudflare Worker event server (the Worker source is in this repo under
+`event-server/worker/`), store the same signing secret on the Worker from your
+checkout:
 
 ```bash
-cd event-server  # in the bobi-deploy repo
+cd event-server/worker
 wrangler secret put LINEAR_WEBHOOK_SECRET
 ```
 

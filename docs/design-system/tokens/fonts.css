@@ -1,0 +1,5 @@
+/* Bobi type families. The product ships these via Google Fonts (the Next.js app
+   loads them with next/font/google as Geist, Geist_Mono, Inter — same families,
+   same weights). No local binaries exist in the source repo, so this design
+   system links the hosted CSS rather than shipping @font-face binaries. */
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap");

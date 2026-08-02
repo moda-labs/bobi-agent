@@ -76,9 +76,9 @@ packages = ["bobi"]
 # copy into the framework wheel would pin a team to the framework release and
 # defeat independent team versioning. `bobi setup` lists teams from the
 # registry (and, in a source checkout, the repo's `agents/` dir for dev).
-# The Fly deploy assets (Dockerfile, docker/, deploy scripts) ship in the
-# bobi-deploy plugin wheel, not here (#707) - the public product builds no
-# docker images.
+# The container recipe (Dockerfile, docker/) lives in this repo and is
+# published as the reference image; the fleet deploy engine and its scripts
+# ship in a private plugin wheel, not here (#707).
 
 [tool.hatch.build.targets.sdist]
 # Agent teams are deliberately NOT shipped in the distribution (wheel or sdist) —

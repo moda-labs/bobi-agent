@@ -54,6 +54,14 @@ class TestSleepCycleFlow:
 
         memory = paths.long_term_memory_path(bobi_env.project_path)
         cursor = paths.long_term_memory_cursor_path(bobi_env.project_path)
+        # Snapshot task files that already exist: this suite shares one home,
+        # and a manager another test started runs its OWN monitor scheduler,
+        # which spawns its own sleep cycle. SIGTERM'ing that manager mid-flight
+        # orphans its task-*.md. Asserting over a directory-wide glob would
+        # then fail on a file this test never created, so only files THIS spawn
+        # leaves behind count.
+        task_dir = paths.state_dir() / "sleep-cycle"
+        preexisting = set(task_dir.glob("task-*.md")) if task_dir.is_dir() else set()
         results = []
         try:
             _default_spawn_sleep_cycle(monitor, str(bobi_env.project_path),
@@ -71,9 +79,8 @@ class TestSleepCycleFlow:
             text = memory.read_text()
             assert "## Facts" in text and "## Decisions" in text, text
             assert "ruff" in text, f"seed decision not distilled: {text}"
-            assert not list(
-                (paths.state_dir() / "sleep-cycle").glob("task-*.md")), \
-                "sleep-cycle task file not cleaned up"
+            leaked = set(task_dir.glob("task-*.md")) - preexisting
+            assert not leaked, f"sleep-cycle task file not cleaned up: {leaked}"
         finally:
             memory.unlink(missing_ok=True)
             cursor.unlink(missing_ok=True)

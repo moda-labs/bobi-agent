@@ -1,7 +1,8 @@
 # Quickstart
 
 Go from nothing to a running Bobi agent - installed, set up, and deployed
-either on your own machine or on Fly.io. Every command is copy-pasteable.
+either on your own machine or as a container in the cloud. Every command is
+copy-pasteable.
 Expect about 15 minutes for the local path; add 15-30 more for a cloud deploy.
 
 If you get stuck at any point, jump to [If you get stuck](#if-you-get-stuck) -
@@ -14,7 +15,7 @@ have it troubleshoot with you.
 - An agent runtime (Claude Code) installed and logged in.
 - Your first agent team, designed with the `bobi setup` client and installed
   on your machine.
-- The agent running locally, or deployed as an always-on instance on Fly.io.
+- The agent running locally, or deployed as an always-on container instance.
 - Optionally, Slack wired up so you can talk to your team from chat.
 
 ## Prerequisites
@@ -36,8 +37,8 @@ have it troubleshoot with you.
   For current releases, install Node separately and verify `node --version` reports 20 or newer, including when installing Bobi with Homebrew.
   A companion Homebrew formula update will automate this prerequisite once it ships.
 
-- **Optional, for cloud deployment**: a [Fly.io](https://fly.io) account
-  (Step 5, Option B).
+- **Optional, for cloud deployment**: somewhere to run a container - a VM with
+  Docker, a Kubernetes cluster, or any container host (Step 5, Option B).
 
 You do not need to clone the Bobi repo. Bobi is a published package - install
 the CLI and go.
@@ -191,7 +192,8 @@ to the home screen at any point):
 
 1. **Test your Bobi team locally** by running it from your terminal - Step 4
    below.
-2. **Deploy the agent team** - on your own hardware or on Fly.io - Step 5.
+2. **Deploy the agent team** - on your own hardware or as a cloud container -
+   Step 5.
 3. **Finalize chat (Slack) configuration** so you can send and receive
    messages from Slack - Step 6.
 
@@ -284,47 +286,33 @@ If local covers your needs, skip ahead to
 [Step 6](#step-6-finalize-chat-slack-configuration) or
 [Where to go next](#where-to-go-next).
 
-### Option B: deploy to Fly.io (always-on)
+### Option B: deploy as a container (always-on)
 
-`bobi deploy` packages your agent into a container image and runs it as an
-always-on Fly Machine - no Dockerfile, no server config. The deployed instance
-holds an outbound WebSocket to an internet-reachable event server, so Slack
-and GitHub webhooks work without a tunnel on your machine.
-
-The deploy commands ship in the separate `bobi-deploy` package, distributed
-privately as part of the managed/enterprise offering (see the README's
-[Cloud Deployment](../README.md#cloud-deployment) section for how to get
-access). Its distribution includes the full deployment runbook
-(CONTAINERIZED_DEPLOYMENT.md).
+Bobi publishes a reference image, `ghcr.io/moda-labs/bobi`, that runs an agent
+as an always-on container on anything that already runs containers - a VM with
+Docker, a Kubernetes cluster, your own orchestrator. The instance holds an
+outbound WebSocket to an internet-reachable event server, so Slack and GitHub
+webhooks reach it without a tunnel on your machine, and it needs no public
+ingress of its own.
 
 The easiest way through this is to let Claude Code or Codex drive it. Open a
 session and paste:
 
 ```plaintext
-Read the CONTAINERIZED_DEPLOYMENT.md runbook from my bobi-deploy distribution and help me deploy my bobi agent "my-agent" to Fly.io.
+Deploy my bobi agent "my-agent" as an always-on container from ghcr.io/moda-labs/bobi. Read https://github.com/moda-labs/bobi-agent/blob/main/docs/REFERENCE_IMAGE.md for the runtime env contract and walk me through the env vars, the durable volume, and the secrets it needs.
 ```
 
 Or do it by hand:
 
-**1. Use a released Bobi version, plus the deploy plugin.** Deploy from a
-normal `uv tool install bobi` / Homebrew install (the instance image pins the
-version you're running). The `deploy`/`destroy` commands ship in the separate
-`bobi-deploy` package (distributed privately; see Option B above for access) -
-install it alongside bobi and they appear in the CLI.
+**1. Decide how the container gets your team.** On first boot it installs the
+team named by `BOBI_TEAM` (a bundled or registry name) or fetched from
+`BOBI_TEAM_URL` (a public `.tar.gz` of one team package) - set exactly one. If
+you designed your own team in Step 3, publish it as a tarball and point
+`BOBI_TEAM_URL` at it. With neither set the container enters a *wait-for-team*
+state and polls rather than crashing, which is the hook for pushing a team onto
+the volume out of band.
 
-**2. Set up Fly.** If you've never used Fly:
-
-```bash
-brew install flyctl
-fly auth signup     # or: fly auth login
-```
-
-New personal Fly orgs may be flagged "high-risk" until you verify a card at
-[fly.io/high-risk-unlock](https://fly.io/high-risk-unlock). Don't worry about
-getting all of this perfect: `bobi deploy` preflights your Fly setup first and
-prints exactly what's missing and how to fix it.
-
-**3. Write a secrets file.** Deployed instances default to API-key auth, so
+**2. Write a secrets file.** Deployed instances default to API-key auth, so
 you need an Anthropic API key (from
 [console.anthropic.com](https://console.anthropic.com)) plus every credential
 your team uses (the same ones you captured in setup - they live in
@@ -336,35 +324,46 @@ printf 'ANTHROPIC_API_KEY=sk-ant-your-key-here\n' > ./my-agent.env
 
 Keep this file out of git.
 
-**4. Deploy.** Point `--team` at your installed agent's source and go:
+**3. Run it.** The container expects a real PID 1 (`--init`) and a durable
+volume at `/data`:
 
 ```bash
-bobi deploy my-agent --team ~/.bobi/agents/my-agent/src --env-file ./my-agent.env
+docker run -d --init --name my-agent \
+  -v my-agent-data:/data \
+  --env-file ./my-agent.env \
+  -e BOBI_INSTANCE=my-agent \
+  -e BOBI_TEAM=my-team \
+  -e BOBI_AUTH=api_key \
+  -e BOBI_EVENT_SERVER=https://your-event-server.example.com \
+  ghcr.io/moda-labs/bobi:latest
 ```
 
-The command provisions the Fly app and volume, builds the image, ships your
-team, and starts the agent. First deploys take several minutes (image build
-plus first boot). It's idempotent: run the same command again anytime to
-update the instance in place.
+First boot takes a few minutes (team install plus runtime warm-up). The volume
+at `/data` is the agent's identity and its only durable state: reuse it and the
+agent resumes where it left off, discard it and you get a fresh agent.
 
-**5. Verify and operate.** The Fly app name matches your deployment name
-(`my-agent` here; it becomes `<fleet>-<name>` only if you set a fleet):
+**4. Verify and operate.**
 
 ```bash
-fly status -a my-agent
-fly logs -a my-agent
+docker logs -f my-agent
 ```
 
-Tear it down when you're done (this deletes the volume, the only copy of the
-instance's state):
+Tear it down when you're done - dropping the volume deletes the only copy of
+the instance's state:
 
 ```bash
-bobi destroy my-agent
+docker rm -f my-agent && docker volume rm my-agent-data
 ```
 
-For CI-driven fleets, GitOps, Codex-backed teams, and subscription-auth
-deployments, read the full CONTAINERIZED_DEPLOYMENT.md runbook that ships
-with the bobi-deploy distribution.
+`docs/REFERENCE_IMAGE.md` is the full runtime contract: every environment
+variable, the PID-1 requirement per orchestrator, first-boot behavior, and the
+`TEAM_DEPS` hook for baking your team's own dependencies into a derived image.
+`docs/SELF_HOSTED_EVENT_SERVER.md` covers standing up the event server this
+instance connects out to.
+
+For CI-driven fleets, GitOps reconciliation across many instances, and a hosted
+admin control plane, those are part of Moda's managed/enterprise offering - see
+the README's [Cloud Deployment](../README.md#cloud-deployment) section.
 
 ## Step 6: Finalize chat (Slack) configuration
 
@@ -423,10 +422,12 @@ Work through these in order:
    bobi agent my-agent start --fresh
    ```
 
-5. **Fly deploys:** `fly logs -a <app>` is the first stop. The deployment
-   runbook's troubleshooting list (CONTAINERIZED_DEPLOYMENT.md in the
-   bobi-deploy distribution) covers the known failure modes. Re-running
-   `bobi deploy <name>` is safe and fixes most partial deploys.
+5. **Container deploys:** the container's own logs are the first stop
+   (`docker logs <name>`, or your orchestrator's equivalent). The entrypoint
+   fails loudly rather than degrading quietly - an unresolvable team name and a
+   missing provider key under API-key auth each abort the boot with the reason.
+   `docs/REFERENCE_IMAGE.md` documents the runtime contract those checks
+   enforce.
 
 6. **Enlist an AI pair.** Bobi's docs are written to be agent-readable. Open a
    Claude Code or Codex session next to your terminal and paste:
