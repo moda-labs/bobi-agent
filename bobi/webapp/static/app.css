@@ -788,18 +788,16 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   --run-live-soft: color-mix(in srgb, #12855A 14%, var(--bobi-white));
   --run-live-lit: #3CC98A;
   --run-fail: #C2372A;
-  /* Raised from #F0655A: on the tan strip that measured 3.6:1, under AA
-     for a 15px semibold state word. This is 4.8:1. */
-  --run-fail-lit: #FA8A7C;
+  --run-fail-lit: #F0655A;
 
-  /* The strip's fill. Brand ink warmed with a little clay — a dark TAN,
-     not a black hole punched in the paper, and not the blue-black
-     `--bobi-term-bg` the transcript slab uses. Two dark surfaces doing two
-     different jobs should not be the same colour: this one is chrome the
-     page wears, that one is the machine's own output. Derived from tokens
-     so it moves if the brand does. */
-  --strip-bg: color-mix(in srgb, var(--bobi-ink) 88%, var(--bobi-clay));
-  --strip-line: color-mix(in srgb, var(--bobi-paper) 14%, transparent);
+  /* The strip's fill is the system's dark surface — the same near-black the
+     transcript slab uses. A tan was tried (brand ink warmed with clay) and
+     rejected on looks: against warm paper the near-black is what makes the
+     strip read as an instrument rather than another card, and it is the
+     ground the green and red were tuned against. Kept as tokens so the
+     surface is one line to change. */
+  --strip-bg: var(--slab-bg);
+  --strip-line: var(--slab-border);
 }
 
 .agent-page { padding: 20px 22px 28px; overflow-y: auto; flex: 1; }
@@ -881,7 +879,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 /* A failed start's preflight report, rendered under the strip in the
    strip's own grammar rather than vanishing into a toast. */
 .band-report {
-  background: color-mix(in srgb, var(--strip-bg) 92%, #000000); color: var(--slab-text);
+  background: var(--slab-surface); color: var(--slab-text);
   border-bottom: 1px solid var(--strip-line);
   font-family: var(--font-mono); font-size: 11.5px; line-height: 1.6;
   padding: 10px 20px; white-space: pre-wrap; max-height: 30vh; overflow: auto;
