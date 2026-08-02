@@ -767,14 +767,41 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
    is the visual spec; tokens come from tokens.css.
    ============================================================ */
 
-/* Status hues come from the design system, not from here. This page was
-   authored against the older amber/CRT identity, where the accent was
-   amber and had to be kept OFF status so green/red could carry state.
-   The system inverts that: violet IS state (live, enforced, gated,
-   focused), clay is the decorative highlight, and green does not exist —
-   a live thing reads violet like everything else live, and failure is
-   Moda's brick. `--status-*` are those tokens; the page defines none of
-   its own. */
+/* Operational status: a DELIBERATE, scoped deviation from the system.
+   (Decided 2026-08-01 with the maintainer.)
+
+   The system says violet is state and green does not exist — right for
+   "this integration is live", where the question is which of many things
+   is active. This page answers a different question, and only one: is my
+   agent up, and is anything broken. A steward scanning it wants the
+   traffic-light read they already have for every other running system,
+   and violet-for-live/brick-for-failed is too quiet at a glance.
+
+   So the vocabulary is green and red HERE, and nowhere else. Confined to
+   `.agent-page` so the dashboard, setup and every shared component keep
+   the system's palette; defined as tokens so the deviation is one block
+   to read and one block to revert. Neither hue is Moda's red #FD4235,
+   which never appears on a Bobi surface. `-lit` variants are the on-dark
+   readings for the status strip and the slab. */
+.agent-page {
+  --run-live: #12855A;
+  --run-live-soft: color-mix(in srgb, #12855A 14%, var(--bobi-white));
+  --run-live-lit: #3CC98A;
+  --run-fail: #C2372A;
+  /* Raised from #F0655A: on the tan strip that measured 3.6:1, under AA
+     for a 15px semibold state word. This is 4.8:1. */
+  --run-fail-lit: #FA8A7C;
+
+  /* The strip's fill. Brand ink warmed with a little clay — a dark TAN,
+     not a black hole punched in the paper, and not the blue-black
+     `--bobi-term-bg` the transcript slab uses. Two dark surfaces doing two
+     different jobs should not be the same colour: this one is chrome the
+     page wears, that one is the machine's own output. Derived from tokens
+     so it moves if the brand does. */
+  --strip-bg: color-mix(in srgb, var(--bobi-ink) 88%, var(--bobi-clay));
+  --strip-line: color-mix(in srgb, var(--bobi-paper) 14%, transparent);
+}
+
 .agent-page { padding: 20px 22px 28px; overflow-y: auto; flex: 1; }
 
 /* --- header card + the ship's-computer instrument strip --- */
@@ -782,9 +809,15 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 12px; margin-bottom: 16px; overflow: visible;
 }
+/* The strip is dark CHROME, not the terminal. `--bobi-void` is the brand's
+   warm near-black and its documented job is exactly this (dark chrome /
+   footer); the transcript slab keeps `--bobi-term-bg`, the blue-black
+   terminal inset. Before this they shared one surface and read as the same
+   thing doing two jobs — and the cool cast fought both the warm paper around
+   it and the green/red it has to carry. */
 .status-band {
   display: flex; align-items: center; flex-wrap: wrap;
-  padding: 12px 20px; background: var(--slab-bg);
+  padding: 12px 20px; background: var(--strip-bg);
   background-image: repeating-linear-gradient(0deg,
     rgba(232, 226, 214, .03) 0 1px, transparent 1px 3px);
   border-top: 2px solid var(--slab-accent);
@@ -800,7 +833,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 }
 .status-band .seg {
   display: flex; flex-direction: column; gap: 2px;
-  padding: 2px 18px; border-left: 1px solid var(--slab-border);
+  padding: 2px 18px; border-left: 1px solid var(--strip-line);
 }
 .status-band .seg .lbl {
   font-family: var(--font-sans); font-size: 10.5px; color: var(--slab-muted);
@@ -813,7 +846,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   margin-left: auto; display: flex; gap: 8px; padding-left: 16px;
 }
 .status-band .btn {
-  background: transparent; border-color: var(--slab-border);
+  background: transparent; border-color: var(--strip-line);
   color: var(--slab-text);
 }
 .status-band .btn:hover { border-color: var(--slab-muted); }
@@ -823,37 +856,38 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 .status-band .btn.primary:hover { background: var(--accent-2); }
 .status-band .btn[disabled] { opacity: .55; cursor: default; }
 
-/* Running is the page's one genuinely LIVE thing, so it is violet — the
-   same signal every live state carries. On the dark strip that is
-   `--bobi-acc-bright`, the on-dark variant. */
+/* Running is the one thing on this page that has to be readable from
+   across the room. */
+.band-running { border-top-color: var(--run-live-lit); }
 .band-running .lamp {
-  background: var(--slab-accent);
-  box-shadow: 0 0 10px color-mix(in srgb, var(--slab-accent) 70%, transparent);
+  background: var(--run-live-lit);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--run-live-lit) 80%, transparent);
 }
-.band-running .state { color: var(--slab-accent); }
+.band-running .state { color: var(--run-live-lit); }
 /* Stopped: the screen is powered down — hollow lamp, no lit edge. */
-.band-stopped { border-top-color: var(--slab-border); }
+.band-stopped { border-top-color: var(--strip-line); }
 .band-stopped .lamp {
   background: transparent; border: 2px solid var(--slab-muted);
   width: 9px; height: 9px;
 }
 .band-stopped .state { color: var(--slab-muted); }
 .band-error .lamp {
-  background: var(--status-failed);
-  box-shadow: 0 0 10px color-mix(in srgb, var(--status-failed) 70%, transparent);
+  background: var(--run-fail-lit);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--run-fail-lit) 80%, transparent);
 }
-.band-error .state { color: var(--status-failed); }
+.band-error { border-top-color: var(--run-fail-lit); }
+.band-error .state { color: var(--run-fail-lit); }
 
 /* A failed start's preflight report, rendered under the strip in the
    strip's own grammar rather than vanishing into a toast. */
 .band-report {
-  background: var(--slab-surface); color: var(--slab-text);
-  border-bottom: 1px solid var(--slab-border);
+  background: color-mix(in srgb, var(--strip-bg) 92%, #000000); color: var(--slab-text);
+  border-bottom: 1px solid var(--strip-line);
   font-family: var(--font-mono); font-size: 11.5px; line-height: 1.6;
   padding: 10px 20px; white-space: pre-wrap; max-height: 30vh; overflow: auto;
 }
 .band-report .rep-head {
-  color: var(--status-failed); font-size: 11px; font-weight: 600;
+  color: var(--run-fail-lit); font-size: 11px; font-weight: 600;
   display: block; margin-bottom: 4px;
 }
 
@@ -966,18 +1000,20 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
   font-family: var(--font-sans); font-size: 12.5px; white-space: nowrap;
 }
 .rdot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--faint); }
-.rstat.running { color: var(--status-live); }
+.rstat.running { color: var(--run-live); font-weight: var(--weight-medium); }
 .rstat.running .rdot {
-  background: var(--status-live); box-shadow: 0 0 0 3px var(--status-live-soft);
+  background: var(--run-live); box-shadow: 0 0 0 3px var(--run-live-soft);
 }
 .rstat.idle { color: var(--muted); }
 .rstat.done { color: var(--muted); }
-.rstat.failed, .rstat.crashed { color: var(--status-failed); }
-.rstat.failed .rdot, .rstat.crashed .rdot { background: var(--status-failed); }
+.rstat.failed, .rstat.crashed {
+  color: var(--run-fail); font-weight: var(--weight-medium);
+}
+.rstat.failed .rdot, .rstat.crashed .rdot { background: var(--run-fail); }
 /* Stalled is hollow: waiting on something that is not coming. */
-.rstat.stalled { color: var(--status-failed); }
+.rstat.stalled { color: var(--run-fail); font-weight: var(--weight-medium); }
 .rstat.stalled .rdot {
-  background: transparent; border: 2px solid var(--status-failed);
+  background: transparent; border: 2px solid var(--run-fail);
   width: 7px; height: 7px;
 }
 
@@ -987,7 +1023,7 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
   letter-spacing: .03em; margin-top: 2px;
 }
 .runs .r-note { font-size: 12px; color: var(--muted); margin-top: 1px; }
-.runs .r-note.bad { color: var(--status-failed); }
+.runs .r-note.bad { color: var(--run-fail); }
 .r-when, .r-tok {
   font-family: var(--font-mono); font-size: 12px; color: var(--muted);
   font-variant-numeric: tabular-nums; white-space: nowrap;
@@ -1048,5 +1084,5 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
 }
 .tr-line .txt { color: var(--slab-text); white-space: pre-wrap; word-break: break-word; }
 .tr-line.tool .txt { color: var(--syn-str); }
-.tr-line.err .txt { color: var(--status-failed); }
+.tr-line.err .txt { color: var(--run-fail-lit); }
 .tr-empty { color: var(--slab-muted); }
