@@ -4,7 +4,7 @@
    Three elements, in the order the questions get asked:
 
      1. a status strip — is this thing running, and recover it if not
-     2. an identity header — what is it (SAVED / ABOUT popovers)
+     2. an identity header — what is it (saved / about popovers)
      3. one runs table — what did it do, and what failed
 
    This replaced the five-panel page (needs-attention, health, spend,
@@ -93,13 +93,13 @@ export function mountAgent(el, { api, name }) {
         <div class="ah-right">
           <span class="stat-popover" data-el="savedWrap">
             <span class="chip" data-el="savedChip" tabindex="0"
-                  role="button" aria-expanded="false">SAVED …</span>
+                  role="button" aria-expanded="false">saved …</span>
             <span class="popover"><span class="pop-card" data-el="savedCard">
             </span></span>
           </span>
           <span class="stat-popover" data-el="aboutWrap">
             <span class="chip" data-el="aboutChip" tabindex="0"
-                  role="button" aria-expanded="false">ABOUT</span>
+                  role="button" aria-expanded="false">about</span>
             <span class="popover"><span class="pop-card" data-el="aboutCard">
             </span></span>
           </span>
@@ -111,7 +111,7 @@ export function mountAgent(el, { api, name }) {
 
     <section class="panel">
       <div class="panel-head">
-        <span class="eyebrow">Runs</span>
+        <span class="eyebrow">runs</span>
         <span class="count" data-el="runsCount"></span>
         <div class="tabs" data-el="tabs"></div>
       </div>
@@ -183,8 +183,10 @@ export function mountAgent(el, { api, name }) {
 
   /* --- 1. status strip --------------------------------------------- */
 
+  // Chrome is lowercase, and a state is a label rather than data — the
+  // design system's rule, and the reason none of this shouts any more.
   const STATE_WORD = {
-    running: "RUNNING", stopped: "STOPPED", not_responding: "NOT RESPONDING",
+    running: "running", stopped: "stopped", not_responding: "not responding",
   };
   const STATE_CLASS = {
     running: "band-running", stopped: "band-stopped",
@@ -285,7 +287,7 @@ export function mountAgent(el, { api, name }) {
     card.appendChild(row);
   }
 
-  /** SAVED — the value story. Estimates never present as a bill. */
+  /** saved — the value story. Estimates never present as a bill. */
   function renderSaved() {
     const card = els.savedCard;
     card.innerHTML = "";
@@ -298,10 +300,10 @@ export function mountAgent(el, { api, name }) {
     const total = estimated + cacheSaved;
 
     els.savedChip.textContent = total > 0
-      ? `SAVED ⌁ ~${fmtUsd(total)} · ${spend.sessions_counted || 0} runs`
-      : `SAVED ⌁ ${spend.sessions_counted || 0} runs`;
+      ? `saved ~${fmtUsd(total)} · ${spend.sessions_counted || 0} runs`
+      : `saved · ${spend.sessions_counted || 0} runs`;
 
-    card.appendChild(mk("div", "eyebrow", "Saved"));
+    card.appendChild(mk("div", "eyebrow", "saved"));
     kv(card, "list-price value of tokens", fmtEst(estimated) || "—");
     kv(card, "recorded spend", recorded > 0 ? fmtUsd(recorded)
                                             : "$0 (subscription)");
@@ -332,21 +334,21 @@ export function mountAgent(el, { api, name }) {
       " Lifetime, over runs still on disk." + EST_NOTE));
   }
 
-  /** ABOUT — composition, read-only. Editing lives in setup. */
+  /** about — composition, read-only. Editing lives in setup. */
   function renderAbout() {
     const card = els.aboutCard;
     card.innerHTML = "";
     if (!overview) { card.appendChild(mk("div", "note", "…")); return; }
 
     if (overview.roles && overview.roles.length) {
-      card.appendChild(mk("div", "eyebrow", "Roles"));
+      card.appendChild(mk("div", "eyebrow", "roles"));
       for (const role of overview.roles.slice(0, 6)) {
         kv(card, role.name, role.description || "—");
       }
       card.appendChild(mk("hr"));
     }
 
-    card.appendChild(mk("div", "eyebrow", "Reaches"));
+    card.appendChild(mk("div", "eyebrow", "reaches"));
     const chat = overview.chat || {};
     kv(card, "chat", chat.service
       ? chat.service + (chat.channels && chat.channels.length
@@ -357,7 +359,7 @@ export function mountAgent(el, { api, name }) {
 
     const auto = overview.automations || {};
     card.appendChild(mk("hr"));
-    card.appendChild(mk("div", "eyebrow", "Automations"));
+    card.appendChild(mk("div", "eyebrow", "automations"));
     kv(card, "scheduled", `${auto.monitors || 0} monitors` +
       (auto.paused_monitors ? ` (${auto.paused_monitors} off)` : ""));
     kv(card, "event-triggered", `${auto.workflows || 0} workflows`);
@@ -365,7 +367,7 @@ export function mountAgent(el, { api, name }) {
     const brain = overview.brain || {};
     const cap = overview.spend_cap || {};
     card.appendChild(mk("hr"));
-    card.appendChild(mk("div", "eyebrow", "Brain"));
+    card.appendChild(mk("div", "eyebrow", "brain"));
     kv(card, [brain.kind, brain.model].filter(Boolean).join(" · ") || "—",
        brain.max_turns ? `max ${brain.max_turns} turns` : "");
     kv(card, "spend cap",
@@ -410,9 +412,9 @@ export function mountAgent(el, { api, name }) {
   /* --- 3. runs table ------------------------------------------------ */
 
   const TABS = [
-    { key: "all", label: "ALL" },
-    { key: "running", label: "RUNNING" },
-    { key: "failed", label: "FAILED" },
+    { key: "all", label: "all" },
+    { key: "running", label: "running" },
+    { key: "failed", label: "failed" },
   ];
 
   function renderTabs() {
@@ -436,6 +438,11 @@ export function mountAgent(el, { api, name }) {
 
   const FAILED_SET = new Set(["failed", "crashed", "stalled"]);
 
+  /** A run's status as a LABEL — sentence case, not a shout. The status
+      vocabulary is one word each, so capitalising the first is the whole
+      rule; `not_responding` never reaches a row. */
+  const STATUS_LABEL = (s) => (s ? s[0].toUpperCase() + s.slice(1) : "");
+
   function visibleRows() {
     const rows = (runs && runs.runs) || [];
     if (tab === "running") return rows.filter((r) => r.status === "running");
@@ -447,8 +454,9 @@ export function mountAgent(el, { api, name }) {
     const rows = visibleRows();
     els.runRows.innerHTML = "";
     const counts = (runs && runs.counts) || {};
-    els.runsCount.textContent = counts.all
-      ? `⌁ ${counts.all} run${counts.all === 1 ? "" : "s"}` : "";
+    // The eyebrow beside this already says "runs", so the count is a
+    // number and nothing else.
+    els.runsCount.textContent = counts.all ? String(counts.all) : "";
 
     if (!rows.length) {
       els.runsEmpty.hidden = false;
@@ -469,7 +477,7 @@ export function mountAgent(el, { api, name }) {
       const stat = mk("td");
       const chip = mk("span", "rstat " + row.status);
       chip.appendChild(mk("span", "rdot"));
-      chip.appendChild(mk("span", null, row.status.toUpperCase()));
+      chip.appendChild(mk("span", null, STATUS_LABEL(row.status)));
       stat.appendChild(chip);
       tr.appendChild(stat);
 
@@ -569,7 +577,7 @@ export function mountAgent(el, { api, name }) {
     // Rows with a session get a transcript; rows without get details.
     // That is the rule, and it is decided by data rather than by kind.
     if (row.session_id) {
-      els.slabKind.textContent = "Transcript";
+      els.slabKind.textContent = "transcript";
       const { ok, data } = await api(
         `${base}/subagents/${encodeURIComponent(row.session_id)}/transcript`);
       if (!ok || !data) return slabError("Could not read that transcript.");
@@ -577,7 +585,7 @@ export function mountAgent(el, { api, name }) {
       return;
     }
 
-    els.slabKind.textContent = "Details";
+    els.slabKind.textContent = "details";
     // The details endpoint serves MONITOR run records. A session-less
     // workflow run — a stalled one, suspended before it ever spawned — has
     // no such record, and needs no fetch either: its row already carries
@@ -635,7 +643,7 @@ export function mountAgent(el, { api, name }) {
   /** Details for a run whose story is entirely in its row — a workflow run
       that suspended without a session behind it. */
   function renderRowDetails(row) {
-    els.slabMeta.textContent = row.status.toUpperCase();
+    els.slabMeta.textContent = STATUS_LABEL(row.status);
     els.slabBody.innerHTML = "";
     const d = row.detail || {};
     slabLine("status", row.status);
@@ -676,7 +684,7 @@ export function mountAgent(el, { api, name }) {
   function renderDetails(row, data) {
     const rec = data.run || {};
     const def = data.definition || {};
-    els.slabMeta.textContent = rec.outcome ? rec.outcome.toUpperCase() : "";
+    els.slabMeta.textContent = rec.outcome || "";
     els.slabBody.innerHTML = "";
 
     const line = slabLine;

@@ -767,18 +767,14 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
    is the visual spec; tokens come from tokens.css.
    ============================================================ */
 
-/* Status hues. DESIGN.md locks amber to the brand accent (primary
-   action, active selection, slab edge) precisely so it never doubles
-   as a status signal — state is carried by green/red/neutral instead,
-   and these are the tints that job needs. Derived here rather than in
-   tokens.css: they exist for this page's instrument strip and run
-   chips, not as global design tokens. */
-.agent-page {
-  --ok-soft: #E7F0E9;
-  --slab-ok: #29A36A;
-  --slab-err: #E0574A;
-}
-
+/* Status hues come from the design system, not from here. This page was
+   authored against the older amber/CRT identity, where the accent was
+   amber and had to be kept OFF status so green/red could carry state.
+   The system inverts that: violet IS state (live, enforced, gated,
+   focused), clay is the decorative highlight, and green does not exist —
+   a live thing reads violet like everything else live, and failure is
+   Moda's brick. `--status-*` are those tokens; the page defines none of
+   its own. */
 .agent-page { padding: 20px 22px 28px; overflow-y: auto; flex: 1; }
 
 /* --- header card + the ship's-computer instrument strip --- */
@@ -798,16 +794,16 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   width: 10px; height: 10px; border-radius: 50%; flex: none; margin-right: 10px;
 }
 .status-band .state {
-  font-family: var(--font-mono); font-size: 15px; font-weight: 700;
-  letter-spacing: .12em; margin-right: 22px; white-space: nowrap;
+  font-family: var(--font-sans); font-size: 15px;
+  font-weight: var(--weight-semibold); letter-spacing: var(--track-tight);
+  margin-right: 22px; white-space: nowrap;
 }
 .status-band .seg {
   display: flex; flex-direction: column; gap: 2px;
   padding: 2px 18px; border-left: 1px solid var(--slab-border);
 }
 .status-band .seg .lbl {
-  font-family: var(--font-mono); font-size: 8.5px; letter-spacing: .14em;
-  text-transform: uppercase; color: var(--slab-muted);
+  font-family: var(--font-sans); font-size: 10.5px; color: var(--slab-muted);
 }
 .status-band .seg .val {
   font-family: var(--font-mono); font-size: 12.5px; color: var(--slab-text);
@@ -827,13 +823,15 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 .status-band .btn.primary:hover { background: var(--accent-2); }
 .status-band .btn[disabled] { opacity: .55; cursor: default; }
 
+/* Running is the page's one genuinely LIVE thing, so it is violet — the
+   same signal every live state carries. On the dark strip that is
+   `--bobi-acc-bright`, the on-dark variant. */
 .band-running .lamp {
-  background: var(--slab-ok); box-shadow: 0 0 10px rgba(41, 163, 106, .75);
+  background: var(--slab-accent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--slab-accent) 70%, transparent);
 }
-.band-running .state {
-  color: var(--slab-ok); text-shadow: 0 0 14px rgba(41, 163, 106, .4);
-}
-/* Stopped: the screen is powered down — hollow lamp, no amber edge. */
+.band-running .state { color: var(--slab-accent); }
+/* Stopped: the screen is powered down — hollow lamp, no lit edge. */
 .band-stopped { border-top-color: var(--slab-border); }
 .band-stopped .lamp {
   background: transparent; border: 2px solid var(--slab-muted);
@@ -841,11 +839,10 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 }
 .band-stopped .state { color: var(--slab-muted); }
 .band-error .lamp {
-  background: var(--slab-err); box-shadow: 0 0 10px rgba(224, 87, 74, .75);
+  background: var(--status-failed);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--status-failed) 70%, transparent);
 }
-.band-error .state {
-  color: var(--slab-err); text-shadow: 0 0 14px rgba(224, 87, 74, .4);
-}
+.band-error .state { color: var(--status-failed); }
 
 /* A failed start's preflight report, rendered under the strip in the
    strip's own grammar rather than vanishing into a toast. */
@@ -856,8 +853,8 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   padding: 10px 20px; white-space: pre-wrap; max-height: 30vh; overflow: auto;
 }
 .band-report .rep-head {
-  color: var(--slab-err); letter-spacing: .08em; text-transform: uppercase;
-  font-size: 10px; display: block; margin-bottom: 4px;
+  color: var(--status-failed); font-size: 11px; font-weight: 600;
+  display: block; margin-bottom: 4px;
 }
 
 /* --- identity --- */
@@ -878,7 +875,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 }
 .agent-page .chip {
   display: inline-flex; align-items: center; gap: 7px;
-  font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .05em;
+  font-family: var(--font-sans); font-size: 12.5px;
   padding: 5px 10px; border: 1px solid var(--border-strong);
   border-radius: 999px; background: var(--raised); color: var(--muted);
   white-space: nowrap; font-variant-numeric: tabular-nums;
@@ -909,8 +906,8 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 }
 .pop-card .eyebrow { margin-bottom: 8px; }
 .agent-page .eyebrow {
-  font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em;
-  text-transform: uppercase; color: var(--muted); font-weight: 500;
+  font-family: var(--font-sans); font-size: 12px; color: var(--text-secondary);
+  font-weight: var(--weight-medium);
 }
 .kv {
   display: flex; justify-content: space-between; gap: 12px; padding: 3px 0;
@@ -940,17 +937,20 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 }
 .tabs { display: flex; gap: 6px; margin-left: auto; }
 .tab {
-  font-family: var(--font-mono); font-size: 11px; letter-spacing: .05em;
+  font-family: var(--font-sans); font-size: 13px;
   padding: 5px 12px; border-radius: 999px; cursor: pointer;
   border: 1px solid var(--border-strong); background: var(--raised);
   color: var(--muted); font-variant-numeric: tabular-nums;
 }
-.tab.active { border-color: var(--accent); color: var(--accent); background: #FBF1E9; }
+.tab.active {
+  border-color: var(--accent); color: var(--accent);
+  background: var(--accent-soft);
+}
 
 table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
 .runs th {
-  text-align: left; font-family: var(--font-mono); font-size: 10.5px;
-  letter-spacing: .08em; text-transform: uppercase; font-weight: 500;
+  text-align: left; font-family: var(--font-sans); font-size: 12px;
+  font-weight: var(--weight-medium);
   color: var(--faint); padding: 6px 14px; border-bottom: 1px solid var(--border);
 }
 .runs td {
@@ -963,20 +963,22 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
 
 .rstat {
   display: inline-flex; align-items: center; gap: 7px;
-  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .07em;
-  white-space: nowrap;
+  font-family: var(--font-sans); font-size: 12.5px; white-space: nowrap;
 }
 .rdot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--faint); }
-.rstat.running { color: var(--ok); }
-.rstat.running .rdot { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.rstat.running { color: var(--status-live); }
+.rstat.running .rdot {
+  background: var(--status-live); box-shadow: 0 0 0 3px var(--status-live-soft);
+}
 .rstat.idle { color: var(--muted); }
 .rstat.done { color: var(--muted); }
-.rstat.failed, .rstat.crashed { color: var(--err); }
-.rstat.failed .rdot, .rstat.crashed .rdot { background: var(--err); }
+.rstat.failed, .rstat.crashed { color: var(--status-failed); }
+.rstat.failed .rdot, .rstat.crashed .rdot { background: var(--status-failed); }
 /* Stalled is hollow: waiting on something that is not coming. */
-.rstat.stalled { color: var(--err); }
+.rstat.stalled { color: var(--status-failed); }
 .rstat.stalled .rdot {
-  background: transparent; border: 2px solid var(--err); width: 7px; height: 7px;
+  background: transparent; border: 2px solid var(--status-failed);
+  width: 7px; height: 7px;
 }
 
 .runs .r-title { font-weight: 550; }
@@ -985,7 +987,7 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
   letter-spacing: .03em; margin-top: 2px;
 }
 .runs .r-note { font-size: 12px; color: var(--muted); margin-top: 1px; }
-.runs .r-note.bad { color: var(--err); }
+.runs .r-note.bad { color: var(--status-failed); }
 .r-when, .r-tok {
   font-family: var(--font-mono); font-size: 12px; color: var(--muted);
   font-variant-numeric: tabular-nums; white-space: nowrap;
@@ -1030,8 +1032,7 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
 .tr-line { display: flex; gap: 14px; padding: 1px 0; }
 .tr-line .ts { color: var(--syn-com); flex: none; }
 .tr-line .who {
-  flex: none; width: 52px; letter-spacing: .05em; font-size: 10.5px;
-  text-transform: uppercase; padding-top: 1px;
+  flex: none; width: 52px; font-size: 10.5px; padding-top: 1px;
 }
 .tr-line .who.user { color: var(--slab-muted); }
 .tr-line .who.agent { color: var(--slab-accent); }
@@ -1043,9 +1044,9 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
    A wider column, and one that WRAPS: a label that outgrows even this must
    take a second line, never paint over the value beside it. */
 .tr-line.field .who {
-  width: 96px; word-break: break-word; text-transform: uppercase;
+  width: 96px; word-break: break-word;
 }
 .tr-line .txt { color: var(--slab-text); white-space: pre-wrap; word-break: break-word; }
 .tr-line.tool .txt { color: var(--syn-str); }
-.tr-line.err .txt { color: var(--slab-err); }
+.tr-line.err .txt { color: var(--status-failed); }
 .tr-empty { color: var(--slab-muted); }
