@@ -196,24 +196,60 @@ jobs:
         # This is a readiness gate, not a retry-until-green: it demands HTTP
         # 200 AND the release sha of the commit under test, so a genuinely
         # broken or stale deploy never becomes "ready" and the step fails loud
-        # with the last response it saw.
+        # with what it last saw.
+        #
+        # ONE OBSERVATION IS NOT ENOUGH, and that is not a theory. The first
+        # SCHEDULED run of this lane (30740272285, 2026-08-02) passed this gate
+        # and then the very next request — the smoke — was served by the
+        # PREVIOUS run's version. Cloudflare's rollover is not atomic: while
+        # propagation finishes, successive requests to the same URL can land on
+        # either version, so a single match says nothing about the next request.
+        #
+        # Hence a RUN of consecutive matches, reset by any mismatch. If some
+        # fraction of requests still reach the old version, the streak keeps
+        # collapsing and the gate keeps waiting; it only clears once the edge is
+        # answering consistently. The smoke's own sha assertion stays exactly as
+        # strict — it is the thing that caught this, and weakening it to absorb
+        # the race would have thrown away the signal.
         if: steps.live.outputs.run == 'true'
         env:
           SMOKE_URL: ${{ steps.deploy.outputs.url }}
         run: |
           set -uo pipefail
-          deadline=$(( SECONDS + 120 ))
+          needed=5           # consecutive matches required
+          interval=3         # seconds between probes -> ~12s of stable serving
+          streak=0
+          probes=0
+          resets=0
+          mismatch=""
+          deadline=$(( SECONDS + 180 ))
           while [ "$SECONDS" -lt "$deadline" ]; do
             body="$(curl -fsS --max-time 10 "$SMOKE_URL/health" 2>/dev/null || true)"
+            probes=$(( probes + 1 ))
             case "$body" in
               *"\"sha\":\"$GITHUB_SHA\""*)
-                echo "deployment is serving $GITHUB_SHA"
-                exit 0 ;;
+                streak=$(( streak + 1 ))
+                if [ "$streak" -ge "$needed" ]; then
+                  echo "deployment is serving $GITHUB_SHA on $needed consecutive requests (${probes} probes, ${resets} rollover reset(s))"
+                  exit 0
+                fi
+                ;;
+              *)
+                # Only interesting once we had started counting: a reset here
+                # IS the race, caught. Log it so a flaky rollover is visible in
+                # the run rather than hidden behind an eventual pass.
+                if [ "$streak" -gt 0 ]; then
+                  resets=$(( resets + 1 ))
+                  echo "rollover still in flight — a different version answered after ${streak} match(es); restarting the count"
+                fi
+                streak=0
+                mismatch="${body:-<no response>}"
+                ;;
             esac
-            sleep 5
+            sleep "$interval"
           done
-          echo "::error::$SMOKE_URL never served release sha $GITHUB_SHA within 120s" >&2
-          echo "last response: ${body:-<none>}" >&2
+          echo "::error::$SMOKE_URL did not serve release sha $GITHUB_SHA on $needed consecutive requests within 180s (${probes} probes, ${resets} reset(s), final streak ${streak}/${needed})" >&2
+          echo "last non-matching response: ${mismatch:-<none>}" >&2
           exit 1
 
       - name: Smoke the DEPLOYED Worker
