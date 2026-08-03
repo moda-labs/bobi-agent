@@ -163,11 +163,21 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def agent_spend(name: str) -> JSONResponse:
         return JSONResponse(rt.spend_summary(name))
 
+    # The identity header's read-only view of the team's composition:
+    # description, roles, reach, automation counts, brain, spend cap.
+    @app.get("/api/agents/{name}/overview")
+    def agent_overview(name: str) -> JSONResponse:
+        return JSONResponse(rt.overview(name))
+
     # System health (#733 vertical 2): manager liveness + session statuses;
     # a hosted runtime adds reachability and the sidecar's lifecycle trail.
+    # Normalized on the way out so the state keys the strip reads are present
+    # whatever runtime answered — including one that predates them.
     @app.get("/api/agents/{name}/health")
     def agent_health(name: str) -> JSONResponse:
-        return JSONResponse(rt.health_summary(name))
+        from bobi.webapp.health import normalize
+
+        return JSONResponse(normalize(rt.health_summary(name)))
 
     # Session logs (#733 vertical 3): the full session history with honest
     # terminal outcomes; transcripts drill in via the messages route below.
@@ -325,6 +335,22 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
         if not safe_name(session):
             return JSONResponse({"error": "unknown agent"}, status_code=404)
         return JSONResponse({"messages": rt.messages(name, session)})
+
+    # The debugging view of the same transcript: timestamps and tool calls.
+    # `/messages` above is the chat view and stays exactly as it was.
+    @app.get("/api/agents/{name}/subagents/{session}/transcript")
+    def subagent_transcript(name: str, session: str) -> JSONResponse:
+        if not safe_name(session):
+            return JSONResponse({"error": "unknown agent"}, status_code=404)
+        return JSONResponse(rt.transcript(name, session))
+
+    # What a session-less run shows instead of a transcript: the run record
+    # plus the definition of the monitor that produced it.
+    @app.get("/api/agents/{name}/runs/{run_id}/details")
+    def run_details(name: str, run_id: str) -> JSONResponse:
+        if not safe_name(run_id):
+            return JSONResponse({"error": "unknown run"}, status_code=404)
+        return JSONResponse(rt.run_details(name, run_id))
 
     # Submit-then-poll chat: the POST returns a message id immediately and
     # the deliver runs in the background — no request is held open for the

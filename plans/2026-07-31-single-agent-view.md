@@ -211,17 +211,17 @@ first. Implementation stacks on an integration branch
 - Testable: records appear under `run/state/` for a live monitor tick.
 
 **U2 — unified runs read model + `GET /api/agents/{name}/runs`** *(Phase 1)*
-- [ ] Merge sessions + workflow runs + U1 monitor records into one run
+- [x] Merge sessions + workflow runs + U1 monitor records into one run
       shape: `status` (`running|idle|done|failed|crashed|stalled`),
       `title`, `origin`, `started_at`, `duration`, `tokens`, `est_cost`,
       `error`, `session_id?`, `run_id?`. Newest first; `status=` filter;
       explicit cap + `truncated`.
-- [ ] `stalled` = suspended past threshold (default 24h, constant).
-- [ ] Per-run tokens/est cost surfaced from `model_usage`.
+- [x] `stalled` = suspended past threshold (default 24h, constant).
+- [x] Per-run tokens/est cost surfaced from `model_usage`.
 - Testable: `curl` returns the merged list for a seeded home.
 
 **U3 — health tri-state + strip telemetry** *(Phase 2)*
-- [ ] `LocalRuntime.health_summary` proxies the manager probe
+- [x] `LocalRuntime.health_summary` proxies the manager probe
       (`run/state/manager-health.port` → `GET /health`, fall back to
       pidfile view) → `running` / `stopped` / `not_responding` + detail
       + segments (uptime, live count, last activity; stopped:
@@ -230,18 +230,18 @@ first. Implementation stacks on an integration branch
   manager shows all three states.
 
 **U4 — overview + savings reads** *(Phases 3+4 data)*
-- [ ] `GET .../overview`: description, roles, chat channel, services,
+- [x] `GET .../overview`: description, roles, chat channel, services,
       automation counts, brain/model, spend cap (`Config.load`,
       `discover_roles`, `agent.md`).
-- [ ] Spend payload gains aggregated script-cache savings
+- [x] Spend payload gains aggregated script-cache savings
       (`run/state/scripts/*.state.json`).
 - Testable: `curl` both; values match `agent.yaml` / `bobi agent costs`.
 
 **U5 — transcript + details reads** *(Phase 3 data)*
-- [ ] Transcript endpoint variant with timestamps + tool-call lines
+- [x] Transcript endpoint variant with timestamps + tool-call lines
       (reuse the `transcript show` / `history.db` path; keep `/messages`
       untouched for chat compatibility).
-- [ ] Details payload for session-less runs: run record + monitor
+- [x] Details payload for session-less runs: run record + monitor
       definition YAML.
 - Testable: `curl` a session transcript and a cached-tick's details.
 
@@ -330,10 +330,56 @@ comparison (dashboard's job) · RBAC/audit.
 
 — none yet.
 
-*(The line above and the header's `Last amended` are frozen review surface —
-the plan-artifact check is insertion-only, so amendments land beneath the
+*(Both lines above are frozen review surface: the header's `Last amended`
+and this placeholder predate the amendments below, and the plan-artifact
+check is insertion-only, so the first amendment lands beneath the
 placeholder rather than replacing it. Last amended: **2026-08-01**.)*
 
+- **2026-08-01** (U2 build session): **row identity is three fields, not
+  two.** The U2 row shape above lists `session_id?` / `run_id?`; the built
+  row carries a third, `key` (`session:<name>` / `workflow:<run_id>` /
+  `monitor:<run_id>`). `key` is stable UI row identity across polls and is
+  never a handle for opening anything; `session_id` and `run_id` say what a
+  row can actually open — a transcript, a run's details, both, or neither.
+  The "neither" case is real and load-bearing: a `$0` script-cache monitor
+  tick spawned no session, so its only drill-down is the Details slab (U5).
+  Contract documented in `docs/RUNS_VIEW.md`.
+- **2026-08-01** (U2 build session): **open question 1 answered — 24h
+  constant, not per-workflow config.** `STALLED_AFTER_SECONDS` is a module
+  constant because the threshold encodes a judgement about human attention
+  ("nobody is coming back to this today"), not anything about a particular
+  workflow; per-workflow config would make the Failed tab mean something
+  different per row. The clock runs from the last resume, not the original
+  start. Questions 2 (pagination) and 3 (today bucket) stay open.
+- **2026-08-01** (U3 build session): **the NOT RESPONDING strip's
+  `Health probe: failing 12m` is not built.** The prototype is the visual
+  spec, so this is a deliberate deviation, not an omission. A failure
+  *duration* requires remembering when the probe first failed; the webapp
+  answers each request from disk and holds nothing between them, so any
+  number there would start whenever the browser happened to poll — a
+  fabricated figure in the one place the page is asked to be precise. The
+  segment stays qualitative (`no answer on :<port>`) and LAST ACTIVITY, a
+  real recorded fact, carries the "how long has this been wrong" signal.
+  Contract documented in `docs/AGENT_STATE.md`.
+- **2026-08-01** (U4 build session): **script-cache savings are priced per
+  monitor, and not priced at all without a basis.** The Savings framing
+  above lists "script-cache runner savings" without saying how it is
+  computed; the built fold uses each monitor's own arithmetic (its cached
+  ticks × what its own agent ticks cost on average), never a fleet-wide
+  blend, which would price a cheap monitor's savings with an expensive
+  one's bill. Where a monitor has never paid for an agent tick — the normal
+  case under subscription auth, where a tick records $0 — no dollar figure
+  is estimated at all, and the payload carries `priced_monitors` so a
+  caller can tell "$0 saved" from "nothing could be priced". The cached-run
+  count always tells the true story. Contract documented in
+  `docs/AGENT_OVERVIEW.md`.
+- **2026-08-01** (U5 build session): **the Details slab shows a CURATED
+  monitor definition, not the whole one.** U5 says "run record + monitor
+  definition YAML"; the built payload omits `command`, because a monitor's
+  command can carry credentials interpolated into it and this is a
+  debugging view, not a config dump. Everything else identifying the
+  monitor's intent (schedule, event, description, check, relevance,
+  id_field) is carried. Contract documented in `docs/RUN_DRILLDOWNS.md`.
 - **2026-08-01** (U6 build session): **resume SPAWNS the CLI command rather
   than reusing its logic in-process, and the claim moved into that
   command.** U6 says "reuse CLI resume logic; single-winner claim semantics
