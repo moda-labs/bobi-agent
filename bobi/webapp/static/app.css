@@ -788,8 +788,8 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   text-transform: lowercase; margin: 0;
 }
 .ah-name .desc {
-  max-width: 720px; margin: 6px 0 0; color: var(--text-secondary);
-  font-size: 13.5px; line-height: 1.55;
+  max-width: 620px; margin: 8px 0 0; color: var(--text-secondary);
+  font-size: 13.5px; line-height: 1.6;
 }
 .ah-right {
   display: flex; align-items: center; justify-content: flex-end;
