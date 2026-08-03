@@ -238,10 +238,10 @@ first. Implementation stacks on an integration branch
 - Testable: `curl` both; values match `agent.yaml` / `bobi agent costs`.
 
 **U5 — transcript + details reads** *(Phase 3 data)*
-- [ ] Transcript endpoint variant with timestamps + tool-call lines
+- [x] Transcript endpoint variant with timestamps + tool-call lines
       (reuse the `transcript show` / `history.db` path; keep `/messages`
       untouched for chat compatibility).
-- [ ] Details payload for session-less runs: run record + monitor
+- [x] Details payload for session-less runs: run record + monitor
       definition YAML.
 - Testable: `curl` a session transcript and a cached-tick's details.
 
@@ -373,3 +373,10 @@ placeholder rather than replacing it. Last amended: **2026-08-01**.)*
   caller can tell "$0 saved" from "nothing could be priced". The cached-run
   count always tells the true story. Contract documented in
   `docs/AGENT_OVERVIEW.md`.
+- **2026-08-01** (U5 build session): **the Details slab shows a CURATED
+  monitor definition, not the whole one.** U5 says "run record + monitor
+  definition YAML"; the built payload omits `command`, because a monitor's
+  command can carry credentials interpolated into it and this is a
+  debugging view, not a config dump. Everything else identifying the
+  monitor's intent (schedule, event, description, check, relevance,
+  id_field) is carried. Contract documented in `docs/RUN_DRILLDOWNS.md`.
