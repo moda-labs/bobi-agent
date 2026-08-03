@@ -428,8 +428,11 @@ def test_source_install_and_build_use_single_exact_commands(
 ):
     calls = []
 
-    def run_npm(args, path):
+    timeouts = {}
+
+    def run_npm(args, path, timeout=300):
         calls.append(args)
+        timeouts[tuple(args)] = timeout
         output = "9.2.0\n" if args == ["npm", "--version"] else ""
         return subprocess.CompletedProcess(
             args, returncode=0, stdout=output, stderr=""
@@ -455,12 +458,51 @@ def test_source_install_and_build_use_single_exact_commands(
         ["npm", "run", "build:local"],
         ["npm", "--version"],
     ]
+    # A cold `npm ci` of the whole workspace is minutes of network, and the
+    # tree quadrupled when the Worker gained its MCP dependencies. The default
+    # ceiling is sized for commands like `npm --version`; installing under it
+    # would abort a legitimate install as a timeout.
+    assert timeouts[("npm", "ci", "--no-audit", "--no-fund")] >= 900
+    assert timeouts[("npm", "--version")] == 300
     assert generated == [
         (
             tmp_path,
             {"node_version": "v20.19.2", "npm_version": "9.2.0"},
         )
     ]
+
+
+def test_source_install_clears_the_tree_before_npm_ci(tmp_path, monkeypatch):
+    """`npm ci` must never be asked to delete the existing tree itself.
+
+    npm 10 on Node 20 fails its own cleanup with `ENOTEMPTY ... rmdir
+    node_modules/<pkg>`, which is how the whole non-Claude integration job went
+    red once the Worker workspace grew its MCP dependencies. Clearing the
+    directory first sidesteps it — but only if it happens BEFORE npm runs, so
+    the ordering is what is asserted here, not merely the removal.
+    """
+    stale = tmp_path / "node_modules" / "empathic" / "nested"
+    stale.mkdir(parents=True)
+    (stale / "index.js").write_text("// left over from an earlier install\n")
+
+    observed = []
+
+    def run_npm(args, path, timeout=300):
+        observed.append((args, (tmp_path / "node_modules").exists()))
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(es, "_run_npm", run_npm)
+    monkeypatch.setattr(es, "_refresh_dependency_stamp", lambda path: None)
+
+    es._install_source_dependencies(tmp_path)
+
+    assert observed, "npm ci never ran"
+    args, tree_present_when_npm_ran = observed[0]
+    assert args == ["npm", "ci", "--no-audit", "--no-fund"]
+    assert not tree_present_when_npm_ran, (
+        "node_modules still existed when npm ci started — npm would have had to "
+        "remove it itself, which is the ENOTEMPTY failure this guards"
+    )
 
 
 def test_fresh_source_artifact_skips_npm(monkeypatch, tmp_path):

@@ -22,6 +22,7 @@ import hmac
 import json
 import os
 import queue
+import shutil
 import signal
 import socket
 import subprocess
@@ -261,9 +262,20 @@ def _start_wrangler_server():
             (d for d in _bounded_parents(es_dir) if (d / "package-lock.json").is_file()),
             es_dir,
         )
+        # Clear the tree ourselves rather than letting `npm ci` do it. npm 10 on
+        # Node 20 fails its own cleanup with `ENOTEMPTY ... rmdir
+        # node_modules/empathic` when a partial tree is already present - which
+        # it is here, because an earlier step in the same job installs the
+        # workspace. That was latent until the Worker gained the MCP
+        # dependencies and the tree grew roughly fourfold; shutil.rmtree does
+        # not share the bug.
+        shutil.rmtree(install_dir / "node_modules", ignore_errors=True)
         subprocess.run(
             ["npm", "ci", "--no-audit", "--no-fund"],
-            cwd=str(install_dir), check=True, capture_output=True, timeout=300,
+            # 300s was sized for the pre-MCP tree. A cold CI runner installing
+            # the current one has been seen to need well over half of that, so
+            # the old ceiling left no headroom for a slow registry.
+            cwd=str(install_dir), check=True, capture_output=True, timeout=900,
         )
 
     lock_path = es_dir / ".dev.vars.test.lock"

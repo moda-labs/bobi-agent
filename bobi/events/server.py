@@ -238,7 +238,17 @@ def _refresh_dependency_stamp(es_dir: Path) -> None:
 
 
 def _install_source_dependencies(es_dir: Path) -> None:
-    _run_npm(["npm", "ci", "--no-audit", "--no-fund"], es_dir)
+    # Clear the tree ourselves instead of leaving it to `npm ci`. npm 10 on
+    # Node 20 fails its own cleanup with `ENOTEMPTY ... rmdir
+    # node_modules/<pkg>` when a populated tree is already there, which is the
+    # normal case here: this runs to REFRESH an install, not only to create
+    # one. Latent until the Worker workspace gained its MCP dependencies and
+    # the tree grew roughly fourfold; shutil.rmtree does not share the bug.
+    #
+    # Only the source path reaches this. An installed bobi validates a
+    # prebuilt artifact (`_validate_packaged_artifact`) and never runs npm.
+    shutil.rmtree(es_dir / "node_modules", ignore_errors=True)
+    _run_npm(["npm", "ci", "--no-audit", "--no-fund"], es_dir, timeout=900)
     _refresh_dependency_stamp(es_dir)
 
 
@@ -320,12 +330,17 @@ def _is_local_url(url: str) -> bool:
 def _run_npm(
     args: list[str],
     es_dir: Path,
+    timeout: float = 300,
 ) -> subprocess.CompletedProcess[str]:
     """Run an npm command, surfacing its output on failure.
 
     npm failures here used to raise a bare CalledProcessError with the
     output captured but never shown — the real cause (e.g. ENOSPC)
     was invisible in manager.log.
+
+    `timeout` is per-command because they are not comparable: `npm --version`
+    answers instantly, while a cold `npm ci` of the whole workspace is minutes
+    of network. One ceiling sized for the former silently caps the latter.
     """
     try:
         result = subprocess.run(
@@ -334,7 +349,7 @@ def _run_npm(
             capture_output=True,
             env=event_server_artifact.sanitized_node_environment(),
             text=True,
-            timeout=300,
+            timeout=timeout,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
@@ -342,7 +357,7 @@ def _run_npm(
         ) from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
-            f"{' '.join(args)} timed out after 300s in {es_dir}"
+            f"{' '.join(args)} timed out after {timeout:g}s in {es_dir}"
         ) from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()[-2000:]
