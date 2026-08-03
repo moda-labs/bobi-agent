@@ -142,7 +142,40 @@ class TeamRuntime(ABC):
         counts for models that report no dollars (#760), kept separate so an
         estimate is never mistaken for a bill. ``tokens_by_model`` carries the
         raw token volumes - the render fallback when no estimate exists.
+
+        Implementations may add ``script_cache`` (see
+        ``bobi.webapp.savings``): what the cached-script monitor runner did
+        NOT spend. Those are counterfactual dollars and live in their own
+        block for that reason - they are never summed into the recorded or
+        estimated totals above.
         """
+
+    def overview(self, name: str) -> dict:
+        """What a team IS: its description, roles, reach, automations, brain,
+        and spend cap - the identity header's read-only view of composition.
+
+        Shape (see ``bobi.webapp.overview.build_overview``)::
+
+            {"name", "description",
+             "roles": [{"name", "description"}, ...],
+             "chat": {"service", "channels"},
+             "services": [{"name", "events", "required"}, ...],
+             "automations": {"monitors", "paused_monitors", "workflows"},
+             "brain": {"kind", "model", "effort", "max_turns", "gateway"},
+             "spend_cap": {"value", "is_default"},
+             "entry_role": str}
+
+        Read-only by design: composition is edited in setup, and this exists
+        so nobody has to open setup to remember what a team is. Values come
+        from the installed package image, never a source directory - the
+        runtime runs the image, so the image is the truth.
+
+        NOT abstract, for the same reason ``runs`` is not: an out-of-tree
+        subclass in the private bobi-deploy repo implements this ABC, and
+        adding an ``@abstractmethod`` here breaks its CI the moment this
+        merges. It becomes abstract once the hosted runtime implements it.
+        """
+        raise TeamLifecycleError("overview is not available on this runtime")
 
     @abstractmethod
     def fleet_spend(self) -> dict:
@@ -540,10 +573,20 @@ class LocalRuntime(TeamRuntime):
 
     def spend_summary(self, name: str) -> dict:
         from bobi.costs import rollup_costs
+        from bobi.webapp.savings import script_cache_savings
 
         root = self._resolve(name)
         # sessions_path (not sessions_dir): a read endpoint must not mkdir.
-        return rollup_costs(paths.sessions_path(root)).to_dict()
+        payload = rollup_costs(paths.sessions_path(root)).to_dict()
+        # Counterfactual dollars, kept in their own block so nothing can
+        # accidentally add them to a bill.
+        payload["script_cache"] = script_cache_savings(root)
+        return payload
+
+    def overview(self, name: str) -> dict:
+        from bobi.webapp.overview import build_overview
+
+        return build_overview(self._resolve(name))
 
     def fleet_spend(self) -> dict:
         """Roll up spend across every installed team. Offline: reads each

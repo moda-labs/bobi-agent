@@ -27,6 +27,9 @@ Bobi is an event-driven AI agent framework.
 - `docs/REFERENCE_IMAGE.md`: the published container image
   (`ghcr.io/moda-labs/bobi`) - what it contains, the `--init` requirement, the
   runtime env contract, the `TEAM_DEPS` bake hook, and how it is published.
+- `docs/AGENT_OVERVIEW.md`: the agent page's read-only composition view
+  (`GET .../overview`) and the `script_cache` savings block in the spend
+  payload - how automations are counted and how savings are priced.
 - `docs/AGENT_STATE.md`: the agent page's state tri-state (`running` /
   `stopped` / `not_responding`), the manager health probe behind it, and the
   status strip's best-effort telemetry segments.
