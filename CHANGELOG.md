@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.53.0 - 2026-08-03
+
+Minor release: the fleet control plane grows an agent-shaped surface, and Claude
+token telemetry stops reading zero.
+
+### Added
+- **The fleet control plane is served as MCP from the event-server Worker
+  (#923).** `POST /mcp` on the Worker exposes the same control plane the hosted
+  console already drives, so an agent binds to named tools with declared schemas
+  instead of re-deriving the `/fleet/*` URL shapes, the 202-then-poll contract,
+  and the per-command argument shapes. The read half only —
+  `bobi_fleet_status`, `bobi_instance_detail`, `bobi_command_result` — each
+  calling **in-process** the same builder its HTTP route calls, so there is no
+  second implementation of the read model and no HTTP hop. Stateless: one
+  `McpServer` per request, no Durable Object, no session id. Auth is the
+  existing `FLEET_OPERATOR_TOKEN` via `requireOperator`, checked in the route
+  before any tool body runs — **the MCP route widens the interface, not the
+  authority.** Nothing here can restart, stop, or message an instance; write
+  tools are Lane B of `plans/2026-07-30-mcp-fleet-control.md`. A team consumes
+  the endpoint with no framework change, via `mcp_servers` `type: http` plus
+  `headers`.
+
+  **Self-hosters redeploying their own Worker: `wrangler.jsonc` now sets
+  `compatibility_flags: ["nodejs_compat"]`, and it is not optional.**
+  `createMcpHandler` carries its per-request context in an `AsyncLocalStorage`,
+  so the bundle imports `node:async_hooks`; without the flag workerd refuses to
+  start and **every route on the script goes down with it**, bus included. The
+  compatibility date is past 2024-09-23, so the flag is additive rather than
+  replacing workerd's own APIs. Conformance is asserted by replaying the literal
+  request bodies a real `claude-code/2.1.220` session sent, and the deployed
+  `/mcp` route is exercised for real by `worker-deploy-smoke.yml` — the unit
+  pool injects its own Node flags, so a pool test alone could never have proven
+  this one.
+- **`bobi agent <name> costs backfill` recovers lost token telemetry (#935,
+  #936).** Reads Claude's retained JSONL transcripts and fills the token
+  counters the defect below left at zero. Dry run by default, `--write` to
+  apply, idempotent across runs. It only ever **fills**: recorded tokens and
+  provider dollars are never overwritten, `last_activity` is never bumped, and a
+  session whose transcript is gone stays honestly unknown rather than estimated
+  into place. Against a real 151-session registry it repaired 112 with provider
+  dollars byte-identical before and after. Four hazards are handled that only
+  running it surfaced — assistant lines repeat per content block under one
+  message id (naive summing overcounts ~2x), the `<synthetic>` pseudo-model
+  never converges, live sessions would double-count against the recorder, and
+  recovered usage must land on the *existing* model key rather than splitting
+  one model across two rows. `costs` became a command group; the bare `costs`
+  invocation is unchanged.
+
+### Fixed
+- **Claude token counts were recorded as zero while the dollars arrived (#935,
+  #936).** `claude_agent_sdk` 0.2.128 passes the CLI's `modelUsage` through
+  verbatim, so its keys are **camelCase**, but `_one_model_usage_to_cost` read
+  only the legacy snake_case spellings — every token field came back `0` while
+  `total_cost_usd` arrived on a separate attribute, producing exactly the
+  reported shape of rows with dollars and no tokens. Each field is now read
+  across both spellings, first match wins, so a payload carrying both is read
+  once rather than summed. `AssistantMessage.usage` is deliberately untouched:
+  it is the raw Anthropic API shape, which is genuinely snake_case.
+
+### Changed
+- **Documentation re-verified against the tree it describes (#937, #938,
+  #939).** The review-remediation plan re-checked all 229 items against `main`
+  and its Lane D swept 24 of them: repo-root and pack docs, stale specs, and the
+  engine, monitor, event-server, and setup-skill references that had drifted
+  from the code.
+
 ## 0.52.0 - 2026-08-03
 
 Minor release: Bobi looks like Bobi, and public CI proves the product rather
