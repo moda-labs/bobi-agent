@@ -205,6 +205,12 @@ Gated on F and R. Subtree-merge the `bobi-deploy` remainder into `moda-agents` (
 
 Runs after the last lane merges — lane gates prove the pieces, this proves the seams. Fuse-runnable portion: full `pytest tests/` + both TS suites + both typechecks against a locally merged preview of all lanes. Deferred portion (needs the real merge sequence): the Consumer proof below, and one full two-repo release under the rewritten runbook.
 
+**2026-08-03 — the release half is DISCHARGED; the gate stays `[ ]` on the Consumer proof alone.** bobi 0.52.0 was cut end to end under the rewritten runbook: wheel to PyPI, the reference image published from `bobi-agent` for the first time (`ghcr.io/moda-labs/bobi:0.52.0`, multi-arch, verified by an anonymous `docker run` after `docker logout`), the fleet gate run from `moda-agents` (`release.yml`'s first-ever execution — the `stage-release` → `fleet` seam held), the Worker deployed and `/health` reporting `0.52.0 @ af76437`, the canary genuinely smoked (`CANARY-OK`, `smoked=true`), and all five teams rolled and confirmed running 0.52.0. Slack E2E green on eng-team.
+
+The roll also exposed a defect this gate exists to catch, in exactly the seam it names: `deploy-agent-teams.yml`'s moda-skills pin resolution had never once succeeded in CI, because `actions/checkout`'s persisted `http.extraheader` overrides URL-embedded credentials, so its `git ls-remote` authenticated as `GITHUB_TOKEN` and 404'd on the private repo. Every deploy since the pin landed (2026-08-01) had been of a team that does not pin moda-skills and took the early exit. Fixed in moda-agents #86. Two further never-run surfaces surfaced with it: `version-gate.yml` cannot push its own pin-bump PR (`GITHUB_TOKEN` has no `workflows` scope, and three of the four pins are workflow files), and `HOMEBREW_TAP_TOKEN` had expired.
+
+**Still blocking:** the Consumer proof below — a K8s pod running the sidecar against a Terraform-deployed Worker. A release does not close it.
+
 ## Proof of work
 
 - **Worker**: spec suite + wrangler-dev protocol suite green in public CI (no Cloudflare credentials); a real `wrangler deploy` to a scratch account applies the `v1` DO migration and `/health` responds, from a clean clone following only the runbook.

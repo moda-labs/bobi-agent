@@ -145,8 +145,22 @@ Two hazards worth re-reading before dispatching `release-image.yml`:
   and moves `:latest` too when the version is the newest release. That is
   occasionally what you want (a corrective re-publish) but never something to
   do absent-mindedly.
-- This repo's `release` environment currently has NO protection rules. Add
-  required reviewers before treating the dispatch path as gated.
+- This repo's `release` environment has NO protection rules, and that is now a
+  DECISION rather than an omission (2026-08-03, Zach). A required-reviewers rule
+  had been added at some point with a single reviewer — the same account that
+  dispatches the release — and `prevent_self_review: false`. That is a
+  self-approval gate: it cost a click per arch job and bought no second pair of
+  eyes, so it was removed. Do not re-add one naming only the releaser. If this
+  path is ever to be genuinely gated, the reviewer must be someone who is not
+  the dispatcher, or the gate belongs upstream (a cross-repo
+  `repository_dispatch` from the fleet canary, per the note at the top of this
+  file).
+
+  While removing it, note the operational trap that bit the 0.52.0 release:
+  **editing the environment while a run is waiting on it FAILS the pending
+  deployment** rather than releasing it. The `publish-manifest` job died with
+  zero steps and had to be re-run. Approve or cancel the in-flight run first,
+  then edit.
 
 If PyPI was just published, allow a short propagation delay before installing
 the new version from another repo.
