@@ -72,7 +72,7 @@ Fix shape: `_drain_turn`'s dead-transport path must make the failure observable 
 - [ ] **D003** `bobi/session.py:1214` — `stop()` no-ops when `_keep_alive` doesn't exist yet (startup turn in flight); the session thread + brain subprocess survive forever. Make stop interrupt the startup phase too.
 - [ ] **D021** `bobi/session.py:1205` — `start()` waits the full timeout on `_ready` even after the session thread has already died; also watch thread liveness and return early.
 - [ ] **D067** `bobi/subagent.py:511` — `_run_agent_supervised`'s `except asyncio.TimeoutError` is unreachable (timeout never enforced in the coroutine); enforce it or remove the dead handler honestly.
-- [ ] **D073** `bobi/events/drain.py:349` — `monitor.error` inbox pushes omit `on_done=batch_ack.attach()`, ACKing their event seq at push time instead of after processing; attach the completion callback like every other push site.
+- [x] **D073** `bobi/events/drain.py:349` — `monitor.error` inbox pushes omit `on_done=batch_ack.attach()`, ACKing their event seq at push time instead of after processing; attach the completion callback like every other push site.
 
 **Validation gate** — do not exit this phase until every line passes; if a command fails, fix the cause and re-run.
 
@@ -94,7 +94,7 @@ Fix shape for conditions (`variables.py` numeric comparisons) is withdrawn with 
 - [f] **D025** `bobi/workflow/orchestrator.py:848` — stale handoff files not cleared before a prompt step. *Superseded 2026-07-26: handoff files are deleted.*
 - [f] **D028** `bobi/workflow/orchestrator.py:873` — non-mapping handoff YAML crashes with AttributeError. *Superseded 2026-07-26: handoff files are deleted.*
 - [f] **Q017/D026** `bobi/workflow/variables.py:92` — route conditions resolved by textual substitution; add numeric comparison operators. *Superseded 2026-07-26: route conditions are deleted. (`${{}}` interpolation may survive — the checklist plan's Phase 4 re-verifies consumers before deleting `variables.py`.)*
-- [f] **D015** `agents/dogfood-content-review/workflows/dogfood-content-review.yaml:35` — `issues_count > 0` uses the unsupported `>`. *Superseded 2026-07-26: this workflow migrates to a checklist; the condition ceases to exist.*
+- [ ] **D015** `agents/dogfood-content-review/workflows/dogfood-content-review.yaml:35` — `issues_count > 0` uses the unsupported `>`. *Superseded 2026-07-26: this workflow migrates to a checklist; the condition ceases to exist.*
 - [f] **D016** `agents/eng-team/workflows/pr-closed.yaml:14` — `merged == true` references bare `merged`. *Superseded 2026-07-26: `pr-closed.yaml`'s deterministic pieces become checklist items naming commands (`gh pr view <n> --json merged -q .merged`), so the condition is replaced rather than fixed.*
 - [ ] **D017** `agents/eng-team/agent.yaml:126` — `auto_dispatch` rule `event: github.issues.assigned` matches a type never emitted (adapter emits `github.issues` with the action in fields); fix the rule to match reality and add a validate-time check for unmatchable event types. **SURVIVES:** this is event→dispatch routing (`bobi/workflow/triggers.py` is explicitly KEPT by the checklist plan), not step-machine code, and per this plan's own Notes issue pickup needs a Slack directive until it lands.
 - [f] **D060** `agents/dogfood-content-review/roles/manager/ROLE.md:16` — routing table dispatches workflows that don't exist in the pack. *Absorbed 2026-07-26: the checklist plan's Phase 4 rewrites every pack's routing surface, and correcting a table that is about to be replaced is waste. If the cutover is abandoned, this returns to scope.*
@@ -179,7 +179,7 @@ Includes Q4's expired compat layers and Q3's flag removal once decided. For conf
 - [ ] **D062** `bobi/cli.py:958` — Dead helpers _find_pid_path (line 948), _stop_manager_pid (line 958) and _run_from_config (line 364) duplicate the live stop/start paths in…
 - [ ] **Q008** `bobi/cli.py:1594` — Six unreachable `if not project_path:` guards / else-branches follow `_detect_project_root()` (or `paths.home_dir()`), which can never return a falsy…
 - [ ] **Q032** `bobi/config.py:317` — Config fields `registries`, `default_role`, and `chat` are parsed from agent.yaml but never read by any production code.
-- [ ] **Q125** `bobi/config.py:409` — Config.brain_small_model property has zero callers — the one real consumer bypasses it and reads the raw brain dict. *(unverified — re-verify first)*
+- [x] **Q125** `bobi/config.py:409` — Config.brain_small_model property has zero callers — the one real consumer bypasses it and reads the raw brain dict. *(unverified — re-verify first)*
 - [ ] **Q038** `bobi/config.py:510` — Config.default_role is parsed from agent.yaml's `defaults.role` but never read by anything, so the key is silently ignored.
 - [ ] **Q045** `bobi/doctor.py:517` — `_check_policy` is a self-described 'deprecated compatibility wrapper for one release' with zero production callers, several releases after the…
 - [ ] **Q053** `bobi/history.py:15` — SESSIONS_DIR module constant is never referenced.
@@ -308,7 +308,7 @@ Read `docs/FRONTEND_QA.md` before touching the static UIs. Security items first:
 - [ ] **D091** `event-server/core/src/adapters/discord.ts:91` — The attachment-to-files normalization loop (build Array<Record<string,string>> with per-key presence checks and String() coercion, then mirror into…
 - [ ] **Q117** `event-server/core/src/adapters/github.ts:42` — Webhook-payload field extraction is handled in two conflicting styles: linear/whatsapp/discord narrow at runtime (asRecord/stringField helpers,… *(plausible — re-verify first)*
 - [ ] **D047** `event-server/core/src/circuit-breaker.ts:237` — The tripped-breaker pause buffer is unbounded and only flushed lazily on the next event in the same conversation key, so a hot external loop grows…
-- [ ] **Q098** `event-server/core/src/circuit-breaker.ts:286` — isBreakerTripped has zero callers anywhere in the repo, including tests.
+- [x] **Q098** `event-server/core/src/circuit-breaker.ts:286` — isBreakerTripped has zero callers anywhere in the repo, including tests.
 - [ ] **Q101** `event-server/core/src/core.ts:27` — SlackNormalizationResult.skip is redundant state — it is always exactly `event === null`, and consumers already double-check both.
 - [ ] **Q100** `event-server/core/src/core.ts:980` — createIngestEvent hardcodes its topic spelling as [topic, `ingest/${topic}`] instead of calling sourceQualifiedTopics, even though that helper's own…
 - [ ] **D089** `event-server/core/src/core.ts:1314` — handleRegisterDeployment trusts `body.subscriptions as string[]` with no shape validation on the unauthenticated MINT path: a string value passes the…
@@ -330,22 +330,22 @@ Read `docs/FRONTEND_QA.md` before touching the static UIs. Security items first:
 
 For each item: re-verify the claim against the tree, then edit the doc to say the truth (or delete the stale artifact — the three shipped-issue spec files and superseded design docs get deleted, matching the plans/ convention). No runtime code changes in this phase.
 
-- [ ] **D113** `CLAUDE.md:70` — '(see Bug fixes above)' references a 'Bug fixes' section that does not exist anywhere in the file (nor in the identical root AGENTS.md).
+- [x] **D113** `CLAUDE.md:70` — '(see Bug fixes above)' references a 'Bug fixes' section that does not exist anywhere in the file (nor in the identical root AGENTS.md).
 - [ ] **D106** `README.md:295` — The 'Under the hood' command block shows `bobi agent <name> subagents launch --role <role> --task "context"` without the -w/--workflow option, which…
-- [ ] **D121** `agents/eng-team/README.md:20` — README's package layout listing omits shipped files: workflows/stall-recovery.yaml and tools/image-gen.md.
+- [x] **D121** `agents/eng-team/README.md:20` — README's package layout listing omits shipped files: workflows/stall-recovery.yaml and tools/image-gen.md.
 - [ ] **D120** `agents/eng-team/roles/engineer/ROLE.md:148` — The reusable base eng-team engineer prompt embeds bobi-agent-specific test-setup instructions ("For this repo, broad non-integration tests use `pip…
-- [ ] **D122** `agents/personal-assistant/agent.md:87` — Setup docs say install prompts for `SLACK_BOT_TOKEN` and `VENN_API_KEY`, omitting `SLACK_SIGNING_SECRET` which agent.yaml also declares as a required…
+- [x] **D122** `agents/personal-assistant/agent.md:87` — Setup docs say install prompts for `SLACK_BOT_TOKEN` and `VENN_API_KEY`, omitting `SLACK_SIGNING_SECRET` which agent.yaml also declares as a required…
 - [ ] **D082** `bobi/sdk.py:5` — sdk.py module docstring claims every session 'wraps a ClaudeSDKClient', contradicting the post-#485 brain-agnostic session model.
 - [ ] **D079** `bobi/slack_manifest.py:23` — Module comment points at event-server/src/index.ts for the Slack webhook route, but that file does not exist.
-- [ ] **D110** `docs/BUILDING_AGENT_TEAMS.md:149` — The native-service list ('github', 'slack', 'linear') omits whatsapp and discord, which are fully registered native ingestion adapters.
+- [x] **D110** `docs/BUILDING_AGENT_TEAMS.md:149` — The native-service list ('github', 'slack', 'linear') omits whatsapp and discord, which are fully registered native ingestion adapters.
 - [ ] **D111** `docs/BUILDING_AGENT_TEAMS.md:246` — The weekly-job worked example claims eng-team ships context/prep-doc.md 'wired from the director role's monitor/prep.weekly_due handler', but no such…
 - [ ] **D112** `docs/BUILDING_AGENT_TEAMS.md:271` — The raw-API tool-guide exception cites 'agents/eng-team/tools/linear.md', which does not exist — the Linear guide moved to context/.
 - [ ] **D057** `docs/BUILDING_AGENT_TEAMS.md:298` — The entire 'Decision log (memory)' section documents the retired per-session INDEX.md decision log and an agent-curated memory contract that the…
 - [ ] **D108** `docs/EVENT_SERVER.md:472` — Public-server prerequisites say to "set all three provider webhook secrets (WEBHOOK_SECRET, SLACK_SIGNING_SECRET, LINEAR_WEBHOOK_SECRET) so every…
 - [ ] **D054** `docs/EVENT_SERVER.md:485` — EVENT_SERVER.md documents the Cloudflare Worker runtime files (event-server/src/index.ts, event-server/src/deployment-session.ts, wrangler.jsonc) as…
-- [ ] **D055** `docs/MONITORS.md:61` — Doc says monitor configuration 'merges in tiers, later wins by name' with agent.yaml's monitors: key (tier 3) overriding run/package/monitors.yaml…
+- [x] **D055** `docs/MONITORS.md:61` — Doc says monitor configuration 'merges in tiers, later wins by name' with agent.yaml's monitors: key (tier 3) overriding run/package/monitors.yaml…
 - [ ] **D014** `docs/MONITORS.md:68` — Doc says 'Set enabled: false on a name to switch off a default', but a runtime-tier disable (run/package/monitors.yaml or the monitors: key in…
-- [ ] **D013** `docs/MONITORS.md:297` — Doc claims a self-healed script that widens its capability envelope 're-enters review even in auto mode' so self-healing 'cannot silently widen what…
+- [x] **D013** `docs/MONITORS.md:297` — Doc claims a self-healed script that widens its capability envelope 're-enters review even in auto mode' so self-healing 'cannot silently widen what…
 - [ ] **D107** `docs/OVERVIEW.md:46` — OVERVIEW states every tool dependency is "declared in the team's agent.yaml under tool_library:", but the eng-team example it uses declares its only…
 - [ ] **D053** `docs/QUICKSTART.md:123` — Quickstart Step 3a claims the setup client defaults the team library to ~/bobi-agents/, but the actual default is $BOBI_HOME/agents…
 - [ ] **D109** `docs/RELEASE_RUNBOOK.md:107` — The repo-split edit truncated the GHCR package-visibility instruction, leaving an incoherent orphaned sentence fragment and losing the actual…
@@ -426,6 +426,59 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   2. **Q1's sizing recommendation was falsified** — see the note on Q1. Reviewability is a split criterion co-equal with parallelism, and Lane A is the evidence: 59 items / 47 production files / 2963 insertions could not be re-gated cheaply, so its verdict went 28 commits stale and defects compounded unseen.
   3. **The 2026-07-26 supersession rationale no longer holds as written.** Nine Phase 2 items were marked `[f]` because "the checklist plan deletes the step machine." As of 2026-07-29 that plan **freezes** the engine rather than deleting it: eng-team migrates, the example packs stay on the engine, and deletion is gated on a mechanical trigger. The `[f]` markers stand, but the reason becomes *"frozen — repaired only where a live pack breaks."* **D015 returns to scope on that test**: `agents/dogfood-content-review/workflows/dogfood-content-review.yaml`'s `issues_count > 0` uses an unsupported `>`, and that pack is one this plan's successor deliberately **keeps** on the engine, so it is a broken route in live code with no scheduled removal. **D060** is arguably the same. Engine internals (D005/D027/D024/D025/D028/Q017/D026) stay `[f]`.
   4. **D092 (`fsutil`), Q062/D071 (`claim()`) and D029 are no longer shared infrastructure for anything.** The checklist plan dropped its `bobi/` parser, so the atomic-write coupling that made them load-bearing is gone. D029 is still worth fixing on its own merits — a registry entry stuck `running` makes `bobi/subagent.py:1063-1070` refuse re-dispatch of that unit forever, blocking a human recovering by hand — but it gates nothing.
+
+- **2026-08-03** (re-triage session, Zach): **the plan is picked back up, and every item was re-verified against `main` @ `eac952b`** — 84 commits / 300 files / +52,268 / −4,479 past the review tree (`58aba2c`, 2026-07-17). Three decisions plus a full re-validation sweep. Ten markers move in this amendment's PR; **all per-item detail lives here rather than on the checklist lines, because the review surface above the appendix fence is insertion-only.**
+
+  **Status:** the 2026-07-29 deprioritization is **LIFTED**. The header's `Status:`/`Tracking issue:` lines are approved text and stay as written; read them together with this amendment — tracking is now Linear **MOD-278** (see decision 4).
+
+  ### 1. Lane A / PR #844 is closed — harvested, not rebased
+
+  The branch stays at `f58081cc527c36eca850d4c36c09c9b615af5c6d` on `agent/818-lane-a`; **do not delete the ref.** Its true size was worse than the 2026-07-29 note recorded: **55 commits / 102 files / +9,888 / −974** (the "2963 insertions" figure was production-only), and it is `CONFLICTING` against the drift above. Rebasing costs more than re-deriving its 59 items and would carry all four outstanding BLOCKINGs through. **Every one of those defects is branch-only; closing keeps `main` clean.** Use it as a reference diff per item — never a blind cherry-pick, since it went 0-for-4 on gate rounds with 3,853 unit tests green while a private key was readable over the setup API.
+
+  ### 2. Re-validation: 229 items → 220 still actionable
+
+  Every cited path (**102/102**) still exists; the repo reorg moved none of them. **Line numbers in the checklist are deliberately NOT refreshed** — they drifted far enough (D003 `session.py:1214`→1653, D021 `1205`→1645, D031 `events/server.py:706`→930, D067 `511`→536, D029 `546`→527) that updating them would rot again within weeks. Locate by symbol, as this plan already instructs.
+
+  **Nine items are already resolved and their markers flip to `[x]`:**
+
+  | Item | Why it closed |
+  |---|---|
+  | D073 | The `monitor.error` push now carries `on_done=batch_ack.attach() if batch_ack else None` |
+  | D113 | The dangling "see Bug fixes above" reference is gone from `CLAUDE.md` |
+  | D121 | `agents/eng-team/README.md` now lists `stall-recovery.yaml` and `image-gen.md` |
+  | D122 | `SLACK_SIGNING_SECRET` is now documented in `agents/personal-assistant/agent.md` |
+  | D110 | `docs/BUILDING_AGENT_TEAMS.md` now lists whatsapp among native services |
+  | D055 | The "later wins by name" claim is gone from `docs/MONITORS.md` |
+  | D013 | The "re-enters review even in auto mode" claim is gone from `docs/MONITORS.md` |
+  | Q125 | **REFUTED** — `bobi/brain/__init__.py:435` now calls `cfg.brain_small_model`; the property has a real consumer and stays |
+  | Q098 | **REFUTED** — `isBreakerTripped` no longer exists anywhere in `event-server/` |
+
+  **D008/Q025 is NARROWED, not closed — read this before building it.** The markdown link renderer now scheme-validates (`/^(https?:|mailto:)/i.test(url) ? url : "#"`), which fixes the `javascript:` half. **The attribute-injection half survives:** `safe` is still interpolated into `href="${safe}"` unescaped, so a URL containing a double quote breaks out of the attribute. **Fix the escaping only; do not re-add a scheme check.** A builder skimming the item would plausibly see the scheme check and mark it done.
+
+  **Three items grew and their scope is larger than the checklist line says:**
+
+  - **D103** — `_free_port` is now duplicated across **ten** integration test files, not seven.
+  - **Q015** — `_on_sleep_cycle_result` now repeats its failure block **nine** times, not seven.
+  - **Q027 / Q104** — the named survivor was renamed `_claude_projects_dirs` → **`claude_projects_dirs`** (`bobi/chat_history.py:83`, now public), and the hand-rolled copies grew to **four**: `bobi/cli.py:1568`, `bobi/history.py:14`, `bobi/brain/claude.py:374`, plus the house one. Consolidate onto `claude_projects_dirs` and resolve Q027 and Q104 together.
+
+  **Two items shrank without closing:** Q008 (six unreachable `if not project_path:` guards → **three**, at `cli.py:1666`, `2489`, `2783`) and Q041 (four hand-rolled `/health` polling loops → **three**).
+
+  **One item's inventory changed:** D092's five atomic-write re-implementations are now `bobi/monitors/script_cache_checks.py`, `bobi/sdk.py`, `bobi/launch_admission.py`, `bobi/workflow/state.py`, `bobi/brain/instructions.py`. Still five, still no shared helper — `bobi/fsutil.py` does not exist. **Survey these, not the appendix's list.**
+
+  **D017 gained a second symptom.** `agents/eng-team/agent.yaml:126` still carries the unmatchable `event: github.issues.assigned`, and `bobi/events/reactor.py:316` now branches on that same never-emitted type to shape a dispatch prompt — so that branch is dead for the identical reason. **Fix both.** The adapter comment at `event-server/core/src/adapters/github.ts:21` ("making the issues.assigned miss impossible") is about **fields** being structurally present, not the event type; the action still travels in `fields.action`. **The Operational note in Notes therefore still holds: issue pickup needs a Slack directive until D017 lands.**
+
+  **D015 returns to scope and its marker moves `[f]` → `[ ]`.** The 2026-07-29 amendment's test applies — the successor plan freezes the engine rather than deleting it and deliberately KEEPS `dogfood-content-review` on it — and re-verification confirms `dogfood-content-review.yaml:35` still reads `if: "issues_count > 0"`, unchanged. A broken route in live code with no scheduled removal. **Phase 2 therefore has FOUR survivors, not the three its section header says. D060 is arguably the same and should be re-decided when Lane A reaches it.**
+
+  ### 3. PR sizing replaces Q1's falsified guidance
+
+  The Lane map table stays as approved; what changes is the **PR boundary inside a lane**, which is precisely what Q1 got wrong. A lane is a tracking unit, not a PR. **Each lane lands as several PRs, each sized to what a gate can re-review: roughly one phase-section or ~10–15 items, under ~800 changed lines.** Target counts: Lane A ~55 items / 4–5 PRs · Lane B ~103 / 7–8 · Lane C 21 / 2 · Lane D 24 / 2 · Lane E 13 / 1. Two hard rules, both bought with #844's four failed gate rounds:
+
+  - **Never bundle a security fix with mechanical cleanup.** Phase 4's `webui/server.py` items (D007, D081, D080, D033) and Phase 7's (D008, D089, D049) ship as their own PRs. Three confinement BLOCKINGs hid inside 2,963 lines of unrelated churn while the unit suite stayed green.
+  - **One PR closes one issue** per `docs/TICKETING_POLICY.md`. Where a lane needs several PRs, the lane issue stays open until its last PR lands, and each PR names the item IDs it closes.
+
+  ### 4. Tracking moved to Linear
+
+  #817 was closed **NOT_PLANNED** on 2026-07-31 in the epic migration — this plan is now **MOD-278**, with lanes #818–822 staying as GitHub issues mirrored 1:1 as sub-issues. **#852 was closed the same minute for the same reason, not because it finished** — its Phase 4 (eng-team trial) is still 24 unchecked items. The 2026-07-29 hold ("no lane work until #852 completes") was therefore discharged administratively, not by work; Zach lifted it explicitly on 2026-08-03.
 
 ## Notes
 
