@@ -30,8 +30,17 @@ Bobi is an event-driven AI agent framework.
 - `docs/RUN_DRILLDOWNS.md`: opening a run - the debugging transcript view
   (timestamps + tool calls, distinct from `/messages`) and the Details
   payload for runs that have no transcript.
+- `docs/AGENT_OVERVIEW.md`: the agent page's read-only composition view
+  (`GET .../overview`) and the `script_cache` savings block in the spend
+  payload - how automations are counted and how savings are priced.
+- `docs/AGENT_STATE.md`: the agent page's state tri-state (`running` /
+  `stopped` / `not_responding`), the manager health probe behind it, and the
+  status strip's best-effort telemetry segments.
 - `docs/MONITORS.md`: monitor scheduler and the `script_cache` token-saving runner.
 - `docs/WORKFLOW_ENGINE.md`: workflow state machine, step types, suspend/resume.
+- `docs/RUNS_VIEW.md`: the unified runs read model behind the agent page - one
+  row shape over sessions, workflow runs, and monitor records; the status
+  vocabulary and the two rules it derives.
 - `docs/TOOL_LIBRARY.md`: unified dependency model - declaring tools/skills/MCP
   deps (pinned `install:` vs guide-only), the catalog, and how they bake + verify.
 - `docs/SECURITY.md`: overall security model (trust, credentials, prompt-injection).
