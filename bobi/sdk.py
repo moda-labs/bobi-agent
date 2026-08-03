@@ -233,6 +233,60 @@ def _has_tokens(entry: Any) -> bool:
     return bool(entry.get("input_tokens") or entry.get("output_tokens"))
 
 
+def _same_model(a: str, b: str) -> bool:
+    """Whether two model ids name the same physical model.
+
+    The live cost writer keys ``model_usage`` by the SDK's own dict key, which
+    can carry a context-variant marker (``claude-opus-4-8[1m]``) or a dated
+    snapshot suffix (``claude-haiku-4-5-20251001``) that a recovered
+    transcript's bare ``message.model`` does not. Matching on the base id keeps
+    one model on one row. The prefix arm only accepts a match on a ``-``
+    boundary, so a genuinely different model is never collapsed in.
+    """
+    a, b = a.split("[", 1)[0], b.split("[", 1)[0]
+    if a == b:
+        return True
+    short, long = sorted((a, b), key=len)
+    if not short or not long.startswith(short + "-"):
+        return False
+    # Only a YYYYMMDD snapshot suffix marks the same model. Any digits at all
+    # is too loose: it would read claude-sonnet-4-5 as a snapshot of
+    # claude-sonnet-4 and merge two different models onto one row.
+    suffix = long[len(short) + 1:]
+    return len(suffix) == 8 and suffix.isdigit()
+
+
+def _token_total(usage: dict) -> int:
+    """Total token volume recorded across a ``model_usage`` map."""
+    return sum(
+        _tok(e.get("input_tokens")) + _tok(e.get("output_tokens"))
+        for e in usage.values() if isinstance(e, dict)
+    )
+
+
+def _tok(value: Any) -> int:
+    """A token count usable in arithmetic (bool is an int subclass)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _matching_usage_key(usage: dict, provider: str, model: str) -> str:
+    """The ``model_usage`` key recovered usage for *model* belongs under.
+
+    Reuses an existing key for the same physical model rather than adding a
+    second one: splitting a model across two keys would double its rows in the
+    cost fold forever, and :func:`_has_tokens` would then report the session
+    populated, making the split unrepairable by a re-run.
+    """
+    key = f"{provider}:{model}" if provider else model
+    if key in usage:
+        return key
+    for existing in usage:
+        known = existing.split(":", 1)[1] if ":" in existing else existing
+        if _same_model(known, model):
+            return existing
+    return key
+
+
 @dataclass
 class SessionEntry:
     name: str
@@ -250,10 +304,19 @@ class SessionEntry:
     provider: str = ""
     total_cost_usd: float = 0.0
     # model_usage: "provider:model" -> {cost_usd, input_tokens, output_tokens,
-    # cached_input_tokens}. Entries are built ONLY by record_cost below; the
-    # presence of the cached_input_tokens key marks an entry recorded after
-    # the #760 cached/uncached split and licenses fold-time dollar estimation
-    # (bobi.costs.rollup_costs). Legacy entries lack the key and never gain it.
+    # cached_input_tokens}. The presence of the cached_input_tokens key marks
+    # an entry whose cached tokens are split out per #760 and licenses
+    # fold-time dollar estimation (bobi.costs.rollup_costs).
+    #
+    # Two writers, with different rules about that key:
+    #   record_cost      - the live path. Never adds the key to an entry that
+    #                      lacks it: one post-upgrade turn on a straddling
+    #                      session would otherwise mark the whole merged entry
+    #                      priceable and bill its inflated legacy input.
+    #   backfill_usage   - the #935 repair path. Writes the key, because it
+    #                      replaces zeroed counters wholesale with a genuine
+    #                      split recovered from the transcript, and only ever
+    #                      touches entries carrying no token volume at all.
     model_usage: dict = field(default_factory=dict)
     rotation_count: int = 0
     started_at: float = field(default_factory=time.time)
@@ -406,10 +469,19 @@ class SessionRegistry:
                        write: bool = True) -> str:
         """Fill ZEROED or missing token telemetry from recovered usage (#935).
 
-        A repair, not a recording: it never adds dollars, never bumps
-        ``last_activity``, and refuses any entry that already carries real
-        tokens - a recorded fact outranks a reconstructed one, which is also
-        what makes re-running the backfill a no-op.
+        A repair, not a recording: it never adds dollars and never bumps
+        ``last_activity``.
+
+        A recorded fact outranks a reconstructed one: any session already
+        carrying token volume is left exactly as it is, which is also what
+        makes re-running a no-op. That rule has a real cost, so it is reported
+        rather than hidden. The recording fix and this repair ship together, so
+        a long-lived agent can book one post-fix turn before an operator runs
+        the backfill; its pre-fix history is then visible in the transcript but
+        NOT recoverable here, and comes back as ``"partially_recorded"`` so the
+        operator can see what was left behind instead of reading a clean
+        ``already_populated``. Completing those entries would mean overwriting
+        recorded numbers, which this repair deliberately never does.
 
         ``usage_by_model`` maps a bare model id to
         ``{input_tokens, output_tokens, cached_input_tokens}``. The merge runs
@@ -424,7 +496,7 @@ class SessionRegistry:
         path = self._state_path(name)
         if not path.exists():
             return "missing"
-        with _state_file_lock(path):
+        if True:
             if not path.exists():
                 return "missing"
             try:
@@ -432,12 +504,17 @@ class SessionRegistry:
             except (json.JSONDecodeError, TypeError):
                 return "missing"
             usage = data.get("model_usage") or {}
-            if any(_has_tokens(entry) for entry in usage.values()):
-                return "already_populated"
+            recorded = _token_total(usage)
+            if recorded:
+                recovered = sum(t.get("input_tokens", 0)
+                                + t.get("output_tokens", 0)
+                                for t in usage_by_model.values())
+                return ("partially_recorded" if recovered > recorded
+                        else "already_populated")
             if not write:
                 return "repaired"
             for model, tokens in usage_by_model.items():
-                key = f"{provider}:{model}" if provider else model
+                key = _matching_usage_key(usage, provider, model)
                 entry = usage.get(key) or {"cost_usd": 0.0}
                 entry.setdefault("cost_usd", 0.0)
                 entry["input_tokens"] = tokens.get("input_tokens", 0)

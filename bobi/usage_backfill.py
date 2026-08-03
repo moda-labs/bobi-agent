@@ -15,11 +15,11 @@ into place.
 from __future__ import annotations
 
 import json
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
-from bobi.sdk import SessionRegistry
+from bobi.chat_history import claude_projects_dirs
+from bobi.sdk import ACTIVE_STATUSES, SessionEntry, SessionRegistry
 
 # The provider a Claude transcript can speak for. A session recorded against
 # any other provider is skipped outright: its tokens were never Claude's.
@@ -33,14 +33,20 @@ class BackfillReport:
     repaired: int = 0
     already_populated: int = 0
     transcript_missing: int = 0
-    unparseable: int = 0
+    # "unusable", not "unparseable": a transcript that read and parsed
+    # cleanly but held no billable usage lands here too.
+    unusable: int = 0
     skipped: int = 0
-    repaired_sessions: list[str] = field(default_factory=list)
+    # Recorded token volume smaller than the transcript's: the pre-fix history
+    # is visible but not recoverable, because completing it would mean
+    # overwriting recorded numbers.
+    partially_recorded: int = 0
 
     @property
     def scanned(self) -> int:
         return (self.repaired + self.already_populated
-                + self.transcript_missing + self.unparseable + self.skipped)
+                + self.transcript_missing + self.unusable + self.skipped
+                + self.partially_recorded)
 
     def render(self, *, write: bool) -> str:
         verb = "Repaired" if write else "Would repair"
@@ -49,32 +55,22 @@ class BackfillReport:
             f"{verb + ':':<22}{self.repaired}",
             f"Already populated:    {self.already_populated}",
             f"Transcript missing:   {self.transcript_missing}",
-            f"Transcript unusable:  {self.unparseable}",
+            f"Transcript unusable:  {self.unusable}",
             f"Skipped:              {self.skipped}",
-        ])
+        ] + ([
+            f"Partially recorded:   {self.partially_recorded}"
+            "  (post-fix turns already booked; earlier history not"
+            " recoverable without overwriting them)"
+        ] if self.partially_recorded else []))
 
 
-def claude_projects_dirs(claude_config_dir: Path | None = None) -> list[Path]:
-    """Where Claude retains transcripts, most specific first."""
-    if claude_config_dir is not None:
-        return [Path(claude_config_dir) / "projects"]
-    dirs = []
-    configured = os.environ.get("CLAUDE_CONFIG_DIR")
-    if configured:
-        dirs.append(Path(configured) / "projects")
-    home = Path.home() / ".claude" / "projects"
-    if home not in dirs:
-        dirs.append(home)
-    return dirs
-
-
-def index_transcripts(claude_config_dir: Path | None = None) -> dict[str, Path]:
+def _index_transcripts(claude_config_dir: Path | None = None) -> dict[str, Path]:
     """Map Claude session id -> transcript path, walked once.
 
     Transcripts are named ``<session_id>.jsonl`` under a per-project directory
     whose name is a slug of the session's cwd. The slug rule is Claude's, not
     ours, so a session's ``cwd`` only orders the search (see
-    :func:`resolve_transcript`) - the uuid filename is what actually resolves.
+    :func:`_resolve_transcript`) - the uuid filename is what actually resolves.
     """
     index: dict[str, Path] = {}
     for projects in claude_projects_dirs(claude_config_dir):
@@ -98,7 +94,7 @@ def index_transcripts(claude_config_dir: Path | None = None) -> dict[str, Path]:
     return index
 
 
-def resolve_transcript(session_id: str, cwd: str,
+def _resolve_transcript(session_id: str, cwd: str,
                        index: dict[str, Path]) -> Path | None:
     """The retained transcript for *session_id*, preferring *cwd*'s project.
 
@@ -131,10 +127,18 @@ def transcript_usage(path: Path) -> dict[str, dict[str, int]]:
 
     Raises ``OSError`` if the transcript cannot be read; unreadable individual
     lines are skipped, which is how a truncated tail stays recoverable.
+
+    Decoding is deliberately lenient. A session killed by a crash, OOM, or full
+    disk leaves its transcript cut mid-multibyte, and strict decoding would
+    raise on the whole file rather than yield the usable prefix. Only a regular
+    file is opened: a ``<uuid>.jsonl`` that is a FIFO would block forever, and
+    one pointing at a character device would read without end.
     """
+    if not path.is_file():
+        raise OSError(f"not a regular file: {path}")
     per_model: dict[str, dict[str, int]] = {}
     seen: set[str] = set()
-    with path.open() as fh:
+    with path.open(encoding="utf-8", errors="replace") as fh:
         for line in fh:
             record = _parse_line(line)
             if record is None:
@@ -201,12 +205,19 @@ def backfill_usage(*, claude_config_dir: Path | None = None,
     """
     report = BackfillReport()
     registry = SessionRegistry(root)
-    index = index_transcripts(claude_config_dir)
+    index = _index_transcripts(claude_config_dir)
 
     claimed: set[str] = set()
     for entry in _entries_oldest_first(registry):
         provider = (entry.provider or "").strip()
         if provider and provider != CLAUDE_PROVIDER:
+            report.skipped += 1
+            continue
+        # A live session's in-flight turn is already in the transcript but not
+        # yet in state.json. Repairing now, then letting record_cost add the
+        # same turn, would double-count it - and the entry would then carry
+        # tokens, so no later run could correct it.
+        if entry.status in ACTIVE_STATUSES:
             report.skipped += 1
             continue
         # One transcript's tokens belong to one run. Two registry rows sharing
@@ -216,17 +227,20 @@ def backfill_usage(*, claude_config_dir: Path | None = None,
             report.skipped += 1
             continue
 
-        transcript = resolve_transcript(entry.session_id, entry.cwd, index)
+        transcript = _resolve_transcript(entry.session_id, entry.cwd, index)
         if transcript is None:
             report.transcript_missing += 1
             continue
         try:
             usage = transcript_usage(transcript)
-        except OSError:
-            report.unparseable += 1
+        except (OSError, ValueError, MemoryError):
+            # One damaged transcript is a fact about that session, not a reason
+            # to strand every session behind it - and sessions are walked
+            # oldest-first, so an early bad file would strand the most.
+            report.unusable += 1
             continue
         if not usage:
-            report.unparseable += 1
+            report.unusable += 1
             continue
 
         outcome = registry.backfill_usage(
@@ -234,10 +248,12 @@ def backfill_usage(*, claude_config_dir: Path | None = None,
         )
         if outcome == "repaired":
             report.repaired += 1
-            report.repaired_sessions.append(entry.name)
             claimed.add(entry.session_id)
         elif outcome == "already_populated":
             report.already_populated += 1
+            claimed.add(entry.session_id)
+        elif outcome == "partially_recorded":
+            report.partially_recorded += 1
             claimed.add(entry.session_id)
         else:
             # The state file vanished between the listing and the write.
@@ -245,7 +261,7 @@ def backfill_usage(*, claude_config_dir: Path | None = None,
     return report
 
 
-def _entries_oldest_first(registry: SessionRegistry) -> list:
+def _entries_oldest_first(registry: SessionRegistry) -> list[SessionEntry]:
     """Registry entries oldest run first, ties broken by name.
 
     Deterministic ordering is what makes a shared-session-id tie break the same
