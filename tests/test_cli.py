@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
@@ -217,6 +217,92 @@ class TestSubagents:
         assert mock.call_args[1]["task"] == "Fix #42"
         assert mock.call_args[1]["role"] == "engineer"
         assert mock.call_args[1]["cwd"] == str(bobi_install.repo_path)
+
+    def test_id_random_is_passed_through(self, bobi_install):
+        with patch("bobi.subagent.launch_agent", return_value="wf-adhoc-x") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--id-random",
+                "--task", "Fan out",
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[1]["random_key"] is True
+
+    def test_id_random_reaches_the_wait_path_too(self, bobi_install):
+        """--wait resolves the name itself, so it needs its OWN passthrough.
+
+        Asserting only the detached branch leaves `--wait --id-random` free to
+        fall back to a derived key, which is the opposite of what was asked
+        for: two deliberate parallel runs would land on one name.
+        """
+        with patch("bobi.subagent.spawn_adhoc") as spawn:
+            spawn.return_value = MagicMock(final_text="", success=True, error="")
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--wait", "--id-random",
+                "--task", "Fan out",
+            ])
+        assert result.exit_code == 0, result.output
+        assert spawn.call_args[1]["name"].startswith("rand-")
+
+    def test_wait_derives_a_name_and_starts_it_fresh(self, bobi_install):
+        """The --wait path resolves the name a frame before spawn_adhoc, so it
+        carries the derived-key implication itself: spawn_adhoc sees an
+        explicit name and would otherwise resume that name's transcript."""
+        with patch("bobi.subagent.spawn_adhoc") as spawn:
+            spawn.return_value = MagicMock(final_text="", success=True, error="")
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--wait",
+                "--task", "Investigate X",
+            ])
+        assert result.exit_code == 0, result.output
+        assert spawn.call_args[1]["name"].startswith("adhoc-")
+        assert spawn.call_args[1]["fresh"] is True
+
+    def test_id_and_id_random_are_mutually_exclusive(self, bobi_install):
+        with patch("bobi.subagent.launch_agent") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer",
+                "--id", "42", "--id-random", "--task", "X",
+            ])
+        assert result.exit_code != 0
+        assert "--id-random" in result.output
+        mock.assert_not_called()
+
+    def test_duplicate_launch_reports_cleanly(self, bobi_install):
+        """Refusing an un-keyed duplicate is a common path now, not a crash."""
+        from bobi.subagent import DuplicateRunError
+        refusal = DuplicateRunError(
+            "A run is already active: wf-adhoc-x (status=running). Its run key "
+            "was derived from the task; pass --id-random to run both.",
+            session_name="wf-adhoc-x", status="running", derived_key=True,
+        )
+        with patch("bobi.subagent.launch_agent", side_effect=refusal):
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--task", "Fix #42",
+            ])
+        assert result.exit_code == 1
+        assert "already active" in result.output
+        assert "Traceback" not in result.output
+        # The remediation must be runnable as printed, not a <name> placeholder.
+        assert f"bobi agent {TEST_AGENT_NAME} subagents cancel wf-adhoc-x" \
+            in result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+
+    def test_a_dependency_failure_is_not_reported_as_a_duplicate(self, bobi_install):
+        """`launch_agent` raises RuntimeError for the requires preflight and the
+        spend governor too; a blanket catch would relabel those."""
+        with patch("bobi.subagent.launch_agent",
+                   side_effect=RuntimeError("Required dependency check failed: gh")):
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--task", "Fix #42",
+            ])
+        assert result.exit_code != 0
+        assert "Launch refused" not in result.output
 
     def test_workflow_required(self, bobi_install):
         result = CliRunner().invoke(main, [

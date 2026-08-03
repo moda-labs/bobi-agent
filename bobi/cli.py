@@ -2840,7 +2840,21 @@ main.add_command(event_server_cmd)
 @subagents.command("launch")
 @click.option("--workflow", "-w", required=True, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
 @click.option("--role", required=True, help="Agent role (see 'bobi agent <name> roles list')")
-@click.option("--id", "run_key", default=None, help="Explicit run key for correlation (e.g. issue number)")
+@click.option("--id", "run_key", default=None,
+              help="Explicit run key for correlation (e.g. an issue number). "
+                   "Relaunching the same key resumes that run. Default: a key "
+                   "derived from the launch itself - workflow, role, model, "
+                   "effort, task text - so an identical launch collides with "
+                   "the run already in flight instead of starting a second "
+                   "one.")
+@click.option("--id-random", "random_key", is_flag=True,
+              help="Mint a random run key instead of deriving one from the "
+                   "launch. Without it, an un-keyed launch derives its key "
+                   "from the workflow, role, model, effort and task text, so "
+                   "relaunching the same one while the first run is still "
+                   "going is refused as a duplicate. Use this to fan out N "
+                   "copies of an IDENTICAL launch on purpose. Cannot be "
+                   "combined with --id.")
 @click.option("--task", default=None, help="Task description / context for the agent")
 @click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
 @click.option("--wait", is_flag=True,
@@ -2874,10 +2888,11 @@ main.add_command(event_server_cmd)
                    "every RE-dispatch of a worker that re-orients from durable "
                    "state — a committed checklist, the branch's commits — "
                    "since re-running the same --task otherwise resumes the "
-                   "dead session.")
-def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
-                     post_event, requested_by, non_interactive, persistent,
-                     subscribe, model, effort, fresh):
+                   "dead session. Implied when the run key is derived (no "
+                   "--id), where there is no run the caller meant to continue.")
+def subagents_launch(workflow, role, run_key, random_key, task, timeout, wait,
+                     as_check, post_event, requested_by, non_interactive,
+                     persistent, subscribe, model, effort, fresh):
     """Launch a sub-agent with a workflow and role.
 
     Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
@@ -2890,6 +2905,7 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
     if subscribe:
         persistent = True
     _dispatch_agent(task=task, workflow=workflow, role=role, run_key=run_key,
+                    random_key=random_key,
                     timeout=timeout, wait=wait, as_check=as_check,
                     post_event=post_event, requested_by=requested_by,
                     interactive=not non_interactive,
@@ -2898,7 +2914,8 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
                     model=model, effort=effort, fresh=fresh)
 
 
-def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
+def _dispatch_agent(*, task, workflow, role, run_key=None, random_key=False,
+                    timeout, wait,
                     as_check=False, post_event=None, requested_by=None,
                     interactive=True, persistent=False, subscribe=None,
                     model="", effort="", fresh=False):
@@ -2926,6 +2943,10 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
     if post_event and not as_check:
         click.echo("--post-event requires --as-check", err=True)
         raise SystemExit(1)
+    if run_key and random_key:
+        click.echo("--id-random cannot be combined with --id (an explicit run "
+                   "key already opts out of task-derived dedup)", err=True)
+        raise SystemExit(1)
 
     if as_check:
         _run_check(cwd=cwd, task=task, timeout=timeout, post_event=post_event)
@@ -2940,9 +2961,10 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
         raise SystemExit(1)
 
     if wait:
-        with _launch_refusal_is_readable():
+        with _launch_refusal_is_readable(project_path):
             _run_agent_wait(cwd=cwd, task=task, workflow=workflow, role=role,
-                            run_key=run_key, timeout=timeout,
+                            run_key=run_key, random_key=random_key,
+                            timeout=timeout,
                             requested_by=requested_by, interactive=interactive,
                             persistent=persistent, subscribe=subscribe or [],
                             model=model, effort=effort, fresh=fresh)
@@ -2962,7 +2984,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
             raise SystemExit(1)
 
     from .subagent import launch_agent
-    with _launch_refusal_is_readable():
+    with _launch_refusal_is_readable(project_path):
         session_name = launch_agent(
             task=task, cwd=cwd, workflow_name=workflow,
             timeout=timeout, requested_by=requester,
@@ -2971,6 +2993,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
             persistent=persistent,
             subscribe=subscribe or [],
             run_key=run_key,
+            random_key=random_key,
             model=model,
             effort=effort,
             fresh=fresh,
@@ -2979,21 +3002,44 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
 
 
 @contextmanager
-def _launch_refusal_is_readable():
-    """Surface a blocked launch as one line on stderr, never a traceback.
+def _launch_refusal_is_readable(project_path: Path):
+    """Surface a refused launch as one line on stderr, never a traceback.
 
-    The highest-stakes surface in the lineage guard, because the reader is an
+    The highest-stakes surface in either launch guard, because the reader is an
     LLM. A raw traceback reads as a transient crash, and the natural recovery
     is to retry with a fresh run key or ``-w adhoc`` - turning one refusal into
-    the launch storm the guard exists to stop. The message itself (built in
-    ``bobi/launch_lineage.py``) says the block is deterministic and names each
-    retry vector; all this does is make sure the agent sees it and nothing else.
+    the launch storm the guards exist to stop. Both refusals land here so that
+    property holds once rather than per call site:
+
+    - ``LaunchBlockedError`` (lineage, #849) carries its own message, built in
+      ``bobi/launch_lineage.py``, which says the block is deterministic and
+      names each retry vector.
+    - ``DuplicateRunError`` (derived run key, #850) needs the remediation
+      spelled out here, where the agent name is resolvable.
     """
     from .launch_lineage import LaunchBlockedError
+    from .sdk import ACTIVE_STATUSES
+    from .subagent import DuplicateRunError
     try:
         yield
     except LaunchBlockedError as exc:
         click.echo(str(exc), err=True)
+        raise SystemExit(1) from None
+    except DuplicateRunError as exc:
+        # Render the real agent name: an LLM pastes a `<name>` placeholder
+        # verbatim and the remediation fails.
+        agent_name = paths.agent_name_for_root(project_path)
+        click.echo(f"Launch refused: {exc}", err=True)
+        click.echo(f"  Watch it:  bobi agent {agent_name} subagents show "
+                   f"{exc.session_name}", err=True)
+        # Only offer the cancel when it would do something. `cancel_agent`
+        # ignores anything outside ACTIVE_STATUSES, so printing it for a
+        # suspended run sends the reader to a command that reports "no running
+        # sub-agent" and teaches them the refusal is bogus. The exception's own
+        # message carries the remedy that fits that case.
+        if exc.status in ACTIVE_STATUSES:
+            click.echo(f"  Cancel it: bobi agent {agent_name} subagents cancel "
+                       f"{exc.session_name}", err=True)
         raise SystemExit(1) from None
 
 
@@ -3002,7 +3048,7 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
                     run_key: str | None, timeout: int, requested_by,
                     interactive: bool, persistent: bool, subscribe: list[str],
                     model: str = "", effort: str = "",
-                    fresh: bool = False) -> None:
+                    fresh: bool = False, random_key: bool = False) -> None:
     """Run a real agent synchronously and print its final text."""
     if workflow != "adhoc":
         # Deliberate limit, not an oversight: --wait blocks by running the task
@@ -3042,17 +3088,26 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
     # and `-w adhoc --wait` is the delegation idiom the role prompts teach, so
     # it is the shape most likely to run away.
     from .launch_lineage import ADHOC_WORKFLOW, admit, stamp
-    from .subagent import adhoc_session_name, spawn_adhoc
-    session_name = adhoc_session_name(task, run_key)
+    from .subagent import (_resolve_project_name, resolve_adhoc_session_name,
+                           spawn_adhoc)
+    # Resolved ONCE and handed to spawn_adhoc as the name: with --id-random
+    # there is no derivation to repeat, and a stamped link naming a session
+    # that never registers makes every chain through it unreadable.
+    session_name, derived_key = resolve_adhoc_session_name(
+        task, run_key, random_key, project=_resolve_project_name(cwd),
+        role=role, model=model, effort=effort)
     stamp(os.environ, admit(
         _detect_project_root(), session=session_name,
         workflow=ADHOC_WORKFLOW, run_key=session_name,
     ))
 
     result = spawn_adhoc(
-        cwd=cwd, task=task, timeout=timeout, name=run_key,
+        cwd=cwd, task=task, timeout=timeout, name=session_name,
         requested_by=requester, persistent=False, role=role,
-        subscribe=subscribe, model=model, effort=effort, fresh=fresh,
+        subscribe=subscribe, model=model, effort=effort,
+        # spawn_adhoc forces fresh on a name it derived itself; this one was
+        # derived a frame earlier, so the caller carries the same implication.
+        fresh=fresh or derived_key,
     )
     if result.final_text:
         click.echo(result.final_text)

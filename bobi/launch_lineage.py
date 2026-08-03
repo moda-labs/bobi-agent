@@ -9,8 +9,11 @@ shapes before any process is spawned:
 2. **Depth** - a chain deeper than ``max_launch_depth``.
 
 The depth rule is what catches the reported incident (#849). Every generation
-there carried a fresh ``adhoc-<uuid4[:8]>`` run key, so the recursion was
-plausibly ``adhoc`` launching ``adhoc`` and no same-workflow rule could fire.
+there carried a fresh random run key, so the recursion was plausibly ``adhoc``
+launching ``adhoc`` and no same-workflow rule could fire. #850 has since made
+an un-keyed key DERIVED rather than random, which caps that exact chain at two
+- but only while the task text repeats verbatim, so the depth rule stays the
+structural guard and this module is not redundant.
 
 ## The chain lives in the environment, and nowhere else
 
@@ -118,9 +121,9 @@ class LineageLink:
     """One run in a chain.
 
     Keyed on ``session`` - the registry's actual key - rather than on
-    ``run_key``, which is not unique: ``spawn_adhoc`` derives
-    ``adhoc-<sha256(task)[:8]>`` from task text, so the same run key recurs
-    across workflows. ``workflow`` is carried explicitly and never read back
+    ``run_key``, which is not unique: since #850 both launchers DERIVE the key
+    from the launch's own dials when none is passed, so the same run key recurs
+    across workflows by construction. ``workflow`` is carried explicitly and never read back
     from the registry, whose ``phase`` drifts to the current step name mid-run
     and is therefore not a stable workflow identifier. It is ``""`` for a bare
     persistent session, which executes no workflow.

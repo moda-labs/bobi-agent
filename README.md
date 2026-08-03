@@ -304,7 +304,7 @@ Full walkthrough: **[Slack setup](skills/slack-setup.md)**.
 ```bash
 # Launch and operate agents
 bobi agent <name> start
-bobi agent <name> subagents launch --role <role> --task "context"
+bobi agent <name> subagents launch -w adhoc --role <role> --task "context"
 
 # Talk to running agents
 bobi agent <name> ask "question"          # blocks until response

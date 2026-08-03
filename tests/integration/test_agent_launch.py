@@ -10,6 +10,7 @@ sidecar e2e uses.
 """
 
 import json
+import os
 import time
 
 import pytest
@@ -28,6 +29,139 @@ def bobi_env(dual_brain_env):
 @pytest.fixture
 def cli_run(dual_brain_cli_run):
     return dual_brain_cli_run
+
+
+# These tests assert launch ADMISSION, never latency, so the subprocess budget
+# is generous on purpose: a cold `bobi` import is seconds on a loaded box, and
+# the sibling tests that do assert latency own that concern.
+LAUNCH_TIMEOUT_S = 60
+
+
+@pytest.mark.timeout(600)
+class TestUnkeyedLaunchDedup:
+    """The #850 incident, end to end through the real CLI.
+
+    A role file documented `subagents launch` without `--id`. Every launch got a
+    random run key, so the "already active" guard never fired and the chain ran
+    50 deep to the spend cap. With a derived key the chain terminates at N=2.
+    """
+
+    TASK = "Say 'hello dedup' and exit. Issue #850"
+    ROLE = "engineer"
+
+    def _derived_session_name(self):
+        """The name the CLI below will actually register under.
+
+        Every dial the launch passes has to be passed here too - `--role` most
+        of all, since these launches carry one. A helper that derived under a
+        different role would compute a name production never produces, and both
+        tests would then assert against a session that does not exist.
+        """
+        from bobi.subagent import derive_run_key
+        key = derive_run_key("adhoc", self.TASK, role=self.ROLE)
+        return f"wf-adhoc-test-repo-{key}"
+
+    def test_an_unkeyed_launch_registers_under_the_derived_name(
+        self, bobi_env, cli_run, clean_session
+    ):
+        """Half of the guard: both launches have to agree on a name at all.
+
+        This is what was broken. Every un-keyed launch minted a random key, so
+        no two ever landed on the same session and the admission check below
+        could not fire no matter how it was written.
+        """
+        name = self._derived_session_name()
+        clean_session(name)
+
+        result = cli_run(
+            "subagents", "launch",
+            "-w", "adhoc", "--role", self.ROLE, "--task", self.TASK,
+            timeout=LAUNCH_TIMEOUT_S,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert f"Agent started: {name}" in result.stdout, result.stdout
+        # The derivation is announced, so an un-keyed launch is not silent.
+        assert "derived" in result.stderr, result.stderr
+
+    def test_identical_unkeyed_launch_is_refused_while_the_first_runs(
+        self, bobi_env, cli_run, clean_session
+    ):
+        """The other half: the run in flight refuses its own twin.
+
+        The first run is pinned active rather than raced against. A real stub
+        agent can finish inside the seconds the second CLI spends starting up,
+        and then admitting the second launch is *correct* - so racing it would
+        make this test pass or fail on timing rather than on the guard.
+
+        Pinning only holds if nothing else is still writing the entry, so the
+        first run is allowed to SETTLE first. Otherwise the agent's own
+        terminal write lands after the pin and clobbers it - the same race in
+        the other direction.
+        """
+        from bobi.sdk import get_registry
+        name = self._derived_session_name()
+        clean_session(name)
+
+        first = cli_run(
+            "subagents", "launch",
+            "-w", "adhoc", "--role", self.ROLE, "--task", self.TASK,
+            timeout=LAUNCH_TIMEOUT_S,
+        )
+        assert first.returncode == 0, f"stderr: {first.stderr}"
+
+        registry = get_registry()
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            entry = registry.get(name)
+            if entry and entry.status not in ("starting", "running", "idle"):
+                break
+            time.sleep(1)
+        else:
+            pytest.fail(f"first run never settled: {registry.get(name)}")
+
+        # Now that no one else writes this entry, hold it active under a pid
+        # that is certainly alive: this process, so admission's crash-close
+        # (reconcile.close_dead_run) must NOT clear it.
+        registry.update(name, status="running", pid=os.getpid())
+
+        second = cli_run(
+            "subagents", "launch",
+            "-w", "adhoc", "--role", self.ROLE, "--task", self.TASK,
+            timeout=LAUNCH_TIMEOUT_S,
+        )
+        assert second.returncode != 0, (
+            "a byte-identical un-keyed relaunch started a second run - "
+            f"stdout: {second.stdout}"
+        )
+        output = second.stdout + second.stderr
+        assert "already active" in output, output
+        assert "--id-random" in output, output
+        assert "subagents cancel" in output, output
+        assert "Traceback" not in output, output
+
+    def test_id_random_opts_back_into_parallel_fan_out(
+        self, bobi_env, cli_run, clean_session
+    ):
+        started = []
+        for _ in range(2):
+            result = cli_run(
+                "subagents", "launch",
+                "-w", "adhoc", "--role", self.ROLE, "--id-random",
+                "--task", self.TASK,
+                timeout=LAUNCH_TIMEOUT_S,
+            )
+            assert result.returncode == 0, f"stderr: {result.stderr}"
+            name = result.stdout.split("Agent started:")[-1].strip()
+            clean_session(name)
+            started.append(name)
+
+        assert len(set(started)) == 2, started
+
+    # "A different task still launches alongside" is deliberately NOT here.
+    # Proving it end to end needs two live agents at once, so it measures the
+    # concurrency semaphore rather than dedup and fails on a loaded box for a
+    # reason unrelated to what it claims. It is pinned deterministically at
+    # tests/test_subagent.py::TestLaunchAgentUnkeyedDedup instead.
 
 
 @pytest.mark.timeout(120)

@@ -241,6 +241,12 @@ bobi agent my-agent subagents launch -w adhoc --role engineer --task "Fix the lo
 
 (`-w adhoc` runs an open-ended task outside any structured workflow.)
 
+(With no `--id`, the run key is derived from the launch itself - workflow,
+project, role, model, effort and the task text - so relaunching the same task
+while the first run is still going is refused as a duplicate. Pass `--id <key>`
+for work with a natural identity, or `--id-random` to run several copies of an
+identical task at once.)
+
 (Roles are defined by the team - run `bobi agent my-agent roles list` to see
 what yours has.)
 
