@@ -1,6 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import { buildBubbleSignature } from "@moda-labs/bobi-events-core";
+import { mintBubble, publishSigned, registerSigned } from "./bubble-helpers";
 import {
 	type FleetCommandRecord,
 	type FleetCommandResultRecord,
@@ -269,64 +269,6 @@ describe("admin command view", () => {
 // Through the real Worker: operator auth + signed-publish -> fold -> read
 // ---------------------------------------------------------------------------
 
-async function mintBubble(): Promise<{ bubble_id: string; bubble_key: string }> {
-	const res = await SELF.fetch("https://example.com/deployments", {
-		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ name: `mint-${Date.now()}`, subscriptions: ["_bootstrap"] }),
-	});
-	if (res.status !== 201) throw new Error(`mintBubble failed: ${res.status}`);
-	return res.json();
-}
-
-async function publishSigned(topic: string, bubbleId: string, bubbleKey: string, payload: unknown): Promise<Response> {
-	const path = `/events/${topic}`;
-	const body = JSON.stringify({ source: "fleet", payload });
-	const timestamp = String(Math.floor(Date.now() / 1000));
-	const nonce = `n-${Math.random().toString(16).slice(2)}`;
-	const signature = await buildBubbleSignature(bubbleKey, timestamp, nonce, "POST", path, body);
-	return SELF.fetch(`https://example.com${path}`, {
-		method: "POST",
-		headers: {
-			"content-type": "application/json",
-			"x-moda-bubble": bubbleId,
-			"x-moda-algo": "hmac-sha256",
-			"x-moda-timestamp": timestamp,
-			"x-moda-nonce": nonce,
-			"x-moda-signature": signature,
-		},
-		body,
-	});
-}
-
-// Register a deployment (JOIN the existing bubble via a signed POST) subscribed
-// to `subscriptions` - mirrors what the sidecar's admin listener does so the
-// server has a live subscription for the command to deliver to.
-async function registerSigned(
-	name: string,
-	subscriptions: string[],
-	bubbleId: string,
-	bubbleKey: string,
-): Promise<Response> {
-	const path = "/deployments";
-	const body = JSON.stringify({ name, subscriptions });
-	const timestamp = String(Math.floor(Date.now() / 1000));
-	const nonce = `n-${Math.random().toString(16).slice(2)}`;
-	const signature = await buildBubbleSignature(bubbleKey, timestamp, nonce, "POST", path, body);
-	return SELF.fetch(`https://example.com${path}`, {
-		method: "POST",
-		headers: {
-			"content-type": "application/json",
-			"x-moda-bubble": bubbleId,
-			"x-moda-algo": "hmac-sha256",
-			"x-moda-timestamp": timestamp,
-			"x-moda-nonce": nonce,
-			"x-moda-signature": signature,
-		},
-		body,
-	});
-}
-
 const OPERATOR = { authorization: "Bearer test-operator-token" };
 
 describe("fleet HTTP API", () => {
@@ -358,7 +300,7 @@ describe("fleet HTTP API", () => {
 		const b = await mintBubble();
 		const fleet = "acme";
 		const instance = `prod-${Date.now()}`;
-		const pub = await publishSigned("fleet/heartbeat", b.bubble_id, b.bubble_key,
+		const pub = await publishSigned("fleet/heartbeat", b,
 			snapshot(fleet, instance, { manager: { status: "idle", healthy: true, restart_count: 0 } }));
 		expect(pub.status).toBeLessThan(300);
 
@@ -370,7 +312,7 @@ describe("fleet HTTP API", () => {
 		expect(mine!.reachability).toBe("live");
 
 		// Publish a wedge lifecycle event; instance detail carries the trail.
-		const life = await publishSigned("fleet/lifecycle", b.bubble_id, b.bubble_key, {
+		const life = await publishSigned("fleet/lifecycle", b, {
 			deployment: { fleet, instance },
 			event: "probe_failing",
 			status: "wedged",
@@ -426,7 +368,7 @@ describe("fleet HTTP API", () => {
 		const fleet = "acme";
 		const instance = `no-sub-${Date.now()}`;
 		// Heartbeat (so the instance is addressable) but NO admin subscription.
-		const hb = await publishSigned("fleet/heartbeat", b.bubble_id, b.bubble_key, snapshot(fleet, instance));
+		const hb = await publishSigned("fleet/heartbeat", b, snapshot(fleet, instance));
 		expect(hb.status).toBeLessThan(300);
 		const post = await SELF.fetch(`https://example.com/fleet/instances/${fleet}/${instance}/commands`, {
 			method: "POST",
@@ -442,11 +384,11 @@ describe("fleet HTTP API", () => {
 		const instance = `cmd-${Date.now()}`;
 		// The sidecar's admin listener: register the admin subscription under the
 		// instance bubble so the command has a live subscriber to deliver to.
-		const reg = await registerSigned(`${instance}-admin`, [adminTopic(fleet, instance)], b.bubble_id, b.bubble_key);
+		const reg = await registerSigned(`${instance}-admin`, [adminTopic(fleet, instance)], b);
 		expect(reg.status).toBeLessThan(300);
 		// A signed heartbeat so the server captures the deployment's bubble (the
 		// command route needs it to address the admin topic).
-		const hb = await publishSigned("fleet/heartbeat", b.bubble_id, b.bubble_key, snapshot(fleet, instance));
+		const hb = await publishSigned("fleet/heartbeat", b, snapshot(fleet, instance));
 		expect(hb.status).toBeLessThan(300);
 
 		const post = await SELF.fetch(`https://example.com/fleet/instances/${fleet}/${instance}/commands`, {
@@ -466,7 +408,7 @@ describe("fleet HTTP API", () => {
 		expect(((await pending.json()) as { status: string }).status).toBe("pending");
 
 		// The supervisor publishes its result (signed, same bubble); the server folds it.
-		const reply = await publishSigned("fleet/command_result", b.bubble_id, b.bubble_key, {
+		const reply = await publishSigned("fleet/command_result", b, {
 			deployment: { fleet, instance },
 			command_id: issued.command_id,
 			status: "done",

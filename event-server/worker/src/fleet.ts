@@ -401,6 +401,131 @@ export async function buildCommandView(
 	};
 }
 
+// ---------------------------------------------------------------------------
+// Issuing an admin command
+// ---------------------------------------------------------------------------
+
+// Publishes the admin event into the target deployment's bubble and returns the
+// number of REGISTERED admin subscriptions it was buffered for. Injected rather
+// than imported so this module stays free of the bus storage adapter: the two
+// callers (the HTTP route and the MCP tools) both live in index.ts's world,
+// where `createTopicEvent` + `storage.deliver` are already in scope.
+export type AdminPublisher = (
+	topic: string,
+	payload: Record<string, unknown>,
+	bubbleId: string,
+) => Promise<number>;
+
+// Why a command could not be issued. Each maps to a different HTTP status on
+// the REST route and a different recovery sentence on the MCP surface, so the
+// distinction is carried in the result rather than flattened to a boolean.
+export type IssueFailure =
+	// No heartbeat has ever been folded for this (fleet, instance).
+	| "unknown_instance"
+	// Known, but no bubble captured - the admin topic cannot be addressed.
+	| "not_addressable"
+	// Published, but no supervisor holds an admin subscription: the command
+	// would black-hole, so nothing is recorded and the caller retries.
+	| "not_delivered";
+
+export type IssueOutcome =
+	| { ok: true; command_id: string; delivered_to: number }
+	| { ok: false; failure: IssueFailure };
+
+/**
+ * Issue an admin command against one instance.
+ *
+ * The single implementation behind both `POST /fleet/instances/:f/:i/commands`
+ * and the MCP write tools. It publishes onto the deployment's OWN bubble (the
+ * one captured from its last authenticated heartbeat), which is what makes
+ * addressing fail-closed, then records the command pending. The supervisor's
+ * reply arrives separately as a `fleet/command_result` fold; nothing here waits
+ * for it.
+ *
+ * Ordering is deliberate: deliver BEFORE recording. A command recorded but
+ * never delivered is a pending row that can never resolve, which is worse than
+ * a delivered command whose pending row was lost - `buildCommandView` already
+ * tolerates the latter (result-only reads fine) and cannot tolerate the former.
+ */
+export async function issueAdminCommand(
+	store: FleetStorage,
+	publish: AdminPublisher,
+	params: {
+		fleet: string;
+		instance: string;
+		command: AdminCommand;
+		args?: Record<string, unknown>;
+		now: number;
+	},
+): Promise<IssueOutcome> {
+	const { fleet, instance, command, args, now } = params;
+	const record = await store.getInstance(fleet, instance);
+	if (!record) return { ok: false, failure: "unknown_instance" };
+	if (!record.bubble_id) return { ok: false, failure: "not_addressable" };
+
+	const commandId = crypto.randomUUID();
+	const delivered = await publish(
+		adminTopic(fleet, instance),
+		{ command_id: commandId, command, args, issued_at: now },
+		record.bubble_id,
+	);
+	if (delivered === 0) return { ok: false, failure: "not_delivered" };
+
+	await store.putCommand({ command_id: commandId, fleet, instance, command, args, issued_at: now });
+	return { ok: true, command_id: commandId, delivered_to: delivered };
+}
+
+// The bounded server-side wait (plan Q4). 5s by default, env-tunable: long
+// enough that the fast commands - transcript/roster/spend/status and the
+// lifecycle setters all answer well under a second - resolve in ONE tool call
+// instead of three, and short enough that one wedged instance cannot hold an
+// agent's tool call while its client counts down.
+export const DEFAULT_COMMAND_WAIT_MS = 5_000;
+
+// Matches the hosted console's COMMAND_POLL_INTERVAL. The console has polled
+// this exact read path in production since 2026-07-10, which is the evidence
+// that a result folded by a different request becomes visible to a poller.
+const COMMAND_POLL_INTERVAL_MS = 250;
+
+export function commandWaitMsFromEnv(raw?: string): number {
+	const parsed = raw ? Number(raw) : NaN;
+	// A non-negative finite override wins; 0 means "never wait, always poll".
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_COMMAND_WAIT_MS;
+}
+
+/**
+ * Poll a command's view until it resolves or the budget runs out.
+ *
+ * Returns the view as of the last read - `status: "pending"` if the supervisor
+ * had not replied in time, which is a normal outcome and not an error. The
+ * caller hands the command id back so the agent can poll `bobi_command_result`.
+ *
+ * Reads via `buildCommandView`, i.e. two exact-key `get()`s, and deliberately
+ * never a prefix `list()`: KV listings are eventually consistent while a keyed
+ * read is not, so a wait built on a listing would report `pending` for a
+ * command that had already resolved. Verified rather than assumed - the suite
+ * folds a result from a separate request while a call is in flight.
+ */
+export async function awaitCommandResult(
+	store: FleetStorage,
+	fleet: string,
+	instance: string,
+	commandId: string,
+	waitMs: number,
+	now: () => number = Date.now,
+): Promise<Record<string, unknown> | null> {
+	const deadline = now() + waitMs;
+	// Always read once, even at waitMs=0: a command that resolved between the
+	// publish and this read should not be reported pending.
+	for (;;) {
+		const view = await buildCommandView(store, fleet, instance, commandId);
+		if (view && view.status !== "pending") return view;
+		if (now() >= deadline) return view;
+		const remaining = deadline - now();
+		await new Promise((resolve) => setTimeout(resolve, Math.min(COMMAND_POLL_INTERVAL_MS, remaining)));
+	}
+}
+
 export async function buildInstanceDetail(
 	store: FleetStorage,
 	fleet: string,
