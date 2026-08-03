@@ -15,7 +15,7 @@
    /runs and /spend. Formatting happens HERE on purpose: the server sends
    raw epochs and seconds because it does not know the viewer's timezone. */
 
-import { openSetup, fmtUsd, fmtEst, fmtTok, EST_NOTE } from "../shell.js";
+import { fmtUsd, fmtEst, fmtTok, EST_NOTE } from "../shell.js";
 
 /* --- formatting ------------------------------------------------------ */
 
@@ -103,8 +103,6 @@ export function mountAgent(el, { api, name }) {
             <span class="popover"><span class="pop-card" data-el="aboutCard">
             </span></span>
           </span>
-          <button class="btn quiet" data-el="edit" type="button"
-                  title="Open this team in the setup editor">Edit design</button>
         </div>
       </div>
     </div>
@@ -113,19 +111,26 @@ export function mountAgent(el, { api, name }) {
       <div class="panel-head">
         <span class="eyebrow">runs</span>
         <span class="count" data-el="runsCount"></span>
-        <div class="tabs" data-el="tabs"></div>
+        <div class="runs-controls">
+          <input class="runs-search" data-el="runsSearch" type="search"
+                 aria-label="Search runs" placeholder="Search runs">
+          <div class="tabs" data-el="tabs"></div>
+        </div>
       </div>
-      <table class="runs">
-        <thead><tr>
-          <th style="width:104px">Status</th>
-          <th>Run</th>
-          <th style="width:130px">When</th>
-          <th style="width:120px" class="r-tok">Tokens · cost</th>
-          <th style="width:96px"></th>
-        </tr></thead>
-        <tbody data-el="runRows"></tbody>
-      </table>
+      <div class="runs-scroll">
+        <table class="runs">
+          <thead><tr>
+            <th style="width:104px">Status</th>
+            <th>Run</th>
+            <th style="width:130px">When</th>
+            <th style="width:120px" class="r-tok">Tokens · cost</th>
+            <th style="width:280px"></th>
+          </tr></thead>
+          <tbody data-el="runRows"></tbody>
+        </table>
+      </div>
       <p class="runs-empty" data-el="runsEmpty" hidden></p>
+      <div class="runs-pager" data-el="runsPager"></div>
     </section>
 
     <div class="modal-backdrop" data-el="backdrop">
@@ -154,7 +159,11 @@ export function mountAgent(el, { api, name }) {
   let overview = null;
   let runs = null;
   let spend = null;
-  let tab = "all";          // all | running | failed
+  let tab = "all";          // all | running | awaiting_action | failed
+  let query = "";
+  let pageIndex = 0;
+  let searchTimer = null;
+  let runsRequest = 0;
   let busyVerb = null;
   let runsError = "";       // why the table is empty, when it is not "no runs"
 
@@ -260,10 +269,7 @@ export function mountAgent(el, { api, name }) {
     pollRuns();
   }
 
-  /** The strip's inline failure band. `head` names WHICH action failed:
-      three different actions report here (start/stop/restart, Edit design,
-      Resume) and labelling a failed Edit design "start failed" sends the
-      reader to diagnose the wrong thing. */
+  /** The strip's inline failure band. `head` names which action failed. */
   function showReport(head, text) {
     els.report.innerHTML = "";
     els.report.appendChild(mk("span", "rep-head", head));
@@ -342,8 +348,8 @@ export function mountAgent(el, { api, name }) {
 
     if (overview.roles && overview.roles.length) {
       card.appendChild(mk("div", "eyebrow", "roles"));
-      for (const role of overview.roles.slice(0, 6)) {
-        kv(card, role.name, role.description || "—");
+      for (const role of overview.roles) {
+        kv(card, role.name, role.description || "—", "prose");
       }
       card.appendChild(mk("hr"));
     }
@@ -372,8 +378,7 @@ export function mountAgent(el, { api, name }) {
        brain.max_turns ? `max ${brain.max_turns} turns` : "");
     kv(card, "spend cap",
        `${cap.value || 0} inv/hr` + (cap.is_default ? " (default)" : ""));
-    card.appendChild(mk("div", "note",
-      "Composition is read-only here — change it in Edit design."));
+    card.appendChild(mk("div", "note", "Composition is read-only here."));
   }
 
   // Hover opens these (CSS); tap toggles them, because hover-only is dead
@@ -402,18 +407,12 @@ export function mountAgent(el, { api, name }) {
   };
   document.addEventListener("click", closePopovers);
 
-  // Edit design is an ACTION, not an href: the setup mount is per-session,
-  // so a hardcoded /setup/<slot> link is not guaranteed to resolve.
-  els.edit.addEventListener("click", async () => {
-    const err = await openSetup({ name, mode: "open" });
-    if (err) showReport("couldn't open the editor", err);
-  });
-
   /* --- 3. runs table ------------------------------------------------ */
 
   const TABS = [
     { key: "all", label: "all" },
     { key: "running", label: "running" },
+    { key: "awaiting_action", label: "awaiting action" },
     { key: "failed", label: "failed" },
   ];
 
@@ -428,30 +427,28 @@ export function mountAgent(el, { api, name }) {
                    n == null ? t.label : `${t.label} · ${n}`);
       b.type = "button";
       b.addEventListener("click", () => {
+        if (tab === t.key) return;
         tab = t.key;
+        pageIndex = 0;
         renderTabs();
-        renderRuns();
+        pollRuns();
       });
       els.tabs.appendChild(b);
     }
   }
 
-  const FAILED_SET = new Set(["failed", "crashed", "stalled"]);
-
   /** A run's status as a LABEL — sentence case, not a shout. The status
       vocabulary is one word each, so capitalising the first is the whole
       rule; `not_responding` never reaches a row. */
-  const STATUS_LABEL = (s) => (s ? s[0].toUpperCase() + s.slice(1) : "");
-
-  function visibleRows() {
-    const rows = (runs && runs.runs) || [];
-    if (tab === "running") return rows.filter((r) => r.status === "running");
-    if (tab === "failed") return rows.filter((r) => FAILED_SET.has(r.status));
-    return rows;
-  }
+  const STATUS_LABELS = {
+    awaiting_action: "Awaiting action",
+    closed: "Closed",
+  };
+  const STATUS_LABEL = (s) => STATUS_LABELS[s] ||
+    (s ? s[0].toUpperCase() + s.slice(1) : "");
 
   function renderRuns() {
-    const rows = visibleRows();
+    const rows = (runs && runs.runs) || [];
     els.runRows.innerHTML = "";
     const counts = (runs && runs.counts) || {};
     // The eyebrow beside this already says "runs", so the count is a
@@ -462,8 +459,12 @@ export function mountAgent(el, { api, name }) {
       els.runsEmpty.hidden = false;
       els.runsEmpty.textContent = !runs
         ? (runsError || "Loading…")
+        : query
+          ? `No runs match “${query}”.`
+        : tab === "awaiting_action"
+          ? "No workflows are waiting for approval or clarification."
         : tab === "failed"
-          ? "Nothing needs a human — no failed, crashed, or stalled runs."
+          ? "No failed or crashed runs."
           : tab === "running"
             ? "No live runs."
             : "No runs yet. Start the agent and its first work will appear here.";
@@ -483,6 +484,11 @@ export function mountAgent(el, { api, name }) {
 
       const run = mk("td");
       run.appendChild(mk("div", "r-title", row.title || "—"));
+      if (row.status === "awaiting_action") {
+        const pending = ((row.detail && row.detail.await_event) || "action")
+          .replaceAll("_", " ");
+        run.appendChild(mk("div", "r-pending", `Awaiting ${pending}`));
+      }
       if (row.origin) run.appendChild(mk("div", "r-origin", row.origin));
       const note = row.error || (row.detail && row.detail.note) || "";
       if (note) {
@@ -510,7 +516,7 @@ export function mountAgent(el, { api, name }) {
       tr.appendChild(mk("td", "r-tok", parts.join(" · ") || "—"));
 
       const act = mk("td", "r-act");
-      act.appendChild(rowAction(row));
+      act.appendChild(rowActions(row));
       tr.appendChild(act);
 
       tr.addEventListener("click", () => openSlab(row));
@@ -518,40 +524,126 @@ export function mountAgent(el, { api, name }) {
     }
   }
 
-  /** One action per row: Resume for a stalled run, else Open/Transcript
-      when there is a session, else Details. */
-  function rowAction(row) {
-    if (row.status === "stalled" && row.detail && row.detail.resumable) {
-      const b = mk("button", "btn small primary", "Resume");
-      b.type = "button";
-      b.addEventListener("click", (e) => { e.stopPropagation(); resume(row); });
-      return b;
-    }
-    const label = row.session_id
-      ? (row.status === "running" ? "Open" : "Transcript")
-      : "Details";
-    const b = mk("button", "btn small", label);
-    b.type = "button";
-    b.addEventListener("click", (e) => { e.stopPropagation(); openSlab(row); });
-    return b;
+  function renderPager() {
+    els.runsPager.innerHTML = "";
+    if (!runs) return;
+    const total = runs.total == null ? ((runs.runs || []).length) : runs.total;
+    const limit = runs.limit || 100;
+    const offset = runs.offset || 0;
+    const start = total ? offset + 1 : 0;
+    const end = Math.min(offset + (runs.runs || []).length, total);
+    const summary = query
+      ? `${start}–${end} of ${total} matches`
+      : `${start}–${end} of ${total}`;
+    els.runsPager.appendChild(mk("span", "pager-summary", summary));
+
+    const prev = mk("button", "btn small", "Previous");
+    prev.type = "button";
+    prev.disabled = pageIndex === 0;
+    prev.addEventListener("click", () => { pageIndex -= 1; pollRuns(); });
+    els.runsPager.appendChild(prev);
+
+    const pages = Math.max(1, Math.ceil(total / limit));
+    els.runsPager.appendChild(mk(
+      "span", "pager-page", `${pageIndex + 1} / ${pages}`));
+
+    const next = mk("button", "btn small", "Next");
+    next.type = "button";
+    next.disabled = offset + (runs.runs || []).length >= total;
+    next.addEventListener("click", () => { pageIndex += 1; pollRuns(); });
+    els.runsPager.appendChild(next);
   }
 
-  /** Resume force-continues the suspended step — on an `await: approval`
-      gate that proceeds AS IF APPROVED — so name what is being waved
-      through before firing. */
-  async function resume(row) {
-    const awaited = (row.detail && row.detail.await_event) || "the awaited event";
-    const ok = window.confirm(
-      `Resume "${row.title}" from step ` +
-      `${(row.detail && row.detail.suspended_at_step) ?? "?"}?\n\n` +
-      `It is waiting for ${awaited}. Resuming continues as if that ` +
-      `arrived — an approval gate proceeds as if approved.`);
-    if (!ok) return;
-    const { ok: sent, data } = await api(
-      `${base}/workflows/runs/${encodeURIComponent(row.run_id)}/resume`,
+  els.runsSearch.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      query = els.runsSearch.value.trim();
+      pageIndex = 0;
+      pollRuns();
+    }, 250);
+  });
+
+  /** Transcript stays visible on every row. Awaiting workflows add delivery
+      and closure actions; neither action advances the approval gate. */
+  function rowActions(row) {
+    const actions = mk("div", "row-actions");
+    const transcript = mk("button", "btn small", "Transcript");
+    transcript.type = "button";
+    transcript.disabled = !row.session_id;
+    if (!row.session_id) transcript.title = "No transcript was recorded for this run";
+    transcript.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openSlab(row);
+    });
+    actions.appendChild(transcript);
+
+    if (!row.session_id && row.kind !== "session") {
+      const details = mk("button", "btn small", "Details");
+      details.type = "button";
+      details.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openSlab(row);
+      });
+      actions.appendChild(details);
+    }
+
+    if (row.status === "awaiting_action") {
+      const remindButton = mk("button", "btn small remind", "Remind");
+      remindButton.type = "button";
+      remindButton.addEventListener("click", (e) => {
+        e.stopPropagation();
+        remind(row, remindButton);
+      });
+      actions.appendChild(remindButton);
+
+      const closeButton = mk("button", "btn small quiet", "Close");
+      closeButton.type = "button";
+      closeButton.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeRun(row, closeButton);
+      });
+      actions.appendChild(closeButton);
+    }
+    return actions;
+  }
+
+  async function remind(row, button) {
+    button.disabled = true;
+    button.textContent = "Sending…";
+    const { ok, data } = await api(
+      `${base}/workflows/runs/${encodeURIComponent(row.run_id)}/remind`,
       { method: "POST", body: "{}" });
-    if (!sent) {
-      showReport("resume failed", (data && data.error) || "");
+    if (!ok) {
+      button.disabled = false;
+      button.textContent = "Remind";
+      showReport("reminder failed", (data && data.error) || "");
+      return;
+    }
+    button.textContent = "Sent";
+    setTimeout(() => {
+      if (button.isConnected) {
+        button.disabled = false;
+        button.textContent = "Remind";
+      }
+    }, 1800);
+  }
+
+  async function closeRun(row, button) {
+    const awaited = ((row.detail && row.detail.await_event) || "action")
+      .replaceAll("_", " ");
+    const confirmed = window.confirm(
+      `Close "${row.title}"?\n\nIt is awaiting ${awaited}. ` +
+      "Closing ends this workflow without approving it or running later steps.");
+    if (!confirmed) return;
+    button.disabled = true;
+    button.textContent = "Closing…";
+    const { ok, data } = await api(
+      `${base}/workflows/runs/${encodeURIComponent(row.run_id)}/close`,
+      { method: "POST", body: "{}" });
+    if (!ok) {
+      button.disabled = false;
+      button.textContent = "Close";
+      showReport("close failed", (data && data.error) || "");
       return;
     }
     pollRuns();
@@ -587,7 +679,7 @@ export function mountAgent(el, { api, name }) {
 
     els.slabKind.textContent = "details";
     // The details endpoint serves MONITOR run records. A session-less
-    // workflow run — a stalled one, suspended before it ever spawned — has
+    // workflow run suspended before it ever spawned has
     // no such record, and needs no fetch either: its row already carries
     // the whole story (what step, what event, how long).
     if (row.kind !== "monitor") {
@@ -646,7 +738,7 @@ export function mountAgent(el, { api, name }) {
     els.slabMeta.textContent = STATUS_LABEL(row.status);
     els.slabBody.innerHTML = "";
     const d = row.detail || {};
-    slabLine("status", row.status);
+    slabLine("status", STATUS_LABEL(row.status));
     slabLine("started", fmtIso(row.started_at));
     if (row.duration_seconds != null) {
       slabLine("ran for", fmtDur(row.duration_seconds));
@@ -657,16 +749,7 @@ export function mountAgent(el, { api, name }) {
     slabLine("awaiting", d.await_event);
     slabLine("run key", d.run_key);
     slabLine("repo", d.repo);
-    // A stalled run's `error` IS its step and awaited event restated as a
-    // sentence ("suspended at step 3 awaiting pr.merged") — the two lines
-    // above already say it, in this slab's own label/value grammar. Any
-    // other row's error is news, so it still prints.
-    const restated = row.status === "stalled" && step !== "" && d.await_event;
-    if (row.error && !restated) slabLine("why", row.error);
-    if (d.resumable) {
-      els.slabBody.appendChild(mk("div", "tr-empty",
-        "Resume continues from this step as if the awaited event arrived."));
-    }
+    if (row.error) slabLine("why", row.error);
   }
 
   /** One `label  value` row in the Details slab. It borrows the transcript's
@@ -716,15 +799,36 @@ export function mountAgent(el, { api, name }) {
     if (ok && data) { health = data; renderBand(); }
   }
   async function pollRuns() {
-    const { ok, status, data } = await api(base + "/runs");
+    const request = ++runsRequest;
+    const params = new URLSearchParams({
+      limit: "100",
+      offset: String(pageIndex * 100),
+    });
+    if (tab !== "all") params.set("status", tab);
+    if (query) params.set("query", query);
+    const { ok, status, data } = await api(base + "/runs?" + params);
+    if (request !== runsRequest) return;
     if (status === 404) return showMissing();
-    if (ok && data) { runs = data; renderTabs(); renderRuns(); return; }
+    if (ok && data) {
+      if (pageIndex > 0 && data.offset >= data.total) {
+        pageIndex = Math.max(0, Math.ceil(data.total / 100) - 1);
+        pollRuns();
+        return;
+      }
+      runs = data;
+      runsError = "";
+      renderTabs();
+      renderRuns();
+      renderPager();
+      return;
+    }
     // A read that failed is not a read that is still running. Left saying
     // "Loading…" the table claims work is coming that never will.
     runsError = status === 0
       ? "Lost the app server — the table stopped updating."
       : "Could not read this agent's runs.";
     renderRuns();
+    renderPager();
   }
   async function pollOverview() {
     const { ok, data } = await api(base + "/overview");
@@ -738,6 +842,7 @@ export function mountAgent(el, { api, name }) {
   renderBand();
   renderTabs();
   renderRuns();
+  renderPager();
   pollHealth();
   pollRuns();
   pollOverview();
@@ -753,6 +858,7 @@ export function mountAgent(el, { api, name }) {
   ];
   return () => {
     timers.forEach(clearInterval);
+    clearTimeout(searchTimer);
     document.removeEventListener("keydown", onKey);
     document.removeEventListener("click", closePopovers);
   };

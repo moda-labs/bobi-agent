@@ -6,7 +6,7 @@ agent's work is recorded have to become one shape.
 
 - **sessions** — `SessionRegistry`: the manager and every subagent it ran
 - **workflow runs** — `run/state/workflow/runs/*.json`, including the ones
-  suspended waiting for an event that never came
+  suspended waiting for a human approval or clarification
 - **monitor runs** — `run/state/monitor_runs/*.json`, one record per firing
   ([MONITORS.md](MONITORS.md))
 
@@ -16,19 +16,21 @@ nothing to open. `bobi agent events` still serves them.
 
 ## `GET /api/agents/{name}/runs`
 
-Query: `status=` (`running` / `failed`, the tabs) and `limit=` (default 200).
+Query: `status=` (`running` / `failed`, the tabs), `query=` (case-insensitive
+text search), `offset=`, and `limit=` (default 100).
 
 ```json
 {"runs": [
-   {"kind": "workflow", "key": "workflow:wf-71", "status": "stalled",
+   {"kind": "workflow", "key": "workflow:wf-71", "status": "awaiting_action",
     "title": "publish", "origin": "workflow · on github/issue.opened",
     "started_at": "2026-07-30T19:22:43+00:00", "duration_seconds": null,
     "tokens": 0, "cost_usd": 0.0, "est_cost_usd": 0.0,
-    "error": "suspended at step 3 awaiting pr.merged",
+    "error": "",
     "session_id": "", "run_id": "wf-71",
     "detail": {"await_event": "pr.merged", "suspended_at_step": 3,
                "run_key": "", "repo": "", "resumable": true}}],
- "counts": {"all": 14, "running": 1, "failed": 4},
+ "counts": {"all": 14, "running": 1, "awaiting_action": 2, "failed": 2},
+ "total": 14, "offset": 0, "limit": 100, "query": "",
  "truncated": false}
 ```
 
@@ -41,26 +43,26 @@ came for. `404` for an agent this machine does not have.
 
 ## The status vocabulary
 
-`running` · `idle` · `done` · `failed` · `crashed` · `stalled`.
+`running` · `idle` · `awaiting_action` · `done` · `closed` · `failed` ·
+`crashed`.
 
 Each source maps its own on-disk word onto it. Two mappings are judgement
 rather than translation:
 
-**`stalled` is derived, not recorded.** A workflow run suspended past
-`STALLED_AFTER_SECONDS` (24h, a constant) is waiting on something that is not
-coming, which is a human's problem — so it leaves the waiting rows and joins
-the Failed tab. The clock runs from the last resume, not from first suspension:
-a run resumed an hour ago is waiting again, not still stalled. The threshold is
-a judgement about human attention ("nobody is coming back to this today"), not
-about any particular workflow, which is why it is not configurable.
+**`awaiting_action` is derived, not recorded.** A workflow run suspended past
+`AWAITING_ACTION_AFTER_SECONDS` (24h, a constant) is elevated from idle into its
+own attention state and tab. It remains a healthy, resumable human gate, not a
+failure. The row names the awaited event and offers reminder and close actions.
+The clock runs from the last resume, not from first suspension.
 
-**`status=failed` is the TAB, not a literal match.** It returns `failed`,
-`crashed` and `stalled` — everything that needs a human. Any other value
-matches exactly.
+**`status=failed` is the terminal-failure tab.** It returns `failed` and
+`crashed`. Human approval and clarification gates use `status=awaiting_action`.
 
-`counts` always describes the **whole** set, so the tab counts stay honest
-after `limit` or `status=` has cut the payload. `truncated` says the list was
-cut; the counts say by how much.
+`status` and `query` filter before `offset` and `limit` select a page. Search
+matches the visible row fields, identifiers, and the kind-specific `detail`
+bag. `counts` always describes the **whole** set, so tab counts stay honest;
+`total` describes the filtered set, so the pager stays honest. `truncated`
+says another page follows the current one.
 
 ## One piece of work, one row
 
@@ -110,6 +112,5 @@ must not create its runs directory.
 
 ## What is deliberately not here
 
-Real pagination (the fold reads everything on disk and caps the payload; a home
-that outgrows this gets pagination then, not before) · per-run latency (not
-captured) · time-series cost (no data) · decisions and raw event deliveries.
+Per-run latency (not captured) · time-series cost (no data) · decisions and raw
+event deliveries.

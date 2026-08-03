@@ -186,11 +186,13 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
         return JSONResponse(rt.session_log(name))
 
     # The unified runs view: sessions + workflow runs + monitor runs as one
-    # list. `status=running|failed` are the page's tabs (`failed` covers
-    # crashed and stalled — everything needing a human).
+    # list. Filters are applied before the page window is selected.
     @app.get("/api/agents/{name}/runs")
-    def agent_runs(name: str, status: str = "", limit: int = 0) -> JSONResponse:
-        return JSONResponse(rt.runs(name, status=status, limit=limit or None))
+    def agent_runs(name: str, status: str = "", query: str = "",
+                   offset: int = 0, limit: int = 0) -> JSONResponse:
+        return JSONResponse(rt.runs(
+            name, status=status, query=query, offset=max(0, offset),
+            limit=limit or None))
 
     # The runs table's one write action. Resume force-continues a suspended
     # step, so the page confirms first (naming the awaited event) — see the
@@ -201,6 +203,18 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
         if not safe_name(run_id):
             return JSONResponse({"error": "unknown run"}, status_code=404)
         return JSONResponse(rt.resume_run(name, run_id))
+
+    @app.post("/api/agents/{name}/workflows/runs/{run_id}/remind")
+    def remind_workflow_run(name: str, run_id: str) -> JSONResponse:
+        if not safe_name(run_id):
+            return JSONResponse({"error": "unknown run"}, status_code=404)
+        return JSONResponse(rt.remind_run(name, run_id))
+
+    @app.post("/api/agents/{name}/workflows/runs/{run_id}/close")
+    def close_workflow_run(name: str, run_id: str) -> JSONResponse:
+        if not safe_name(run_id):
+            return JSONResponse({"error": "unknown run"}, status_code=404)
+        return JSONResponse(rt.close_run(name, run_id))
 
     @app.get("/api/agents/{name}/status")
     def agent_status(name: str) -> JSONResponse:

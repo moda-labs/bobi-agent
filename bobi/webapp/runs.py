@@ -23,32 +23,32 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Status vocabulary. `stalled` is the one derived state: a workflow run
-# suspended long enough that it is waiting on something that is not coming,
-# which is a human's problem and so belongs under the Failed tab.
+# Status vocabulary. `awaiting_action` is derived for a workflow gate that has
+# waited long enough to require renewed human attention.
 RUNNING = "running"
 IDLE = "idle"
 DONE = "done"
 FAILED = "failed"
 CRASHED = "crashed"
-STALLED = "stalled"
+AWAITING_ACTION = "awaiting_action"
+CLOSED = "closed"
+# Compatibility names for callers that imported the old symbols.
+STALLED = AWAITING_ACTION
 
-# What the FAILED tab holds: everything that needs a human.
-FAILED_STATUSES = (FAILED, CRASHED, STALLED)
+# What the FAILED tab holds: terminal failures, not healthy human gates.
+FAILED_STATUSES = (FAILED, CRASHED)
 # What the RUNNING tab holds. `idle` is a live-but-waiting manager or a
 # freshly suspended workflow — present, not working.
 LIVE_STATUSES = (RUNNING,)
 
-# How long a workflow run may sit suspended before it reads as stalled rather
-# than waiting. A constant, not config: the threshold is a judgement about
-# human attention ("nobody is coming back to this today"), not about any
-# particular workflow. Revisit if a real workflow legitimately waits longer.
-STALLED_AFTER_SECONDS = 24 * 3600
+# How long a workflow gate may sit before it is elevated from idle to awaiting
+# action. A constant, not config: this is a judgement about human attention.
+AWAITING_ACTION_AFTER_SECONDS = 24 * 3600
+STALLED_AFTER_SECONDS = AWAITING_ACTION_AFTER_SECONDS
 
 # Rows returned in one response. The fold reads everything on disk and counts
-# it all; only the payload is capped, so the tab counts stay true even when
-# the list is cut. Real pagination waits for a home that outgrows this.
-DEFAULT_LIMIT = 200
+# it all; filtering and pagination only shape the response page.
+DEFAULT_LIMIT = 100
 
 
 def _iso(epoch: float | None) -> str:
@@ -183,11 +183,13 @@ def _workflow_status(run, *, now: float) -> str:
     if run.status in ("waiting", "suspended"):
         # Suspended is normal; suspended for a day is a human's problem.
         started = _epoch(run.resumed_at or run.started_at)
-        if started and (now - started) >= STALLED_AFTER_SECONDS:
-            return STALLED
+        if started and (now - started) >= AWAITING_ACTION_AFTER_SECONDS:
+            return AWAITING_ACTION
         return IDLE
     if run.status == "running":
         return RUNNING
+    if run.status == "cancelled":
+        return CLOSED
     return DONE
 
 
@@ -201,11 +203,6 @@ def _workflow_rows(root: Path, *, now: float,
         trigger = (run.trigger_event or {}).get("type", "")
         started = _epoch(run.started_at)
         usage = usage_by_session.get(run.session_name) or {}
-        error = ""
-        if status == STALLED:
-            error = (f"suspended at step {run.suspended_at_step} "
-                     f"awaiting {run.await_event}" if run.await_event
-                     else f"suspended at step {run.suspended_at_step}")
         rows.append(_row(
             run_kind="workflow",
             key=f"workflow:{run.run_id}",
@@ -214,7 +211,7 @@ def _workflow_rows(root: Path, *, now: float,
             origin=(f"workflow · on {trigger}" if trigger else "workflow"),
             started_at=started,
             duration=_duration(started, _epoch(run.completed_at)),
-            error=error,
+            error="",
             session_id=run.session_name,
             run_id=run.run_id,
             tokens=usage.get("total_tokens", 0),
@@ -223,7 +220,8 @@ def _workflow_rows(root: Path, *, now: float,
             detail={"await_event": run.await_event,
                     "suspended_at_step": run.suspended_at_step,
                     "run_key": run.run_key, "repo": run.repo,
-                    "resumable": status == STALLED or run.status == "waiting"},
+                    "awaiting_action": status == AWAITING_ACTION,
+                    "resumable": run.status == "waiting"},
         ))
     return rows
 
@@ -333,20 +331,41 @@ def _claim_sessions(rows: list[dict]) -> list[dict]:
 
 
 def _matches(row: dict, status: str) -> bool:
-    """`status=failed` is the FAILED TAB — everything needing a human, not
-    just rows literally marked failed. Any other value matches exactly."""
+    """`status=failed` includes failed and crashed terminal outcomes."""
     if status == FAILED:
         return row["status"] in FAILED_STATUSES
     return row["status"] == status
 
 
+def _search_values(value):
+    """Yield scalar values from a run row, including its detail bag."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from _search_values(item)
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            yield from _search_values(item)
+    elif value is not None:
+        yield str(value)
+
+
+def _matches_query(row: dict, query: str) -> bool:
+    needle = query.casefold().strip()
+    return not needle or any(
+        needle in value.casefold() for value in _search_values(row)
+    )
+
+
 def build_runs(root: Path, *, manager_name: str = "", status: str = "",
+               query: str = "", offset: int = 0,
                limit: int = DEFAULT_LIMIT, now: float | None = None) -> dict:
     """Everything this agent did, newest first, live runs at the top.
 
-    ``status`` filters the payload (``running`` / ``failed`` are the tabs;
-    ``failed`` covers crashed and stalled too). ``counts`` always describes
-    the whole set, so the tab counts stay honest when ``limit`` cuts the list.
+    ``status`` and ``query`` filter before ``offset`` / ``limit`` paginate.
+    ``failed`` covers crashed terminal sessions too. ``counts`` always
+    describes the whole set; ``total`` describes the filtered set so both tabs
+    and the pager stay honest.
     """
     now = time.time() if now is None else now
     from bobi.costs import session_usage
@@ -368,20 +387,39 @@ def build_runs(root: Path, *, manager_name: str = "", status: str = "",
     rows = _claim_sessions(rows)
 
     # Live first, then newest first — a running job is what you came for.
-    rows.sort(key=lambda r: (0 if r["status"] in LIVE_STATUSES else 1,
+    attention_rank = {RUNNING: 0, AWAITING_ACTION: 1}
+    rows.sort(key=lambda r: (attention_rank.get(r["status"], 2),
                              -r["_started"]))
 
-    counts = {"all": len(rows), "running": 0, "failed": 0}
+    counts = {"all": len(rows), "running": 0, "awaiting_action": 0,
+              "failed": 0}
     for row in rows:
         if row["status"] in LIVE_STATUSES:
             counts["running"] += 1
+        if row["status"] == AWAITING_ACTION:
+            counts["awaiting_action"] += 1
         if row["status"] in FAILED_STATUSES:
             counts["failed"] += 1
 
     if status:
         rows = [r for r in rows if _matches(r, status)]
-    truncated = len(rows) > limit
-    rows = rows[:limit]
+    query = query.strip()
+    if query:
+        rows = [r for r in rows if _matches_query(r, query)]
+
+    total = len(rows)
+    offset = max(0, offset)
+    limit = limit if limit > 0 else DEFAULT_LIMIT
+    rows = rows[offset:offset + limit]
+    truncated = offset + len(rows) < total
     for row in rows:
         row.pop("_started", None)
-    return {"runs": rows, "counts": counts, "truncated": truncated}
+    return {
+        "runs": rows,
+        "counts": counts,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "query": query,
+        "truncated": truncated,
+    }

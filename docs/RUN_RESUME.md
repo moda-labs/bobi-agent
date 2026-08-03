@@ -1,4 +1,21 @@
-# Resuming a stalled run
+# Force-resuming a waiting run
+
+> The agent UI no longer exposes force-resume. Awaiting-action rows resend the
+> original gate notification or close the workflow. The endpoint below remains
+> available to the CLI/framework for explicit force-continuation.
+
+## User-facing waiting actions
+
+`POST /api/agents/{name}/workflows/runs/{run_id}/remind` reconstructs the
+visited deterministic notification from saved workflow context and posts it to
+the original Slack channel/thread. A legacy gate whose agent sent the original
+message gets a generic same-thread reminder naming the workflow and awaited
+action. It does not mutate the run or emit the awaited event.
+
+`POST /api/agents/{name}/workflows/runs/{run_id}/close` atomically competes with
+resume/event delivery for a still-waiting run. The winner closes the workflow as
+`cancelled` and marks its dormant session terminal; it never executes later
+steps. Both endpoints return `409` if the run is no longer waiting.
 
 `POST /api/agents/{name}/workflows/runs/{run_id}/resume` — the runs table's one
 write action. Everything else on the agent page reads; this restarts a workflow

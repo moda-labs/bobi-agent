@@ -4,9 +4,9 @@ Three places record what an agent did — the session registry, workflow run
 files, monitor run records — and this fold has to make them one list the page
 can sort, tab and count. The tests below pin the parts that are judgement
 rather than plumbing: which on-disk word maps to which status, when a
-suspended run stops reading as waiting and starts reading as stalled, that one
+suspended run moves from idle to awaiting action, that one
 piece of work produces exactly one row, and that `counts` keeps describing the
-whole set after `limit` has cut the payload.
+whole set after search and pagination have cut the payload.
 
 `now` is always passed explicitly — a threshold test that sleeps is a test
 that is slow and flaky in exchange for nothing.
@@ -22,7 +22,7 @@ from bobi.monitors import run_records
 from bobi.monitors.run_records import FAILED as MONITOR_FAILED
 from bobi.monitors.run_records import NOTIFIED, QUIET, MonitorRun
 from bobi.webapp import server
-from bobi.webapp.runs import STALLED_AFTER_SECONDS, build_runs
+from bobi.webapp.runs import AWAITING_ACTION_AFTER_SECONDS, build_runs
 
 TOKEN = "runs-token-123"
 NOW = 1785600000.0
@@ -125,24 +125,30 @@ class TestWorkflowStatus:
         assert _by_key(_rows(bobi_install))["workflow:wf-1"]["status"] \
             == "failed"
 
+    def test_cancelled_is_closed(self, bobi_install):
+        _workflow(bobi_install, "wf-1", status="cancelled")
+        assert _by_key(_rows(bobi_install))["workflow:wf-1"]["status"] \
+            == "closed"
+
     def test_waiting_is_idle_just_under_the_threshold(self, bobi_install):
         _workflow(bobi_install, "wf-1", status="waiting", completed_at=0,
-                  started_at=NOW - STALLED_AFTER_SECONDS + 60,
+                  started_at=NOW - AWAITING_ACTION_AFTER_SECONDS + 60,
                   suspended_at_step=2, await_event="pr.merged")
         assert _by_key(_rows(bobi_install))["workflow:wf-1"]["status"] == "idle"
 
-    def test_waiting_is_stalled_at_the_threshold(self, bobi_install):
+    def test_old_waiting_run_awaits_action_at_the_threshold(self, bobi_install):
         _workflow(bobi_install, "wf-1", status="waiting", completed_at=0,
-                  started_at=NOW - STALLED_AFTER_SECONDS,
+                  started_at=NOW - AWAITING_ACTION_AFTER_SECONDS,
                   suspended_at_step=2, await_event="pr.merged")
         row = _by_key(_rows(bobi_install))["workflow:wf-1"]
-        assert row["status"] == "stalled"
-        # A stalled row says what it is waiting for; that IS the diagnosis.
-        assert row["error"] == "suspended at step 2 awaiting pr.merged"
+        assert row["status"] == "awaiting_action"
+        assert row["detail"]["await_event"] == "pr.merged"
+        # Waiting for a human is not an error.
+        assert row["error"] == ""
 
     def test_the_clock_runs_from_the_last_resume(self, bobi_install):
         # Resumed an hour ago, first suspended three days ago: it is waiting
-        # again, not still stalled.
+        # again, not yet awaiting renewed action.
         _workflow(bobi_install, "wf-1", status="waiting", completed_at=0,
                   started_at=NOW - 3 * 86400, resumed_at=NOW - 3600,
                   suspended_at_step=2, await_event="pr.merged")
@@ -239,34 +245,84 @@ class TestCounts:
         _session(install, "ok")
         _session(install, "bad", status="failed", error="turn errored")
         _session(install, "dead", status="crashed", error="died")
-        _workflow(install, "wf-stalled", status="waiting", completed_at=0,
-                  started_at=NOW - STALLED_AFTER_SECONDS - 60,
+        _workflow(install, "wf-awaiting", status="waiting", completed_at=0,
+                  started_at=NOW - AWAITING_ACTION_AFTER_SECONDS - 60,
                   suspended_at_step=3, await_event="pr.merged")
 
     def test_counts_describe_the_whole_set(self, bobi_install):
         self._seed_a_bit_of_everything(bobi_install)
         payload = _rows(bobi_install)
-        assert payload["counts"] == {"all": 5, "running": 1, "failed": 3}
+        assert payload["counts"] == {
+            "all": 5, "running": 1, "awaiting_action": 1, "failed": 2}
 
     def test_counts_survive_the_limit_cutting_the_payload(self, bobi_install):
         self._seed_a_bit_of_everything(bobi_install)
         payload = _rows(bobi_install, limit=2)
         assert len(payload["runs"]) == 2
         assert payload["truncated"] is True
-        assert payload["counts"] == {"all": 5, "running": 1, "failed": 3}
+        assert payload["total"] == 5
+        assert payload["counts"] == {
+            "all": 5, "running": 1, "awaiting_action": 1, "failed": 2}
 
     def test_counts_survive_a_status_filter(self, bobi_install):
         self._seed_a_bit_of_everything(bobi_install)
         payload = _rows(bobi_install, status="running")
         assert [r["key"] for r in payload["runs"]] == ["session:live"]
-        assert payload["counts"] == {"all": 5, "running": 1, "failed": 3}
+        assert payload["counts"] == {
+            "all": 5, "running": 1, "awaiting_action": 1, "failed": 2}
 
     def test_failed_is_the_tab_not_a_literal_match(self, bobi_install):
-        # Everything that needs a human, not just rows marked `failed`.
+        # Terminal failures only; human gates have their own tab.
         self._seed_a_bit_of_everything(bobi_install)
         payload = _rows(bobi_install, status="failed")
         assert {r["status"] for r in payload["runs"]} == {
-            "failed", "crashed", "stalled"}
+            "failed", "crashed"}
+
+    def test_awaiting_action_has_its_own_filter(self, bobi_install):
+        self._seed_a_bit_of_everything(bobi_install)
+        payload = _rows(bobi_install, status="awaiting_action")
+        assert [r["status"] for r in payload["runs"]] == ["awaiting_action"]
+
+    def test_awaiting_action_sorts_after_running_before_completed(
+            self, bobi_install):
+        self._seed_a_bit_of_everything(bobi_install)
+        statuses = [r["status"] for r in _rows(bobi_install)["runs"]]
+        assert statuses[0] == "running"
+        assert statuses[1] == "awaiting_action"
+
+    def test_search_is_case_insensitive_and_reads_nested_detail(
+            self, bobi_install):
+        _session(bobi_install, "worker", title="Review Launch Copy")
+        _workflow(bobi_install, "wf-1", status="waiting", completed_at=0,
+                  started_at=NOW - AWAITING_ACTION_AFTER_SECONDS,
+                  suspended_at_step=2, await_event="pr.merged")
+        assert [r["key"] for r in _rows(
+            bobi_install, query="LAUNCH copy")["runs"]] == ["session:worker"]
+        assert [r["key"] for r in _rows(
+            bobi_install, query="PR.MERGED")["runs"]] == ["workflow:wf-1"]
+
+    def test_search_and_status_filter_before_pagination(self, bobi_install):
+        _session(bobi_install, "new", title="unrelated",
+                 started_at=NOW - 10)
+        _session(bobi_install, "match", title="needle",
+                 status="failed", error="needle failed",
+                 started_at=NOW - 1000)
+        payload = _rows(
+            bobi_install, status="failed", query="needle", limit=1)
+        assert [r["key"] for r in payload["runs"]] == ["session:match"]
+        assert payload["total"] == 1
+
+    def test_offset_returns_the_next_stable_page(self, bobi_install):
+        for i in range(3):
+            _session(bobi_install, f"worker-{i}", started_at=NOW - 100 * i)
+        first = _rows(bobi_install, limit=2)
+        second = _rows(bobi_install, limit=2, offset=2)
+        assert [r["key"] for r in first["runs"]] == [
+            "session:worker-0", "session:worker-1"]
+        assert [r["key"] for r in second["runs"]] == ["session:worker-2"]
+        assert first["total"] == second["total"] == 3
+        assert first["truncated"] is True
+        assert second["truncated"] is False
 
 
 class TestShape:
@@ -283,7 +339,9 @@ class TestShape:
 
     def test_an_empty_home_is_an_empty_list_not_an_error(self, bobi_install):
         assert _rows(bobi_install) == {
-            "runs": [], "counts": {"all": 0, "running": 0, "failed": 0},
+            "runs": [], "counts": {"all": 0, "running": 0,
+                                    "awaiting_action": 0, "failed": 0},
+            "total": 0, "offset": 0, "limit": 100, "query": "",
             "truncated": False}
 
 
@@ -324,6 +382,30 @@ class TestEndpoint:
                     limit=1).json()
         assert len(body["runs"]) == 1
         assert body["truncated"] is True
+
+    def test_default_page_contains_one_hundred_runs(self, client,
+                                                     bobi_install):
+        for i in range(101):
+            _session(bobi_install, f"worker-{i}", started_at=NOW - i)
+        body = _get(
+            client, f"/api/agents/{bobi_install.agent_name}/runs").json()
+        assert len(body["runs"]) == 100
+        assert body["total"] == 101
+        assert body["limit"] == 100
+        assert body["truncated"] is True
+
+    def test_query_and_offset_are_exposed_by_the_endpoint(self, client,
+                                                           bobi_install):
+        _session(bobi_install, "first", title="content review",
+                 started_at=NOW)
+        _session(bobi_install, "second", title="content revision",
+                 started_at=NOW - 1)
+        body = _get(client, f"/api/agents/{bobi_install.agent_name}/runs",
+                    query="CONTENT", offset=1, limit=1).json()
+        assert [r["key"] for r in body["runs"]] == ["session:second"]
+        assert body["total"] == 2
+        assert body["offset"] == 1
+        assert body["query"] == "CONTENT"
 
     def test_unknown_agent_404s(self, client):
         res = _get(client, "/api/agents/does-not-exist/runs")
