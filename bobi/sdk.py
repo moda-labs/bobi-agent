@@ -226,6 +226,13 @@ def get_cli_path() -> str:
     return _resolve_cli_path()
 
 
+def _has_tokens(entry: Any) -> bool:
+    """Whether a ``model_usage`` entry carries recorded token volume."""
+    if not isinstance(entry, dict):
+        return False
+    return bool(entry.get("input_tokens") or entry.get("output_tokens"))
+
+
 @dataclass
 class SessionEntry:
     name: str
@@ -393,6 +400,62 @@ class SessionRegistry:
                 data["provider"] = provider
             data["last_activity"] = time.time()
             self._write_state(path, data)
+
+    def backfill_usage(self, name: str, usage_by_model: dict[str, dict],
+                       *, provider: str = "anthropic",
+                       write: bool = True) -> str:
+        """Fill ZEROED or missing token telemetry from recovered usage (#935).
+
+        A repair, not a recording: it never adds dollars, never bumps
+        ``last_activity``, and refuses any entry that already carries real
+        tokens - a recorded fact outranks a reconstructed one, which is also
+        what makes re-running the backfill a no-op.
+
+        ``usage_by_model`` maps a bare model id to
+        ``{input_tokens, output_tokens, cached_input_tokens}``. The merge runs
+        under the shared state lock so the decision and the write cannot
+        straddle a concurrent ``record_cost``. ``write=False`` reaches the same
+        verdict against the same locked state and returns without writing, so a
+        dry run reports what the real run would do rather than a second
+        opinion about it.
+
+        Returns ``"repaired"``, ``"already_populated"``, or ``"missing"``.
+        """
+        path = self._state_path(name)
+        if not path.exists():
+            return "missing"
+        with _state_file_lock(path):
+            if not path.exists():
+                return "missing"
+            try:
+                data = json.loads(path.read_text())
+            except (json.JSONDecodeError, TypeError):
+                return "missing"
+            usage = data.get("model_usage") or {}
+            if any(_has_tokens(entry) for entry in usage.values()):
+                return "already_populated"
+            if not write:
+                return "repaired"
+            for model, tokens in usage_by_model.items():
+                key = f"{provider}:{model}" if provider else model
+                entry = usage.get(key) or {"cost_usd": 0.0}
+                entry.setdefault("cost_usd", 0.0)
+                entry["input_tokens"] = tokens.get("input_tokens", 0)
+                entry["output_tokens"] = tokens.get("output_tokens", 0)
+                # Written even when zero: the key marks a post-#760 entry whose
+                # cached tokens are split out, which is what licenses the fold
+                # to price it (bobi.costs.rollup_costs).
+                entry["cached_input_tokens"] = tokens.get(
+                    "cached_input_tokens", 0)
+                usage[key] = entry
+            data["model_usage"] = usage
+            if provider and not data.get("provider"):
+                data["provider"] = provider
+            # Only an unambiguous single-model session earns a `model` label.
+            if len(usage_by_model) == 1 and not data.get("model"):
+                data["model"] = next(iter(usage_by_model))
+            self._write_state(path, data)
+            return "repaired"
 
     def mark_done(self, name: str) -> None:
         self.update(name, status="done", pid=0)
