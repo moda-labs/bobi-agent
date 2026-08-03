@@ -279,10 +279,13 @@ bobi agent <name> monitors add weekly-prep-doc \
 
 The *task* the job performs lives in the pack, not the framework: a
 `context/` skill file the agent reads when the event arrives, plus a
-routing line in the role prompt that points to it. The eng-team ships
-exactly this pattern as a worked example — `context/prep-doc.md` (the
-skill) wired from the director role's `monitor/prep.weekly_due` handler.
-Copy it as a template for your own weekly jobs.
+routing line in the role prompt that points to it. The eng-team ships the
+skill half of this pattern — `agents/eng-team/context/prep-doc.md` — but no
+`prep.weekly_due` monitor or handler, so it is a template for the *file*, not
+a wired end-to-end example. For a wired one, see the director role's
+`monitor/status.roundup_due` handler (`roles/director/ROLE.md`), which routes a
+scheduled monitor event to a task the same way; swap its schedule for the
+`at:`/`days:` form above.
 
 ## Tool guides: function vs. policy
 
@@ -305,8 +308,10 @@ a bobi command that doesn't exist (this drift reached main twice).
 
 The exception: services the framework doesn't wrap (a raw REST/GraphQL
 API the team calls with a `${VAR}` credential). The pack is the only
-owner of those mechanics, so document them in the tool guide — minimal
-and tested by hand. See `agents/eng-team/tools/linear.md`.
+owner of those mechanics, so document them — minimal and tested by hand.
+See `agents/eng-team/context/linear.md`, which documents Linear's GraphQL
+calls; it sits in `context/` rather than `tools/` because there is no
+`linear` CLI for a guide to teach.
 
 ## Context files
 
@@ -333,67 +338,69 @@ Reference these files from role prompts by installed path
 in before starting the team. Filling in workspace files is not
 customization — the team source stays untouched and updatable.
 
-## Decision log (memory)
+## Long-term memory
 
-Every agent has a persistent decision log at
-`run/state/memory/<session-name>/`. The framework injects it into
-context at every session start — this is what makes `--fresh` and session
-rotation safe. The agent curates the content; the framework owns the
-lifecycle.
+The team has a single, team-scoped long-term memory at
+`run/state/long_term_memory.md`. The framework injects it **read-only** into
+every agent's prompt at session start — this is what makes `--fresh` and
+session rotation safe. The `sleep-cycle` monitor owns the content; the
+framework owns the lifecycle.
+
+It replaces the per-session decision log (`run/state/memory/<session>/INDEX.md`)
+that earlier versions of Bobi shipped. That journal bloated prompts and died
+with the agent; nothing writes it now.
 
 ### Storage
 
 ```
-run/state/memory/<session-name>/
-  INDEX.md           # YAML current-state block + prose notes
-  2026-06-10-deploy-policy.md   # optional per-topic notes
+run/state/long_term_memory.md   # one file, team-scoped, two sections
 ```
 
-The `INDEX.md` opens with a YAML frontmatter block for machine-readable
-current operational state, followed by timestamped prose notes:
+The file holds two sections — `## Facts` (the current state of the world: which
+tracker the repo uses, the deploy command, stable preferences) and
+`## Decisions` (settled choices not to re-litigate):
 
 ```markdown
----
-managed_repos:
-  - moda-labs/bobi
-  - moda-labs/jobtack
-slack_channel: "#eng-alerts"
-linear_team: MDS
----
+## Facts
 
 - dogfood tracks in MDS — Zach, 2026-06-10
+- deploys run from `main` only — team decision, 2026-06-09
+
+## Decisions
+
 - prefer squash merges for single-commit PRs — team decision, 2026-06-09
 ```
 
 ### Prompt contract
 
-The base prompt (`prompts/base.md`) instructs every agent to:
+The base prompt (`prompts/base.md`) tells every agent the opposite of a
+write-your-own-notes contract:
 
-- **Write a note** when making a durable decision or learning something
-  that future sessions need.
-- **Keep the YAML current-state block accurate** — update it when facts
-  change.
-- **Prune** entries that turn out to be wrong or superseded.
-- **One fact per note line**, with provenance (who said it, when).
-- **Never store secrets** in the decision log.
+- **Agents do not write it.** The `sleep-cycle` monitor is the single writer.
+  `prompts/base.md` says explicitly: *"Do not edit
+  `<run>/state/long_term_memory.md` yourself."*
+- **To make something durable, state it plainly in the transcript** — the
+  decision, the preference, or the standing instruction, with who said it and
+  when. The sleep cycle distills transcripts into the file on a schedule.
+- **There is no per-session journal** to maintain and no flush step on rotation.
+- **Don't record volatile detail** (a single ticket number, a transient session
+  id) — that is re-derived from GitHub/Linear/`agents list`.
+- **Never store secrets**, tokens, or credentials.
 
 ### Lifecycle
 
 - Memory survives `--fresh` (which only wipes the session ID, not state).
 - Memory survives reinstall and version upgrades (lives in `state/`,
   which is gitignored and not part of the frozen install image).
-- `bobi agent <name> doctor` checks for agents with empty decision logs and
-  flags them as potential drift.
+- `bobi agent <name> doctor` checks `long_term_memory.md` — that it exists, is
+  within its size cap, and has no foreign writers.
 
 ### Team authoring notes
 
-When designing roles for your team, consider what each role should record:
-
-- **Directors/managers**: topology decisions (which repos, routing
-  preferences, team mappings), operational intent.
-- **Project leads**: per-repo context, preferred workflows, known quirks.
-- **Engineers**: generally don't need persistent memory — they work on
-  bounded tasks via workflows.
+Because the sleep cycle is the only writer, you do **not** design per-role
+memory contracts. What you influence is what ends up worth distilling: roles
+whose prompts ask for decisions to be stated plainly (with provenance) give the
+sleep cycle something to work with; roles that work silently do not.
 
 You don't need to add memory-related instructions to your role prompts —
 the contract in `prompts/base.md` is inherited by every role automatically.

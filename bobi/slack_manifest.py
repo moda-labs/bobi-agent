@@ -17,8 +17,9 @@ import yaml
 
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "slack-app.manifest.yaml"
 
-# The single webhook path the event server exposes for Slack (see
-# event-server/src/index.ts). The request URL is always <event_server> + this.
+# The single webhook path the event server exposes for Slack (the
+# `/webhooks/<source>` route -> verifier -> normalizer -> deliver() pipeline in
+# event-server/core/src/core.ts). The request URL is always <event_server> + this.
 WEBHOOK_PATH = "/webhooks/slack"
 SOCKET_MODE_HEADER = (
     "# message with thread_ts -> slack.thread_reply. "

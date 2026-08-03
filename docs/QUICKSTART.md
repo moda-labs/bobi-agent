@@ -132,9 +132,10 @@ The client walks you through four phases:
 
 <!-- TODO(screenshot): the intro screen - location field, Browse button, and the create/modify/registry tabs -->
 
-First, pick where the agent team lives on your local drive (it defaults to a
-`~/bobi-agents/` library, with a Browse button to choose elsewhere), and
-choose how to start:
+First, pick where the agent team lives on your local drive (it defaults to the
+`$BOBI_HOME/agents` library — `~/.bobi/agents/<name>/src` unless you set
+`BOBI_HOME` — with a Browse button to choose elsewhere), and choose how to
+start:
 
 - **Start from scratch** - describe what you want and Bobi authors the team.
 - **Use a template** - open an existing team on disk, or pull one from a
