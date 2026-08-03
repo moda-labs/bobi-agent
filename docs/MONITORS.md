@@ -64,8 +64,28 @@ Configuration merges in tiers, later wins by `name`:
 2. **Team package** - `run/package/monitors.yaml` in the installed image.
 3. **User overrides** - the `monitors:` key in `run/package/agent.yaml`.
 
-Set `enabled: false` on a name to switch off a default. The registry reloads
-every tick, so monitors added at runtime take effect without a restart.
+`enabled: false` only switches a monitor off at the tier that **defines** it.
+Setting it in tier 2 or 3 against a name that came from tier 1 - including
+`bobi agent <name> monitors pause`, which writes exactly that record - does
+**not** stop the monitor. The runtime tiers record an *opt-out*, which narrows
+only which projects a monitor's check runs against; the tier-1 record stays in
+the scheduler's effective set and keeps firing on its interval. Notify, command,
+and sleep-cycle monitors never consult the opt-out at all, and the sleep cycle
+falls back to the scheduler's own bound root, so it keeps running - and keeps
+paying for LLM calls - after a `pause` that reported success. This gap is
+tracked as D014 in `plans/2026-07-22-review-remediation.md`.
+
+To actually remove a framework default, prune it at compose time from the team
+package's `agent.yaml`, which drops the record from the composed image's
+`monitors/defaults.yaml`:
+
+```yaml
+prune:
+  monitors: [sleep-cycle]
+```
+
+The registry reloads every tick, so monitors added at runtime take effect
+without a restart.
 
 ## Flavors
 
