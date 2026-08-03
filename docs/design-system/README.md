@@ -112,7 +112,8 @@ offsets. **Dusk violet** (`oklch(0.53 0.17 285)`, bright `oklch(0.70 0.14 285)`)
 is the accent and is strictly semantic: live, enforced, gated, focused. Warm
 near-black `#221C15` is the dark surface (sidebar, footer). The single cool
 surface is the terminal `#0F1226` — reserved for real shell output. `sky
-#7DAABD` is a rare support tint. Moda's red never appears.
+#7DAABD` is a rare support tint. Completed and saved states resolve to quiet
+ink or muted treatments, not violet. Moda's red never appears.
 
 Never apply an `/opacity` modifier to the accent (it is a `var()` string) — use
 `color-mix(in srgb, var(--bobi-acc) 5%, transparent)` for washes.

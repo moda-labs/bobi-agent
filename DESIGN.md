@@ -178,7 +178,8 @@ gradients and aurora blobs. Bobi's violet is load-bearing: if a thing is not
 live, enforced, gated, or focused, it is not violet.
 
 There is no green in the palette. A connected integration is a *live* state, so
-it reads violet; failure uses Moda's brick `#9E3A28`; waiting uses clay.
+it reads violet; failure uses Moda's brick `#9E3A28`; waiting uses clay;
+completed and saved states resolve to quiet ink or muted treatments.
 
 ## Typography — the brand faces, vendored locally
 
