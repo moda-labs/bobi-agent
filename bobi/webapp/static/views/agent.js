@@ -87,7 +87,7 @@ export function mountAgent(el, { api, name }) {
       <div class="band-report" data-el="report" hidden></div>
       <div class="ah-body">
         <div class="ah-name">
-          <span class="agent-kicker"><span aria-hidden="true">◇</span> local agent</span>
+          <span class="agent-kicker">local agent</span>
           <h1 data-el="title"></h1>
           <p class="desc" data-el="desc"></p>
         </div>
@@ -105,7 +105,6 @@ export function mountAgent(el, { api, name }) {
             </span></span>
           </span>
         </div>
-        <span class="plate-mark" aria-hidden="true">MODA LABS · BOBI</span>
       </div>
     </div>
 
@@ -116,9 +115,16 @@ export function mountAgent(el, { api, name }) {
           <span class="count" data-el="runsCount"></span>
         </div>
         <div class="runs-controls">
-          <input class="runs-search" data-el="runsSearch" type="search"
-                 aria-label="Search runs" placeholder="Search runs">
-          <div class="tabs" data-el="tabs"></div>
+          <span class="runs-search-field bobi-field">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5"></circle>
+              <path d="m16 16 4 4"></path>
+            </svg>
+            <input class="runs-search" data-el="runsSearch" type="search"
+                   aria-label="Search runs" placeholder="Search runs">
+          </span>
+          <div class="tabs" data-el="tabs" role="tablist"
+               aria-label="Filter runs"></div>
         </div>
       </div>
       <div class="runs-scroll">
@@ -144,7 +150,7 @@ export function mountAgent(el, { api, name }) {
           <span class="eyebrow" data-el="slabKind"></span>
           <span class="path" data-el="slabTitle"></span>
           <span class="meta" data-el="slabMeta"></span>
-          <button class="btn small" data-el="slabClose" type="button">Close</button>
+          <button class="btn bobi-btn small" data-el="slabClose" type="button">Close</button>
         </div>
         <div class="transcript" data-el="slabBody"></div>
       </div>
@@ -228,7 +234,8 @@ export function mountAgent(el, { api, name }) {
 
     const actions = mk("span", "band-actions");
     const btn = (label, cls, verb) => {
-      const b = mk("button", "btn " + cls, busyVerb ? busyVerb + "…" : label);
+      const b = mk("button", "btn bobi-btn " + cls,
+                   busyVerb ? busyVerb + "…" : label);
       b.type = "button";
       if (busyVerb) b.disabled = true;
       else b.addEventListener("click", () => act(verb));
@@ -427,9 +434,12 @@ export function mountAgent(el, { api, name }) {
       // ALL stays bare: the panel head's "⌁ N runs" IS the all-count, and
       // printing it again one gap to the right reads as two facts.
       const n = t.key === "all" ? null : counts[t.key];
-      const b = mk("button", "tab" + (tab === t.key ? " active" : ""),
+      const on = tab === t.key;
+      const b = mk("button", "tab" + (on ? " active" : ""),
                    n == null ? t.label : `${t.label} · ${n}`);
       b.type = "button";
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-selected", on ? "true" : "false");
       b.addEventListener("click", () => {
         if (tab === t.key) return;
         tab = t.key;
@@ -477,7 +487,9 @@ export function mountAgent(el, { api, name }) {
     els.runsEmpty.hidden = true;
 
     for (const row of rows) {
-      const tr = mk("tr");
+      const tr = mk("tr", "bobi-row");
+      tr.tabIndex = 0;
+      tr.setAttribute("role", "button");
 
       const stat = mk("td");
       const chip = mk("span", "rstat " + row.status);
@@ -524,6 +536,12 @@ export function mountAgent(el, { api, name }) {
       tr.appendChild(act);
 
       tr.addEventListener("click", () => openSlab(row));
+      tr.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openSlab(row);
+        }
+      });
       els.runRows.appendChild(tr);
     }
   }
@@ -541,7 +559,7 @@ export function mountAgent(el, { api, name }) {
       : `${start}–${end} of ${total}`;
     els.runsPager.appendChild(mk("span", "pager-summary", summary));
 
-    const prev = mk("button", "btn small", "Previous");
+    const prev = mk("button", "btn bobi-btn small", "Previous");
     prev.type = "button";
     prev.disabled = pageIndex === 0;
     prev.addEventListener("click", () => { pageIndex -= 1; pollRuns(); });
@@ -551,7 +569,7 @@ export function mountAgent(el, { api, name }) {
     els.runsPager.appendChild(mk(
       "span", "pager-page", `${pageIndex + 1} / ${pages}`));
 
-    const next = mk("button", "btn small", "Next");
+    const next = mk("button", "btn bobi-btn small", "Next");
     next.type = "button";
     next.disabled = offset + (runs.runs || []).length >= total;
     next.addEventListener("click", () => { pageIndex += 1; pollRuns(); });
@@ -571,7 +589,7 @@ export function mountAgent(el, { api, name }) {
       and closure actions; neither action advances the approval gate. */
   function rowActions(row) {
     const actions = mk("div", "row-actions");
-    const transcript = mk("button", "btn small", "Transcript");
+    const transcript = mk("button", "btn bobi-btn small", "Transcript");
     transcript.type = "button";
     transcript.disabled = !row.session_id;
     if (!row.session_id) transcript.title = "No transcript was recorded for this run";
@@ -582,7 +600,7 @@ export function mountAgent(el, { api, name }) {
     actions.appendChild(transcript);
 
     if (!row.session_id && row.kind !== "session") {
-      const details = mk("button", "btn small", "Details");
+      const details = mk("button", "btn bobi-btn small", "Details");
       details.type = "button";
       details.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -592,7 +610,7 @@ export function mountAgent(el, { api, name }) {
     }
 
     if (row.status === "awaiting_action") {
-      const remindButton = mk("button", "btn small remind", "Remind");
+      const remindButton = mk("button", "btn bobi-btn small remind", "Remind");
       remindButton.type = "button";
       remindButton.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -600,7 +618,7 @@ export function mountAgent(el, { api, name }) {
       });
       actions.appendChild(remindButton);
 
-      const closeButton = mk("button", "btn small quiet", "Close");
+      const closeButton = mk("button", "btn bobi-btn small quiet", "Close");
       closeButton.type = "button";
       closeButton.addEventListener("click", (e) => {
         e.stopPropagation();
