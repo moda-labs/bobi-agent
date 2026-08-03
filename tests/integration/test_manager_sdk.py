@@ -36,10 +36,23 @@ class TestManagerSDKDirect:
     """Test the manager's ClaudeSDKClient usage directly."""
 
     async def test_promptless_connect_has_no_turn_to_drain(self):
-        """A real connect(None) emits nothing until a query creates a turn."""
+        """A real connect(None) starts no TURN until a query creates one.
+
+        Asserts on turn traffic, not on total silence. A promptless connect
+        can still emit non-turn lifecycle messages - ``SessionStart`` hook
+        events, system/init - and whether any appear depends on the developer's
+        LOCAL Claude Code hook configuration, which the test does not control.
+        The original "the stream stays silent for 250ms" form therefore failed
+        on any machine with a SessionStart hook configured, reporting
+        "DID NOT RAISE TimeoutError" for a `HookEventMessage` that is not a
+        turn at all. What the manager actually depends on is that no
+        assistant/result message arrives without a query.
+        """
         from claude_agent_sdk import (
+            AssistantMessage,
             ClaudeAgentOptions,
             ClaudeSDKClient,
+            ResultMessage,
         )
         from bobi.sdk import get_cli_path
 
@@ -54,8 +67,16 @@ class TestManagerSDKDirect:
         try:
             await client.connect(None)
             stream = client.receive_response()
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(anext(stream), timeout=0.25)
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                try:
+                    msg = await asyncio.wait_for(anext(stream), timeout=0.25)
+                except asyncio.TimeoutError:
+                    break  # silence: no turn was started, which is the point
+                except StopAsyncIteration:
+                    break
+                assert not isinstance(msg, (AssistantMessage, ResultMessage)), (
+                    f"promptless connect produced turn traffic: {msg!r}")
         finally:
             await _safe_disconnect(client)
 

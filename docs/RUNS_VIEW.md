@@ -1,142 +1,116 @@
 # The runs view: everything an agent did, as one list
 
-An agent records its work in three unrelated places. A session registry entry
-per manager and subagent, a `WorkflowRun` file per workflow execution, and -
-since the run-record ledger - one monitor record per firing. Each store answers
-its own question well and none of them answers the one a human actually asks
-when they open an agent: **what has this thing been doing, and what broke?**
+The agent page asks two questions, in order: is this thing running, and what
+failed. The second is answered by a single table, so the three places an
+agent's work is recorded have to become one shape.
 
-The runs read model (`bobi/webapp/runs.py`) folds all three into a single list
-of rows with one shape, and `GET /api/agents/{name}/runs` serves it. This
-document is the contract: what a row means, and the two places the fold decides
-something rather than reporting it.
+- **sessions** — `SessionRegistry`: the manager and every subagent it ran
+- **workflow runs** — `run/state/workflow/runs/*.json`, including the ones
+  suspended waiting for a human approval or clarification
+- **monitor runs** — `run/state/monitor_runs/*.json`, one record per firing
+  ([MONITORS.md](MONITORS.md))
 
-Deliberately **not** folded in: decisions and raw event deliveries. They are log
-lines, not runs - no status, no cost, nothing to open. `bobi agent events` still
-serves them.
+The fold lives in `bobi/webapp/runs.py`. Decisions and raw event deliveries are
+deliberately **not** here: they are log lines, not runs — no status, no cost,
+nothing to open. `bobi agent events` still serves them.
 
-## The row
+## `GET /api/agents/{name}/runs`
 
-Every row carries every field. A source that cannot know a field gets an empty
-string, a zero, or `null` - never a missing key - so render code branches on
-value and never on key presence.
+Query: `status=` (`running` / `failed`, the tabs), `query=` (case-insensitive
+text search), `offset=`, and `limit=` (default 100).
 
-| field | meaning |
-|---|---|
-| `kind` | `session` · `workflow` · `monitor` - which store it came from |
-| `key` | stable row identity for the UI (see below) |
-| `status` | `running` · `idle` · `done` · `failed` · `crashed` · `stalled` |
-| `title` | the session title, workflow name, or monitor name |
-| `origin` | what kicked it off, for the row's sub-line |
-| `started_at` | ISO 8601 UTC, `""` when the source recorded no start |
-| `duration_seconds` | `float`, or `null` while a run is still going |
-| `tokens` | input + output tokens for the session behind this row |
-| `cost_usd` | provider-**reported** dollars |
-| `est_cost_usd` | list-price estimate, only where honesty allows |
-| `error` | `""` unless the run needs a human |
-| `session_id` | the transcript this row can open, `""` if none |
-| `run_id` | the workflow or monitor run this row can detail, `""` if none |
-| `detail` | kind-specific extras (role, await event, cache mode, ...) |
-
-`cost_usd` and `est_cost_usd` are never summed: an estimate must never read as a
-bill. The estimate is populated under the same rules as the fleet-wide rollup -
-the model reported no cost, the entry carries the cached/uncached token split,
-and the model is in the price table.
-
-### Row identity is three fields, not one
-
-`key` is what the UI keys a row on across polls - `session:<name>`,
-`workflow:<run_id>`, `monitor:<run_id>`. It is never a handle for opening
-anything.
-
-What a row can *open* is said by the other two. `session_id` means there is a
-transcript to show. `run_id` means there is a run record or workflow run to
-detail. A row can carry both (a workflow run that spawned a session), one, or
-neither - a `$0` script-cache monitor tick spawned nothing, so it has a
-`run_id` and no `session_id`, and the only thing to show is its record.
-
-## Status: five reported, one derived
-
-Four of the six statuses are read straight off the source.
-
-**Sessions** map their registry vocabulary: the active statuses (`starting`,
-`running`) become `running`, `idle` stays `idle`, `failed` / `error` become
-`failed`, `crashed` becomes `crashed`, and `completed` / `done` - plus anything
-outside the vocabulary an older writer recorded - become `done`. Over, and not a
-failure the fold gets to claim. Sessions are read with the registry's dead-pid
-reaping on, so a session whose process died never renders as running.
-
-**Workflow runs** map `completed` to `done`, `failed` / `error` to `failed`,
-`running` to `running`, and `waiting` / `suspended` to `idle` - with one
-exception below.
-
-**Monitor records** map their outcome: `notified` and `quiet` are both `done` (a
-tick with nothing to say is a successful tick), and `failed` is `failed`,
-carrying its reason as the row's error. See
-[MONITORS.md § Run records](MONITORS.md#run-records-what-each-firing-actually-did)
-for what each outcome means.
-
-### `stalled` is the derived one
-
-A workflow run suspended waiting for an event is normal. A workflow run
-suspended for a day is waiting for something that is not coming, which is a
-human's problem. Past `STALLED_AFTER_SECONDS` (24h) a suspended run reads
-`stalled` instead of `idle`, and its error names where it stopped and what it is
-waiting on.
-
-The clock runs from the last resume, not the original start: a run suspended a
-week ago but resumed a minute ago is waiting, not stalled.
-
-The threshold is a module constant, not configuration. It encodes a judgement
-about human attention ("nobody is coming back to this today"), not anything
-about a particular workflow. Revisit it if a real workflow legitimately waits
-longer.
-
-## `failed` is a tab, not a literal match
-
-The page has three tabs, and the filter serves them:
-
-- `status=running` - only `running`. `idle` is deliberately excluded: a live
-  but waiting manager is present, not working.
-- `status=failed` - `failed`, `crashed`, **and** `stalled`. The tab means
-  "everything that needs a human", and a crashed session and a stalled workflow
-  need one just as much as a failed turn.
-- any other value matches that status exactly.
-
-## Ordering, counts, and the cap
-
-Rows sort **live first, then newest first**. A running job is what you came for,
-even when it started before three finished ones.
-
-`counts` (`all` / `running` / `failed`) always describes the **whole** set,
-computed before the status filter and before the cap. The tab counts have to
-stay true when you are looking at a filtered, truncated list - a FAILED tab
-reading `3` while showing one row is correct; a FAILED tab that renumbered
-itself to match its own filter would be useless.
-
-`limit` caps only the payload (default 200), and `truncated` says whether it
-did. Real pagination waits for a home that outgrows this.
-
-## Every read takes an explicit root
-
-One `bobi app` process serves every team on the machine and binds none of them,
-so nothing in the fold may rely on a bound runtime root. `WorkflowRun.list_runs`
-and `run_records.load_all` both take `root=` for this, and neither creates its
-directory on the read path: a reader must never mkdir inside someone else's
-runtime tree. A store that does not exist yet reads as empty.
-
-## The endpoint
-
-```
-GET /api/agents/{name}/runs?status=&limit=
+```json
+{"runs": [
+   {"kind": "workflow", "key": "workflow:wf-71", "status": "awaiting_action",
+    "title": "publish", "origin": "workflow · on github/issue.opened",
+    "started_at": "2026-07-30T19:22:43+00:00", "duration_seconds": null,
+    "tokens": 0, "cost_usd": 0.0, "est_cost_usd": 0.0,
+    "error": "",
+    "session_id": "", "run_id": "wf-71",
+    "detail": {"await_event": "pr.merged", "suspended_at_step": 3,
+               "run_key": "", "repo": "", "resumable": true}}],
+ "counts": {"all": 14, "running": 1, "awaiting_action": 2, "failed": 2},
+ "total": 14, "offset": 0, "limit": 100, "query": "",
+ "truncated": false}
 ```
 
-Returns `{"runs": [...], "counts": {...}, "truncated": bool}`. `404` for an
-unknown agent; the app's token and loopback Host guard apply as they do to every
-`/api` route.
+Every field a source cannot know is empty or zero, never omitted, so render
+code branches on value and never on key presence. `detail` is the one
+per-`kind` bag; everything above it means the same thing for every row.
 
-`TeamRuntime.runs()` is **not** an `@abstractmethod`. An out-of-tree subclass in
-the private deploy repo implements this ABC, and marking the method abstract
-here would break its CI the moment this merges. It becomes abstract once the
-hosted runtime implements it - the sequencing rule the ABC's own docstring
-states. Until then the base raises `TeamLifecycleError`.
+Rows come back **live first, then newest first** — a running job is what you
+came for. `404` for an agent this machine does not have.
+
+## The status vocabulary
+
+`running` · `idle` · `awaiting_action` · `done` · `closed` · `failed` ·
+`crashed`.
+
+Each source maps its own on-disk word onto it. Two mappings are judgement
+rather than translation:
+
+**`awaiting_action` is derived, not recorded.** A workflow run suspended past
+`AWAITING_ACTION_AFTER_SECONDS` (24h, a constant) is elevated from idle into its
+own attention state and tab. It remains a healthy, resumable human gate, not a
+failure. The row names the awaited event and offers reminder and close actions.
+The clock runs from the last resume, not from first suspension.
+
+**`status=failed` is the terminal-failure tab.** It returns `failed` and
+`crashed`. Human approval and clarification gates use `status=awaiting_action`.
+
+`status` and `query` filter before `offset` and `limit` select a page. Search
+matches the visible row fields, identifiers, and the kind-specific `detail`
+bag. `counts` always describes the **whole** set, so tab counts stay honest;
+`total` describes the filtered set, so the pager stays honest. `truncated`
+says another page follows the current one.
+
+## One piece of work, one row
+
+A monitor firing that spawned a check agent, and a workflow run that ran
+through a session, each leave **two** records on disk: the run's own, and the
+session's. Emitted as two rows they listed the same twelve seconds twice,
+offered the same transcript from two rows, and — because a session's usage is
+attributed to whichever row points at it — printed the same tokens and the
+same estimated cost twice in a column a reader totals by eye.
+
+So the run record claims its session and the session row is dropped. The run
+record wins because it knows what the work *was* (a monitor's outcome, a
+workflow's step) where the session only knows that a process ran; the claiming
+row keeps `session_id`, so the transcript stays one click away.
+
+Nothing is dropped silently. A record closes when the run's own bookkeeping
+finished, which is not the moment its session ended, so a claimed session still
+gets to say two things its record can be wrong about:
+
+- **that the work failed** — a monitor record reading `notified` while its
+  agent crashed on the way out must not render as a clean run
+- **that it is still running** — dropping a live session would take a live row
+  off the page and out of the RUNNING tab
+
+In both cases the claiming row takes the session's status (and its error, when
+it has none of its own).
+
+## Row identity is three fields, not one
+
+- **`key`** — stable UI row identity (`session:<name>` / `workflow:<id>` /
+  `monitor:<run_id>`). For lists and keys only; it opens nothing.
+- **`session_id`** — there is a transcript to open
+  ([RUN_DRILLDOWNS.md](RUN_DRILLDOWNS.md))
+- **`run_id`** — there is a run record to open, or an action to take against
+  it ([RUN_RESUME.md](RUN_RESUME.md))
+
+A row can have both, one, or neither. A row with neither gets the Details slab
+rendered from the row itself — it already carries the whole story.
+
+## Reads take an explicit root
+
+One webapp process serves every team on the machine and binds none of them, so
+every store read from `bobi/webapp/` takes an explicit `root=`. That is why
+`WorkflowRun.list_runs` and `run_records.load_all` both grew that parameter.
+Never `mkdir` on a read path: asking about a team that has never run a workflow
+must not create its runs directory.
+
+## What is deliberately not here
+
+Per-run latency (not captured) · time-series cost (no data) · decisions and raw
+event deliveries.

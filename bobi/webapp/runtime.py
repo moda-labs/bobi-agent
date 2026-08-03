@@ -86,8 +86,8 @@ class TeamRuntime(ABC):
     outcome lands on the job) so no request is held open for a minutes-long
     agent reply regardless of what transport an implementation uses.
 
-    Widening this ABC: an out-of-tree subclass lives in the private
-    bobi-deploy repo (``EventBusRuntime``), whose CI tracks this repo's
+    Widening this ABC: an out-of-tree subclass lives in a private consumer
+    repo (``EventBusRuntime``), whose CI tracks this repo's
     ``dev`` channel (auto-advanced to every green main push, #740). Adding
     an ``@abstractmethod`` here therefore breaks that repo's CI the moment
     this repo merges - Python rejects instantiating the subclass until it
@@ -323,8 +323,8 @@ class TeamRuntime(ABC):
         readable as long as its registry entry exists.
         """
 
-    def runs(self, name: str, *, status: str = "",
-             limit: int | None = None) -> dict:
+    def runs(self, name: str, *, status: str = "", query: str = "",
+             offset: int = 0, limit: int | None = None) -> dict:
         """One team's runs: sessions, workflow runs, and monitor runs merged
         into one list, newest first with live runs at the top.
 
@@ -333,7 +333,7 @@ class TeamRuntime(ABC):
             {"runs": [{"kind",        # session | workflow | monitor
                        "key",         # stable row identity
                        "status",      # running|idle|done|failed|crashed|
-                                      # stalled
+                                      # awaiting_action|closed
                        "title", "origin",       # what it is, what kicked it off
                        "started_at",            # ISO 8601, "" if unknown
                        "duration_seconds",      # float | None
@@ -341,12 +341,14 @@ class TeamRuntime(ABC):
                        "error",                 # "" unless it failed
                        "session_id", "run_id",  # "" when the row has neither
                        "detail"}, ...],         # kind-specific extras
-             "counts": {"all", "running", "failed"},
+             "counts": {"all", "running", "awaiting_action", "failed"},
+             "total": int, "offset": int, "limit": int, "query": str,
              "truncated": bool}
 
-        ``status`` filters the payload; ``failed`` is the tab, so it covers
-        ``crashed`` and ``stalled`` too. ``counts`` always describes the whole
-        set so the tab counts stay honest when ``limit`` cuts the list.
+        ``status`` and ``query`` filter before ``offset`` / ``limit`` paginate;
+        ``failed`` covers terminal failures; human gates use
+        ``awaiting_action``.
+        ``counts`` describes the whole set and ``total`` the filtered set.
 
         NOT abstract on purpose: an out-of-tree subclass in the private
         bobi-deploy repo implements this ABC, and adding an
@@ -373,6 +375,16 @@ class TeamRuntime(ABC):
         NOT abstract, per this class's sequencing rule.
         """
         raise TeamLifecycleError("resume is not available on this runtime")
+
+    def remind_run(self, name: str, run_id: str) -> dict:
+        """Resend a waiting workflow's user-facing gate notification."""
+        raise TeamLifecycleError(
+            "workflow reminders are not available on this runtime")
+
+    def close_run(self, name: str, run_id: str) -> dict:
+        """Close a waiting workflow without advancing its gate."""
+        raise TeamLifecycleError(
+            "workflow close is not available on this runtime")
 
 
 # --- Local implementation ----------------------------------------------------
@@ -894,8 +906,56 @@ class LocalRuntime(TeamRuntime):
                 "workflow": run.workflow_name,
                 "await_event": run.await_event}
 
-    def runs(self, name: str, *, status: str = "",
-             limit: int | None = None) -> dict:
+    def remind_run(self, name: str, run_id: str) -> dict:
+        from bobi.workflow.orchestrator import remind_workflow
+        from bobi.workflow.state import WorkflowRun
+        from bobi.workflow.triggers import WorkflowDispatcher
+
+        root = self._resolve(name)
+        run = next((r for r in WorkflowRun.list_runs(root=root)
+                    if r.run_id == run_id), None)
+        if run is None:
+            raise UnknownRun(run_id)
+        if run.status != "waiting":
+            raise TeamLifecycleError(
+                f"run {run_id} is '{run.status}', not 'waiting'")
+        dispatcher = WorkflowDispatcher()
+        dispatcher.load_all_workflows(project_path=root)
+        workflow = dispatcher.find_workflow(run.workflow_name)
+        if workflow is None:
+            raise TeamLifecycleError(
+                f"workflow '{run.workflow_name}' is no longer installed")
+        outcome = remind_workflow(run, workflow)
+        if not outcome.delivered:
+            raise TeamLifecycleError(outcome.error)
+        return {"ok": True, "delivered": True, "run_id": run_id,
+                "workflow": run.workflow_name,
+                "await_event": run.await_event}
+
+    def close_run(self, name: str, run_id: str) -> dict:
+        from bobi.sdk import SessionRegistry
+        from bobi.workflow.state import WorkflowRun
+
+        root = self._resolve(name)
+        existing = next((r for r in WorkflowRun.list_runs(root=root)
+                         if r.run_id == run_id), None)
+        if existing is None:
+            raise UnknownRun(run_id)
+        if existing.status != "waiting":
+            raise TeamLifecycleError(
+                f"run {run_id} is '{existing.status}', not 'waiting'")
+        closed = WorkflowRun.close(run_id, root=root)
+        if closed is None:
+            raise TeamLifecycleError(f"run {run_id} is no longer waiting")
+        if closed.session_name:
+            SessionRegistry(root).mark_terminal(
+                closed.session_name, "cancelled",
+                error="workflow closed by operator")
+        return {"ok": True, "closed": True, "run_id": run_id,
+                "workflow": closed.workflow_name}
+
+    def runs(self, name: str, *, status: str = "", query: str = "",
+             offset: int = 0, limit: int | None = None) -> dict:
         """Fold this machine's three run stores for one team. Every read takes
         the resolved root explicitly - this process serves every team and
         binds none of them."""
@@ -907,5 +967,7 @@ class LocalRuntime(TeamRuntime):
             root,
             manager_name=service.manager_session_name(root),
             status=status or "",
+            query=query or "",
+            offset=max(0, offset),
             limit=limit if limit and limit > 0 else DEFAULT_LIMIT,
         )

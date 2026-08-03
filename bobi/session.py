@@ -1494,7 +1494,13 @@ class Session:
                 await self._safe_disconnect(self._client)
                 self._client = None
             self._set_state("stopped")
-            registry.update(self.name, status="stopped")
+            # Stamp WHEN it stopped and drop the pid: this block only runs on
+            # an orderly teardown, so the run is over and the pid is stale the
+            # moment it is written. Without the stamp the record says a
+            # session ended but not when, and the agent page's STOPPED strip
+            # (SINCE / WAS UP, #887) has nothing to report.
+            registry.update(self.name, status="stopped", pid=0,
+                            terminal_at=time.time())
 
     def _thread_target(self, startup_prompt: str | None) -> None:
         self._loop = asyncio.new_event_loop()

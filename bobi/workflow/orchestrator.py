@@ -76,6 +76,49 @@ class _NotifyOutcome:
     error: str = ""
 
 
+def remind_workflow(run: WorkflowRun, workflow: Workflow) -> _NotifyOutcome:
+    """Replay the notification that directly armed a waiting workflow gate.
+
+    This is delivery only: it does not emit the awaited event, mutate the run,
+    or resume execution. The saved visit map disambiguates branch-specific
+    notifications that lead to the same await step.
+    """
+    if run.status != "waiting" or run.suspended_at_step <= 0:
+        return _NotifyOutcome(False, "run is not waiting for action")
+
+    await_idx = run.suspended_at_step - 1
+    if await_idx >= len(workflow.steps):
+        return _NotifyOutcome(False, "saved await step is outside the workflow")
+    await_step = workflow.steps[await_idx]
+    if not await_step.await_event:
+        return _NotifyOutcome(False, "saved step is not an await gate")
+
+    visits = (run.variable_scopes.get("_runtime", {}) or {}).get("visits", {})
+    candidates = []
+    for idx, step in enumerate(workflow.steps):
+        if not step.notify:
+            continue
+        if step.goto == await_step.name or idx + 1 == await_idx:
+            candidates.append((idx, step))
+    visited = [item for item in candidates if visits.get(item[1].name)]
+    if visited or len(candidates) == 1:
+        _, notify_step = max(visited or candidates, key=lambda item: item[0])
+    else:
+        action = await_step.await_event.replace("_", " ")
+        subject = f" for {run.run_key}" if run.run_key else ""
+        notify_step = StepDef(
+            name=f"remind_{await_step.name}", notify="slack",
+            message=(f"Reminder: {run.workflow_name}{subject} is waiting for "
+                     f"your {action}. Reply in this thread to continue, or "
+                     "close the workflow from Bobi."),
+        )
+    ctx = VariableContext()
+    ctx.scopes = run.variable_scopes
+    return _execute_notify_step(
+        notify_step, ctx, run.cwd, run.run_key, run.workflow_name,
+    )
+
+
 class DrainResult(NamedTuple):
     """One drained turn: ``final_text`` (None on failure), error, error kind."""
 

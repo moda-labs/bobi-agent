@@ -7,7 +7,7 @@ name: Container image
 # (the claude.ai installer, the python:3.11-slim base, apt/pip indexes) even
 # when no file in the repo changed.
 #
-# This workflow came from the private bobi-deploy repo with the image itself
+# This workflow came from the private deploy repo with the image itself
 # (repo reorg, Phase 6). Two things fell away in the move, both because the
 # image recipe now lives in the same repo as the source it installs:
 #   * the `setup-public-bobi` composite action — a sibling checkout of this
@@ -75,6 +75,10 @@ jobs:
   container-image:
     name: Build + contract tests
     runs-on: ubuntu-latest
+    # The live round-trips below are allowed 600s each by their own timeout
+    # marks, on top of a wheel build and an image build. Bound the job so a
+    # wedged brain call cannot burn a runner for six hours.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
@@ -91,7 +95,7 @@ jobs:
       # job anywhere — see the Worker protocol suite in ci.yml, which pins 22.
       #
       # Absent this pin the job fails on a green tree, which is what it did
-      # nightly in bobi-deploy from 2026-07-28 until this move.
+      # nightly in the private deploy repo from 2026-07-28 until this move.
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -128,3 +132,111 @@ jobs:
         env:
           BOBI_TEST_IMAGE: bobi:ci
         run: pytest tests/integration/test_container_image.py -m "docker and not live" -v --timeout=400
+
+      # ------------------------------------------------------------------
+      # LIVE LANE — the only place in this repo where a real brain executes.
+      #
+      # `test_image_ask_roundtrip` (Claude) and `test_image_codex_ask_roundtrip`
+      # (Codex) run the image built above against an ephemeral event server
+      # started from the real Worker sources, and each completes one real ask
+      # round-trip. That is the product's core claim, and until #909 nothing in
+      # CI proved it on either brain.
+      #
+      # It spends real model credits, so it is gated: nightly, manual dispatch,
+      # or the `ci:live` label on a PR (the label trigger has been in this
+      # workflow's `on:` block since the reorg; this is the step it was for).
+      # ------------------------------------------------------------------
+      - name: Decide whether the live lane runs
+        id: live
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          # '' on non-PR events; the fork's slug on a fork PR.
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+          HAS_LIVE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:live') }}
+        run: |
+          set -euo pipefail
+          run=false
+          case "$EVENT_NAME" in
+            schedule|workflow_dispatch)
+              run=true ;;
+            pull_request)
+              # Provably inert on fork PRs. GitHub already withholds secrets
+              # from `pull_request` runs on forks, which would make the lane
+              # fail rather than leak — but failing a contributor's PR for a
+              # credential they cannot have is its own bug, so refuse by
+              # identity and say why. This workflow never uses
+              # `pull_request_target`, which is what would actually hand a
+              # fork's code the repo's secrets.
+              if [ "$PR_HEAD_REPO" != "$THIS_REPO" ]; then
+                echo "fork PR ($PR_HEAD_REPO) — live lane is inert"
+              elif [ "$HAS_LIVE_LABEL" = "true" ]; then
+                run=true
+              else
+                echo "no ci:live label — live lane is inert"
+              fi ;;
+          esac
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "live lane runs: $run (event=$EVENT_NAME)"
+
+      - name: Fail fast when the live credentials are missing
+        # Ran-assertion, layer (i). Both round-trips `skipif` on an absent key,
+        # so a renamed/rotated/never-added secret would skip both and exit 0.
+        # Catch the common case here, loudly, before spending a brain call.
+        if: steps.live.outputs.run == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${ANTHROPIC_API_KEY:-}" ] || missing="$missing ANTHROPIC_API_KEY"
+          [ -n "${OPENAI_API_KEY:-}" ] || missing="$missing OPENAI_API_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::live lane cannot run — missing repo secret(s):$missing" >&2
+            exit 1
+          fi
+          echo "both live credentials are present"
+
+      # NODE 22, replacing the 20 pinned at the top of this job — deliberate,
+      # and it must come AFTER the wheel build. wrangler refuses to start below
+      # v22, while hatch_build.py's non-editable wheel build requires EXACTLY
+      # 20 (`_require_build_node`). Nothing below builds a wheel, so the swap
+      # is safe here and only here. See the same note in ci.yml's `wrangler` job.
+      - uses: actions/setup-node@v4
+        if: steps.live.outputs.run == 'true'
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: event-server/package-lock.json
+
+      - name: Install the wrangler harness
+        # `_start_wrangler_server` runs the real Worker under `wrangler dev` in
+        # local mode — no Cloudflare account or credentials involved. Without
+        # this, `_has_wrangler()` is false and both round-trips SKIP.
+        if: steps.live.outputs.run == 'true'
+        working-directory: event-server
+        run: npm ci --no-audit --no-fund
+
+      - name: Run the live brain round-trips (Claude + Codex)
+        if: steps.live.outputs.run == 'true'
+        env:
+          BOBI_TEST_IMAGE: bobi:ci
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          pytest tests/integration/test_container_image.py \
+            -m "docker and live" -v --timeout=700 \
+            --junitxml=live-roundtrips.xml
+
+      - name: Assert the live round-trips actually ran
+        # Ran-assertion, layer (ii). Layer (i) catches an absent secret; this
+        # catches every other way the lane can skip to green — the Linux guard,
+        # an unavailable wrangler harness, a marker expression that stopped
+        # matching. Counts come from the junit XML, never from `-rA` prose.
+        if: steps.live.outputs.run == 'true'
+        run: |
+          python scripts/assert_junit_ran.py live-roundtrips.xml \
+            --expect-passed 2 \
+            --require test_image_ask_roundtrip \
+            --require test_image_codex_ask_roundtrip

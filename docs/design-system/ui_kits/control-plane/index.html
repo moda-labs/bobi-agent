@@ -1,0 +1,43 @@
+<!-- @dsCard group="Control plane" viewport="1280x820" subtitle="The Bobi control plane — queue, approvals, agents, config" name="Control plane" -->
+<!-- @startingPoint section="Product" subtitle="Bobi control-plane app shell" viewport="1280x820" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>bobi — control plane</title>
+<link rel="stylesheet" href="../../styles.css" />
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>html,body{margin:0;height:100%}#root{min-height:100%}</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="kit-data.js?v=8"></script>
+<script type="text/babel" src="component-shim.jsx?v=8"></script>
+<script type="text/babel" src="Chrome.jsx?v=8"></script>
+<script type="text/babel" src="Screens.jsx?v=8"></script>
+<script type="text/babel">
+  const { useState } = React;
+  function App() {
+    const [view, setView] = useState("queue");
+    const [decisions, setDecisions] = useState({});
+    const open = Object.keys(KIT.events.filter((e) => e.gate).reduce((a, e) => ({ ...a, [e.id]: 1 }), {}))
+      .filter((id) => !decisions[id]).length;
+    return (
+      <div className="bobi-app" style={{ display: "flex", minHeight: "100vh", background: "var(--surface-page)" }}>
+        <KitSideNav active={view} onSelect={setView} counts={{ gates: open || undefined }} />
+        <main style={{ flex: 1, minWidth: 0 }}>
+          {view === "queue" && <QueueScreen onOpenGate={() => setView("gates")} />}
+          {view === "gates" && <GatesScreen decisions={decisions} onDecide={(id, d) => setDecisions((p) => ({ ...p, [id]: d }))} />}
+          {view === "agents" && <AgentsScreen />}
+          {view === "config" && <ConfigScreen />}
+        </main>
+      </div>
+    );
+  }
+  ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

@@ -218,8 +218,8 @@ class _PluginGroup(click.Group):
     """A click Group that also serves plugin commands, lazily.
 
     Plugins register under the `bobi.commands` entry-point group — the seam
-    separately-installed packages deliver commands through (e.g. bobi-deploy
-    adds `bobi deploy` / `deploy-init` / `destroy`). Without such a package
+    separately-installed packages deliver commands through (e.g. the private
+    deploy plugin adds `bobi deploy` / `deploy-init` / `destroy`). Without such a package
     installed, the CLI is the local product only.
 
     Lazy on purpose: the entry-point scan reads metadata for every installed

@@ -7,6 +7,7 @@ a dedicated process, and return without holding the request open.
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,18 +17,21 @@ from bobi.webapp import runtime as runtime_mod
 from bobi.webapp import server
 from bobi.webapp.runtime import LocalRuntime, TeamLifecycleError, UnknownRun
 from bobi.workflow.state import WorkflowRun
+from bobi.workflow.schema import StepDef, Workflow
 
 TOKEN = "resume-token-123"
 
 
 def _seed_run(run_id="wf-1", *, status="waiting", name="await-review",
-              await_event="pr.merged", suspended_at_step=3):
+              await_event="pr.merged", suspended_at_step=3,
+              session_name="worker", variable_scopes=None, cwd=""):
     run = WorkflowRun(
         run_id=run_id, workflow_name=name,
         trigger_event={"type": "issue.assigned", "data": {}},
         started_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
         status=status, suspended_at_step=suspended_at_step,
-        await_event=await_event, session_name="worker",
+        await_event=await_event, session_name=session_name,
+        variable_scopes=variable_scopes or {}, cwd=cwd,
     )
     run.save()
     return run
@@ -54,6 +58,20 @@ def _client():
     c = TestClient(app, base_url="http://127.0.0.1")
     c.headers.update({"x-bobi-webui-token": TOKEN})
     return c
+
+
+def _install_workflow(install, name="await-review"):
+    directory = paths.workflows_dir(install.repo_path)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{name}.yaml").write_text(
+        f"name: {name}\nsteps:\n"
+        "  - name: notify_review\n"
+        "    notify: slack\n"
+        "    message: Review this\n"
+        "  - name: await_review\n"
+        "    await: approval\n"
+        "  - name: finish\n"
+        "    prompt: finish\n")
 
 
 class TestResumeAction:
@@ -144,6 +162,168 @@ class TestClaimIsSingleWinner:
         assert claimed["resumed_at"]
 
 
+class TestCloseIsSingleWinner:
+    def test_close_publishes_a_terminal_cancelled_run(self, bobi_install):
+        _seed_run()
+        closed = WorkflowRun.close("wf-1", root=bobi_install.repo_path)
+        assert closed is not None
+        assert closed.status == "cancelled"
+        assert closed.completed_at
+        assert closed.await_event == ""
+        saved = WorkflowRun.list_runs(root=bobi_install.repo_path)[0]
+        assert saved.status == "cancelled"
+
+    def test_close_loses_after_resume_claims(self, bobi_install):
+        run = _seed_run()
+        assert run.claim() is True
+        assert WorkflowRun.close(
+            "wf-1", root=bobi_install.repo_path) is None
+
+    def test_resume_claim_loses_after_close(self, bobi_install):
+        run = _seed_run()
+        assert WorkflowRun.close(
+            "wf-1", root=bobi_install.repo_path) is not None
+        assert run.claim() is False
+
+
+class TestReminderReconstruction:
+    def test_replays_the_visited_notification_without_mutating_run(
+            self, bobi_install, monkeypatch):
+        from bobi.workflow import orchestrator
+
+        scopes = {
+            "requested_by": {"channel": "C123", "thread_ts": "99.1"},
+            "draft": {"summary": "Review this"},
+            "_runtime": {"visits": {"notify_review": 1}},
+        }
+        run = _seed_run(
+            await_event="approval", suspended_at_step=2,
+            variable_scopes=scopes, cwd=str(bobi_install.repo_path))
+        workflow = Workflow("await-review", [
+            StepDef(name="notify_review", notify="slack",
+                    message="${{draft.summary}}"),
+            StepDef(name="await_review", await_event="approval"),
+            StepDef(name="finish", prompt="finish"),
+        ])
+        calls = []
+
+        def _notify(step, ctx, cwd, run_key, workflow_name):
+            calls.append((step.name, ctx.resolve(step.message), cwd))
+            return SimpleNamespace(delivered=True, error="")
+
+        monkeypatch.setattr(orchestrator, "_execute_notify_step", _notify)
+        outcome = orchestrator.remind_workflow(run, workflow)
+        assert outcome.delivered is True
+        assert calls == [("notify_review", "Review this",
+                          str(bobi_install.repo_path))]
+        assert run.status == "waiting"
+        assert run.await_event == "approval"
+
+    def test_visit_map_selects_the_branch_that_was_delivered(
+            self, bobi_install, monkeypatch):
+        from bobi.workflow import orchestrator
+
+        run = _seed_run(
+            await_event="approval", suspended_at_step=3,
+            variable_scopes={"_runtime": {"visits": {"fallback": 1}}},
+            cwd=str(bobi_install.repo_path))
+        workflow = Workflow("await-review", [
+            StepDef(name="fallback", notify="slack", goto="await_review"),
+            StepDef(name="normal", notify="slack"),
+            StepDef(name="await_review", await_event="approval"),
+            StepDef(name="finish", prompt="finish"),
+        ])
+        seen = []
+        monkeypatch.setattr(
+            orchestrator, "_execute_notify_step",
+            lambda step, *args: (seen.append(step.name) or
+                                 SimpleNamespace(delivered=True, error="")))
+        assert orchestrator.remind_workflow(run, workflow).delivered is True
+        assert seen == ["fallback"]
+
+    def test_agent_delivered_gate_gets_a_generic_thread_reminder(
+            self, bobi_install, monkeypatch):
+        from bobi.workflow import orchestrator
+
+        run = _seed_run(
+            name="blog-image", await_event="clarification",
+            suspended_at_step=2,
+            variable_scopes={"requested_by": {"channel": "C123"}},
+            cwd=str(bobi_install.repo_path))
+        workflow = Workflow("blog-image", [
+            StepDef(name="describe", prompt="post and ask"),
+            StepDef(name="await_decision", await_event="clarification"),
+            StepDef(name="finish", prompt="finish"),
+        ])
+        messages = []
+
+        def _notify(step, ctx, cwd, run_key, workflow_name):
+            messages.append(step.message)
+            return SimpleNamespace(delivered=True, error="")
+
+        monkeypatch.setattr(orchestrator, "_execute_notify_step", _notify)
+        assert orchestrator.remind_workflow(run, workflow).delivered is True
+        assert "blog-image" in messages[0]
+        assert "clarification" in messages[0]
+        assert "Reply in this thread" in messages[0]
+
+
+class TestWaitingRunActions:
+    def test_runtime_reminds_without_resuming(self, bobi_install, monkeypatch):
+        from bobi.workflow import orchestrator
+
+        _install_workflow(bobi_install)
+        _seed_run(await_event="approval", suspended_at_step=2,
+                  variable_scopes={
+                      "_runtime": {"visits": {"notify_review": 1}}},
+                  cwd=str(bobi_install.repo_path))
+        monkeypatch.setattr(
+            orchestrator, "remind_workflow",
+            lambda run, workflow: SimpleNamespace(delivered=True, error=""))
+        body = LocalRuntime().remind_run(bobi_install.agent_name, "wf-1")
+        assert body["delivered"] is True
+        assert body["await_event"] == "approval"
+        assert WorkflowRun.list_runs(root=bobi_install.repo_path)[0].status \
+            == "waiting"
+
+    def test_runtime_surfaces_undeliverable_reminder(self, bobi_install,
+                                                      monkeypatch):
+        from bobi.workflow import orchestrator
+
+        _install_workflow(bobi_install)
+        _seed_run(await_event="approval", suspended_at_step=2)
+        monkeypatch.setattr(
+            orchestrator, "remind_workflow",
+            lambda run, workflow: SimpleNamespace(
+                delivered=False, error="no Slack channel available"))
+        with pytest.raises(TeamLifecycleError,
+                           match="no Slack channel available"):
+            LocalRuntime().remind_run(bobi_install.agent_name, "wf-1")
+
+    def test_runtime_closes_waiting_run(self, bobi_install):
+        from bobi.sdk import SessionEntry, SessionRegistry
+
+        SessionRegistry(bobi_install.repo_path).register(
+            SessionEntry(name="worker", status="waiting"))
+        _seed_run(session_name="worker")
+        body = LocalRuntime().close_run(bobi_install.agent_name, "wf-1")
+        assert body == {"ok": True, "closed": True, "run_id": "wf-1",
+                        "workflow": "await-review"}
+        assert WorkflowRun.list_runs(root=bobi_install.repo_path)[0].status \
+            == "cancelled"
+        [session] = SessionRegistry(bobi_install.repo_path).list_all()
+        assert session.status == "cancelled"
+        assert session.error == "workflow closed by operator"
+        assert session.terminal_at > 0
+
+    @pytest.mark.parametrize("action", ["remind", "close"])
+    def test_only_waiting_runs_accept_actions(self, bobi_install, action):
+        _seed_run(status="completed")
+        method = getattr(LocalRuntime(), f"{action}_run")
+        with pytest.raises(TeamLifecycleError, match="not 'waiting'"):
+            method(bobi_install.agent_name, "wf-1")
+
+
 class TestResumeEndpoint:
     def _post(self, bobi_install, run_id="wf-1"):
         return _client().post(
@@ -188,3 +368,34 @@ class TestResumeEndpoint:
                    f"/workflows/runs/wf-1/resume")
         assert r.status_code == 403
         assert spawned == []
+
+
+class TestWaitingActionEndpoints:
+    def _post(self, install, action, run_id="wf-1"):
+        return _client().post(
+            f"/api/agents/{install.agent_name}/workflows/runs/"
+            f"{run_id}/{action}")
+
+    def test_remind_delivered(self, bobi_install, monkeypatch):
+        monkeypatch.setattr(
+            LocalRuntime, "remind_run",
+            lambda self, name, run_id: {
+                "ok": True, "delivered": True, "run_id": run_id})
+        response = self._post(bobi_install, "remind")
+        assert response.status_code == 200
+        assert response.json()["delivered"] is True
+
+    def test_close_accepted(self, bobi_install, monkeypatch):
+        monkeypatch.setattr(
+            LocalRuntime, "close_run",
+            lambda self, name, run_id: {
+                "ok": True, "closed": True, "run_id": run_id})
+        response = self._post(bobi_install, "close")
+        assert response.status_code == 200
+        assert response.json()["closed"] is True
+
+    @pytest.mark.parametrize("action", ["remind", "close"])
+    def test_traversing_run_id_is_rejected(self, bobi_install, action):
+        response = self._post(
+            bobi_install, action, run_id="..%2F..%2Fetc")
+        assert response.status_code == 404

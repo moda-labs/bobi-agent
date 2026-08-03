@@ -18,8 +18,8 @@ from bobi.cli import main as cli_main
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Commands delivered by the private bobi-deploy plugin via `bobi.commands`
-# entry points (repo split: the plugin lives in moda-labs/bobi-deploy). The
+# Commands delivered by the private deploy plugin via `bobi.commands`
+# entry points (the plugin ships from a private consumer repo). The
 # public docs deliberately keep describing them - README's Cloud Deployment
 # section is the enterprise pointer - so they are contract-checked against
 # this list instead of the CLI. Any OTHER unknown command in docs still
@@ -33,7 +33,7 @@ def test_plugin_command_list_matches_installed_entry_points():
     """Anti-drift tripwire for _PLUGIN_COMMANDS.
 
     The public suite runs without the plugin (the group is empty -> skip).
-    The private deploy repo's CI installs bobi-deploy and runs this file, so
+    The private consumer repo's CI installs the plugin and runs this file, so
     a renamed/retired plugin command fails THERE until both its pyproject and
     this list (and the public docs) agree again.
     """
@@ -41,7 +41,7 @@ def test_plugin_command_list_matches_installed_entry_points():
 
     installed = frozenset(ep.name for ep in entry_points(group="bobi.commands"))
     if not installed:
-        pytest.skip("bobi-deploy plugin not installed (public CI)")
+        pytest.skip("deploy plugin not installed (public CI)")
     assert installed == _PLUGIN_COMMANDS, (
         "bobi.commands entry points and _PLUGIN_COMMANDS disagree - update "
         "this list and the public docs to match the plugin's pyproject: "
@@ -203,7 +203,7 @@ def _command_error(tokens: tuple[str, ...]) -> str | None:
     if command.startswith("-"):
         return None
     # Resolve through the group, not `.commands`: plugin commands (the
-    # `bobi.commands` entry points, e.g. bobi-deploy's deploy/destroy) are
+    # `bobi.commands` entry points, e.g. the deploy plugin's deploy/destroy) are
     # served lazily by _PluginGroup.get_command and never live in the dict.
     # When the plugin is not installed (the public unit suite), fall back to
     # its on-disk entry-point declarations.

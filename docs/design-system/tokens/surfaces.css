@@ -1,0 +1,93 @@
+/* Bobi surfaces: radii, borders, shadows, and the two signature backdrops
+   (architect grid-paper, dashed rules). Bobi is a LOW-radius, HAIRLINE system:
+   figure plates and code cards are square or barely rounded; only chips,
+   buttons, and soft cards round. Shadows appear on hover and on floating
+   figure nodes — never as ambient decoration on flat sections. */
+
+:root {
+  --radius-none: 0;            /* figure plates, code cards, terminal blocks */
+  --radius-sm: 6px;            /* buttons, chips, pills, file-tree rows */
+  --radius-md: 8px;            /* walkthrough card */
+  --radius-lg: 10px;           /* fig-node, icon tile */
+  --radius-xl: 12px;           /* soft benefit card, workspace panel */
+
+  --border-width: 1px;
+
+  /* shadows — all warm-ink based, never neutral gray/black */
+  --shadow-node: 0 10px 24px rgba(54, 46, 37, 0.07);
+  --shadow-node-sm: 0 8px 20px rgba(54, 46, 37, 0.06);
+  --shadow-card: 0 12px 30px rgba(54, 46, 37, 0.06);
+  --shadow-panel: 0 14px 34px rgba(54, 46, 37, 0.07);
+  --shadow-hover: 0 10px 26px rgba(54, 46, 37, 0.08);
+  --shadow-hover-lg: 0 12px 34px rgba(54, 46, 37, 0.09);
+  --shadow-header: 0 6px 24px rgba(54, 46, 37, 0.07);
+
+  /* ---- app elevation scale (product UI) ----
+     Two-part shadows: a 1px contact edge that keeps the card crisp against the
+     sunken page, plus a wide soft ambient. Warm ink, never neutral gray. */
+  --elev-1: 0 1px 2px rgba(54, 46, 37, 0.06), 0 1px 1px rgba(54, 46, 37, 0.04);
+  --elev-2: 0 1px 2px rgba(54, 46, 37, 0.05), 0 4px 12px rgba(54, 46, 37, 0.05);
+  --elev-3: 0 1px 2px rgba(54, 46, 37, 0.05), 0 10px 28px rgba(54, 46, 37, 0.07);
+  --elev-4: 0 2px 4px rgba(54, 46, 37, 0.06), 0 18px 44px rgba(54, 46, 37, 0.10);
+
+  /* text shadows for copy over imagery */
+  --text-shadow-hero: 0 2px 18px rgba(0, 0, 0, 0.4);
+  --text-shadow-hero-body: 0 1px 14px rgba(0, 0, 0, 0.5);
+  --text-shadow-cta: 0 2px 24px rgba(0, 0, 0, 0.35);
+
+  /* glass chip over dark imagery */
+  --glass-bg: rgba(250, 247, 238, 0.08);
+  --glass-border: rgba(250, 247, 238, 0.18);
+  --glass-blur: 6px;
+}
+
+/* --- signature backdrop 1: the architect dashed rule (2px on / 4px gap) --- */
+.bobi-dash-h {
+  height: 1px;
+  background-image: repeating-linear-gradient(to right, var(--border-dashed) 0 2px, transparent 2px 6px);
+}
+.bobi-dash-v {
+  width: 1px;
+  background-image: repeating-linear-gradient(to bottom, var(--border-dashed) 0 2px, transparent 2px 6px);
+}
+
+/* --- signature backdrop 2: faded engineering grid-paper ---
+   80px major grid + 16px minor grid, dissolving downward. Drop as the first
+   child of a `position: relative` section; keep content above it. */
+.bobi-grid-paper {
+  position: absolute; left: 0; right: 0; top: 0; height: 360px;
+  pointer-events: none; z-index: 0;
+  background-image:
+    linear-gradient(to right, rgba(0, 0, 0, 0.10) 0 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.10) 0 1px, transparent 1px),
+    repeating-linear-gradient(to right, rgba(0, 0, 0, 0.05) 0 1px, transparent 1px 16px),
+    repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0.05) 0 1px, transparent 1px 16px);
+  background-size: 80px 80px, 80px 80px, auto, auto;
+  -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.25) 45%, rgba(0,0,0,0) 80%);
+  mask-image: linear-gradient(to bottom, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.25) 45%, rgba(0,0,0,0) 80%);
+}
+
+/* --- dark-surface grid overlay (over hero imagery) --- */
+.bobi-grid-dark {
+  position: absolute; inset: 0; pointer-events: none; opacity: 0.7;
+  background-image:
+    linear-gradient(to right, rgba(250, 247, 238, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(250, 247, 238, 0.05) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+
+/* Tabular figures for any column of numbers, ids, or timestamps — misaligned
+   digits are the fastest way to make a dense enterprise table look sloppy. */
+.bobi-tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+
+/* App card: the default raised object in product UI. */
+.bobi-app .bobi-card {
+  background: var(--surface-card);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--elev-2);
+}
+
+/* A sunken well — table headers, empty states, code gutters. */
+.bobi-app .bobi-well { background: var(--surface-inset); }

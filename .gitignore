@@ -11,6 +11,11 @@ dist/
 .wrangler/
 # `wrangler dev` logs from the protocol suite (one per test port)
 event-server/worker/.wrangler-test-*.log
+# Rendered by scripts/render_worker_ci_config.py in the deploy-smoke lane.
+# Generated per run and never committed - checking it in would create a second
+# hand-maintained copy of wrangler.jsonc, which is exactly what deriving it
+# avoids.
+event-server/worker/wrangler.ci.jsonc
 node_modules/
 .claude/settings.local.json
 .claude/projects/

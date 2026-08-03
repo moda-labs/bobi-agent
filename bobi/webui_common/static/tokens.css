@@ -1,44 +1,238 @@
+/* Bobi design tokens — shared by `bobi setup` and the `bobi` web app.
+
+   Source of truth for the values here is the Bobi design system in
+   docs/design-system/ (tokens/*.css). This file is the offline,
+   vanilla-CSS port of it: same palette, type ramp, spacing, radii, shadows,
+   and motion, with the brand faces vendored locally (see fonts.css) instead
+   of pulled from Google Fonts.
+
+   THE ONE RULE THAT SHAPES EVERYTHING BELOW: violet is STATE, never
+   decoration. It means live, enforced, gated, or focused. Decorative
+   highlights — eyebrows, indices, "add" affordances, hover warmth — are
+   CLAY. Moda Labs' red (#FD4235) never appears on a Bobi surface.
+
+   Legacy aliases at the bottom keep the pre-reskin variable names working and
+   map each one onto the palette BY MEANING, not by hue. */
+
 :root {
-  /* Light chrome, from DESIGN.md. */
-  --bg: #F4F1EA;
-  --surface: #FBFAF6;
-  --raised: #FFFDF9;
-  --text: #1F1B16;
-  --muted: #7A7062;
-  --faint: #A89E90;
-  --border: #E2DCD0;
-  --border-strong: #D6CCBD;
+  /* ---- paper / ink base ---- */
+  --bobi-paper: #FAF7EE;        /* default canvas */
+  --bobi-paper-alt: #EAE4D1;    /* alternating band, chip fill */
+  --bobi-ink: #362E25;          /* primary text, line-art strokes */
+  --bobi-muted: #84725B;        /* secondary text, mono labels */
+  --bobi-rule: #E5DED6;         /* soft solid hairline */
+  --bobi-clay: #D67B55;         /* terracotta: highlights, indices, riso offset */
+  --bobi-sky: #7DAABD;          /* rare supporting blue */
+  --bobi-void: #221C15;         /* warm near-black: dark chrome */
+  --bobi-white: #FFFDF8;        /* warm white */
 
-  /* The one dark slab. */
-  --slab-bg: #181410;
-  --slab-surface: #1E1A15;
-  --slab-text: #E8E2D6;
-  --slab-muted: #948A7B;
-  --slab-border: #2A241D;
+  /* ---- the Bobi accent: dusk violet ----
+     sRGB first so browsers without oklch() still get a working accent; the
+     oklch re-declarations win where supported. */
+  --bobi-acc: #6556c8;
+  --bobi-acc-bright: #9690f1;
+  --bobi-acc: oklch(0.53 0.17 285);         /* on light surfaces */
+  --bobi-acc-bright: oklch(0.70 0.14 285);  /* on dark surfaces, glyph dots */
 
-  /* Restrained syntax tints. */
-  --syn-key: #AFC0D2;
-  --syn-str: #CBBA8B;
-  --syn-punc: #7E776B;
-  --syn-com: #6E6354;
+  /* violet washes — always via color-mix, never an /opacity modifier */
+  --bobi-acc-wash: color-mix(in srgb, var(--bobi-acc) 5%, transparent);
+  --bobi-acc-wash-strong: color-mix(in srgb, var(--bobi-acc) 12%, transparent);
+  --bobi-acc-border: color-mix(in srgb, var(--bobi-acc) 55%, transparent);
 
-  /* Locked amber accent. */
-  --accent: #C8612B;
-  --accent-2: #D86E33;
-  --slab-accent: #E0843F;
-  --accent-soft: rgba(200, 97, 43, 0.10);
-  --accent-ring: rgba(200, 97, 43, 0.30);
+  /* ---- hero night sky (the dusk print scrim) ----
+     Marketing-only today; carried so this stays a faithful port of the design
+     system rather than a subset that quietly drifts. */
+  --bobi-night: #1A1D33;
+  --bobi-night-scrim: rgba(15, 18, 38, 0.92);
 
-  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+  /* ---- terminal: the single cool surface, for real shell/code output ---- */
+  --bobi-term-bg: #0F1226;
+  --bobi-term-fg: rgba(250, 247, 238, 0.88);
+  --bobi-term-dim: rgba(250, 247, 238, 0.45);
+  --bobi-term-ok: oklch(0.78 0.10 65);      /* warm amber: success output */
+
+  /* ---- semantic aliases — prefer THESE in component CSS ---- */
+  --text-primary: var(--bobi-ink);
+  --text-secondary: var(--bobi-muted);
+  --text-faint: color-mix(in srgb, var(--bobi-muted) 68%, var(--bobi-paper));
+  --text-highlight: var(--bobi-clay);
+  --text-accent: var(--bobi-acc);
+  --text-on-dark: var(--bobi-paper);
+
+  --surface-page: var(--bobi-paper);
+  --surface-band: var(--bobi-paper-alt);
+  --surface-card: var(--bobi-paper);
+  --surface-raised: var(--bobi-white);
+  --surface-inset: rgba(234, 228, 209, 0.6);
+  --surface-dark: var(--bobi-void);
+  --surface-terminal: var(--bobi-term-bg);
+
+  --border-hairline: var(--bobi-rule);
+  --border-card: rgba(54, 46, 37, 0.15);
+  --border-node: rgba(54, 46, 37, 0.12);
+  --border-strong: rgba(54, 46, 37, 0.25);
+  --border-dashed: rgba(132, 114, 91, 0.55);
+  --border-gate: var(--bobi-acc-border);
+
+  /* ---- status ----
+     The system encodes status as violet (live/enforced/gated), clay
+     (waiting), ink (done), muted (idle), and Moda's brick for failure. There
+     is deliberately NO green: a connected integration is a LIVE state, so it
+     reads violet like every other live thing. */
+  --status-live: var(--bobi-acc);
+  --status-waiting: var(--bobi-clay);
+  --status-done: var(--bobi-ink);
+  --status-idle: var(--bobi-muted);
+  --status-failed: #9E3A28;
+
+  --status-live-soft: color-mix(in srgb, var(--bobi-acc) 9%, var(--bobi-white));
+  --status-live-edge: color-mix(in srgb, var(--bobi-acc) 32%, transparent);
+  --status-waiting-soft: color-mix(in srgb, var(--bobi-clay) 12%, var(--bobi-white));
+  --status-waiting-edge: color-mix(in srgb, var(--bobi-clay) 38%, transparent);
+  --status-done-soft: color-mix(in srgb, var(--bobi-ink) 6%, var(--bobi-white));
+  --status-done-edge: color-mix(in srgb, var(--bobi-ink) 20%, transparent);
+  --status-idle-soft: color-mix(in srgb, var(--bobi-muted) 8%, var(--bobi-white));
+  --status-idle-edge: color-mix(in srgb, var(--bobi-muted) 26%, transparent);
+  --status-failed-soft: color-mix(in srgb, #9E3A28 8%, var(--bobi-white));
+  --status-failed-edge: color-mix(in srgb, #9E3A28 32%, transparent);
+
+  /* ---- type ----
+     Geist for headings, Inter for body, Geist Mono for data. Vendored as
+     woff2 in fonts.css; the system stacks stay as fallbacks so the UI is
+     still legible if a binary is ever missing. */
+  --font-display: "Geist", ui-sans-serif, system-ui, -apple-system,
+                  "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system,
                "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo,
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", "SFMono-Regular", Menlo,
                "Cascadia Mono", "Segoe UI Mono", Consolas,
                "Liberation Mono", monospace;
-  --space: 8px;
-  --radius: 12px;
-  --radius-sm: 7px;
 
-  --ok: #177B52;
-  --warn: #B98300;
-  --err: #B5462B;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* tracking — the brand's signature */
+  --track-tightest: -0.03em;   /* display headings + mono eyebrows */
+  --track-tight: -0.02em;
+  --track-button: -0.01em;
+  --track-wordmark: -0.045em;  /* the "bobi" lockup only */
+  --track-label: 0.16em;       /* uppercase mono plate labels */
+  --track-label-wide: 0.2em;   /* corner plate marks */
+  --track-index: 0.04em;
+  --track-caps-sm: 0.09em;
+
+  /* ---- motion: one curve for the entire system ---- */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 200ms;    /* hover, color, press */
+  --dur-mid: 300ms;     /* card lift, tab switch */
+  --dur-slow: 600ms;    /* node arrival */
+  --dur-reveal: 1050ms;
+
+  /* ---- radii: low and meaningful ----
+     0 = documents (code cards, terminal). 6 = buttons, chips, pills.
+     8 = config card. 10 = nodes, icon tiles. 12 = soft cards, panels. */
+  --radius-none: 0;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+
+  /* ---- shadows: warm ink, never neutral gray ---- */
+  --shadow-node: 0 10px 24px rgba(54, 46, 37, 0.07);
+  --shadow-panel: 0 14px 34px rgba(54, 46, 37, 0.07);
+  --shadow-hover: 0 10px 26px rgba(54, 46, 37, 0.08);
+
+  /* app elevation: a 1px contact edge + a wide soft ambient */
+  --elev-1: 0 1px 2px rgba(54, 46, 37, 0.06), 0 1px 1px rgba(54, 46, 37, 0.04);
+  --elev-2: 0 1px 2px rgba(54, 46, 37, 0.05), 0 4px 12px rgba(54, 46, 37, 0.05);
+  --elev-3: 0 1px 2px rgba(54, 46, 37, 0.05), 0 10px 28px rgba(54, 46, 37, 0.07);
+  --elev-4: 0 2px 4px rgba(54, 46, 37, 0.06), 0 18px 44px rgba(54, 46, 37, 0.10);
+
+  /* ---- spacing (exact source values; not snapped to a 4/8 grid) ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 10px;
+  --space-4: 12px;
+  --space-5: 16px;
+  --space-6: 20px;
+  --space-7: 26px;
+  --space-8: 30px;
+  --space-9: 40px;
+}
+
+/* ============================================================================
+   APP SURFACE RAMP — product UI only.
+   The marketing language is flat: one cream canvas, hairlines, no elevation.
+   That reads badly on a dense operational screen, so the app gets a sunken
+   page, near-white cards, and a real elevation scale. Both Bobi web UIs set
+   .bobi-app on <body>.
+   ========================================================================= */
+.bobi-app {
+  /* Warm but LOW-CHROMA: the marketing cream turns beige-pink when it tiles a
+     dense screen, so pull the chroma out and keep the hue. */
+  --surface-page: #F4F2ED;
+  --surface-card: #FFFFFF;
+  --surface-raised: #FFFFFF;
+  --surface-band: #EDEBE5;
+  --surface-inset: rgba(54, 46, 37, 0.04);
+  --surface-hover: rgba(54, 46, 37, 0.025);
+  --surface-selected: color-mix(in srgb, var(--bobi-acc) 5%, #FFFFFF);
+
+  /* The marketing muted is a saturated brown that reads dated in bulk UI.
+     Keep the warmth, drop the chroma, gain contrast (4.9:1 on white). */
+  --text-secondary: #6B6459;
+  --text-faint: #8A8377;
+
+  --border-hairline: rgba(54, 46, 37, 0.09);
+  --border-card: rgba(54, 46, 37, 0.10);
+  --border-strong: rgba(54, 46, 37, 0.17);
+}
+
+/* ============================================================================
+   LEGACY ALIASES
+   The pre-reskin token names, remapped onto the palette BY MEANING. Kept so
+   any rule not yet migrated still resolves to an on-brand value. Prefer the
+   semantic names above in new CSS.
+   ========================================================================= */
+:root,
+.bobi-app {
+  --bg: var(--surface-page);
+  --surface: var(--surface-card);
+  --raised: var(--surface-raised);
+  --text: var(--text-primary);
+  --muted: var(--text-secondary);
+  --faint: var(--text-faint);
+  --border: var(--border-hairline);
+
+  /* the dark slab is now the brand's cool terminal surface */
+  --slab-bg: var(--bobi-term-bg);
+  --slab-surface: color-mix(in srgb, var(--bobi-term-bg) 88%, #FFFFFF);
+  --slab-text: var(--bobi-term-fg);
+  --slab-muted: var(--bobi-term-dim);
+  --slab-border: rgba(250, 247, 238, 0.14);
+  --slab-accent: var(--bobi-acc-bright);
+
+  /* syntax tints on the terminal surface */
+  --syn-key: var(--bobi-acc-bright);
+  --syn-str: var(--bobi-term-ok);
+  --syn-punc: rgba(250, 247, 238, 0.45);
+  --syn-com: rgba(250, 247, 238, 0.32);
+
+  /* --accent is STATE (violet). --hi is the decorative highlight (clay). */
+  --accent: var(--bobi-acc);
+  --accent-2: var(--bobi-acc-bright);
+  --accent-soft: var(--bobi-acc-wash);
+  --accent-ring: var(--bobi-acc-border);
+  --hi: var(--bobi-clay);
+  --hi-soft: color-mix(in srgb, var(--bobi-clay) 10%, transparent);
+  --hi-ring: color-mix(in srgb, var(--bobi-clay) 38%, transparent);
+
+  /* No green in the palette: a connected/succeeded thing is LIVE. */
+  --ok: var(--status-live);
+  --warn: var(--status-waiting);
+  --err: var(--status-failed);
+
+  --space: 8px;
+  --radius: var(--radius-xl);
 }

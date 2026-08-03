@@ -1,0 +1,38 @@
+/* Bobi spacing + layout. Values are the exact ones used on the live page —
+   they are not snapped to a 4/8px grid, and should not be rounded. */
+
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 10px;
+  --space-4: 12px;
+  --space-5: 16px;
+  --space-6: 20px;
+  --space-7: 26px;
+  --space-8: 30px;
+  --space-9: 40px;
+  --space-10: 52px;
+  --space-11: 72px;
+  --space-12: 88px;
+
+  /* layout */
+  --container-max: 1280px;      /* max-w-7xl */
+  --container-pad: 24px;        /* px-6 */
+  --container-pad-lg: 40px;     /* lg:px-10 */
+  --reading-max: 840px;         /* FAQ / prose column */
+  --section-pad-y: 80px;        /* py-20 */
+  --section-pad-y-lg: 112px;    /* md:py-28 */
+
+  /* vertical rhythm inside a section */
+  --stack-eyebrow-heading: 20px;   /* mb-5 */
+  --stack-heading-body: 20px;      /* mt-5 */
+  --stack-intro-content: 48px;     /* mt-12 */
+
+  /* card interiors */
+  --card-pad: 28px;             /* p-7 */
+  --card-pad-lg: 30px;
+  --card-pad-sm: 24px;          /* p-6, benefit cards */
+
+  /* the sticky pin line used by the setup walkthrough */
+  --pin-offset: 96px;
+}

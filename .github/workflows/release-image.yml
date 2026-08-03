@@ -78,7 +78,7 @@ jobs:
           - platform: linux/arm64
             arch: arm64
             # Free arm runners exist only for PUBLIC repos. In private
-            # bobi-deploy this label required a paid GitHub larger-runner
+            # the private deploy repo this label required a paid GitHub larger-runner
             # configured with this exact name, and was carried as an open
             # cut-aftermath item; publishing the image resolves it, because
             # this repo is public and `ubuntu-24.04-arm` is a standard free

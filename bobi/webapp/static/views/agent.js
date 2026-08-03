@@ -1,937 +1,865 @@
-/* Agent view — one agent's dashboard: run controls in the header, the
-   subagent roster (left), and chat (right). Roster/chat ported from the
-   standalone agentui SPA, routed under #/agents/<name> with team-scoped
-   endpoints. */
+/* Agent view — the single-agent page (#887 / plan
+   plans/2026-07-31-single-agent-view.md).
 
-import { openSetup, fmtUsd, fmtEst, fmtSpend, fmtTok, EST_NOTE, healthChip,
-         fmtAgo } from "../shell.js";
+   Three elements, in the order the questions get asked:
+
+     1. a status strip — is this thing running, and recover it if not
+     2. an identity header — what is it (saved / about popovers)
+     3. one runs table — what did it do, and what failed
+
+   This replaced the five-panel page (needs-attention, health, spend,
+   roster, session log) plus the chat column. Chat lives in Slack and the
+   CLI; this page observes and recovers.
+
+   Every value is rendered from the read models behind /health, /overview,
+   /runs and /spend. Formatting happens HERE on purpose: the server sends
+   raw epochs and seconds because it does not know the viewer's timezone. */
+
+import { fmtUsd, fmtEst, fmtTok, EST_NOTE } from "../shell.js";
+
+/* --- formatting ------------------------------------------------------ */
+
+/** "2d 4h" / "18m" / "42s" — an elapsed span, coarse on purpose. */
+function fmtDur(seconds) {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "";
+  const s = Math.round(seconds);
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + "h " + (m % 60) + "m";
+  return Math.floor(h / 24) + "d " + (h % 24) + "h";
+}
+
+/** Clock time for today, date + clock for anything older. */
+function fmtWhen(epochSeconds) {
+  if (!epochSeconds) return "";
+  const d = new Date(epochSeconds * 1000);
+  if (Number.isNaN(d.getTime())) return "";
+  const clock = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const today = new Date();
+  if (d.toDateString() === today.toDateString()) return clock;
+  const day = d.toLocaleDateString([], { month: "short", day: "numeric" });
+  return day + " " + clock;
+}
+
+function fmtIso(iso) {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? fmtWhen(t / 1000) : "";
+}
+
+/** A transcript line's clock, seconds included — debugging wants them. */
+function fmtStamp(iso) {
+  if (!iso) return "--:--:--";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "--:--:--";
+  return d.toLocaleTimeString([], {
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+
+/** One strip segment's value, per the server's `kind`. */
+function fmtSegment(seg) {
+  const v = seg.value;
+  if (seg.kind === "duration") return fmtDur(v);
+  if (seg.kind === "time") return fmtWhen(v);
+  if (seg.kind === "count") return String(v ?? 0);
+  return v == null ? "" : String(v);
+}
+
+function mk(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+
+/* --- the view -------------------------------------------------------- */
 
 export function mountAgent(el, { api, name }) {
   const base = "/api/agents/" + encodeURIComponent(name);
 
   el.innerHTML = "";
-
-  const head = document.createElement("div");
-  head.className = "agent-ctl";
-  head.innerHTML = `
-    <span class="agent-ctl-name">${name.replace(/[&<>]/g, "")}</span>
-    <span class="status" data-el="runStatus">…</span>
-    <span class="ctl-spacer"></span>
-    <div class="agent-ctl-actions" data-el="actions"></div>
-    <button class="btn" data-el="edit" type="button">Edit source</button>`;
-  el.appendChild(head);
-
-  const shell = document.createElement("div");
-  shell.className = "shell";
-  shell.innerHTML = `
-    <aside class="sidebar">
-      <div class="attention-panel" data-el="attentionPanel" hidden></div>
-      <div class="health-panel" data-el="healthPanel" hidden></div>
-      <div class="spend-panel" data-el="spendPanel" hidden></div>
-      <div class="side-head mono"><a class="side-back" href="#/">&larr; agents</a> · subagents</div>
-      <div class="cards" data-el="cards"></div>
-      <p class="empty" data-el="empty" hidden>No active subagents. Press Start
-        above to bring the team up.</p>
-      <div class="sessions-panel" data-el="sessionsPanel" hidden>
-        <div class="sessions-head mono"><span>session log</span>
-          <span class="sessions-counts" data-el="sessionCounts"></span></div>
-        <div data-el="sessionRows"></div>
-      </div>
-    </aside>
-    <section class="pane">
-      <div class="placeholder" data-el="placeholder">
-        <span class="mark big" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="34" height="34" fill="none"
-               stroke="currentColor" stroke-width="1.4" stroke-linecap="round"
-               stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3.2"></circle>
-            <path d="M12 2.4v3M12 18.6v3M2.4 12h3M18.6 12h3"></path>
-            <path d="M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1"></path>
-          </svg>
-        </span>
-        <p>Select a subagent to start chatting.</p>
-      </div>
-      <div class="chat" data-el="chat" hidden>
-        <div class="chat-head">
-          <span class="chat-name" data-el="chatName"></span>
-          <span class="chip" data-el="chatRole"></span>
-          <span class="chip" data-el="chatStatus"></span>
+  const page = mk("div", "agent-page");
+  page.innerHTML = `
+    <div class="agent-header">
+      <div class="status-band" data-el="band"></div>
+      <div class="band-report" data-el="report" hidden></div>
+      <div class="ah-body">
+        <div class="ah-name">
+          <h1 data-el="title"></h1>
+          <p class="desc" data-el="desc"></p>
         </div>
-        <div class="slab" data-el="transcript" aria-live="polite"></div>
-        <p class="chat-ended mono" data-el="chatEnded" hidden></p>
-        <form class="composer" data-el="composer">
-          <textarea data-el="input" rows="1" placeholder="Message this agent…"
-                    autocomplete="off"></textarea>
-          <button data-el="send" type="submit">Send</button>
-        </form>
+        <div class="ah-right">
+          <span class="stat-popover" data-el="savedWrap">
+            <span class="chip" data-el="savedChip" tabindex="0"
+                  role="button" aria-expanded="false">saved …</span>
+            <span class="popover"><span class="pop-card" data-el="savedCard">
+            </span></span>
+          </span>
+          <span class="stat-popover" data-el="aboutWrap">
+            <span class="chip" data-el="aboutChip" tabindex="0"
+                  role="button" aria-expanded="false">about</span>
+            <span class="popover"><span class="pop-card" data-el="aboutCard">
+            </span></span>
+          </span>
+        </div>
       </div>
-    </section>`;
-  el.appendChild(shell);
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <span class="eyebrow">runs</span>
+        <span class="count" data-el="runsCount"></span>
+        <div class="runs-controls">
+          <input class="runs-search" data-el="runsSearch" type="search"
+                 aria-label="Search runs" placeholder="Search runs">
+          <div class="tabs" data-el="tabs"></div>
+        </div>
+      </div>
+      <div class="runs-scroll">
+        <table class="runs">
+          <thead><tr>
+            <th style="width:104px">Status</th>
+            <th>Run</th>
+            <th style="width:130px">When</th>
+            <th style="width:120px" class="r-tok">Tokens · cost</th>
+            <th style="width:280px"></th>
+          </tr></thead>
+          <tbody data-el="runRows"></tbody>
+        </table>
+      </div>
+      <p class="runs-empty" data-el="runsEmpty" hidden></p>
+      <div class="runs-pager" data-el="runsPager"></div>
+    </section>
+
+    <div class="modal-backdrop" data-el="backdrop">
+      <div class="modal" role="dialog" aria-modal="true"
+           aria-label="Run detail">
+        <div class="modal-head">
+          <span class="eyebrow" data-el="slabKind"></span>
+          <span class="path" data-el="slabTitle"></span>
+          <span class="meta" data-el="slabMeta"></span>
+          <button class="btn small" data-el="slabClose" type="button">Close</button>
+        </div>
+        <div class="transcript" data-el="slabBody"></div>
+      </div>
+    </div>`;
+  el.appendChild(page);
 
   const els = {};
-  for (const n of el.querySelectorAll("[data-el]")) {
-    els[n.dataset.el] = n;
+  page.querySelectorAll("[data-el]").forEach((n) => {
+    els[n.getAttribute("data-el")] = n;
+  });
+
+  els.title.textContent = name;
+
+  let timers = [];
+  let health = null;
+  let overview = null;
+  let runs = null;
+  let spend = null;
+  let tab = "all";          // all | running | awaiting_action | failed
+  let query = "";
+  let pageIndex = 0;
+  let searchTimer = null;
+  let runsRequest = 0;
+  let busyVerb = null;
+  let runsError = "";       // why the table is empty, when it is not "no runs"
+
+  /* --- the agent that isn't there ----------------------------------- */
+
+  /** Every read 404s when the route names an agent this machine does not
+      have (a stale bookmark, a deleted team, a typo). Rendering the page
+      shell anyway offers a Start button for nothing and leaves the table
+      saying "Loading…" forever, so say the true thing instead. */
+  let missing = false;
+  function showMissing() {
+    if (missing) return;
+    missing = true;
+    timers.forEach(clearInterval);
+    timers = [];
+    page.innerHTML = "";
+    const wrap = mk("div", "stub");
+    wrap.appendChild(mk("h2", null, name));
+    wrap.appendChild(mk("p", null,
+      "No agent by that name is installed on this machine."));
+    const back = mk("a", "btn quiet", "All agents");
+    back.href = "#/";
+    wrap.appendChild(back);
+    page.appendChild(wrap);
   }
 
-  // --- run controls (header) -----------------------------------------
-  let runState = null;   // last /status payload
-  let busyVerb = null;   // "starting" | "stopping" | "restarting" while acting
+  /* --- 1. status strip --------------------------------------------- */
 
-  function renderControls() {
-    // Same worst-signal-wins derivation as the dashboard cards (#733):
-    // hosted /status cards carry reachability + manager_status.
-    const chip = busyVerb ? { label: busyVerb, cls: "starting" }
-                          : healthChip(runState);
-    els.runStatus.className = "status " + chip.cls;
-    els.runStatus.textContent = chip.label;
+  // Chrome is lowercase, and a state is a label rather than data — the
+  // design system's rule, and the reason none of this shouts any more.
+  const STATE_WORD = {
+    running: "running", stopped: "stopped", not_responding: "not responding",
+  };
+  const STATE_CLASS = {
+    running: "band-running", stopped: "band-stopped",
+    not_responding: "band-error",
+  };
 
-    els.actions.innerHTML = "";
-    const btn = (label, kind, onClick, disabled) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "btn " + kind;
-      b.textContent = label;
-      b.disabled = !!disabled;
-      if (onClick) b.addEventListener("click", onClick);
-      els.actions.appendChild(b);
-    };
-    if (busyVerb) {
-      btn(busyVerb + "…", "", null, true);
-    } else if (runState && runState.running) {
-      btn("Stop", "", () => act("stop"));
-      btn("Restart", "", () => act("restart"));
-    } else if (runState) {
-      btn("Start", "primary", () => act("start"));
+  function renderBand() {
+    const state = (health && health.state) || "stopped";
+    els.band.className = "status-band " + (STATE_CLASS[state] || "band-stopped");
+    els.band.innerHTML = "";
+    els.band.title = (health && health.detail) || "";
+
+    els.band.appendChild(mk("span", "lamp"));
+    els.band.appendChild(mk("span", "state", STATE_WORD[state] || "—"));
+
+    // Whatever segments the runtime could actually produce. A reading it
+    // could not is absent, never faked, so this renders the list given.
+    for (const seg of (health && health.segments) || []) {
+      const box = mk("span", "seg");
+      box.appendChild(mk("span", "lbl", seg.label));
+      const value = fmtSegment(seg);
+      box.appendChild(mk("span", "val",
+        seg.note ? `${value} · ${seg.note}` : value));
+      els.band.appendChild(box);
     }
-  }
 
-  // No standalone /status poller: the health poll below carries a superset
-  // of what the header chip needs and keeps runState fresh. act() still
-  // probes /status directly for its settle loop.
+    const actions = mk("span", "band-actions");
+    const btn = (label, cls, verb) => {
+      const b = mk("button", "btn " + cls, busyVerb ? busyVerb + "…" : label);
+      b.type = "button";
+      if (busyVerb) b.disabled = true;
+      else b.addEventListener("click", () => act(verb));
+      actions.appendChild(b);
+    };
+    // Amber marks only the primary recovery action — never the state.
+    if (state === "running") {
+      btn("Restart", "small", "restart");
+      btn("Stop", "small", "stop");
+    } else if (state === "not_responding") {
+      btn("Restart agent", "primary big", "restart");
+    } else {
+      btn("▸ Start agent", "primary big", "start");
+    }
+    els.band.appendChild(actions);
+  }
 
   async function act(verb) {
     busyVerb = verb === "start" ? "starting"
       : verb === "stop" ? "stopping" : "restarting";
-    renderControls();
+    renderBand();
+    els.report.hidden = true;
     const { ok, data } = await api(base + "/" + verb,
                                    { method: "POST", body: "{}" });
     if (!ok) {
       busyVerb = null;
-      renderControls();
-      ctlError((data && (data.report || data.error)) || verb + " failed");
+      renderBand();
+      // A failed start carries a preflight report. Render it under the
+      // strip in the strip's own grammar rather than dropping it.
+      showReport(verb + " failed",
+                 (data && (data.report || data.error)) || "");
       return;
     }
     const wantRunning = verb !== "stop";
     for (let i = 0; i < 40; i++) {
       const { ok: sok, data: sd } = await api(base + "/status");
-      if (sok && sd && sd.running === wantRunning) { runState = sd; break; }
+      if (sok && sd && sd.running === wantRunning) break;
       await new Promise((r) => setTimeout(r, 750));
     }
     busyVerb = null;
-    renderControls();
-    poll();          // refresh the roster right away
-    pollHealth();    // and the health panel/chip
-    pollSessions();  // a stop lands sessions in the log
+    pollHealth();
+    pollRuns();
   }
 
-  els.edit.addEventListener("click", async () => {
-    const err = await openSetup({ name, mode: "open" });
-    if (err) ctlError(err);
+  /** The strip's inline failure band. `head` names which action failed. */
+  function showReport(head, text) {
+    els.report.innerHTML = "";
+    els.report.appendChild(mk("span", "rep-head", head));
+    els.report.appendChild(document.createTextNode(text || ""));
+    els.report.hidden = false;
+  }
+
+  /* --- 2. identity ------------------------------------------------- */
+
+  function renderIdentity() {
+    els.desc.textContent = (overview && overview.description) || "";
+    els.desc.hidden = !(overview && overview.description);
+    renderSaved();
+    renderAbout();
+  }
+
+  function kv(card, k, v, cls) {
+    const row = mk("div", "kv");
+    row.appendChild(mk("span", "k", k));
+    row.appendChild(mk("span", "v" + (cls ? " " + cls : ""), v));
+    card.appendChild(row);
+  }
+
+  /** saved — the value story. Estimates never present as a bill. */
+  function renderSaved() {
+    const card = els.savedCard;
+    card.innerHTML = "";
+    if (!spend) { card.appendChild(mk("div", "note", "…")); return; }
+
+    const cache = spend.script_cache || {};
+    const estimated = spend.estimated_cost_usd || 0;
+    const recorded = spend.total_cost_usd || 0;
+    const cacheSaved = cache.estimated_savings_usd || 0;
+    const total = estimated + cacheSaved;
+
+    els.savedChip.textContent = total > 0
+      ? `saved ~${fmtUsd(total)} · ${spend.sessions_counted || 0} runs`
+      : `saved · ${spend.sessions_counted || 0} runs`;
+
+    card.appendChild(mk("div", "eyebrow", "saved"));
+    kv(card, "list-price value of tokens", fmtEst(estimated) || "—");
+    kv(card, "recorded spend", recorded > 0 ? fmtUsd(recorded)
+                                            : "$0 (subscription)");
+    if (cache.cached_runs) {
+      kv(card, "script-cache ticks", `${cache.cached_runs} at ~$0`);
+      // priced_monitors is the honesty dial: 0 means nothing COULD be
+      // priced, not that nothing was saved.
+      kv(card, "script-cache saved",
+         cache.priced_monitors ? fmtEst(cacheSaved) : "no priced basis");
+    }
+    if (total > 0) {
+      const hr = mk("hr"); card.appendChild(hr);
+      kv(card, "total saved", fmtEst(total), "strong");
+    }
+
+    const tokens = spend.tokens_by_model || {};
+    const names = Object.keys(tokens);
+    if (names.length) {
+      card.appendChild(mk("hr"));
+      for (const model of names.slice(0, 4)) {
+        const t = tokens[model] || {};
+        kv(card, model,
+           fmtTok((t.input_tokens || 0) + (t.output_tokens || 0)) + " tok");
+      }
+    }
+    card.appendChild(mk("div", "note",
+      "Estimated at API list price for the tokens this team actually used." +
+      " Lifetime, over runs still on disk." + EST_NOTE));
+  }
+
+  /** about — composition, read-only. Editing lives in setup. */
+  function renderAbout() {
+    const card = els.aboutCard;
+    card.innerHTML = "";
+    if (!overview) { card.appendChild(mk("div", "note", "…")); return; }
+
+    if (overview.roles && overview.roles.length) {
+      card.appendChild(mk("div", "eyebrow", "roles"));
+      for (const role of overview.roles) {
+        kv(card, role.name, role.description || "—", "prose");
+      }
+      card.appendChild(mk("hr"));
+    }
+
+    card.appendChild(mk("div", "eyebrow", "reaches"));
+    const chat = overview.chat || {};
+    kv(card, "chat", chat.service
+      ? chat.service + (chat.channels && chat.channels.length
+          ? " · " + chat.channels.join(", ") : "")
+      : "—");
+    kv(card, "services",
+       (overview.services || []).map((s) => s.name).join(" · ") || "—");
+
+    const auto = overview.automations || {};
+    card.appendChild(mk("hr"));
+    card.appendChild(mk("div", "eyebrow", "automations"));
+    kv(card, "scheduled", `${auto.monitors || 0} monitors` +
+      (auto.paused_monitors ? ` (${auto.paused_monitors} off)` : ""));
+    kv(card, "event-triggered", `${auto.workflows || 0} workflows`);
+
+    const brain = overview.brain || {};
+    const cap = overview.spend_cap || {};
+    card.appendChild(mk("hr"));
+    card.appendChild(mk("div", "eyebrow", "brain"));
+    kv(card, [brain.kind, brain.model].filter(Boolean).join(" · ") || "—",
+       brain.max_turns ? `max ${brain.max_turns} turns` : "");
+    kv(card, "spend cap",
+       `${cap.value || 0} inv/hr` + (cap.is_default ? " (default)" : ""));
+    card.appendChild(mk("div", "note", "Composition is read-only here."));
+  }
+
+  // Hover opens these (CSS); tap toggles them, because hover-only is dead
+  // on touch. Clicking anywhere else closes.
+  for (const key of ["saved", "about"]) {
+    const wrap = els[key + "Wrap"];
+    const chip = els[key + "Chip"];
+    const toggle = (e) => {
+      e.stopPropagation();
+      const open = wrap.classList.toggle("open");
+      chip.setAttribute("aria-expanded", String(open));
+      for (const other of ["saved", "about"]) {
+        if (other !== key) els[other + "Wrap"].classList.remove("open");
+      }
+    };
+    chip.addEventListener("click", toggle);
+    chip.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(e); }
+    });
+  }
+  const closePopovers = () => {
+    for (const key of ["saved", "about"]) {
+      els[key + "Wrap"].classList.remove("open");
+      els[key + "Chip"].setAttribute("aria-expanded", "false");
+    }
+  };
+  document.addEventListener("click", closePopovers);
+
+  /* --- 3. runs table ------------------------------------------------ */
+
+  const TABS = [
+    { key: "all", label: "all" },
+    { key: "running", label: "running" },
+    { key: "awaiting_action", label: "awaiting action" },
+    { key: "failed", label: "failed" },
+  ];
+
+  function renderTabs() {
+    const counts = (runs && runs.counts) || {};
+    els.tabs.innerHTML = "";
+    for (const t of TABS) {
+      // ALL stays bare: the panel head's "⌁ N runs" IS the all-count, and
+      // printing it again one gap to the right reads as two facts.
+      const n = t.key === "all" ? null : counts[t.key];
+      const b = mk("button", "tab" + (tab === t.key ? " active" : ""),
+                   n == null ? t.label : `${t.label} · ${n}`);
+      b.type = "button";
+      b.addEventListener("click", () => {
+        if (tab === t.key) return;
+        tab = t.key;
+        pageIndex = 0;
+        renderTabs();
+        pollRuns();
+      });
+      els.tabs.appendChild(b);
+    }
+  }
+
+  /** A run's status as a LABEL — sentence case, not a shout. The status
+      vocabulary is one word each, so capitalising the first is the whole
+      rule; `not_responding` never reaches a row. */
+  const STATUS_LABELS = {
+    awaiting_action: "Awaiting action",
+    closed: "Closed",
+  };
+  const STATUS_LABEL = (s) => STATUS_LABELS[s] ||
+    (s ? s[0].toUpperCase() + s.slice(1) : "");
+
+  function renderRuns() {
+    const rows = (runs && runs.runs) || [];
+    els.runRows.innerHTML = "";
+    const counts = (runs && runs.counts) || {};
+    // The eyebrow beside this already says "runs", so the count is a
+    // number and nothing else.
+    els.runsCount.textContent = counts.all ? String(counts.all) : "";
+
+    if (!rows.length) {
+      els.runsEmpty.hidden = false;
+      els.runsEmpty.textContent = !runs
+        ? (runsError || "Loading…")
+        : query
+          ? `No runs match “${query}”.`
+        : tab === "awaiting_action"
+          ? "No workflows are waiting for approval or clarification."
+        : tab === "failed"
+          ? "No failed or crashed runs."
+          : tab === "running"
+            ? "No live runs."
+            : "No runs yet. Start the agent and its first work will appear here.";
+      return;
+    }
+    els.runsEmpty.hidden = true;
+
+    for (const row of rows) {
+      const tr = mk("tr");
+
+      const stat = mk("td");
+      const chip = mk("span", "rstat " + row.status);
+      chip.appendChild(mk("span", "rdot"));
+      chip.appendChild(mk("span", null, STATUS_LABEL(row.status)));
+      stat.appendChild(chip);
+      tr.appendChild(stat);
+
+      const run = mk("td");
+      run.appendChild(mk("div", "r-title", row.title || "—"));
+      if (row.status === "awaiting_action") {
+        const pending = ((row.detail && row.detail.await_event) || "action")
+          .replaceAll("_", " ");
+        run.appendChild(mk("div", "r-pending", `Awaiting ${pending}`));
+      }
+      if (row.origin) run.appendChild(mk("div", "r-origin", row.origin));
+      const note = row.error || (row.detail && row.detail.note) || "";
+      if (note) {
+        run.appendChild(mk("div", "r-note" + (row.error ? " bad" : ""), note));
+      }
+      tr.appendChild(run);
+
+      const when = mk("td", "r-when");
+      when.appendChild(mk("span", null, fmtIso(row.started_at) || "—"));
+      if (row.duration_seconds != null) {
+        when.appendChild(document.createTextNode(" "));
+        when.appendChild(mk("span", "dur", fmtDur(row.duration_seconds)));
+      }
+      tr.appendChild(when);
+
+      // Tokens and cost are independent: a session can record dollars with
+      // no per-model token split (a legacy entry), and one can record
+      // tokens with no dollars (subscription auth). Show whichever exists
+      // rather than hiding a real cost behind a missing token count.
+      const cost = row.cost_usd > 0 ? fmtUsd(row.cost_usd)
+                                    : fmtEst(row.est_cost_usd);
+      const parts = [];
+      if (row.tokens) parts.push(fmtTok(row.tokens) + " tok");
+      if (cost) parts.push(cost);
+      tr.appendChild(mk("td", "r-tok", parts.join(" · ") || "—"));
+
+      const act = mk("td", "r-act");
+      act.appendChild(rowActions(row));
+      tr.appendChild(act);
+
+      tr.addEventListener("click", () => openSlab(row));
+      els.runRows.appendChild(tr);
+    }
+  }
+
+  function renderPager() {
+    els.runsPager.innerHTML = "";
+    if (!runs) return;
+    const total = runs.total == null ? ((runs.runs || []).length) : runs.total;
+    const limit = runs.limit || 100;
+    const offset = runs.offset || 0;
+    const start = total ? offset + 1 : 0;
+    const end = Math.min(offset + (runs.runs || []).length, total);
+    const summary = query
+      ? `${start}–${end} of ${total} matches`
+      : `${start}–${end} of ${total}`;
+    els.runsPager.appendChild(mk("span", "pager-summary", summary));
+
+    const prev = mk("button", "btn small", "Previous");
+    prev.type = "button";
+    prev.disabled = pageIndex === 0;
+    prev.addEventListener("click", () => { pageIndex -= 1; pollRuns(); });
+    els.runsPager.appendChild(prev);
+
+    const pages = Math.max(1, Math.ceil(total / limit));
+    els.runsPager.appendChild(mk(
+      "span", "pager-page", `${pageIndex + 1} / ${pages}`));
+
+    const next = mk("button", "btn small", "Next");
+    next.type = "button";
+    next.disabled = offset + (runs.runs || []).length >= total;
+    next.addEventListener("click", () => { pageIndex += 1; pollRuns(); });
+    els.runsPager.appendChild(next);
+  }
+
+  els.runsSearch.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      query = els.runsSearch.value.trim();
+      pageIndex = 0;
+      pollRuns();
+    }, 250);
   });
 
-  function ctlError(msg) {
-    const note = document.createElement("div");
-    note.className = "action-error";
-    note.textContent = msg;
-    head.insertAdjacentElement("afterend", note);
-    setTimeout(() => note.remove(), 12000);
-  }
-
-  // name -> [{who, text, error, pending}] so a chat survives roster refreshes.
-  const history = new Map();
-  let selected = null;
-  let lastAgents = [];
-  let sessionLog = [];            // last /sessions payload rows
-  let sessionLogTruncated = false; // the runtime capped the row list
-  let lastHealth = null;          // last /health payload (lifecycle trail)
-  let sending = false;
-  let messagesLoading = false;
-
-  // Whether a session is over comes from the wire (`ended`, derived
-  // server-side from the active vocabulary) so this view never has to
-  // enumerate terminal words. The alias map folds legacy words onto an
-  // existing chip ("done" = success, "error" = a turn-level failure,
-  // cancelled = torn down); an unmapped word degrades to the neutral dot.
-  // NOTE: since #733 vertical 4 this map is load-bearing beyond styling -
-  // the needs-attention feed alarms on chips that resolve to
-  // failed/crashed (ATTENTION_OUTCOMES below), so aliasing a word here
-  // also decides whether it alarms.
-  const CHIP_ALIAS = { done: "completed", error: "failed", cancelled: "stopped" };
-  const chipClass = (s) =>
-    Object.hasOwn(CHIP_ALIAS, s) ? CHIP_ALIAS[s] : s;
-
-  // --- tiny, safe markdown (agent replies) ---------------------------
-  // Everything is HTML-escaped FIRST, then a fixed set of inline/block
-  // transforms run on the escaped text — so agent output can never inject
-  // markup. No CDN, no deps.
-  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;")
-                      .replace(/>/g, "&gt;");
-
-  function mdInline(t) {
-    // Inline code spans hide behind \x00N\x00 sentinels while the other
-    // transforms run, then restore. A NUL can never occur in the escaped
-    // text (the standalone agentui used a bare " N " sentinel, which ate
-    // plain numbers in prose - fixed here).
-    const codes = [];
-    t = t.replace(/`([^`]+)`/g, (_, c) => `\x00${codes.push(c) - 1}\x00`);
-    t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) => {
-      const safe = /^(https?:|mailto:)/i.test(url) ? url : "#";
-      return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  /** Transcript stays visible on every row. Awaiting workflows add delivery
+      and closure actions; neither action advances the approval gate. */
+  function rowActions(row) {
+    const actions = mk("div", "row-actions");
+    const transcript = mk("button", "btn small", "Transcript");
+    transcript.type = "button";
+    transcript.disabled = !row.session_id;
+    if (!row.session_id) transcript.title = "No transcript was recorded for this run";
+    transcript.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openSlab(row);
     });
-    t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-         .replace(/__([^_]+)__/g, "<strong>$1</strong>");
-    t = t.replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
-         .replace(/(^|[^A-Za-z0-9])_([^_\n]+)_(?![A-Za-z0-9])/g, "$1<em>$2</em>");
-    return t.replace(/\x00(\d+)\x00/g, (_, i) => `<code>${codes[+i]}</code>`);
-  }
+    actions.appendChild(transcript);
 
-  function renderMarkdown(src) {
-    const lines = esc(src).split("\n");
-    let html = "", para = [], list = null, i = 0;
-    const flushP = () => {
-      if (para.length) { html += "<p>" + mdInline(para.join(" ")) + "</p>"; para = []; }
-    };
-    const closeL = () => { if (list) { html += `</${list}>`; list = null; } };
-    while (i < lines.length) {
-      const line = lines[i];
-      if (/^\s*```/.test(line)) {
-        flushP(); closeL(); i++;
-        const code = [];
-        while (i < lines.length && !/^\s*```/.test(lines[i])) code.push(lines[i++]);
-        i++;
-        html += "<pre><code>" + code.join("\n") + "</code></pre>";
-        continue;
-      }
-      const h = line.match(/^(#{1,6})\s+(.*)$/);
-      if (h) { flushP(); closeL(); const l = Math.min(h[1].length + 2, 6);
-        html += `<h${l}>` + mdInline(h[2]) + `</h${l}>`; i++; continue; }
-      if (/^>\s?/.test(line)) { flushP(); closeL();
-        html += "<blockquote>" + mdInline(line.replace(/^>\s?/, "")) + "</blockquote>"; i++; continue; }
-      if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { flushP(); closeL(); html += "<hr>"; i++; continue; }
-      const ul = line.match(/^\s*[-*+]\s+(.*)$/);
-      if (ul) { flushP(); if (list !== "ul") { closeL(); html += "<ul>"; list = "ul"; }
-        html += "<li>" + mdInline(ul[1]) + "</li>"; i++; continue; }
-      const ol = line.match(/^\s*\d+\.\s+(.*)$/);
-      if (ol) { flushP(); if (list !== "ol") { closeL(); html += "<ol>"; list = "ol"; }
-        html += "<li>" + mdInline(ol[1]) + "</li>"; i++; continue; }
-      if (/^\s*$/.test(line)) { flushP(); closeL(); i++; continue; }
-      closeL(); para.push(line.trim()); i++;
+    if (!row.session_id && row.kind !== "session") {
+      const details = mk("button", "btn small", "Details");
+      details.type = "button";
+      details.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openSlab(row);
+      });
+      actions.appendChild(details);
     }
-    flushP(); closeL();
-    return html;
-  }
 
-  function renderCards(agents) {
-    els.empty.hidden = agents.length > 0;
-    els.cards.innerHTML = "";
-    for (const a of agents) {
-      const card = document.createElement("button");
-      card.className = "card" + (a.name === selected ? " active" : "");
-      card.type = "button";
+    if (row.status === "awaiting_action") {
+      const remindButton = mk("button", "btn small remind", "Remind");
+      remindButton.type = "button";
+      remindButton.addEventListener("click", (e) => {
+        e.stopPropagation();
+        remind(row, remindButton);
+      });
+      actions.appendChild(remindButton);
 
-      const top = document.createElement("div");
-      top.className = "card-top";
-      const nameEl = document.createElement("span");
-      nameEl.className = "card-name";
-      nameEl.textContent = a.name;
-      top.appendChild(nameEl);
-      if (a.is_manager) {
-        const b = document.createElement("span");
-        b.className = "badge";
-        b.textContent = "mgr";
-        top.appendChild(b);
-      }
-      card.appendChild(top);
-
-      if (a.title) {
-        const t = document.createElement("div");
-        t.className = "card-title";
-        t.textContent = a.title;
-        card.appendChild(t);
-      }
-
-      const meta = document.createElement("div");
-      meta.className = "card-meta";
-      const status = document.createElement("span");
-      status.className = "status " + (a.status || "");
-      status.textContent = a.status || "unknown";
-      meta.appendChild(status);
-      if (a.role && !a.is_manager) {
-        const r = document.createElement("span");
-        r.textContent = "· " + a.role;
-        meta.appendChild(r);
-      }
-      const cost = fmtUsd(a.total_cost_usd);
-      if (cost) {
-        const cEl = document.createElement("span");
-        cEl.className = "card-cost";
-        cEl.textContent = cost;
-        cEl.title = "Cumulative recorded spend for this session";
-        meta.appendChild(cEl);
-      }
-      card.appendChild(meta);
-
-      card.addEventListener("click", () => selectAgent(a.name));
-      els.cards.appendChild(card);
+      const closeButton = mk("button", "btn small quiet", "Close");
+      closeButton.type = "button";
+      closeButton.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeRun(row, closeButton);
+      });
+      actions.appendChild(closeButton);
     }
+    return actions;
   }
 
-  async function selectAgent(sub) {
-    selected = sub;
-    els.placeholder.hidden = true;
-    els.chat.hidden = false;
-    updateChatHead();
-    renderCards(lastAgents);
-    renderSessionRows();
-    renderAttention();
-    renderTranscript();
-    if (!els.composer.hidden) els.input.focus();
-    loadMessages(sub);
-  }
-
-  function sameMessages(a, b) {
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) {
-      if (a[i].who !== b[i].who || a[i].text !== b[i].text ||
-          !!a[i].error !== !!b[i].error || !!a[i].pending !== !!b[i].pending) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  async function loadMessages(sub) {
-    if (!sub || messagesLoading) return;
-    // Don't clobber the optimistic pending row while a UI-originated blocking
-    // chat request is in flight. The final reply path updates history directly.
-    if (sending && sub === selected) return;
-    messagesLoading = true;
-    let result;
-    try {
-      result = await api(base + "/subagents/" + encodeURIComponent(sub) + "/messages");
-    } catch {
+  async function remind(row, button) {
+    button.disabled = true;
+    button.textContent = "Sending…";
+    const { ok, data } = await api(
+      `${base}/workflows/runs/${encodeURIComponent(row.run_id)}/remind`,
+      { method: "POST", body: "{}" });
+    if (!ok) {
+      button.disabled = false;
+      button.textContent = "Remind";
+      showReport("reminder failed", (data && data.error) || "");
       return;
-    } finally {
-      messagesLoading = false;
     }
-    const { ok, data } = result;
-    if (selected !== sub) return;
-    if (ok && data && Array.isArray(data.messages)) {
-      const next = data.messages.map((m) => ({ who: m.role, text: m.text }));
-      const current = history.get(sub) || [];
-      if (!sameMessages(current, next)) {
-        history.set(sub, next);
-        renderTranscript();
+    button.textContent = "Sent";
+    setTimeout(() => {
+      if (button.isConnected) {
+        button.disabled = false;
+        button.textContent = "Remind";
       }
-    } else if (!history.has(sub)) {
-      history.set(sub, []);
+    }, 1800);
+  }
+
+  async function closeRun(row, button) {
+    const awaited = ((row.detail && row.detail.await_event) || "action")
+      .replaceAll("_", " ");
+    const confirmed = window.confirm(
+      `Close "${row.title}"?\n\nIt is awaiting ${awaited}. ` +
+      "Closing ends this workflow without approving it or running later steps.");
+    if (!confirmed) return;
+    button.disabled = true;
+    button.textContent = "Closing…";
+    const { ok, data } = await api(
+      `${base}/workflows/runs/${encodeURIComponent(row.run_id)}/close`,
+      { method: "POST", body: "{}" });
+    if (!ok) {
+      button.disabled = false;
+      button.textContent = "Close";
+      showReport("close failed", (data && data.error) || "");
+      return;
     }
+    pollRuns();
   }
 
-  function updateChatHead() {
-    // The roster (3s poll) is the fresher source for active sessions; a
-    // terminal session only appears in the session log.
-    const a = lastAgents.find((x) => x.name === selected)
-      || sessionLog.find((x) => x.name === selected)
-      || { name: selected };
-    els.chatName.textContent = a.name;
-    els.chatRole.textContent = a.is_manager ? "manager" : (a.role || "agent");
-    els.chatStatus.textContent = a.status || "";
-    els.chatStatus.hidden = !a.status;
-    // An ended session's transcript stays readable; the composer goes away
-    // (chat targets a live process). Re-derived on every poll, so a session
-    // that ends while selected flips read-only by itself.
-    const ended = a.ended === true;
-    els.composer.hidden = ended;
-    els.chatEnded.hidden = !ended;
-    if (ended) {
-      els.chatEnded.textContent = "session ended: " + a.status
-        + (a.error ? " · " + a.error : "");
-    }
-  }
+  /* --- the dark slab ------------------------------------------------ */
 
-  function renderTranscript() {
-    const msgs = history.get(selected) || [];
-    els.transcript.innerHTML = "";
-    for (const m of msgs) {
-      const wrap = document.createElement("div");
-      wrap.className = "msg " + (m.error ? "error" : m.who)
-        + (m.pending ? " pending" : "");
-      const who = document.createElement("div");
-      who.className = "who";
-      who.textContent = m.who === "user" ? "you" : m.error ? "error" : selected;
-      const body = document.createElement("div");
-      body.className = "body";
-      // Markdown only for the agent's own replies; user/error/pending stay literal.
-      if (m.who === "agent" && !m.error && !m.pending) {
-        body.innerHTML = renderMarkdown(m.text);
-      } else {
-        body.textContent = m.text;
-      }
-      wrap.appendChild(who);
-      wrap.appendChild(body);
-      els.transcript.appendChild(wrap);
-    }
-    els.transcript.scrollTop = els.transcript.scrollHeight;
-  }
+  function closeSlab() { els.backdrop.classList.remove("open"); }
+  els.slabClose.addEventListener("click", closeSlab);
+  els.backdrop.addEventListener("click", (e) => {
+    if (e.target === els.backdrop) closeSlab();
+  });
+  const onKey = (e) => { if (e.key === "Escape") closeSlab(); };
+  document.addEventListener("keydown", onKey);
 
-  function push(sub, msg) {
-    if (!history.has(sub)) history.set(sub, []);
-    history.get(sub).push(msg);
-    if (sub === selected) renderTranscript();
-  }
+  async function openSlab(row) {
+    els.backdrop.classList.add("open");
+    els.slabTitle.textContent = row.title || "";
+    els.slabMeta.textContent = "";
+    els.slabBody.innerHTML = "";
+    els.slabBody.appendChild(mk("div", "tr-empty", "Loading…"));
 
-  // Submit-then-poll: POST returns a message id immediately; the reply
-  // arrives in the transcript (messages poll) and this watcher tracks the
-  // job's status endpoint for completion/errors. No held-open request.
-  async function sendMessage(text) {
-    if (sending || !selected) return;
-    const sub = selected;
-    sending = true;
-    els.send.disabled = true;
-    push(sub, { who: "user", text });
-    const pending = { who: "agent", text: "", pending: true };
-    push(sub, pending);
-
-    const finish = (replacement) => {
-      const msgs = history.get(sub);
-      const idx = msgs.indexOf(pending);
-      if (idx >= 0) {
-        if (replacement) msgs[idx] = replacement;
-        else msgs.splice(idx, 1);
-      }
-      if (sub === selected) renderTranscript();
-      sending = false;
-      els.send.disabled = false;
-      els.input.focus();
-    };
-
-    const { ok, data } = await api(base + "/chat", {
-      method: "POST",
-      body: JSON.stringify({ subagent: sub, text }),
-    });
-    if (!ok || !data || !data.message_id) {
-      finish({ who: "agent", error: true,
-               text: (data && data.error) || "delivery failed" });
+    // Rows with a session get a transcript; rows without get details.
+    // That is the rule, and it is decided by data rather than by kind.
+    if (row.session_id) {
+      els.slabKind.textContent = "transcript";
+      const { ok, data } = await api(
+        `${base}/subagents/${encodeURIComponent(row.session_id)}/transcript`);
+      if (!ok || !data) return slabError("Could not read that transcript.");
+      renderTranscript(row, data);
       return;
     }
 
-    const watch = async () => {
-      const r = await api(base + "/chat/" + data.message_id);
-      const job = r.data || {};
-      if (r.ok && job.status === "pending") {
-        setTimeout(watch, 1500);
-        return;
+    els.slabKind.textContent = "details";
+    // The details endpoint serves MONITOR run records. A session-less
+    // workflow run suspended before it ever spawned has
+    // no such record, and needs no fetch either: its row already carries
+    // the whole story (what step, what event, how long).
+    if (row.kind !== "monitor") {
+      renderRowDetails(row);
+      return;
+    }
+    const { ok, data } = await api(
+      `${base}/runs/${encodeURIComponent(row.run_id)}/details`);
+    if (!ok || !data) return slabError("That run's record is gone.");
+    renderDetails(row, data);
+  }
+
+  function slabError(msg) {
+    els.slabBody.innerHTML = "";
+    els.slabBody.appendChild(mk("div", "tr-empty", msg));
+  }
+
+  function renderTranscript(row, data) {
+    const usage = data.usage || {};
+    const parts = [];
+    if (usage.started_at && usage.ended_at) {
+      parts.push(fmtDur(usage.ended_at - usage.started_at));
+    }
+    if (usage.tokens) parts.push(fmtTok(usage.tokens) + " tok");
+    const cost = usage.cost_usd > 0 ? fmtUsd(usage.cost_usd)
+                                    : fmtEst(row.est_cost_usd);
+    if (cost) parts.push(cost);
+    els.slabMeta.textContent = parts.join(" · ");
+
+    els.slabBody.innerHTML = "";
+    const entries = data.entries || [];
+    if (!entries.length) {
+      els.slabBody.appendChild(mk("div", "tr-empty",
+        "No transcript on disk for this run."));
+      return;
+    }
+    for (const entry of entries) {
+      const line = mk("div", "tr-line" +
+        (entry.kind === "tool" ? " tool" : "") +
+        (entry.is_error ? " err" : ""));
+      line.appendChild(mk("span", "ts", fmtStamp(entry.at)));
+      const who = entry.kind === "message" ? entry.role : "tool";
+      line.appendChild(mk("span", "who " + who, who));
+      const text = entry.kind === "tool" && entry.tool
+        ? `${entry.tool}: ${entry.text}`
+        : entry.text + (entry.truncated ? " …" : "");
+      line.appendChild(mk("span", "txt", text));
+      els.slabBody.appendChild(line);
+    }
+    els.slabBody.scrollTop = els.slabBody.scrollHeight;
+  }
+
+  /** Details for a run whose story is entirely in its row — a workflow run
+      that suspended without a session behind it. */
+  function renderRowDetails(row) {
+    els.slabMeta.textContent = STATUS_LABEL(row.status);
+    els.slabBody.innerHTML = "";
+    const d = row.detail || {};
+    slabLine("status", STATUS_LABEL(row.status));
+    slabLine("started", fmtIso(row.started_at));
+    if (row.duration_seconds != null) {
+      slabLine("ran for", fmtDur(row.duration_seconds));
+    }
+    slabLine("origin", row.origin);
+    const step = d.suspended_at_step >= 0 ? d.suspended_at_step : "";
+    slabLine("step", step);
+    slabLine("awaiting", d.await_event);
+    slabLine("run key", d.run_key);
+    slabLine("repo", d.repo);
+    if (row.error) slabLine("why", row.error);
+  }
+
+  /** One `label  value` row in the Details slab. It borrows the transcript's
+      line, but NOT its speaker column: these labels are data (a monitor
+      definition's own keys), so the column has to be sized for them and has
+      to wrap rather than paint over the value — hence `field`. */
+  function slabLine(label, value) {
+    if (value === "" || value == null) return;
+    const l = mk("div", "tr-line field");
+    l.appendChild(mk("span", "who tool", label));
+    l.appendChild(mk("span", "txt", String(value)));
+    els.slabBody.appendChild(l);
+  }
+
+  function renderDetails(row, data) {
+    const rec = data.run || {};
+    const def = data.definition || {};
+    els.slabMeta.textContent = rec.outcome || "";
+    els.slabBody.innerHTML = "";
+
+    const line = slabLine;
+    line("outcome", rec.outcome);
+    line("reason", rec.reason);
+    line("started", fmtIso(rec.started_at));
+    line("ended", fmtIso(rec.ended_at));
+    line("flavor", rec.flavor);
+    line("cache", rec.script_cache_mode);
+    line("published", rec.published);
+
+    if (Object.keys(def).length) {
+      els.slabBody.appendChild(mk("div", "tr-line"));
+      els.slabBody.appendChild(mk("div", "tr-empty", "— definition —"));
+      for (const [k, v] of Object.entries(def)) {
+        line(k, Array.isArray(v) ? v.join(", ") : v);
       }
-      if (r.ok && job.status === "done") {
-        // Reply is persisted — drop the placeholder and pull the truth.
-        finish(null);
-        loadMessages(sub);
-        return;
-      }
-      finish({ who: "agent", error: true,
-               text: job.error || "delivery failed" });
-    };
-    setTimeout(watch, 1200);
-  }
-
-  async function poll() {
-    const { ok, data } = await api(base + "/subagents");
-    if (ok && data) {
-      lastAgents = data.subagents || [];
-      renderCards(lastAgents);
-      if (selected) updateChatHead();
-      // The selected session just left the active roster and the log
-      // doesn't know it ended yet: refresh the log now so the pane flips
-      // read-only without waiting out the slower session poll (during
-      // which a stale log row would keep the composer live against a
-      // dead process). The `ended` guard keeps this a one-shot.
-      if (selected && !lastAgents.some((x) => x.name === selected)) {
-        const row = sessionLog.find((x) => x.name === selected);
-        if (!row || !row.ended) pollSessions();
-      }
+    } else {
+      els.slabBody.appendChild(mk("div", "tr-empty",
+        "This monitor no longer exists — only its record remains."));
     }
   }
 
-  function pollMessages() {
-    if (selected) loadMessages(selected);
-  }
-
-  // --- session log (observability, #733 vertical 3) --------------------
-  // Terminal outcomes under the roster: what ended, how, and why. Active
-  // sessions already live above as roster cards, so the panel lists only
-  // ended runs; the counts line covers the whole history. Clicking a row
-  // opens the session's transcript read-only in the chat pane.
-  const MAX_SESSION_ROWS = 50;
-
-  // When a session "happened" for log/alarm ordering, epoch ms: when it
-  // ended, else its last activity. Shared with the attention feed.
-  const sessionWhen = (s) => (s.terminal_at || s.last_activity || 0) * 1000;
-
-  function renderSessionRows() {
-    const rows = sessionLog.filter((s) => s.ended);
-    if (!rows.length) { els.sessionsPanel.hidden = true; return; }
-    els.sessionsPanel.hidden = false;
-    els.sessionRows.innerHTML = "";
-    for (const s of rows.slice(0, MAX_SESSION_ROWS)) {
-      const row = document.createElement("button");
-      row.type = "button";
-      row.className = "session-row" + (s.name === selected ? " active" : "");
-      const top = document.createElement("div");
-      top.className = "session-top";
-      const nm = document.createElement("span");
-      nm.className = "session-name";
-      nm.textContent = s.name;
-      top.appendChild(nm);
-      const chip = document.createElement("span");
-      chip.className = "status " + chipClass(s.status);
-      chip.textContent = s.status;
-      top.appendChild(chip);
-      row.appendChild(top);
-      const bits = [];
-      const when = fmtAgo(sessionWhen(s));
-      if (when) bits.push(when);
-      if (s.role && !s.is_manager) bits.push(s.role);
-      if (s.is_manager) bits.push("manager");
-      const cost = fmtUsd(s.total_cost_usd);
-      if (cost) bits.push(cost);
-      if (bits.length) {
-        const meta = document.createElement("div");
-        meta.className = "session-meta mono";
-        meta.textContent = bits.join(" · ");
-        row.appendChild(meta);
-      }
-      if (s.error) {
-        const err = document.createElement("div");
-        err.className = "session-error";
-        err.textContent = s.error;
-        err.title = s.error;
-        row.appendChild(err);
-      }
-      row.addEventListener("click", () => selectAgent(s.name));
-      els.sessionRows.appendChild(row);
-    }
-    // Honest footer: what this render hides, plus the runtime's own cap
-    // (`truncated`: a hosted box sends only the newest rows, so the counts
-    // line above may cover more history than arrived here).
-    const hidden = rows.length - MAX_SESSION_ROWS;
-    if (hidden > 0 || sessionLogTruncated) {
-      const more = document.createElement("div");
-      more.className = "session-more mono";
-      const bits = [];
-      if (hidden > 0) bits.push("+ " + hidden + " older sessions");
-      if (sessionLogTruncated) bits.push("older history capped by the runtime");
-      more.textContent = bits.join(" · ");
-      els.sessionRows.appendChild(more);
-    }
-  }
-
-  function renderSessionCounts(counts) {
-    const bits = [];
-    if (counts.completed) bits.push(counts.completed + " completed");
-    if (counts.failed) bits.push(counts.failed + " failed");
-    if (counts.crashed) bits.push(counts.crashed + " crashed");
-    els.sessionCounts.textContent = bits.join(" · ");
-  }
-
-  // A hosted supervisor that predates the session_log command never replies,
-  // so a failed poll there costs a full command timeout server-side. After
-  // two straight misses, back off to every 6th tick (~1 minute) until a poll
-  // succeeds again.
-  let sessionPollMisses = 0;
-  let sessionPollSkips = 0;
-
-  async function pollSessions() {
-    if (sessionPollMisses >= 2) {
-      sessionPollSkips = (sessionPollSkips + 1) % 6;
-      if (sessionPollSkips !== 0) return;
-    }
-    const { ok, data } = await api(base + "/sessions");
-    if (!ok || !data) { sessionPollMisses++; return; }
-    sessionPollMisses = 0;
-    sessionLog = data.sessions || [];
-    sessionLogTruncated = !!data.truncated;
-    renderSessionCounts(data.counts || {});
-    renderSessionRows();
-    renderAttention();
-    if (selected) updateChatHead();
-  }
-
-  // --- spend panel (observability, #733) ------------------------------
-  // Team total plus the top-spend models, folded from existing per-session
-  // cost. A read-only surface: no controls, hidden until there is spend.
-  // Models that report no dollars (the codex brain, #760) show a fold-time
-  // estimate marked "~ … est", or raw token volume when no defensible
-  // estimate exists (model not in the price table, or pre-split history).
-  function renderSpend(data) {
-    const recorded = (data && data.total_cost_usd) || 0;
-    const estimated = (data && data.estimated_cost_usd) || 0;
-    const byModel = (data && data.by_model) || {};
-    const byEst = (data && data.estimated_by_model) || {};
-    const tokens = (data && data.tokens_by_model) || {};
-    const total = fmtSpend(recorded, estimated);
-    const hasTokens = Object.keys(tokens).length > 0;
-    if (!total && !hasTokens) { els.spendPanel.hidden = true; return; }
-    els.spendPanel.hidden = false;
-    // The figure is lifetime-cumulative: it sums each session's recorded cost
-    // across all sessions still on disk, persists across restarts, and is not
-    // scoped to a time period. Label it so it is not read as "today".
-    els.spendPanel.title =
-      "Cumulative recorded spend across all sessions on disk (not a time period)."
-      + (estimated > 0 || hasTokens ? EST_NOTE : "");
-    const n = data.sessions_counted || 0;
-    // Recorded dollars rank first, then estimates, then token-only volume.
-    const rows = Object.entries(byModel)
-      .filter(([, v]) => v > 0)
-      .map(([k, v]) => [k, fmtUsd(v)]);
-    for (const [k, v] of Object.entries(byEst)) {
-      if (v > 0) rows.push([k, fmtEst(v)]);
-    }
-    for (const [k, t] of Object.entries(tokens)) {
-      if (byModel[k] > 0 || byEst[k] > 0) continue;
-      rows.push(
-        [k, `${fmtTok(t.input_tokens)} in / ${fmtTok(t.output_tokens)} out`]);
-    }
-    els.spendPanel.innerHTML = "";
-    const head = document.createElement("div");
-    head.className = "spend-head mono";
-    // fmtSpend output is our own formatted string, never agent/user data.
-    head.innerHTML =
-      `<span>spend</span><span class="spend-total">${total || "-"}</span>`;
-    els.spendPanel.appendChild(head);
-    const sub = document.createElement("div");
-    sub.className = "spend-sub";
-    sub.textContent = `cumulative · ${n} session${n === 1 ? "" : "s"}`;
-    els.spendPanel.appendChild(sub);
-    for (const [key, val] of rows.slice(0, 4)) {
-      const row = document.createElement("div");
-      row.className = "spend-row";
-      const label = document.createElement("span");
-      label.className = "spend-label";
-      // key is "provider:model" - show the model, keep provider in the title.
-      label.textContent = key.includes(":") ? key.split(":").slice(1).join(":") : key;
-      label.title = key;
-      const amt = document.createElement("span");
-      amt.className = "spend-amt";
-      amt.textContent = val;
-      row.appendChild(label);
-      row.appendChild(amt);
-      els.spendPanel.appendChild(row);
-    }
-  }
-
-  async function pollSpend() {
-    const { ok, data } = await api(base + "/spend");
-    if (ok && data) renderSpend(data);
-  }
-
-  // --- health panel (observability, #733) ------------------------------
-  // Manager liveness + the supervisor's lifecycle trail, above the roster.
-  // A local team has no supervisor: the restart fields are null and the
-  // trail is empty, so the panel shows just the manager line. A hosted
-  // team adds reachability, restart count, and the 48h lifecycle trail.
-  // Severity per supervisor lifecycle event (the sidecar's vocabulary);
-  // an event not listed here renders with the neutral dot.
-  const LIFECYCLE_CLASS = {
-    probe_failing: "bad", budget_exhausted: "bad",
-    probe_recovered: "ok", manager_started: "ok",
-    manager_restarted: "warn",
-  };
-
-  // One timestamp per lifecycle event, epoch ms: server receipt
-  // (authoritative) first, the box's own clock as the fallback; 0 when
-  // neither is usable. Shared by the trail and the attention feed.
-  const evWhen = (ev) =>
-    ev.received_at || (ev.at ? Date.parse(ev.at) : NaN) || 0;
-
-  // The severity-dotted event label, shared by the health trail and the
-  // attention feed so one vocabulary and one guard serve both. hasOwn: an
-  // event name from the wire must never resolve an inherited Object
-  // property into the class list.
-  function lifecycleEventEl(ev) {
-    const el = document.createElement("span");
-    el.className = "health-event " +
-      (Object.hasOwn(LIFECYCLE_CLASS, ev.event)
-        ? LIFECYCLE_CLASS[ev.event] : "");
-    el.textContent = ev.event;
-    if (ev.reason) el.title = ev.reason;
-    return el;
-  }
-
-  function renderHealth(data) {
-    const mgr = data && data.manager;
-    if (!mgr) { els.healthPanel.hidden = true; return; }
-    els.healthPanel.hidden = false;
-    els.healthPanel.innerHTML = "";
-
-    // Degraded reachability outranks the manager's own status: a stale or
-    // unreachable heartbeat means the status line can no longer be trusted.
-    const reach = data.reachability;
-    const degraded = reach === "stale" || reach === "unreachable";
-    const st = degraded ? reach
-      : mgr.status || (mgr.running ? "running" : "stopped");
-
-    const head = document.createElement("div");
-    head.className = "health-head mono";
-    const label = document.createElement("span");
-    label.textContent = "health";
-    const chip = document.createElement("span");
-    chip.className = "status " + st;
-    chip.textContent = st;
-    head.appendChild(label);
-    head.appendChild(chip);
-    els.healthPanel.appendChild(head);
-
-    const bits = [];
-    if (mgr.pid) bits.push("pid " + mgr.pid);
-    if (typeof mgr.restart_count === "number") {
-      bits.push(mgr.restart_count + " restart" +
-                (mgr.restart_count === 1 ? "" : "s"));
-    }
-    // Heartbeat age answers "how long since we last heard" - meaningful
-    // only when degraded. On a live box it is implied, and the timestamp is
-    // the box's own clock, so skew would contradict the (server-derived)
-    // live chip.
-    if (degraded && data.last_heartbeat_at) {
-      const ago = fmtAgo(Date.parse(data.last_heartbeat_at));
-      if (ago) bits.push("hb " + ago);
-    }
-    if (bits.length) {
-      const sub = document.createElement("div");
-      sub.className = "health-sub";
-      sub.textContent = bits.join(" · ");
-      if (mgr.last_restart_reason) {
-        sub.title = "last restart: " + mgr.last_restart_reason;
-      }
-      els.healthPanel.appendChild(sub);
-    }
-
-    for (const ev of (data.lifecycle || []).slice(0, 6)) {
-      const row = document.createElement("div");
-      row.className = "health-row";
-      const when = document.createElement("span");
-      when.className = "health-when";
-      when.textContent = fmtAgo(evWhen(ev));
-      row.appendChild(lifecycleEventEl(ev));
-      row.appendChild(when);
-      els.healthPanel.appendChild(row);
-    }
-  }
+  /* --- polling ------------------------------------------------------- */
 
   async function pollHealth() {
-    const { ok, data } = await api(base + "/health");
-    if (!ok || !data) return;
-    lastHealth = data;
-    renderHealth(data);
-    renderAttention();
-    // One liveness source: the header chip derives from the same payload
-    // (installed is implied - only installed teams have an agent view).
-    const mgr = data.manager || {};
-    runState = { installed: true, running: !!mgr.running,
-                 reachability: data.reachability,
-                 manager_status: mgr.status };
-    if (!busyVerb) renderControls();
+    const { ok, status, data } = await api(base + "/health");
+    if (status === 404) return showMissing();
+    if (ok && data) { health = data; renderBand(); }
   }
-
-  // --- needs attention (observability, #733 vertical 4) ----------------
-  // Harness errors, surfaced: one panel that says "something went wrong"
-  // without reading logs. A pure client-side composition of the two feeds
-  // the panels below already poll - trouble lifecycle events from /health
-  // (probe_failing / manager_restarted / budget_exhausted, hosted-only
-  // data) and failed/crashed sessions with their error lines from
-  // /sessions - merged newest first. No new endpoint, runtime method, or
-  // admin command backs this surface.
-  //
-  // Which words alarm derives from the presentation maps above, so one
-  // vocabulary serves dot color and alarm alike: every lifecycle event
-  // whose severity is not "ok", and every ended session whose chip
-  // resolves to failed/crashed (CHIP_ALIAS folds legacy "error" in). An
-  // event or outcome those maps do not know simply does not alarm - the
-  // panels below still show it.
-  const ATTENTION_LIFECYCLE = new Set(
-    Object.entries(LIFECYCLE_CLASS)
-      .filter(([, cls]) => cls !== "ok")
-      .map(([event]) => event));
-  const ATTENTION_OUTCOMES = new Set(["failed", "crashed"]);
-  const MAX_ATTENTION_ROWS = 8;
-  // Trouble decays: the hosted lifecycle trail is 48h-bounded server-side,
-  // and session failures observe the same window here - an alarm surface
-  // that never ages out just teaches the operator to ignore it. The full
-  // failure history stays in the session log below.
-  const ATTENTION_WINDOW_MS = 48 * 3600 * 1000;
-
-  function attentionItems() {
-    const items = [];
-    const trail = (lastHealth && lastHealth.lifecycle) || [];
-    // A probe episode closes with probe_recovered, and the trail is newest
-    // first (the wire contract) - so "still open" is an ORDER question,
-    // not a clock question: a probe_failing is open trouble only while no
-    // recovery sits above it. This never compares the box's own clock
-    // (`at`) against server receipt, and an event with no usable
-    // timestamp still alarms. Restarts and budget exhaustion have no
-    // "recovered" edge; they stay listed until the trail ages them out.
-    const recovered = trail.findIndex(
-      (ev) => ev && ev.event === "probe_recovered");
-    trail.forEach((ev, i) => {
-      if (!ev || !ATTENTION_LIFECYCLE.has(ev.event)) return;
-      if (ev.event === "probe_failing" && recovered !== -1
-          && i > recovered) return;
-      items.push({ kind: "lifecycle", when: evWhen(ev), ev });
+  async function pollRuns() {
+    const request = ++runsRequest;
+    const params = new URLSearchParams({
+      limit: "100",
+      offset: String(pageIndex * 100),
     });
-    const cutoff = Date.now() - ATTENTION_WINDOW_MS;
-    for (const s of sessionLog) {
-      if (!s.ended || !ATTENTION_OUTCOMES.has(chipClass(s.status))) continue;
-      const when = sessionWhen(s);
-      if (when < cutoff) continue;
-      items.push({ kind: "session", when,
-                   name: s.name, status: s.status, detail: s.error || "" });
-    }
-    items.sort((a, b) => b.when - a.when);
-    return items;
-  }
-
-  // Two pollers land here (health at 4s, sessions at 10s), and the rows
-  // are clickable buttons - rebuilding nodes whose content did not change
-  // would swallow a click landing mid-rebuild. Same-content renders only
-  // refresh the relative "ago" labels in place.
-  let attentionSig = "";
-
-  function renderAttention() {
-    const items = attentionItems();
-    if (!items.length) {
-      els.attentionPanel.hidden = true;
-      attentionSig = "";
+    if (tab !== "all") params.set("status", tab);
+    if (query) params.set("query", query);
+    const { ok, status, data } = await api(base + "/runs?" + params);
+    if (request !== runsRequest) return;
+    if (status === 404) return showMissing();
+    if (ok && data) {
+      if (pageIndex > 0 && data.offset >= data.total) {
+        pageIndex = Math.max(0, Math.ceil(data.total / 100) - 1);
+        pollRuns();
+        return;
+      }
+      runs = data;
+      runsError = "";
+      renderTabs();
+      renderRuns();
+      renderPager();
       return;
     }
-    const sig = JSON.stringify([selected, sessionLogTruncated,
-      items.map((it) => it.kind === "session"
-        ? [it.when, it.name, it.status, it.detail]
-        : [it.when, it.ev.event, it.ev.reason])]);
-    if (sig === attentionSig && !els.attentionPanel.hidden) {
-      const whens = els.attentionPanel.querySelectorAll(".attention-when");
-      items.slice(0, MAX_ATTENTION_ROWS).forEach((it, i) => {
-        if (whens[i]) whens[i].textContent = fmtAgo(it.when);
-      });
-      return;
-    }
-    attentionSig = sig;
-    els.attentionPanel.hidden = false;
-    els.attentionPanel.innerHTML = "";
-
-    const head = document.createElement("div");
-    head.className = "attention-head mono";
-    const label = document.createElement("span");
-    label.textContent = "needs attention";
-    const count = document.createElement("span");
-    count.className = "attention-count";
-    count.textContent = String(items.length);
-    head.appendChild(label);
-    head.appendChild(count);
-    els.attentionPanel.appendChild(head);
-
-    for (const it of items.slice(0, MAX_ATTENTION_ROWS)) {
-      // A session row drills into its (read-only) transcript, like the
-      // session log below; a lifecycle event has nowhere to go.
-      const row = document.createElement(
-        it.kind === "session" ? "button" : "div");
-      row.className = "attention-row"
-        + (it.kind === "session" && it.name === selected ? " active" : "");
-      const top = document.createElement("div");
-      top.className = "attention-top";
-      const what = document.createElement("span");
-      what.className = "attention-what";
-      if (it.kind === "session") {
-        row.type = "button";
-        const nm = document.createElement("span");
-        nm.className = "attention-label";
-        nm.textContent = it.name;
-        const chip = document.createElement("span");
-        chip.className = "status " + chipClass(it.status);
-        chip.textContent = it.status;
-        what.appendChild(nm);
-        what.appendChild(chip);
-        row.addEventListener("click", () => selectAgent(it.name));
-      } else {
-        what.appendChild(lifecycleEventEl(it.ev));
-      }
-      top.appendChild(what);
-      const when = document.createElement("span");
-      when.className = "attention-when mono";
-      when.textContent = fmtAgo(it.when);
-      top.appendChild(when);
-      row.appendChild(top);
-      const detail = it.kind === "session" ? it.detail
-        : (it.ev.reason || "");
-      if (detail) {
-        const detailEl = document.createElement("div");
-        detailEl.className = "attention-detail";
-        detailEl.textContent = detail;
-        detailEl.title = detail;
-        row.appendChild(detailEl);
-      }
-      els.attentionPanel.appendChild(row);
-    }
-
-    // Honest footer, like the session log's: what this render hides, and
-    // the runtime's own cap (a hosted box sends only the newest rows, so
-    // older failures may never reach this feed at all).
-    const hidden = items.length - MAX_ATTENTION_ROWS;
-    if (hidden > 0 || sessionLogTruncated) {
-      const more = document.createElement("div");
-      more.className = "attention-more mono";
-      const bits = [];
-      if (hidden > 0) bits.push("+ " + hidden + " older");
-      if (sessionLogTruncated) {
-        bits.push("older history capped by the runtime");
-      }
-      more.textContent = bits.join(" · ");
-      els.attentionPanel.appendChild(more);
-    }
+    // A read that failed is not a read that is still running. Left saying
+    // "Loading…" the table claims work is coming that never will.
+    runsError = status === 0
+      ? "Lost the app server — the table stopped updating."
+      : "Could not read this agent's runs.";
+    renderRuns();
+    renderPager();
+  }
+  async function pollOverview() {
+    const { ok, data } = await api(base + "/overview");
+    if (ok && data) { overview = data; renderIdentity(); }
+  }
+  async function pollSpend() {
+    const { ok, data } = await api(base + "/spend");
+    if (ok && data) { spend = data; renderSaved(); }
   }
 
-  els.composer.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const text = els.input.value.trim();
-    if (!text) return;
-    els.input.value = "";
-    els.input.style.height = "auto";
-    sendMessage(text);
-  });
-
-  // Enter sends, Shift+Enter newlines; textarea auto-grows.
-  els.input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      els.composer.requestSubmit();
-    }
-  });
-  els.input.addEventListener("input", () => {
-    els.input.style.height = "auto";
-    els.input.style.height = Math.min(els.input.scrollHeight, 160) + "px";
-  });
-
-  poll();
-  pollMessages();
-  pollSpend();
+  renderBand();
+  renderTabs();
+  renderRuns();
+  renderPager();
   pollHealth();
-  pollSessions();
-  const t1 = setInterval(poll, 3000);
-  const t2 = setInterval(pollMessages, 3000);
-  const t3 = setInterval(pollHealth, 4000);
-  const t4 = setInterval(pollSpend, 8000);
-  // The log only changes when a session ends, and the hosted read is a
-  // full command RPC - poll slower than the live surfaces. Lifecycle
-  // actions and a roster drop of the selected session refresh it directly.
-  const t5 = setInterval(pollSessions, 10000);
-  return () => { [t1, t2, t3, t4, t5].forEach(clearInterval); };
+  pollRuns();
+  pollOverview();
+  pollSpend();
+
+  // The strip and the runs table are the live surfaces. Composition only
+  // changes in setup, and spend moves slowly, so both poll far slower.
+  timers = [
+    setInterval(pollHealth, 4000),
+    setInterval(pollRuns, 4000),
+    setInterval(pollSpend, 10000),
+    setInterval(pollOverview, 30000),
+  ];
+  return () => {
+    timers.forEach(clearInterval);
+    clearTimeout(searchTimer);
+    document.removeEventListener("keydown", onKey);
+    document.removeEventListener("click", closePopovers);
+  };
 }

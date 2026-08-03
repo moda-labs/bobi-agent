@@ -227,6 +227,21 @@ class TestStoppedSegments:
                       role="director", terminal_at=NOW)
         assert _segments(_state(bobi_install))["exit"]["value"] == "crashed"
 
+    def test_a_gracefully_stopped_manager_reports_all_three(self,
+                                                            bobi_install):
+        # The shape the REAL stop path writes: `Session._run`'s teardown ends
+        # with status="stopped", not "completed". Every test above seeded
+        # "completed", so the whole stopped strip rendered empty in practice
+        # while the suite stayed green — found by stopping a live agent from
+        # the page and watching SINCE/EXIT/WAS UP not appear (#887 QA).
+        _seed_session(bobi_install.sessions_dir, MANAGER, status="stopped",
+                      role="director", started_at=NOW - 3600,
+                      terminal_at=NOW - 30)
+        segs = _segments(_state(bobi_install))
+        assert segs["since"]["value"] == NOW - 30
+        assert segs["exit"]["value"] == "clean"
+        assert segs["was_up"]["value"] == 3600 - 30
+
     def test_unclosed_record_reports_no_exit(self, bobi_install):
         # The manager is gone but its record was never closed, so it still
         # reads `idle`. "Exit: idle" would be a live-sounding word for a dead

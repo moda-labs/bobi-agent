@@ -1,0 +1,58 @@
+/* Bobi typography. Three families, one tracking signature (-0.03em on display
+   and mono labels). Bobi's own move on top of Moda: the wordmark sets tighter
+   at -0.045em, and mono carries far more of the UI than on the marketing site —
+   filenames, event ids, timestamps, and status all read as mono. */
+
+:root {
+  --font-display: "Geist", system-ui, sans-serif;   /* all headings */
+  --font-sans: "Inter", system-ui, sans-serif;      /* body, buttons */
+  --font-mono: "Geist Mono", ui-monospace, monospace; /* labels, code, data */
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* tracking */
+  --track-tightest: -0.03em;   /* every display heading + mono eyebrow */
+  --track-tight: -0.02em;      /* FAQ question, dense headings */
+  --track-button: -0.01em;
+  --track-wordmark: -0.045em;  /* the "bobi" lockup only */
+  --track-label: 0.16em;       /* uppercase mono plate labels */
+  --track-label-wide: 0.2em;   /* corner plate marks */
+  --track-index: 0.04em;       /* 01 / 02 numerals, GITHUB ↗ nav */
+  --track-caps: 0.06em;        /* display CAPS page titles (product chrome) */
+  --track-caps-sm: 0.09em;     /* small caps labels in dense UI */
+
+  /* display scale — clamp() pairs are mobile → desktop */
+  --text-h1: clamp(40px, 4.6vw, 64px);
+  --text-h1-lh: 1.04;
+  --text-h2: clamp(32px, 3.6vw, 48px);
+  --text-h2-lh: 1.1;
+  --text-h3: 27px;             /* walkthrough step / subsection */
+  --text-h3-lh: 1.16;
+  --text-h4: 23px;             /* card heading */
+  --text-h4-lh: 1.14;
+  --text-h5: 20px;             /* benefit card heading, FAQ question */
+  --text-h5-lh: 1.12;
+
+  /* body */
+  --text-body: 16px;
+  --text-body-lh: 1.625;
+  --text-body-sm: 15px;
+  --text-body-xs: 14px;
+
+  /* mono */
+  --text-eyebrow: 14px;        /* ▪ SECTION EYEBROW */
+  --text-mono: 13px;           /* nav, indices, code */
+  --text-mono-sm: 12.5px;      /* terminal, install pill, outcome line */
+  --text-plate: 11px;          /* uppercase plate label */
+  --text-plate-sm: 10.5px;     /* corner mark, node subtitle */
+
+  /* product chrome */
+  --text-page-title: 21px;     /* CAPS page title in an app header */
+  --text-section-title: 13px;  /* CAPS panel/section label */
+
+  /* figure node text */
+  --text-node-title: 13px;
+  --text-node-sub: 10.5px;
+}

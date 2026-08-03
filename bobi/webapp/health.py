@@ -157,11 +157,14 @@ def _stopped_segments(manager_entry) -> list[dict]:
     status = getattr(manager_entry, "status", "") or ""
     if error:
         segments.append(_segment("exit", "Exit", TEXT, error))
-    elif status in TERMINAL_STATUSES:
-        # "completed" is a clean exit in the strip's words; anything else
-        # (crashed, failed) is reported as the registry recorded it.
+    elif status in TERMINAL_STATUSES or status == "stopped":
+        # "completed" is a clean exit in the strip's words, and so is
+        # "stopped" — the manager only writes it from its own shutdown path,
+        # which means it wound down rather than died. Anything else (crashed,
+        # failed) is reported as the registry recorded it.
         segments.append(_segment("exit", "Exit", TEXT,
-                                 "clean" if status in ("completed", "done")
+                                 "clean" if status in ("completed", "done",
+                                                       "stopped")
                                  else status))
     # A NON-terminal status here (a manager whose process is gone but whose
     # record was never closed) reports no exit at all. It is a live-sounding

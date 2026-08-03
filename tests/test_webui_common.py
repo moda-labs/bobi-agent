@@ -137,8 +137,37 @@ def test_static_routes_still_serve_shared_tokens(tmp_path):
 
     r = _client(app).get("/static/tokens.css")
     assert r.status_code == 200
-    assert "--accent: #C8612B;" in r.text
+    # Served from the shared dir even though static_dir is empty.
+    assert "--bobi-acc" in r.text
     assert resolve_static_asset(static_dir, "tokens.css") is not None
+
+
+def test_static_routes_serve_shared_brand_fonts(tmp_path):
+    """The vendored brand faces are shared by both UIs, like tokens.css.
+
+    They also live under a fonts/ subdirectory, so this covers prefix-based
+    sharing and the woff2 media type on top of plain name matching.
+    """
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    app = FastAPI()
+    mount_static(app, static_dir)
+    c = _client(app)
+
+    sheet = c.get("/static/fonts.css")
+    assert sheet.status_code == 200
+    assert "@font-face" in sheet.text
+    # Relative src paths keep resolving under a mounted base path.
+    assert 'src: url("fonts/' in sheet.text
+    assert "fonts.googleapis.com" not in sheet.text, "offline UI must not hit a CDN"
+
+    face = c.get("/static/fonts/geist-latin.woff2")
+    assert face.status_code == 200
+    assert face.headers["content-type"] == "font/woff2"
+
+    assert resolve_static_asset(static_dir, "fonts/geist-latin.woff2") is not None
+    # The prefix must not become a path-traversal hole.
+    assert resolve_static_asset(static_dir, "fonts/../../secret.txt") is None
 
 
 def test_serve_local_mints_secret_opens_browser_and_runs_bound_socket(monkeypatch):
