@@ -949,6 +949,23 @@ class TestDependencyTreeProblemTriage:
             ["invalid: @moda-labs/bobi-events-core@1.0.0 /es/node_modules/x"], local
         )
 
+    def test_unparseable_invalid_line_is_fatal(self):
+        """Fail CLOSED when the wording changes.
+
+        The allowance is driven by a parsed package name. If npm reshapes the
+        `invalid:` line, a lenient parser would emit a name matching nothing in
+        the local set and quietly forgive a real conflict. Anything that does
+        not parse to a plausible package name stays fatal.
+        """
+        local = frozenset({"ws"})
+        for line in (
+            "invalid:",
+            "invalid: ",
+            "invalid: some/odd wording npm might ship",
+            "invalid: @@broken@1.0.0 /es/node_modules/x",
+        ):
+            assert es._fatal_tree_problems([line], local) == [line], line
+
     def test_invalid_stays_fatal_when_the_local_set_is_unknown(self):
         """Omitting the set must not widen the allowance.
 

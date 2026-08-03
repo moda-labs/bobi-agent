@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -197,15 +198,27 @@ def _local_dependency_names(es_dir: Path) -> frozenset[str] | None:
     return frozenset(names)
 
 
+#: `@scope/name` or `name` - what an npm package identifier may look like once
+#: the version suffix is stripped.
+_PACKAGE_NAME_RE = re.compile(r"^(?:@[^/\s@]+/)?[^/\s@]+$")
+
+
 def _invalid_problem_package(problem: str) -> str | None:
-    """The package name in an `invalid: <name>@<version> <path>` line."""
+    """The package name in an `invalid: <name>@<version> <path>` line.
+
+    None when the line does not parse into something that looks like a package
+    name. Callers treat None as fatal, so a future change to npm's wording
+    fails the build loudly instead of being forgiven by a parser that quietly
+    produced a name matching nothing.
+    """
     body = problem.strip()[len("invalid:"):].strip()
     if not body:
         return None
     spec = body.split()[0]
     # Scoped names keep their leading @, so only split on a LATER one.
     at = spec.rfind("@")
-    return spec[:at] if at > 0 else spec
+    name = spec[:at] if at > 0 else spec
+    return name if _PACKAGE_NAME_RE.match(name) else None
 
 
 def _fatal_tree_problems(
