@@ -86,6 +86,13 @@ bobi agent <name> transcript show manager
 bobi agent <name> transcript search "query"
 bobi agent <name> costs
 
+# Recover token telemetry for sessions that recorded zero (#935). Reads each
+# session's retained Claude transcript and fills ONLY missing counters -
+# recorded tokens and provider dollars are never overwritten. Dry run by
+# default; re-running after a write is a no-op.
+bobi agent <name> costs backfill
+bobi agent <name> costs backfill --write
+
 # Reply into a chat conversation (channel-agnostic; ref comes from the event)
 bobi reply <conversation> "markdown text"
 bobi reply <conversation> --edit <ts> "text"     # resolve a placeholder

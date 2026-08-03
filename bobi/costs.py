@@ -149,8 +149,9 @@ def _tok(v) -> int:
     """A token count usable in arithmetic. isinstance (not just ``or 0``) for
     the same reason the cost fold coerces null: a hand-edited state.json can
     carry a string count, and the fold backs a web endpoint that must not 500
-    on one malformed session."""
-    return v if isinstance(v, int) else 0
+    on one malformed session. ``bool`` is excluded for the same reason: it is
+    an ``int`` subclass, so a stray ``true`` would otherwise price as 1 token."""
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
 
 
 def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
@@ -248,7 +249,12 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
             summary.by_provider[provider] = (
                 summary.by_provider.get(provider, 0.0) + unattributed_cost
             )
-            if not model_usage:
+            # Gate on attributed DOLLARS, not on model_usage being empty: the
+            # #935 repair populates model_usage with token counts and
+            # cost_usd 0.0, so an emptiness test would silently drop a
+            # session's dollars out of the by-model view the moment its tokens
+            # were recovered, leaving the column no longer summing to the total.
+            if not attributed_cost:
                 model_key = f"{provider}:{data.get('model', 'unknown')}"
                 summary.by_model[model_key] = (
                     summary.by_model.get(model_key, 0.0) + unattributed_cost

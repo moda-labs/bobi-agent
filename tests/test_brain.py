@@ -623,6 +623,74 @@ def test_result_to_turn_includes_claude_cache_tokens_in_input_volume():
     assert turn.costs[0].output_tokens == 3_432
 
 
+def test_result_to_turn_normalizes_sdk_camel_case_model_usage():
+    """The shape claude-agent-sdk 0.2.128 actually reports (#935).
+
+    ``claude_agent_sdk.types.ModelUsage`` is passed through verbatim from the
+    CLI's ``modelUsage`` field, so its keys are camelCase. Reading only the
+    legacy snake_case spellings recorded every token counter as zero while
+    ``total_cost_usd`` still arrived, which is how the GTM registry ended up
+    with dollars and no tokens.
+    """
+    msg = _result(model_usage={
+        "claude-opus-4-8": {
+            "inputTokens": 2,
+            "cacheCreationInputTokens": 24_576,
+            "cacheReadInputTokens": 15_282,
+            "outputTokens": 10,
+            "webSearchRequests": 0,
+            "costUSD": 0.253661,
+            "contextWindow": 200_000,
+            "maxOutputTokens": 32_000,
+            "canonicalModel": "claude-opus-4-8",
+            "provider": "firstParty",
+        }
+    })
+    turn = _result_to_turn(msg)
+    assert len(turn.costs) == 1
+    cost = turn.costs[0]
+    assert cost.model == "claude-opus-4-8"
+    # Observed smoke payload: 2 + 24,576 + 15,282 + 10 == 39,870 total.
+    assert cost.input_tokens == 39_860
+    assert cost.cached_input_tokens == 15_282
+    assert cost.output_tokens == 10
+    assert cost.input_tokens + cost.output_tokens == 39_870
+
+
+def test_result_to_turn_normalizes_camel_case_object_usage():
+    """An object-like usage value with camelCase attributes normalizes too."""
+    usage = SimpleNamespace(
+        inputTokens=5,
+        outputTokens=7,
+        cacheReadInputTokens=11,
+        cacheCreationInputTokens=13,
+        canonicalModel="claude-haiku-4-5",
+    )
+    turn = _result_to_turn(_result(model_usage=[usage]))
+    assert len(turn.costs) == 1
+    assert turn.costs[0].model == "claude-haiku-4-5"
+    assert turn.costs[0].input_tokens == 29
+    assert turn.costs[0].cached_input_tokens == 11
+    assert turn.costs[0].output_tokens == 7
+
+
+def test_result_to_turn_prefers_snake_case_when_both_spellings_present():
+    """A mixed dict must not double-count: one spelling wins per field."""
+    turn = _result_to_turn(_result(model_usage={
+        "claude-opus-4-8": {
+            "input_tokens": 100,
+            "inputTokens": 100,
+            "output_tokens": 5,
+            "outputTokens": 5,
+            "cache_read_input_tokens": 20,
+            "cacheReadInputTokens": 20,
+        }
+    }))
+    assert turn.costs[0].input_tokens == 120
+    assert turn.costs[0].cached_input_tokens == 20
+    assert turn.costs[0].output_tokens == 5
+
+
 def test_result_to_turn_handles_error_and_status():
     msg = _result(is_error=True, result="API Error: 529 Overloaded")
     msg.api_error_status = 529
