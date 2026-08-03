@@ -203,21 +203,21 @@ first. Implementation stacks on an integration branch
   committed checklist; flip markers per unit inside its PR.
 
 **U1 — monitor run records** *(Phase 1 enabler; the only new runtime write)*
-- [ ] Scheduler persists a run record per firing: monitor name,
+- [x] Scheduler persists a run record per firing: monitor name,
       started/ended, outcome (`notified` | `quiet` | `failed` + reason),
       script-cache mode, runner session ref when one spawned. Failed
       publishes (`pending_publish`) count as not-yet-`notified`.
-- [ ] Bounded retention (cap per monitor); unit tests over the fold.
+- [x] Bounded retention (cap per monitor); unit tests over the fold.
 - Testable: records appear under `run/state/` for a live monitor tick.
 
 **U2 — unified runs read model + `GET /api/agents/{name}/runs`** *(Phase 1)*
-- [ ] Merge sessions + workflow runs + U1 monitor records into one run
+- [x] Merge sessions + workflow runs + U1 monitor records into one run
       shape: `status` (`running|idle|done|failed|crashed|stalled`),
       `title`, `origin`, `started_at`, `duration`, `tokens`, `est_cost`,
       `error`, `session_id?`, `run_id?`. Newest first; `status=` filter;
       explicit cap + `truncated`.
-- [ ] `stalled` = suspended past threshold (default 24h, constant).
-- [ ] Per-run tokens/est cost surfaced from `model_usage`.
+- [x] `stalled` = suspended past threshold (default 24h, constant).
+- [x] Per-run tokens/est cost surfaced from `model_usage`.
 - Testable: `curl` returns the merged list for a seeded home.
 
 **U3 — health tri-state + strip telemetry** *(Phase 2)*
@@ -330,10 +330,27 @@ comparison (dashboard's job) · RBAC/audit.
 
 — none yet.
 
-*(The line above and the header's `Last amended` are frozen review surface —
-the plan-artifact check is insertion-only, so amendments land beneath the
+*(Both lines above are frozen review surface: the header's `Last amended`
+and this placeholder predate the amendments below, and the plan-artifact
+check is insertion-only, so the first amendment lands beneath the
 placeholder rather than replacing it. Last amended: **2026-08-01**.)*
 
+- **2026-08-01** (U2 build session): **row identity is three fields, not
+  two.** The U2 row shape above lists `session_id?` / `run_id?`; the built
+  row carries a third, `key` (`session:<name>` / `workflow:<run_id>` /
+  `monitor:<run_id>`). `key` is stable UI row identity across polls and is
+  never a handle for opening anything; `session_id` and `run_id` say what a
+  row can actually open — a transcript, a run's details, both, or neither.
+  The "neither" case is real and load-bearing: a `$0` script-cache monitor
+  tick spawned no session, so its only drill-down is the Details slab (U5).
+  Contract documented in `docs/RUNS_VIEW.md`.
+- **2026-08-01** (U2 build session): **open question 1 answered — 24h
+  constant, not per-workflow config.** `STALLED_AFTER_SECONDS` is a module
+  constant because the threshold encodes a judgement about human attention
+  ("nobody is coming back to this today"), not anything about a particular
+  workflow; per-workflow config would make the Failed tab mean something
+  different per row. The clock runs from the last resume, not the original
+  start. Questions 2 (pagination) and 3 (today bucket) stay open.
 - **2026-08-01** (U3 build session): **the NOT RESPONDING strip's
   `Health probe: failing 12m` is not built.** The prototype is the visual
   spec, so this is a deliberate deviation, not an omission. A failure

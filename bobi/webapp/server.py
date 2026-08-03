@@ -174,6 +174,13 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def agent_sessions(name: str) -> JSONResponse:
         return JSONResponse(rt.session_log(name))
 
+    # The unified runs view: sessions + workflow runs + monitor runs as one
+    # list. `status=running|failed` are the page's tabs (`failed` covers
+    # crashed and stalled — everything needing a human).
+    @app.get("/api/agents/{name}/runs")
+    def agent_runs(name: str, status: str = "", limit: int = 0) -> JSONResponse:
+        return JSONResponse(rt.runs(name, status=status, limit=limit or None))
+
     @app.get("/api/agents/{name}/status")
     def agent_status(name: str) -> JSONResponse:
         return JSONResponse(rt.team_status(name))

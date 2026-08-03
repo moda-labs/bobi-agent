@@ -226,6 +226,39 @@ class TeamRuntime(ABC):
         readable as long as its registry entry exists.
         """
 
+    def runs(self, name: str, *, status: str = "",
+             limit: int | None = None) -> dict:
+        """One team's runs: sessions, workflow runs, and monitor runs merged
+        into one list, newest first with live runs at the top.
+
+        Shape (see ``bobi.webapp.runs.build_runs``)::
+
+            {"runs": [{"kind",        # session | workflow | monitor
+                       "key",         # stable row identity
+                       "status",      # running|idle|done|failed|crashed|
+                                      # stalled
+                       "title", "origin",       # what it is, what kicked it off
+                       "started_at",            # ISO 8601, "" if unknown
+                       "duration_seconds",      # float | None
+                       "tokens", "cost_usd", "est_cost_usd",
+                       "error",                 # "" unless it failed
+                       "session_id", "run_id",  # "" when the row has neither
+                       "detail"}, ...],         # kind-specific extras
+             "counts": {"all", "running", "failed"},
+             "truncated": bool}
+
+        ``status`` filters the payload; ``failed`` is the tab, so it covers
+        ``crashed`` and ``stalled`` too. ``counts`` always describes the whole
+        set so the tab counts stay honest when ``limit`` cuts the list.
+
+        NOT abstract on purpose: an out-of-tree subclass in the private
+        bobi-deploy repo implements this ABC, and adding an
+        ``@abstractmethod`` here breaks its CI the moment this merges (see
+        the class docstring's sequencing rule). This becomes abstract once
+        the hosted runtime implements it.
+        """
+        raise TeamLifecycleError("runs are not available on this runtime")
+
 
 # --- Local implementation ----------------------------------------------------
 
@@ -648,3 +681,19 @@ class LocalRuntime(TeamRuntime):
             "counts": session_outcome_counts(entries),
             "truncated": False,
         }
+
+    def runs(self, name: str, *, status: str = "",
+             limit: int | None = None) -> dict:
+        """Fold this machine's three run stores for one team. Every read takes
+        the resolved root explicitly - this process serves every team and
+        binds none of them."""
+        from bobi import service
+        from bobi.webapp.runs import DEFAULT_LIMIT, build_runs
+
+        root = self._resolve(name)
+        return build_runs(
+            root,
+            manager_name=service.manager_session_name(root),
+            status=status or "",
+            limit=limit if limit and limit > 0 else DEFAULT_LIMIT,
+        )

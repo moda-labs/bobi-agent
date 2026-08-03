@@ -1671,6 +1671,9 @@ class CheckResult:
     error: str = ""
     duration_ms: int = 0
     total_cost_usd: float = 0.0
+    # Registry entry name of the session this check ran under, so a caller
+    # holding only the verdict can still find the transcript.
+    session: str = ""
 
 
 def _build_check_prompt(description: str, extra: dict[str, Any] | None = None) -> str:
@@ -1844,6 +1847,7 @@ def run_check_blocking(
             raw_output=result.final_text if result else "",
             duration_ms=result.duration_ms if result else 0,
             total_cost_usd=result.total_cost_usd if result else 0.0,
+            session=session,
         )
 
     finding = bool(verdict.get("finding"))
@@ -1854,7 +1858,7 @@ def run_check_blocking(
     return CheckResult(
         success=True, finding=finding, summary=summary, details=details,
         raw_output=result.final_text, duration_ms=result.duration_ms,
-        total_cost_usd=result.total_cost_usd,
+        total_cost_usd=result.total_cost_usd, session=session,
     )
 
 
