@@ -81,7 +81,7 @@ code, pre, kbd { font-family: var(--font-mono); }
 
    The dashboard keeps this plane untextured. The single-agent page is the
    deliberate exception: its one bounded workspace uses the design system's
-   faint engineering grid behind opaque document plates. The grid never
+   faint engineering grid behind opaque management surfaces. The grid never
    crosses global chrome and never runs through table content.
    ========================================================================= */
 
@@ -817,8 +817,8 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 .agent-header {
   width: 100%; max-width: 1280px; margin: 0 auto 30px;
   position: relative; overflow: visible;
-  background: var(--bobi-paper); border: 1px solid rgba(54, 46, 37, .18);
-  border-radius: 0;
+  background: var(--bobi-white); border: 1px solid rgba(54, 46, 37, .14);
+  border-radius: var(--radius-xl); box-shadow: var(--elev-1);
 }
 /* Dark chrome, not a terminal. A 48px drawing grid echoes the constellation
    field on buildmoda.ai/bobi without turning live controls into decoration. */
@@ -832,7 +832,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   background-size: 48px 48px;
   border-top: 4px solid var(--bobi-clay);
   border-bottom: 1px solid rgba(250, 247, 238, .12);
-  border-radius: 0;
+  border-radius: 11px 11px 0 0;
 }
 .status-band .lamp {
   width: 10px; height: 10px; border-radius: 50%; flex: none; margin-right: 10px;
@@ -972,7 +972,8 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 .pop-card {
   display: block;
   background: var(--bobi-white); border: 1px solid rgba(54, 46, 37, .22);
-  border-top: 3px solid var(--bobi-clay); border-radius: 0; padding: 18px 20px;
+  border-top: 3px solid var(--bobi-clay); border-radius: var(--radius-xl);
+  padding: 18px 20px;
   box-shadow: var(--elev-3);
   max-height: min(68vh, 600px); overflow-y: auto; overscroll-behavior: contain;
 }
@@ -1005,15 +1006,15 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 /* --- runs panel --- */
 .agent-page .panel {
   width: 100%; max-width: 1280px; margin: 0 auto 16px;
-  background: var(--bobi-paper); border: 1px solid rgba(54, 46, 37, .18);
-  border-radius: 0;
+  background: var(--bobi-white); border: 1px solid rgba(54, 46, 37, .14);
+  border-radius: var(--radius-xl); box-shadow: var(--elev-1);
   overflow: hidden;
 }
 .panel-head {
   display: flex; align-items: center; gap: 18px; min-height: 72px;
   padding: 15px 20px; flex-wrap: wrap;
   background: color-mix(in srgb, var(--bobi-paper-alt) 64%, var(--bobi-paper));
-  border-bottom: 1px dashed var(--border-dashed);
+  border-bottom: 1px solid rgba(54, 46, 37, .12);
 }
 .panel-title {
   display: flex; align-items: baseline; gap: 10px; min-width: 88px;
@@ -1093,7 +1094,7 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 0; }
 .runs .r-title { font-weight: 550; }
 .runs .r-pending {
   display: inline-block; margin-top: 5px; padding: 4px 8px;
-  border-left: 3px solid var(--run-await); border-radius: 0;
+  border-left: 3px solid var(--run-await); border-radius: var(--radius-sm);
   background: var(--run-await-soft); color: var(--run-await-strong);
   font-size: 14px; font-weight: var(--weight-medium); line-height: 1.35;
 }
