@@ -2000,6 +2000,44 @@ describe("handleRegisterDeployment", () => {
 		expect(result.status).toBe(400);
 	});
 
+	// D089 — the MINT path is unauthenticated, so `body` is attacker-shaped. A
+	// bare `as string[]` cast satisfies the `!subscriptions?.length` guard with a
+	// non-empty STRING, which then iterates character-by-character into the
+	// subscription index; a non-string ELEMENT reaches isGlobalTopic and throws
+	// on `.startsWith`, surfacing as a 500 after a bubble has already been
+	// persisted. Both must be a clean 400 with nothing written.
+	it("rejects a string (not array) subscriptions without indexing it per character (D089)", async () => {
+		const store = createMockStorage();
+		const body = { name: "x", subscriptions: "github:foo" };
+		const raw = JSON.stringify(body);
+		const result = await handleRegisterDeployment(store, body, mintCtx("POST", "/deployments", raw));
+		expect(result.status).toBe(400);
+		// No per-character subscriptions ("g", "i", "t", ...) and no orphan bubble.
+		expect(store.subscriptions.size).toBe(0);
+		expect(store.deployments.size).toBe(0);
+		expect(store.bubbles.size).toBe(0);
+	});
+
+	it("rejects a non-string element in subscriptions instead of throwing (D089)", async () => {
+		const store = createMockStorage();
+		const body = { name: "x", subscriptions: [42] };
+		const raw = JSON.stringify(body);
+		const result = await handleRegisterDeployment(store, body, mintCtx("POST", "/deployments", raw));
+		expect(result.status).toBe(400);
+		expect(store.bubbles.size).toBe(0);
+		expect(store.deployments.size).toBe(0);
+	});
+
+	it("rejects a non-string name (D089)", async () => {
+		const store = createMockStorage();
+		const body = { name: { evil: true }, subscriptions: ["inbox/x"] };
+		const raw = JSON.stringify(body);
+		const result = await handleRegisterDeployment(store, body, mintCtx("POST", "/deployments", raw));
+		expect(result.status).toBe(400);
+		expect(store.deployments.size).toBe(0);
+		expect(store.bubbles.size).toBe(0);
+	});
+
 	it("supersedes a prior deployment with the same name in the same bubble (#278)", async () => {
 		const store = createMockStorage();
 		const bubble = seedBubble(store);

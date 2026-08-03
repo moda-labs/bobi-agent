@@ -136,6 +136,7 @@ All configuration is environment variables, read at startup:
 | `BOBI_ES_WHATSAPP_APP_SECRET` | unset | Meta app secret for WhatsApp signatures |
 | `BOBI_ES_WHATSAPP_VERIFY_TOKEN` | unset | WhatsApp GET-subscribe handshake token |
 | `BOBI_ES_INGEST_TOKENS` | unset | Boot-seeded `topic=token` ingest bindings, comma-separated |
+| `BOBI_ES_MAX_BODY_BYTES` | `8388608` (8 MiB) | Hard ceiling on a request body. The read is aborted at the cap and answered `413`, so an oversized POST never costs the memory it asked for. Raise it only if `/channels/send` legitimately carries larger base64 file uploads |
 
 An unset provider secret admits that provider's webhooks **unverified**
 (zero-config local development). On a public server set every secret for a
