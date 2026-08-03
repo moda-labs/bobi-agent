@@ -393,10 +393,16 @@ was that `createMcpHandler` is web-standards, so no Node compatibility should
 be needed. It is: the handler carries its per-request server context in an
 `AsyncLocalStorage`, so the bundle imports `node:async_hooks`, and the
 `wrangler deploy --dry-run` bundle warns accordingly. The flag is now set in
-`wrangler.jsonc`. This matters beyond us — it is Worker-wide, and its failure
-mode is quiet: without the flag every other route serves normally and only MCP
-tool calls throw. Documented in `docs/ADMIN_PROTOCOL.md` and
-`docs/SELF_HOSTED_EVENT_SERVER.md` for anyone maintaining their own config.
+`wrangler.jsonc`. This matters beyond us — it is Worker-wide, and the failure
+is total rather than confined to `/mcp`: workerd refuses the script outright
+with `No such module "node:async_hooks"`, so the bus goes down with it.
+
+That last sentence is a correction. This amendment first recorded the failure
+as quiet — "every other route serves normally and only MCP tool calls throw" —
+and that was wrong, propagated into both docs and several test comments before
+anyone checked it. What established the truth was the CI coverage added at the
+`wrangler dev` rung: removing the flag does not fail a tool call, it fails
+Worker startup. Corrected everywhere on the same PR.
 
 **Q7's known client risk did not materialize.** The two open Claude Code issues
 about configured headers not being attached (#50464, #29562) do not affect

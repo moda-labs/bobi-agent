@@ -180,9 +180,9 @@ describe("/mcp authorization", () => {
 });
 
 describe("Worker configuration the /mcp route depends on", () => {
-	// `createMcpHandler` imports node:async_hooks, so a deployed Worker without
-	// the nodejs_compat flag serves every other route normally and throws only
-	// when a tool is called.
+	// `createMcpHandler` imports node:async_hooks, so without the nodejs_compat
+	// flag workerd refuses to start the script at all - the whole Worker is
+	// dead, not just /mcp.
 	//
 	// This asserts the flag is CONFIGURED, which is all a unit test here can do:
 	// @cloudflare/vitest-pool-workers injects its own enable_nodejs_* flags for

@@ -348,6 +348,7 @@ mcp_servers:
 The route requires the **`nodejs_compat`** compatibility flag, already set in
 `event-server/worker/wrangler.jsonc`. The MCP handler carries its per-request
 context in an `AsyncLocalStorage`, so the bundle imports `node:async_hooks`.
-A Worker deployed without the flag serves every other route normally and
-throws only when a tool is called — so if you maintain your own wrangler
-config, carry the flag across.
+Without the flag the whole Worker fails to boot, not just `/mcp`: workerd
+refuses to start with `No such module "node:async_hooks"`, taking the bus down
+with it. So if you maintain your own wrangler config, carry the flag across —
+this is not a degraded-MCP failure, it is a dead Worker.

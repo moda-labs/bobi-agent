@@ -314,8 +314,9 @@ stay closed. Anyone holding it has full control of every instance in the
 fleet, so treat it as an admin credential, not a read key.
 
 `/mcp` also needs the **`nodejs_compat`** compatibility flag, which the shipped
-`wrangler.jsonc` sets. If you maintain your own config, carry the flag over —
-without it every other route works and only MCP tool calls fail.
+`wrangler.jsonc` sets. If you maintain your own config, carry the flag over:
+without it the Worker does not start at all — workerd rejects the script with
+`No such module "node:async_hooks"`, so the bus goes down too, not just MCP.
 
 **3. Deploy and verify.**
 

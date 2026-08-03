@@ -254,9 +254,10 @@ def test_deployed_worker_mcp_tool_call(smoke_url: str):
 
     This is the only place the `nodejs_compat` compatibility flag is actually
     proven. `createMcpHandler` carries its per-request context in an
-    `AsyncLocalStorage`, so the bundle imports `node:async_hooks`; a Worker
-    deployed without the flag serves every other route normally and throws
-    only when a tool is called. The Worker unit suite cannot see this —
+    `AsyncLocalStorage`, so the bundle imports `node:async_hooks`; without the
+    flag workerd refuses the script outright (`No such module
+    "node:async_hooks"`) and the whole Worker is dead, bus included. The Worker
+    unit suite cannot see this —
     `@cloudflare/vitest-pool-workers` injects its own `enable_nodejs_*` flags
     for the Vitest runner, so those tests stay green with the flag deleted
     (verified by mutation 2026-08-03). `event-server/worker/test/mcp.spec.ts`

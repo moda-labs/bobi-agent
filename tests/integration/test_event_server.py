@@ -41,6 +41,9 @@ from bobi.runtime_guard import with_mutable_runtime_package
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 TEST_GRANTS_SECRET = "bobi-integration-test-grants"
+#: Operator credential handed to the `wrangler dev` Worker so `/mcp` is
+#: reachable. Test-only, and only ever written into a local `.dev.vars`.
+TEST_FLEET_OPERATOR_TOKEN = "bobi-integration-test-operator"
 
 
 def _free_port() -> int:
@@ -297,6 +300,10 @@ def _start_wrangler_server():
     test_secrets = {
         "INTERNAL_DO_SECRET": "test-internal-secret",
         "TEST_GRANTS_SECRET": TEST_GRANTS_SECRET,
+        # /fleet/* and /mcp fail closed without this - `requireOperator`
+        # answers 503 before any handler runs, so the MCP tests below would
+        # assert against a "not configured" response and prove nothing.
+        "FLEET_OPERATOR_TOKEN": TEST_FLEET_OPERATOR_TOKEN,
     }
     for key, value in test_secrets.items():
         secret_line = f"{key}={value}"
@@ -1887,3 +1894,115 @@ class TestIngestTokens:
             while procs:
                 proc, lf = procs.pop()
                 TestBindAddress._stop(proc, lf)
+
+
+# ---------------------------------------------------------------------------
+# The MCP control surface, against a REAL workerd.
+#
+# This is the rung between the miniflare suite and the billed deploy lane, and
+# it is the cheapest place `nodejs_compat` can actually be proven.
+#
+# `event-server/worker/test/mcp.spec.ts` runs under
+# @cloudflare/vitest-pool-workers, which injects its own `enable_nodejs_*`
+# flags for the Vitest runner - so it stays green with `nodejs_compat` deleted
+# from wrangler.jsonc and can only assert the flag is CONFIGURED, not that it
+# works. `wrangler dev` reads the shipped wrangler.jsonc verbatim, including
+# `compatibility_flags`, so a tool call here fails if the flag is missing or
+# ineffective. It needs no Cloudflare account and runs on every PR, unlike
+# worker-deploy-smoke.yml.
+# ---------------------------------------------------------------------------
+
+
+def _mcp_rpc(base_url: str, payload: dict, token: str | None = TEST_FLEET_OPERATOR_TOKEN):
+    """POST one JSON-RPC message to /mcp; return (status, parsed_or_None)."""
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(
+        f"{base_url}/mcp", data=json.dumps(payload).encode(), headers=headers
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode()
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        return exc.code, None
+    # The transport answers on text/event-stream; the JSON-RPC message is the
+    # `data:` line of the SSE frame.
+    for line in raw.splitlines():
+        if line.startswith("data:"):
+            return status, json.loads(line[len("data:"):].strip())
+    return status, (json.loads(raw) if raw.strip() else None)
+
+
+def _require_worker_backend(event_server):
+    base_url, _port, backend = event_server
+    if backend != "wrangler":
+        pytest.skip(f"/mcp is a Worker route (backend={backend})")
+    return base_url
+
+
+def test_mcp_tool_call_against_real_workerd(event_server):
+    """A tool call succeeds on a real workerd started from the shipped config.
+
+    This is the assertion that proves `nodejs_compat`: `createMcpHandler`
+    carries its per-request context in an `AsyncLocalStorage`, so the bundle
+    imports `node:async_hooks`. Without the flag workerd refuses to start the
+    script at all - verified by mutation: removing `nodejs_compat` fails this
+    test with `No such module "node:async_hooks"` before a single request is
+    served.
+    """
+    base_url = _require_worker_backend(event_server)
+
+    status, handshake = _mcp_rpc(base_url, {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "bobi-integration", "version": "1"},
+        },
+    })
+    assert status == 200, f"initialize -> HTTP {status}"
+    assert handshake["result"]["serverInfo"]["name"] == "bobi-fleet", handshake
+
+    status, listed = _mcp_rpc(base_url, {
+        "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
+    })
+    assert status == 200
+    names = sorted(t["name"] for t in listed["result"]["tools"])
+    assert names == [
+        "bobi_command_result", "bobi_fleet_status", "bobi_instance_detail"
+    ], names
+
+    status, called = _mcp_rpc(base_url, {
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "bobi_fleet_status", "arguments": {}},
+    })
+    assert status == 200
+    assert "error" not in called, (
+        f"tools/call returned a JSON-RPC error under real workerd: {called!r} — "
+        "a node:async_hooks failure here means nodejs_compat is missing or "
+        "ineffective in event-server/worker/wrangler.jsonc"
+    )
+    result = called["result"]
+    assert not result.get("isError"), result
+    payload = json.loads(result["content"][0]["text"])
+    assert isinstance(payload["instances"], list), payload
+
+
+def test_mcp_rejects_an_unauthenticated_request_on_real_workerd(event_server):
+    """/mcp is a new public route on a Worker that also serves the bus."""
+    base_url = _require_worker_backend(event_server)
+
+    status, _ = _mcp_rpc(base_url, {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+    }, token=None)
+    assert status == 401, f"unauthenticated /mcp answered {status}, expected 401"
+
+    status, _ = _mcp_rpc(base_url, {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+    }, token="not-the-operator-token")
+    assert status == 401, f"wrong-token /mcp answered {status}, expected 401"
