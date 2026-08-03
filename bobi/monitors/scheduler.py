@@ -158,6 +158,7 @@ def _parse_iso(value: str):
         dt = dt.replace(tzinfo=_tz.utc)
     return dt
 from .registry import MonitorRegistry
+from .run_records import RunTracker
 from .schema import Condition
 
 log = logging.getLogger(__name__)
@@ -207,6 +208,42 @@ def _append_manager_log(message: str) -> None:
         pass
 
 
+# The bundled check runner whose whole point is WHICH runtime served a tick —
+# a $0 cached script or a paid agent regeneration. Recorded per run.
+SCRIPT_CACHE_CHECK = "script_cache"
+
+
+def _run_flavor(monitor) -> str:
+    """How this monitor detects — the run record's `flavor`."""
+    if monitor.notify:
+        return "notify"
+    if monitor.command:
+        return "command"
+    if monitor.check:
+        return f"check:{monitor.check}"
+    if monitor.sleep_cycle:
+        return "sleep_cycle"
+    return "description"
+
+
+def _script_cache_mode(monitor_name: str) -> str:
+    """The script-cache runner's mode for the tick it just ran, or "".
+
+    Read back from the runner's own state file rather than plumbed through the
+    check protocol: checks return conditions, and widening that contract for
+    one runner's telemetry would touch every check.
+    """
+    try:
+        from bobi.monitors import script_cache_checks
+
+        state = script_cache_checks._load_trusted_state(monitor_name)
+        return str((state or {}).get("last_mode") or "")
+    except Exception:
+        log.debug("Could not read script_cache mode for %s", monitor_name,
+                  exc_info=True)
+        return ""
+
+
 def _publish_monitor_error(monitor_name: str, kind: str, reason: str,
                            detail: str = "", publish=None) -> None:
     payload = {
@@ -254,7 +291,8 @@ def _parse_gate_output(output: str) -> dict | None:
 
 
 def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
-                         on_result, cleanup=None, publish=None) -> None:
+                         on_result, cleanup=None, publish=None,
+                         on_error=None) -> None:
     """Launch an out-of-band monitor agent subprocess and report its result.
 
     The shared subprocess machinery for the check, gate, and curator flavors:
@@ -262,10 +300,23 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
     tees stdout to manager.log and hands ``parse(stdout)`` - or None on
     spawn/timeout failure, indeterminate - to ``on_result``. ``cleanup`` (if
     given) runs exactly once when the subprocess is finished with its inputs.
+
+    ``on_error(reason, detail)``, when given, is called just before
+    ``on_result(None)`` on every failure path. ``on_result(None)`` already
+    says "this run produced nothing trustworthy"; ``on_error`` carries WHY,
+    so the run record can say `spawn-failed: ...` rather than a bare failure.
     """
     from bobi import paths
     root = paths.bobi_root()
     log_path = paths.state_dir() / "manager.log"
+
+    def _note(reason: str, detail: str) -> None:
+        if on_error is None:
+            return
+        try:
+            on_error(reason, detail)
+        except Exception:  # observability must never break a monitor run
+            log.exception("on_error hook failed for monitor %s", monitor_name)
 
     oversized = [(idx, len(str(arg).encode())) for idx, arg in enumerate(cmd)
                  if len(str(arg).encode()) > MAX_MONITOR_ARG_BYTES]
@@ -281,6 +332,7 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
             cleanup()
         _publish_monitor_error(
             monitor_name, kind, "spawn-failed", detail, publish=publish)
+        _note("spawn-failed", detail)
         on_result(None)
         return
 
@@ -301,6 +353,7 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
             cleanup()
         _publish_monitor_error(
             monitor_name, kind, "spawn-failed", detail, publish=publish)
+        _note("spawn-failed", detail)
         on_result(None)
         return
 
@@ -319,6 +372,7 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
             _append_manager_log(message)
             _publish_monitor_error(
                 monitor_name, kind, "timeout", detail, publish=publish)
+            _note("timeout", detail)
             on_result(None)
             return
         finally:
@@ -339,6 +393,7 @@ def _spawn_monitor_agent(cmd, monitor_name: str, kind: str, parse,
             _publish_monitor_error(
                 monitor_name, kind, "indeterminate-result", detail,
                 publish=publish)
+            _note("indeterminate-result", detail)
         on_result(result)
 
     threading.Thread(target=_wait, daemon=True,
@@ -367,7 +422,7 @@ def _monitor_agent_role(monitor) -> str:
 
 
 def _default_spawn_check(monitor, cwd: str | None, on_verdict,
-                         publish=None) -> None:
+                         publish=None, on_error=None) -> None:
     """Launch a non-interactive check subprocess and report its verdict.
 
     Runs `bobi agent <name> subagents launch --as-check` out-of-band so the
@@ -391,7 +446,7 @@ def _default_spawn_check(monitor, cwd: str | None, on_verdict,
     ]
     _spawn_monitor_agent(
         cmd, monitor.name, "check", _parse_verdict, on_verdict,
-        publish=publish)
+        publish=publish, on_error=on_error)
 
 
 # A gate request file older than this is an orphan: the waiter thread that
@@ -493,7 +548,7 @@ def _write_curator_task(monitor, task: str) -> str | None:
 
 
 def _default_spawn_gate(monitor, cwd: str | None, items: list, on_verdict,
-                        publish=None) -> None:
+                        publish=None, on_error=None) -> None:
     """Launch a non-interactive relevance-gate subprocess over new items (#630).
 
     Mirrors _default_spawn_check: out-of-band so the scheduler thread is never
@@ -507,6 +562,8 @@ def _default_spawn_gate(monitor, cwd: str | None, items: list, on_verdict,
 
     request_path = _write_gate_request(monitor, items)
     if request_path is None:
+        if on_error is not None:
+            on_error("spawn-failed", "failed to write the gate request file")
         on_verdict(None)
         return
 
@@ -519,12 +576,12 @@ def _default_spawn_gate(monitor, cwd: str | None, items: list, on_verdict,
     _spawn_monitor_agent(
         cmd, monitor.name, "gate", _parse_gate_output, on_verdict,
         cleanup=lambda: Path(request_path).unlink(missing_ok=True),
-        publish=publish,
+        publish=publish, on_error=on_error,
     )
 
 
 def _default_spawn_sleep_cycle(monitor, cwd: str | None, task: str, on_result,
-                               publish=None) -> None:
+                               publish=None, on_error=None) -> None:
     """Launch the out-of-band sleep-cycle agent with a pre-rendered task (#456).
 
     Mirrors _default_spawn_gate: the full rendered task rides in a request
@@ -543,6 +600,8 @@ def _default_spawn_sleep_cycle(monitor, cwd: str | None, task: str, on_result,
         _publish_monitor_error(
             monitor.name, "sleep-cycle", "spawn-failed",
             "failed to write sleep-cycle task file", publish=publish)
+        if on_error is not None:
+            on_error("spawn-failed", "failed to write sleep-cycle task file")
         on_result(None)
         return
 
@@ -560,7 +619,7 @@ def _default_spawn_sleep_cycle(monitor, cwd: str | None, task: str, on_result,
     _spawn_monitor_agent(
         cmd, monitor.name, "sleep-cycle", _parse_sleep_cycle, on_result,
         cleanup=lambda: Path(task_path).unlink(missing_ok=True),
-        publish=publish,
+        publish=publish, on_error=on_error,
     )
 
 
@@ -577,18 +636,25 @@ class MonitorScheduler:
                  spawn_curator=None,
                  spawn_gate=None):
         self.publish = publish or _default_publish
+        # The injectable spawn hooks keep their 3-/4-argument signatures so
+        # test doubles stay unchanged; the run-record error sink is resolved
+        # here, at spawn time, on the scheduler thread — so it always binds
+        # the firing that is actually being dispatched.
         self.spawn_check = spawn_check or (
             lambda monitor, cwd, on_verdict: _default_spawn_check(
-                monitor, cwd, on_verdict, publish=self.publish)
+                monitor, cwd, on_verdict, publish=self.publish,
+                on_error=self._run_error_sink(monitor))
         )
         self.spawn_sleep_cycle = spawn_sleep_cycle or spawn_curator or (
             lambda monitor, cwd, task, on_result: _default_spawn_sleep_cycle(
-                monitor, cwd, task, on_result, publish=self.publish)
+                monitor, cwd, task, on_result, publish=self.publish,
+                on_error=self._run_error_sink(monitor))
         )
         self.spawn_curator = self.spawn_sleep_cycle
         self.spawn_gate = spawn_gate or (
             lambda monitor, cwd, items, on_verdict: _default_spawn_gate(
-                monitor, cwd, items, on_verdict, publish=self.publish)
+                monitor, cwd, items, on_verdict, publish=self.publish,
+                on_error=self._run_error_sink(monitor))
         )
         self.state_path = Path(state_path) if state_path else _monitor_state_path()
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -609,6 +675,11 @@ class MonitorScheduler:
         # systematically broken gate (each retry pays for a model call that
         # never lands a verdict). Reset on any successful verdict.
         self._gate_failures: dict[str, int] = {}
+        # The firing currently being dispatched, per monitor — how a spawn
+        # hook finds the run record it should annotate. Set for the duration
+        # of run_monitor's synchronous portion only; the out-of-band
+        # callbacks capture their tracker directly.
+        self._open_runs: dict[str, RunTracker] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -738,37 +809,58 @@ class MonitorScheduler:
         Detection is the only flavor-specific step. Description-only checks
         detect out-of-band: nothing reconciles here, the waiter thread calls
         back into _reconcile when the verdict lands.
+
+        Every firing leaves one run record behind. In-thread flavors close it
+        here; the out-of-band ones hand their tracker to the callback that
+        resolves them, so the record lands when the firing actually finishes,
+        not when it was dispatched.
         """
         sleep_cycle_spawned = False
-        if monitor.notify:
-            # Scheduled notification — keyed to the due time, so the shared
-            # dedup path never suppresses it.
-            conditions: list | None = [
-                Condition(key=now.isoformat(),
-                          data={"description": monitor.description})
-            ]
-        elif monitor.command:
-            conditions = self._command_conditions(monitor)
-        elif monitor.check:
-            conditions = self._check_conditions(monitor, registry)
-        elif monitor.sleep_cycle:
-            # The sleep cycle writes an artifact, not a verdict — it does not flow
-            # through _reconcile. The cursor advance + publish happen on result.
-            sleep_cycle_spawned = self._spawn_sleep_cycle(
-                monitor, registry.projects_for(monitor))
-            conditions = None
-        else:
-            self._spawn_check(monitor, registry.projects_for(monitor))
-            conditions = None  # detection in flight — reconciled on verdict
-
-        if conditions is not None:
-            if monitor.gated:
-                # Two-tier semantic gate (#630): the mechanical detector
-                # decided what exists, a cheap-model gate judges what is new.
-                self._reconcile_gated(monitor, conditions,
-                                      registry.projects_for(monitor))
+        tracker = RunTracker(monitor.name, flavor=_run_flavor(monitor))
+        self._open_runs[monitor.state_key] = tracker
+        try:
+            in_flight = False
+            if monitor.notify:
+                # Scheduled notification — keyed to the due time, so the shared
+                # dedup path never suppresses it.
+                conditions: list | None = [
+                    Condition(key=now.isoformat(),
+                              data={"description": monitor.description})
+                ]
+            elif monitor.command:
+                conditions = self._command_conditions(monitor, tracker)
+            elif monitor.check:
+                conditions = self._check_conditions(monitor, registry, tracker)
+            elif monitor.sleep_cycle:
+                # The sleep cycle writes an artifact, not a verdict — it does not flow
+                # through _reconcile. The cursor advance + publish happen on result.
+                sleep_cycle_spawned = self._spawn_sleep_cycle(
+                    monitor, registry.projects_for(monitor), tracker)
+                conditions = None
+                in_flight = sleep_cycle_spawned
             else:
-                self._reconcile(monitor, conditions)
+                self._spawn_check(monitor, registry.projects_for(monitor),
+                                  tracker)
+                conditions = None  # detection in flight — reconciled on verdict
+                in_flight = True
+
+            if conditions is not None:
+                if monitor.gated:
+                    # Two-tier semantic gate (#630): the mechanical detector
+                    # decided what exists, a cheap-model gate judges what is new.
+                    in_flight = self._reconcile_gated(
+                        monitor, conditions, registry.projects_for(monitor),
+                        tracker)
+                else:
+                    self._reconcile(monitor, conditions, tracker)
+
+            if not in_flight:
+                # Detection resolved in this thread: either it produced an
+                # answer (close on what was published) or the detector failed
+                # and noted why (close as failed).
+                tracker.close()
+        finally:
+            self._open_runs.pop(monitor.state_key, None)
 
         with self._state_lock:
             entry = self.state.setdefault(monitor.state_key, {})
@@ -777,7 +869,38 @@ class MonitorScheduler:
                 entry["last_spawn"] = now.isoformat()
             self._save_state()
 
-    def _reconcile(self, monitor, conditions: list) -> None:
+    def _sleep_cycle_error(self, monitor, reason: str, detail: str,
+                           tracker=None) -> None:
+        """Publish a sleep-cycle failure and record it against the firing.
+
+        The sleep cycle has many ways to turn back (unreadable artifact, blown
+        memory budget, a reference file that did not change); each one already
+        published `system/monitor.error`. Routing them through here means the
+        run record carries the same reason the bus event did.
+        """
+        _publish_monitor_error(monitor.name, "sleep-cycle", reason, detail,
+                               publish=self.publish)
+        if tracker is not None:
+            tracker.note_failure(f"{reason}: {detail}" if detail else reason)
+
+    def _run_error_sink(self, monitor):
+        """A `(reason, detail)` sink bound to the firing being dispatched.
+
+        Resolved when a spawn hook runs — synchronously, on the scheduler
+        thread, inside run_monitor — so it can never bind a later firing's
+        record. Returns None when there is no open run (a direct call from a
+        test, say), which the spawn helpers treat as "nothing to annotate".
+        """
+        tracker = self._open_runs.get(monitor.state_key)
+        if tracker is None:
+            return None
+
+        def _sink(reason: str, detail: str = "") -> None:
+            tracker.note_failure(f"{reason}: {detail}" if detail else reason)
+
+        return _sink
+
+    def _reconcile(self, monitor, conditions: list, tracker=None) -> None:
         """The single dedup + publish chokepoint for every monitor flavor.
 
         Fires events only for conditions that weren't active last time.
@@ -791,11 +914,26 @@ class MonitorScheduler:
             previous = set(entry.get("active", []))
             current = {c.key: c for c in conditions}
             active: list[str] = []
+            fired = 0
+            unpublished = 0
             for key, condition in current.items():
-                if key in previous or self._fire(monitor, condition):
+                if key in previous:
                     active.append(key)
+                elif self._fire(monitor, condition):
+                    active.append(key)
+                    fired += 1
+                else:
+                    unpublished += 1
             entry["active"] = active
             self._save_state()
+        if tracker is not None:
+            tracker.add_published(fired)
+            if unpublished:
+                # Nobody heard about these findings — the firing did not
+                # deliver, however many of its siblings did.
+                tracker.note_failure(
+                    f"{unpublished} finding(s) failed to publish — "
+                    "retrying next interval")
 
     def _fire(self, monitor, condition) -> bool:
         event = monitor.event or f"monitor/{monitor.name}"
@@ -814,9 +952,12 @@ class MonitorScheduler:
     # --- relevance gate (two-tier semantic gate, #630) -------------------
 
     def _reconcile_gated(self, monitor, conditions: list,
-                         projects: list[Path]) -> None:
+                         projects: list[Path], tracker=None) -> bool:
         """Dedup first, then judge ONLY the new conditions with a cheap-model
         relevance gate before anything publishes.
+
+        Returns True when a gate is in flight — the firing is not finished and
+        its run record stays open until the verdict lands.
 
         The cost shape is the point: a tick where the mechanical detector
         finds nothing new ends here with zero LLM calls (the common case).
@@ -858,24 +999,30 @@ class MonitorScheduler:
             # Already judged relevant, publish failed last time: retry the
             # publish only, outside the lock.
             self._publish_judged(monitor, [Condition(key=k, data=d)
-                                           for k, d in pending.items()])
+                                           for k, d in pending.items()],
+                                 tracker)
 
         if not spawn:
-            return
+            return False
         cwd = str(projects[0]) if projects else None
         log.info(f"Monitor {monitor.name}: gating {len(new)} new item(s) "
                  "against its relevance criterion")
         try:
             self.spawn_gate(monitor, cwd, new,
-                            lambda verdict: self._on_gate_verdict(monitor, new, verdict))
+                            lambda verdict: self._on_gate_verdict(
+                                monitor, new, verdict, tracker))
         except Exception as e:
             # A spawn that raised will never deliver a verdict - lift the
             # in-flight guard so the next tick can retry.
             with self._state_lock:
                 self._gates_in_flight.discard(monitor.state_key)
             log.error(f"Failed to spawn gate for monitor {monitor.name}: {e}")
+            if tracker is not None:
+                tracker.note_failure(f"gate spawn failed: {e}")
+            return False
+        return True
 
-    def _publish_judged(self, monitor, conditions: list) -> None:
+    def _publish_judged(self, monitor, conditions: list, tracker=None) -> None:
         """Publish judged-relevant conditions and record the outcome.
 
         Publishes run OUTSIDE the state lock - they are HTTP posts (up to
@@ -903,9 +1050,16 @@ class MonitorScheduler:
             else:
                 entry.pop("pending_publish", None)
             self._save_state()
+        if tracker is not None:
+            tracker.add_published(len(fired))
+            parked = len(conditions) - len(fired)
+            if parked:
+                tracker.note_failure(
+                    f"{parked} judged finding(s) failed to publish — "
+                    "parked for a mechanical retry")
 
     def _on_gate_verdict(self, monitor, judged: list,
-                         verdict: dict | None) -> None:
+                         verdict: dict | None, tracker=None) -> None:
         """Reconcile a relevance-gate verdict (waiter-thread callback).
 
         Irrelevant items are recorded active without publishing - judged
@@ -920,6 +1074,10 @@ class MonitorScheduler:
         if not isinstance(verdict, dict) or not verdict.get("success", False):
             with self._state_lock:
                 self._gates_in_flight.discard(key)
+            if tracker is not None:
+                tracker.note_failure("relevance gate returned no verdict — "
+                                     "new items stay unjudged")
+                tracker.close()
             failures = self._gate_failures.get(key, 0) + 1
             self._gate_failures[key] = failures
             log.warning(f"Monitor {monitor.name}: gate indeterminate - "
@@ -947,27 +1105,39 @@ class MonitorScheduler:
             self._save_state()
 
         if to_publish:
-            self._publish_judged(monitor, to_publish)
+            self._publish_judged(monitor, to_publish, tracker)
 
         with self._state_lock:
             self._gates_in_flight.discard(key)
+        if tracker is not None:
+            tracker.close()
 
     # --- detectors ------------------------------------------------------
 
-    def _check_conditions(self, monitor, registry: MonitorRegistry) -> list | None:
+    def _check_conditions(self, monitor, registry: MonitorRegistry,
+                          tracker=None) -> list | None:
         """Run a native check runner. None when the check itself failed."""
         check = self._checks.get(monitor.check)
         if check is None:
-            log.warning(f"Monitor {monitor.name} names unknown check "
-                        f"'{monitor.check}' — skipping")
+            reason = f"unknown check '{monitor.check}'"
+            log.warning(f"Monitor {monitor.name} names {reason} — skipping")
+            if tracker is not None:
+                tracker.note_failure(reason)
             return None
         try:
             return check(monitor, registry.projects_for(monitor))
         except Exception as e:
             log.error(f"Check '{monitor.check}' for {monitor.name} failed: {e}")
+            if tracker is not None:
+                tracker.note_failure(f"check '{monitor.check}' raised: {e}")
             return None
+        finally:
+            if tracker is not None and monitor.check == SCRIPT_CACHE_CHECK:
+                # Whether this tick ran the $0 cached script or paid an agent
+                # to regenerate it is the script-cache runner's whole story.
+                tracker.note_script_cache_mode(_script_cache_mode(monitor.name))
 
-    def _command_conditions(self, monitor) -> list | None:
+    def _command_conditions(self, monitor, tracker=None) -> list | None:
         """Run a shell command and parse its JSON output into conditions.
 
         None when the command failed or printed garbage (indeterminate);
@@ -980,14 +1150,22 @@ class MonitorScheduler:
             )
         except subprocess.TimeoutExpired:
             log.error(f"Command monitor {monitor.name} timed out")
+            if tracker is not None:
+                tracker.note_failure("command timed out after 60s")
             return None
         except OSError as e:
             log.error(f"Command monitor {monitor.name} failed to run: {e}")
+            if tracker is not None:
+                tracker.note_failure(f"command failed to run: {e}")
             return None
 
         if result.returncode != 0:
             stderr = result.stderr.strip()[:200] if result.stderr else ""
             log.warning(f"Command monitor {monitor.name} exited {result.returncode}: {stderr}")
+            if tracker is not None:
+                tracker.note_failure(
+                    f"command exited {result.returncode}"
+                    + (f": {stderr}" if stderr else ""))
             return None
 
         stdout = result.stdout.strip()
@@ -998,6 +1176,8 @@ class MonitorScheduler:
             data = json.loads(stdout)
         except json.JSONDecodeError:
             log.warning(f"Command monitor {monitor.name} returned non-JSON output")
+            if tracker is not None:
+                tracker.note_failure("command printed non-JSON output")
             return None
 
         items = data if isinstance(data, list) else [data]
@@ -1011,7 +1191,7 @@ class MonitorScheduler:
                 conditions.append(Condition(key=str(key), data=item))
         return conditions
 
-    def _spawn_check(self, monitor, projects: list[Path]) -> None:
+    def _spawn_check(self, monitor, projects: list[Path], tracker=None) -> None:
         """No native check — run the description as an out-of-band detector.
 
         Rather than injecting a check-due event into the manager (which would
@@ -1028,16 +1208,27 @@ class MonitorScheduler:
         cwd = str(projects[0]) if projects else None
         log.info(f"Monitor {monitor.name} due — spawning non-interactive check")
         self.spawn_check(monitor, cwd,
-                         lambda verdict: self._on_check_verdict(monitor, verdict))
+                         lambda verdict: self._on_check_verdict(
+                             monitor, verdict, tracker))
 
-    def _on_check_verdict(self, monitor, verdict: dict | None) -> None:
+    def _on_check_verdict(self, monitor, verdict: dict | None,
+                          tracker=None) -> None:
         """Reconcile an out-of-band check's verdict (waiter-thread callback)."""
+        if tracker is not None and isinstance(verdict, dict):
+            # The check agent reports the session it ran under, so its run
+            # row can open the transcript rather than a bare "no detail".
+            tracker.note_session(str(verdict.get("session", "")))
         conditions = self._verdict_conditions(verdict)
         if conditions is None:
             log.warning(f"Monitor {monitor.name}: check indeterminate — "
                         "leaving state untouched, retrying next interval")
+            if tracker is not None:
+                tracker.note_failure("check agent returned no usable verdict")
+                tracker.close()
             return
-        self._reconcile(monitor, conditions)
+        self._reconcile(monitor, conditions, tracker)
+        if tracker is not None:
+            tracker.close()
 
     @staticmethod
     def _verdict_conditions(verdict: dict | None) -> list | None:
@@ -1098,7 +1289,8 @@ class MonitorScheduler:
         """Deprecated compatibility wrapper for one release."""
         return self._load_sleep_cycle_prompt(root)
 
-    def _spawn_sleep_cycle(self, monitor, projects: list[Path]) -> bool:
+    def _spawn_sleep_cycle(self, monitor, projects: list[Path],
+                           tracker=None) -> bool:
         """Window the transcript delta, apply the input cap, and launch the
         sleep-cycle agent with the rendered delta (#456).
 
@@ -1159,16 +1351,16 @@ class MonitorScheduler:
 
                 if cold_memory_kb_needs_sync(root, reference_path):
                     self._sync_reference_kb_or_publish_error(
-                        monitor, root, reference_path, demoted=0, reference_updated=False)
+                        monitor, root, reference_path, demoted=0,
+                        reference_updated=False, tracker=tracker)
             except Exception as e:
                 detail = (
                     f"workspace/memory/reference.md KB sync check failed at "
                     f"{reference_path}: {e}"
                 )
                 log.warning("Monitor %s: %s", monitor.name, detail)
-                _publish_monitor_error(
-                    monitor.name, "sleep-cycle", "reference-kb-index-failed", detail,
-                    publish=self.publish)
+                self._sleep_cycle_error(
+                    monitor, "reference-kb-index-failed", detail, tracker)
             log.info("Monitor %s due - no new transcript messages since cursor %d "
                      "and nothing to seed", monitor.name, cursor)
             return False
@@ -1204,7 +1396,8 @@ class MonitorScheduler:
             lambda result: self._on_sleep_cycle_result(
                 monitor, result, highest_id, cursor_path, memory_path,
                 compaction_required, reference_path,
-                hashlib.sha256(current_reference.encode()).hexdigest()),
+                hashlib.sha256(current_reference.encode()).hexdigest(),
+                tracker),
         )
         return True
 
@@ -1217,28 +1410,50 @@ class MonitorScheduler:
                                memory_path: Path | None = None,
                                compaction_required: bool = False,
                                reference_path: Path | None = None,
-                               reference_before_hash: str | None = None) -> None:
+                               reference_before_hash: str | None = None,
+                               tracker=None) -> None:
         """Waiter-thread callback for a finished sleep-cycle run.
 
         Advances the cursor ONLY on success (a failed/indeterminate run leaves
         it unmoved so the same window is re-read next interval - no transcript
         skipped). Publishes `system/memory.updated` only when the run actually
         changed long_term_memory.md.
+
+        Every exit closes the firing's run record — the reason, when there is
+        one, was noted by whichever _sleep_cycle_error call turned back.
         """
+        try:
+            self._apply_sleep_cycle_result(
+                monitor, result, highest_id, cursor_path, memory_path,
+                compaction_required, reference_path, reference_before_hash,
+                tracker)
+        finally:
+            if tracker is not None:
+                tracker.close()
+
+    def _apply_sleep_cycle_result(self, monitor, result: dict | None,
+                                  highest_id: int | None, cursor_path: Path,
+                                  memory_path: Path | None,
+                                  compaction_required: bool,
+                                  reference_path: Path | None,
+                                  reference_before_hash: str | None,
+                                  tracker) -> None:
         from bobi.memory import MAX_MEMORY_CHARS, WORKING_MEMORY_CHARS
         from bobi.monitors import sleep_cycle as sleep_cycle_mod
 
         if not isinstance(result, dict):
             log.warning("Monitor %s: sleep-cycle run failed/indeterminate - cursor "
                         "NOT advanced, retrying next interval", monitor.name)
+            if tracker is not None:
+                tracker.note_failure(
+                    "sleep-cycle agent returned no usable result")
             return
         if not result.get("success"):
             summary = str(result.get("summary", "") or "sleep cycle returned failure")
             log.warning("Monitor %s: sleep-cycle run failed - cursor NOT advanced, "
                         "retrying next interval: %s", monitor.name, summary)
-            _publish_monitor_error(
-                monitor.name, "sleep-cycle", "indeterminate-result", summary,
-                publish=self.publish)
+            self._sleep_cycle_error(
+                monitor, "indeterminate-result", summary, tracker)
             return
 
         path = memory_path or cursor_path.with_name("long_term_memory.md")
@@ -1258,9 +1473,8 @@ class MonitorScheduler:
             )
             log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
                         monitor.name, detail)
-            _publish_monitor_error(
-                monitor.name, "sleep-cycle", "memory-artifact-unreadable", detail,
-                publish=self.publish)
+            self._sleep_cycle_error(
+                monitor, "memory-artifact-unreadable", detail, tracker)
             return
         if actual_chars > MAX_MEMORY_CHARS:
             detail = (
@@ -1271,9 +1485,8 @@ class MonitorScheduler:
             )
             log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
                         monitor.name, detail)
-            _publish_monitor_error(
-                monitor.name, "sleep-cycle", "memory-cap-exceeded", detail,
-                publish=self.publish)
+            self._sleep_cycle_error(
+                monitor, "memory-cap-exceeded", detail, tracker)
             return
         if actual_chars > WORKING_MEMORY_CHARS and (
             compaction_required or result.get("updated")
@@ -1287,9 +1500,8 @@ class MonitorScheduler:
             )
             log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
                         monitor.name, detail)
-            _publish_monitor_error(
-                monitor.name, "sleep-cycle", "memory-working-budget-exceeded", detail,
-                publish=self.publish)
+            self._sleep_cycle_error(
+                monitor, "memory-working-budget-exceeded", detail, tracker)
             return
         reference_changed_required = bool(
             result.get("demoted") or result.get("reference_updated")
@@ -1305,9 +1517,8 @@ class MonitorScheduler:
                 )
                 log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
                             monitor.name, detail)
-                _publish_monitor_error(
-                    monitor.name, "sleep-cycle", "reference-artifact-unreadable", detail,
-                    publish=self.publish)
+                self._sleep_cycle_error(
+                    monitor, "reference-artifact-unreadable", detail, tracker)
                 return
             if not reference.strip() or "## " not in reference:
                 detail = (
@@ -1316,9 +1527,8 @@ class MonitorScheduler:
                 )
                 log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
                             monitor.name, detail)
-                _publish_monitor_error(
-                    monitor.name, "sleep-cycle", "reference-artifact-invalid", detail,
-                    publish=self.publish)
+                self._sleep_cycle_error(
+                    monitor, "reference-artifact-invalid", detail, tracker)
                 return
             after_hash = hashlib.sha256(reference.encode()).hexdigest()
             if reference_before_hash is not None and after_hash == reference_before_hash:
@@ -1329,9 +1539,8 @@ class MonitorScheduler:
                 )
                 log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
                             monitor.name, detail)
-                _publish_monitor_error(
-                    monitor.name, "sleep-cycle", "reference-artifact-unchanged", detail,
-                    publish=self.publish)
+                self._sleep_cycle_error(
+                    monitor, "reference-artifact-unchanged", detail, tracker)
                 return
             memory_content = path.read_text() if path.is_file() else ""
             if not _facts_section_has_reference_pointer(memory_content):
@@ -1343,15 +1552,15 @@ class MonitorScheduler:
                 )
                 log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
                             monitor.name, detail)
-                _publish_monitor_error(
-                    monitor.name, "sleep-cycle", "reference-pointer-missing", detail,
-                    publish=self.publish)
+                self._sleep_cycle_error(
+                    monitor, "reference-pointer-missing", detail, tracker)
                 return
             sync = self._sync_reference_kb_or_publish_error(
                 monitor, path.parent.parent, ref_path,
                 demoted=result.get("demoted", 0),
                 reference_updated=bool(result.get("reference_updated")),
                 retry_note=True,
+                tracker=tracker,
             )
             if sync is None:
                 return
@@ -1376,7 +1585,7 @@ class MonitorScheduler:
                         result.get("lossy_drops"), result.get("summary", ""))
 
         if result.get("updated"):
-            self._publish_memory_updated(monitor, result)
+            self._publish_memory_updated(monitor, result, tracker)
         else:
             log.info("Monitor %s: sleep cycle found nothing durable - no publish",
                      monitor.name)
@@ -1390,6 +1599,7 @@ class MonitorScheduler:
         demoted: int = 0,
         reference_updated: bool = False,
         retry_note: bool = False,
+        tracker=None,
     ) -> dict | None:
         try:
             from bobi.memory import sync_reference_to_cold_memory_kb
@@ -1406,9 +1616,8 @@ class MonitorScheduler:
             )
             suffix = " - cursor NOT advanced, retrying next interval" if retry_note else ""
             log.warning("Monitor %s: %s%s", monitor.name, detail, suffix)
-            _publish_monitor_error(
-                monitor.name, "sleep-cycle", "reference-kb-index-failed", detail,
-                publish=self.publish)
+            self._sleep_cycle_error(
+                monitor, "reference-kb-index-failed", detail, tracker)
             return None
 
     def _on_curator_result(self, monitor, result: dict | None,
@@ -1416,7 +1625,7 @@ class MonitorScheduler:
         """Deprecated compatibility wrapper for one release."""
         self._on_sleep_cycle_result(monitor, result, highest_id, cursor_path)
 
-    def _publish_memory_updated(self, monitor, result: dict) -> None:
+    def _publish_memory_updated(self, monitor, result: dict, tracker=None) -> None:
         """Publish the completion event directly (bypassing _reconcile dedup).
 
         A completion signal is not a deduped finding - two runs with the same
@@ -1446,8 +1655,12 @@ class MonitorScheduler:
         if published:
             log.info("Monitor %s published %s (urgent=%s)",
                      monitor.name, event, payload["urgent"])
+            if tracker is not None:
+                tracker.add_published(1)
         else:
             log.warning("Monitor %s failed to publish %s", monitor.name, event)
+            if tracker is not None:
+                tracker.note_failure(f"failed to publish {event}")
 
     def _publish_policy_updated(self, monitor, result: dict) -> None:
         """Deprecated compatibility wrapper for one release."""

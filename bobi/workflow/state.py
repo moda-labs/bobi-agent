@@ -9,8 +9,15 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-def _runs_dir() -> Path:
+def _runs_dir(root: Path | None = None) -> Path:
+    """The runs directory for *root*, or the bound root when omitted.
+
+    Only created on the write paths: a reader (the web app folds these into
+    its runs view) must never mkdir inside someone else's runtime tree.
+    """
     from bobi import paths
+    if root is not None:
+        return paths.state_path(root) / "workflow" / "runs"
     d = paths.state_dir() / "workflow" / "runs"
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -133,11 +140,13 @@ class WorkflowRun:
         return None
 
     @classmethod
-    def list_runs(cls, status: str | None = None) -> list[WorkflowRun]:
-        if not _runs_dir().exists():
+    def list_runs(cls, status: str | None = None,
+                  root: Path | None = None) -> list[WorkflowRun]:
+        runs_dir = _runs_dir(root)
+        if not runs_dir.exists():
             return []
         runs = []
-        for path in sorted(_runs_dir().glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        for path in sorted(runs_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
                 data = json.loads(path.read_text())
                 if status and data.get("status") != status:
