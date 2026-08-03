@@ -152,9 +152,9 @@ Object.assign(window, { Button });
 /* ==================== core/Eyebrow ==================== */
 (function () {
 
-// The section eyebrow: a 10px violet square + uppercase mono label. Bobi's most
-// repeated structural signal — every major section opens with one.
-function Eyebrow({ children, color = "var(--bobi-acc)", className = "", style }) {
+// The editorial eyebrow: a 10px clay square + uppercase mono label. Clay keeps
+// this decorative marketing signature distinct from violet product state.
+function Eyebrow({ children, color = "var(--bobi-clay)", className = "", style }) {
   return (
     <p className={className} style={{ display: "flex", alignItems: "center", margin: "0 0 var(--stack-eyebrow-heading)", fontFamily: "var(--font-mono)", fontSize: "var(--text-eyebrow)", fontWeight: 500, letterSpacing: "var(--track-tightest)", color: "var(--text-secondary)", ...style }}>
       <span aria-hidden="true" style={{ display: "inline-block", width: 10, height: 10, background: color, marginRight: 8, flexShrink: 0 }}></span>
@@ -550,7 +550,7 @@ Object.assign(window, { FileTree });
 const STATES = {
   live:    { label: "Live",    color: "var(--status-live)",    bg: "var(--status-live-soft)",    edge: "var(--status-live-edge)",    dot: true, pulse: true },
   waiting: { label: "Gate",    color: "var(--status-waiting)", bg: "var(--status-waiting-soft)", edge: "var(--status-waiting-edge)", dot: true },
-  done:    { label: "Done",    color: "var(--text-secondary)", bg: "transparent",                edge: "var(--border-strong)" },
+  done:    { label: "Done",    color: "var(--status-done)",    bg: "transparent",                edge: "var(--status-done-edge)" },
   idle:    { label: "Idle",    color: "var(--text-secondary)", bg: "transparent",                edge: "var(--border-hairline)" },
   failed:  { label: "Failed",  color: "var(--status-failed)",  bg: "var(--status-failed-soft)",  edge: "var(--status-failed-edge)",  dot: true },
 };
@@ -920,4 +920,3 @@ function SideNav({ items = [], active, onSelect, footer, agent, tone = "light", 
 
 Object.assign(window, { SideNav });
 })();
-
