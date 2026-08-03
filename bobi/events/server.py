@@ -160,9 +160,65 @@ def _read_dependency_stamp(es_dir: Path) -> dict | None:
 # never loads.
 _NON_FATAL_TREE_PROBLEM_PREFIXES = ("extraneous:",)
 
+# `invalid:` is NOT blanket-harmless and is not listed above: an installed
+# version that does not satisfy its declared range breaks the build whenever
+# the local bundle actually imports that package.
+#
+# But it is only fatal for packages the local bundle CAN reach. The Worker
+# workspace's `agents` dependency declares peers on `vite`, `react`, `ai` and
+# friends; npm resolves some of those to versions it then calls `invalid`,
+# inside a subtree `esbuild src/local.ts` never traverses. Failing the local
+# server's launch over a peer conflict in the Cloudflare Worker's dev tooling
+# is the same category of mistake the `extraneous` allowance above fixed.
+#
+# So the test is membership, not wording: an `invalid:` for anything named in
+# the local package.json stays fatal (`invalid: ws@...` must still bite);
+# anything else is somebody else's subtree.
+def _local_dependency_names(es_dir: Path) -> frozenset[str] | None:
+    """Package names the LOCAL server's own package.json declares.
 
-def _fatal_tree_problems(problems: object) -> list[str]:
-    """The `npm ls` problems that must block a source build (default-deny)."""
+    None when the manifest cannot be read or is not an object. That is the
+    fail-CLOSED value: `_fatal_tree_problems` keeps every `invalid:` fatal
+    rather than forgiving one because the check could not be performed. An
+    empty frozenset would do the opposite - nothing would match, so everything
+    would be waved through.
+    """
+    try:
+        manifest = json.loads((es_dir / "package.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    names: set[str] = set()
+    for field in ("dependencies", "devDependencies", "optionalDependencies"):
+        section = manifest.get(field)
+        if isinstance(section, dict):
+            names.update(str(k) for k in section)
+    return frozenset(names)
+
+
+def _invalid_problem_package(problem: str) -> str | None:
+    """The package name in an `invalid: <name>@<version> <path>` line."""
+    body = problem.strip()[len("invalid:"):].strip()
+    if not body:
+        return None
+    spec = body.split()[0]
+    # Scoped names keep their leading @, so only split on a LATER one.
+    at = spec.rfind("@")
+    return spec[:at] if at > 0 else spec
+
+
+def _fatal_tree_problems(
+    problems: object, local_dependencies: frozenset[str] | None = None
+) -> list[str]:
+    """The `npm ls` problems that must block a source build (default-deny).
+
+    `local_dependencies` names the packages the local server declares. An
+    `invalid:` for one of them is fatal; an `invalid:` for anything else is a
+    conflict inside a subtree the local bundle never traverses. Omitting the
+    argument keeps every `invalid:` fatal, so a caller that cannot determine
+    the set does not accidentally widen the allowance.
+    """
     if not problems:
         return []
     if isinstance(problems, str):
@@ -171,15 +227,35 @@ def _fatal_tree_problems(problems: object) -> list[str]:
         # An unrecognized shape is not something to reason about - fail loudly
         # rather than silently treating an unknown report as "no problems".
         return [f"unrecognized npm ls problems payload: {problems!r}"]
-    return [
-        p for p in problems
-        if not isinstance(p, str)
-        or not p.strip().lower().startswith(_NON_FATAL_TREE_PROBLEM_PREFIXES)
-    ]
+
+    def is_fatal(p: object) -> bool:
+        if not isinstance(p, str):
+            return True
+        text = p.strip().lower()
+        if text.startswith(_NON_FATAL_TREE_PROBLEM_PREFIXES):
+            return False
+        if text.startswith("invalid:") and local_dependencies is not None:
+            package = _invalid_problem_package(p)
+            return package is None or package in local_dependencies
+        return True
+
+    return [p for p in problems if is_fatal(p)]
 
 
 def _dependency_tree(es_dir: Path) -> dict:
-    result = _run_npm(["npm", "ls", "--all", "--json", "--offline"], es_dir)
+    # `npm ls` exits 1 whenever it reports ANY problem, including the harmless
+    # classes enumerated above. Treating that exit as fatal made
+    # `_fatal_tree_problems` unreachable — the extraneous allowance below could
+    # never actually run, because the raise happened first. So the exit code is
+    # ignored here and the JSON payload is the authority: `problems` is what
+    # gets classified, default-deny, exactly as intended.
+    #
+    # A genuinely broken tree still fails, just one layer later and with a
+    # better message: `missing:` stays fatal, which is what the
+    # deleted-transitive-dependency path depends on.
+    result = _run_npm(
+        ["npm", "ls", "--all", "--json", "--offline"], es_dir, allow_failure=True
+    )
     try:
         tree = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
@@ -188,7 +264,9 @@ def _dependency_tree(es_dir: Path) -> dict:
         ) from exc
     if not isinstance(tree, dict):
         raise RuntimeError(f"npm ls returned a non-object dependency tree in {es_dir}")
-    problems = _fatal_tree_problems(tree.get("problems"))
+    problems = _fatal_tree_problems(
+        tree.get("problems"), _local_dependency_names(es_dir)
+    )
     if problems:
         raise RuntimeError(f"npm dependency tree is invalid in {es_dir}: {problems}")
     return tree
@@ -331,6 +409,7 @@ def _run_npm(
     args: list[str],
     es_dir: Path,
     timeout: float = 300,
+    allow_failure: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run an npm command, surfacing its output on failure.
 
@@ -359,7 +438,7 @@ def _run_npm(
         raise RuntimeError(
             f"{' '.join(args)} timed out after {timeout:g}s in {es_dir}"
         ) from exc
-    if result.returncode != 0:
+    if result.returncode != 0 and not allow_failure:
         detail = (result.stderr or result.stdout or "").strip()[-2000:]
         log.error(f"{' '.join(args)} failed (exit {result.returncode}):\n{detail}")
         raise RuntimeError(

@@ -360,7 +360,7 @@ def test_source_dependency_stamp_requires_exact_lock_and_offline_tree(
     _write_source_dependency_state(tmp_path, tree)
     calls = []
 
-    def run_npm(args, path):
+    def run_npm(args, path, timeout=300, allow_failure=False):
         calls.append(args)
         return subprocess.CompletedProcess(
             args, returncode=0, stdout=json.dumps(tree), stderr=""
@@ -389,7 +389,7 @@ def test_source_dependency_stamp_schema_requires_an_exact_integer(
     monkeypatch.setattr(
         es,
         "_run_npm",
-        lambda *args: (_ for _ in ()).throw(
+        lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("invalid stamp schema must fail before npm inspection")
         ),
     )
@@ -406,7 +406,7 @@ def test_deleted_transitive_dependency_triggers_exact_reinstall_and_build(
     monkeypatch.setattr(
         es,
         "_run_npm",
-        lambda args, path: (_ for _ in ()).throw(
+        lambda args, path, **kwargs: (_ for _ in ()).throw(
             RuntimeError("npm dependency tree is invalid: missing transitive payload")
         ),
     )
@@ -430,7 +430,7 @@ def test_source_install_and_build_use_single_exact_commands(
 
     timeouts = {}
 
-    def run_npm(args, path, timeout=300):
+    def run_npm(args, path, timeout=300, allow_failure=False):
         calls.append(args)
         timeouts[tuple(args)] = timeout
         output = "9.2.0\n" if args == ["npm", "--version"] else ""
@@ -926,6 +926,58 @@ class TestDependencyTreeProblemTriage:
         assert len(fatal) == 2
         assert any(p.startswith("missing:") for p in fatal)
         assert any(p.startswith("invalid:") for p in fatal)
+
+    def test_invalid_is_fatal_only_for_packages_the_local_build_declares(self):
+        """`invalid:` is scoped by PACKAGE, not waved through by wording.
+
+        The Worker workspace's `agents` dependency declares peers (`vite`,
+        `react`, `ai`) that npm resolves to versions it then calls invalid,
+        inside a subtree `esbuild src/local.ts` never traverses. Failing the
+        local server's launch over that is the same mistake the `extraneous`
+        allowance fixed. An `invalid:` on a package the local package.json
+        actually declares must still bite.
+        """
+        local = frozenset({"ws", "esbuild", "@moda-labs/bobi-events-core"})
+        assert es._fatal_tree_problems(
+            ["invalid: vite@7.3.3 /es/node_modules/vite"], local
+        ) == []
+        assert es._fatal_tree_problems(
+            ["invalid: ws@1.0.0 /es/node_modules/ws"], local
+        ) == ["invalid: ws@1.0.0 /es/node_modules/ws"]
+        # Scoped names must not be split on their leading @.
+        assert es._fatal_tree_problems(
+            ["invalid: @moda-labs/bobi-events-core@1.0.0 /es/node_modules/x"], local
+        )
+
+    def test_invalid_stays_fatal_when_the_local_set_is_unknown(self):
+        """Omitting the set must not widen the allowance.
+
+        `_local_dependency_names` returns empty on an unreadable package.json,
+        and the default is None - either way an `invalid:` keeps failing rather
+        than being silently forgiven because we could not check.
+        """
+        assert es._fatal_tree_problems(["invalid: vite@7.3.3 /x"])
+        assert es._fatal_tree_problems(["invalid: vite@7.3.3 /x"], None)
+
+    def test_npm_ls_nonzero_exit_does_not_bypass_triage(self):
+        """`npm ls` exits 1 whenever it reports ANY problem, harmless ones
+        included. Treating that exit as fatal made this whole triage
+        unreachable - the extraneous allowance could never run, because the
+        raise happened first. The JSON payload is the authority.
+        """
+        tree = {"name": "event-server", "problems": [
+            "extraneous: tslib@2.8.1 /es/node_modules/tslib",
+        ]}
+
+        def run_npm(args, path, timeout=300, allow_failure=False):
+            assert allow_failure, "npm ls must tolerate its own non-zero exit"
+            return subprocess.CompletedProcess(
+                args, returncode=1, stdout=json.dumps(tree), stderr="ELSPROBLEMS"
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(es, "_run_npm", run_npm)
+            assert es._dependency_tree(Path("/es")) == tree
 
     def test_unknown_problem_wording_is_fatal_by_default(self):
         """Default-deny. An earlier version enumerated the FATAL prefixes, so
