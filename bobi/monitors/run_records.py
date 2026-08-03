@@ -50,9 +50,15 @@ RETENTION_PER_MONITOR = 50
 _write_lock = threading.RLock()
 
 
-def _runs_dir() -> Path:
+def _runs_dir(root: Path | None = None) -> Path:
+    """The records directory for *root*, or the bound root when omitted.
+
+    The scheduler writes from inside a bound manager process; readers (the web
+    app's runs view) pass an explicit root because one webapp process serves
+    every team on the machine and binds none of them.
+    """
     from bobi import paths
-    return paths.state_path() / "monitor_runs"
+    return paths.state_path(root) / "monitor_runs"
 
 
 def _safe_name(monitor_name: str) -> str:
@@ -113,8 +119,8 @@ def new_run_id(monitor_name: str) -> str:
     return f"{_safe_name(monitor_name)}-{uuid.uuid4().hex[:12]}"
 
 
-def record_path(monitor_name: str) -> Path:
-    return _runs_dir() / f"{_safe_name(monitor_name)}.json"
+def record_path(monitor_name: str, root: Path | None = None) -> Path:
+    return _runs_dir(root) / f"{_safe_name(monitor_name)}.json"
 
 
 def record(run: MonitorRun) -> None:
@@ -138,9 +144,7 @@ def record(run: MonitorRun) -> None:
         log.exception("Failed to record monitor run for %s", run.monitor)
 
 
-def load(monitor_name: str) -> list[MonitorRun]:
-    """Records for one monitor, newest first. Empty when there are none."""
-    path = record_path(monitor_name)
+def _read_file(path: Path) -> list[MonitorRun]:
     if not path.exists():
         return []
     try:
@@ -154,25 +158,23 @@ def load(monitor_name: str) -> list[MonitorRun]:
     return [MonitorRun.from_json(item) for item in raw if isinstance(item, dict)]
 
 
-def load_all() -> list[MonitorRun]:
+def load(monitor_name: str, root: Path | None = None) -> list[MonitorRun]:
+    """Records for one monitor, newest first. Empty when there are none."""
+    return _read_file(record_path(monitor_name, root))
+
+
+def load_all(root: Path | None = None) -> list[MonitorRun]:
     """Every monitor's records, newest first across all monitors.
 
-    The read side of this module — the runs read model (U2) folds these in
+    The read side of this module — the runs read model folds these in
     alongside sessions and workflow runs.
     """
-    runs_dir = _runs_dir()
+    runs_dir = _runs_dir(root)
     if not runs_dir.exists():
         return []
     runs: list[MonitorRun] = []
     for path in sorted(runs_dir.glob("*.json")):
-        try:
-            data = json.loads(path.read_text()) or {}
-        except (OSError, json.JSONDecodeError):
-            log.warning("Corrupt monitor run records at %s — ignoring", path)
-            continue
-        raw = data.get("runs") if isinstance(data, dict) else None
-        if isinstance(raw, list):
-            runs.extend(MonitorRun.from_json(i) for i in raw if isinstance(i, dict))
+        runs.extend(_read_file(path))
     runs.sort(key=lambda r: r.started_at, reverse=True)
     return runs
 

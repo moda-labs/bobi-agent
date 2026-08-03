@@ -232,6 +232,11 @@ the whole retention policy - this is a debugging ledger, not an audit log.
 Recording is best-effort: a ledger write that fails is logged and never breaks
 the firing.
 
+Records surface in the agent page's runs table alongside sessions and workflow
+runs - `notified` and `quiet` both read as a completed run, `failed` lands under
+the tab for everything needing a human. See
+[RUNS_VIEW.md](RUNS_VIEW.md) for that fold.
+
 ---
 
 # Script cache: paying once for a check, then running it free
