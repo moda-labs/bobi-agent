@@ -1,7 +1,7 @@
 # Agentic fleet control: an MCP server on the event-server Worker
 
-> **Status:** Draft
-> **Tracking issue:** none by decision (2026-07-30) · **Created:** 2026-07-30 · **Last amended:** —
+> **Status:** Building
+> **Tracking issue:** none by decision (2026-07-30) · **Created:** 2026-07-30 · **Last amended:** 2026-08-03
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -35,7 +35,8 @@ this plan a future reader must not have to reconstruct.
 `POST /fleet/instances/:f/:i/commands`, and the poll-by-id route are a fine HTTP API
 and a poor tool surface: an agent has to be told the URL shape, the 202-then-poll
 contract, the per-command argument shapes (documented only in a comment at
-`event-server/src/fleet.ts:330-343`), and the fact that `chat` never returns a reply.
+`event-server/worker/src/fleet.ts`, above `ADMIN_COMMANDS`), and the fact that
+`chat` never returns a reply.
 Every consumer re-derives all of it.
 
 **The obvious implementation is in the wrong language and the wrong repo.** A Python
@@ -52,8 +53,8 @@ new public API, new version surface, cutting against the reorg mid-flight.
 
 ### The Worker serves MCP
 
-Add a `/mcp` route to `event-server/src/index.ts`, positioned like the `/fleet/*` block
-at `index.ts:414`: bearer auth first, then dispatch. It is served by
+Add a `/mcp` route to `event-server/worker/src/index.ts`, positioned like the
+`/fleet/*` block beside it: bearer auth first, then dispatch. It is served by
 **`createMcpHandler`** from `agents/mcp/server` (Q1) — a stateless handler that builds
 one `McpServer` per request over a web-standards transport, with no Durable Object and
 no session state. Cloudflare's own guidance for it is to keep application state in KV
@@ -70,9 +71,9 @@ except its non-goal line, corrected on that plan's own PR.
 
 **Bobi teams can consume it with no framework change.** `mcp_servers` already accepts
 `type: http` with `url` and `headers` (`bobi/validate.py:493`,
-`bobi/mcp_handshake.py:94`), and `bobi validate` already runs an `initialize`
+`bobi/mcp_handshake.py:94`), and the config preflight already runs an `initialize`
 handshake against declared servers. An ops team declares the endpoint in `agent.yaml`
-and the existing preflight proves the connection.
+and `bobi agent <name> doctor` proves the connection.
 
 ### The tool surface is task-shaped, not a command dump
 
@@ -106,8 +107,8 @@ a result. This keeps self-restart available as a self-heal primitive.
 
 ### The security posture
 
-v1 authenticates with the existing `FLEET_OPERATOR_TOKEN` (`fleet.ts:429`) and adds no
-scopes, no approval gates, and no per-principal attribution (Q2, Q3). Holding the token
+v1 authenticates with the existing `FLEET_OPERATOR_TOKEN` (`fleet.ts`'s
+`requireOperator`) and adds no scopes, no approval gates, and no per-principal attribution (Q2, Q3). Holding the token
 means full control of every instance in the fleet. This is a deliberate call, and the
 reasoning it rests on should be checked whenever the deployment posture changes:
 
@@ -179,35 +180,39 @@ Two couplings, both already recorded on that plan's PR (#870):
 
 ### Existing (verified 2026-07-30)
 
-**Worker (`bobi-deploy/event-server/`, moving public):** `src/index.ts:414-534` (the
-`/fleet/*` route block — the positional model for `/mcp`); `src/fleet.ts:344-359`
-(`ADMIN_COMMANDS`, `isAdminCommand`), `:381-419` (`buildCommandView`,
-`buildInstanceDetail`), `:313-328` (`buildFleetStatus`), `:429-441`
-(`requireOperator` — reused unchanged), `:92-208` (`FleetStorage` +
-`createFleetKVStorage`), `:72-90` (`FleetCommandRecord`); `test/fleet.spec.ts`,
-`test/index.spec.ts` (the miniflare pool the MCP suite joins); `package.json` (gains
-`agents`, `@modelcontextprotocol/server`, `zod`); `wrangler.jsonc`.
+Paths below were re-verified against the post-reorg layout on 2026-08-03 (see
+Amendments). The Worker now lives at `event-server/worker/` in this repo.
 
-**Sidecar (`bobi-deploy/.../supervisor/`, moving to `bobi/supervisor/`):**
-`admin.py:52-63` (the topic/vocabulary contract), `:175-222` (dispatch),
-`:304-326` (the async `chat` path — why `bobi_send_message` cannot return a reply).
+**Worker (`bobi-agent/event-server/worker/`):** `src/index.ts` (the `/fleet/*`
+route block — the positional model for `/mcp`); `src/fleet.ts` (`ADMIN_COMMANDS`,
+`isAdminCommand`, `buildCommandView`, `buildInstanceDetail`, `buildFleetStatus`,
+`requireOperator` — reused unchanged, `FleetStorage` + `createFleetKVStorage`,
+`FleetCommandRecord`); `test/fleet.spec.ts`, `test/index.spec.ts` (the miniflare
+pool the MCP suite joins); `package.json` (gains `agents`,
+`@modelcontextprotocol/server`, `zod`); `wrangler.jsonc`.
+
+**Sidecar (`bobi/supervisor/`):** `admin.py` — the topic/vocabulary contract,
+dispatch, and the async `chat` path (why `bobi_send_message` cannot return a
+reply). Untouched by this plan.
 
 **Public `bobi-agent`:** `bobi/webapp/runtime.py:67` (`TeamRuntime` — the tool surface
 this mirrors); `bobi/validate.py:483-524` and `bobi/mcp_handshake.py:89-95` (the
 `type: http` + `headers` consumer path that needs no change); `docs/SECURITY.md:64`
-(the prompt-injection section this extends).
+(the prompt-injection section this extends); `docs/ADMIN_PROTOCOL.md` § Commands
+(the published admin-protocol contract).
 
-**Private console (moving to `moda-agents`):**
-`bobi_deploy/webapp/runtime.py:154-206` (`_issue_command`/`_await_command`/`_command`
-— the reference implementation of the 202-then-poll contract, and the source of the
-timeout constants the bounded wait should match).
+**Private console:** `moda-labs/moda-agents`, under `bobi-deploy/` —
+`_issue_command`/`_await_command`/`_command`, the reference implementation of the
+202-then-poll contract and the source of the timeout constants the bounded wait
+should match.
 
 ### New
 
-- `event-server/src/mcp.ts` — `createMcpHandler` wiring and the tool registry.
-- `event-server/test/mcp.spec.ts` — miniflare suite.
+- `event-server/worker/src/mcp.ts` — `createMcpHandler` wiring and the tool registry.
+- `event-server/worker/test/mcp.spec.ts` — miniflare suite.
+- `event-server/worker/test/fixtures-claude-code-mcp.json` — captured real-client traffic.
 - `docs/SECURITY.md` § agentic control surface.
-- MCP endpoint section in the admin protocol spec (reorg Lane C).
+- `docs/ADMIN_PROTOCOL.md` § MCP control surface.
 
 ## Questionables
 
@@ -303,7 +308,7 @@ gates a phase below — the two plans review independently.
 
 ## Phases
 
-### Phase 1 — MCP handler + read tools (Lane A) `[ ]`
+### Phase 1 — MCP handler + read tools (Lane A) `[x]`
 
 `src/mcp.ts`: `createMcpHandler` wired into the Worker's fetch dispatch behind
 `requireOperator`; tools `bobi_fleet_status`, `bobi_instance_detail`,
@@ -311,6 +316,10 @@ gates a phase below — the two plans review independently.
 dependencies; bundle size checked against the Workers limit. Miniflare suite in the
 existing vitest pool. Capture a real Claude Code session's traffic as the conformance
 fixture — including whether the configured bearer header actually arrives (Q7).
+
+Delivered 2026-08-03. Bundle 34 KiB → 209 KiB gzipped, ~7% of the 3 MiB
+compressed ceiling. Q7's client risk did not materialize (see Amendments);
+`nodejs_compat` did (see Amendments).
 
 ### Phase 2 — Write tools + bounded wait (Lane B) `[ ]`
 
@@ -322,7 +331,7 @@ framing on transcript output.
 
 ### Phase 3 — The agentic consumer + security stance (Lane C) `[ ]`
 
-Depends on B. An ops team's `agent.yaml` declares the endpoint and `bobi validate`
+Depends on B. An ops team's `agent.yaml` declares the endpoint and `bobi agent <name> doctor`
 proves the handshake. `docs/SECURITY.md` gains the agentic control surface section,
 carrying the posture and its trigger condition verbatim — this is the artifact that
 has to survive after the plan is archived. The admin protocol spec gains its MCP
@@ -348,24 +357,79 @@ section.
   rejected before any tool runs — proven by a failing-first test, since `/mcp` is a new
   public route on a Worker that also serves the bus.
 - **Bobi-team consumption:** a team declaring the endpoint in `mcp_servers` passes
-  `bobi validate`'s existing `initialize` probe with no framework change.
+  the existing `initialize` preflight (`bobi agent <name> doctor`) with no
+  framework change.
 - **No regression:** the console's suites and the existing `/fleet/*` route tests stay
   green.
 
 ## Lane map
 
-| Lane | Scope | Depends on | Parallel with |
-|---|---|---|---|
-| A | MCP handler + read-only tools | — | — |
-| B | Write tools + bounded wait | A | — |
-| C | Agentic consumer + security doc | B | — |
+| Lane | Scope | Depends on | Parallel with | Status |
+|---|---|---|---|---|
+| A | MCP handler + read-only tools | — | — | `[x]` |
+| B | Write tools + bounded wait | A | — | `[ ]` |
+| C | Agentic consumer + security doc | B | — | `[ ]` |
+
+Marker mode: `solo` — same repo, one lane at a time, markers flip in the code PR.
 
 Sequential by construction: the tool registry built in A is what B extends, and C
 documents what B establishes. Parallelism would cost more in conflicts than it saves.
 
 ## Amendments
 
-_None yet._
+### 2026-08-03 — Lane A built; three things the plan had wrong
+
+Recorded on Lane A's PR.
+
+**Relevant-files paths were pre-reorg.** The plan was written against
+`bobi-deploy/event-server/`; Movement 1 landed and the Worker is now
+`bobi-agent/event-server/worker/`. The code did not change, only its address.
+The section above is corrected, and the "MCP endpoint section in the admin
+protocol spec (reorg Lane C)" line now names the file that actually exists,
+`docs/ADMIN_PROTOCOL.md`.
+
+**`nodejs_compat` IS required — the plan assumed it was not.** The reasoning
+was that `createMcpHandler` is web-standards, so no Node compatibility should
+be needed. It is: the handler carries its per-request server context in an
+`AsyncLocalStorage`, so the bundle imports `node:async_hooks`, and the
+`wrangler deploy --dry-run` bundle warns accordingly. The flag is now set in
+`wrangler.jsonc`. This matters beyond us — it is Worker-wide, and the failure
+is total rather than confined to `/mcp`: workerd refuses the script outright
+with `No such module "node:async_hooks"`, so the bus goes down with it.
+
+That last sentence is a correction. This amendment first recorded the failure
+as quiet — "every other route serves normally and only MCP tool calls throw" —
+and that was wrong, propagated into both docs and several test comments before
+anyone checked it. What established the truth was the CI coverage added at the
+`wrangler dev` rung: removing the flag does not fail a tool call, it fails
+Worker startup. Corrected everywhere on the same PR.
+
+**Q7's known client risk did not materialize.** The two open Claude Code issues
+about configured headers not being attached (#50464, #29562) do not affect
+`claude-code/2.1.220`: a real session was driven through a logging proxy at a
+live `wrangler dev`, and `Authorization: Bearer …` was present on every
+request, including the SSE `GET`. That capture is now
+`event-server/worker/test/fixtures-claude-code-mcp.json`, and the miniflare
+suite replays it, so the transport choice rests on observed client behavior
+rather than on the spec. Q7 stays resolved-as-dropped; no reopen.
+
+Two smaller build-time calls, recorded so Lane B does not re-litigate them:
+
+- **Tool results are JSON text, not `structuredContent`.** The spec pairs
+  structured output with a declared `outputSchema`, and pinning one here would
+  freeze the read model's shape into the tool contract. The read model is owned
+  by `fleet.ts` and the supervisor's heartbeat and grows additively; text keeps
+  the tool contract to the argument shape.
+- **CORS is off on `/mcp`.** Browser-based fleet control is already a non-goal
+  (Q7), so the route advertises no cross-origin access at all rather than
+  carrying the handler's permissive default.
+
+And one stale claim corrected: the plan said `bobi validate` runs the
+`initialize` preflight. There is no `bobi validate` command — `validate_config`
+is a module reached through `bobi agent doctor` (`bobi/doctor.py`). Caught by
+`tests/test_tool_guides.py`, which checks documented `bobi` invocations against
+the real CLI. Lane C's acceptance depends on this, so it is corrected above
+rather than left to be discovered there.
 
 ## Notes
 

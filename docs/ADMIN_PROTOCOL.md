@@ -274,3 +274,81 @@ act on**. A command whose result never arrives may have been delivered and
 executed. Confirm lifecycle effects on the heartbeat, and make retries
 idempotent — `restart` is safe to repeat, and a duplicate `command_id` simply
 produces a second result record.
+
+## MCP control surface
+
+Everything above is the wire contract; this is the surface an **agent** binds
+to instead of implementing it. The Worker serves the Model Context Protocol at
+**`POST /mcp`** — the same fleet read model and, in a later phase, the same
+command path, as named tools with declared argument schemas.
+
+It is a schema wrapper, not a second implementation: each tool calls in-process
+the same builder the corresponding `/fleet/*` route calls. There is no second
+place where the vocabulary lives, and nothing new to keep in sync.
+
+**Authentication is the existing operator credential.** `/mcp` is gated by
+`FLEET_OPERATOR_TOKEN` exactly as `/fleet/*` is, checked before any tool body
+runs. Holding that token means full control of every instance in the fleet;
+the MCP route widens the interface, not the authority. There are no scopes and
+no per-principal attribution.
+
+That is a deliberate call, and it rests on the holder being a **human-operated
+interactive session** — an operator's Claude Code, or a bobi team someone is
+talking to — where a person reads the tool calls as they happen. The moment an
+*unattended* agent holds this credential (a monitor, a scheduled job, an
+autonomous remediation loop), that reasoning no longer holds and scoped
+credentials become a prerequisite. The full posture, including what it costs,
+is in `plans/2026-07-30-mcp-fleet-control.md` § "The security posture", and
+moves into `docs/SECURITY.md` when the write tools land.
+
+**Transport is streamable HTTP with a bearer header.** No OAuth, no session
+id: the server is stateless, one MCP server instance per request, with fleet
+state read from KV. Browser clients are not supported and CORS is off.
+
+### Tools
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `bobi_fleet_status` | none | Every instance: reachability, manager state, sessions, versions |
+| `bobi_instance_detail` | `fleet`, `instance` | One instance's full heartbeat plus its lifecycle trail |
+| `bobi_command_result` | `fleet`, `instance`, `command_id` | One command's folded view (`pending` / `done` / `error`) |
+
+This is the read half. `bobi_read_transcript`, `bobi_send_message`, and
+`bobi_lifecycle` are not yet registered; an agent sees only the three tools
+above at `tools/list`.
+
+An unknown instance or command id comes back as a **tool error with a
+recovery** ("check the names with `bobi_fleet_status`"), not a protocol error,
+so an agent can correct itself and call again on the same connection.
+
+### Connecting
+
+An operator's Claude Code:
+
+```bash
+claude mcp add --transport http bobi-fleet https://events.example.com/mcp \
+  --header "Authorization: Bearer ${FLEET_OPERATOR_TOKEN}"
+```
+
+A bobi team, in its `agent.yaml` — this needs no framework change, and
+`bobi agent <name> doctor` proves the connection with the existing `initialize`
+preflight it already runs against declared MCP servers:
+
+```yaml
+mcp_servers:
+  bobi-fleet:
+    type: http
+    url: https://events.example.com/mcp
+    headers:
+      Authorization: "Bearer ${FLEET_OPERATOR_TOKEN}"
+```
+
+### Deployment note
+
+The route requires the **`nodejs_compat`** compatibility flag, already set in
+`event-server/worker/wrangler.jsonc`. The MCP handler carries its per-request
+context in an `AsyncLocalStorage`, so the bundle imports `node:async_hooks`.
+Without the flag the whole Worker fails to boot, not just `/mcp`: workerd
+refuses to start with `No such module "node:async_hooks"`, taking the bus down
+with it. So if you maintain your own wrangler config, carry the flag across —
+this is not a degraded-MCP failure, it is a dead Worker.

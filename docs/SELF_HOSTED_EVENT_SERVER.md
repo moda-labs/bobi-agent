@@ -309,7 +309,14 @@ npx wrangler secret put WHATSAPP_VERIFY_TOKEN     # Meta GET subscribe handshake
 
 To use the fleet query surface (the admin read model — see
 [ADMIN_PROTOCOL.md](ADMIN_PROTOCOL.md)), also set `FLEET_OPERATOR_TOKEN`. It
-gates every fleet read; without it those routes stay closed.
+gates every fleet read *and* the `/mcp` agent-control route; without it both
+stay closed. Anyone holding it has full control of every instance in the
+fleet, so treat it as an admin credential, not a read key.
+
+`/mcp` also needs the **`nodejs_compat`** compatibility flag, which the shipped
+`wrangler.jsonc` sets. If you maintain your own config, carry the flag over:
+without it the Worker does not start at all — workerd rejects the script with
+`No such module "node:async_hooks"`, so the bus goes down too, not just MCP.
 
 **3. Deploy and verify.**
 
