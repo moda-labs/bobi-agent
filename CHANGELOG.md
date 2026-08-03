@@ -1,5 +1,110 @@
 # Changelog
 
+## 0.52.0 - 2026-08-03
+
+Minor release: Bobi looks like Bobi, and public CI proves the product rather
+than trusting it. This is also the first release published entirely from this
+repo — the reference container image now builds and pushes from `bobi-agent`,
+not from the archived private deploy repo, which completes the public half of
+the 2026-07 reorg (`plans/2026-07-29-repo-reorg.md`).
+
+### Added
+- **Public CI proves both brains, against the real image (#909, #911).** CI
+  verified none of the three things Bobi actually is. The `container-image` job
+  in `container.yml` now runs the built image through one real **Claude** ask
+  and one real **Codex** ask, against an ephemeral event server started from the
+  real Worker sources. It is off by default — nightly, on `workflow_dispatch`,
+  or on a PR carrying the `ci:live` label — and never on a fork PR.
+- **A real `wrangler deploy` is exercised before yours is (#909, #911).**
+  `wrangler dev` proves the Worker's code but never a deployment: the KV
+  binding, the `v1` `new_sqlite_classes` Durable Object migration, and
+  account-side provisioning were covered nowhere, and the only real
+  `wrangler deploy` in existence went straight to production.
+  `worker-deploy-smoke.yml` deploys a dedicated `bobi-events-ci-smoke` Worker in
+  a **separate Cloudflare account** and runs a health check plus a
+  publish→subscribe round-trip against the deployed URL. Cloudflare grants
+  Workers and KV permissions at account scope only, so a CI-only account is the
+  strongest isolation available; `scripts/render_worker_ci_config.py` derives
+  the CI config from the shipped `wrangler.jsonc` so the migration and
+  compatibility date cannot drift from what production deploys.
+- **The live lanes must prove they RAN (#909, #911).** Every test in both lanes
+  carries a `skipif`, so a renamed secret or an unavailable harness would have
+  skipped to green — which is exactly how this repo shipped four
+  green-but-vacuous lanes. Each lane now has a fail-fast step when a credential
+  is empty plus `scripts/assert_junit_ran.py`, which reads the junit report and
+  rejects any skip, any wrong count, and any missing named test.
+  `tests/test_ci_live_wiring.py` asserts the wiring itself is still in place and
+  fails if a live step is deleted.
+- **The reference image is published from this repo (#898).** `Dockerfile`,
+  `docker/`, `release-image.yml`, `container.yml`, and the container contract
+  tests moved here from the private deploy repo, with a new
+  `docs/REFERENCE_IMAGE.md` covering the run contract, the `--init` requirement,
+  the runtime env contract, and the `TEAM_DEPS` bake hook. A self-hoster runs
+  Bobi from a public pull instead of a repo grant.
+
+### Changed
+- **`bobi setup` and `bobi app` are reskinned onto the Bobi design system
+  (#883).** Both local web UIs now look like the Bobi that ships on buildmoda.ai
+  rather than the amber/CRT identity that predated the brand. The design system
+  is vendored as `docs/design-system/` and is the source of truth for anything
+  visual on any Bobi surface. Violet is **state** — live, enforced, gated,
+  focused — never decoration; everything decorative is clay, and a connected
+  integration reads violet like anything else live rather than green. Geist,
+  Geist Mono, and Inter are vendored as woff2 subsets under
+  `bobi/webui_common/static/fonts/`, so the offline constraint is intact: no
+  CDN, no network at runtime, no build step. Both UIs are full-bleed — the
+  simulated title bar, traffic lights, and address chip are gone. Legacy token
+  names are kept as aliases and remapped by meaning, so nothing resolves to an
+  off-brand value.
+- **The supervisor arrives via the wheel, not a `COPY` (#898).** The container
+  no longer carries `ARG BOBI_SUPERVISOR_SRC`, the supervisor `COPY`, or the
+  `/usr/local/bin/bobi-supervisor` PYTHONPATH shim — since 0.51.0 the sidecar
+  ships inside the wheel as `bobi.supervisor`. The entrypoint execs
+  `bobi agent "${AGENT_NAME}" supervise -- --foreground`, and its misbuilt-image
+  guard asks the CLI whether `supervise` is really present rather than testing
+  for a binary that no longer exists.
+- **The setup wizard's Cloud card points at something readers can obtain
+  (#907).** It previously told new users to read a runbook from the private
+  `bobi-deploy` distribution — an archived repo. It now points at
+  `ghcr.io/moda-labs/bobi` and `docs/REFERENCE_IMAGE.md`. README Cloud
+  Deployment and `docs/QUICKSTART.md` Option B were rewritten around the
+  published multi-arch image for the same reason, and `skills/linear-setup.md`
+  now sends readers to `event-server/worker/` in this repo (#905).
+- **`docs/RELEASE_RUNBOOK.md` describes the two-repo train (#900).** It states
+  the direction the reorg established — `moda-agents` consumes released
+  `bobi-agent` versions, and this repo owns the gating that keeps its releases
+  from breaking them — and says out loud that the fleet canary gates the fleet
+  **roll**, not the image publish, because the canary builds `FROM` the
+  published base and a gate cannot precede the artifact it consumes.
+
+### Fixed
+- **Subagent launch chains are bounded before a process is spawned (#849,
+  #888).** Launches recorded no parent or ancestry, so a workflow step launching
+  its own workflow was undetectable and unbounded: on 2026-07-25 one scheduled
+  trigger became **50 runs in 44 minutes**, stopped only by the spend governor —
+  whose own docstring calls it a classification-free backstop, i.e. the last
+  resort. Here it was the only resort. Every launch now carries the ordered
+  chain of runs that led to it in `BOBI_LAUNCH_LINEAGE`, and a launch is refused
+  up front when it is self-recursive (a named workflow already in its own chain;
+  `adhoc` is exempt, since `-w adhoc --wait` delegation is ordinary work and
+  depth governs it) or deeper than `max_launch_depth` (default 8, settable in
+  `agent.yaml` or per deployment via `BOBI_MAX_LAUNCH_DEPTH`). The refusal
+  message tells the agent this is a deterministic block rather than a rate
+  limit, so retrying with a new run key or after waiting is not a workaround.
+- **Two supervisor test files that tested a private copy now test the shipped
+  code (#904).** The reorg moved the sidecar to `bobi/supervisor/` and brought
+  six of its eight test files with it; `test_supervisor_alerting.py` and
+  `test_supervision_operator.py` stayed behind, exercising a second
+  implementation that would stay green while the real one moved — the same
+  failure mode that left entrypoint tests asserting a `bobi-supervisor` shim
+  that had not existed for a release. The port is a pure import rewrite and all
+  23 pass unchanged, which is itself the evidence the copies never diverged.
+- **Three integration tests failed on ambient state rather than on the code
+  (#908).** A module-scoped fixture unset the session's `BOBI_HOME`, letting
+  tests reach the real `~/.bobi` — it failed deterministically after any
+  dual-brain module and passed deterministically alone, which reads as
+  flakiness but is shared state.
+
 ## 0.51.1 - 2026-07-31
 
 Patch release: an agent no longer needs a build-time secret in order to run.
