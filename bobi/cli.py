@@ -3082,6 +3082,9 @@ def _run_check(cwd: str, task: str, timeout: int, post_event: str | None) -> Non
         "finding": result.finding,
         "summary": result.summary,
         "details": result.details,
+        # The session this check ran under — the monitor scheduler records it
+        # on the run so the run's row can open a transcript.
+        "session": result.session,
     }
     click.echo(json.dumps(verdict))
 

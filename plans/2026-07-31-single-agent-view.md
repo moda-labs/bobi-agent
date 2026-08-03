@@ -203,11 +203,11 @@ first. Implementation stacks on an integration branch
   committed checklist; flip markers per unit inside its PR.
 
 **U1 — monitor run records** *(Phase 1 enabler; the only new runtime write)*
-- [ ] Scheduler persists a run record per firing: monitor name,
+- [x] Scheduler persists a run record per firing: monitor name,
       started/ended, outcome (`notified` | `quiet` | `failed` + reason),
       script-cache mode, runner session ref when one spawned. Failed
       publishes (`pending_publish`) count as not-yet-`notified`.
-- [ ] Bounded retention (cap per monitor); unit tests over the fold.
+- [x] Bounded retention (cap per monitor); unit tests over the fold.
 - Testable: records appear under `run/state/` for a live monitor tick.
 
 **U2 — unified runs read model + `GET /api/agents/{name}/runs`** *(Phase 1)*
