@@ -62,6 +62,7 @@ import {
 	requireOperator,
 	windowsFromEnv,
 } from "./fleet";
+import { MCP_ROUTE, handleMcpRequest } from "./mcp";
 
 interface Env {
 	EVENTS: KVNamespace;
@@ -403,6 +404,19 @@ export default {
 				rejections: getAuthRejectionCounters(),
 			});
 		}
+
+			// -----------------------------------------------------------------
+			// The agentic control surface: the same fleet control plane served as
+			// MCP, so an agent binds to named tools with declared schemas instead
+			// of re-deriving the route shapes below. Same credential, same
+			// authority - the interface widens, not the authorization. Auth runs
+			// here, before dispatch, exactly as it does for /fleet/* below.
+			// -----------------------------------------------------------------
+			if (path === MCP_ROUTE) {
+				const op = requireOperator(request.headers.get("authorization"), env.FLEET_OPERATOR_TOKEN);
+				if (op) return op;
+				return handleMcpRequest(request, env, ctx);
+			}
 
 			// -----------------------------------------------------------------
 			// Fleet control-plane API (#6, #9). Operator-authenticated (one

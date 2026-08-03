@@ -14,7 +14,9 @@ operator commands between the supervisor sidecar and any monitoring or control
 surface. If you are writing a dashboard or an admin client, that contract —
 topics, all nine command schemas, the heartbeat/snapshot shape, and the
 compatibility promise — is [ADMIN_PROTOCOL.md](ADMIN_PROTOCOL.md), not this
-document.
+document. If your client is an **agent**, you do not have to implement that
+contract at all: the Worker serves it as MCP at `POST /mcp`, documented in the
+same file under § MCP control surface.
 
 ## Mental model
 
@@ -540,6 +542,9 @@ carries its own `tsconfig.json` and `vitest.config.mts`.
 - `event-server/worker/src/deployment-session.ts` - the per-deployment Durable Object.
 - `event-server/worker/src/fleet.ts` - fleet read model + operator query surface
   (see [ADMIN_PROTOCOL.md](ADMIN_PROTOCOL.md)).
+- `event-server/worker/src/mcp.ts` - the same control plane served as MCP at
+  `POST /mcp`, for agents rather than dashboards (see
+  [ADMIN_PROTOCOL.md](ADMIN_PROTOCOL.md) § MCP control surface).
 - `event-server/worker/src/internal-auth.ts` - signs the Worker-to-DO hop.
 - `event-server/src/local.ts` - local Node entry (in-memory store, direct sockets).
 - `bobi/events/server.py` - local-server launcher + bubble mint / grant setup.

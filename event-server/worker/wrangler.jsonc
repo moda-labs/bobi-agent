@@ -2,6 +2,18 @@
 	"name": "bobi-events",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-05-26",
+	// Required by the /mcp route: `createMcpHandler` (agents/mcp/server) carries
+	// its per-request server context in an AsyncLocalStorage, so the bundle
+	// imports `node:async_hooks`. Without this flag the module resolves to
+	// nothing and the route throws at runtime while every other route keeps
+	// working - a failure that only shows up once someone calls a tool.
+	// The plan assumed this would not be needed (the transport itself is
+	// web-standards); the dry-run bundle said otherwise.
+	// Worker-wide, not route-scoped: it adds the `node:` module surface and the
+	// Node globals to the whole script. Safe here because the compatibility
+	// date (above) is past 2024-09-23, which selects the v2 mode where those
+	// APIs are additive rather than replacing workerd's own.
+	"compatibility_flags": ["nodejs_compat"],
 	"observability": {
 		"enabled": true
 	},
