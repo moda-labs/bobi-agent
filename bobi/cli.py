@@ -2314,6 +2314,15 @@ def workflow_resume(run_id, timeout):
         click.echo(f"Run {run_id} is '{run.status}', not 'waiting'.", err=True)
         sys.exit(1)
 
+    # Claim before resuming. The event-driven path has always done this; this
+    # command never did, so two concurrent resumes of the same run both ran it.
+    # That is now reachable from the web app, which spawns this command — and
+    # the claim belongs in the process that does the work, not in the caller:
+    # a claim held by a process that then fails to start strands the run.
+    if not run.claim():
+        click.echo(f"Run {run_id} was claimed by another process.", err=True)
+        sys.exit(1)
+
     dispatcher = WorkflowDispatcher()
     dispatcher.load_all_workflows()
     wf = dispatcher.find_workflow(run.workflow_name)

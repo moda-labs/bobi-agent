@@ -38,6 +38,8 @@ Bobi is an event-driven AI agent framework.
   status strip's best-effort telemetry segments.
 - `docs/MONITORS.md`: monitor scheduler and the `script_cache` token-saving runner.
 - `docs/WORKFLOW_ENGINE.md`: workflow state machine, step types, suspend/resume.
+- `docs/RUN_RESUME.md`: resuming a stalled workflow run from the agent page -
+  why it spawns a process, and where the single-winner claim lives.
 - `docs/RUNS_VIEW.md`: the unified runs read model behind the agent page - one
   row shape over sessions, workflow runs, and monitor records; the status
   vocabulary and the two rules it derives.
