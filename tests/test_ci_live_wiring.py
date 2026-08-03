@@ -32,6 +32,11 @@ CLAUDE_ROUNDTRIP = "test_image_ask_roundtrip"
 CODEX_ROUNDTRIP = "test_image_codex_ask_roundtrip"
 DEPLOY_HEALTH = "test_deployed_worker_health"
 DEPLOY_ROUNDTRIP = "test_deployed_worker_publish_subscribe_roundtrip"
+# The MCP route's only real proof: `nodejs_compat` cannot be exercised by the
+# Worker unit suite, because vitest-pool-workers injects its own enable_nodejs_*
+# flags. Drop this from the lane and the flag goes back to being unproven.
+DEPLOY_MCP_CALL = "test_deployed_worker_mcp_tool_call"
+DEPLOY_MCP_CLOSED = "test_deployed_worker_mcp_route_is_closed_without_a_token"
 
 
 def _steps(workflow: str, job: str) -> list[dict]:
@@ -119,13 +124,14 @@ def test_live_lane_installs_the_wrangler_harness_it_needs():
 
 
 @pytest.mark.parametrize(
-    "workflow,job,step_name,junit,required",
+    "workflow,job,step_name,junit,expect_passed,required",
     [
         (
             "container.yml",
             "container-image",
             "Assert the live round-trips actually ran",
             "live-roundtrips.xml",
+            2,
             (CLAUDE_ROUNDTRIP, CODEX_ROUNDTRIP),
         ),
         (
@@ -133,19 +139,25 @@ def test_live_lane_installs_the_wrangler_harness_it_needs():
             "deploy-smoke",
             "Assert the deploy smoke actually ran",
             "worker-deploy-smoke.xml",
-            (DEPLOY_HEALTH, DEPLOY_ROUNDTRIP),
+            4,
+            (DEPLOY_HEALTH, DEPLOY_ROUNDTRIP, DEPLOY_MCP_CALL, DEPLOY_MCP_CLOSED),
         ),
     ],
 )
-def test_each_live_lane_asserts_it_ran(workflow, job, step_name, junit, required):
+def test_each_live_lane_asserts_it_ran(workflow, job, step_name, junit, expect_passed, required):
     """Ran-assertion, layer (ii), on every live lane.
 
     Exiting 0 is not evidence: every test in these lanes carries a `skipif`.
+
+    The count is pinned alongside the names so that ADDING a test to a lane
+    without raising `--expect-passed` fails here: the named tests would still
+    pass while the new one skipped silently, which is the exact shape this
+    whole guard exists to catch.
     """
     run = _step(_steps(workflow, job), step_name)["run"]
     assert "scripts/assert_junit_ran.py" in run
     assert junit in run
-    assert "--expect-passed 2" in run
+    assert f"--expect-passed {expect_passed}" in run
     for name in required:
         assert f"--require {name}" in run, f"{name} is no longer a required pass"
 
@@ -290,11 +302,36 @@ def test_worker_deploy_waits_for_the_deployment_before_smoking():
         "a stale Worker"
     )
     assert "exit 1" in wait["run"]
-    assert _index(steps, "Set the Durable Object internal secret") < _index(
+    assert _index(steps, "Set the deployed Worker's secrets") < _index(
         steps, "Wait for the deployment to serve this commit"
     ), "the wait must come after the LAST step that publishes a new version"
     assert _index(steps, "Wait for the deployment to serve this commit") < _index(
         steps, "Smoke the DEPLOYED Worker"
+    )
+
+
+def test_worker_deploy_mints_the_operator_token_on_the_deployed_script():
+    """The MCP smoke must run against a route that is actually OPEN to it.
+
+    `/mcp` fails closed when `FLEET_OPERATOR_TOKEN` is unset — `requireOperator`
+    answers 503 before the handler runs. A lane that deployed without minting
+    the token would never reach the MCP handler at all, so the tool call could
+    not prove `nodejs_compat` no matter how green it looked.
+
+    The token is passed to pytest from the same step that puts it on the script,
+    so the two cannot drift apart.
+    """
+    steps = _steps("worker-deploy-smoke.yml", "deploy-smoke")
+    put = _step(steps, "Set the deployed Worker's secrets")["run"]
+    assert "wrangler secret put FLEET_OPERATOR_TOKEN" in put, (
+        "the lane no longer sets FLEET_OPERATOR_TOKEN — /mcp would 503 and the "
+        "MCP smoke would prove nothing"
+    )
+    assert "::add-mask::" in put, "the minted operator token is not masked in the log"
+
+    smoke = _step(steps, "Smoke the DEPLOYED Worker")
+    assert "BOBI_SMOKE_FLEET_OPERATOR_TOKEN" in smoke["env"], (
+        "the smoke step no longer receives the operator token"
     )
 
 

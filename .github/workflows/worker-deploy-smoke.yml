@@ -171,11 +171,19 @@ jobs:
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "deployed: $url"
 
-      - name: Set the Durable Object internal secret
+      - name: Set the deployed Worker's secrets
+        id: secrets
         # The DO rejects unauthenticated internal fetches, so the WebSocket
-        # subscribe (and therefore the round-trip below) needs this set on the
-        # deployed script. Rotated every run — it authenticates Worker→DO calls
-        # within this one deployment and nothing else.
+        # subscribe (and therefore the round-trip below) needs INTERNAL_DO_SECRET
+        # set on the deployed script. FLEET_OPERATOR_TOKEN gates /fleet/* and
+        # /mcp, which fail closed when it is unset — without it the MCP smoke
+        # would assert against a 503 and prove nothing.
+        #
+        # Both are minted here and rotated every run: they authorize this one
+        # ephemeral deployment and nothing else, so neither needs to be a repo
+        # secret. Both are set in ONE step on purpose — each `wrangler secret
+        # put` publishes another version, and the readiness gate below has to
+        # come after the last of them.
         if: steps.live.outputs.run == 'true'
         working-directory: event-server/worker
         env:
@@ -185,6 +193,13 @@ jobs:
           set -euo pipefail
           openssl rand -hex 32 \
             | npx --no-install wrangler secret put INTERNAL_DO_SECRET --config wrangler.ci.jsonc
+
+          operator="$(openssl rand -hex 32)"
+          # Mask before it can reach any log line, including the failure paths.
+          echo "::add-mask::$operator"
+          printf '%s' "$operator" \
+            | npx --no-install wrangler secret put FLEET_OPERATOR_TOKEN --config wrangler.ci.jsonc
+          echo "operator_token=$operator" >> "$GITHUB_OUTPUT"
 
       - name: Wait for the deployment to serve this commit
         # A deploy is not instantly live. `wrangler secret put` above publishes
@@ -257,17 +272,20 @@ jobs:
         env:
           BOBI_SMOKE_EVENT_SERVER_URL: ${{ steps.deploy.outputs.url }}
           BOBI_SMOKE_EXPECTED_SHA: ${{ github.sha }}
+          BOBI_SMOKE_FLEET_OPERATOR_TOKEN: ${{ steps.secrets.outputs.operator_token }}
         run: |
           pytest tests/integration/test_worker_deploy_smoke.py \
             -m live -v --timeout=180 \
             --junitxml=worker-deploy-smoke.xml
 
       - name: Assert the deploy smoke actually ran
-        # Ran-assertion, layer (ii): both tests skipif on an absent URL, so a
+        # Ran-assertion, layer (ii): every test skipif's on an absent URL, so a
         # deploy step that silently produced no URL would otherwise skip green.
         if: steps.live.outputs.run == 'true'
         run: |
           python scripts/assert_junit_ran.py worker-deploy-smoke.xml \
-            --expect-passed 2 \
+            --expect-passed 4 \
             --require test_deployed_worker_health \
-            --require test_deployed_worker_publish_subscribe_roundtrip
+            --require test_deployed_worker_publish_subscribe_roundtrip \
+            --require test_deployed_worker_mcp_tool_call \
+            --require test_deployed_worker_mcp_route_is_closed_without_a_token

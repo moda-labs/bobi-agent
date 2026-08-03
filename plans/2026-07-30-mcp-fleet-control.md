@@ -71,9 +71,9 @@ except its non-goal line, corrected on that plan's own PR.
 
 **Bobi teams can consume it with no framework change.** `mcp_servers` already accepts
 `type: http` with `url` and `headers` (`bobi/validate.py:493`,
-`bobi/mcp_handshake.py:94`), and `bobi validate` already runs an `initialize`
+`bobi/mcp_handshake.py:94`), and the config preflight already runs an `initialize`
 handshake against declared servers. An ops team declares the endpoint in `agent.yaml`
-and the existing preflight proves the connection.
+and `bobi agent <name> doctor` proves the connection.
 
 ### The tool surface is task-shaped, not a command dump
 
@@ -331,7 +331,7 @@ framing on transcript output.
 
 ### Phase 3 — The agentic consumer + security stance (Lane C) `[ ]`
 
-Depends on B. An ops team's `agent.yaml` declares the endpoint and `bobi validate`
+Depends on B. An ops team's `agent.yaml` declares the endpoint and `bobi agent <name> doctor`
 proves the handshake. `docs/SECURITY.md` gains the agentic control surface section,
 carrying the posture and its trigger condition verbatim — this is the artifact that
 has to survive after the plan is archived. The admin protocol spec gains its MCP
@@ -357,7 +357,8 @@ section.
   rejected before any tool runs — proven by a failing-first test, since `/mcp` is a new
   public route on a Worker that also serves the bus.
 - **Bobi-team consumption:** a team declaring the endpoint in `mcp_servers` passes
-  `bobi validate`'s existing `initialize` probe with no framework change.
+  the existing `initialize` preflight (`bobi agent <name> doctor`) with no
+  framework change.
 - **No regression:** the console's suites and the existing `/fleet/*` route tests stay
   green.
 
@@ -416,6 +417,13 @@ Two smaller build-time calls, recorded so Lane B does not re-litigate them:
 - **CORS is off on `/mcp`.** Browser-based fleet control is already a non-goal
   (Q7), so the route advertises no cross-origin access at all rather than
   carrying the handler's permissive default.
+
+And one stale claim corrected: the plan said `bobi validate` runs the
+`initialize` preflight. There is no `bobi validate` command — `validate_config`
+is a module reached through `bobi agent doctor` (`bobi/doctor.py`). Caught by
+`tests/test_tool_guides.py`, which checks documented `bobi` invocations against
+the real CLI. Lane C's acceptance depends on this, so it is corrected above
+rather than left to be discovered there.
 
 ## Notes
 

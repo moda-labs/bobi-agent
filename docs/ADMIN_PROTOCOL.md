@@ -290,8 +290,16 @@ place where the vocabulary lives, and nothing new to keep in sync.
 `FLEET_OPERATOR_TOKEN` exactly as `/fleet/*` is, checked before any tool body
 runs. Holding that token means full control of every instance in the fleet;
 the MCP route widens the interface, not the authority. There are no scopes and
-no per-principal attribution — see `docs/SECURITY.md` for the posture and the
-condition that changes it.
+no per-principal attribution.
+
+That is a deliberate call, and it rests on the holder being a **human-operated
+interactive session** — an operator's Claude Code, or a bobi team someone is
+talking to — where a person reads the tool calls as they happen. The moment an
+*unattended* agent holds this credential (a monitor, a scheduled job, an
+autonomous remediation loop), that reasoning no longer holds and scoped
+credentials become a prerequisite. The full posture, including what it costs,
+is in `plans/2026-07-30-mcp-fleet-control.md` § "The security posture", and
+moves into `docs/SECURITY.md` when the write tools land.
 
 **Transport is streamable HTTP with a bearer header.** No OAuth, no session
 id: the server is stateless, one MCP server instance per request, with fleet
@@ -323,7 +331,8 @@ claude mcp add --transport http bobi-fleet https://events.example.com/mcp \
 ```
 
 A bobi team, in its `agent.yaml` — this needs no framework change, and
-`bobi validate` proves the connection with its existing `initialize` probe:
+`bobi agent <name> doctor` proves the connection with the existing `initialize`
+preflight it already runs against declared MCP servers:
 
 ```yaml
 mcp_servers:

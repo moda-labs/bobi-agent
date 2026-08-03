@@ -169,6 +169,32 @@ describe("/mcp authorization", () => {
 		const res = await replay(initialize());
 		expect(res.status).toBe(200);
 	});
+
+	// The captured session opens a standalone SSE stream with GET and the
+	// transport also accepts DELETE. A gate that only covered POST would leave
+	// the stream open to anyone, and every test above would still pass.
+	it.each(["GET", "DELETE"])("rejects an unauthenticated %s", async (method) => {
+		const res = await SELF.fetch(MCP_URL, { method, headers: { accept: "text/event-stream" } });
+		expect(res.status).toBe(401);
+	});
+});
+
+describe("Worker configuration the /mcp route depends on", () => {
+	// `createMcpHandler` imports node:async_hooks, so a deployed Worker without
+	// the nodejs_compat flag serves every other route normally and throws only
+	// when a tool is called.
+	//
+	// This asserts the flag is CONFIGURED, which is all a unit test here can do:
+	// @cloudflare/vitest-pool-workers injects its own enable_nodejs_* flags for
+	// the Vitest runner, so the pool keeps working with the flag removed and no
+	// behavioural test in this file can see its absence (verified by mutation).
+	// The flag's runtime effect is proven against a real deploy by
+	// tests/integration/test_worker_deploy_smoke.py::test_deployed_worker_mcp_tool_call.
+	it("wrangler.jsonc sets nodejs_compat", async () => {
+		const raw = await import("../wrangler.jsonc?raw").then((m) => m.default as string);
+		const config = JSON.parse(raw.replace(/^\s*\/\/.*$/gm, ""));
+		expect(config.compatibility_flags).toContain("nodejs_compat");
+	});
 });
 
 describe("/mcp conformance against captured claude-code traffic", () => {
