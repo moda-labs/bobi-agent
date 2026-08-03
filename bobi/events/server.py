@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +32,23 @@ log = logging.getLogger(__name__)
 REGISTER_READ_TIMEOUT = 30.0
 REGISTER_TIMEOUT = httpx.Timeout(REGISTER_READ_TIMEOUT, connect=5.0)
 DEPENDENCY_STAMP_NAME = ".bobi-lock-digest"
+
+# The LOCAL server is built from `event-server/src/local.ts` with esbuild. It
+# needs the workspace root's own dependencies and the shared `core` package -
+# and nothing from the `worker` workspace, which exists to be deployed to
+# Cloudflare and is never imported by this bundle.
+#
+# npm installs every workspace by default, so without this scope a local
+# bootstrap drags in the Worker's whole toolchain (`agents`, the MCP SDK,
+# wrangler, babel) - roughly four times the tree, none of it reachable from
+# `local.ts`. That surplus is not merely wasted: it is what put `agents`' peer
+# conflicts and optional binaries into the very dependency tree this module
+# inspects to decide whether the install is healthy.
+#
+# Install scope and inspect scope MUST stay identical. `npm ls` reports a
+# workspace that was deliberately not installed as `missing:`, which is fatal
+# by design - so an unscoped read of a scoped install would fail every time.
+_LOCAL_WORKSPACE_SCOPE = ("--include-workspace-root", "--workspace", "core")
 
 
 class PackagedEventServerArtifactError(RuntimeError):
@@ -161,77 +177,9 @@ def _read_dependency_stamp(es_dir: Path) -> dict | None:
 # never loads.
 _NON_FATAL_TREE_PROBLEM_PREFIXES = ("extraneous:",)
 
-# `invalid:` is NOT blanket-harmless and is not listed above: an installed
-# version that does not satisfy its declared range breaks the build whenever
-# the local bundle actually imports that package.
-#
-# But it is only fatal for packages the local bundle CAN reach. The Worker
-# workspace's `agents` dependency declares peers on `vite`, `react`, `ai` and
-# friends; npm resolves some of those to versions it then calls `invalid`,
-# inside a subtree `esbuild src/local.ts` never traverses. Failing the local
-# server's launch over a peer conflict in the Cloudflare Worker's dev tooling
-# is the same category of mistake the `extraneous` allowance above fixed.
-#
-# So the test is membership, not wording: an `invalid:` for anything named in
-# the local package.json stays fatal (`invalid: ws@...` must still bite);
-# anything else is somebody else's subtree.
-def _local_dependency_names(es_dir: Path) -> frozenset[str] | None:
-    """Package names the LOCAL server's own package.json declares.
 
-    None when the manifest cannot be read or is not an object. That is the
-    fail-CLOSED value: `_fatal_tree_problems` keeps every `invalid:` fatal
-    rather than forgiving one because the check could not be performed. An
-    empty frozenset would do the opposite - nothing would match, so everything
-    would be waved through.
-    """
-    try:
-        manifest = json.loads((es_dir / "package.json").read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(manifest, dict):
-        return None
-    names: set[str] = set()
-    for field in ("dependencies", "devDependencies", "optionalDependencies"):
-        section = manifest.get(field)
-        if isinstance(section, dict):
-            names.update(str(k) for k in section)
-    return frozenset(names)
-
-
-#: `@scope/name` or `name` - what an npm package identifier may look like once
-#: the version suffix is stripped.
-_PACKAGE_NAME_RE = re.compile(r"^(?:@[^/\s@]+/)?[^/\s@]+$")
-
-
-def _invalid_problem_package(problem: str) -> str | None:
-    """The package name in an `invalid: <name>@<version> <path>` line.
-
-    None when the line does not parse into something that looks like a package
-    name. Callers treat None as fatal, so a future change to npm's wording
-    fails the build loudly instead of being forgiven by a parser that quietly
-    produced a name matching nothing.
-    """
-    body = problem.strip()[len("invalid:"):].strip()
-    if not body:
-        return None
-    spec = body.split()[0]
-    # Scoped names keep their leading @, so only split on a LATER one.
-    at = spec.rfind("@")
-    name = spec[:at] if at > 0 else spec
-    return name if _PACKAGE_NAME_RE.match(name) else None
-
-
-def _fatal_tree_problems(
-    problems: object, local_dependencies: frozenset[str] | None = None
-) -> list[str]:
-    """The `npm ls` problems that must block a source build (default-deny).
-
-    `local_dependencies` names the packages the local server declares. An
-    `invalid:` for one of them is fatal; an `invalid:` for anything else is a
-    conflict inside a subtree the local bundle never traverses. Omitting the
-    argument keeps every `invalid:` fatal, so a caller that cannot determine
-    the set does not accidentally widen the allowance.
-    """
+def _fatal_tree_problems(problems: object) -> list[str]:
+    """The `npm ls` problems that must block a source build (default-deny)."""
     if not problems:
         return []
     if isinstance(problems, str):
@@ -240,34 +188,27 @@ def _fatal_tree_problems(
         # An unrecognized shape is not something to reason about - fail loudly
         # rather than silently treating an unknown report as "no problems".
         return [f"unrecognized npm ls problems payload: {problems!r}"]
-
-    def is_fatal(p: object) -> bool:
-        if not isinstance(p, str):
-            return True
-        text = p.strip().lower()
-        if text.startswith(_NON_FATAL_TREE_PROBLEM_PREFIXES):
-            return False
-        if text.startswith("invalid:") and local_dependencies is not None:
-            package = _invalid_problem_package(p)
-            return package is None or package in local_dependencies
-        return True
-
-    return [p for p in problems if is_fatal(p)]
+    return [
+        p for p in problems
+        if not isinstance(p, str)
+        or not p.strip().lower().startswith(_NON_FATAL_TREE_PROBLEM_PREFIXES)
+    ]
 
 
 def _dependency_tree(es_dir: Path) -> dict:
-    # `npm ls` exits 1 whenever it reports ANY problem, including the harmless
-    # classes enumerated above. Treating that exit as fatal made
-    # `_fatal_tree_problems` unreachable — the extraneous allowance below could
-    # never actually run, because the raise happened first. So the exit code is
-    # ignored here and the JSON payload is the authority: `problems` is what
-    # gets classified, default-deny, exactly as intended.
+    # Scoped to match the install exactly (see _LOCAL_WORKSPACE_SCOPE).
     #
-    # A genuinely broken tree still fails, just one layer later and with a
-    # better message: `missing:` stays fatal, which is what the
-    # deleted-transitive-dependency path depends on.
+    # `allow_failure` because `npm ls` exits 1 whenever it reports ANY problem,
+    # including the harmless classes enumerated above. Treating that exit as
+    # fatal made `_fatal_tree_problems` unreachable - the extraneous allowance
+    # could never actually run, because the raise happened first. The JSON
+    # payload is the authority: `problems` is what gets classified,
+    # default-deny, exactly as intended. A genuinely broken tree still fails,
+    # one layer later and with a better message.
     result = _run_npm(
-        ["npm", "ls", "--all", "--json", "--offline"], es_dir, allow_failure=True
+        ["npm", "ls", "--all", "--json", "--offline", *_LOCAL_WORKSPACE_SCOPE],
+        es_dir,
+        allow_failure=True,
     )
     try:
         tree = json.loads(result.stdout)
@@ -277,9 +218,7 @@ def _dependency_tree(es_dir: Path) -> dict:
         ) from exc
     if not isinstance(tree, dict):
         raise RuntimeError(f"npm ls returned a non-object dependency tree in {es_dir}")
-    problems = _fatal_tree_problems(
-        tree.get("problems"), _local_dependency_names(es_dir)
-    )
+    problems = _fatal_tree_problems(tree.get("problems"))
     if problems:
         raise RuntimeError(f"npm dependency tree is invalid in {es_dir}: {problems}")
     return tree
@@ -314,6 +253,28 @@ def _source_dependencies_valid(es_dir: Path) -> bool:
 
 
 def _refresh_dependency_stamp(es_dir: Path) -> None:
+    # Create the stamp file BEFORE measuring the tree, not after.
+    #
+    # npm keeps a hidden lockfile at `node_modules/.package-lock.json` and
+    # decides whether it is still authoritative by comparing the `node_modules`
+    # directory's mtime. Creating a file in that directory changes the mtime,
+    # so npm stops trusting the hidden lockfile and starts reporting the tree
+    # it actually finds on disk - at which point optional dependencies that
+    # were never installed (esbuild's and vitest's other-platform binaries)
+    # switch from full metadata to empty objects, and the digest changes.
+    #
+    # Writing the stamp last therefore recorded a digest that the very act of
+    # writing it invalidated: the stamp could never match on a fresh install,
+    # so every artifact rebuild paid a full reinstall it did not need. This is
+    # long-standing (reproduced on main) and was simply never noticed, because
+    # the penalty is invisible correctness-wise - just slow.
+    #
+    # Touching the file first spends that one-time perturbation up front. The
+    # measurement then happens in the settled state, and rewriting the file's
+    # CONTENTS below does not disturb it again: only creating, removing or
+    # renaming an entry changes a directory's mtime.
+    stamp_path = _dependency_stamp_path(es_dir)
+    stamp_path.touch()
     stamp = {
         "installed_tree_sha256": event_server_artifact.canonical_json_digest(
             _dependency_tree(es_dir)
@@ -323,9 +284,7 @@ def _refresh_dependency_stamp(es_dir: Path) -> None:
         ),
         "schema_version": 1,
     }
-    _dependency_stamp_path(es_dir).write_text(
-        json.dumps(stamp, indent=2, sort_keys=True) + "\n"
-    )
+    stamp_path.write_text(json.dumps(stamp, indent=2, sort_keys=True) + "\n")
 
 
 def _install_source_dependencies(es_dir: Path) -> None:
@@ -339,7 +298,8 @@ def _install_source_dependencies(es_dir: Path) -> None:
     # Only the source path reaches this. An installed bobi validates a
     # prebuilt artifact (`_validate_packaged_artifact`) and never runs npm.
     shutil.rmtree(es_dir / "node_modules", ignore_errors=True)
-    _run_npm(["npm", "ci", "--no-audit", "--no-fund"], es_dir, timeout=900)
+    _run_npm(["npm", "ci", "--no-audit", "--no-fund", *_LOCAL_WORKSPACE_SCOPE], es_dir,
+             timeout=900)
     _refresh_dependency_stamp(es_dir)
 
 

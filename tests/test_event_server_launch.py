@@ -369,7 +369,9 @@ def test_source_dependency_stamp_requires_exact_lock_and_offline_tree(
     monkeypatch.setattr(es, "_run_npm", run_npm)
 
     assert es._source_dependencies_valid(tmp_path)
-    assert calls == [["npm", "ls", "--all", "--json", "--offline"]]
+    assert calls == [
+        ["npm", "ls", "--all", "--json", "--offline", "--include-workspace-root", "--workspace", "core"]
+    ]
 
     (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 2}\n')
     assert not es._source_dependencies_valid(tmp_path)
@@ -453,7 +455,7 @@ def test_source_install_and_build_use_single_exact_commands(
     es._build_local(tmp_path, "v20.19.2")
 
     assert calls == [
-        ["npm", "ci", "--no-audit", "--no-fund"],
+        ["npm", "ci", "--no-audit", "--no-fund", "--include-workspace-root", "--workspace", "core"],
         ["refresh-stamp"],
         ["npm", "run", "build:local"],
         ["npm", "--version"],
@@ -462,7 +464,10 @@ def test_source_install_and_build_use_single_exact_commands(
     # tree quadrupled when the Worker gained its MCP dependencies. The default
     # ceiling is sized for commands like `npm --version`; installing under it
     # would abort a legitimate install as a timeout.
-    assert timeouts[("npm", "ci", "--no-audit", "--no-fund")] >= 900
+    assert timeouts[
+        ("npm", "ci", "--no-audit", "--no-fund",
+         "--include-workspace-root", "--workspace", "core")
+    ] >= 900
     assert timeouts[("npm", "--version")] == 300
     assert generated == [
         (
@@ -498,11 +503,105 @@ def test_source_install_clears_the_tree_before_npm_ci(tmp_path, monkeypatch):
 
     assert observed, "npm ci never ran"
     args, tree_present_when_npm_ran = observed[0]
-    assert args == ["npm", "ci", "--no-audit", "--no-fund"]
+    assert args == ["npm", "ci", "--no-audit", "--no-fund", "--include-workspace-root", "--workspace", "core"]
     assert not tree_present_when_npm_ran, (
         "node_modules still existed when npm ci started — npm would have had to "
         "remove it itself, which is the ENOTEMPTY failure this guards"
     )
+
+
+def test_dependency_stamp_is_written_before_the_tree_is_measured(tmp_path, monkeypatch):
+    """The stamp must not invalidate the measurement it is recording.
+
+    npm decides whether its hidden lockfile (`node_modules/.package-lock.json`)
+    is still authoritative from the `node_modules` directory mtime. CREATING a
+    file there changes that mtime, so npm stops trusting the cache and starts
+    reporting the on-disk tree - at which point never-installed optional
+    dependencies switch from full metadata to `{}` and the digest changes.
+
+    Writing the stamp after measuring therefore recorded a digest that the
+    write itself invalidated, so the stamp never matched on a fresh install and
+    every artifact rebuild paid a full reinstall. Reproduced on main; this is
+    long-standing, not new.
+
+    The fix is ordering, so ordering is what this asserts: the stamp file must
+    already exist by the time the tree is read.
+    """
+    node_modules = tmp_path / "node_modules"
+    node_modules.mkdir()
+    (tmp_path / "package-lock.json").write_text("{}")
+    stamp_path = es._dependency_stamp_path(tmp_path)
+
+    existed_when_measured = []
+
+    def fake_tree(path):
+        existed_when_measured.append(stamp_path.exists())
+        return {"name": "event-server"}
+
+    monkeypatch.setattr(es, "_dependency_tree", fake_tree)
+    es._refresh_dependency_stamp(tmp_path)
+
+    assert existed_when_measured == [True], (
+        "the tree was measured before the stamp file existed — creating it "
+        "afterwards changes node_modules' mtime and invalidates the very "
+        "digest just recorded"
+    )
+    assert json.loads(stamp_path.read_text())["schema_version"] == 1
+
+
+def test_local_install_excludes_the_worker_workspace(tmp_path, monkeypatch):
+    """The local bundle never imports the Cloudflare Worker's tree.
+
+    npm installs every workspace by default, so an unscoped `npm ci` dragged
+    the Worker's whole toolchain (`agents`, the MCP SDK, wrangler, babel) into
+    a local bootstrap - roughly four times the tree, none of it reachable from
+    `local.ts`, and the source of the peer conflicts and optional binaries this
+    module then had to triage out of its own health check.
+    """
+    seen = []
+
+    def run_npm(args, path, timeout=300, allow_failure=False):
+        seen.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(es, "_run_npm", run_npm)
+    monkeypatch.setattr(es, "_refresh_dependency_stamp", lambda path: None)
+    monkeypatch.setattr(es.shutil, "rmtree", lambda *a, **k: None)
+
+    es._install_source_dependencies(tmp_path)
+
+    assert seen == [[
+        "npm", "ci", "--no-audit", "--no-fund",
+        "--include-workspace-root", "--workspace", "core",
+    ]]
+
+
+def test_install_and_inspect_scopes_are_identical(tmp_path, monkeypatch):
+    """The two scopes must never drift apart.
+
+    `npm ls` reports a workspace that was deliberately not installed as
+    `missing:` - fatal by design. So an unscoped read of a scoped install fails
+    every single time, and a scoped read of an unscoped install silently stops
+    noticing half the tree. Pinning them to ONE constant is the invariant; this
+    asserts both commands actually carry it.
+    """
+    seen = []
+
+    def run_npm(args, path, timeout=300, allow_failure=False):
+        seen.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(es, "_run_npm", run_npm)
+    monkeypatch.setattr(es, "_refresh_dependency_stamp", lambda path: None)
+    monkeypatch.setattr(es.shutil, "rmtree", lambda *a, **k: None)
+
+    es._install_source_dependencies(tmp_path)
+    es._dependency_tree(tmp_path)
+
+    scope = list(es._LOCAL_WORKSPACE_SCOPE)
+    assert len(seen) == 2
+    for args in seen:
+        assert args[-len(scope):] == scope, args
 
 
 def test_fresh_source_artifact_skips_npm(monkeypatch, tmp_path):
@@ -926,55 +1025,6 @@ class TestDependencyTreeProblemTriage:
         assert len(fatal) == 2
         assert any(p.startswith("missing:") for p in fatal)
         assert any(p.startswith("invalid:") for p in fatal)
-
-    def test_invalid_is_fatal_only_for_packages_the_local_build_declares(self):
-        """`invalid:` is scoped by PACKAGE, not waved through by wording.
-
-        The Worker workspace's `agents` dependency declares peers (`vite`,
-        `react`, `ai`) that npm resolves to versions it then calls invalid,
-        inside a subtree `esbuild src/local.ts` never traverses. Failing the
-        local server's launch over that is the same mistake the `extraneous`
-        allowance fixed. An `invalid:` on a package the local package.json
-        actually declares must still bite.
-        """
-        local = frozenset({"ws", "esbuild", "@moda-labs/bobi-events-core"})
-        assert es._fatal_tree_problems(
-            ["invalid: vite@7.3.3 /es/node_modules/vite"], local
-        ) == []
-        assert es._fatal_tree_problems(
-            ["invalid: ws@1.0.0 /es/node_modules/ws"], local
-        ) == ["invalid: ws@1.0.0 /es/node_modules/ws"]
-        # Scoped names must not be split on their leading @.
-        assert es._fatal_tree_problems(
-            ["invalid: @moda-labs/bobi-events-core@1.0.0 /es/node_modules/x"], local
-        )
-
-    def test_unparseable_invalid_line_is_fatal(self):
-        """Fail CLOSED when the wording changes.
-
-        The allowance is driven by a parsed package name. If npm reshapes the
-        `invalid:` line, a lenient parser would emit a name matching nothing in
-        the local set and quietly forgive a real conflict. Anything that does
-        not parse to a plausible package name stays fatal.
-        """
-        local = frozenset({"ws"})
-        for line in (
-            "invalid:",
-            "invalid: ",
-            "invalid: some/odd wording npm might ship",
-            "invalid: @@broken@1.0.0 /es/node_modules/x",
-        ):
-            assert es._fatal_tree_problems([line], local) == [line], line
-
-    def test_invalid_stays_fatal_when_the_local_set_is_unknown(self):
-        """Omitting the set must not widen the allowance.
-
-        `_local_dependency_names` returns empty on an unreadable package.json,
-        and the default is None - either way an `invalid:` keeps failing rather
-        than being silently forgiven because we could not check.
-        """
-        assert es._fatal_tree_problems(["invalid: vite@7.3.3 /x"])
-        assert es._fatal_tree_problems(["invalid: vite@7.3.3 /x"], None)
 
     def test_npm_ls_nonzero_exit_does_not_bypass_triage(self):
         """`npm ls` exits 1 whenever it reports ANY problem, harmless ones
