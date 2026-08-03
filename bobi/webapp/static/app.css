@@ -79,10 +79,10 @@ code, pre, kbd { font-family: var(--font-mono); }
    with". Collapsing them — or running a texture across the boundary — is
    what makes an app feel like an undifferentiated wall of UI.
 
-   The architect grid-paper is deliberately NOT used here. It is a marketing
-   device from the design system's figure language; on a dense operational
-   screen it crosses region boundaries and destroys exactly the separation
-   above. `data-retro` is inert on product surfaces.
+   The dashboard keeps this plane untextured. The single-agent page is the
+   deliberate exception: its one bounded workspace uses the design system's
+   faint engineering grid behind opaque document plates. The grid never
+   crosses global chrome and never runs through table content.
    ========================================================================= */
 
 /* Full-bleed: the browser window IS the app window. No floating card, no
@@ -763,8 +763,9 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 
 /* ============================================================
    Single-agent view (#/agents/<name>) — status strip, identity
-   header, one runs table. Ported from the plan's prototype, which
-   is the visual spec; tokens come from tokens.css.
+   header, one runs table. The composition follows the warm editorial
+   language shared by buildmoda.ai and the Bobi site: paper, engineering
+   grid, clay highlights, architect rules, and one night-sky instrument.
    ============================================================ */
 
 /* Operational status: a DELIBERATE, scoped deviation from the system.
@@ -793,52 +794,60 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   --run-await-soft: #FFF0C2;
   --run-await-strong: #714900;
 
-  /* The strip's fill is the system's dark surface — the same near-black the
-     transcript slab uses. A tan was tried (brand ink warmed with clay) and
-     rejected on looks: against warm paper the near-black is what makes the
-     strip read as an instrument rather than another card, and it is the
-     ground the green and red were tuned against. Kept as tokens so the
-     surface is one line to change. */
-  --strip-bg: var(--slab-bg);
-  --strip-line: var(--slab-border);
+  /* The one night-sky surface connects the operational instrument to Bobi's
+     dusk hero. It stays separate from the cool terminal slab: this is warm
+     void chrome with paper-grid lines, not shell output. */
+  --strip-bg: var(--bobi-void);
+  --strip-line: rgba(250, 247, 238, .16);
 }
 
-.agent-page { padding: 20px 22px 28px; overflow-y: auto; flex: 1; }
-.agent-page .btn { font-size: 16px; height: 39px; }
+.agent-page {
+  width: 100%; padding: 42px 40px 68px; overflow-y: auto; flex: 1;
+  background-color: var(--bobi-paper);
+  background-image:
+    linear-gradient(rgba(132, 114, 91, .09) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(132, 114, 91, .09) 1px, transparent 1px),
+    linear-gradient(rgba(132, 114, 91, .045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(132, 114, 91, .045) 1px, transparent 1px);
+  background-size: 80px 80px, 80px 80px, 16px 16px, 16px 16px;
+}
+.agent-page .btn { font-size: 14.5px; height: 38px; }
 
-/* --- header card + the ship's-computer instrument strip --- */
+/* --- editorial identity plate + the night-sky instrument strip --- */
 .agent-header {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 12px; margin-bottom: 16px; overflow: visible;
+  width: 100%; max-width: 1280px; margin: 0 auto 30px;
+  position: relative; overflow: visible;
+  background: var(--bobi-paper); border: 1px solid rgba(54, 46, 37, .18);
+  border-radius: 0;
 }
-/* The strip is dark CHROME, not the terminal. `--bobi-void` is the brand's
-   warm near-black and its documented job is exactly this (dark chrome /
-   footer); the transcript slab keeps `--bobi-term-bg`, the blue-black
-   terminal inset. Before this they shared one surface and read as the same
-   thing doing two jobs — and the cool cast fought both the warm paper around
-   it and the green/red it has to carry. */
+/* Dark chrome, not a terminal. A 48px drawing grid echoes the constellation
+   field on buildmoda.ai/bobi without turning live controls into decoration. */
 .status-band {
+  position: relative;
   display: flex; align-items: center; flex-wrap: wrap;
-  padding: 12px 20px; background: var(--strip-bg);
-  background-image: repeating-linear-gradient(0deg,
-    rgba(232, 226, 214, .03) 0 1px, transparent 1px 3px);
-  border-top: 2px solid var(--slab-accent);
-  border-radius: 11px 11px 0 0;
+  min-height: 66px; padding: 13px 24px; background-color: var(--strip-bg);
+  background-image:
+    linear-gradient(rgba(250, 247, 238, .045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(250, 247, 238, .045) 1px, transparent 1px);
+  background-size: 48px 48px;
+  border-top: 4px solid var(--bobi-clay);
+  border-bottom: 1px solid rgba(250, 247, 238, .12);
+  border-radius: 0;
 }
 .status-band .lamp {
   width: 10px; height: 10px; border-radius: 50%; flex: none; margin-right: 10px;
 }
 .status-band .state {
-  font-family: var(--font-sans); font-size: 17px;
+  font-family: var(--font-sans); font-size: 16px;
   font-weight: var(--weight-semibold); letter-spacing: 0;
-  margin-right: 22px; white-space: nowrap;
+  margin-right: 24px; white-space: nowrap;
 }
 .status-band .seg {
   display: flex; flex-direction: column; gap: 2px;
   padding: 2px 18px; border-left: 1px solid var(--strip-line);
 }
 .status-band .seg .lbl {
-  font-family: var(--font-sans); font-size: 13px; color: var(--slab-muted);
+  font-family: var(--font-sans); font-size: 12.5px; color: rgba(250, 247, 238, .48);
 }
 .status-band .seg .val {
   font-family: var(--font-mono); font-size: 15px; color: var(--slab-text);
@@ -849,7 +858,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 }
 .status-band .btn {
   background: transparent; border-color: var(--strip-line);
-  color: var(--slab-text); font-size: 16px; height: 39px;
+  color: var(--bobi-paper); font-size: 14.5px; height: 38px;
 }
 .status-band .btn:hover { border-color: var(--slab-muted); }
 .status-band .btn.primary {
@@ -858,16 +867,19 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 .status-band .btn.primary:hover { background: var(--accent-2); }
 .status-band .btn[disabled] { opacity: .55; cursor: default; }
 
-/* Running is the one thing on this page that has to be readable from
-   across the room. */
-.band-running { border-top-color: var(--run-live-lit); }
+/* The clay top rule is the Bobi/Moda horizon. State gets a separate inner
+   rail, lamp, and word, so operational color never replaces brand color. */
+.band-running {
+  border-top-color: var(--bobi-clay);
+  box-shadow: inset 4px 0 0 var(--run-live-lit);
+}
 .band-running .lamp {
   background: var(--run-live-lit);
   box-shadow: 0 0 12px color-mix(in srgb, var(--run-live-lit) 80%, transparent);
 }
 .band-running .state { color: var(--run-live-lit); }
 /* Stopped: the screen is powered down — hollow lamp, no lit edge. */
-.band-stopped { border-top-color: var(--strip-line); }
+.band-stopped { border-top-color: var(--bobi-clay); }
 .band-stopped .lamp {
   background: transparent; border: 2px solid var(--slab-muted);
   width: 9px; height: 9px;
@@ -877,7 +889,10 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   background: var(--run-fail-lit);
   box-shadow: 0 0 12px color-mix(in srgb, var(--run-fail-lit) 80%, transparent);
 }
-.band-error { border-top-color: var(--run-fail-lit); }
+.band-error {
+  border-top-color: var(--bobi-clay);
+  box-shadow: inset 4px 0 0 var(--run-fail-lit);
+}
 .band-error .state { color: var(--run-fail-lit); }
 
 /* A failed start's preflight report, rendered under the strip in the
@@ -895,29 +910,44 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 
 /* --- identity --- */
 .ah-body {
+  position: relative;
   display: grid; grid-template-columns: minmax(0, 1fr) auto;
   align-items: flex-start; gap: 24px;
-  padding: 18px 20px 20px;
+  min-height: 170px; padding: 30px 30px 38px;
 }
 .ah-name { min-width: 0; }
+.agent-kicker {
+  display: inline-flex; align-items: center; gap: 8px;
+  margin-bottom: 13px;
+  font-family: var(--font-mono); font-size: 11px; line-height: 1;
+  letter-spacing: var(--track-label); text-transform: uppercase;
+  color: var(--bobi-clay);
+}
+.agent-kicker > span { font-size: 14px; transform: rotate(45deg); }
 .ah-name h1 {
-  font-size: 27px; font-weight: 650; letter-spacing: 0;
-  line-height: 1.2;
+  font-size: clamp(31px, 3vw, 42px); font-weight: var(--weight-semibold);
+  letter-spacing: var(--track-tightest); line-height: 1.06;
   margin: 0;
 }
 .ah-name .desc {
-  color: var(--muted); font-size: 16.5px; line-height: 1.55;
-  margin: 5px 0 0; max-width: none;
+  color: var(--bobi-muted); font-size: 16px; line-height: 1.625;
+  margin: 12px 0 0; max-width: 760px;
 }
 .ah-right {
   display: flex; align-items: center; gap: 10px;
   flex-wrap: wrap; justify-content: flex-end;
 }
+.plate-mark {
+  position: absolute; right: 14px; bottom: 10px;
+  font-family: var(--font-mono); font-size: 9px;
+  letter-spacing: var(--track-label-wide); color: var(--bobi-muted);
+}
 .agent-page .chip {
   display: inline-flex; align-items: center; gap: 7px;
-  font-family: var(--font-sans); font-size: 15px;
-  padding: 7px 12px; border: 1px solid var(--border-strong);
-  border-radius: 999px; background: var(--raised); color: var(--muted);
+  font-family: var(--font-sans); font-size: 14px;
+  padding: 7px 11px; border: 1px solid rgba(54, 46, 37, .22);
+  border-radius: var(--radius-sm); background: var(--bobi-paper-alt);
+  color: var(--bobi-muted);
   white-space: nowrap; font-variant-numeric: tabular-nums;
   text-transform: none;
 }
@@ -925,7 +955,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 /* Popovers open on hover AND on tap: hover alone is dead on touch. */
 .stat-popover { position: relative; }
 .stat-popover .chip { cursor: pointer; }
-.stat-popover:hover .chip,
+.stat-popover:hover .chip { border-color: var(--bobi-clay); color: var(--text); }
 .stat-popover.open .chip { border-color: var(--accent); color: var(--text); }
 .popover {
   display: none; position: absolute; right: 0; top: 100%; z-index: 60;
@@ -941,15 +971,16 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
    loose text over whatever is under it. */
 .pop-card {
   display: block;
-  background: var(--raised); border: 1px solid var(--border-strong);
-  border-radius: 12px; padding: 18px 20px;
-  box-shadow: 0 8px 28px rgba(31, 27, 22, .12);
+  background: var(--bobi-white); border: 1px solid rgba(54, 46, 37, .22);
+  border-top: 3px solid var(--bobi-clay); border-radius: 0; padding: 18px 20px;
+  box-shadow: var(--elev-3);
   max-height: min(68vh, 600px); overflow-y: auto; overscroll-behavior: contain;
 }
 .pop-card .eyebrow { margin-bottom: 10px; }
 .agent-page .eyebrow {
-  font-family: var(--font-sans); font-size: 14px; color: var(--text-secondary);
-  font-weight: var(--weight-medium);
+  font-family: var(--font-mono); font-size: 11px; color: var(--bobi-clay);
+  font-weight: var(--weight-medium); letter-spacing: var(--track-label);
+  text-transform: uppercase;
 }
 .kv {
   display: grid; grid-template-columns: minmax(112px, .8fr) minmax(0, 1.2fr);
@@ -973,13 +1004,19 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 
 /* --- runs panel --- */
 .agent-page .panel {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 12px; margin-bottom: 16px;
+  width: 100%; max-width: 1280px; margin: 0 auto 16px;
+  background: var(--bobi-paper); border: 1px solid rgba(54, 46, 37, .18);
+  border-radius: 0;
   overflow: hidden;
 }
 .panel-head {
-  display: flex; align-items: center; gap: 10px; padding: 14px 20px 0;
-  flex-wrap: wrap;
+  display: flex; align-items: center; gap: 18px; min-height: 72px;
+  padding: 15px 20px; flex-wrap: wrap;
+  background: color-mix(in srgb, var(--bobi-paper-alt) 64%, var(--bobi-paper));
+  border-bottom: 1px dashed var(--border-dashed);
+}
+.panel-title {
+  display: flex; align-items: baseline; gap: 10px; min-width: 88px;
 }
 .panel-head .count {
   font-family: var(--font-mono); font-size: 13px; color: var(--faint);
@@ -992,7 +1029,7 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 .runs-search {
   width: 280px; height: 39px; padding: 7px 11px;
   border: 1px solid var(--border-strong); border-radius: 6px;
-  background: var(--raised); color: var(--ink);
+  background: var(--bobi-paper); color: var(--ink);
   font-family: var(--font-sans); font-size: 15px; letter-spacing: 0;
 }
 .runs-search::placeholder { color: var(--faint); }
@@ -1003,8 +1040,8 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 .tabs { display: flex; gap: 6px; }
 .tab {
   font-family: var(--font-sans); font-size: 15px;
-  padding: 5px 12px; border-radius: 999px; cursor: pointer;
-  border: 1px solid var(--border-strong); background: var(--raised);
+  padding: 5px 11px; border-radius: var(--radius-sm); cursor: pointer;
+  border: 1px solid var(--border-strong); background: var(--bobi-paper);
   color: var(--muted); font-variant-numeric: tabular-nums;
 }
 .tab.active {
@@ -1013,11 +1050,12 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 }
 
 .runs-scroll { overflow-x: auto; }
-table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
+table.runs { width: 100%; border-collapse: collapse; margin-top: 0; }
 .runs th {
   text-align: left; font-family: var(--font-sans); font-size: 14px;
   font-weight: var(--weight-medium);
-  color: var(--faint); padding: 6px 14px; border-bottom: 1px solid var(--border);
+  color: var(--faint); padding: 12px 14px 9px;
+  border-bottom: 1px solid var(--border);
 }
 .runs td {
   padding: 11px 14px; border-bottom: 1px solid var(--border);
@@ -1025,7 +1063,9 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
 }
 .runs tr:last-child td { border-bottom: 0; }
 .runs tbody tr { cursor: pointer; }
-.runs tbody tr:hover td { background: var(--raised); }
+.runs tbody tr:hover td {
+  background: color-mix(in srgb, var(--bobi-paper-alt) 52%, var(--bobi-paper));
+}
 
 .rstat {
   display: inline-flex; align-items: center; gap: 7px;
@@ -1053,7 +1093,7 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
 .runs .r-title { font-weight: 550; }
 .runs .r-pending {
   display: inline-block; margin-top: 5px; padding: 4px 8px;
-  border-left: 3px solid var(--run-await); border-radius: 3px;
+  border-left: 3px solid var(--run-await); border-radius: 0;
   background: var(--run-await-soft); color: var(--run-await-strong);
   font-size: 14px; font-weight: var(--weight-medium); line-height: 1.35;
 }
@@ -1086,7 +1126,8 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
 .runs-pager {
   min-height: 58px; display: flex; align-items: center; justify-content: flex-end;
   gap: 10px; padding: 9px 14px; border-top: 1px solid var(--border);
-  background: var(--raised); font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, var(--bobi-paper-alt) 45%, var(--bobi-paper));
+  font-variant-numeric: tabular-nums;
 }
 .runs-pager:empty { display: none; }
 .runs-pager .pager-summary {
@@ -1159,6 +1200,7 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
 @media (max-width: 960px) {
   .ah-body { grid-template-columns: minmax(0, 1fr); gap: 14px; }
   .ah-right { justify-content: flex-start; }
+  .plate-mark { display: none; }
   .stat-popover .popover {
     position: fixed; left: 50%; right: auto; top: auto; bottom: 18px;
     padding-top: 0; transform: translateX(-50%);
@@ -1166,7 +1208,16 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
 }
 
 @media (max-width: 760px) {
-  .agent-page { padding: 14px 14px 24px; }
+  .agent-page { padding: 24px 14px 40px; }
+  .agent-header { margin-bottom: 20px; }
+  .status-band { padding: 13px 16px; }
+  .status-band .seg { padding-inline: 12px; }
+  .status-band .band-actions {
+    width: 100%; margin: 12px 0 0; padding: 12px 0 0;
+    border-top: 1px solid var(--strip-line);
+  }
+  .ah-body { min-height: 0; padding: 24px 20px 28px; }
+  .ah-name h1 { font-size: 31px; }
   .stat-popover { position: static; }
   .stat-popover .popover {
     left: 14px; right: 14px; top: auto; bottom: 14px;
@@ -1176,6 +1227,7 @@ table.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
   [data-el="aboutWrap"] .popover { width: auto; }
   .pop-card { max-height: min(62vh, 520px); }
   .panel-head { padding-inline: 14px; }
+  .panel-title { width: 100%; }
   .runs-controls { width: 100%; justify-content: space-between; }
   .runs-search { width: 100%; }
   .runs { min-width: 940px; }

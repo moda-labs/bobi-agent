@@ -87,6 +87,7 @@ export function mountAgent(el, { api, name }) {
       <div class="band-report" data-el="report" hidden></div>
       <div class="ah-body">
         <div class="ah-name">
+          <span class="agent-kicker"><span aria-hidden="true">◇</span> local agent</span>
           <h1 data-el="title"></h1>
           <p class="desc" data-el="desc"></p>
         </div>
@@ -104,13 +105,16 @@ export function mountAgent(el, { api, name }) {
             </span></span>
           </span>
         </div>
+        <span class="plate-mark" aria-hidden="true">MODA LABS · BOBI</span>
       </div>
     </div>
 
-    <section class="panel">
+    <section class="panel runs-panel">
       <div class="panel-head">
-        <span class="eyebrow">runs</span>
-        <span class="count" data-el="runsCount"></span>
+        <div class="panel-title">
+          <span class="eyebrow">runs</span>
+          <span class="count" data-el="runsCount"></span>
+        </div>
         <div class="runs-controls">
           <input class="runs-search" data-el="runsSearch" type="search"
                  aria-label="Search runs" placeholder="Search runs">
