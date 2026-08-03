@@ -69,11 +69,18 @@ For a self-hosted event server (tunnel or standalone box), set it as
 `BOBI_ES_LINEAR_WEBHOOK_SECRET` in the server's environment - see
 `docs/SELF_HOSTED_EVENT_SERVER.md`.
 
-## 5. Label issues for automation
+## 5. Decide what the agent acts on
 
-Create a label in Linear called `agent` (or whatever you set in `trigger_labels`). When you want dispatch to pick up an issue, add that label.
+The framework has no built-in Linear dispatcher: it delivers Linear webhook
+events to the agent and stops there. Which issues get picked up, what label or
+state means "work this", and whether the agent moves a ticket as it goes are all
+**team-pack prompt behavior**, not framework configuration — there is no
+`trigger_labels` setting to set.
 
-Dispatch only picks up issues in `Triage` or `Unstarted` states. Once it starts working, it moves the issue to `In Progress`.
+Write the convention you want into the pack's Linear context guide. The in-repo
+eng-team pack is a worked example: `agents/eng-team/context/linear.md` names the
+states it uses (`Todo`, `In Progress`, `Blocked`, `In Review`, `Done`) and tells
+the agent to move issues through them along the engineer lifecycle.
 
 ## Multiple Linear teams
 
@@ -93,8 +100,8 @@ Then reference the appropriate workspace when configuring your projects.
 
 | Problem | Fix |
 |---------|-----|
-| No issues found | Check `trigger_labels` matches a real label in Linear |
+| No issues found | The pack decides what to act on — check its Linear context guide, not a framework setting |
 | Wrong project | Verify the project key matches your issue ID prefix |
 | `401 Unauthorized` | API key expired or revoked — regenerate at linear.app/settings/api |
 | Inbound webhook returns `401` | `LINEAR_WEBHOOK_SECRET` does not match the webhook signing secret |
-| Issues not picked up | They must be in `Triage` or `Unstarted` state, not `In Progress` or `Done` |
+| Issues not picked up | Confirm the webhook is delivering (see above); beyond that, pickup is prompt behavior — check the pack's Linear context guide |

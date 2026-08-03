@@ -95,8 +95,12 @@ turn, then reads a handoff file. This is the only step type that uses the LLM.
 ```
 
 `agent` names the role whose prompt frames the turn. `timeout` (seconds, default
-1800) is the declared deadline carried into the registry for the reconciler's
-dead-man check.
+1800) is the step's wall-clock budget, and it has exactly one enforcement point:
+it gates whether a turn-cap restart is allowed to **start** (see [Turn
+budget](#turn-budget) for the resulting bound). Nothing interrupts a drain already in
+flight on it. It is **not** the value the reconciler's dead-man check uses —
+that check reads the **run-level** timeout (`run_workflow`'s own parameter,
+default 3600), which covers the whole run, not any single step.
 
 `model` is optional. When omitted, a prompt step uses the acting role's
 configured model (`roles.<role>.model` in `agent.yaml`), then the team default
@@ -147,10 +151,9 @@ Model changes are prompt-step boundaries. When a workflow reaches a prompt
 step whose model differs from the session's current model, the engine
 continues the same session natively on the new model when the brain supports
 it (Claude does), keeping the full conversation. On brains without that
-capability, when the step switches back to the provider default, or when the
-step also changes `agent:` (a new agent never inherits another agent's
-transcript), it falls back to a fresh session seeded with the accumulated
-workflow context, so the handoff chain remains intact either way. Note that
+capability, or when the step switches back to the provider default, it falls
+back to a fresh session seeded with the accumulated workflow context, so the
+handoff chain remains intact either way. Note that
 native continuation carries the full transcript into the new model's context,
 so a step that switches a long conversation onto a pricier model pays for
 that history in input tokens.
@@ -161,6 +164,16 @@ session natively under the new dial on every brain, keeping the transcript
 whenever a resumable session id exists (the rare fallbacks that clear it - a
 stale resume, a session that never reported an id - re-seed a fresh session
 from the workflow context, exactly as a model switch would).
+
+An `agent:` change is **not** on its own a session boundary. The engine only
+rebuilds the session when a step changes `model`, `effort`, or `max_turns`; a
+step that switches `agent:` while all three of those match continues in the live
+session and inherits the previous agent's transcript under its own system
+prompt. That is a known gap, not an intended behavior - a reviewer step
+following a builder step at identical dials sees the builder's reasoning. When a
+step must start clean, give it an explicit dial change (a different `model`,
+`effort`, or `max_turns`): that enters the rebuild branch, and an agent change
+inside it always starts fresh rather than resuming natively.
 
 ### Turn budget
 
@@ -243,8 +256,14 @@ unblocks it.
 ### Notify step
 
 Deterministic Slack message, no LLM. Resolves the `message` template and posts
-to the requester's channel and thread. Notification failures are non-fatal: they
-are logged and the workflow continues.
+to the requester's channel and thread. Notification failures are normally
+non-fatal: they are logged and the workflow continues.
+
+The one exception is a notify step immediately followed by an await step. If
+that notification is undeliverable (no token, no channel, or a failed Slack
+post), the run **fails** with `workflow.notify_undeliverable` rather than
+arming the await - the engine refuses to suspend a run waiting on an approval
+nobody was actually asked for.
 
 ```yaml
   - name: notify_start
@@ -353,9 +372,17 @@ captures everything needed to continue: `workflow_name`, `suspended_at_step`
 `variable_scopes`, `repo`, `cwd`, and `run_key`. Writes are atomic (temp file
 then rename) so a process killed mid-write cannot leave a truncated record.
 
-**On resume**, the manager calls `try_resume_for_event(event_type, run_key,
-event, repo)` when an event arrives. It looks up a waiting run matching the event
-type, run key, and repo (`WorkflowRun.find_waiting`). To avoid two processes
+**On resume**, a suspended run is picked up by
+`bobi agent <name> workflows resume <run_id>`. Resume is **manual today**: the
+event-driven entry point `try_resume_for_event(event_type, run_key, event, repo)`
+exists in `bobi/workflow/orchestrator.py` and is covered by tests, but nothing in
+the runtime calls it, so a run that suspends on `await:` stays `waiting` even
+once its awaited event arrives. Wiring it up is tracked as part of the
+[checklist-execution model](../plans/2026-07-26-checklist-execution-model.md),
+which proposes removing the await/resume feature rather than repairing it.
+
+The resume path itself works as follows. It looks up a waiting run matching the
+event type, run key, and repo (`WorkflowRun.find_waiting`). To avoid two processes
 resuming the same run, the caller must first `claim()` it: an atomic rename of
 `<run_id>.json` to `<run_id>.resuming.json`. Exactly one caller wins; the others
 get `FileNotFoundError` and back off. The winner re-stamps the run's registry

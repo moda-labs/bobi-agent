@@ -517,8 +517,13 @@ to every granted bubble, and a `linear:<TEAM>` key can collide across two Linear
 webhooks to a specific account is the multi-tenant hardening tracked in **#239**.
 
 Running a shared or public event server is a deliberate step with prerequisites:
-serve over TLS and set all three provider webhook secrets (`WEBHOOK_SECRET`,
-`SLACK_SIGNING_SECRET`, `LINEAR_WEBHOOK_SECRET`) so every inbound route verifies.
+serve over TLS and set every provider webhook secret (`WEBHOOK_SECRET`,
+`SLACK_SIGNING_SECRET`, `LINEAR_WEBHOOK_SECRET`, `WHATSAPP_APP_SECRET` - plus
+`WHATSAPP_VERIFY_TOKEN` for Meta's GET handshake) so every inbound route
+verifies. An unset github/slack/linear secret admits that provider unverified,
+visible on `/health` as `webhook_unverified`; WhatsApp fails closed instead, so
+a WhatsApp-enabled server missing those two secrets rejects every inbound event
+rather than admitting it. See `docs/SECURITY.md` for why.
 
 ## Key files
 

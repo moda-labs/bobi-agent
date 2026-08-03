@@ -97,8 +97,10 @@ are delivered; unrelated channel messages are ignored.
    event and replies into the same channel via
    `bobi reply discord:<application_id>:channel:<channel_id> "…"` (DMs use
    `:dm:<channel_id>`).
-3. `bobi agent <name> event-server status` (or `GET /health`) shows a
-   `discord_gateway` block with the connection state.
+3. `GET /health` on the event server shows a `discord_gateway` block with the
+   connection state. (`bobi agent <name> event-server status` prints only the
+   mode and deployment count — it does not surface the Gateway block, so query
+   `/health` directly: `curl -s localhost:8080/health | jq .discord_gateway`.)
 
 Discord renders a markdown subset (bold, italics, code blocks, lists);
 messages cap at 2000 characters - the gateway chunks longer replies.
