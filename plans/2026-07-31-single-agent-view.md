@@ -217,7 +217,7 @@ first. Implementation stacks on an integration branch
       `error`, `session_id?`, `run_id?`. Newest first; `status=` filter;
       explicit cap + `truncated`.
 - [x] `stalled` = suspended past threshold (default 24h, constant).
-- [ ] Per-run tokens/est cost surfaced from `model_usage`.
+- [x] Per-run tokens/est cost surfaced from `model_usage`.
 - Testable: `curl` returns the merged list for a seeded home.
 
 **U3 — health tri-state + strip telemetry** *(Phase 2)*
@@ -330,45 +330,27 @@ comparison (dashboard's job) · RBAC/audit.
 
 — none yet.
 
-*(The line above and the header's `Last amended` are frozen review surface —
-the plan-artifact check is insertion-only, so amendments land beneath the
+*(Both lines above are frozen review surface: the header's `Last amended`
+and this placeholder predate the amendments below, and the plan-artifact
+check is insertion-only, so the first amendment lands beneath the
 placeholder rather than replacing it. Last amended: **2026-08-01**.)*
 
-- **2026-08-01** (U7 build session): **a session-less WORKFLOW row renders
-  its Details slab from the row itself, with no fetch.** The design delta
-  "rows with a session get Transcript, rows without get Details" was
-  written with monitor rows in mind, and U5's details endpoint serves
-  monitor run records only — so a stalled workflow run, which is exactly
-  the session-less row a human most needs to open, 404'd. Its row already
-  carries the whole story (`await_event`, `suspended_at_step`, `run_key`,
-  `repo`, the error), so the slab renders from that. Found by driving the
-  real page in a browser, not by a unit test.
-
-*(The line above and the header's `Last amended` are frozen review surface —
-the plan-artifact check is insertion-only, so amendments land beneath the
-placeholder rather than replacing it. Last amended: **2026-08-01**.)*
-
-- **2026-08-01** (QA session on the integration branch): **one piece of work
-  produces one row — the run record claims its session.** U2 says "merge
-  sessions + workflow runs + monitor records into one run shape" and the
-  built fold merged them without deduplicating, so a monitor firing that
-  spawned a check agent, and a workflow run that ran through a session,
-  each produced TWO rows: the run's and the session's. They listed the same
-  seconds twice, offered the same transcript from two rows, and printed the
-  same tokens and estimated cost twice in a column a reader totals by eye —
-  exactly the "panels triple-listed the same objects" this design cut. The
-  run record now claims its session and the session row is dropped, with the
-  claimed session still able to hand up a failure or a still-running status
-  its record can be wrong about. Found by reading the seeded table in a
-  browser. Contract documented in `docs/RUNS_VIEW.md`.
-- **2026-08-01** (QA session on the integration branch): **`stopped` is a
-  clean exit, and the shutdown path now stamps when it happened.** The
-  STOPPED strip's SINCE · EXIT · WAS UP never rendered: the manager's
-  teardown wrote `status="stopped"` with no `terminal_at`, and the strip
-  treated that status as non-terminal. Every unit test had seeded
-  `completed`, a status that path never writes, so the suite stayed green
-  while one of the three specified states was empty in practice. Contract
-  documented in `docs/AGENT_STATE.md`.
+- **2026-08-01** (U2 build session): **row identity is three fields, not
+  two.** The U2 row shape above lists `session_id?` / `run_id?`; the built
+  row carries a third, `key` (`session:<name>` / `workflow:<run_id>` /
+  `monitor:<run_id>`). `key` is stable UI row identity across polls and is
+  never a handle for opening anything; `session_id` and `run_id` say what a
+  row can actually open — a transcript, a run's details, both, or neither.
+  The "neither" case is real and load-bearing: a `$0` script-cache monitor
+  tick spawned no session, so its only drill-down is the Details slab (U5).
+  Contract documented in `docs/RUNS_VIEW.md`.
+- **2026-08-01** (U2 build session): **open question 1 answered — 24h
+  constant, not per-workflow config.** `STALLED_AFTER_SECONDS` is a module
+  constant because the threshold encodes a judgement about human attention
+  ("nobody is coming back to this today"), not anything about a particular
+  workflow; per-workflow config would make the Failed tab mean something
+  different per row. The clock runs from the last resume, not the original
+  start. Questions 2 (pagination) and 3 (today bucket) stay open.
 - **2026-08-01** (U3 build session): **the NOT RESPONDING strip's
   `Health probe: failing 12m` is not built.** The prototype is the visual
   spec, so this is a deliberate deviation, not an omission. A failure
@@ -412,3 +394,34 @@ placeholder rather than replacing it. Last amended: **2026-08-01**.)*
   real gap: the CLI resume never claimed at all, so two concurrent
   invocations both ran the same run. Contract documented in
   `docs/RUN_RESUME.md`.
+- **2026-08-01** (U7 build session): **a session-less WORKFLOW row renders
+  its Details slab from the row itself, with no fetch.** The design delta
+  "rows with a session get Transcript, rows without get Details" was
+  written with monitor rows in mind, and U5's details endpoint serves
+  monitor run records only — so a stalled workflow run, which is exactly
+  the session-less row a human most needs to open, 404'd. Its row already
+  carries the whole story (`await_event`, `suspended_at_step`, `run_key`,
+  `repo`, the error), so the slab renders from that. Found by driving the
+  real page in a browser, not by a unit test.
+
+- **2026-08-01** (QA session on the integration branch): **one piece of work
+  produces one row — the run record claims its session.** U2 says "merge
+  sessions + workflow runs + monitor records into one run shape" and the
+  built fold merged them without deduplicating, so a monitor firing that
+  spawned a check agent, and a workflow run that ran through a session,
+  each produced TWO rows: the run's and the session's. They listed the same
+  seconds twice, offered the same transcript from two rows, and printed the
+  same tokens and estimated cost twice in a column a reader totals by eye —
+  exactly the "panels triple-listed the same objects" this design cut. The
+  run record now claims its session and the session row is dropped, with the
+  claimed session still able to hand up a failure or a still-running status
+  its record can be wrong about. Found by reading the seeded table in a
+  browser. Contract documented in `docs/RUNS_VIEW.md`.
+- **2026-08-01** (QA session on the integration branch): **`stopped` is a
+  clean exit, and the shutdown path now stamps when it happened.** The
+  STOPPED strip's SINCE · EXIT · WAS UP never rendered: the manager's
+  teardown wrote `status="stopped"` with no `terminal_at`, and the strip
+  treated that status as non-terminal. Every unit test had seeded
+  `completed`, a status that path never writes, so the suite stayed green
+  while one of the three specified states was empty in practice. Contract
+  documented in `docs/AGENT_STATE.md`.
