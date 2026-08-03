@@ -535,6 +535,16 @@ the two compile units are mutually exclusive: `src/` is Node-only
 `fetch`/`Request`/`Response` declarations conflict with Node's. Each package
 carries its own `tsconfig.json` and `vitest.config.mts`.
 
+**Working on the Worker in a source checkout:** run `npm ci` in
+`event-server/` first. Starting a local agent builds the embedded local server,
+and that bootstrap installs only what `src/local.ts` needs — the workspace root
+plus `core`. It deliberately skips the `worker` workspace, whose toolchain
+(`agents`, the MCP SDK, wrangler) roughly quadruples the tree and is never
+imported by the local bundle. So after a local agent run, the Worker's
+typecheck and suites report missing modules until a full `npm ci` restores
+them. The reverse is safe: a full install is left alone, because the bootstrap
+reinstalls only when the built artifact is actually stale.
+
 - `event-server/core/src/core.ts` - shared handlers, the unified webhook pipeline,
   routing, HMAC auth, grant filter.
 - `event-server/core/src/adapters/{github,slack,linear}.ts` - webhook normalizers.

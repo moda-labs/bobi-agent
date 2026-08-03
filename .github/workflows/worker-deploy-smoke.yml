@@ -181,9 +181,19 @@ jobs:
         #
         # Both are minted here and rotated every run: they authorize this one
         # ephemeral deployment and nothing else, so neither needs to be a repo
-        # secret. Both are set in ONE step on purpose — each `wrangler secret
-        # put` publishes another version, and the readiness gate below has to
-        # come after the last of them.
+        # secret.
+        #
+        # `secret bulk` rather than two `secret put` calls, and that is
+        # load-bearing rather than tidiness: EVERY secret write publishes a new
+        # Worker version, and Cloudflare's rollover between versions is not
+        # atomic (see the readiness gate below). Two writes meant two rollovers
+        # and a wider window in which a request can still be served by the
+        # previous version — which is exactly what happened on the first live
+        # run carrying this step: the smoke's unauthenticated /mcp probe was
+        # answered 404 by a version predating the route, while the calls either
+        # side of it hit the new one. `secret bulk` sets both in a single
+        # request, so this step costs one version, as it did before /mcp
+        # existed.
         if: steps.live.outputs.run == 'true'
         working-directory: event-server/worker
         env:
@@ -191,14 +201,14 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          openssl rand -hex 32 \
-            | npx --no-install wrangler secret put INTERNAL_DO_SECRET --config wrangler.ci.jsonc
-
+          internal="$(openssl rand -hex 32)"
           operator="$(openssl rand -hex 32)"
-          # Mask before it can reach any log line, including the failure paths.
+          # Mask before either can reach any log line, including failure paths.
+          echo "::add-mask::$internal"
           echo "::add-mask::$operator"
-          printf '%s' "$operator" \
-            | npx --no-install wrangler secret put FLEET_OPERATOR_TOKEN --config wrangler.ci.jsonc
+          printf '{"INTERNAL_DO_SECRET":"%s","FLEET_OPERATOR_TOKEN":"%s"}' \
+            "$internal" "$operator" \
+            | npx --no-install wrangler secret bulk --config wrangler.ci.jsonc
           echo "operator_token=$operator" >> "$GITHUB_OUTPUT"
 
       - name: Wait for the deployment to serve this commit

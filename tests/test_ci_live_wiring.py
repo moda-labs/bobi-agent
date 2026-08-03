@@ -323,11 +323,25 @@ def test_worker_deploy_mints_the_operator_token_on_the_deployed_script():
     """
     steps = _steps("worker-deploy-smoke.yml", "deploy-smoke")
     put = _step(steps, "Set the deployed Worker's secrets")["run"]
-    assert "wrangler secret put FLEET_OPERATOR_TOKEN" in put, (
+    assert "FLEET_OPERATOR_TOKEN" in put, (
         "the lane no longer sets FLEET_OPERATOR_TOKEN — /mcp would 503 and the "
         "MCP smoke would prove nothing"
     )
     assert "::add-mask::" in put, "the minted operator token is not masked in the log"
+
+    # ONE write, so one new Worker version. Every secret write publishes a
+    # version and Cloudflare's rollover is not atomic, so a second write widens
+    # the window in which the smoke can be answered by the PREVIOUS version —
+    # observed as a 404 from a version predating /mcp on this lane's first live
+    # run. `secret bulk` sets both in a single request.
+    assert "secret bulk" in put, (
+        "secrets are no longer set in one request — each `secret put` publishes "
+        "another version and widens the non-atomic rollover window"
+    )
+    assert "secret put" not in put, (
+        "a `wrangler secret put` crept back in alongside `secret bulk`; that is "
+        "an extra version publish and an extra rollover"
+    )
 
     smoke = _step(steps, "Smoke the DEPLOYED Worker")
     assert "BOBI_SMOKE_FLEET_OPERATOR_TOKEN" in smoke["env"], (

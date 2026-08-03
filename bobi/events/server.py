@@ -301,6 +301,16 @@ def _install_source_dependencies(es_dir: Path) -> None:
     _run_npm(["npm", "ci", "--no-audit", "--no-fund", *_LOCAL_WORKSPACE_SCOPE], es_dir,
              timeout=900)
     _refresh_dependency_stamp(es_dir)
+    # Say so where someone will actually hit it. This install is scoped, so the
+    # Cloudflare Worker workspace is now absent - its typecheck and test suites
+    # will fail on missing modules until it is restored. Cheaper to name the
+    # one-line remedy here than to let it read as a broken checkout.
+    log.info(
+        "Installed the local event server's dependencies only (workspace root + "
+        "core). The Cloudflare Worker workspace was not installed; run "
+        "`npm ci` in %s if you are working on the Worker itself.",
+        es_dir,
+    )
 
 
 def _build_local(es_dir: Path, node_version: str) -> None:
