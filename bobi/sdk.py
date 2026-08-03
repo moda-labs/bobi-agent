@@ -1,8 +1,11 @@
-"""Session registry — persistent tracking for all Claude Code sessions.
+"""Session registry — persistent tracking for all agent sessions.
 
 Every session (manager or agent) is tracked here. Sessions persist
 across restarts via state.json files in per-session directories.
-Each session wraps a ClaudeSDKClient with connect/resume/query/disconnect.
+Each session wraps a brain-agnostic session adapter, built through
+``Brain.make_session()`` (#485) — a Claude SDK client, a per-turn ``codex
+exec`` subprocess, or the stub, depending on the configured brain. Nothing
+in this module is Claude-specific.
 
 All session state lives under a selected Bobi Agent runtime root:
 ``<BOBI_HOME>/agents/<name>/run/state/sessions/``. Every process binds

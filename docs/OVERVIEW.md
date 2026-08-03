@@ -43,7 +43,12 @@ eng-team --name eng-team` gives you the whole org chart in one command.
 
 Agents act on the world through tools, and Bobi treats every kind of tool the
 same way - a **dependency with a verifiable success condition**, declared in
-the team's `agent.yaml` under `tool_library:`. Three common shapes:
+the team's `agent.yaml`. There are two authoring surfaces for that: `requires:`
+spells a dependency out inline (a `check:` command plus a `fix:` hint), while
+`tool_library:` names an entry from the shared catalog and expands into a
+`requires:` entry for you. The eng-team uses `requires:` directly for `gh`;
+`tool_library:` is the shortcut when the catalog already defines the tool.
+Three common shapes:
 
 - **CLIs.** Most tools are just command-line programs the agent runs, paired
   with a short markdown guide (`tools/<name>.md`) teaching the agent how to
