@@ -44,6 +44,7 @@ import {
 	SlackSocketManager,
 	slackSocketConfigurationError,
 } from "./slack-socket-local";
+import { readBody, BodyTooLargeError } from "./http-body";
 import {
 	isExemptFromBreaker,
 	recordDelivery,
@@ -411,15 +412,6 @@ function attachEnvIngestTokens(bubbleId: string) {
 // ---------------------------------------------------------------------------
 // Node.js HTTP helpers
 // ---------------------------------------------------------------------------
-
-function readBody(req: http.IncomingMessage): Promise<string> {
-	return new Promise((resolve, reject) => {
-		const chunks: Buffer[] = [];
-		req.on("data", (chunk: Buffer) => chunks.push(chunk));
-		req.on("end", () => resolve(Buffer.concat(chunks).toString()));
-		req.on("error", reject);
-	});
-}
 
 function json(res: http.ServerResponse, data: unknown, status = 200) {
 	res.writeHead(status, { "Content-Type": "application/json" });
@@ -866,6 +858,12 @@ const server = http.createServer(async (req, res) => {
 	try {
 		await handleRequest(req, res);
 	} catch (err) {
+		// An over-cap body is a client error, not a server fault (D049) — say so
+		// rather than logging it as an internal failure on every oversized POST.
+		if (err instanceof BodyTooLargeError) {
+			if (!res.headersSent) json(res, { error: "payload too large" }, 413);
+			return;
+		}
 		console.error("Request error:", err);
 		if (!res.headersSent) {
 			res.writeHead(500);

@@ -1312,10 +1312,23 @@ export async function handleRegisterDeployment(
 	body: Record<string, unknown>,
 	ctx: BubbleAuthContext,
 ): Promise<HandlerResult> {
-	const name = body.name as string;
-	const subscriptions = body.subscriptions as string[];
+	// SHAPE FIRST, before anything is minted or written (D089). The MINT path
+	// below is unauthenticated, so `body` is attacker-controlled: a bare
+	// `as string[]` cast is a lie the runtime never checks. A non-empty STRING
+	// satisfies `.length` and then iterates character-by-character into the
+	// subscription index; a non-string ELEMENT reaches isGlobalTopic and throws
+	// on `.startsWith`, escaping the handler as a 500 — after putBubble has
+	// already persisted an orphan. Validate, don't cast.
+	const name = body.name;
+	const subscriptions = body.subscriptions;
 
-	if (!name || !subscriptions?.length) {
+	if (
+		typeof name !== "string" ||
+		!name ||
+		!Array.isArray(subscriptions) ||
+		!subscriptions.length ||
+		!subscriptions.every((s) => typeof s === "string" && s.length > 0)
+	) {
 		return { status: 400, body: { error: "name and subscriptions[] required" } };
 	}
 

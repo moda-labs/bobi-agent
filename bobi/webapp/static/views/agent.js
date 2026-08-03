@@ -5,6 +5,7 @@
 
 import { openSetup, fmtUsd, fmtEst, fmtSpend, fmtTok, EST_NOTE, healthChip,
          fmtAgo } from "../shell.js";
+import { renderMarkdown } from "./markdown.js";
 
 export function mountAgent(el, { api, name }) {
   const base = "/api/agents/" + encodeURIComponent(name);
@@ -171,67 +172,6 @@ export function mountAgent(el, { api, name }) {
   const CHIP_ALIAS = { done: "completed", error: "failed", cancelled: "stopped" };
   const chipClass = (s) =>
     Object.hasOwn(CHIP_ALIAS, s) ? CHIP_ALIAS[s] : s;
-
-  // --- tiny, safe markdown (agent replies) ---------------------------
-  // Everything is HTML-escaped FIRST, then a fixed set of inline/block
-  // transforms run on the escaped text — so agent output can never inject
-  // markup. No CDN, no deps.
-  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;")
-                      .replace(/>/g, "&gt;");
-
-  function mdInline(t) {
-    // Inline code spans hide behind \x00N\x00 sentinels while the other
-    // transforms run, then restore. A NUL can never occur in the escaped
-    // text (the standalone agentui used a bare " N " sentinel, which ate
-    // plain numbers in prose - fixed here).
-    const codes = [];
-    t = t.replace(/`([^`]+)`/g, (_, c) => `\x00${codes.push(c) - 1}\x00`);
-    t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) => {
-      const safe = /^(https?:|mailto:)/i.test(url) ? url : "#";
-      return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${label}</a>`;
-    });
-    t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-         .replace(/__([^_]+)__/g, "<strong>$1</strong>");
-    t = t.replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
-         .replace(/(^|[^A-Za-z0-9])_([^_\n]+)_(?![A-Za-z0-9])/g, "$1<em>$2</em>");
-    return t.replace(/\x00(\d+)\x00/g, (_, i) => `<code>${codes[+i]}</code>`);
-  }
-
-  function renderMarkdown(src) {
-    const lines = esc(src).split("\n");
-    let html = "", para = [], list = null, i = 0;
-    const flushP = () => {
-      if (para.length) { html += "<p>" + mdInline(para.join(" ")) + "</p>"; para = []; }
-    };
-    const closeL = () => { if (list) { html += `</${list}>`; list = null; } };
-    while (i < lines.length) {
-      const line = lines[i];
-      if (/^\s*```/.test(line)) {
-        flushP(); closeL(); i++;
-        const code = [];
-        while (i < lines.length && !/^\s*```/.test(lines[i])) code.push(lines[i++]);
-        i++;
-        html += "<pre><code>" + code.join("\n") + "</code></pre>";
-        continue;
-      }
-      const h = line.match(/^(#{1,6})\s+(.*)$/);
-      if (h) { flushP(); closeL(); const l = Math.min(h[1].length + 2, 6);
-        html += `<h${l}>` + mdInline(h[2]) + `</h${l}>`; i++; continue; }
-      if (/^>\s?/.test(line)) { flushP(); closeL();
-        html += "<blockquote>" + mdInline(line.replace(/^>\s?/, "")) + "</blockquote>"; i++; continue; }
-      if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { flushP(); closeL(); html += "<hr>"; i++; continue; }
-      const ul = line.match(/^\s*[-*+]\s+(.*)$/);
-      if (ul) { flushP(); if (list !== "ul") { closeL(); html += "<ul>"; list = "ul"; }
-        html += "<li>" + mdInline(ul[1]) + "</li>"; i++; continue; }
-      const ol = line.match(/^\s*\d+\.\s+(.*)$/);
-      if (ol) { flushP(); if (list !== "ol") { closeL(); html += "<ol>"; list = "ol"; }
-        html += "<li>" + mdInline(ol[1]) + "</li>"; i++; continue; }
-      if (/^\s*$/.test(line)) { flushP(); closeL(); i++; continue; }
-      closeL(); para.push(line.trim()); i++;
-    }
-    flushP(); closeL();
-    return html;
-  }
 
   function renderCards(agents) {
     els.empty.hidden = agents.length > 0;

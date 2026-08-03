@@ -67,12 +67,14 @@ WORKER_ADAPTER_MODULES = {"index", "deployment-session", "internal-auth", "fleet
 # present must be in this exact set (test_src_modules_fully_classified), so a
 # new file cannot silently default into the local server. The two gateway
 # drivers and their shared socket scaffolding are local-runtime Node modules
-# with no Cloudflare knowledge.
+# with no Cloudflare knowledge; http-body reads a node:http request stream and
+# is meaningless off Node for the same reason.
 PUBLIC_LOCAL_MODULES = {
     "local",
     "discord-gateway-local",
     "slack-socket-local",
     "socket-driver-common",
+    "http-body",
 }
 
 
