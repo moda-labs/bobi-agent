@@ -164,6 +164,9 @@ class TeamRuntime(ABC):
 
             {"reachability": "live" | "stale" | "unreachable",
              "last_heartbeat_at": str | None,
+             "state": "running" | "stopped" | "not_responding",
+             "detail": str,          # one line of prose for a human
+             "segments": [{"key", "label", "kind", "value", "note"}, ...],
              "manager": {"status", "pid", "running", "healthy",
                          "restart_count", "last_restart_reason",
                          "last_restart_at", "idle_seconds"},
@@ -174,6 +177,22 @@ class TeamRuntime(ABC):
         null/empty rather than omitted (a local team has no heartbeats and no
         supervisor trail), so render code branches on value, never on key
         presence.
+
+        ``state`` is the agent's own state, and ``not_responding`` is why it
+        exists: a manager process can be alive while the manager is not
+        working, and reporting that as running is the failure this surface
+        cannot afford. ``segments`` is the status strip's telemetry, ordered
+        for display and BEST-EFFORT: a reading this runtime cannot produce is
+        omitted rather than faked, so callers must render the list they are
+        given rather than expecting a fixed set. ``kind`` says how to read
+        ``value`` - ``duration`` (elapsed seconds), ``time`` (epoch seconds),
+        ``count``, ``text`` - and formatting belongs to the client, which
+        knows the viewer's timezone.
+
+        These three keys are newer than this interface. An implementation
+        that predates them may omit them; ``bobi.webapp.health.normalize``
+        completes the payload at the response boundary so the null/empty rule
+        above holds for every runtime. See ``bobi/webapp/health.py``.
         """
 
     @abstractmethod
@@ -564,11 +583,14 @@ class LocalRuntime(TeamRuntime):
     def health_summary(self, name: str) -> dict:
         """Manager liveness + session statuses from this machine's files -
         the same sources the dashboard card and the roster read (manager
-        pidfile, session registry). A local team shares this host, so
-        ``reachability`` is "live" by construction; there is no supervisor
-        here, so the restart fields are null and the lifecycle trail is
-        empty - the hosted runtime fills those from its sidecar."""
+        pidfile, session registry) - plus the manager's own health probe,
+        which is what makes ``state`` a tri-state rather than pid presence
+        rephrased. A local team shares this host, so ``reachability`` is
+        "live" by construction; there is no supervisor here, so the restart
+        fields are null and the lifecycle trail is empty - the hosted runtime
+        fills those from its sidecar."""
         from bobi import service
+        from bobi.webapp import health as health_state
 
         root = self._resolve(name)
         status = service.team_status(root)
@@ -585,23 +607,60 @@ class LocalRuntime(TeamRuntime):
             # Manager pid alive but no registered manager session yet: the
             # boot window. Same fail-open verdict the hosted sidecar reports.
             mgr_status = "starting"
+
+        # The strip's SINCE/EXIT/WAS UP come from the manager's last TERMINAL
+        # record, which by definition is not in the active list - so the
+        # stopped path pays one extra registry read, and only it does.
+        strip_entry = mgr_entry
+        if not running:
+            strip_entry = self._last_manager_record(root, mgr_name)
+
+        # "Last activity" is the agent's last sign of life, not the manager's
+        # alone: a subagent still working is the newest thing that happened.
+        last_activity = max((e.last_activity or 0.0 for e in entries),
+                            default=0.0)
+        state = health_state.build_state(
+            running=running,
+            pid=status.manager_pid,
+            root=root,
+            manager_entry=strip_entry,
+            live_runs=sum(1 for e in entries if e.name != mgr_name),
+            last_activity=last_activity,
+        )
         return {
             "reachability": "live",
             "last_heartbeat_at": None,
+            "state": state["state"],
+            "detail": state["detail"],
+            "segments": state["segments"],
             "manager": {
                 "status": mgr_status,
                 "pid": status.manager_pid,
                 "running": running,
-                "healthy": running,
+                # A wedged manager is not healthy, whatever its pid says.
+                # This is the #887 defect: process-alive was read as healthy.
+                "healthy": running and state["probe_ok"] is not False,
                 "restart_count": None,
                 "last_restart_reason": None,
                 "last_restart_at": None,
-                "idle_seconds": None,
+                "idle_seconds": state["idle_seconds"],
             },
             "sessions": [{"name": e.name, "role": e.role, "status": e.status}
                          for e in entries],
             "lifecycle": [],
         }
+
+    @staticmethod
+    def _last_manager_record(root: Path, mgr_name: str):
+        """The manager's registry entry including terminal ones, or None.
+
+        Read with dead-pid reaping so a manager killed without reporting a
+        terminal status reads as crashed here too, never as still running.
+        """
+        from bobi.sdk import SessionRegistry
+
+        return next((e for e in SessionRegistry(root).list_all(reap_dead=True)
+                     if e.name == mgr_name), None)
 
     def session_log(self, name: str) -> dict:
         """The whole registry, terminal sessions included. ``reap_dead``
