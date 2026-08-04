@@ -13,6 +13,8 @@ from pathlib import Path
 
 import yaml
 
+from bobi.fsutil import atomic_write_json
+
 log = logging.getLogger(__name__)
 
 # `${{...}}` is workflow template syntax, not an env reference. Excluding
@@ -755,13 +757,13 @@ def load_deployment_state(project_path: Path, session: str) -> dict:
 def save_deployment_state(project_path: Path, session: str,
                           deployment_id: str, api_key: str) -> None:
     """Save a session's event server deployment_id + api_key."""
-    import json
     state_file = deployment_state_path(project_path, session)
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps({
+    # Atomic: a torn write here reads back as {} and the session loses the
+    # credentials it needs to reach its event server.
+    atomic_write_json(state_file, {
         "deployment_id": deployment_id,
         "api_key": api_key,
-    }))
+    }, indent=None)
 
 
 # --- bubble (trust-domain) state -------------------------------------------

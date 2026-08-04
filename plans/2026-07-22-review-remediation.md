@@ -112,18 +112,18 @@ Rewritten 2026-07-26 to prove only the three surviving items (D029, D017, D119).
 
 ### Phase 3 — Persistence atomicity (one helper, all writers)
 
-- [ ] **D092** `bobi/workflow/state.py:36` — hoist the atomic-write pattern (5 existing re-implementations, appendix lists them) into ONE helper; all five sites adopt it.
-- [ ] **D034** `bobi/setup/state.py:231` — `SetupState.save` bare `write_text`, no locking, concurrent FastAPI threadpool handlers; adopt the helper + a lock.
-- [ ] **D038** `bobi/brain/codex_config.py:214` — `write_codex_config` non-atomic rewrite of `$CODEX_HOME/config.toml` (crash = foreign entries lost); adopt the helper.
-- [ ] **D087** `bobi/spend_governor.py:83` — `record_invocation` unlocked read-modify-write of spend_governor.json; adopt helper + file lock.
-- [ ] **Q062/D071** `bobi/workflow/state.py:89` — `claim()` writes the temp file before the atomic claim, leaving a crash window that makes the run permanently unresumable; reorder per the appendix trace.
-- [ ] **Q039** `bobi/monitors/scheduler.py:1470` — durable JSON persisted in two conflicting styles within the same subsystem; converge on the helper (house pattern).
+- [x] **D092** `bobi/workflow/state.py:36` — hoist the atomic-write pattern (5 existing re-implementations, appendix lists them) into ONE helper; all five sites adopt it.
+- [x] **D034** `bobi/setup/state.py:231` — `SetupState.save` bare `write_text`, no locking, concurrent FastAPI threadpool handlers; adopt the helper + a lock.
+- [x] **D038** `bobi/brain/codex_config.py:214` — `write_codex_config` non-atomic rewrite of `$CODEX_HOME/config.toml` (crash = foreign entries lost); adopt the helper.
+- [x] **D087** `bobi/spend_governor.py:83` — `record_invocation` unlocked read-modify-write of spend_governor.json; adopt helper + file lock.
+- [x] **Q062/D071** `bobi/workflow/state.py:89` — `claim()` writes the temp file before the atomic claim, leaving a crash window that makes the run permanently unresumable; reorder per the appendix trace.
+- [x] **Q039** `bobi/monitors/scheduler.py:1470` — durable JSON persisted in two conflicting styles within the same subsystem; converge on the helper (house pattern).
 
 **Validation gate**
 
-- [ ] Helper unit tests incl. a crash-window test (kill between tmp write and replace → old state intact)
-- [ ] `grep -rn "write_text" bobi/ | grep -iE "state|config\.toml|governor"` shows no remaining bare durable-state writes (document any justified survivors in the PR)
-- [ ] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q`
+- [x] Helper unit tests incl. a crash-window test (kill between tmp write and replace → old state intact)
+- [x] `grep -rn "write_text" bobi/ | grep -iE "state|config\.toml|governor"` shows no remaining bare durable-state writes (document any justified survivors in the PR)
+- [x] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q`
 
 ### Phase 4 — bobi/ bug batch (each independent; failing-test-first)
 
@@ -537,6 +537,19 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   - **D067** — confirmed. Worth recording *why the dead handler looked live*: `test_timeout_is_reported_as_subprocess_timeout` reaches it by making `connect()` raise `asyncio.TimeoutError` synthetically, which nothing in production does. The real overrun path arrives as `CancelledError` from the caller's `wait_for` and skips both handlers. Enforcing the deadline inside makes the caller's `wait_for` a backstop, and **a flat grace on it was wrong**: `test_timeout_returns_failed_check` patches `_run_agent_supervised` out entirely, so only the outer deadline exists there, and a flat +30s turned a `timeout=1` check into 31s per attempt. The grace is proportional instead — `timeout + max(1, min(30, timeout × 0.1))`.
 
   **Reading the diff:** `bobi/subagent.py` reports ~93 changed lines but `git diff -w` shows **25** — wrapping the supervised loop in `async with asyncio.timeout(...)` re-indented its body.
+
+- **2026-08-04** (Lane A PR 2, authorized by Zach): **the 2026-08-04 Lane C deferral amendment's collision measurement is wrong, and the error is a reusable one.** That entry states `bobi/setup/webui/static/app.js` and `bobi/webapp/static/shell.js` are **untouched** by the restyle, and concludes D124 and Q073 are "genuinely collision-free". Both claims are false. Measured against PR **#948** (`feat/single-agent-view` → main, opened after that amendment was written) with the three-dot diff from its merge base `4cf045a`, the branch touches **all four** of Lane C's files plus a fifth: `bobi/setup/webui/static/app.css` 1,149 changed lines · `app.js` 97 · `bobi/webapp/static/app.css` 996 · `shell.js` 10 · `views/agent.js` 1,623. **Nothing in the deferred six is collision-free.**
+
+  **Cause, worth carrying forward:** the earlier measurement used a **two-dot** `git diff origin/main origin/feat/single-agent-view`, which compares branch TIPS. A pull request's file list is the **three-dot** diff from the merge base — what the branch changed, not how it differs from a main that moved independently underneath it. Two-dot understated the branch precisely because main had since touched some of the same files. **When the question is "what does this PR change", use `git diff $(git merge-base A B) B`.**
+
+  **Zach's deferral decision is unaffected and better supported** — it was made on "those surfaces are about to change significantly", which is now measured rather than asserted. What changes is the unblock trigger: it is no longer "rebase the two collision-free items early", it is **when #948 merges, rebase all six (D098, D099, D124, Q073, Q076, Q074) onto it**. #819 stays open holding exactly those six until then.
+
+  **Phase 3 shipped in this PR** (D092, D034, D038, D087, Q062/D071, Q039 + all three gate lines). Four notes the checklist lines could not carry:
+
+  - **D092 undercounts by one, and Q039 overcounts by one.** D092 lists five hand-rolled atomic writers; there are **six** — `bobi/sdk.py:_write_state` grew one after the review tree, and it was the best of them (process-unique temp name, cleanup in `finally`), so it is the implementation `bobi/fsutil.py` hoists. Conversely Q039 lists `bobi/sdk.py:291/312/358` among the **non**-atomic deviants; those line numbers no longer point at writes, and sdk.py's only state write is already atomic. That half of Q039 is stale and is dropped rather than "fixed".
+  - **The grep gate has zero justified survivors.** The gate anticipated documenting some; instead the four small process files it surfaced outside the item list (`manager.pid`, `ui.port`, two `event-server.port` writers) were converted too — each a one-line adoption, and each otherwise able to be left empty by a kill between the truncating `open()` and the `write()`. `bobi/events/client.py` (the event cursor) and `bobi/supervisor/alerting.py` (incident state) were converted for the same reason; Q039 names the first explicitly.
+  - **D071's crash window is NOT closed, and the reorder its own item prescribes slightly widens it.** Q062's trace claims the reorder "preserves every guarantee"; it preserves the ones it enumerates, but the claim is two file operations (rename the run aside, then write the updated status over it) and a crash between them leaves `<run_id>.resuming.json` reading `waiting` — `find_waiting` keeps matching it while `claim()` can never win again, which is exactly D071. No ordering of two operations removes that; closing it needs a **recovery protocol for a torn claim**. Built anyway from Q062: the loser now writes nothing at all, and the temp name is process-unique (it was derived only from the run id, so every racing claimer shared one temp path — a winner could rename a file another process was still writing). **D071 should be re-decided with the fate of await/resume itself** — `claim()`'s only caller is `try_resume_for_event`, which the runtime still does not call (Phase 2 D027, `[f]`). Recorded in `docs/WORKFLOW_ENGINE.md` where the resume protocol is described.
+  - **A lock file is a file, and `SetupState`'s lives inside a hashed tree.** D034 asks for "the helper + a lock"; adding `setup.json.lock` broke `test_validate_then_install_when_state_file_sits_inside_source_tree`, because a run/ directory nested in a team source tree puts the lock under `source_tree_hash`, which already excludes the checkpoint for this exact reason. Both are now excluded through one `setup_state_artifacts()` list, so a future sidecar cannot be added to the save path and forgotten by the two hash callers.
 
 ## Notes
 

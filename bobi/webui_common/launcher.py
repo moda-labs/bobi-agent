@@ -13,6 +13,8 @@ import webbrowser
 from fastapi import FastAPI
 import uvicorn
 
+from bobi.fsutil import atomic_write_text
+
 AppFactory = Callable[[str], FastAPI]
 Announcer = Callable[[str], str]
 
@@ -87,7 +89,7 @@ def serve_container(
 
     sock = _serve_socket(bind_host, bind_port)
     bound_port = sock.getsockname()[1]
-    (state_dir / "ui.port").write_text(str(bound_port))
+    atomic_write_text(state_dir / "ui.port", str(bound_port))
 
     app = app_factory(token)
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))

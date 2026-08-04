@@ -16,6 +16,8 @@ from queue import SimpleQueue
 import certifi
 import websocket
 
+from bobi.fsutil import atomic_write_json
+
 log = logging.getLogger(__name__)
 
 def _state_path(name: str) -> Path:
@@ -39,8 +41,9 @@ def _load_cursor(path: Path | None = None) -> int:
 
 def _save_cursor(seq: int, path: Path | None = None) -> None:
     path = path or _state_path("cursor.json")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"last_seen": seq}))
+    # Atomic: a torn cursor reads back as 0 (see _load_cursor), which
+    # replays the whole event backlog from the beginning.
+    atomic_write_json(path, {"last_seen": seq}, indent=None)
 
 
 def _log_event(event: dict, session_id: str = "",
