@@ -79,7 +79,9 @@ skills themselves. This section carries only the repo-anchored
 conventions that hold regardless of how the stages are tooled:
 
 - **Plans**: initiative-sized work (multiple coherent deliverables) gets
-  a plan artifact `plans/<slug>.md`, merged and amended via PR, with a
+  a plan artifact `plans/YYYY-MM-DD-<slug>.md`, dated on creation — the
+  stage pack validates this shape, and existing undated paths stay valid.
+  It is merged and amended via PR, with a
   lightweight GitHub tracking issue (the issue holds discussion; the plan
   file is the source of truth). That issue is the feature request itself —
   no `plan` label, no `[plan]` prefix, a title that outlines the task to be
