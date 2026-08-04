@@ -1,13 +1,13 @@
 /**
- * Section eyebrow: 10px violet square + uppercase mono label, 20px above the
- * heading it introduces. Write the label in CAPS.
+ * Editorial eyebrow: 10px clay square + uppercase mono label, 20px above the
+ * marketing heading it introduces. Write the label in CAPS.
  *
- * The square is violet on Bobi surfaces (it is red on Moda Labs surfaces — do
- * not mix the two systems).
+ * Product screens use the sentence-case `SectionLabel` instead. Violet is
+ * reserved for live, selected, focused, gated, and enforced state.
  */
 export interface EyebrowProps {
   children?: React.ReactNode;
-  /** Square color. Default var(--bobi-acc). */
+  /** Square color. Default var(--bobi-clay). */
   color?: string;
   className?: string;
   style?: React.CSSProperties;

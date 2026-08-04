@@ -82,15 +82,14 @@ export function mountAgent(el, { api, name }) {
   el.innerHTML = "";
   const page = mk("div", "agent-page");
   page.innerHTML = `
-    <div class="agent-header">
-      <div class="status-band" data-el="band"></div>
-      <div class="band-report" data-el="report" hidden></div>
+    <header class="agent-page-header">
       <div class="ah-body">
         <div class="ah-name">
           <h1 data-el="title"></h1>
           <p class="desc" data-el="desc"></p>
         </div>
         <div class="ah-right">
+          <div class="agent-header-state" data-el="band"></div>
           <span class="stat-popover" data-el="savedWrap">
             <span class="chip" data-el="savedChip" tabindex="0"
                   role="button" aria-expanded="false">saved …</span>
@@ -105,33 +104,47 @@ export function mountAgent(el, { api, name }) {
           </span>
         </div>
       </div>
-    </div>
+      <div class="band-report" data-el="report" hidden></div>
+    </header>
 
-    <section class="panel">
-      <div class="panel-head">
-        <span class="eyebrow">runs</span>
-        <span class="count" data-el="runsCount"></span>
-        <div class="runs-controls">
-          <input class="runs-search" data-el="runsSearch" type="search"
-                 aria-label="Search runs" placeholder="Search runs">
-          <div class="tabs" data-el="tabs"></div>
+    <div class="agent-content">
+      <section class="telemetry-grid" data-el="telemetry" hidden></section>
+
+      <section class="runs-section">
+        <div class="section-label">
+          <span>Runs</span>
+          <span class="count" data-el="runsCount"></span>
         </div>
-      </div>
-      <div class="runs-scroll">
-        <table class="runs">
-          <thead><tr>
-            <th style="width:104px">Status</th>
-            <th>Run</th>
-            <th style="width:130px">When</th>
-            <th style="width:120px" class="r-tok">Tokens · cost</th>
-            <th style="width:280px"></th>
-          </tr></thead>
-          <tbody data-el="runRows"></tbody>
-        </table>
-      </div>
-      <p class="runs-empty" data-el="runsEmpty" hidden></p>
-      <div class="runs-pager" data-el="runsPager"></div>
-    </section>
+        <div class="runs-controls">
+          <span class="runs-search-field bobi-field">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5"></circle>
+              <path d="m16 16 4 4"></path>
+            </svg>
+            <input class="runs-search" data-el="runsSearch" type="search"
+                   aria-label="Search runs" placeholder="Search runs">
+          </span>
+          <div class="tabs" data-el="tabs" role="tablist"
+               aria-label="Filter runs"></div>
+        </div>
+        <div class="panel runs-panel">
+          <div class="runs-scroll">
+            <table class="runs">
+              <thead><tr>
+                <th style="width:118px">Status</th>
+                <th>Run</th>
+                <th style="width:150px">When</th>
+                <th style="width:130px" class="r-tok">Tokens · cost</th>
+                <th style="width:280px"></th>
+              </tr></thead>
+              <tbody data-el="runRows"></tbody>
+            </table>
+          </div>
+          <p class="runs-empty" data-el="runsEmpty" hidden></p>
+          <div class="runs-pager" data-el="runsPager"></div>
+        </div>
+      </section>
+    </div>
 
     <div class="modal-backdrop" data-el="backdrop">
       <div class="modal" role="dialog" aria-modal="true"
@@ -140,7 +153,7 @@ export function mountAgent(el, { api, name }) {
           <span class="eyebrow" data-el="slabKind"></span>
           <span class="path" data-el="slabTitle"></span>
           <span class="meta" data-el="slabMeta"></span>
-          <button class="btn small" data-el="slabClose" type="button">Close</button>
+          <button class="btn bobi-btn small" data-el="slabClose" type="button">Close</button>
         </div>
         <div class="transcript" data-el="slabBody"></div>
       </div>
@@ -184,13 +197,13 @@ export function mountAgent(el, { api, name }) {
     wrap.appendChild(mk("h2", null, name));
     wrap.appendChild(mk("p", null,
       "No agent by that name is installed on this machine."));
-    const back = mk("a", "btn quiet", "All agents");
+    const back = mk("a", "btn bobi-btn quiet", "All agents");
     back.href = "#/";
     wrap.appendChild(back);
     page.appendChild(wrap);
   }
 
-  /* --- 1. status strip --------------------------------------------- */
+  /* --- 1. page header + status ------------------------------------- */
 
   // Chrome is lowercase, and a state is a label rather than data — the
   // design system's rule, and the reason none of this shouts any more.
@@ -198,46 +211,51 @@ export function mountAgent(el, { api, name }) {
     running: "running", stopped: "stopped", not_responding: "not responding",
   };
   const STATE_CLASS = {
-    running: "band-running", stopped: "band-stopped",
-    not_responding: "band-error",
+    running: "running", stopped: "stopped",
+    not_responding: "failed",
   };
 
   function renderBand() {
     const state = (health && health.state) || "stopped";
-    els.band.className = "status-band " + (STATE_CLASS[state] || "band-stopped");
+    els.band.className = "agent-header-state";
     els.band.innerHTML = "";
     els.band.title = (health && health.detail) || "";
 
-    els.band.appendChild(mk("span", "lamp"));
-    els.band.appendChild(mk("span", "state", STATE_WORD[state] || "—"));
+    const status = mk("span", "status-badge " +
+      (STATE_CLASS[state] || "stopped"));
+    status.appendChild(mk("span", "status-dot"));
+    status.appendChild(mk("span", null, STATE_WORD[state] || "—"));
+    els.band.appendChild(status);
 
-    // Whatever segments the runtime could actually produce. A reading it
-    // could not is absent, never faked, so this renders the list given.
+    // Telemetry uses the design library's MetricTile composition. Whatever
+    // the runtime could not read is absent, never synthesized.
+    els.telemetry.innerHTML = "";
     for (const seg of (health && health.segments) || []) {
-      const box = mk("span", "seg");
-      box.appendChild(mk("span", "lbl", seg.label));
+      const box = mk("div", "metric-tile");
+      box.appendChild(mk("span", "metric-label", seg.label));
       const value = fmtSegment(seg);
-      box.appendChild(mk("span", "val",
+      box.appendChild(mk("span", "metric-value",
         seg.note ? `${value} · ${seg.note}` : value));
-      els.band.appendChild(box);
+      els.telemetry.appendChild(box);
     }
+    els.telemetry.hidden = !els.telemetry.children.length;
 
-    const actions = mk("span", "band-actions");
+    const actions = mk("span", "agent-header-actions");
     const btn = (label, cls, verb) => {
-      const b = mk("button", "btn " + cls, busyVerb ? busyVerb + "…" : label);
+      const b = mk("button", "btn bobi-btn " + cls,
+                   busyVerb ? busyVerb + "…" : label);
       b.type = "button";
       if (busyVerb) b.disabled = true;
       else b.addEventListener("click", () => act(verb));
       actions.appendChild(b);
     };
-    // Amber marks only the primary recovery action — never the state.
     if (state === "running") {
       btn("Restart", "small", "restart");
       btn("Stop", "small", "stop");
     } else if (state === "not_responding") {
       btn("Restart agent", "primary big", "restart");
     } else {
-      btn("▸ Start agent", "primary big", "start");
+      btn("Start agent", "primary big", "start");
     }
     els.band.appendChild(actions);
   }
@@ -252,8 +270,8 @@ export function mountAgent(el, { api, name }) {
     if (!ok) {
       busyVerb = null;
       renderBand();
-      // A failed start carries a preflight report. Render it under the
-      // strip in the strip's own grammar rather than dropping it.
+      // A failed start carries a preflight report. Keep it attached to the
+      // page header instead of dropping it into a transient toast.
       showReport(verb + " failed",
                  (data && (data.report || data.error)) || "");
       return;
@@ -423,9 +441,12 @@ export function mountAgent(el, { api, name }) {
       // ALL stays bare: the panel head's "⌁ N runs" IS the all-count, and
       // printing it again one gap to the right reads as two facts.
       const n = t.key === "all" ? null : counts[t.key];
-      const b = mk("button", "tab" + (tab === t.key ? " active" : ""),
+      const on = tab === t.key;
+      const b = mk("button", "tab" + (on ? " active" : ""),
                    n == null ? t.label : `${t.label} · ${n}`);
       b.type = "button";
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-selected", on ? "true" : "false");
       b.addEventListener("click", () => {
         if (tab === t.key) return;
         tab = t.key;
@@ -473,7 +494,9 @@ export function mountAgent(el, { api, name }) {
     els.runsEmpty.hidden = true;
 
     for (const row of rows) {
-      const tr = mk("tr");
+      const tr = mk("tr", "bobi-row");
+      tr.tabIndex = 0;
+      tr.setAttribute("role", "button");
 
       const stat = mk("td");
       const chip = mk("span", "rstat " + row.status);
@@ -520,6 +543,12 @@ export function mountAgent(el, { api, name }) {
       tr.appendChild(act);
 
       tr.addEventListener("click", () => openSlab(row));
+      tr.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openSlab(row);
+        }
+      });
       els.runRows.appendChild(tr);
     }
   }
@@ -537,7 +566,7 @@ export function mountAgent(el, { api, name }) {
       : `${start}–${end} of ${total}`;
     els.runsPager.appendChild(mk("span", "pager-summary", summary));
 
-    const prev = mk("button", "btn small", "Previous");
+    const prev = mk("button", "btn bobi-btn small", "Previous");
     prev.type = "button";
     prev.disabled = pageIndex === 0;
     prev.addEventListener("click", () => { pageIndex -= 1; pollRuns(); });
@@ -547,7 +576,7 @@ export function mountAgent(el, { api, name }) {
     els.runsPager.appendChild(mk(
       "span", "pager-page", `${pageIndex + 1} / ${pages}`));
 
-    const next = mk("button", "btn small", "Next");
+    const next = mk("button", "btn bobi-btn small", "Next");
     next.type = "button";
     next.disabled = offset + (runs.runs || []).length >= total;
     next.addEventListener("click", () => { pageIndex += 1; pollRuns(); });
@@ -567,7 +596,7 @@ export function mountAgent(el, { api, name }) {
       and closure actions; neither action advances the approval gate. */
   function rowActions(row) {
     const actions = mk("div", "row-actions");
-    const transcript = mk("button", "btn small", "Transcript");
+    const transcript = mk("button", "btn bobi-btn small", "Transcript");
     transcript.type = "button";
     transcript.disabled = !row.session_id;
     if (!row.session_id) transcript.title = "No transcript was recorded for this run";
@@ -578,7 +607,7 @@ export function mountAgent(el, { api, name }) {
     actions.appendChild(transcript);
 
     if (!row.session_id && row.kind !== "session") {
-      const details = mk("button", "btn small", "Details");
+      const details = mk("button", "btn bobi-btn small", "Details");
       details.type = "button";
       details.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -588,7 +617,7 @@ export function mountAgent(el, { api, name }) {
     }
 
     if (row.status === "awaiting_action") {
-      const remindButton = mk("button", "btn small remind", "Remind");
+      const remindButton = mk("button", "btn bobi-btn small remind", "Remind");
       remindButton.type = "button";
       remindButton.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -596,7 +625,7 @@ export function mountAgent(el, { api, name }) {
       });
       actions.appendChild(remindButton);
 
-      const closeButton = mk("button", "btn small quiet", "Close");
+      const closeButton = mk("button", "btn bobi-btn small quiet", "Close");
       closeButton.type = "button";
       closeButton.addEventListener("click", (e) => {
         e.stopPropagation();

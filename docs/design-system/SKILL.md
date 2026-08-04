@@ -20,7 +20,7 @@ If the user invokes this skill without any other guidance, ask them what they wa
 
 ## Non-negotiables
 
-1. Violet (`--bobi-acc`) means **state**: live, enforced, gated, focused. Never decorative.
+1. Violet (`--bobi-acc`) means **state**: live, enforced, gated, focused. Never decorative. Completed and saved states are quiet ink or muted.
 2. Human approval gates always render with the violet left rail + 4% wash + rotated-square glyph, and always name the workflow and step. Never a toast.
 3. Show real config — filenames in `FileChip`, YAML in `CodeCard`, shell in `Terminal`.
 4. The Bobi lockup always travels with the "BY MODA LABS ↗" byline.

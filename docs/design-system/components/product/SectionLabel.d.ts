@@ -4,8 +4,8 @@
  *
  * Prefer this over a tinted header bar inside the card: it keeps cards as clean
  * white objects and lets a screen carry several groups without visual noise.
- * Reserve the uppercase-mono treatment for page titles (PageHeader) and column
- * headers — not for these.
+ * Reserve uppercase mono for figure plates, table columns, and corner marks —
+ * not page titles or these group labels.
  */
 export interface SectionLabelProps {
   children?: React.ReactNode;

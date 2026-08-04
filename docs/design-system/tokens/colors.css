@@ -93,10 +93,9 @@
    elevation scale WITHOUT touching the marketing language.
    ========================================================================= */
 .bobi-app {
-  /* Warm but LOW-CHROMA. The marketing cream (#FAF7EE) is beautiful full-bleed
-     and turns beige-pink when it tiles a dense screen, so the app pulls most of
-     the chroma out while keeping the warm hue. Same family, less saturation. */
-  --surface-page: #F4F2ED;      /* sunken page — warm, nearly neutral */
+  /* Carry the core Moda/Bobi paper into the operational canvas. White cards,
+     borders, and elevation preserve enterprise hierarchy above it. */
+  --surface-page: var(--bobi-paper); /* sunken page — core brand cream */
   --surface-card: #FFFFFF;      /* cards are white: data reads cleanest on white */
   --surface-raised: #FFFFFF;
   --surface-band: #EDEBE5;

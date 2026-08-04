@@ -143,7 +143,7 @@ The product surface ramp (`.bobi-app` — both web UIs set it on `<body>`). A
 dense operational screen needs hierarchy the flat marketing canvas doesn't
 provide, so the page goes *sunken*, cards go white, and elevation separates:
 ```css
---surface-page: #F4F2ED;  /* sunken, warm but LOW-chroma */
+--surface-page: var(--bobi-paper); /* sunken core-brand cream */
 --surface-card: #FFFFFF;  /* data reads cleanest on white */
 --text-secondary: #6B6459; /* warmth kept, chroma dropped, 4.9:1 on white */
 --elev-1 … --elev-4;       /* 1px contact edge + wide soft ambient, warm ink */
@@ -178,7 +178,8 @@ gradients and aurora blobs. Bobi's violet is load-bearing: if a thing is not
 live, enforced, gated, or focused, it is not violet.
 
 There is no green in the palette. A connected integration is a *live* state, so
-it reads violet; failure uses Moda's brick `#9E3A28`; waiting uses clay.
+it reads violet; failure uses Moda's brick `#9E3A28`; waiting uses clay;
+completed and saved states resolve to quiet ink or muted treatments.
 
 ## Typography — the brand faces, vendored locally
 

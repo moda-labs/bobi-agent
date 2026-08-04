@@ -63,10 +63,11 @@ abstractions — "a Linear ticket lands", not "work items are ingested".
 Never "we" in product copy. Never first-person from the agent.
 
 **Casing.** The wordmark is always lowercase `bobi`. In prose it is `Bobi` as a
-sentence subject. Everything the system owns — agent names, roles, filenames,
-CLI verbs, nav labels — is **lowercase mono**: `director`, `engineer agent`,
-`agent.yaml`, `bobi agent my-agent start`. Eyebrows and plate labels are
-UPPERCASE mono. Headings are sentence case.
+sentence subject. The system-owned vocabulary remains lowercase. Identifiers
+and data use mono: `director`, `engineer-agent`, `agent.yaml`,
+`bobi agent my-agent start`. Product chrome—page titles, tabs, nav, buttons—is
+lowercase sans/display. Editorial eyebrows and figure-plate labels are
+UPPERCASE mono. Marketing headings stay sentence case.
 
 **Numbers are real or absent.** `ENG-142`, `PR #488`, `02:00`, `23:59`,
 `50 USD`, `12 tickets resolved`. Never a rounded fake metric, never a percentage
@@ -112,7 +113,20 @@ offsets. **Dusk violet** (`oklch(0.53 0.17 285)`, bright `oklch(0.70 0.14 285)`)
 is the accent and is strictly semantic: live, enforced, gated, focused. Warm
 near-black `#221C15` is the dark surface (sidebar, footer). The single cool
 surface is the terminal `#0F1226` — reserved for real shell output. `sky
-#7DAABD` is a rare support tint. Moda's red never appears.
+#7DAABD` is a rare support tint. Completed and saved states resolve to quiet
+ink or muted treatments, not violet. Moda's red never appears.
+
+| Meaning | Treatment | Typical uses |
+|---|---|---|
+| Live, selected, focused, gated, enforced | Dusk violet | Running agents, active tabs, focus rings, human gates |
+| Waiting, warning, constructive emphasis | Clay | Awaiting action, indices, add affordances, hover warmth |
+| Completed, saved, idle | Ink or muted neutral | Finished steps, saved values, generated files |
+| Failed | Moda brick | Errors and halted runs only |
+
+Color balance follows the work on screen, not a quota. A creation flow will
+naturally carry more clay; an operating agent will naturally carry more
+violet. Components must preserve the semantic mapping even when the resulting
+proportions differ.
 
 Never apply an `/opacity` modifier to the accent (it is a `var()` string) — use
 `color-mix(in srgb, var(--bobi-acc) 5%, transparent)` for washes.

@@ -115,7 +115,7 @@ code,pre,kbd{font-family:var(--font-mono);}
 }
 .step .dot{width:15px;height:15px;border-radius:50%;flex:0 0 15px;border:1.5px solid var(--border-strong);display:grid;place-items:center;background:var(--surface-card);}
 .step.done{color:var(--text-primary);}
-.step.done .dot{background:var(--accent);border-color:var(--accent);}
+.step.done .dot{background:var(--status-done);border-color:var(--status-done);}
 .step.done .dot svg{width:9px;height:9px;color:var(--bobi-paper);}
 /* current = focused: the one place a rail item earns violet */
 .step.current{color:var(--text-primary);background:var(--surface-selected);font-weight:var(--weight-medium);}
@@ -238,8 +238,8 @@ textarea.answer:focus,input.answer:focus{outline:none;border-color:var(--accent)
 .ebadge{font-family:var(--font-mono);font-size:11px;letter-spacing:var(--track-index);padding:2px 7px;border-radius:var(--radius-sm);border:1px solid var(--border-hairline);color:var(--text-secondary);}
 .ebadge.req{color:var(--text-highlight);border-color:var(--status-waiting-edge);background:var(--status-waiting-soft);}
 .ebadge.opt{color:var(--text-faint);}
-.ebadge.sec{color:var(--accent);border-color:var(--status-live-edge);background:var(--status-live-soft);}
-.ebadge.ok{color:var(--status-live);border-color:var(--status-live-edge);background:var(--status-live-soft);}
+.ebadge.sec{color:var(--text-secondary);border-color:var(--border-hairline);background:var(--surface-inset);}
+.ebadge.ok{color:var(--status-done);border-color:var(--status-done-edge);background:var(--status-done-soft);}
 .ehint{font-size:12.5px;color:var(--text-faint);}
 .cdot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:middle;background:var(--border-strong);}
 .cdot.ok{background:var(--status-live);box-shadow:0 0 0 3px var(--accent-soft);}
@@ -256,7 +256,7 @@ textarea.answer:focus,input.answer:focus{outline:none;border-color:var(--accent)
 .secret input{font-family:var(--font-mono);font-size:13px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:9px 11px;background:var(--surface-card);transition:border-color var(--dur-fast) var(--ease);}
 .secret input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
 .secret .shelp{font-size:12.5px;color:var(--text-faint);line-height:1.45;}
-.secret-saved{font-family:var(--font-mono);font-size:12.5px;color:var(--status-live);display:flex;align-items:center;gap:9px;flex-wrap:wrap;}
+.secret-saved{font-family:var(--font-mono);font-size:12.5px;color:var(--status-done);display:flex;align-items:center;gap:9px;flex-wrap:wrap;}
 /* ---- links -------------------------------------------------------------
    Two kinds, and the difference is semantic:
 
@@ -491,7 +491,7 @@ textarea.answer:focus,input.answer:focus{outline:none;border-color:var(--accent)
 .ucard .ud .ph{color:var(--text-faint);font-style:italic;}
 .udot{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;border:1.5px solid var(--border-strong);}
 .udot svg{width:10px;height:10px;color:var(--bobi-paper);}
-.udot.ok{background:var(--accent);border-color:var(--accent);}
+.udot.ok{background:var(--status-done);border-color:var(--status-done);}
 .udot.thin{border-color:var(--accent);background:var(--accent-soft);}
 .udot.empty{border-style:dashed;}
 .urole{display:flex;flex-direction:column;gap:1px;margin-bottom:7px;}
@@ -508,8 +508,8 @@ textarea.answer:focus,input.answer:focus{outline:none;border-color:var(--accent)
 .cbadge.connected{display:inline-flex;align-items:center;gap:4px;color:var(--bobi-paper);background:var(--accent);border-radius:var(--radius-sm);padding:2px 9px 2px 7px;font-size:11px;letter-spacing:var(--track-index);}
 .cbadge.warn{color:var(--status-failed);}
 .cbadge.connected svg{width:10px;height:10px;color:var(--bobi-paper);}
-.venn-done{display:flex;align-items:center;gap:12px;background:var(--status-live-soft);border:1px solid var(--status-live-edge);border-radius:var(--radius-lg);padding:13px 15px;margin-bottom:12px;}
-.venn-done .vd-seal{flex:0 0 auto;width:30px;height:30px;border-radius:50%;background:var(--accent);display:grid;place-items:center;}
+.venn-done{display:flex;align-items:center;gap:12px;background:var(--status-done-soft);border:1px solid var(--status-done-edge);border-radius:var(--radius-lg);padding:13px 15px;margin-bottom:12px;}
+.venn-done .vd-seal{flex:0 0 auto;width:30px;height:30px;border-radius:50%;background:var(--status-done);display:grid;place-items:center;}
 .venn-done .vd-seal svg{width:17px;height:17px;color:var(--bobi-paper);}
 .venn-done .vd-copy{display:flex;flex-direction:column;gap:2px;}
 .venn-done .vd-copy b{font-size:14.5px;color:var(--text-primary);font-weight:var(--weight-medium);}
@@ -591,7 +591,7 @@ textarea.answer:focus,input.answer:focus{outline:none;border-color:var(--accent)
 .urole .urow b{font-size:14px;line-height:1.3;font-weight:var(--weight-medium);}
 .rdot{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;border:1.5px solid var(--border-strong);}
 .rdot svg{width:9px;height:9px;color:var(--bobi-paper);}
-.rdot.done{background:var(--accent);border-color:var(--accent);}
+.rdot.done{background:var(--status-done);border-color:var(--status-done);}
 .rdot.wip{border-style:dashed;border-color:var(--hi);}
 
 /* Workflows card — the optional tag, the human-gate badge, and the read-only
@@ -694,7 +694,7 @@ textarea.answer:focus,input.answer:focus{outline:none;border-color:var(--accent)
 .tnode{font-family:var(--font-mono);font-size:13px;color:var(--text-secondary);padding:5px 8px;border-radius:var(--radius-sm);cursor:pointer;display:flex;align-items:center;gap:7px;transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease);}
 .tnode.file:hover{background:var(--surface-hover);color:var(--text-primary);}
 .tnode.sel{background:var(--surface-selected);color:var(--text-primary);box-shadow:inset 2px 0 0 var(--accent);}
-.tnode .ok{color:var(--accent);font-size:12px;}
+.tnode .ok{color:var(--status-done);font-size:12px;}
 #fd-tree .tnode{padding-left:calc(8px + var(--d,0) * 14px);}
 .tnode.dir{color:var(--text-secondary);cursor:pointer;}
 .tnode.dir:hover{color:var(--text-primary);background:var(--surface-hover);}
@@ -702,7 +702,7 @@ textarea.answer:focus,input.answer:focus{outline:none;border-color:var(--accent)
 
 /* -------------------------------------------------------- big success --- */
 .done-wrap{max-width:none;padding:48px max(44px,calc((100% - 760px) / 2)) 64px;overflow-y:auto;}
-.seal{width:46px;height:46px;border-radius:var(--radius-xl);background:var(--accent);display:grid;place-items:center;margin-bottom:18px;}
+.seal{width:46px;height:46px;border-radius:var(--radius-xl);background:var(--status-done);display:grid;place-items:center;margin-bottom:18px;}
 .seal svg{width:26px;height:26px;color:var(--bobi-paper);}
 /* A shell command is a document, not a card. */
 .cmd{font-family:var(--font-mono);font-size:13.5px;background:var(--surface-terminal);color:var(--slab-text);border-radius:var(--radius-sm);padding:13px 15px;margin:14px 0;display:flex;align-items:center;gap:10px;}
@@ -755,14 +755,14 @@ textarea.answer:focus,input.answer:focus{outline:none;border-color:var(--accent)
 .slackrow input{flex:1;font-family:var(--font-mono);font-size:13.5px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:9px 11px;background:var(--surface-card);transition:border-color var(--dur-fast) var(--ease),box-shadow var(--dur-fast) var(--ease);}
 .slackrow input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
 .ns-slackstatus{font-family:var(--font-mono);font-size:12.5px;color:var(--text-secondary);margin-top:9px;min-height:16px;}
-.ns-slackstatus.ok{color:var(--status-live);}
+.ns-slackstatus.ok{color:var(--status-done);}
 .ns-slackstatus.err{color:var(--status-failed);}
 .ns-exit{display:flex;justify-content:space-between;gap:10px;margin-top:18px;}
 
 /* post-build screen: the built-in file browser */
 .filesdone{display:flex;flex-direction:column;height:100%;min-height:0;}
 .fd-head{display:flex;align-items:center;gap:16px;padding:18px 28px;border-bottom:1px solid var(--border-hairline);}
-.fd-seal{flex:0 0 auto;width:40px;height:40px;border-radius:var(--radius-lg);background:var(--accent);display:grid;place-items:center;}
+.fd-seal{flex:0 0 auto;width:40px;height:40px;border-radius:var(--radius-lg);background:var(--status-done);display:grid;place-items:center;}
 .fd-seal svg{width:22px;height:22px;color:var(--bobi-paper);}
 .fd-title{flex:1;min-width:0;}
 .fd-title h1{font-size:22px;margin:1px 0 3px;}
@@ -778,7 +778,7 @@ textarea.answer:focus,input.answer:focus{outline:none;border-color:var(--accent)
 .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--border-strong);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;}
 .banner{font-size:14px;border-radius:var(--radius-md);padding:10px 13px;margin-top:14px;}
 .banner.err{background:var(--status-failed-soft);border:1px solid var(--status-failed-edge);color:var(--status-failed);}
-.banner.ok{background:var(--status-live-soft);border:1px solid var(--status-live-edge);color:var(--accent);}
+.banner.ok{background:var(--status-done-soft);border:1px solid var(--status-done-edge);color:var(--status-done);}
 .banner pre{white-space:pre-wrap;font-family:var(--font-mono);font-size:12.5px;margin:6px 0 0;}
 
 .chsetup:empty{display:none;}
