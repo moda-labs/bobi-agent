@@ -76,10 +76,10 @@ Fix shape: `_drain_turn`'s dead-transport path must make the failure observable 
 
 **Validation gate** — do not exit this phase until every line passes; if a command fails, fix the cause and re-run.
 
-- [ ] New regression tests, written failing-first: dead-transport turn does NOT advance the ack cursor; dead-transport phase persists `TERMINAL_FAILED`/`session.failed`; `stop()` during a hung startup turn tears the session down; `start()` returns promptly when the thread dies
-- [ ] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q`
-- [ ] `pytest tests/integration -q -k "session or subagent or drain"`
-- [ ] Real-Claude e2e leg (`[stub]+[claude]` parametrization per CLAUDE.md) for the dead-transport ack/terminal path — this is brain-path risk, the claude leg is required
+- [x] New regression tests, written failing-first: dead-transport turn does NOT advance the ack cursor; dead-transport phase persists `TERMINAL_FAILED`/`session.failed`; `stop()` during a hung startup turn tears the session down; `start()` returns promptly when the thread dies
+- [x] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q`
+- [x] `pytest tests/integration -q -k "session or subagent or drain"`
+- [x] Real-Claude e2e leg (`[stub]+[claude]` parametrization per CLAUDE.md) for the dead-transport ack/terminal path — this is brain-path risk, the claude leg is required
 
 ### Phase 2 — Workflow engine + agent-pack routing correctness
 
