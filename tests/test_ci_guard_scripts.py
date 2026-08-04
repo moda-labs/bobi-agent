@@ -417,3 +417,39 @@ def test_gate_refuses_a_stale_deploy(fake_worker):
 
     with pytest.raises(await_worker_ready.NotReady, match="release sha"):
         _await(base_url, "c0ffee" * 6)
+
+
+def test_gate_cli_refuses_to_run_without_the_operator_token(monkeypatch, capsys):
+    """No token means no credential check, which is a sha-only gate — the exact
+    thing this script replaced. It must fail loudly, not quietly degrade."""
+    monkeypatch.delenv(await_worker_ready.OPERATOR_TOKEN_ENV, raising=False)
+
+    rc = await_worker_ready.main(["--url", "https://example.invalid", "--expect-sha", "abc"])
+
+    assert rc == 1
+    assert "::error::" in capsys.readouterr().err
+
+
+def test_gate_cli_exits_nonzero_when_the_deployment_never_becomes_ready(
+    fake_worker, monkeypatch, capsys
+):
+    """The CLI must surface NotReady as a non-zero exit with the reason, so the
+    workflow step fails on it rather than falling through to the smoke."""
+    base_url, state = fake_worker
+    monkeypatch.setenv(await_worker_ready.OPERATOR_TOKEN_ENV, "this-run-token")
+
+    rc = await_worker_ready.main(
+        [
+            "--url", base_url + "/",   # trailing slash must not double up the path
+            "--expect-sha", state["sha"],
+            "--needed", "5",
+            "--interval", "0",
+            "--timeout", "1",
+        ]
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "::error::" in err
+    assert "401" in err
+    assert "this-run-token" not in err, "the minted token leaked into the log"
