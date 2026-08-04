@@ -1,5 +1,110 @@
 # Changelog
 
+## 0.54.0 - 2026-08-04
+
+Minor release: the MCP fleet-control surface gains the tools that *act*, and a
+security + reuse sweep lands across the event server.
+
+### Added
+- **MCP fleet control gains its write half (#944).** `POST /mcp` on the
+  event-server Worker adds `bobi_read_transcript`, `bobi_send_message`, and
+  `bobi_lifecycle` alongside 0.53.0's three read tools, so an agent can act on a
+  fleet rather than only observe it. **No new authority and no new admin
+  vocabulary** — the same `FLEET_OPERATOR_TOKEN` gate runs before any tool body,
+  and the tools drive the same nine commands the sidecar already answers. The
+  route widens the interface, not the authorization.
+
+  Commands resolve through a **bounded server-side wait** (5s,
+  `MCP_COMMAND_WAIT_MS`, `0` disables): fast commands return in one tool call
+  instead of three, slow ones return `status: "pending"` plus a `command_id` for
+  `bobi_command_result`. `pending` means not-yet-answered, never failed. The wait
+  polls by command id and **never a KV prefix listing** — keyed reads are
+  strongly consistent and listings are not, so a listing-based wait would report
+  `pending` for a command that had already resolved. Verified by folding a
+  supervisor result from a separate request while a tool call is in flight,
+  rather than assumed.
+
+  Three behaviors are stated in the tool descriptions because an agent would
+  otherwise believe the opposite. **`bobi_send_message` does not return the
+  agent's reply and does not wait for one** — the supervisor runs `chat` on a
+  detached thread that resolves only when the whole turn ends, minutes later, so
+  the reply is read back with `bobi_read_transcript`. **Transcript output is
+  untrusted third-party content**, returned in its own content block between an
+  explicit opening and closing warning, because it is a concentrated feed of
+  attacker-controllable Slack/GitHub/email text handed to a client that also
+  holds lifecycle tools. **`bobi_lifecycle` requires a `reason`**, recorded on
+  the command as an audit control; self-targeting a restart is allowed and
+  annotated rather than refused, so self-heal stays available.
+
+  `issueAdminCommand` moved out of the `/fleet/*` route body into `fleet.ts` and
+  now backs both surfaces, so the deliver-**before**-record ordering exists once
+  rather than twice: a recorded-but-undelivered command is a pending row that can
+  never resolve. `MCP_SERVER_VERSION` is `1.1.0` — it versions the tool surface,
+  and this release is additive to it.
+
+### Fixed
+- **Attribute injection in the agent-reply markdown renderer (#942).** The
+  dashboard interpolated a link URL into `href="${safe}"` while escaping only
+  `&`, `<`, `>`, so agent output could close the attribute and land a live event
+  handler — and agent replies are prompt-injectable from any page, email, or
+  tool result the agent reads. Quotes are now escaped before any transform runs,
+  closing the sink for every attribute at once. The renderer moved to its own
+  module so the fix is provable: the suite executes it under Node and parses the
+  output at DOM level rather than grepping the source.
+- **Unvalidated register payload on the unauthenticated mint path (#942).**
+  `handleRegisterDeployment` cast `subscriptions` to `string[]` and checked only
+  truthiness, so a bare string registered one subscription per character and a
+  non-string element threw *after* an orphan bubble had been persisted. Shape is
+  now validated before anything is minted or written.
+- **Unbounded request-body buffering (#942).** `readBody` concatenated every
+  chunk with no cap, and the existing gate could only run against an
+  already-fully-read body — so the 413 arrived after the memory was spent. On a
+  non-loopback bind the webhook route reads the body before signature
+  verification, making the peak unauthenticated. The reader now rejects on the
+  chunk that crosses the cap (8 MiB, `BOBI_ES_MAX_BODY_BYTES`) and answers 413.
+- **Slack file uploads in DMs and thread replies never arrived (#945).** Slack
+  stamps the `file_share` subtype on every message that shares a file, and the
+  bridge skipped every subtyped message before classification — so those never
+  became events at all. Channel @mentions survived only because `app_mention`
+  carries no subtype, and the existing test passed only because its synthetic
+  payload omitted what real Slack always sends.
+- **The circuit breaker's pause buffer was unbounded and never released
+  (#945).** It grew by a full event per event for the whole cooldown with no cap,
+  and resume is lazy — a conversation that tripped and then went quiet held its
+  state and buffer for the life of the process, contradicting the module's own
+  "buffered, not dropped" and "auto-resume" claims. Now capped at 50 (newest
+  wins, drops counted) and swept on the local server's existing eviction
+  interval.
+- **`/channels/send` accepted required text and delivered it nowhere (#945).**
+  The file + `edit_ref` path performed its placeholder edit only where the
+  channel supports editing, and uploaded files with no comment on either branch —
+  so on WhatsApp the user got the PDF and never the sentence explaining it. The
+  text now rides as the file comment where there is no placeholder to move it
+  into.
+- **Concurrent Slack workspace registrations raced away a bot's signing secret
+  (#945).** The record is updated read-merge-write across an `await`, so two bots
+  registering the same workspace — a fleet roll restarting both agents — each
+  merged onto a stale snapshot and the second put dropped the first app's entry,
+  401ing its inbound events. Writes are now serialized per storage key. This
+  closes the window within one runtime instance, which is where the reported
+  failure lives; a cross-isolate race on the Worker's KV backing needs a
+  storage-layer change and is documented rather than claimed fixed.
+
+### Changed
+- **The release workflow publishes the pins the image dispatch needs (#943).**
+  `release-image.yml` requires the exact claude CLI version the release resolved
+  from the floating `stable` channel, but since the repo reorg that value existed
+  only inside a finished job's shell variable — so dispatching the image meant
+  re-deriving the channel by hand and hoping it had not moved, defeating the
+  point of resolving it once. It is now published as a ready-to-paste command in
+  the run summary and as a `::notice::` that outlives summary retention.
+- **Event-server reuse sweep (#945).** Eight duplicated or dead surfaces
+  converged: the doubled `ingest/` topic spelling, an impossible `skip` state on
+  the Slack normalizer, three hand-rolled Slack Web API calls, three near-identical
+  copies of the deliver/buffer/broadcast block, an eviction path re-implementing
+  the deregistration bodies defined above it, the attachment→files extraction
+  written twice across adapters, and two identical unreachable guards.
+
 ## 0.53.0 - 2026-08-03
 
 Minor release: the fleet control plane grows an agent-shaped surface, and Claude
