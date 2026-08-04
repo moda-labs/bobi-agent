@@ -1484,6 +1484,24 @@ describe("ingest tokens (#640)", () => {
 			expect(event.delivery).toBe("bulk");
 			expect(event.v).toBe(2);
 		});
+
+		it("emits the bare topic plus its source-qualified spelling", () => {
+			const event = createIngestEvent("alert/firing", {}, "bub_1");
+			expect(event.topics).toEqual(["alert/firing", "ingest/alert/firing"]);
+		});
+
+		// Q100: sourceQualifiedTopics suppresses the prefix when the topic
+		// already carries it, and its comment claims BOTH createTopicEvent and
+		// createIngestEvent route through it "so the two spellings can never
+		// drift". createIngestEvent re-spelled the pair inline instead, and had
+		// already drifted here — "ingest/" is not in INGEST_RESERVED_SOURCES,
+		// so a caller can mint this topic and get a nonsense doubled prefix.
+		it("does not double-prefix a topic that already starts with ingest/", () => {
+			expect(validateIngestTopic("ingest/alert")).toBeNull();
+			const event = createIngestEvent("ingest/alert", {}, "bub_1");
+			expect(event.topics).toEqual(["ingest/alert"]);
+			expect(event.topics).not.toContain("ingest/ingest/alert");
+		});
 	});
 });
 
@@ -2917,6 +2935,39 @@ describe("handleSlackWorkspaceRegister", () => {
 		expect(store.delivered).toHaveLength(0);
 	});
 
+	// D048: mergeBot only protects SEQUENTIAL registrations. The global write
+	// is a read-merge-write across an await, so two bots registering the same
+	// workspace at the same time (a fleet roll restarting both agents) each
+	// merge onto the snapshot they read before the other wrote, and the second
+	// put drops the first app's entry — including its per-app signing_secret,
+	// whose loss 401s that app's inbound events. That is the exact incident
+	// mergeBot was written to prevent, reached by a different route.
+	it("does not lose a concurrently-registering bot's entry", async () => {
+		const store = createMockStorage();
+		const realGet = store.getSlackWorkspace.bind(store);
+		// Any real store's read takes time; the yield is what opens the window.
+		store.getSlackWorkspace = async (key: string) => {
+			const value = await realGet(key);
+			await new Promise((r) => setTimeout(r, 10));
+			return value;
+		};
+
+		await Promise.all([
+			handleSlackWorkspaceRegister(store, {
+				workspace_id: "T_RACE", bot_token: "xoxb-1", bot_id: "B1", app_id: "A1",
+				signing_secret: "sec-1",
+			}),
+			handleSlackWorkspaceRegister(store, {
+				workspace_id: "T_RACE", bot_token: "xoxb-2", bot_id: "B2", app_id: "A2",
+				signing_secret: "sec-2",
+			}),
+		]);
+
+		const ws = store.slackWorkspaces.get("T_RACE");
+		expect(ws?.bots?.A1?.signing_secret).toBe("sec-1");
+		expect(ws?.bots?.A2?.signing_secret).toBe("sec-2");
+	});
+
 	// Regression: a re-registration that OMITS signing_secret (e.g. an older
 	// client that doesn't send it) must NOT wipe a previously-stored secret —
 	// otherwise every restart of that client drops the per-app secret and the
@@ -3414,6 +3465,41 @@ describe("whatsapp number registration and outbound send", () => {
 		expect((typing.body as Record<string, unknown>).supported).toBe(false);
 		const history = await handleChannelsHistory(store, WA_CONV, 10, "bubA");
 		expect(history.status).toBe(400);
+	});
+
+	// D046: the file+edit_ref path validated text as REQUIRED, then performed
+	// the placeholder edit only when the channel supports editing - and
+	// uploaded the files with no comment either way. On WhatsApp (edit: false)
+	// the required text was therefore accepted, never delivered, and the call
+	// still returned 200. The text-only path above already degrades correctly.
+	it("delivers the text as the file caption when a placeholder edit cannot be made", async () => {
+		const store = createMockStorage();
+		const sends: Array<Record<string, unknown>> = [];
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes(`/${WA_PNID}?fields=id`)) return fetchOk(200, { id: WA_PNID });
+			if (u.endsWith(`/${WA_PNID}/media`)) return fetchOk(200, { id: "media.1" });
+			if (u.endsWith(`/${WA_PNID}/messages`)) {
+				sends.push(JSON.parse(String(init?.body)));
+				return fetchOk(200, { messages: [{ id: `wamid.out.${sends.length}` }] });
+			}
+			return fetchOk(404, { error: { message: `unexpected ${u}` } });
+		}));
+		await register(store);
+		openWindow(store);
+
+		const res = await handleChannelsSend(store, {
+			conversation: WA_CONV,
+			text: "here's the report",
+			mode: "final",
+			edit_ref: "wamid.placeholder",
+			files: [{ name: "report.pdf", content_b64: btoa("pdf-bytes") }],
+		}, "bubA");
+
+		expect(res.status).toBe(200);
+		expect(sends).toHaveLength(1);
+		const doc = sends[0]!.document as Record<string, unknown>;
+		expect(doc.caption).toBe("here's the report");
 	});
 
 	it("clamps document captions to the 1024-char Cloud API media limit", async () => {
