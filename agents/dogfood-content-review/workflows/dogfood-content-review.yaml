@@ -32,7 +32,7 @@ steps:
     timeout: 1800
 
   - name: route_fixes
-    if: "issues_count > 0"
+    if: "issues_count != 0"   # `>` is not a supported operator (D015)
     goto: fix
     else: done
 

@@ -312,8 +312,12 @@ class EventReactor:
             parts.append("Address the reviewer's comments.")
             return " ".join(parts)
 
-        # Issue assigned
-        if event_type == "github.issues.assigned":
+        # Issue assigned. Keyed on type + fields.action, because the adapter
+        # emits `github.issues` and carries the action in fields — the dotted
+        # `github.issues.assigned` this branch used to test for is never a
+        # type any adapter produces, so the branch was dead and assignment
+        # fell through to the generic fallback text (D017).
+        if event_type == "github.issues" and action == "assigned":
             title = fields.get("title", "")
             return f"Issue #{number} in {repo} assigned: {title}. Begin work."
 

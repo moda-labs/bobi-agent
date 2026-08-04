@@ -92,6 +92,34 @@ linear:
 Only include services the team actually needs. `bobi agents install`
 prompts for any `${VAR}` references and writes them to `run/.env`.
 
+`chat:` must name a service the pack declares. Ingress subscribes topics from
+declared services only, so `chat: slack` without a `slack` service means no
+Slack event ever arrives and a reply has no bot token — while the role prompt
+goes on describing how to handle Slack messages.
+
+#### auto_dispatch: `event:` is a type, never a type + action
+
+`auto_dispatch` rules match the event **type** by exact equality, and the type
+is whatever the adapter emits (`docs/EVENT_SERVER.md` lists them per source).
+Anything narrower belongs in `match:`, against the event's fields:
+
+```yaml
+auto_dispatch:
+  - event: github.issues           # NOT github.issues.assigned
+    match:
+      action: assigned             # the action is a FIELD, not part of the type
+    workflow: issue-lifecycle
+```
+
+The distinction is per source and there is no universal rule: GitHub emits
+`github.<webhook-event>` and carries the action in `fields.action`, while
+Linear emits `linear.<type>.<action>` with the action *in* the type. A rule
+naming a type nothing emits fails silently — the deterministic dispatch it
+promises simply never happens and the work falls through to whatever the
+director LLM decides. `bobi validate` warns about the shapes it recognizes,
+but it fails open on sources it has not been taught, so it is a safety net
+rather than a guarantee.
+
 To give the team host tools, skills, or MCP servers, declare them under
 `tool_library:` (a named catalog entry like `- venn`, or an inline dependency
 with a required `success:`). See `docs/TOOL_LIBRARY.md` for the two ways to

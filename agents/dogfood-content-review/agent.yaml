@@ -1,7 +1,11 @@
-version: "1.2.1"
+version: "1.2.2"
 
 entry_point: manager
-chat: slack
+# No chat: this pack declares github + email only. It previously said
+# `chat: slack` with no slack service declared, so no slack topic was
+# ever subscribed and a reply had no bot token (D119). Adding the
+# service instead would cost the credential-free start the dogfood and
+# release smokes depend on (Zach, #329/#405).
 
 # Baked CLI tools from the framework catalog (#416). `venn` provides the
 # `venn` CLI the new-emails monitor shells out to (tools execute -s gmail …);
