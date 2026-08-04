@@ -335,6 +335,45 @@ describe("bridge normalization behavior", () => {
 		expect(bridged.event!.payload.files).toEqual(parsed);
 	});
 
+	// D011: Slack sets subtype 'file_share' on EVERY message that shares a
+	// file, so the blanket subtype skip above used to drop the whole DM and
+	// thread-reply upload path - the test above passes only because its
+	// synthetic payload omits the subtype real Slack always sends.
+	it("delivers a DM file upload, which Slack marks subtype file_share", () => {
+		const body = dmPayload({
+			subtype: "file_share",
+			text: "here's the screenshot",
+			files: [{ id: "F0AB12CD34", name: "screenshot.png", mimetype: "image/png" }],
+		});
+		const bridged = bridgeSlackWebhook(body);
+		expect(bridged.event).not.toBeNull();
+		expect(bridged.event!.type).toBe("slack.dm");
+		expect(JSON.parse(bridged.event!.fields!.files as string)).toEqual([
+			{ id: "F0AB12CD34", name: "screenshot.png", mimetype: "image/png" },
+		]);
+	});
+
+	it("delivers a thread-reply file upload (subtype file_share)", () => {
+		const bridged = bridgeSlackWebhook(
+			threadReplyPayload({
+				subtype: "file_share",
+				files: [{ id: "F0THREAD", name: "log.txt" }],
+			}),
+		);
+		expect(bridged.event).not.toBeNull();
+		expect(bridged.event!.type).toBe("slack.thread_reply");
+		expect(bridged.event!.payload.files).toEqual([
+			{ id: "F0THREAD", name: "log.txt" },
+		]);
+	});
+
+	it("still skips the non-file message subtypes", () => {
+		for (const subtype of ["message_changed", "message_deleted", "channel_join"]) {
+			const result = bridgeSlackWebhook(dmPayload({ subtype }));
+			expect(result.event, `subtype ${subtype} must not produce an event`).toBeNull();
+		}
+	});
+
 	it("keeps thread replies that mention someone other than our bot user", () => {
 		const result = bridgeSlackWebhook(
 			threadReplyPayload({ text: "<@UOTHER> can you check this?" }),

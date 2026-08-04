@@ -75,6 +75,7 @@ PUBLIC_LOCAL_MODULES = {
     "slack-socket-local",
     "socket-driver-common",
     "http-body",
+    "delivery-buffer",
 }
 
 

@@ -78,8 +78,14 @@ export function bridgeSlackWebhook(
 	const innerEvent = raw.event as Record<string, unknown> | undefined;
 	if (!innerEvent) return { event: null, skip: true };
 
-	// Skip subtypes (message_changed, message_deleted, etc.)
-	if (innerEvent.subtype) {
+	// Skip subtypes (message_changed, message_deleted, etc.) - they are edits
+	// and system notices, not new user messages.
+	//
+	// `file_share` is the exception (D011): Slack stamps it on EVERY message
+	// that shares a file, so skipping it drops the whole DM and thread-reply
+	// upload path along with the file extraction below. Channel @mentions with
+	// files survived only because app_mention events carry no subtype.
+	if (innerEvent.subtype && innerEvent.subtype !== "file_share") {
 		return { event: null, skip: true };
 	}
 
