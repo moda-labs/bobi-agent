@@ -300,6 +300,30 @@ Landed as moda-agents PR #80 (`cada0a49`); both merge-blocked gates discharged 2
   this repo, so there is no concurrent writer to collide with, and the
   falsified claims above are things a reviewer needs to see in the same diff
   that acts on them.
+- **2026-08-04** (Lane A follow-up): Phase 2's readiness gate was **incomplete,
+  and the claim above that "a stale or broken deploy never becomes ready" is
+  falsified**. The gate polled `/health` for the commit's release sha, but
+  `BOBI_RELEASE_SHA` is a `var` baked in at render time, so the version
+  published by `wrangler deploy` and the version published by `wrangler secret
+  bulk` report the SAME sha. The gate could never discriminate them. The deploy
+  version inherits the PREVIOUS run's secrets, so it answers 401 on `/mcp` and
+  500 on the round-trip while satisfying every condition the gate checked.
+  Scheduled run 30895709421 cleared the gate on 5 consecutive matches with 0
+  resets and failed exactly that way; the two smoke tests blind to the
+  difference (health, and the unauthenticated `/mcp` probe) passed. Note this
+  also revises the 2026-08-01 note above: `CF_VERSION_METADATA` was dismissed
+  as a "really deployed" signal because `wrangler dev` populates it too, but
+  version *stability across a streak* is a signal the sha cannot give at all,
+  and the gate now uses it alongside the sha. Readiness is now "the version
+  carrying THIS run's credentials is serving, consistently": release sha, plus
+  an operator-authenticated 200 with the freshly minted token, plus a stable
+  `worker.version_id`, on 5 consecutive probes. The logic moved out of inline
+  shell into `scripts/await_worker_ready.py` so it is testable at all — it had
+  survived two fixes untested, which is why the third failure had no test that
+  could reach it. Also falsifies the Proof of work entry claiming run
+  30804504803 "confirm[ed] #921's 5-consecutive-match readiness fix holds":
+  that run passed, but the mechanism was incomplete and the same lane failed
+  the next night.
 - **2026-08-01** (session "repo-reorg"): self-review (red-team / staff-engineer / implementer lenses) folded back three findings — the prod-KV guard was unimplementable across the public/private boundary and is re-specified against properties bobi-agent owns; the ran-assertion got a concrete two-layer mechanism; and Phase 4's dockerfile repair was superseded by Q1(c), which retires the full-recipe build in moda-agents entirely.
 
 ## Notes
