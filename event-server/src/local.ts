@@ -45,12 +45,14 @@ import {
 	slackSocketConfigurationError,
 } from "./slack-socket-local";
 import { readBody, BodyTooLargeError } from "./http-body";
+import { pushAndSend } from "./delivery-buffer";
 import {
 	isExemptFromBreaker,
 	recordDelivery,
 	drainPaused,
 	conversationKey,
 	buildLoopDetectedEvent,
+	sweepBreakers,
 } from "@moda-labs/bobi-events-core/circuit-breaker";
 import { setSlackApiUrl, setWhatsAppApiUrl, setDiscordApiUrl } from "@moda-labs/bobi-events-core/channels";
 
@@ -64,8 +66,6 @@ setDiscordApiUrl(process.env.BOBI_ES_DISCORD_API_URL);
 const port = parseInt(process.env.BOBI_ES_PORT || "8080", 10);
 const bind = process.env.BOBI_ES_BIND || "127.0.0.1";
 const slackSocketConfigError = slackSocketConfigurationError(bind, slackApiUrlOverride);
-
-const MAX_BUFFER = 10_000;
 
 // Eviction backstop (#279): a deployment with zero WebSocket connections
 // for longer than this threshold is considered leaked (client SIGKILLed
@@ -300,53 +300,20 @@ const storage: StorageAdapter = {
 						for (const lid of subscriptionIndex.get(lk) || []) {
 							const ldep = deployments.get(lid);
 							if (!ldep) continue;
-							const lseq = ldep.nextSeq++;
-							const lseqEvent = { ...loopEvent, seq: lseq };
-							ldep.eventBuffer.push(lseqEvent);
-							if (ldep.eventBuffer.length >= 2 * MAX_BUFFER) {
-								ldep.eventBuffer = ldep.eventBuffer.slice(-MAX_BUFFER);
-							}
-							const lmsg = JSON.stringify({ type: "event", data: lseqEvent });
-							for (const ws of ldep.websockets) {
-								try { ws.send(lmsg); } catch { ldep.websockets.delete(ws); }
-							}
+							pushAndSend(ldep, loopEvent);
 						}
 					}
 				}
 				if (!verdict.allow) continue;
 
 				// Human event may have unpaused — drain buffered events
-				const drained = drainPaused(depId, event);
-				for (const paused of drained) {
-					const pseq = dep.nextSeq++;
-					const pseqEvent = { ...paused, seq: pseq };
-					dep.eventBuffer.push(pseqEvent);
-					if (dep.eventBuffer.length >= 2 * MAX_BUFFER) {
-						dep.eventBuffer = dep.eventBuffer.slice(-MAX_BUFFER);
-					}
-					const pmsg = JSON.stringify({ type: "event", data: pseqEvent });
-					for (const ws of dep.websockets) {
-						try { ws.send(pmsg); } catch { dep.websockets.delete(ws); }
-					}
+				for (const paused of drainPaused(depId, event)) {
+					pushAndSend(dep, paused);
 				}
 			}
 
-			const seq = dep.nextSeq++;
-			const seqEvent = { ...event, seq };
-			dep.eventBuffer.push(seqEvent);
-			if (dep.eventBuffer.length >= 2 * MAX_BUFFER) {
-				dep.eventBuffer = dep.eventBuffer.slice(-MAX_BUFFER);
-			}
+			pushAndSend(dep, event);
 			delivered++;
-
-			const msg = JSON.stringify({ type: "event", data: seqEvent });
-			for (const ws of dep.websockets) {
-				try {
-					ws.send(msg);
-				} catch {
-					dep.websockets.delete(ws);
-				}
-			}
 		}
 
 		return delivered;
@@ -830,24 +797,44 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer, 
 // Eviction backstop (#279) — periodic sweep for leaked deployments
 // ---------------------------------------------------------------------------
 
-function evictStaleDeployments() {
+async function evictStaleDeployments() {
 	const now = Date.now();
-	for (const [id, dep] of deployments) {
+
+	// Collect first, mutate second: the removals below await, and deleting from
+	// `deployments` while iterating it across a yield point is a foot-gun.
+	const stale: Array<{ dep: LocalDeployment; idleMs: number }> = [];
+	for (const dep of deployments.values()) {
 		if (dep.disconnectedAt !== null && now - dep.disconnectedAt >= EVICTION_STALE_MS) {
-			// Remove subscription-index entries
-			for (const sub of dep.subscriptions) {
-				const nsKey = namespaceSubKey(dep.bubbleId, sub);
-				const set = subscriptionIndex.get(nsKey);
-				if (set) {
-					set.delete(id);
-					if (set.size === 0) subscriptionIndex.delete(nsKey);
-				}
-			}
-			deployments.delete(id);
-			apiKeyIndex.delete(dep.apiKey);
-			console.log(`evicted stale deployment ${id} (${dep.name}) — disconnected ${Math.round((now - dep.disconnectedAt) / 1000)}s ago`);
+			stale.push({ dep, idleMs: now - dep.disconnectedAt });
 		}
 	}
+
+	for (const { dep, idleMs } of stale) {
+		// Q115 — go through the storage adapter rather than re-deleting from
+		// `subscriptionIndex`/`deployments`/`apiKeyIndex` by hand, so eviction and
+		// deregistration (handleDeregisterDeployment, which calls these same two
+		// methods) stay guaranteed-identical instead of coincidentally-identical.
+		// removeDeployment also closes live sockets, which is a no-op here:
+		// disconnectedAt is only non-null while dep.websockets is empty (it is
+		// reset to null the moment a socket connects).
+		for (const sub of dep.subscriptions) {
+			await storage.removeSubscription(namespaceSubKey(dep.bubbleId, sub), dep.id);
+		}
+		await storage.removeDeployment({
+			id: dep.id,
+			name: dep.name,
+			api_key: dep.apiKey,
+			bubble_id: dep.bubbleId,
+			subscriptions: [...dep.subscriptions],
+		});
+		console.log(`evicted stale deployment ${dep.id} (${dep.name}) — disconnected ${Math.round(idleMs / 1000)}s ago`);
+	}
+
+	// D047 — the breaker's resume is lazy, so a conversation that trips and
+	// then goes quiet would hold its state and its pause buffer for the life of
+	// this process. Nothing in the breaker schedules its own timer (it also runs
+	// in a Workers isolate), so the long-lived server hangs the sweep here.
+	sweepBreakers(now);
 }
 
 // ---------------------------------------------------------------------------
@@ -876,7 +863,11 @@ const wss = new WebSocketServer({ noServer: true });
 server.on("upgrade", (req, socket, head) => handleUpgrade(req, socket, head, wss));
 
 // Start eviction sweep — unref() so it does not keep the process alive
-const evictionTimer = setInterval(evictStaleDeployments, EVICTION_SWEEP_MS);
+const evictionTimer = setInterval(() => {
+	void evictStaleDeployments().catch((err) => {
+		console.error("eviction sweep failed:", err);
+	});
+}, EVICTION_SWEEP_MS);
 evictionTimer.unref();
 
 async function main() {

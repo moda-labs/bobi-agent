@@ -21,10 +21,15 @@ export interface NormalizedEvent {
 	bubble_id?: string;
 }
 
+/**
+ * A null `event` IS the skip signal (Q101). There was a separate `skip:
+ * boolean` alongside it, but every return site paired skip:true with
+ * event:null and skip:false with a non-null event, so it only ever gave
+ * consumers an impossible fourth state to reason about.
+ */
 export interface SlackNormalizationResult {
 	event: NormalizedEvent | null;
 	challenge?: string;
-	skip: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +332,7 @@ import { normalizeLinearWebhook } from "./adapters/linear.js";
 import { bridgeSlackWebhook } from "./adapters/chat-sdk-slack.js";
 import { normalizeWhatsAppWebhook } from "./adapters/whatsapp.js";
 import { chunkForChannel, discordApi, getChannelAdapter, slackApiUrl, truncateForChannel, whatsappApi, type OutboundFile } from "./channels.js";
+import { callSlackApi } from "@chat-adapter/slack/api";
 import { parseConversation, type Conversation } from "./conversation.js";
 
 export { normalizeGitHubWebhook as normalizeGitHubPayload } from "./adapters/github.js";
@@ -798,7 +804,7 @@ export async function handleSlackWebhook(
 	if (result.challenge !== undefined) {
 		return { status: 200, body: { challenge: result.challenge } };
 	}
-	if (result.skip || !result.event) {
+	if (!result.event) {
 		return { status: 200, body: { ok: true } };
 	}
 
@@ -975,9 +981,11 @@ export function createIngestEvent(
 		source: "ingest",
 		type: topic,
 		timestamp: new Date().toISOString(),
-		// Bare topic plus the source-qualified form, mirroring createTopicEvent's
-		// fallback (#235), so both subscription spellings match.
-		topics: [topic, `ingest/${topic}`],
+		// Bare topic plus the source-qualified form (#235), so both subscription
+		// spellings match. Through the shared helper, not re-spelled inline
+		// (Q100) — the inline pair had already drifted: a mintable topic that
+		// itself starts with "ingest/" got a doubled prefix the helper suppresses.
+		topics: sourceQualifiedTopics(topic, "ingest"),
 		delivery: "bulk",
 		text: typeof body.text === "string" ? body.text : "",
 		fields,
@@ -2218,12 +2226,23 @@ export async function handleChannelsSend(
 					return { status: 400, body: { error: "text required when edit_ref is combined with files" } };
 				}
 				if (adapter.update && caps.edit) {
+					// The placeholder now carries the text, so the file goes up
+					// without a duplicate comment.
 					const edited = await adapter.update(botToken, conv, editRef, outText);
 					if (!edited.ok) {
 						return { status: 502, body: { ok: false, error: edited.error } };
 					}
+					result = await adapter.uploadFiles(botToken, conv, files);
+				} else {
+					// D046 — no edit support, so there is no placeholder to move
+					// the text into. Dropping it here would accept text the
+					// handler just declared REQUIRED and deliver it nowhere,
+					// while still returning 200. Degrade the same way the
+					// text-only path does (channels.ts: "an `update` on a
+					// channel without edit support becomes a follow-up post")
+					// and let the text ride with the file.
+					result = await adapter.uploadFiles(botToken, conv, files, outText);
 				}
-				result = await adapter.uploadFiles(botToken, conv, files);
 			} else {
 				result = await adapter.uploadFiles(botToken, conv, files, outText || undefined);
 			}
@@ -2361,6 +2380,35 @@ export async function handleChannelsHistory(
 // inbound webhook self-reply loop prevention keeps working for any client -
 // signed or not. The bubble-scoped record is written ONLY for an authenticated
 // bubble, and is the only store outbound channel sends read.
+/**
+ * In-flight workspace-record writes, keyed by storage key (D048).
+ *
+ * The Slack workspace record is updated read-merge-write and no storage
+ * adapter offers compare-and-swap, so concurrent registrations for one
+ * workspace are serialized here instead. This closes the window completely
+ * within a single runtime instance — the standalone Node server is one
+ * process, and a Durable Object is single-threaded — which is where the
+ * reported failure lives (a fleet roll restarting two agents against one
+ * event server). It does NOT close a cross-isolate race on the Worker's KV
+ * backing, which has no CAS primitive to build on; narrowing that further
+ * needs a storage-layer change.
+ */
+const workspaceWrites = new Map<string, Promise<unknown>>();
+
+function serializeOnWorkspaceKey<T>(key: string, op: () => Promise<T>): Promise<T> {
+	const prior = workspaceWrites.get(key) ?? Promise.resolve();
+	// Run `op` whether the prior write resolved or rejected — one caller's
+	// failure must not strand every later registration for that workspace.
+	const result = prior.then(op, op);
+	const tail = result.then(() => undefined, () => undefined);
+	workspaceWrites.set(key, tail);
+	void tail.then(() => {
+		// Only the current tail clears the entry, so the map does not grow.
+		if (workspaceWrites.get(key) === tail) workspaceWrites.delete(key);
+	});
+	return result;
+}
+
 export async function handleSlackWorkspaceRegister(
 	storage: StorageAdapter,
 	body: Record<string, unknown>,
@@ -2389,12 +2437,19 @@ export async function handleSlackWorkspaceRegister(
 	let botUserId = (body.bot_user_id as string) || undefined;
 	let appId = (body.app_id as string) || undefined;
 	const signingSecret = (body.signing_secret as string) || undefined;
+	// Q099 — through the Chat SDK's api module, which owns URL joining, the
+	// Bearer header, and body encoding, rather than three hand-rolled fetch()
+	// calls in a module that already has a real Slack client in scope.
+	//
+	// The explicit `ok` checks stay: callSlackApi throws only on a non-2xx
+	// HTTP status, and Slack reports method-level failure as HTTP 200 with
+	// {ok: false, error}. Only transport and HTTP errors reach the catch.
+	const slackCall = (method: string, args: Record<string, unknown> = {}) =>
+		callSlackApi(method, args, { apiUrl: slackApiUrl(), token: botToken });
+
 	if (bubbleId) {
 		try {
-			const resp = await fetch(`${slackApiUrl()}auth.test`, {
-				headers: { Authorization: `Bearer ${botToken}` },
-			});
-			const data = (await resp.json()) as Record<string, unknown>;
+			const data = await slackCall("auth.test");
 			if (!data.ok || data.team_id !== workspaceId) {
 				return { status: 403, body: { error: "forbidden" } };
 			}
@@ -2404,10 +2459,7 @@ export async function handleSlackWorkspaceRegister(
 		}
 	} else if (!botId) {
 		try {
-			const resp = await fetch(`${slackApiUrl()}auth.test`, {
-				headers: { Authorization: `Bearer ${botToken}` },
-			});
-			const data = (await resp.json()) as Record<string, unknown>;
+			const data = await slackCall("auth.test");
 			if (data.ok) {
 				botId = data.bot_id as string;
 				botUserId = (data.user_id as string) || botUserId;
@@ -2418,11 +2470,7 @@ export async function handleSlackWorkspaceRegister(
 	}
 	if (!appId && botId) {
 		try {
-			const resp = await fetch(
-				`${slackApiUrl()}bots.info?bot=${encodeURIComponent(botId)}`,
-				{ headers: { Authorization: `Bearer ${botToken}` } },
-			);
-			const data = (await resp.json()) as Record<string, unknown>;
+			const data = await slackCall("bots.info", { bot: botId });
 			if (data.ok) appId = (data.bot as Record<string, unknown>)?.app_id as string;
 		} catch {
 			// best-effort — falls back to bot_id-keyed storage below
@@ -2468,16 +2516,26 @@ export async function handleSlackWorkspaceRegister(
 
 	// Global record - drives inbound webhook self-reply loop prevention. ALWAYS
 	// written so a client that doesn't (yet) sign keeps loop prevention.
-	const globalExisting = await storage.getSlackWorkspace(workspaceId);
-	await storage.putSlackWorkspace(workspaceId, mergeBot(globalExisting));
+	//
+	// D048 — serialized, because the read-merge-write below spans an await:
+	// two bots registering the same workspace concurrently would otherwise both
+	// merge onto the snapshot they read before the other wrote, and the second
+	// put would drop the first app's bots[] entry along with its per-app
+	// signing_secret. mergeBot alone only protects SEQUENTIAL registrations.
+	await serializeOnWorkspaceKey(workspaceId, async () => {
+		const globalExisting = await storage.getSlackWorkspace(workspaceId);
+		await storage.putSlackWorkspace(workspaceId, mergeBot(globalExisting));
+	});
 
 	// Bubble-scoped record - the ONLY store outbound channel sends read. Written
 	// only for an authenticated bubble, so that bubble (and no other) can send
 	// through this workspace.
 	if (bubbleId) {
 		const scopedKey = bubbleScopedWorkspaceKey(bubbleId, workspaceId);
-		const scopedExisting = await storage.getSlackWorkspace(scopedKey);
-		await storage.putSlackWorkspace(scopedKey, mergeBot(scopedExisting));
+		await serializeOnWorkspaceKey(scopedKey, async () => {
+			const scopedExisting = await storage.getSlackWorkspace(scopedKey);
+			await storage.putSlackWorkspace(scopedKey, mergeBot(scopedExisting));
+		});
 
 		// Slack convergence (#488 §6): the signed registration — proving
 		// possession of the bot token + signing secret — IS the proof of access,

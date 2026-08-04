@@ -181,7 +181,7 @@ describe("SlackSocketSession reconnect policy", () => {
 
 	it("reconnects on staleness and every socket close", () => {
 		const s = session();
-		expect(s.onTimer("staleness")).toEqual([{ kind: "reconnect" }]);
+		expect(s.onTimer()).toEqual([{ kind: "reconnect" }]);
 		expect(s.onSocketClose()).toEqual([{ kind: "reconnect" }]);
 	});
 });
