@@ -80,7 +80,17 @@ def _extract_text(content) -> str:
     return ""
 
 
-def _claude_projects_dirs() -> list[Path]:
+def claude_projects_dirs(claude_config_dir: Path | None = None) -> list[Path]:
+    """Where Claude Code retains transcripts, most specific first.
+
+    Public because it is the canonical copy of this rule: ``bobi.usage_backfill``
+    calls it rather than growing a third one (``bobi.brain.claude`` still
+    carries its own - tracked as Q027). ``claude_config_dir`` pins the search
+    to one root for an operator who passes ``--claude-config-dir``.
+    """
+    if claude_config_dir is not None:
+        return [Path(claude_config_dir) / "projects"]
+
     dirs = []
     cfg = os.environ.get("CLAUDE_CONFIG_DIR", "")
     if cfg:
@@ -100,7 +110,7 @@ def _claude_projects_dirs() -> list[Path]:
 def _transcript_path(session_id: str) -> Path | None:
     if not session_id:
         return None
-    for projects in _claude_projects_dirs():
+    for projects in claude_projects_dirs():
         if not projects.exists():
             continue
         for project_dir in projects.iterdir():

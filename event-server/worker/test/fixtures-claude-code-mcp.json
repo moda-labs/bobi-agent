@@ -1,0 +1,76 @@
+{
+  "captured_from": "claude-code/2.1.220 (sdk-cli)",
+  "negotiated_protocol_version": "2025-11-25",
+  "requests": [
+    {
+      "body": "{\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"roots\":{\"listChanged\":true},\"elicitation\":{}},\"clientInfo\":{\"name\":\"claude-code\",\"title\":\"Claude Code\",\"version\":\"2.1.220\",\"description\":\"Anthropic's agentic coding tool\",\"websiteUrl\":\"https://claude.com/claude-code\"}},\"jsonrpc\":\"2.0\",\"id\":0}",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": null
+      },
+      "id": 0,
+      "method": "initialize"
+    },
+    {
+      "body": "{\"method\":\"notifications/initialized\",\"jsonrpc\":\"2.0\"}",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "id": null,
+      "method": "notifications/initialized"
+    },
+    {
+      "body": "{\"method\":\"tools/call\",\"params\":{\"name\":\"bobi_fleet_status\",\"arguments\":{},\"_meta\":{\"claudecode/toolUseId\":\"toolu_01Amkzxe8P59Dg14dSmM7e5y\",\"progressToken\":2}},\"jsonrpc\":\"2.0\",\"id\":2}",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "id": 2,
+      "method": "tools/call"
+    },
+    {
+      "body": "{\"method\":\"tools/call\",\"params\":{\"name\":\"bobi_instance_detail\",\"arguments\":{\"fleet\":\"moda\",\"instance\":\"eng-team\"},\"_meta\":{\"claudecode/toolUseId\":\"toolu_015YYVYGj9JTCUfTEVyRYRyN\",\"progressToken\":3}},\"jsonrpc\":\"2.0\",\"id\":3}",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "id": 3,
+      "method": "tools/call"
+    },
+    {
+      "body": "{\"method\":\"tools/call\",\"params\":{\"name\":\"bobi_instance_detail\",\"arguments\":{\"fleet\":\"nope\",\"instance\":\"nope\"},\"_meta\":{\"claudecode/toolUseId\":\"toolu_0135Q93CiTDGLoeckQw1u5sG\",\"progressToken\":4}},\"jsonrpc\":\"2.0\",\"id\":4}",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "id": 4,
+      "method": "tools/call"
+    },
+    {
+      "body": "{\"method\":\"tools/call\",\"params\":{\"name\":\"bobi_command_result\",\"arguments\":{\"fleet\":\"moda\",\"instance\":\"eng-team\",\"command_id\":\"missing-id\"},\"_meta\":{\"claudecode/toolUseId\":\"toolu_01P9vN1ztGF5cvyymXcPvSdx\",\"progressToken\":5}},\"jsonrpc\":\"2.0\",\"id\":5}",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "id": 5,
+      "method": "tools/call"
+    },
+    {
+      "body": "{\"method\":\"tools/list\",\"jsonrpc\":\"2.0\",\"id\":1}",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "id": 1,
+      "method": "tools/list"
+    }
+  ]
+}

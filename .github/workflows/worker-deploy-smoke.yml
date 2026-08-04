@@ -171,11 +171,29 @@ jobs:
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "deployed: $url"
 
-      - name: Set the Durable Object internal secret
+      - name: Set the deployed Worker's secrets
+        id: secrets
         # The DO rejects unauthenticated internal fetches, so the WebSocket
-        # subscribe (and therefore the round-trip below) needs this set on the
-        # deployed script. Rotated every run — it authenticates Worker→DO calls
-        # within this one deployment and nothing else.
+        # subscribe (and therefore the round-trip below) needs INTERNAL_DO_SECRET
+        # set on the deployed script. FLEET_OPERATOR_TOKEN gates /fleet/* and
+        # /mcp, which fail closed when it is unset — without it the MCP smoke
+        # would assert against a 503 and prove nothing.
+        #
+        # Both are minted here and rotated every run: they authorize this one
+        # ephemeral deployment and nothing else, so neither needs to be a repo
+        # secret.
+        #
+        # `secret bulk` rather than two `secret put` calls, and that is
+        # load-bearing rather than tidiness: EVERY secret write publishes a new
+        # Worker version, and Cloudflare's rollover between versions is not
+        # atomic (see the readiness gate below). Two writes meant two rollovers
+        # and a wider window in which a request can still be served by the
+        # previous version — which is exactly what happened on the first live
+        # run carrying this step: the smoke's unauthenticated /mcp probe was
+        # answered 404 by a version predating the route, while the calls either
+        # side of it hit the new one. `secret bulk` sets both in a single
+        # request, so this step costs one version, as it did before /mcp
+        # existed.
         if: steps.live.outputs.run == 'true'
         working-directory: event-server/worker
         env:
@@ -183,8 +201,15 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          openssl rand -hex 32 \
-            | npx --no-install wrangler secret put INTERNAL_DO_SECRET --config wrangler.ci.jsonc
+          internal="$(openssl rand -hex 32)"
+          operator="$(openssl rand -hex 32)"
+          # Mask before either can reach any log line, including failure paths.
+          echo "::add-mask::$internal"
+          echo "::add-mask::$operator"
+          printf '{"INTERNAL_DO_SECRET":"%s","FLEET_OPERATOR_TOKEN":"%s"}' \
+            "$internal" "$operator" \
+            | npx --no-install wrangler secret bulk --config wrangler.ci.jsonc
+          echo "operator_token=$operator" >> "$GITHUB_OUTPUT"
 
       - name: Wait for the deployment to serve this commit
         # A deploy is not instantly live. `wrangler secret put` above publishes
@@ -196,24 +221,60 @@ jobs:
         # This is a readiness gate, not a retry-until-green: it demands HTTP
         # 200 AND the release sha of the commit under test, so a genuinely
         # broken or stale deploy never becomes "ready" and the step fails loud
-        # with the last response it saw.
+        # with what it last saw.
+        #
+        # ONE OBSERVATION IS NOT ENOUGH, and that is not a theory. The first
+        # SCHEDULED run of this lane (30740272285, 2026-08-02) passed this gate
+        # and then the very next request — the smoke — was served by the
+        # PREVIOUS run's version. Cloudflare's rollover is not atomic: while
+        # propagation finishes, successive requests to the same URL can land on
+        # either version, so a single match says nothing about the next request.
+        #
+        # Hence a RUN of consecutive matches, reset by any mismatch. If some
+        # fraction of requests still reach the old version, the streak keeps
+        # collapsing and the gate keeps waiting; it only clears once the edge is
+        # answering consistently. The smoke's own sha assertion stays exactly as
+        # strict — it is the thing that caught this, and weakening it to absorb
+        # the race would have thrown away the signal.
         if: steps.live.outputs.run == 'true'
         env:
           SMOKE_URL: ${{ steps.deploy.outputs.url }}
         run: |
           set -uo pipefail
-          deadline=$(( SECONDS + 120 ))
+          needed=5           # consecutive matches required
+          interval=3         # seconds between probes -> ~12s of stable serving
+          streak=0
+          probes=0
+          resets=0
+          mismatch=""
+          deadline=$(( SECONDS + 180 ))
           while [ "$SECONDS" -lt "$deadline" ]; do
             body="$(curl -fsS --max-time 10 "$SMOKE_URL/health" 2>/dev/null || true)"
+            probes=$(( probes + 1 ))
             case "$body" in
               *"\"sha\":\"$GITHUB_SHA\""*)
-                echo "deployment is serving $GITHUB_SHA"
-                exit 0 ;;
+                streak=$(( streak + 1 ))
+                if [ "$streak" -ge "$needed" ]; then
+                  echo "deployment is serving $GITHUB_SHA on $needed consecutive requests (${probes} probes, ${resets} rollover reset(s))"
+                  exit 0
+                fi
+                ;;
+              *)
+                # Only interesting once we had started counting: a reset here
+                # IS the race, caught. Log it so a flaky rollover is visible in
+                # the run rather than hidden behind an eventual pass.
+                if [ "$streak" -gt 0 ]; then
+                  resets=$(( resets + 1 ))
+                  echo "rollover still in flight — a different version answered after ${streak} match(es); restarting the count"
+                fi
+                streak=0
+                mismatch="${body:-<no response>}"
+                ;;
             esac
-            sleep 5
+            sleep "$interval"
           done
-          echo "::error::$SMOKE_URL never served release sha $GITHUB_SHA within 120s" >&2
-          echo "last response: ${body:-<none>}" >&2
+          echo "::error::$SMOKE_URL did not serve release sha $GITHUB_SHA on $needed consecutive requests within 180s (${probes} probes, ${resets} reset(s), final streak ${streak}/${needed})" >&2
+          echo "last non-matching response: ${mismatch:-<none>}" >&2
           exit 1
 
       - name: Smoke the DEPLOYED Worker
@@ -221,17 +282,20 @@ jobs:
         env:
           BOBI_SMOKE_EVENT_SERVER_URL: ${{ steps.deploy.outputs.url }}
           BOBI_SMOKE_EXPECTED_SHA: ${{ github.sha }}
+          BOBI_SMOKE_FLEET_OPERATOR_TOKEN: ${{ steps.secrets.outputs.operator_token }}
         run: |
           pytest tests/integration/test_worker_deploy_smoke.py \
             -m live -v --timeout=180 \
             --junitxml=worker-deploy-smoke.xml
 
       - name: Assert the deploy smoke actually ran
-        # Ran-assertion, layer (ii): both tests skipif on an absent URL, so a
+        # Ran-assertion, layer (ii): every test skipif's on an absent URL, so a
         # deploy step that silently produced no URL would otherwise skip green.
         if: steps.live.outputs.run == 'true'
         run: |
           python scripts/assert_junit_ran.py worker-deploy-smoke.xml \
-            --expect-passed 2 \
+            --expect-passed 4 \
             --require test_deployed_worker_health \
-            --require test_deployed_worker_publish_subscribe_roundtrip
+            --require test_deployed_worker_publish_subscribe_roundtrip \
+            --require test_deployed_worker_mcp_tool_call \
+            --require test_deployed_worker_mcp_route_is_closed_without_a_token

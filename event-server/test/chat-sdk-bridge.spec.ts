@@ -119,7 +119,6 @@ describe("Chat SDK webhook parsing (no credentials)", () => {
 describe("bridgeSlackWebhook → NormalizedEvent", () => {
 	it("produces a valid v2 envelope for app_mention", () => {
 		const result = bridgeSlackWebhook(mentionPayload());
-		expect(result.skip).toBe(false);
 		expect(result.event).not.toBeNull();
 
 		const event = result.event!;
@@ -155,7 +154,7 @@ describe("bridgeSlackWebhook → NormalizedEvent", () => {
 
 	it("handles url_verification with challenge", () => {
 		const result = bridgeSlackWebhook(urlVerificationPayload());
-		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
 		expect(result.challenge).toBe("test_challenge_token");
 		expect(result.event).toBeNull();
 	});
@@ -173,7 +172,6 @@ describe("bridgeSlackWebhook → NormalizedEvent", () => {
 			},
 		});
 		const result = bridgeSlackWebhook(body, "B_SELF");
-		expect(result.skip).toBe(true);
 		expect(result.event).toBeNull();
 	});
 
@@ -191,7 +189,6 @@ describe("bridgeSlackWebhook → NormalizedEvent", () => {
 			},
 		});
 		const result = bridgeSlackWebhook(body, "B_SELF");
-		expect(result.skip).toBe(false);
 		expect(result.event).not.toBeNull();
 	});
 
@@ -207,13 +204,13 @@ describe("bridgeSlackWebhook → NormalizedEvent", () => {
 			},
 		});
 		const result = bridgeSlackWebhook(body);
-		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
 	});
 
 	it("skips non-event_callback payloads", () => {
 		const body = JSON.stringify({ type: "app_rate_limited" });
 		const result = bridgeSlackWebhook(body);
-		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
 	});
 });
 
@@ -270,11 +267,11 @@ describe("bridge normalization behavior", () => {
 			},
 		});
 		const result = bridgeSlackWebhook(body, undefined, "U_BOTUSER");
-		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
 		// A DM mentioning the bot user still delivers (dedup is channel-only).
 		const dm = bridgeSlackWebhook(
 			dmPayload({ text: "<@U_BOTUSER> hi" }), undefined, "U_BOTUSER");
-		expect(dm.skip).toBe(false);
+		expect(dm.event).not.toBeNull();
 	});
 
 	it("filters messages from any of several of our bots", () => {
@@ -291,8 +288,8 @@ describe("bridge normalization behavior", () => {
 				ts: "1718100004.000500",
 			},
 		});
-		expect(bridgeSlackWebhook(body, ["B_FIRST", "B_SECOND"]).skip).toBe(true);
-		expect(bridgeSlackWebhook(body, "B_OTHER").skip).toBe(false);
+		expect(bridgeSlackWebhook(body, ["B_FIRST", "B_SECOND"]).event).toBeNull();
+		expect(bridgeSlackWebhook(body, "B_OTHER").event).not.toBeNull();
 	});
 
 	it("uses event_id as the envelope id", () => {
@@ -335,13 +332,52 @@ describe("bridge normalization behavior", () => {
 		expect(bridged.event!.payload.files).toEqual(parsed);
 	});
 
+	// D011: Slack sets subtype 'file_share' on EVERY message that shares a
+	// file, so the blanket subtype skip above used to drop the whole DM and
+	// thread-reply upload path - the test above passes only because its
+	// synthetic payload omits the subtype real Slack always sends.
+	it("delivers a DM file upload, which Slack marks subtype file_share", () => {
+		const body = dmPayload({
+			subtype: "file_share",
+			text: "here's the screenshot",
+			files: [{ id: "F0AB12CD34", name: "screenshot.png", mimetype: "image/png" }],
+		});
+		const bridged = bridgeSlackWebhook(body);
+		expect(bridged.event).not.toBeNull();
+		expect(bridged.event!.type).toBe("slack.dm");
+		expect(JSON.parse(bridged.event!.fields!.files as string)).toEqual([
+			{ id: "F0AB12CD34", name: "screenshot.png", mimetype: "image/png" },
+		]);
+	});
+
+	it("delivers a thread-reply file upload (subtype file_share)", () => {
+		const bridged = bridgeSlackWebhook(
+			threadReplyPayload({
+				subtype: "file_share",
+				files: [{ id: "F0THREAD", name: "log.txt" }],
+			}),
+		);
+		expect(bridged.event).not.toBeNull();
+		expect(bridged.event!.type).toBe("slack.thread_reply");
+		expect(bridged.event!.payload.files).toEqual([
+			{ id: "F0THREAD", name: "log.txt" },
+		]);
+	});
+
+	it("still skips the non-file message subtypes", () => {
+		for (const subtype of ["message_changed", "message_deleted", "channel_join"]) {
+			const result = bridgeSlackWebhook(dmPayload({ subtype }));
+			expect(result.event, `subtype ${subtype} must not produce an event`).toBeNull();
+		}
+	});
+
 	it("keeps thread replies that mention someone other than our bot user", () => {
 		const result = bridgeSlackWebhook(
 			threadReplyPayload({ text: "<@UOTHER> can you check this?" }),
 			undefined,
 			new Set(["UBOT"]),
 		);
-		expect(result.skip).toBe(false);
+		expect(result.event).not.toBeNull();
 		expect(result.event!.type).toBe("slack.thread_reply");
 	});
 
@@ -365,7 +401,6 @@ describe("bridge normalization behavior", () => {
 			threadReplyPayload({ bot_id: "B_OTHER", text: "third party" }),
 			new Set(["B1", "B2"]),
 		);
-		expect(result.skip).toBe(false);
 		expect(result.event).not.toBeNull();
 		// bot_id must survive onto the normalized event so the circuit breaker
 		// can recognise bot authorship (it reads payload.bot_id).
@@ -387,7 +422,7 @@ describe("bridge normalization behavior", () => {
 			},
 		});
 		const result = bridgeSlackWebhook(body);
-		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
 	});
 });
 
@@ -441,9 +476,8 @@ describe("Chat SDK markdown conversion quality", () => {
 describe("bridge result feeds into existing event server", () => {
 	it("result shape matches SlackNormalizationResult", () => {
 		const result = bridgeSlackWebhook(mentionPayload());
-		// Must have: event (NormalizedEvent | null), skip (boolean)
-		// Optional: challenge (string)
-		expect(typeof result.skip).toBe("boolean");
+		// Must have: event (NormalizedEvent | null) — a null event IS the skip
+		// signal (Q101). Optional: challenge (string).
 		expect(result.event === null || typeof result.event === "object").toBe(true);
 
 		if (result.event) {

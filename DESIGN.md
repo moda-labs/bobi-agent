@@ -143,7 +143,7 @@ The product surface ramp (`.bobi-app` — both web UIs set it on `<body>`). A
 dense operational screen needs hierarchy the flat marketing canvas doesn't
 provide, so the page goes *sunken*, cards go white, and elevation separates:
 ```css
---surface-page: var(--bobi-paper); /* sunken core-brand cream */
+--surface-page: #F4F2ED;  /* sunken, warm but LOW-chroma */
 --surface-card: #FFFFFF;  /* data reads cleanest on white */
 --text-secondary: #6B6459; /* warmth kept, chroma dropped, 4.9:1 on white */
 --elev-1 … --elev-4;       /* 1px contact edge + wide soft ambient, warm ink */
@@ -178,8 +178,7 @@ gradients and aurora blobs. Bobi's violet is load-bearing: if a thing is not
 live, enforced, gated, or focused, it is not violet.
 
 There is no green in the palette. A connected integration is a *live* state, so
-it reads violet; failure uses Moda's brick `#9E3A28`; waiting uses clay;
-completed and saved states resolve to quiet ink or muted treatments.
+it reads violet; failure uses Moda's brick `#9E3A28`; waiting uses clay.
 
 ## Typography — the brand faces, vendored locally
 
@@ -576,15 +575,16 @@ port 8642) serving a shell with a hash router:
   design-only) with start/stop/open actions. Subsumes the "two homes" problem:
   the setup hub's design library and the runtime roster share this one home.
 - **`#/agents/<name>`** - the single-agent view (#887, 2026-08-01,
-  supersedes the roster+chat page this route used to render): a dark
-  instrument **status strip** (RUNNING / STOPPED / NOT RESPONDING, telemetry
-  segments, the recovery action), an **identity header** (description, SAVED
-  and ABOUT hover-or-tap popovers, Edit design), and **one runs table**
-  folding sessions, workflow runs and monitor runs with ALL / RUNNING /
-  FAILED tabs. A row opens the dark slab: a transcript when it has a
-  session, details when it does not. State is carried by green/red/neutral
-  so amber stays the accent; the STOPPED strip drops the amber top edge
-  because the screen is powered down. Endpoints are team-scoped
+  supersedes the roster+chat page this route used to render): a light
+  header carrying a **status strip** (a violet RUNNING / STOPPED / NOT
+  RESPONDING badge, best-effort telemetry segments, the recovery action)
+  and the **identity** (description, SAVED and ABOUT hover-or-tap popovers,
+  Edit design), and below it **one runs table** folding sessions, workflow
+  runs and monitor runs with ALL / RUNNING / FAILED tabs. A row opens the
+  dark slab: a transcript when it has a session, details when it does not.
+  State reads through the system palette - violet for the live/running
+  state, brick for failed, quiet neutral otherwise; the chrome stays
+  lowercase and no green enters it. Endpoints are team-scoped
   (`/api/agents/<name>/health`, `.../runs`, `.../overview`) and resolve the
   runtime per request. The five panels it replaced (needs-attention, health,
   spend, roster, session log) and the chat column are gone - Slack and the

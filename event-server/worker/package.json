@@ -12,7 +12,10 @@
 		"cf-typegen": "wrangler types"
 	},
 	"dependencies": {
-		"@moda-labs/bobi-events-core": "*"
+		"@moda-labs/bobi-events-core": "*",
+		"@modelcontextprotocol/server": "^2.0.0",
+		"agents": "^0.20.1",
+		"zod": "^4.4.3"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.12.4",

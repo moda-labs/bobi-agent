@@ -79,9 +79,10 @@ code, pre, kbd { font-family: var(--font-mono); }
    with". Collapsing them — or running a texture across the boundary — is
    what makes an app feel like an undifferentiated wall of UI.
 
-   Product workspaces keep this plane untextured. Brand motifs such as the
-   engineering grid belong to editorial and marketing moments, not behind
-   operational controls or dense management data.
+   The architect grid-paper is deliberately NOT used here. It is a marketing
+   device from the design system's figure language; on a dense operational
+   screen it crosses region boundaries and destroys exactly the separation
+   above. `data-retro` is inert on product surfaces.
    ========================================================================= */
 
 /* Full-bleed: the browser window IS the app window. No floating card, no

@@ -7,5 +7,4 @@ Groups an operational screen without adding chrome.
 <div className="bobi-card">…</div>
 ```
 
-Sentence case, 13.5px, ink. Uppercase mono is for figure plates, table columns,
-and corner marks—not product page titles.
+Sentence case, 13.5px, ink. Uppercase mono is for page titles and table headers only.

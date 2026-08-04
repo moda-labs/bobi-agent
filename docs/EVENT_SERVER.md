@@ -14,7 +14,9 @@ operator commands between the supervisor sidecar and any monitoring or control
 surface. If you are writing a dashboard or an admin client, that contract —
 topics, all nine command schemas, the heartbeat/snapshot shape, and the
 compatibility promise — is [ADMIN_PROTOCOL.md](ADMIN_PROTOCOL.md), not this
-document.
+document. If your client is an **agent**, you do not have to implement that
+contract at all: the Worker serves it as MCP at `POST /mcp`, documented in the
+same file under § MCP control surface.
 
 ## Mental model
 
@@ -148,8 +150,18 @@ context (edit `edit_ref` when given, else post, then clear the typing indicator)
 reads a conversation's messages; both share the send path's auth and tenancy
 boundary. Channel capabilities (edit, typing, files, length budget) are declared per
 adapter in `event-server/core/src/channels.ts` (`ChannelDescriptor`); degradation is the
-gateway's job, not the caller's. Only adapters build refs and only the gateway parses
+gateway's job, not the caller's. On a channel that cannot edit, an `update` or
+`final` becomes a follow-up post — and when that send also carries `files`, the
+text rides along as the file's comment, so a caller's text is never accepted
+and then delivered nowhere. Only adapters build refs and only the gateway parses
 them; the agent never assembles platform routing fields.
+
+Inbound attachments are the mirror image: an adapter that receives files sets
+`fields.files` (a JSON string) and `payload.files` (the parsed array) with every
+value stringified. Providers disagree on spelling — Slack sends `name`/`mimetype`,
+Discord sends `filename`/`content_type` — so each adapter declares a key map and
+they share one extraction helper in `core/src/adapters/payload.ts`, keeping the
+agent-facing contract identical across channels.
 
 ## Ingestion: getting events in
 
@@ -331,6 +343,16 @@ Admitted deployments are then delivered to: on the Worker, via the per-id
 conversation)` circuit breaker pauses delivery if an agent's own output loops back
 without a human event in between (it exempts `inbox/*` and `reply/*`).
 
+While a conversation is paused, its events are buffered — but only the most
+recent **50** (`BREAKER_MAX_PAUSED`). A tripped conversation is by definition in
+a loop, so the buffer keeps the tail rather than the whole flood; anything past
+the cap is dropped and counted. Resume is **lazy**: it happens when the next
+event arrives on the same conversation, either because the cooldown has expired
+or because a human posted. A conversation that trips and then goes quiet is
+therefore released by a periodic sweep instead (the local server runs it on its
+eviction interval), which discards that conversation's buffered events and logs
+how many — they are the loop traffic, and nothing is waiting to receive them.
+
 ### Replay and catch-up
 
 Replay is cursor-based, per deployment (each deployment has its own `seq` space, so
@@ -476,6 +498,14 @@ the grant, never the credential:
   not just the org).
 - **Slack**: the bubble-signed `/slack/workspaces` registration (proving the bot token via `auth.test`) doubles as the grant and stores per-app send and verification credentials.
   On a local runtime, the same signed record may carry the Socket Mode app token and start the outbound connection; unsigned registrations never do.
+  Several apps can share one workspace: each registration merges a single entry
+  into an `api_app_id`-keyed map rather than replacing the record, and
+  concurrent registrations for the same workspace are serialized so one cannot
+  drop another's entry (and with it that app's `signing_secret`, whose loss
+  would 401 its inbound events). That serialization is per runtime instance —
+  complete for the single-process local server and for a Durable Object, but it
+  does not cover two Worker isolates racing on the same KV key, which has no
+  compare-and-swap to build on.
 - **WhatsApp**: the bubble-signed `/whatsapp/numbers` registration (proving the
   Cloud API token can read the phone-number node on the Graph API) doubles as
   the grant, and stores the bubble-scoped send credential.
@@ -515,8 +545,13 @@ to every granted bubble, and a `linear:<TEAM>` key can collide across two Linear
 webhooks to a specific account is the multi-tenant hardening tracked in **#239**.
 
 Running a shared or public event server is a deliberate step with prerequisites:
-serve over TLS and set all three provider webhook secrets (`WEBHOOK_SECRET`,
-`SLACK_SIGNING_SECRET`, `LINEAR_WEBHOOK_SECRET`) so every inbound route verifies.
+serve over TLS and set every provider webhook secret (`WEBHOOK_SECRET`,
+`SLACK_SIGNING_SECRET`, `LINEAR_WEBHOOK_SECRET`, `WHATSAPP_APP_SECRET` - plus
+`WHATSAPP_VERIFY_TOKEN` for Meta's GET handshake) so every inbound route
+verifies. An unset github/slack/linear secret admits that provider unverified,
+visible on `/health` as `webhook_unverified`; WhatsApp fails closed instead, so
+a WhatsApp-enabled server missing those two secrets rejects every inbound event
+rather than admitting it. See `docs/SECURITY.md` for why.
 
 ## Key files
 
@@ -533,15 +568,35 @@ the two compile units are mutually exclusive: `src/` is Node-only
 `fetch`/`Request`/`Response` declarations conflict with Node's. Each package
 carries its own `tsconfig.json` and `vitest.config.mts`.
 
+**Working on the Worker in a source checkout:** run `npm ci` in
+`event-server/` first. Starting a local agent builds the embedded local server,
+and that bootstrap installs only what `src/local.ts` needs — the workspace root
+plus `core`. It deliberately skips the `worker` workspace, whose toolchain
+(`agents`, the MCP SDK, wrangler) roughly quadruples the tree and is never
+imported by the local bundle. So after a local agent run, the Worker's
+typecheck and suites report missing modules until a full `npm ci` restores
+them. The reverse is safe: a full install is left alone, because the bootstrap
+reinstalls only when the built artifact is actually stale.
+
 - `event-server/core/src/core.ts` - shared handlers, the unified webhook pipeline,
   routing, HMAC auth, grant filter.
 - `event-server/core/src/adapters/{github,slack,linear}.ts` - webhook normalizers.
+- `event-server/core/src/adapters/payload.ts` - the narrowing and
+  attachment-extraction helpers every normalizer shares.
+- `event-server/core/src/circuit-breaker.ts` - the per-(deployment,
+  conversation) loop breaker, its bounded pause buffer, and `sweepBreakers()`.
 - `event-server/worker/src/index.ts` - Cloudflare Worker entry (KV storage, DO fan-out).
 - `event-server/worker/src/deployment-session.ts` - the per-deployment Durable Object.
 - `event-server/worker/src/fleet.ts` - fleet read model + operator query surface
   (see [ADMIN_PROTOCOL.md](ADMIN_PROTOCOL.md)).
+- `event-server/worker/src/mcp.ts` - the same control plane served as MCP at
+  `POST /mcp`, for agents rather than dashboards (see
+  [ADMIN_PROTOCOL.md](ADMIN_PROTOCOL.md) § MCP control surface).
 - `event-server/worker/src/internal-auth.ts` - signs the Worker-to-DO hop.
 - `event-server/src/local.ts` - local Node entry (in-memory store, direct sockets).
+- `event-server/src/delivery-buffer.ts` - per-deployment sequencing, replay
+  buffer, and socket fan-out. A sibling because importing `local.ts` binds a
+  port, so nothing inside it is unit-testable (same for `http-body.ts`).
 - `bobi/events/server.py` - local-server launcher + bubble mint / grant setup.
 - `bobi/events/client.py` - the WebSocket client (connect, replay, heartbeat).
 - `bobi/events/{subscriptions,adapters,drain,publish,signing}.py` - subscription

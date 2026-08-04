@@ -33,6 +33,23 @@ REGISTER_READ_TIMEOUT = 30.0
 REGISTER_TIMEOUT = httpx.Timeout(REGISTER_READ_TIMEOUT, connect=5.0)
 DEPENDENCY_STAMP_NAME = ".bobi-lock-digest"
 
+# The LOCAL server is built from `event-server/src/local.ts` with esbuild. It
+# needs the workspace root's own dependencies and the shared `core` package -
+# and nothing from the `worker` workspace, which exists to be deployed to
+# Cloudflare and is never imported by this bundle.
+#
+# npm installs every workspace by default, so without this scope a local
+# bootstrap drags in the Worker's whole toolchain (`agents`, the MCP SDK,
+# wrangler, babel) - roughly four times the tree, none of it reachable from
+# `local.ts`. That surplus is not merely wasted: it is what put `agents`' peer
+# conflicts and optional binaries into the very dependency tree this module
+# inspects to decide whether the install is healthy.
+#
+# Install scope and inspect scope MUST stay identical. `npm ls` reports a
+# workspace that was deliberately not installed as `missing:`, which is fatal
+# by design - so an unscoped read of a scoped install would fail every time.
+_LOCAL_WORKSPACE_SCOPE = ("--include-workspace-root", "--workspace", "core")
+
 
 class PackagedEventServerArtifactError(RuntimeError):
     """An installed Bobi distribution lacks its immutable server artifact."""
@@ -179,7 +196,20 @@ def _fatal_tree_problems(problems: object) -> list[str]:
 
 
 def _dependency_tree(es_dir: Path) -> dict:
-    result = _run_npm(["npm", "ls", "--all", "--json", "--offline"], es_dir)
+    # Scoped to match the install exactly (see _LOCAL_WORKSPACE_SCOPE).
+    #
+    # `allow_failure` because `npm ls` exits 1 whenever it reports ANY problem,
+    # including the harmless classes enumerated above. Treating that exit as
+    # fatal made `_fatal_tree_problems` unreachable - the extraneous allowance
+    # could never actually run, because the raise happened first. The JSON
+    # payload is the authority: `problems` is what gets classified,
+    # default-deny, exactly as intended. A genuinely broken tree still fails,
+    # one layer later and with a better message.
+    result = _run_npm(
+        ["npm", "ls", "--all", "--json", "--offline", *_LOCAL_WORKSPACE_SCOPE],
+        es_dir,
+        allow_failure=True,
+    )
     try:
         tree = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
@@ -223,6 +253,28 @@ def _source_dependencies_valid(es_dir: Path) -> bool:
 
 
 def _refresh_dependency_stamp(es_dir: Path) -> None:
+    # Create the stamp file BEFORE measuring the tree, not after.
+    #
+    # npm keeps a hidden lockfile at `node_modules/.package-lock.json` and
+    # decides whether it is still authoritative by comparing the `node_modules`
+    # directory's mtime. Creating a file in that directory changes the mtime,
+    # so npm stops trusting the hidden lockfile and starts reporting the tree
+    # it actually finds on disk - at which point optional dependencies that
+    # were never installed (esbuild's and vitest's other-platform binaries)
+    # switch from full metadata to empty objects, and the digest changes.
+    #
+    # Writing the stamp last therefore recorded a digest that the very act of
+    # writing it invalidated: the stamp could never match on a fresh install,
+    # so every artifact rebuild paid a full reinstall it did not need. This is
+    # long-standing (reproduced on main) and was simply never noticed, because
+    # the penalty is invisible correctness-wise - just slow.
+    #
+    # Touching the file first spends that one-time perturbation up front. The
+    # measurement then happens in the settled state, and rewriting the file's
+    # CONTENTS below does not disturb it again: only creating, removing or
+    # renaming an entry changes a directory's mtime.
+    stamp_path = _dependency_stamp_path(es_dir)
+    stamp_path.touch()
     stamp = {
         "installed_tree_sha256": event_server_artifact.canonical_json_digest(
             _dependency_tree(es_dir)
@@ -232,14 +284,33 @@ def _refresh_dependency_stamp(es_dir: Path) -> None:
         ),
         "schema_version": 1,
     }
-    _dependency_stamp_path(es_dir).write_text(
-        json.dumps(stamp, indent=2, sort_keys=True) + "\n"
-    )
+    stamp_path.write_text(json.dumps(stamp, indent=2, sort_keys=True) + "\n")
 
 
 def _install_source_dependencies(es_dir: Path) -> None:
-    _run_npm(["npm", "ci", "--no-audit", "--no-fund"], es_dir)
+    # Clear the tree ourselves instead of leaving it to `npm ci`. npm 10 on
+    # Node 20 fails its own cleanup with `ENOTEMPTY ... rmdir
+    # node_modules/<pkg>` when a populated tree is already there, which is the
+    # normal case here: this runs to REFRESH an install, not only to create
+    # one. Latent until the Worker workspace gained its MCP dependencies and
+    # the tree grew roughly fourfold; shutil.rmtree does not share the bug.
+    #
+    # Only the source path reaches this. An installed bobi validates a
+    # prebuilt artifact (`_validate_packaged_artifact`) and never runs npm.
+    shutil.rmtree(es_dir / "node_modules", ignore_errors=True)
+    _run_npm(["npm", "ci", "--no-audit", "--no-fund", *_LOCAL_WORKSPACE_SCOPE], es_dir,
+             timeout=900)
     _refresh_dependency_stamp(es_dir)
+    # Say so where someone will actually hit it. This install is scoped, so the
+    # Cloudflare Worker workspace is now absent - its typecheck and test suites
+    # will fail on missing modules until it is restored. Cheaper to name the
+    # one-line remedy here than to let it read as a broken checkout.
+    log.info(
+        "Installed the local event server's dependencies only (workspace root + "
+        "core). The Cloudflare Worker workspace was not installed; run "
+        "`npm ci` in %s if you are working on the Worker itself.",
+        es_dir,
+    )
 
 
 def _build_local(es_dir: Path, node_version: str) -> None:
@@ -320,12 +391,18 @@ def _is_local_url(url: str) -> bool:
 def _run_npm(
     args: list[str],
     es_dir: Path,
+    timeout: float = 300,
+    allow_failure: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run an npm command, surfacing its output on failure.
 
     npm failures here used to raise a bare CalledProcessError with the
     output captured but never shown — the real cause (e.g. ENOSPC)
     was invisible in manager.log.
+
+    `timeout` is per-command because they are not comparable: `npm --version`
+    answers instantly, while a cold `npm ci` of the whole workspace is minutes
+    of network. One ceiling sized for the former silently caps the latter.
     """
     try:
         result = subprocess.run(
@@ -334,7 +411,7 @@ def _run_npm(
             capture_output=True,
             env=event_server_artifact.sanitized_node_environment(),
             text=True,
-            timeout=300,
+            timeout=timeout,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
@@ -342,9 +419,9 @@ def _run_npm(
         ) from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
-            f"{' '.join(args)} timed out after 300s in {es_dir}"
+            f"{' '.join(args)} timed out after {timeout:g}s in {es_dir}"
         ) from exc
-    if result.returncode != 0:
+    if result.returncode != 0 and not allow_failure:
         detail = (result.stderr or result.stdout or "").strip()[-2000:]
         log.error(f"{' '.join(args)} failed (exit {result.returncode}):\n{detail}")
         raise RuntimeError(

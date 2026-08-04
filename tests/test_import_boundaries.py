@@ -61,18 +61,21 @@ EVENT_SERVER_WORKER_TEST = EVENT_SERVER_WORKER / "test"
 # (test_worker_modules_fully_classified), and none of them may reappear under
 # src/, where they would be running in the local Node server that has no
 # Cloudflare runtime (test_src_modules_fully_classified).
-WORKER_ADAPTER_MODULES = {"index", "deployment-session", "internal-auth", "fleet"}
+WORKER_ADAPTER_MODULES = {"index", "deployment-session", "internal-auth", "fleet", "mcp"}
 
 # The only src/ modules allowed - the local runtime variants. Every module
 # present must be in this exact set (test_src_modules_fully_classified), so a
 # new file cannot silently default into the local server. The two gateway
 # drivers and their shared socket scaffolding are local-runtime Node modules
-# with no Cloudflare knowledge.
+# with no Cloudflare knowledge; http-body reads a node:http request stream and
+# is meaningless off Node for the same reason.
 PUBLIC_LOCAL_MODULES = {
     "local",
     "discord-gateway-local",
     "slack-socket-local",
     "socket-driver-common",
+    "http-body",
+    "delivery-buffer",
 }
 
 

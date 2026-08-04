@@ -19,13 +19,24 @@ Fly-hosted agents.
 > the recipe, so a released image tag is a hard dependency of every deploy,
 > not just of a first install.
 >
-> **The canary no longer gates the image publish, and you must sequence it by
-> hand.** Pre-reorg, `release.yml` had an `image` job gated on the private
-> fleet canary's `smoked` output. The split removed that coupling — the
-> canary lives in `moda-agents` and this repo cannot see its result without a
-> cross-repo `repository_dispatch`. Until that exists: publish the image, run
-> the fleet canary from `moda-agents`, and **do not roll the fleet until it
-> is green**. A bad image tag is adopted by every team's next deploy.
+> **The canary gates the fleet ROLL, not the publish — and that is now
+> structural, not a gap awaiting repair.** Pre-reorg, `release.yml` had an
+> `image` job gated on the private fleet canary's `smoked` output. The split
+> removed that coupling, and D7 settled it the other way: the canary builds
+> `FROM ghcr.io/moda-labs/bobi:<version>`, the same base the fleet deploys, so
+> **the image must exist before the canary can run at all**. A gate cannot
+> precede the artifact it consumes.
+>
+> So the sequence is: publish the wheel, publish the image, run the fleet gate
+> from `moda-agents`, and **do not roll the fleet until it is green**. A bad
+> image tag is adopted by every team's next deploy. Since 2026-08-01 that last
+> step is mechanical rather than a matter of remembering — `version-gate.yml`
+> in `moda-agents` proves a candidate version on `ci-canary` and only then opens
+> the `BOBI_VERSION` bump PR.
+>
+> PyPI keeps its own external backstop (trusted publishing). GHCR is ungated,
+> which is the accepted cost of the split; re-coupling it would need a
+> cross-repo `repository_dispatch` into this repo's `release-image.yml`.
 
 > **Dev channel (#740 Track A):** every fully-green push to `main`
 > fast-forwards the `dev` branch (the `promote-dev` job in `ci.yml`). This is
@@ -83,9 +94,9 @@ git commit -m "chore(release): cut <version>"
 git push origin main
 ```
 
-Publish the GitHub Release. This tag/release event is the gate that builds the
-wheel, runs canary, publishes to PyPI, deploys the event server, and rolls the
-release-owned fleet.
+Publish the GitHub Release. This tag/release event builds the wheel, publishes
+to PyPI, and bumps Homebrew. It does NOT run a canary, deploy the event server,
+or roll any fleet — those are the private train's, dispatched by hand below.
 
 ```bash
 gh release create v<version> --target main --title "v<version>" --notes-file -
@@ -107,18 +118,41 @@ The public release workflow must go green:
 - PyPI publish
 - Homebrew formula bump + bottle-URL smoke
 
-Then publish the reference image from THIS repo (`release-image.yml`, dispatched
-with the version): multi-arch build + the `:latest` move when this is the newest
-non-prerelease release. It installs `bobi==<version>` from PyPI, so it must run
-after the publish above.
+Then publish the reference image from THIS repo (`release-image.yml`): multi-arch
+build + the `:latest` move when this is the newest non-prerelease release. It
+installs `bobi==<version>` from PyPI, so it must run after the publish above.
+
+It needs `claude-version` as well as the version — the exact claude CLI the
+release resolved from the floating `stable` channel, so every arch bakes the
+same one. **Do not re-derive it.** `build-wheel` prints the ready-made dispatch
+command to its run summary (and as a `::notice::`); copy it from there:
+
+```bash
+gh run view <release-run-id> --repo moda-labs/bobi-agent \
+  --json jobs --jq '.jobs[] | select(.name=="Build the release wheel") | .url'
+```
+
+If you are recovering an OLD release whose summary has expired, resolve the
+channel with `curl -fsSL https://downloads.claude.ai/claude-code-releases/stable`
+and corroborate it against the previous release's published image
+(`docker run --rm --entrypoint claude ghcr.io/moda-labs/bobi:<prev> --version`):
+agreement means the channel has not moved and the value is what that run
+resolved. That is a recovery path, not the normal one.
 
 Then run the fleet train in `moda-labs/moda-agents` (its own workflows):
-event-server Worker deploy + identity check, then the fleet canary build/smoke
-against the just-published wheel. **Sequence this by hand — the canary no longer
-gates the image publish** (see the notice at the top). Do not continue to the
-Moda fleet pin until both are green: the public train alone carries no
-functional fleet proof, and the image is now on the path of every team deploy,
-not just first installs.
+dispatch `release.yml` there with the version. It verifies the wheel and the
+image are both actually published, deploys the event-server Worker and waits for
+`/health` to report that exact version@sha, then deploys `ci-canary` from the
+just-published base image and asserts it answers `CANARY-OK`. **Sequence this by
+hand, and note the direction: the canary runs AFTER the image publish because it
+consumes it** (see the notice at the top). Do not continue to the Moda fleet pin
+until it is green: the public train alone carries no functional fleet proof, and
+the image is now on the path of every team deploy, not just first installs.
+
+The pin bump itself is then `version-gate.yml` in `moda-agents`, dispatched with
+the version — it re-proves the canary and opens the `BOBI_VERSION` PR only on a
+gate that genuinely RAN (`smoked=true`, not merely a green job). Merging that PR
+does not roll the fleet; a `deploy-*` tag or a `rebuild: true` dispatch does.
 
 Two hazards worth re-reading before dispatching `release-image.yml`:
 
@@ -127,8 +161,22 @@ Two hazards worth re-reading before dispatching `release-image.yml`:
   and moves `:latest` too when the version is the newest release. That is
   occasionally what you want (a corrective re-publish) but never something to
   do absent-mindedly.
-- This repo's `release` environment currently has NO protection rules. Add
-  required reviewers before treating the dispatch path as gated.
+- This repo's `release` environment has NO protection rules, and that is now a
+  DECISION rather than an omission (2026-08-03, Zach). A required-reviewers rule
+  had been added at some point with a single reviewer — the same account that
+  dispatches the release — and `prevent_self_review: false`. That is a
+  self-approval gate: it cost a click per arch job and bought no second pair of
+  eyes, so it was removed. Do not re-add one naming only the releaser. If this
+  path is ever to be genuinely gated, the reviewer must be someone who is not
+  the dispatcher, or the gate belongs upstream (a cross-repo
+  `repository_dispatch` from the fleet canary, per the note at the top of this
+  file).
+
+  While removing it, note the operational trap that bit the 0.52.0 release:
+  **editing the environment while a run is waiting on it FAILS the pending
+  deployment** rather than releasing it. The `publish-manifest` job died with
+  zero steps and had to be re-run. Approve or cancel the in-flight run first,
+  then edit.
 
 If PyPI was just published, allow a short propagation delay before installing
 the new version from another repo.
@@ -204,14 +252,19 @@ gh run watch <run-id> --repo moda-labs/moda-agents --interval 20
 ```
 
 The deploy run should show a green job for every team the `plan` job lists as
-"Deployments to reconcile" — read that line rather than trusting this list,
-which goes stale as the fleet grows. As of 2026-07-31 it is five:
+"Deployments to reconcile". **That line is the only trustworthy roster** — the
+fleet gains and loses teams between releases, so read it per run:
 
-- `baohua`
-- `basketbot`
-- `eng-team`
-- `roadmap-pm`
-- `zachs-personal-assistant`
+```bash
+gh run view <run-id> --repo moda-labs/moda-agents --log \
+  | grep -m1 "Deployments to reconcile"
+```
+
+This file used to carry a copy of the roster, hedged with "read the plan job
+rather than trusting this list". It was wrong within days — it still named
+`basketbot` two releases after moda-agents#90 decommissioned it. A list nobody
+is supposed to trust is worse than no list, so it is gone rather than
+re-frozen at today's count.
 
 A team can fail here while the release artifacts are perfectly good. Note that
 `bobi deploy` **pauses the old runtime before it validates the new one**, so a

@@ -360,7 +360,7 @@ def test_source_dependency_stamp_requires_exact_lock_and_offline_tree(
     _write_source_dependency_state(tmp_path, tree)
     calls = []
 
-    def run_npm(args, path):
+    def run_npm(args, path, timeout=300, allow_failure=False):
         calls.append(args)
         return subprocess.CompletedProcess(
             args, returncode=0, stdout=json.dumps(tree), stderr=""
@@ -369,7 +369,9 @@ def test_source_dependency_stamp_requires_exact_lock_and_offline_tree(
     monkeypatch.setattr(es, "_run_npm", run_npm)
 
     assert es._source_dependencies_valid(tmp_path)
-    assert calls == [["npm", "ls", "--all", "--json", "--offline"]]
+    assert calls == [
+        ["npm", "ls", "--all", "--json", "--offline", "--include-workspace-root", "--workspace", "core"]
+    ]
 
     (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 2}\n')
     assert not es._source_dependencies_valid(tmp_path)
@@ -389,7 +391,7 @@ def test_source_dependency_stamp_schema_requires_an_exact_integer(
     monkeypatch.setattr(
         es,
         "_run_npm",
-        lambda *args: (_ for _ in ()).throw(
+        lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("invalid stamp schema must fail before npm inspection")
         ),
     )
@@ -406,7 +408,7 @@ def test_deleted_transitive_dependency_triggers_exact_reinstall_and_build(
     monkeypatch.setattr(
         es,
         "_run_npm",
-        lambda args, path: (_ for _ in ()).throw(
+        lambda args, path, **kwargs: (_ for _ in ()).throw(
             RuntimeError("npm dependency tree is invalid: missing transitive payload")
         ),
     )
@@ -428,8 +430,11 @@ def test_source_install_and_build_use_single_exact_commands(
 ):
     calls = []
 
-    def run_npm(args, path):
+    timeouts = {}
+
+    def run_npm(args, path, timeout=300, allow_failure=False):
         calls.append(args)
+        timeouts[tuple(args)] = timeout
         output = "9.2.0\n" if args == ["npm", "--version"] else ""
         return subprocess.CompletedProcess(
             args, returncode=0, stdout=output, stderr=""
@@ -450,17 +455,153 @@ def test_source_install_and_build_use_single_exact_commands(
     es._build_local(tmp_path, "v20.19.2")
 
     assert calls == [
-        ["npm", "ci", "--no-audit", "--no-fund"],
+        ["npm", "ci", "--no-audit", "--no-fund", "--include-workspace-root", "--workspace", "core"],
         ["refresh-stamp"],
         ["npm", "run", "build:local"],
         ["npm", "--version"],
     ]
+    # A cold `npm ci` of the whole workspace is minutes of network, and the
+    # tree quadrupled when the Worker gained its MCP dependencies. The default
+    # ceiling is sized for commands like `npm --version`; installing under it
+    # would abort a legitimate install as a timeout.
+    assert timeouts[
+        ("npm", "ci", "--no-audit", "--no-fund",
+         "--include-workspace-root", "--workspace", "core")
+    ] >= 900
+    assert timeouts[("npm", "--version")] == 300
     assert generated == [
         (
             tmp_path,
             {"node_version": "v20.19.2", "npm_version": "9.2.0"},
         )
     ]
+
+
+def test_source_install_clears_the_tree_before_npm_ci(tmp_path, monkeypatch):
+    """`npm ci` must never be asked to delete the existing tree itself.
+
+    npm 10 on Node 20 fails its own cleanup with `ENOTEMPTY ... rmdir
+    node_modules/<pkg>`, which is how the whole non-Claude integration job went
+    red once the Worker workspace grew its MCP dependencies. Clearing the
+    directory first sidesteps it — but only if it happens BEFORE npm runs, so
+    the ordering is what is asserted here, not merely the removal.
+    """
+    stale = tmp_path / "node_modules" / "empathic" / "nested"
+    stale.mkdir(parents=True)
+    (stale / "index.js").write_text("// left over from an earlier install\n")
+
+    observed = []
+
+    def run_npm(args, path, timeout=300):
+        observed.append((args, (tmp_path / "node_modules").exists()))
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(es, "_run_npm", run_npm)
+    monkeypatch.setattr(es, "_refresh_dependency_stamp", lambda path: None)
+
+    es._install_source_dependencies(tmp_path)
+
+    assert observed, "npm ci never ran"
+    args, tree_present_when_npm_ran = observed[0]
+    assert args == ["npm", "ci", "--no-audit", "--no-fund", "--include-workspace-root", "--workspace", "core"]
+    assert not tree_present_when_npm_ran, (
+        "node_modules still existed when npm ci started — npm would have had to "
+        "remove it itself, which is the ENOTEMPTY failure this guards"
+    )
+
+
+def test_dependency_stamp_is_written_before_the_tree_is_measured(tmp_path, monkeypatch):
+    """The stamp must not invalidate the measurement it is recording.
+
+    npm decides whether its hidden lockfile (`node_modules/.package-lock.json`)
+    is still authoritative from the `node_modules` directory mtime. CREATING a
+    file there changes that mtime, so npm stops trusting the cache and starts
+    reporting the on-disk tree - at which point never-installed optional
+    dependencies switch from full metadata to `{}` and the digest changes.
+
+    Writing the stamp after measuring therefore recorded a digest that the
+    write itself invalidated, so the stamp never matched on a fresh install and
+    every artifact rebuild paid a full reinstall. Reproduced on main; this is
+    long-standing, not new.
+
+    The fix is ordering, so ordering is what this asserts: the stamp file must
+    already exist by the time the tree is read.
+    """
+    node_modules = tmp_path / "node_modules"
+    node_modules.mkdir()
+    (tmp_path / "package-lock.json").write_text("{}")
+    stamp_path = es._dependency_stamp_path(tmp_path)
+
+    existed_when_measured = []
+
+    def fake_tree(path):
+        existed_when_measured.append(stamp_path.exists())
+        return {"name": "event-server"}
+
+    monkeypatch.setattr(es, "_dependency_tree", fake_tree)
+    es._refresh_dependency_stamp(tmp_path)
+
+    assert existed_when_measured == [True], (
+        "the tree was measured before the stamp file existed — creating it "
+        "afterwards changes node_modules' mtime and invalidates the very "
+        "digest just recorded"
+    )
+    assert json.loads(stamp_path.read_text())["schema_version"] == 1
+
+
+def test_local_install_excludes_the_worker_workspace(tmp_path, monkeypatch):
+    """The local bundle never imports the Cloudflare Worker's tree.
+
+    npm installs every workspace by default, so an unscoped `npm ci` dragged
+    the Worker's whole toolchain (`agents`, the MCP SDK, wrangler, babel) into
+    a local bootstrap - roughly four times the tree, none of it reachable from
+    `local.ts`, and the source of the peer conflicts and optional binaries this
+    module then had to triage out of its own health check.
+    """
+    seen = []
+
+    def run_npm(args, path, timeout=300, allow_failure=False):
+        seen.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(es, "_run_npm", run_npm)
+    monkeypatch.setattr(es, "_refresh_dependency_stamp", lambda path: None)
+    monkeypatch.setattr(es.shutil, "rmtree", lambda *a, **k: None)
+
+    es._install_source_dependencies(tmp_path)
+
+    assert seen == [[
+        "npm", "ci", "--no-audit", "--no-fund",
+        "--include-workspace-root", "--workspace", "core",
+    ]]
+
+
+def test_install_and_inspect_scopes_are_identical(tmp_path, monkeypatch):
+    """The two scopes must never drift apart.
+
+    `npm ls` reports a workspace that was deliberately not installed as
+    `missing:` - fatal by design. So an unscoped read of a scoped install fails
+    every single time, and a scoped read of an unscoped install silently stops
+    noticing half the tree. Pinning them to ONE constant is the invariant; this
+    asserts both commands actually carry it.
+    """
+    seen = []
+
+    def run_npm(args, path, timeout=300, allow_failure=False):
+        seen.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(es, "_run_npm", run_npm)
+    monkeypatch.setattr(es, "_refresh_dependency_stamp", lambda path: None)
+    monkeypatch.setattr(es.shutil, "rmtree", lambda *a, **k: None)
+
+    es._install_source_dependencies(tmp_path)
+    es._dependency_tree(tmp_path)
+
+    scope = list(es._LOCAL_WORKSPACE_SCOPE)
+    assert len(seen) == 2
+    for args in seen:
+        assert args[-len(scope):] == scope, args
 
 
 def test_fresh_source_artifact_skips_npm(monkeypatch, tmp_path):
@@ -884,6 +1025,26 @@ class TestDependencyTreeProblemTriage:
         assert len(fatal) == 2
         assert any(p.startswith("missing:") for p in fatal)
         assert any(p.startswith("invalid:") for p in fatal)
+
+    def test_npm_ls_nonzero_exit_does_not_bypass_triage(self):
+        """`npm ls` exits 1 whenever it reports ANY problem, harmless ones
+        included. Treating that exit as fatal made this whole triage
+        unreachable - the extraneous allowance could never run, because the
+        raise happened first. The JSON payload is the authority.
+        """
+        tree = {"name": "event-server", "problems": [
+            "extraneous: tslib@2.8.1 /es/node_modules/tslib",
+        ]}
+
+        def run_npm(args, path, timeout=300, allow_failure=False):
+            assert allow_failure, "npm ls must tolerate its own non-zero exit"
+            return subprocess.CompletedProcess(
+                args, returncode=1, stdout=json.dumps(tree), stderr="ELSPROBLEMS"
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(es, "_run_npm", run_npm)
+            assert es._dependency_tree(Path("/es")) == tree
 
     def test_unknown_problem_wording_is_fatal_by_default(self):
         """Default-deny. An earlier version enumerated the FATAL prefixes, so

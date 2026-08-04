@@ -14,7 +14,7 @@ guard them. What must hold here:
 3. No job reaches for the private-bound workflow files.
 """
 
-from tests.workflow_utils import load_workflow
+from tests.workflow_utils import load_workflow, workflow_on
 
 PRIVATE_WORKFLOWS = ("release-fleet.yml", "release-image.yml")
 
@@ -104,3 +104,63 @@ def test_release_build_provisions_node_and_smokes_the_exact_wheel():
         "test_installed_wheel_starts_without_mutating_frozen_event_server"
     ) in smoke
     assert "/tmp/whl/bin/bobi --version" in smoke
+
+
+def _meta_step_run() -> str:
+    return next(
+        step
+        for step in _release_jobs()["build-wheel"]["steps"]
+        if step.get("id") == "meta"
+    )["run"]
+
+
+def test_meta_publishes_the_pins_it_resolves():
+    """The resolved pins must be READABLE, not just passed between jobs.
+
+    `release-image.yml` takes `claude-version` as a required dispatch input,
+    and the repo split moved its caller out of release.yml - so the output is
+    consumed by nobody and the value existed only inside a shell variable.
+    Dispatching the image then meant re-deriving the floating `stable`
+    channel by hand, which defeats the entire point of pinning it once.
+    """
+    run = _meta_step_run()
+    assert "$GITHUB_STEP_SUMMARY" in run, (
+        "the meta step must publish the resolved pins to the run summary; "
+        "without it the claude-version release-image.yml requires is "
+        "unreadable and has to be guessed"
+    )
+    assert "::notice" in run, "the pins should also reach the run log"
+
+    # The published value must be the SAME variable written to GITHUB_OUTPUT.
+    # Publishing a separately re-derived value would be worse than nothing:
+    # it would look authoritative while being able to disagree with what the
+    # release actually baked.
+    for var in ("$claude_version", "$version", "$source_sha"):
+        assert run.count(var) >= 2, (
+            f"{var} should be written to GITHUB_OUTPUT and published; "
+            "publish the resolved variable, never a re-derivation"
+        )
+
+
+def test_summary_names_every_required_release_image_input():
+    """If release-image.yml grows a required input, the summary must grow too.
+
+    The summary prints a ready-to-paste dispatch command. An input added
+    there but not here yields a command that fails at dispatch time, during
+    a release, which is the worst moment to discover it.
+    """
+    dispatch = workflow_on(load_workflow("release-image.yml"))["workflow_dispatch"]
+    required = {
+        name
+        for name, spec in dispatch["inputs"].items()
+        if spec.get("required")
+    }
+    assert required, "expected release-image.yml to have required inputs"
+
+    run = _meta_step_run()
+    summary = run[run.index("$GITHUB_STEP_SUMMARY") - 800:]
+    for name in required:
+        assert f"-f {name}=" in run, (
+            f"release-image.yml requires input {name!r}, but release.yml's "
+            f"run summary does not print it: {summary[:200]}"
+        )

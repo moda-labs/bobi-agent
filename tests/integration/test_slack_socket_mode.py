@@ -348,17 +348,20 @@ class _SlackRestStub:
                         "authorization": self.headers.get("Authorization", ""),
                     })
 
+            def _auth_test(self):
+                if self.headers.get("Authorization") != f"Bearer {BOT_TOKEN}":
+                    return self._respond({"ok": False, "error": "invalid_auth"})
+                return self._respond({
+                    "ok": True,
+                    "team_id": TEAM_ID,
+                    "bot_id": BOT_ID,
+                    "user_id": BOT_USER_ID,
+                })
+
             def do_GET(self):
                 self._record("GET")
                 if self.path == "/auth.test":
-                    if self.headers.get("Authorization") != f"Bearer {BOT_TOKEN}":
-                        return self._respond({"ok": False, "error": "invalid_auth"})
-                    return self._respond({
-                        "ok": True,
-                        "team_id": TEAM_ID,
-                        "bot_id": BOT_ID,
-                        "user_id": BOT_USER_ID,
-                    })
+                    return self._auth_test()
                 return self._respond({"ok": False, "error": "unknown_method"}, 404)
 
             def do_POST(self):
@@ -366,6 +369,15 @@ class _SlackRestStub:
                 if length:
                     self.rfile.read(length)
                 self._record("POST")
+                # auth.test is served on BOTH verbs because real Slack accepts
+                # both, and the server calls it through the Chat SDK, which
+                # POSTs form-encoded like every other Web API method. This stub
+                # was GET-only, so it silently encoded one caller's old shape;
+                # test_channel_gateway.py's stub has always answered auth.test
+                # on POST. A GET-only double 404s the POST, which the signed
+                # registration path reports as a 403 forbidden.
+                if self.path == "/auth.test":
+                    return self._auth_test()
                 if self.path == "/apps.connections.open":
                     if self.headers.get("Authorization") != f"Bearer {APP_TOKEN}":
                         return self._respond({"ok": False, "error": "invalid_auth"}, 401)

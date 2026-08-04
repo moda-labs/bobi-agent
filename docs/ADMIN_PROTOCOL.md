@@ -274,3 +274,140 @@ act on**. A command whose result never arrives may have been delivered and
 executed. Confirm lifecycle effects on the heartbeat, and make retries
 idempotent — `restart` is safe to repeat, and a duplicate `command_id` simply
 produces a second result record.
+
+## MCP control surface
+
+Everything above is the wire contract; this is the surface an **agent** binds
+to instead of implementing it. The Worker serves the Model Context Protocol at
+**`POST /mcp`** — the same fleet read model and the same command path, as
+named tools with declared argument schemas.
+
+It is a schema wrapper, not a second implementation: each tool calls in-process
+the same builder the corresponding `/fleet/*` route calls. There is no second
+place where the vocabulary lives, and nothing new to keep in sync.
+
+**Authentication is the existing operator credential.** `/mcp` is gated by
+`FLEET_OPERATOR_TOKEN` exactly as `/fleet/*` is, checked before any tool body
+runs. Holding that token means full control of every instance in the fleet;
+the MCP route widens the interface, not the authority. There are no scopes and
+no per-principal attribution.
+
+That is a deliberate call, and it rests on the holder being a **human-operated
+interactive session** — an operator's Claude Code, or a bobi team someone is
+talking to — where a person reads the tool calls as they happen. The moment an
+*unattended* agent holds this credential (a monitor, a scheduled job, an
+autonomous remediation loop), that reasoning no longer holds and scoped
+credentials become a prerequisite. The full posture, including what it costs,
+is in `plans/2026-07-30-mcp-fleet-control.md` § "The security posture", and
+moves into `docs/SECURITY.md`.
+
+**Transport is streamable HTTP with a bearer header.** No OAuth, no session
+id: the server is stateless, one MCP server instance per request, with fleet
+state read from KV. Browser clients are not supported and CORS is off.
+
+### Tools
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `bobi_fleet_status` | none | Every instance: reachability, manager state, sessions, versions |
+| `bobi_instance_detail` | `fleet`, `instance` | One instance's full heartbeat plus its lifecycle trail |
+| `bobi_command_result` | `fleet`, `instance`, `command_id` | One command's folded view (`pending` / `done` / `error`) |
+| `bobi_read_transcript` | `fleet`, `instance`, `session?` | One session's recent messages, framed as untrusted content |
+| `bobi_send_message` | `fleet`, `instance`, `message`, `session?` | A `command_id`. **Never the reply** |
+| `bobi_lifecycle` | `fleet`, `instance`, `action`, `reason` | The `restart`/`stop`/`start` command's view |
+
+Six tools over nine admin commands, because the vocabulary is deliberately
+**not** one tool per command: `bobi_lifecycle` folds `restart`/`stop`/`start`
+behind an `action` enum, and `status` is already covered by the heartbeat that
+`bobi_instance_detail` returns.
+
+Three commands are **not** exposed as tools in v1 — `roster`, `spend`, and
+`session_log`. Whatever the heartbeat happens to carry (sessions, and spend
+when the supervisor reports it) is readable through `bobi_instance_detail`;
+the commands themselves are not callable from MCP. They remain available over
+`POST /fleet/instances/:fleet/:instance/commands`, which the hosted console
+uses. Exposing them is a sizing question — whether their responses belong
+inline in `bobi_instance_detail` or as separate tools — and that needs
+response sizes measured against a real fleet.
+
+An unknown instance or command id comes back as a **tool error with a
+recovery** ("check the names with `bobi_fleet_status`"), not a protocol error,
+so an agent can correct itself and call again on the same connection.
+
+### The bounded wait
+
+A command is asynchronous — the Worker publishes it and the supervisor replies
+later — but a tool call that always returned `pending` would cost three round
+trips for an operation that usually completes in well under a second. So the
+write tools **wait server-side for up to 5s** (`MCP_COMMAND_WAIT_MS`, in
+milliseconds; `0` disables waiting) and return the resolved command view if the
+reply lands. If it does not, they return `status: "pending"` with the
+`command_id`, and `bobi_command_result` reads it back later. **`pending` means
+not-yet-answered, never failed.**
+
+The wait polls by command id, never a KV prefix listing: keyed reads are
+strongly consistent and listings are not, so a listing-based wait would report
+`pending` for a command that had already resolved.
+
+`bobi_send_message` is the exception and **never waits**. The supervisor runs
+`chat` on a detached thread that publishes the command result only once the
+whole turn finishes — minutes — so any bounded wait would expire by
+construction.
+
+### What the write tools guarantee, and what they do not
+
+- **`bobi_send_message` does not return the agent's reply**, and does not wait
+  for one. The reply lands in the target's transcript; read it back with
+  `bobi_read_transcript`. A tool that appeared to return a reply would be
+  believed, so its description says this outright.
+- **`bobi_read_transcript` output is untrusted third-party content.** It is a
+  concentrated feed of the attacker-controllable Slack/GitHub/email text
+  `docs/SECURITY.md` warns about, returned to a client that also holds
+  lifecycle and messaging tools. It arrives as a **separate content block
+  behind an explicit warning**, so injected text reads as quoted data rather
+  than as instructions.
+- **`bobi_lifecycle` requires a `reason`**, recorded on the command so the KV
+  trail is readable after the fact. It is an **audit** control, not an
+  authorization one: nothing checks or rejects the reason.
+- **Self-targeting is allowed.** An agent may restart the instance it is
+  running on — refusing would foreclose self-restart as a self-heal primitive,
+  and without per-principal identity the Worker cannot reliably detect it
+  anyway. A `restart`/`stop` that stays `pending` is expected rather than
+  failed: the supervisor can go down with the process before replying. Confirm
+  with `bobi_instance_detail`, where a restart shows an incremented
+  `restart_count` on the next heartbeat.
+- **A command to an instance whose supervisor holds no admin subscription is
+  rejected and nothing is recorded.** There is no `command_id` to poll: a
+  recorded-but-undelivered command is a pending row that can never resolve.
+
+### Connecting
+
+An operator's Claude Code:
+
+```bash
+claude mcp add --transport http bobi-fleet https://events.example.com/mcp \
+  --header "Authorization: Bearer ${FLEET_OPERATOR_TOKEN}"
+```
+
+A bobi team, in its `agent.yaml` — this needs no framework change, and
+`bobi agent <name> doctor` proves the connection with the existing `initialize`
+preflight it already runs against declared MCP servers:
+
+```yaml
+mcp_servers:
+  bobi-fleet:
+    type: http
+    url: https://events.example.com/mcp
+    headers:
+      Authorization: "Bearer ${FLEET_OPERATOR_TOKEN}"
+```
+
+### Deployment note
+
+The route requires the **`nodejs_compat`** compatibility flag, already set in
+`event-server/worker/wrangler.jsonc`. The MCP handler carries its per-request
+context in an `AsyncLocalStorage`, so the bundle imports `node:async_hooks`.
+Without the flag the whole Worker fails to boot, not just `/mcp`: workerd
+refuses to start with `No such module "node:async_hooks"`, taking the bus down
+with it. So if you maintain your own wrangler config, carry the flag across —
+this is not a degraded-MCP failure, it is a dead Worker.

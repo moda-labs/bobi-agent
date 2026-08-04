@@ -3483,11 +3483,12 @@ def recall_memory(query, limit):
 # ---------------------------------------------------------------------------
 
 
-@main.command()
+@main.group(invoke_without_command=True)
 @click.option("--by", "group_by", default="provider",
               type=click.Choice(["provider", "model", "session", "role"]),
               help="Group costs by dimension")
-def costs(group_by):
+@click.pass_context
+def costs(ctx, group_by):
     """Show cost attribution across sessions, grouped by provider/model/role.
 
     Aggregates total_cost_usd and model_usage from all session state files.
@@ -3497,7 +3498,11 @@ def costs(group_by):
         bobi agent <name> costs --by model
         bobi agent <name> costs --by role
         bobi agent <name> costs --by session
+        bobi agent <name> costs backfill --write
     """
+    if ctx.invoked_subcommand is not None:
+        return
+
     from .costs import rollup_costs, format_costs
 
     project_path = _detect_project_root()
@@ -3509,6 +3514,44 @@ def costs(group_by):
         return
 
     click.echo(format_costs(summary, group_by=group_by))
+
+
+@costs.command("backfill")
+@click.option("--claude-config-dir", type=click.Path(file_okay=False,
+                                                     path_type=Path),
+              default=None,
+              help="Claude config dir holding projects/ (default: "
+                   "$CLAUDE_CONFIG_DIR, else ~/.claude)")
+@click.option("--write", is_flag=True,
+              help="Apply the repairs. Without it nothing is written.")
+@click.option("--dry-run", is_flag=True,
+              help="Report what would be repaired (the default).")
+def costs_backfill(claude_config_dir, write, dry_run):
+    """Recover token telemetry for sessions that recorded zero (#935).
+
+    Sessions run before the Claude SDK camel-case fix persisted provider
+    dollars with every token counter at zero. This reads each session's
+    retained Claude transcript and fills ONLY the missing counters - recorded
+    tokens and provider dollars are never overwritten, and a session whose
+    transcript is gone stays unknown rather than estimated into place.
+
+    Dry run by default; re-running after a write is a no-op.
+
+    Usage:
+        bobi agent <name> costs backfill
+        bobi agent <name> costs backfill --write
+    """
+    if write and dry_run:
+        raise click.UsageError("--write and --dry-run are mutually exclusive.")
+
+    from .usage_backfill import backfill_usage
+
+    root = _detect_project_root()
+    report = backfill_usage(claude_config_dir=claude_config_dir,
+                            write=write, root=root)
+    click.echo(report.render(write=write))
+    if report.repaired and not write:
+        click.echo("\nDry run - nothing written. Re-run with --write to apply.")
 
 
 for _cmd_name in [

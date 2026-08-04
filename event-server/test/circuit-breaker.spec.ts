@@ -12,9 +12,12 @@ import {
 	drainPaused,
 	buildLoopDetectedEvent,
 	resetAllBreakers,
+	sweepBreakers,
+	breakerStats,
 	BREAKER_THRESHOLD,
 	BREAKER_WINDOW_MS,
 	BREAKER_COOLDOWN_MS,
+	BREAKER_MAX_PAUSED,
 } from "@moda-labs/bobi-events-core/circuit-breaker";
 
 // ---------------------------------------------------------------------------
@@ -582,6 +585,86 @@ describe("circuit-breaker", () => {
 		it("returns empty array when nothing is paused", () => {
 			const drained = drainPaused("dep-1", makeSlackEvent());
 			expect(drained.length).toBe(0);
+		});
+	});
+
+	// D047: the pause buffer was unbounded and never released. A hot external
+	// loop (a CI bot commenting every 2s) buffered a full NormalizedEvent per
+	// event for the whole 5-minute cooldown, forever, in a long-lived server.
+	describe("pause buffer bounds (D047)", () => {
+		it("caps the pause buffer instead of growing without limit", () => {
+			const depId = "dep-bound";
+			for (let i = 0; i < BREAKER_THRESHOLD; i++) {
+				recordDelivery(depId, makeSlackEvent());
+			}
+			// Far more paused events than the cap allows.
+			for (let i = 0; i < BREAKER_MAX_PAUSED * 3; i++) {
+				recordDelivery(depId, makeSlackEvent());
+			}
+			recordDelivery(depId, makeHumanSlackEvent());
+			const drained = drainPaused(depId, makeHumanSlackEvent());
+			expect(drained.length).toBeLessThanOrEqual(BREAKER_MAX_PAUSED);
+		});
+
+		it("keeps the NEWEST events when the buffer overflows", () => {
+			const depId = "dep-newest";
+			for (let i = 0; i < BREAKER_THRESHOLD; i++) {
+				recordDelivery(depId, makeSlackEvent());
+			}
+			const marker = makeSlackEvent();
+			for (let i = 0; i < BREAKER_MAX_PAUSED * 2; i++) {
+				recordDelivery(depId, makeSlackEvent());
+			}
+			recordDelivery(depId, marker);
+			recordDelivery(depId, makeHumanSlackEvent());
+			const drained = drainPaused(depId, makeHumanSlackEvent());
+			expect(drained[drained.length - 1]!.id).toBe(marker.id);
+		});
+
+		it("counts events dropped past the cap so the loss is observable", () => {
+			const depId = "dep-dropped";
+			for (let i = 0; i < BREAKER_THRESHOLD; i++) {
+				recordDelivery(depId, makeSlackEvent());
+			}
+			const overflow = BREAKER_MAX_PAUSED * 2;
+			for (let i = 0; i < overflow; i++) {
+				recordDelivery(depId, makeSlackEvent());
+			}
+			// The trip event + overflow pushes, minus what the buffer retains.
+			expect(breakerStats().droppedPaused).toBe(1 + overflow - BREAKER_MAX_PAUSED);
+		});
+
+		it("releases a cooled-down breaker's stranded buffer on sweep", () => {
+			const depId = "dep-stranded";
+			for (let i = 0; i < BREAKER_THRESHOLD; i++) {
+				recordDelivery(depId, makeSlackEvent());
+			}
+			expect(breakerStats().keys).toBe(1);
+			// The key goes quiet forever: no further event arrives, so neither
+			// recordDelivery nor drainPaused is ever called again.
+			const swept = sweepBreakers(Date.now() + BREAKER_COOLDOWN_MS + 1);
+			expect(swept).toBe(1);
+			expect(breakerStats().keys).toBe(0);
+			expect(breakerStats().pausedEvents).toBe(0);
+		});
+
+		it("does not sweep a breaker that is still within its cooldown", () => {
+			const depId = "dep-hot";
+			for (let i = 0; i < BREAKER_THRESHOLD; i++) {
+				recordDelivery(depId, makeSlackEvent());
+			}
+			expect(sweepBreakers(Date.now() + BREAKER_COOLDOWN_MS - 1_000)).toBe(0);
+			expect(breakerStats().keys).toBe(1);
+			// Still tripped: a further bot event is still refused.
+			expect(recordDelivery(depId, makeSlackEvent()).allow).toBe(false);
+		});
+
+		it("sweeps an untripped key that has gone idle past the window", () => {
+			const depId = "dep-idle";
+			recordDelivery(depId, makeSlackEvent());
+			expect(breakerStats().keys).toBe(1);
+			expect(sweepBreakers(Date.now() + BREAKER_WINDOW_MS + 1)).toBe(1);
+			expect(breakerStats().keys).toBe(0);
 		});
 	});
 

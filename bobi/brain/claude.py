@@ -246,30 +246,47 @@ def _model_usage_to_costs(model_usage: Any) -> list[BrainCost]:
 
 
 def _one_model_usage_to_cost(model: str, usage: Any) -> BrainCost:
-    raw_input = _usage_int(usage, "input_tokens")
-    cache_read = _usage_int(usage, "cache_read_input_tokens")
-    cache_creation = _usage_int(usage, "cache_creation_input_tokens")
+    raw_input = _usage_int(usage, "input_tokens", "inputTokens")
+    cache_read = _usage_int(
+        usage, "cache_read_input_tokens", "cacheReadInputTokens"
+    )
+    cache_creation = _usage_int(
+        usage, "cache_creation_input_tokens", "cacheCreationInputTokens"
+    )
     return BrainCost(
-        model=model or _usage_str(usage, "model"),
+        model=model or _usage_str(usage, "canonicalModel", "model"),
         input_tokens=raw_input + cache_read + cache_creation,
         cached_input_tokens=cache_read,
-        output_tokens=_usage_int(usage, "output_tokens"),
+        output_tokens=_usage_int(usage, "output_tokens", "outputTokens"),
     )
 
 
-def _usage_int(usage: Any, key: str) -> int:
-    if isinstance(usage, dict):
-        value = usage.get(key)
-    else:
-        value = getattr(usage, key, None)
-    return value if isinstance(value, int) else 0
+def _usage_value(usage: Any, *keys: str) -> Any:
+    """First present value across a field's accepted spellings.
+
+    The live SDK (``claude_agent_sdk.types.ModelUsage``) passes the CLI's
+    ``modelUsage`` through verbatim, so its keys are camelCase; older SDK
+    versions and Bobi's own fixtures use snake_case. Reading only one spelling
+    silently recorded zero for every token counter (#935). First match wins, so
+    a payload carrying both spellings of one field is read once, never summed.
+    """
+    for key in keys:
+        value = usage.get(key) if isinstance(usage, dict) else getattr(
+            usage, key, None
+        )
+        if value is not None:
+            return value
+    return None
 
 
-def _usage_str(usage: Any, key: str) -> str:
-    if isinstance(usage, dict):
-        value = usage.get(key)
-    else:
-        value = getattr(usage, key, None)
+def _usage_int(usage: Any, *keys: str) -> int:
+    value = _usage_value(usage, *keys)
+    # bool is an int subclass; a stray True must not read as 1 token.
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _usage_str(usage: Any, *keys: str) -> str:
+    value = _usage_value(usage, *keys)
     return value if isinstance(value, str) else ""
 
 

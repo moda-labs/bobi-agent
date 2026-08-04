@@ -190,6 +190,14 @@ SESSION_READY_WAIT_POLL = 1.0
 # also matches the ~30s window over which the supervisor confirms a stall.
 KEEPALIVE_INTERVAL = 30.0
 
+# How often start() re-checks that the session thread is still alive while
+# waiting for readiness (D021). Distinct from SESSION_READY_WAIT_POLL above,
+# which paces the inbox loop's wait for a *ready session* inside the event
+# loop; this one paces a cross-thread liveness check during launch. Short
+# enough that an instant crash is reported in well under a second; long enough
+# that a normal 120s start costs a few hundred wakeups, not tens of thousands.
+_START_LIVENESS_POLL = 0.25
+
 
 def _emit_session_unreachable_alert(
     *,
@@ -348,6 +356,14 @@ class Session:
         self._ready = threading.Event()
         self._keep_alive: asyncio.Event | None = None
         self._input_ready: asyncio.Event | None = None
+        # Teardown state (D003). _keep_alive only exists once the startup turn
+        # has drained, so stop() cannot rely on it: a session torn down while
+        # that turn is still in flight is ended by cancelling _main_task
+        # instead. _stop_requested carries the intent across the window where
+        # neither mechanism is available yet.
+        self._main_task: asyncio.Task | None = None
+        self._stop_requested = threading.Event()
+        self._cancel_sent = False
         self._state = "stopped"
         self._last_response = ""
         self._last_is_error = False
@@ -1480,6 +1496,10 @@ class Session:
         inbox_task = asyncio.create_task(self._inbox_loop())
 
         self._keep_alive = asyncio.Event()
+        # A stop() that landed between _ready.set() and this line found no
+        # keep-alive to signal. Honour it here rather than parking forever.
+        if self._stop_requested.is_set():
+            self._keep_alive.set()
         try:
             await self._keep_alive.wait()
         finally:
@@ -1506,7 +1526,16 @@ class Session:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._run(startup_prompt))
+            # Run as a task, not a bare coroutine: stop() has no other way to
+            # end a session parked in its startup turn (D003).
+            self._main_task = self._loop.create_task(self._run(startup_prompt))
+            self._loop.run_until_complete(self._main_task)
+        except asyncio.CancelledError:
+            # stop() cancelled us mid-turn. That is a clean shutdown, not a
+            # crash — 'error' here would be the same dishonest terminal status
+            # phase 1 exists to remove.
+            log.info(f"Session '{self.name}' stopped with a turn in flight")
+            self._set_state("stopped")
         except (KeyboardInterrupt, SystemExit) as e:
             log.info(f"Session '{self.name}' exiting: {type(e).__name__}")
             raise
@@ -1514,8 +1543,30 @@ class Session:
             log.error(f"Session '{self.name}' crashed: {e}", exc_info=True)
             self._set_state("error")
         finally:
+            self._main_task = None
+            self._shutdown_client()
             self._loop.close()
             self._loop = None
+
+    def _shutdown_client(self) -> None:
+        """Disconnect a client that the cancelled or crashed path left live.
+
+        ``_run``'s own ``finally`` only covers the keep-alive wait, which a
+        session torn down during its startup turn never reaches — and a session
+        whose ``connect()`` raised never reaches either. Without this, the very
+        leak D003 describes survives the fix: thread gone, brain subprocess
+        still attached. Runs while the loop is still open, before ``close()``.
+        """
+        client, self._client = self._client, None
+        if client is None or self._loop is None or self._loop.is_closed():
+            return
+        try:
+            self._loop.run_until_complete(self._safe_disconnect(client))
+        except Exception:
+            log.warning(
+                "Client disconnect failed during teardown of '%s'",
+                self.name, exc_info=True,
+            )
 
     def _start_subscription(self) -> None:
         """Subscribe this session to its own inbox topic (+ any extras).
@@ -1640,6 +1691,8 @@ class Session:
         )
 
         self._ready.clear()
+        self._stop_requested.clear()
+        self._cancel_sent = False
         self._thread = threading.Thread(
             target=self._thread_target,
             args=(startup_prompt,),
@@ -1648,17 +1701,54 @@ class Session:
         )
         self._thread.start()
 
-        if self._ready.wait(timeout=timeout):
+        if self._wait_ready(timeout):
             return True
-        log.error(f"Session '{self.name}' failed to start within {timeout}s")
+        if self._thread.is_alive():
+            log.error(f"Session '{self.name}' failed to start within {timeout}s")
+        else:
+            log.error(
+                f"Session '{self.name}' failed to start: the session thread "
+                f"exited (state={self._state})"
+            )
         return False
+
+    def _wait_ready(self, timeout: float) -> bool:
+        """Wait for readiness, giving up as soon as the session thread dies.
+
+        ``_ready`` is set only on the happy path: a thread that crashes in
+        ``_run`` (missing brain CLI, ``connect()`` raising with no resume id)
+        sets state 'error' and exits within milliseconds without ever setting
+        it. Waiting on ``_ready`` alone therefore burns the entire timeout on a
+        failure that was already decided — and the launch paths pass timeouts up
+        to 3600s, so a phase that could not start stalls dispatch for an hour
+        (D021).
+
+        Liveness is re-checked only *after* re-reading ``_ready``, so a thread
+        that set ``_ready`` and then exited still reports ready — the ordering
+        a bare ``is_alive()`` poll would get wrong.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return self._ready.is_set()
+            if self._ready.wait(timeout=min(remaining, _START_LIVENESS_POLL)):
+                return True
+            thread = self._thread
+            if thread is not None and not thread.is_alive():
+                return self._ready.is_set()
 
     def get_session_id(self) -> str:
         return load_session_id(self.name)
 
     def stop(self) -> None:
-        if self._keep_alive:
-            self._keep_alive.set()
+        self._stop_requested.set()
+        if not self._signal_keep_alive():
+            # No keep-alive yet: the startup turn is still in flight, and it is
+            # not going to end on its own. Cancelling the task is the only way
+            # out — the pre-D003 code signalled nothing here and then waited out
+            # a join() that could never succeed (D003).
+            self._cancel_main_task()
         # Tell any background registration retry to give up before we tear the
         # subscription down, so it can't wire in a fresh client mid-shutdown.
         self._sub_retry_stop.set()
@@ -1667,6 +1757,12 @@ class Session:
             self._sub_retry_thread = None
         if self._thread:
             self._thread.join(timeout=15)
+            if self._thread.is_alive():
+                # A turn that outlived the grace period. Cancel and give the
+                # teardown its own budget rather than returning with the thread
+                # and its brain subprocess still running.
+                self._cancel_main_task()
+                self._thread.join(timeout=15)
         # Tear down the event subscription (WS client + drain thread) BEFORE
         # unregistering the inbox, so the drain can't push into — or warn about —
         # a closed inbox on its way out. Swap under the lock: a background retry
@@ -1677,6 +1773,42 @@ class Session:
         if sub is not None:
             sub.stop()
         self.inbox.close()
+
+    def _signal_keep_alive(self) -> bool:
+        """Ask ``_run`` to fall out of its keep-alive wait.
+
+        Returns False when there is no keep-alive to signal yet — the startup
+        turn has not drained — which is the caller's cue that only cancellation
+        can end this session. Scheduled onto the session's own loop:
+        ``asyncio.Event.set`` is not thread-safe, and ``stop()`` always runs on
+        another thread.
+        """
+        event, loop = self._keep_alive, self._loop
+        if event is None:
+            return False
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:  # loop closed between the check and the call
+                pass
+            return True
+        event.set()
+        return True
+
+    def _cancel_main_task(self) -> None:
+        """Cancel the session coroutine from another thread, at most once.
+
+        Once only: the second cancel would land inside the teardown that the
+        first one started, interrupting the client disconnect it exists to run.
+        """
+        loop, task = self._loop, self._main_task
+        if self._cancel_sent or loop is None or task is None or loop.is_closed():
+            return
+        self._cancel_sent = True
+        try:
+            loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:  # loop shut down underneath us — nothing to cancel
+            pass
 
     def is_alive(self) -> bool:
         return (

@@ -57,11 +57,35 @@ import {
 	foldCommandResult,
 	isAdminCommand,
 	ADMIN_COMMANDS,
-	adminTopic,
+	issueAdminCommand,
+	type AdminPublisher,
+	type IssueFailure,
 	COMMAND_RESULT_TOPIC,
 	requireOperator,
 	windowsFromEnv,
 } from "./fleet";
+import { MCP_ROUTE, handleMcpRequest } from "./mcp";
+
+// Compose the bus primitives into the publisher `issueAdminCommand` expects.
+// Kept here rather than in fleet.ts so the fleet module stays independent of
+// the bus storage adapter and stays unit-testable without one.
+function adminPublisher(storage: StorageAdapter): AdminPublisher {
+	return (topic, payload, bubbleId) =>
+		storage.deliver(createTopicEvent(topic, { source: "fleet", payload }, bubbleId));
+}
+
+// How each issue failure surfaces on the REST route. 404/409/503 are the
+// statuses this route has always returned; keeping them in a table means the
+// MCP surface can map the same outcomes to its own wording without either
+// surface inventing a case the other does not handle.
+const FLEET_ISSUE_HTTP: Record<IssueFailure, { status: number; body: { error: string } }> = {
+	unknown_instance: { status: 404, body: { error: "unknown instance" } },
+	not_addressable: { status: 409, body: { error: "instance not addressable (no bubble)" } },
+	not_delivered: {
+		status: 503,
+		body: { error: "no live supervisor admin subscription; command not delivered" },
+	},
+};
 
 interface Env {
 	EVENTS: KVNamespace;
@@ -85,6 +109,9 @@ interface Env {
 	FLEET_OPERATOR_TOKEN?: string;
 	FLEET_LIVE_WINDOW_S?: string;
 	FLEET_STALE_WINDOW_S?: string;
+	// How long an MCP command tool waits server-side for the supervisor's
+	// reply before handing back a command_id to poll. See McpEnv.
+	MCP_COMMAND_WAIT_MS?: string;
 }
 
 // Topics the sidecar publishes for the fleet read model (#5/#6). Folded into
@@ -405,6 +432,19 @@ export default {
 		}
 
 			// -----------------------------------------------------------------
+			// The agentic control surface: the same fleet control plane served as
+			// MCP, so an agent binds to named tools with declared schemas instead
+			// of re-deriving the route shapes below. Same credential, same
+			// authority - the interface widens, not the authorization. Auth runs
+			// here, before dispatch, exactly as it does for /fleet/* below.
+			// -----------------------------------------------------------------
+			if (path === MCP_ROUTE) {
+				const op = requireOperator(request.headers.get("authorization"), env.FLEET_OPERATOR_TOKEN);
+				if (op) return op;
+				return handleMcpRequest(request, env, adminPublisher(storage), ctx);
+			}
+
+			// -----------------------------------------------------------------
 			// Fleet control-plane API (#6, #9). Operator-authenticated (one
 			// credential), distinct from bus bubble auth. Read routes (Phase A)
 			// serve the fleet read model; the command routes (Phase B) publish an
@@ -465,49 +505,31 @@ export default {
 								{ status: 400 },
 							);
 						}
-						// Address the deployment's admin topic in its OWN bubble - the
-						// bubble captured from the last authenticated heartbeat. No
-						// heartbeat yet (never seen) => not addressable.
-						const record = await fleetStore.getInstance(fleet, instance);
-						if (!record) return Response.json({ error: "unknown instance" }, { status: 404 });
-						if (!record.bubble_id) {
-							return Response.json({ error: "instance not addressable (no bubble)" }, { status: 409 });
-						}
 						const args = (body.args && typeof body.args === "object")
 							? (body.args as Record<string, unknown>)
 							: undefined;
-						const commandId = crypto.randomUUID();
-						const event = createTopicEvent(
-							adminTopic(fleet, instance),
-							{ source: "fleet", payload: { command_id: commandId, command: body.command, args, issued_at: now } },
-							record.bubble_id,
-						);
-						// delivered_to is the count of REGISTERED admin subscriptions
-						// (buffered for replay), so zero means no supervisor is
-						// listening - the command would black-hole. Reject with 503
-						// (and record nothing) so the operator retries rather than
-						// polling a command that can never complete.
-						const delivered = await storage.deliver(event);
-						if (delivered === 0) {
-							return Response.json(
-								{ error: "no live supervisor admin subscription; command not delivered" },
-								{ status: 503 },
-							);
-						}
-						await fleetStore.putCommand({
-							command_id: commandId,
+						// Shared with the MCP write tools - one implementation of
+						// address-check -> publish -> record, so the two surfaces
+						// cannot drift on which commands are issuable or on the
+						// deliver-before-record ordering.
+						const outcome = await issueAdminCommand(fleetStore, adminPublisher(storage), {
 							fleet,
 							instance,
 							command: body.command,
 							args,
-							issued_at: now,
+							now,
 						});
+						if (!outcome.ok) {
+							return Response.json(FLEET_ISSUE_HTTP[outcome.failure].body, {
+								status: FLEET_ISSUE_HTTP[outcome.failure].status,
+							});
+						}
 						return Response.json(
 							{
-								command_id: commandId,
+								command_id: outcome.command_id,
 								status: "pending",
-								delivered_to: delivered,
-								status_url: `/fleet/instances/${commandsMatch[1]}/${commandsMatch[2]}/commands/${commandId}`,
+								delivered_to: outcome.delivered_to,
+								status_url: `/fleet/instances/${commandsMatch[1]}/${commandsMatch[2]}/commands/${outcome.command_id}`,
 							},
 							{ status: 202 },
 						);

@@ -136,6 +136,7 @@ All configuration is environment variables, read at startup:
 | `BOBI_ES_WHATSAPP_APP_SECRET` | unset | Meta app secret for WhatsApp signatures |
 | `BOBI_ES_WHATSAPP_VERIFY_TOKEN` | unset | WhatsApp GET-subscribe handshake token |
 | `BOBI_ES_INGEST_TOKENS` | unset | Boot-seeded `topic=token` ingest bindings, comma-separated |
+| `BOBI_ES_MAX_BODY_BYTES` | `8388608` (8 MiB) | Hard ceiling on a request body. The read is aborted at the cap and answered `413`, so an oversized POST never costs the memory it asked for. Raise it only if `/channels/send` legitimately carries larger base64 file uploads |
 
 An unset provider secret admits that provider's webhooks **unverified**
 (zero-config local development). On a public server set every secret for a
@@ -309,7 +310,22 @@ npx wrangler secret put WHATSAPP_VERIFY_TOKEN     # Meta GET subscribe handshake
 
 To use the fleet query surface (the admin read model — see
 [ADMIN_PROTOCOL.md](ADMIN_PROTOCOL.md)), also set `FLEET_OPERATOR_TOKEN`. It
-gates every fleet read; without it those routes stay closed.
+gates every fleet read *and* the `/mcp` agent-control route; without it both
+stay closed. Anyone holding it has full control of every instance in the
+fleet, so treat it as an admin credential, not a read key.
+
+`/mcp` also needs the **`nodejs_compat`** compatibility flag, which the shipped
+`wrangler.jsonc` sets. If you maintain your own config, carry the flag over:
+without it the Worker does not start at all — workerd rejects the script with
+`No such module "node:async_hooks"`, so the bus goes down too, not just MCP.
+
+Optionally set **`MCP_COMMAND_WAIT_MS`** (a plain var, not a secret) to change
+how long an MCP command tool waits server-side for the supervisor's reply
+before handing back a `command_id` to poll. It defaults to `5000`; `0` disables
+waiting entirely. Raise it if your instances are far from your Worker's region
+and commands routinely come back `pending`; lower it if a wedged instance
+holding a tool call for five seconds is worse for your agents than an extra
+round trip. Anything unparseable falls back to the default rather than to zero.
 
 **3. Deploy and verify.**
 

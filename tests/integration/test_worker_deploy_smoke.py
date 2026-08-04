@@ -33,6 +33,7 @@ import os
 import ssl
 import threading
 import time
+import urllib.error
 import urllib.request
 
 import pytest
@@ -245,3 +246,111 @@ def test_deployed_worker_publish_subscribe_roundtrip(smoke_url: str):
         f"published marker {marker!r} never reached the subscriber; "
         f"received {events!r}"
     )
+
+
+@requires_deployment
+def test_deployed_worker_mcp_tool_call(smoke_url: str):
+    """An MCP tool call succeeds on the DEPLOYED Worker.
+
+    This is the only place the `nodejs_compat` compatibility flag is actually
+    proven. `createMcpHandler` carries its per-request context in an
+    `AsyncLocalStorage`, so the bundle imports `node:async_hooks`; without the
+    flag workerd refuses the script outright (`No such module
+    "node:async_hooks"`) and the whole Worker is dead, bus included. The Worker
+    unit suite cannot see this —
+    `@cloudflare/vitest-pool-workers` injects its own `enable_nodejs_*` flags
+    for the Vitest runner, so those tests stay green with the flag deleted
+    (verified by mutation 2026-08-03). `event-server/worker/test/mcp.spec.ts`
+    asserts the flag is configured; only a real deploy proves it works.
+
+    The token is minted per-run by the workflow and set on the ci-smoke Worker
+    with `wrangler secret put`, so this needs no long-lived repo secret.
+    """
+    token = os.environ.get("BOBI_SMOKE_FLEET_OPERATOR_TOKEN")
+    assert token, (
+        "BOBI_SMOKE_FLEET_OPERATOR_TOKEN is unset — the workflow mints it and "
+        "puts it on the ci-smoke Worker; without it this test would pass "
+        "vacuously against a 503"
+    )
+
+    def _rpc(payload: dict) -> dict:
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{smoke_url}/mcp",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "Authorization": f"Bearer {token}",
+                "User-Agent": SMOKE_USER_AGENT,
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            assert resp.status == 200, f"/mcp -> HTTP {resp.status}"
+            raw = resp.read().decode()
+        # The transport answers on text/event-stream; the JSON-RPC message is
+        # the `data:` line of the SSE frame.
+        for line in raw.splitlines():
+            if line.startswith("data:"):
+                return json.loads(line[len("data:") :].strip())
+        return json.loads(raw)
+
+    handshake = _rpc(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "bobi-ci-smoke", "version": "1"},
+            },
+        }
+    )
+    assert handshake["result"]["serverInfo"]["name"] == "bobi-fleet", handshake
+
+    # The tool call is the assertion that matters: it is what runs the handler
+    # body that needs node:async_hooks.
+    called = _rpc(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "bobi_fleet_status", "arguments": {}},
+        }
+    )
+    assert "error" not in called, (
+        f"tools/call returned a JSON-RPC error on the deployed Worker: {called!r} "
+        "— a `node:async_hooks` failure here means nodejs_compat is missing "
+        "from the deployed script"
+    )
+    result = called["result"]
+    assert not result.get("isError"), f"tools/call reported a tool error: {result!r}"
+
+    # The ci-smoke Worker has its own empty KV, so the fleet is legitimately
+    # empty; what is proven is that the tool ran and returned the read model's
+    # shape, not that any instance exists.
+    payload = json.loads(result["content"][0]["text"])
+    assert isinstance(payload["instances"], list), payload
+
+
+@requires_deployment
+def test_deployed_worker_mcp_route_is_closed_without_a_token(smoke_url: str):
+    """/mcp on the deployed Worker rejects an unauthenticated request.
+
+    `/mcp` is a new public route on a Worker that also serves the bus, so the
+    gate is worth proving where it actually runs rather than only under
+    miniflare.
+    """
+    req = urllib.request.Request(
+        f"{smoke_url}/mcp",
+        data=b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}',
+        headers={"Content-Type": "application/json", "User-Agent": SMOKE_USER_AGENT},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raise AssertionError(
+                f"unauthenticated /mcp answered HTTP {resp.status} — the route is open"
+            )
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 401, f"expected 401, got {exc.code}"

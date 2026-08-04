@@ -18,6 +18,7 @@ Two things are covered here:
    isolation guard are proven non-vacuous here rather than trusted.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,11 @@ CLAUDE_ROUNDTRIP = "test_image_ask_roundtrip"
 CODEX_ROUNDTRIP = "test_image_codex_ask_roundtrip"
 DEPLOY_HEALTH = "test_deployed_worker_health"
 DEPLOY_ROUNDTRIP = "test_deployed_worker_publish_subscribe_roundtrip"
+# The MCP route's only real proof: `nodejs_compat` cannot be exercised by the
+# Worker unit suite, because vitest-pool-workers injects its own enable_nodejs_*
+# flags. Drop this from the lane and the flag goes back to being unproven.
+DEPLOY_MCP_CALL = "test_deployed_worker_mcp_tool_call"
+DEPLOY_MCP_CLOSED = "test_deployed_worker_mcp_route_is_closed_without_a_token"
 
 
 def _steps(workflow: str, job: str) -> list[dict]:
@@ -118,13 +124,14 @@ def test_live_lane_installs_the_wrangler_harness_it_needs():
 
 
 @pytest.mark.parametrize(
-    "workflow,job,step_name,junit,required",
+    "workflow,job,step_name,junit,expect_passed,required",
     [
         (
             "container.yml",
             "container-image",
             "Assert the live round-trips actually ran",
             "live-roundtrips.xml",
+            2,
             (CLAUDE_ROUNDTRIP, CODEX_ROUNDTRIP),
         ),
         (
@@ -132,19 +139,25 @@ def test_live_lane_installs_the_wrangler_harness_it_needs():
             "deploy-smoke",
             "Assert the deploy smoke actually ran",
             "worker-deploy-smoke.xml",
-            (DEPLOY_HEALTH, DEPLOY_ROUNDTRIP),
+            4,
+            (DEPLOY_HEALTH, DEPLOY_ROUNDTRIP, DEPLOY_MCP_CALL, DEPLOY_MCP_CLOSED),
         ),
     ],
 )
-def test_each_live_lane_asserts_it_ran(workflow, job, step_name, junit, required):
+def test_each_live_lane_asserts_it_ran(workflow, job, step_name, junit, expect_passed, required):
     """Ran-assertion, layer (ii), on every live lane.
 
     Exiting 0 is not evidence: every test in these lanes carries a `skipif`.
+
+    The count is pinned alongside the names so that ADDING a test to a lane
+    without raising `--expect-passed` fails here: the named tests would still
+    pass while the new one skipped silently, which is the exact shape this
+    whole guard exists to catch.
     """
     run = _step(_steps(workflow, job), step_name)["run"]
     assert "scripts/assert_junit_ran.py" in run
     assert junit in run
-    assert "--expect-passed 2" in run
+    assert f"--expect-passed {expect_passed}" in run
     for name in required:
         assert f"--require {name}" in run, f"{name} is no longer a required pass"
 
@@ -289,9 +302,108 @@ def test_worker_deploy_waits_for_the_deployment_before_smoking():
         "a stale Worker"
     )
     assert "exit 1" in wait["run"]
-    assert _index(steps, "Set the Durable Object internal secret") < _index(
+    assert _index(steps, "Set the deployed Worker's secrets") < _index(
         steps, "Wait for the deployment to serve this commit"
     ), "the wait must come after the LAST step that publishes a new version"
     assert _index(steps, "Wait for the deployment to serve this commit") < _index(
         steps, "Smoke the DEPLOYED Worker"
+    )
+
+
+def test_worker_deploy_mints_the_operator_token_on_the_deployed_script():
+    """The MCP smoke must run against a route that is actually OPEN to it.
+
+    `/mcp` fails closed when `FLEET_OPERATOR_TOKEN` is unset — `requireOperator`
+    answers 503 before the handler runs. A lane that deployed without minting
+    the token would never reach the MCP handler at all, so the tool call could
+    not prove `nodejs_compat` no matter how green it looked.
+
+    The token is passed to pytest from the same step that puts it on the script,
+    so the two cannot drift apart.
+    """
+    steps = _steps("worker-deploy-smoke.yml", "deploy-smoke")
+    put = _step(steps, "Set the deployed Worker's secrets")["run"]
+    assert "FLEET_OPERATOR_TOKEN" in put, (
+        "the lane no longer sets FLEET_OPERATOR_TOKEN — /mcp would 503 and the "
+        "MCP smoke would prove nothing"
+    )
+    assert "::add-mask::" in put, "the minted operator token is not masked in the log"
+
+    # ONE write, so one new Worker version. Every secret write publishes a
+    # version and Cloudflare's rollover is not atomic, so a second write widens
+    # the window in which the smoke can be answered by the PREVIOUS version —
+    # observed as a 404 from a version predating /mcp on this lane's first live
+    # run. `secret bulk` sets both in a single request.
+    assert "secret bulk" in put, (
+        "secrets are no longer set in one request — each `secret put` publishes "
+        "another version and widens the non-atomic rollover window"
+    )
+    assert "secret put" not in put, (
+        "a `wrangler secret put` crept back in alongside `secret bulk`; that is "
+        "an extra version publish and an extra rollover"
+    )
+
+    smoke = _step(steps, "Smoke the DEPLOYED Worker")
+    assert "BOBI_SMOKE_FLEET_OPERATOR_TOKEN" in smoke["env"], (
+        "the smoke step no longer receives the operator token"
+    )
+
+
+def test_readiness_gate_requires_consecutive_matches_not_one():
+    """The gate must clear on a RUN of matches, never a single observation.
+
+    Run 30740272285 — the first SCHEDULED run of this lane — passed the gate on
+    one match and was then smoked against the PREVIOUS run's version.
+    Cloudflare's rollover is not atomic, so while propagation finishes,
+    successive requests to the same URL can land on either version; one match
+    predicts nothing about the next request.
+
+    Asserted structurally rather than by substring: a streak is only a streak if
+    a non-match RESETS it, so this pins the reset, the threshold comparison, and
+    the fact that success is reached through the threshold — not merely that the
+    word "streak" appears somewhere.
+    """
+    wait = _step(
+        _steps("worker-deploy-smoke.yml", "deploy-smoke"),
+        "Wait for the deployment to serve this commit",
+    )
+    run = wait["run"]
+    assert 'streak=$(( streak + 1 ))' in run, "nothing counts consecutive matches"
+    assert '[ "$streak" -ge "$needed" ]' in run, (
+        "success is not gated on reaching the consecutive-match threshold"
+    )
+
+    # The THRESHOLD VALUE, not merely that a threshold is declared. `needed=1`
+    # satisfies "needed= appears" while being exactly the bug this test exists
+    # to prevent.
+    declared = re.search(r"^\s*needed=(\d+)", run, re.MULTILINE)
+    assert declared, "the gate declares no consecutive-match threshold"
+    assert int(declared.group(1)) >= 2, (
+        f"the gate clears on {declared.group(1)} observation(s) — a single match "
+        "is the original bug (run 30740272285)"
+    )
+
+    # THE load-bearing line: the reset must live in the MISMATCH branch. Testing
+    # for `streak=0` anywhere also matches the initializer at the top, so
+    # deleting the reset entirely would still pass. Scope it to the default case.
+    #
+    # Matched by regex, not by splitting on a literal indent: `run` is a YAML
+    # block scalar, so it comes back DEDENTED and any hard-coded leading
+    # whitespace would never match — the assertion would then fail for the wrong
+    # reason and "catch" mutants it is not actually testing for.
+    default_case = re.search(r"^[ \t]*\*\)[ \t]*$(.*?)^[ \t]*;;", run,
+                             re.MULTILINE | re.DOTALL)
+    assert default_case, (
+        "the gate has no default (non-matching) case — nothing can reset the streak"
+    )
+    assert "streak=0" in default_case.group(1), (
+        "a non-matching response does not reset the streak — the count would be "
+        "cumulative rather than consecutive, and a flapping rollover would still "
+        "clear the gate"
+    )
+    # And the only `exit 0` must sit behind that threshold, so no earlier path
+    # can short-circuit to ready.
+    ready = run.split('[ "$streak" -ge "$needed" ]', 1)[0]
+    assert "exit 0" not in ready, (
+        "the gate can exit ready before the consecutive-match threshold"
     )

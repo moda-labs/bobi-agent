@@ -169,9 +169,9 @@
    .bobi-app on <body>.
    ========================================================================= */
 .bobi-app {
-  /* Carry the core Moda/Bobi paper into the operational canvas. White cards,
-     borders, and elevation preserve enterprise hierarchy above it. */
-  --surface-page: var(--bobi-paper);
+  /* Warm but LOW-CHROMA: the marketing cream turns beige-pink when it tiles a
+     dense screen, so pull the chroma out and keep the hue. */
+  --surface-page: #F4F2ED;
   --surface-card: #FFFFFF;
   --surface-raised: #FFFFFF;
   --surface-band: #EDEBE5;

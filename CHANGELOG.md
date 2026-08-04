@@ -1,5 +1,281 @@
 # Changelog
 
+## 0.54.0 - 2026-08-04
+
+Minor release: the MCP fleet-control surface gains the tools that *act*, and a
+security + reuse sweep lands across the event server.
+
+### Added
+- **MCP fleet control gains its write half (#944).** `POST /mcp` on the
+  event-server Worker adds `bobi_read_transcript`, `bobi_send_message`, and
+  `bobi_lifecycle` alongside 0.53.0's three read tools, so an agent can act on a
+  fleet rather than only observe it. **No new authority and no new admin
+  vocabulary** — the same `FLEET_OPERATOR_TOKEN` gate runs before any tool body,
+  and the tools drive the same nine commands the sidecar already answers. The
+  route widens the interface, not the authorization.
+
+  Commands resolve through a **bounded server-side wait** (5s,
+  `MCP_COMMAND_WAIT_MS`, `0` disables): fast commands return in one tool call
+  instead of three, slow ones return `status: "pending"` plus a `command_id` for
+  `bobi_command_result`. `pending` means not-yet-answered, never failed. The wait
+  polls by command id and **never a KV prefix listing** — keyed reads are
+  strongly consistent and listings are not, so a listing-based wait would report
+  `pending` for a command that had already resolved. Verified by folding a
+  supervisor result from a separate request while a tool call is in flight,
+  rather than assumed.
+
+  Three behaviors are stated in the tool descriptions because an agent would
+  otherwise believe the opposite. **`bobi_send_message` does not return the
+  agent's reply and does not wait for one** — the supervisor runs `chat` on a
+  detached thread that resolves only when the whole turn ends, minutes later, so
+  the reply is read back with `bobi_read_transcript`. **Transcript output is
+  untrusted third-party content**, returned in its own content block between an
+  explicit opening and closing warning, because it is a concentrated feed of
+  attacker-controllable Slack/GitHub/email text handed to a client that also
+  holds lifecycle tools. **`bobi_lifecycle` requires a `reason`**, recorded on
+  the command as an audit control; self-targeting a restart is allowed and
+  annotated rather than refused, so self-heal stays available.
+
+  `issueAdminCommand` moved out of the `/fleet/*` route body into `fleet.ts` and
+  now backs both surfaces, so the deliver-**before**-record ordering exists once
+  rather than twice: a recorded-but-undelivered command is a pending row that can
+  never resolve. `MCP_SERVER_VERSION` is `1.1.0` — it versions the tool surface,
+  and this release is additive to it.
+
+### Fixed
+- **Attribute injection in the agent-reply markdown renderer (#942).** The
+  dashboard interpolated a link URL into `href="${safe}"` while escaping only
+  `&`, `<`, `>`, so agent output could close the attribute and land a live event
+  handler — and agent replies are prompt-injectable from any page, email, or
+  tool result the agent reads. Quotes are now escaped before any transform runs,
+  closing the sink for every attribute at once. The renderer moved to its own
+  module so the fix is provable: the suite executes it under Node and parses the
+  output at DOM level rather than grepping the source.
+- **Unvalidated register payload on the unauthenticated mint path (#942).**
+  `handleRegisterDeployment` cast `subscriptions` to `string[]` and checked only
+  truthiness, so a bare string registered one subscription per character and a
+  non-string element threw *after* an orphan bubble had been persisted. Shape is
+  now validated before anything is minted or written.
+- **Unbounded request-body buffering (#942).** `readBody` concatenated every
+  chunk with no cap, and the existing gate could only run against an
+  already-fully-read body — so the 413 arrived after the memory was spent. On a
+  non-loopback bind the webhook route reads the body before signature
+  verification, making the peak unauthenticated. The reader now rejects on the
+  chunk that crosses the cap (8 MiB, `BOBI_ES_MAX_BODY_BYTES`) and answers 413.
+- **Slack file uploads in DMs and thread replies never arrived (#945).** Slack
+  stamps the `file_share` subtype on every message that shares a file, and the
+  bridge skipped every subtyped message before classification — so those never
+  became events at all. Channel @mentions survived only because `app_mention`
+  carries no subtype, and the existing test passed only because its synthetic
+  payload omitted what real Slack always sends.
+- **The circuit breaker's pause buffer was unbounded and never released
+  (#945).** It grew by a full event per event for the whole cooldown with no cap,
+  and resume is lazy — a conversation that tripped and then went quiet held its
+  state and buffer for the life of the process, contradicting the module's own
+  "buffered, not dropped" and "auto-resume" claims. Now capped at 50 (newest
+  wins, drops counted) and swept on the local server's existing eviction
+  interval.
+- **`/channels/send` accepted required text and delivered it nowhere (#945).**
+  The file + `edit_ref` path performed its placeholder edit only where the
+  channel supports editing, and uploaded files with no comment on either branch —
+  so on WhatsApp the user got the PDF and never the sentence explaining it. The
+  text now rides as the file comment where there is no placeholder to move it
+  into.
+- **Concurrent Slack workspace registrations raced away a bot's signing secret
+  (#945).** The record is updated read-merge-write across an `await`, so two bots
+  registering the same workspace — a fleet roll restarting both agents — each
+  merged onto a stale snapshot and the second put dropped the first app's entry,
+  401ing its inbound events. Writes are now serialized per storage key. This
+  closes the window within one runtime instance, which is where the reported
+  failure lives; a cross-isolate race on the Worker's KV backing needs a
+  storage-layer change and is documented rather than claimed fixed.
+
+### Changed
+- **The release workflow publishes the pins the image dispatch needs (#943).**
+  `release-image.yml` requires the exact claude CLI version the release resolved
+  from the floating `stable` channel, but since the repo reorg that value existed
+  only inside a finished job's shell variable — so dispatching the image meant
+  re-deriving the channel by hand and hoping it had not moved, defeating the
+  point of resolving it once. It is now published as a ready-to-paste command in
+  the run summary and as a `::notice::` that outlives summary retention.
+- **Event-server reuse sweep (#945).** Eight duplicated or dead surfaces
+  converged: the doubled `ingest/` topic spelling, an impossible `skip` state on
+  the Slack normalizer, three hand-rolled Slack Web API calls, three near-identical
+  copies of the deliver/buffer/broadcast block, an eviction path re-implementing
+  the deregistration bodies defined above it, the attachment→files extraction
+  written twice across adapters, and two identical unreachable guards.
+
+## 0.53.0 - 2026-08-03
+
+Minor release: the fleet control plane grows an agent-shaped surface, and Claude
+token telemetry stops reading zero.
+
+### Added
+- **The fleet control plane is served as MCP from the event-server Worker
+  (#923).** `POST /mcp` on the Worker exposes the same control plane the hosted
+  console already drives, so an agent binds to named tools with declared schemas
+  instead of re-deriving the `/fleet/*` URL shapes, the 202-then-poll contract,
+  and the per-command argument shapes. The read half only —
+  `bobi_fleet_status`, `bobi_instance_detail`, `bobi_command_result` — each
+  calling **in-process** the same builder its HTTP route calls, so there is no
+  second implementation of the read model and no HTTP hop. Stateless: one
+  `McpServer` per request, no Durable Object, no session id. Auth is the
+  existing `FLEET_OPERATOR_TOKEN` via `requireOperator`, checked in the route
+  before any tool body runs — **the MCP route widens the interface, not the
+  authority.** Nothing here can restart, stop, or message an instance; write
+  tools are Lane B of `plans/2026-07-30-mcp-fleet-control.md`. A team consumes
+  the endpoint with no framework change, via `mcp_servers` `type: http` plus
+  `headers`.
+
+  **Self-hosters redeploying their own Worker: `wrangler.jsonc` now sets
+  `compatibility_flags: ["nodejs_compat"]`, and it is not optional.**
+  `createMcpHandler` carries its per-request context in an `AsyncLocalStorage`,
+  so the bundle imports `node:async_hooks`; without the flag workerd refuses to
+  start and **every route on the script goes down with it**, bus included. The
+  compatibility date is past 2024-09-23, so the flag is additive rather than
+  replacing workerd's own APIs. Conformance is asserted by replaying the literal
+  request bodies a real `claude-code/2.1.220` session sent, and the deployed
+  `/mcp` route is exercised for real by `worker-deploy-smoke.yml` — the unit
+  pool injects its own Node flags, so a pool test alone could never have proven
+  this one.
+- **`bobi agent <name> costs backfill` recovers lost token telemetry (#935,
+  #936).** Reads Claude's retained JSONL transcripts and fills the token
+  counters the defect below left at zero. Dry run by default, `--write` to
+  apply, idempotent across runs. It only ever **fills**: recorded tokens and
+  provider dollars are never overwritten, `last_activity` is never bumped, and a
+  session whose transcript is gone stays honestly unknown rather than estimated
+  into place. Against a real 151-session registry it repaired 112 with provider
+  dollars byte-identical before and after. Four hazards are handled that only
+  running it surfaced — assistant lines repeat per content block under one
+  message id (naive summing overcounts ~2x), the `<synthetic>` pseudo-model
+  never converges, live sessions would double-count against the recorder, and
+  recovered usage must land on the *existing* model key rather than splitting
+  one model across two rows. `costs` became a command group; the bare `costs`
+  invocation is unchanged.
+
+### Fixed
+- **Claude token counts were recorded as zero while the dollars arrived (#935,
+  #936).** `claude_agent_sdk` 0.2.128 passes the CLI's `modelUsage` through
+  verbatim, so its keys are **camelCase**, but `_one_model_usage_to_cost` read
+  only the legacy snake_case spellings — every token field came back `0` while
+  `total_cost_usd` arrived on a separate attribute, producing exactly the
+  reported shape of rows with dollars and no tokens. Each field is now read
+  across both spellings, first match wins, so a payload carrying both is read
+  once rather than summed. `AssistantMessage.usage` is deliberately untouched:
+  it is the raw Anthropic API shape, which is genuinely snake_case.
+
+### Changed
+- **Documentation re-verified against the tree it describes (#937, #938,
+  #939).** The review-remediation plan re-checked all 229 items against `main`
+  and its Lane D swept 24 of them: repo-root and pack docs, stale specs, and the
+  engine, monitor, event-server, and setup-skill references that had drifted
+  from the code.
+
+## 0.52.0 - 2026-08-03
+
+Minor release: Bobi looks like Bobi, and public CI proves the product rather
+than trusting it. This is also the first release published entirely from this
+repo — the reference container image now builds and pushes from `bobi-agent`,
+not from the archived private deploy repo, which completes the public half of
+the 2026-07 reorg (`plans/2026-07-29-repo-reorg.md`).
+
+### Added
+- **Public CI proves both brains, against the real image (#909, #911).** CI
+  verified none of the three things Bobi actually is. The `container-image` job
+  in `container.yml` now runs the built image through one real **Claude** ask
+  and one real **Codex** ask, against an ephemeral event server started from the
+  real Worker sources. It is off by default — nightly, on `workflow_dispatch`,
+  or on a PR carrying the `ci:live` label — and never on a fork PR.
+- **A real `wrangler deploy` is exercised before yours is (#909, #911).**
+  `wrangler dev` proves the Worker's code but never a deployment: the KV
+  binding, the `v1` `new_sqlite_classes` Durable Object migration, and
+  account-side provisioning were covered nowhere, and the only real
+  `wrangler deploy` in existence went straight to production.
+  `worker-deploy-smoke.yml` deploys a dedicated `bobi-events-ci-smoke` Worker in
+  a **separate Cloudflare account** and runs a health check plus a
+  publish→subscribe round-trip against the deployed URL. Cloudflare grants
+  Workers and KV permissions at account scope only, so a CI-only account is the
+  strongest isolation available; `scripts/render_worker_ci_config.py` derives
+  the CI config from the shipped `wrangler.jsonc` so the migration and
+  compatibility date cannot drift from what production deploys.
+- **The live lanes must prove they RAN (#909, #911).** Every test in both lanes
+  carries a `skipif`, so a renamed secret or an unavailable harness would have
+  skipped to green — which is exactly how this repo shipped four
+  green-but-vacuous lanes. Each lane now has a fail-fast step when a credential
+  is empty plus `scripts/assert_junit_ran.py`, which reads the junit report and
+  rejects any skip, any wrong count, and any missing named test.
+  `tests/test_ci_live_wiring.py` asserts the wiring itself is still in place and
+  fails if a live step is deleted.
+- **The reference image is published from this repo (#898).** `Dockerfile`,
+  `docker/`, `release-image.yml`, `container.yml`, and the container contract
+  tests moved here from the private deploy repo, with a new
+  `docs/REFERENCE_IMAGE.md` covering the run contract, the `--init` requirement,
+  the runtime env contract, and the `TEAM_DEPS` bake hook. A self-hoster runs
+  Bobi from a public pull instead of a repo grant.
+
+### Changed
+- **`bobi setup` and `bobi app` are reskinned onto the Bobi design system
+  (#883).** Both local web UIs now look like the Bobi that ships on buildmoda.ai
+  rather than the amber/CRT identity that predated the brand. The design system
+  is vendored as `docs/design-system/` and is the source of truth for anything
+  visual on any Bobi surface. Violet is **state** — live, enforced, gated,
+  focused — never decoration; everything decorative is clay, and a connected
+  integration reads violet like anything else live rather than green. Geist,
+  Geist Mono, and Inter are vendored as woff2 subsets under
+  `bobi/webui_common/static/fonts/`, so the offline constraint is intact: no
+  CDN, no network at runtime, no build step. Both UIs are full-bleed — the
+  simulated title bar, traffic lights, and address chip are gone. Legacy token
+  names are kept as aliases and remapped by meaning, so nothing resolves to an
+  off-brand value.
+- **The supervisor arrives via the wheel, not a `COPY` (#898).** The container
+  no longer carries `ARG BOBI_SUPERVISOR_SRC`, the supervisor `COPY`, or the
+  `/usr/local/bin/bobi-supervisor` PYTHONPATH shim — since 0.51.0 the sidecar
+  ships inside the wheel as `bobi.supervisor`. The entrypoint execs
+  `bobi agent "${AGENT_NAME}" supervise -- --foreground`, and its misbuilt-image
+  guard asks the CLI whether `supervise` is really present rather than testing
+  for a binary that no longer exists.
+- **The setup wizard's Cloud card points at something readers can obtain
+  (#907).** It previously told new users to read a runbook from the private
+  `bobi-deploy` distribution — an archived repo. It now points at
+  `ghcr.io/moda-labs/bobi` and `docs/REFERENCE_IMAGE.md`. README Cloud
+  Deployment and `docs/QUICKSTART.md` Option B were rewritten around the
+  published multi-arch image for the same reason, and `skills/linear-setup.md`
+  now sends readers to `event-server/worker/` in this repo (#905).
+- **`docs/RELEASE_RUNBOOK.md` describes the two-repo train (#900).** It states
+  the direction the reorg established — `moda-agents` consumes released
+  `bobi-agent` versions, and this repo owns the gating that keeps its releases
+  from breaking them — and says out loud that the fleet canary gates the fleet
+  **roll**, not the image publish, because the canary builds `FROM` the
+  published base and a gate cannot precede the artifact it consumes.
+
+### Fixed
+- **Subagent launch chains are bounded before a process is spawned (#849,
+  #888).** Launches recorded no parent or ancestry, so a workflow step launching
+  its own workflow was undetectable and unbounded: on 2026-07-25 one scheduled
+  trigger became **50 runs in 44 minutes**, stopped only by the spend governor —
+  whose own docstring calls it a classification-free backstop, i.e. the last
+  resort. Here it was the only resort. Every launch now carries the ordered
+  chain of runs that led to it in `BOBI_LAUNCH_LINEAGE`, and a launch is refused
+  up front when it is self-recursive (a named workflow already in its own chain;
+  `adhoc` is exempt, since `-w adhoc --wait` delegation is ordinary work and
+  depth governs it) or deeper than `max_launch_depth` (default 8, settable in
+  `agent.yaml` or per deployment via `BOBI_MAX_LAUNCH_DEPTH`). The refusal
+  message tells the agent this is a deterministic block rather than a rate
+  limit, so retrying with a new run key or after waiting is not a workaround.
+- **Two supervisor test files that tested a private copy now test the shipped
+  code (#904).** The reorg moved the sidecar to `bobi/supervisor/` and brought
+  six of its eight test files with it; `test_supervisor_alerting.py` and
+  `test_supervision_operator.py` stayed behind, exercising a second
+  implementation that would stay green while the real one moved — the same
+  failure mode that left entrypoint tests asserting a `bobi-supervisor` shim
+  that had not existed for a release. The port is a pure import rewrite and all
+  23 pass unchanged, which is itself the evidence the copies never diverged.
+- **Three integration tests failed on ambient state rather than on the code
+  (#908).** A module-scoped fixture unset the session's `BOBI_HOME`, letting
+  tests reach the real `~/.bobi` — it failed deterministically after any
+  dual-brain module and passed deterministically alone, which reads as
+  flakiness but is shared state.
+
 ## 0.51.1 - 2026-07-31
 
 Patch release: an agent no longer needs a build-time secret in order to run.
