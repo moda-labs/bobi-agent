@@ -214,6 +214,20 @@ therefore has two guards: a fail-fast step when a credential is empty, and
 skip, any wrong count, and any missing named test. `tests/test_ci_live_wiring.py`
 asserts the wiring itself is still in place, and fails if a live step is deleted.
 
+**They must smoke the right deployment.** `wrangler deploy` and the
+`wrangler secret bulk` that follows it publish two Worker versions reporting the
+same release sha, and Cloudflare's rollover between them is not atomic. The
+first one inherits the previous run's secrets, so smoking it yields a 401 on
+`/mcp` and a 500 on the round-trip against credentials minted seconds earlier
+(run 30895709421). `scripts/await_worker_ready.py` is the gate: it clears only
+once the release sha matches, an operator-authenticated route answers 200 to
+THIS run's minted token, and the serving `worker.version_id` holds still, across
+five consecutive probes. Its behaviour is exercised in
+`tests/test_ci_guard_scripts.py` against a Worker that fakes the rollover -
+inline shell had carried this logic through two fixes with no test that could
+reach it. The lane also takes a `concurrency` group: one shared Worker means
+one run at a time, or two runs overwrite each other's minted secrets.
+
 **The Worker lane is isolated by construction.** It deploys to a dedicated
 `bobi-events-ci-smoke` Worker with its own KV namespace, in a **separate
 Cloudflare account** from the one the fleet runs production on — sharing
