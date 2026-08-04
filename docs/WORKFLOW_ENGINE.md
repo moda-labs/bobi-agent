@@ -385,7 +385,14 @@ The resume path itself works as follows. It looks up a waiting run matching the
 event type, run key, and repo (`WorkflowRun.find_waiting`). To avoid two processes
 resuming the same run, the caller must first `claim()` it: an atomic rename of
 `<run_id>.json` to `<run_id>.resuming.json`. Exactly one caller wins; the others
-get `FileNotFoundError` and back off. The winner re-stamps the run's registry
+get `FileNotFoundError` and back off, having written nothing at all. The winner
+then writes its updated `resuming` status over the claimed file. That second
+write is a separate step, and a crash between the two leaves
+`<run_id>.resuming.json` still reading `waiting`: `find_waiting` keeps matching
+it while `claim()` can never succeed again, so the run is unresumable until the
+file is removed by hand. Closing that window needs a recovery protocol for a
+torn claim; it is recorded rather than built because nothing in the runtime
+calls this path today (see above). The winner re-stamps the run's registry
 entry with its own pid and a fresh `started_at`/`timeout` (the resume
 `--timeout`), so the dead-man reconciler judges the resumed process on its own
 budget rather than the long-dead launch process's. It then restores the variable

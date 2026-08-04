@@ -36,6 +36,7 @@ import os
 from pathlib import Path
 
 from bobi import paths
+from bobi.fsutil import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -168,10 +169,7 @@ def write_instructions(path: Path, content: str) -> Path:
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
     rendered = render_instructions(existing, content)
     if rendered != existing:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.bobi-tmp")
-        tmp.write_text(rendered, encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_text(path, rendered)
     return path
 
 

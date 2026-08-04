@@ -13,6 +13,7 @@ from typing import Iterable
 
 from bobi import paths
 from bobi.__version__ import __version__
+from bobi.fsutil import atomic_write_text
 from bobi.sdk import SessionEntry
 
 
@@ -556,7 +557,7 @@ def run_manager_from_config(
     ensure_state_version(project_path)
 
     pid_str = str(os.getpid())
-    (state_dir / "manager.pid").write_text(pid_str)
+    atomic_write_text(state_dir / "manager.pid", pid_str)
 
     def _cleanup():
         pid_file = state_dir / "manager.pid"

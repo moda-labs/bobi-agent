@@ -29,7 +29,8 @@ import click
 import yaml
 
 from bobi import paths
-from bobi.setup.state import SetupState, setup_state_file, source_tree_hash
+from bobi.setup.state import (SetupState, setup_state_artifacts,
+                              source_tree_hash)
 
 # Token shapes that must never appear as literals in a generated pack.
 SECRET_SHAPES = re.compile(
@@ -339,7 +340,7 @@ def validate_team(state: SetupState, project: Path) -> dict:
                 "failure_count": len(failures)}
     state.validated = True
     state.validated_hash = source_tree_hash(
-        pack_dir, exclude=[setup_state_file(project)])
+        pack_dir, exclude=setup_state_artifacts(project))
     state.save(project)
     return {"passed": True, "report": report, "failure_count": 0}
 
@@ -362,7 +363,7 @@ def install_team(state: SetupState, project: Path) -> dict:
 
     if state.mode == "create":
         current = source_tree_hash(pack_dir,
-                                   exclude=[setup_state_file(project)])
+                                   exclude=setup_state_artifacts(project))
         if not state.validated or current != state.validated_hash:
             state.validated = False
             state.save(project)

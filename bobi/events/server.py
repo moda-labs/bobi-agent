@@ -20,6 +20,7 @@ from pathlib import Path
 import httpx
 
 from bobi.events import artifact as event_server_artifact
+from bobi.fsutil import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -468,7 +469,9 @@ def ensure_running(port: int, webhook_secret: str | None = None,
     if health(f"http://localhost:{port}"):
         if project_path is not None:
             from bobi import paths
-            (paths.state_dir(project_path) / "event-server.port").write_text(str(port))
+            atomic_write_text(
+                paths.state_dir(project_path) / "event-server.port", str(port)
+            )
         log.info(f"Event server already running on port {port}")
         return "connected"
 
@@ -540,7 +543,7 @@ def ensure_running(port: int, webhook_secret: str | None = None,
     for _ in range(30):
         time.sleep(0.5)
         if health(f"http://localhost:{port}"):
-            (state / "event-server.port").write_text(str(port))
+            atomic_write_text(state / "event-server.port", str(port))
             log.info(f"Event server started on port {port} (pid {proc.pid})")
             return "started"
     log.error("Event server failed to start within 15 seconds")

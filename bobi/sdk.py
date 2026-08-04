@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from bobi import paths
+from bobi.fsutil import atomic_write_json
 
 log = logging.getLogger(__name__)
 
@@ -377,15 +378,7 @@ class SessionRegistry:
     @staticmethod
     def _write_state(path: Path, data: dict) -> None:
         """Publish one complete state document for concurrent readers."""
-        serialized = json.dumps(data, indent=2)
-        tmp = path.with_name(
-            f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
-        )
-        try:
-            tmp.write_text(serialized)
-            os.replace(tmp, path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        atomic_write_json(path, data)
 
     def register(self, entry: SessionEntry) -> None:
         d = self.session_dir(entry.name)

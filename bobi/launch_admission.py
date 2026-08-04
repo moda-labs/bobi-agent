@@ -15,6 +15,7 @@ from bobi.concurrency_semaphore import (
     _excluded_session_names,
     is_excluded_from_concurrency,
 )
+from bobi.fsutil import atomic_write_json
 from bobi.sdk import get_registry
 
 log = logging.getLogger(__name__)
@@ -318,11 +319,7 @@ def record_init_health(
     with _health_file_lock(root):
         events = [event for event in _read_health_events(root) if event["ts"] >= cutoff]
         events.append({"kind": kind, "ts": ts})
-        path = _health_path(root)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-        tmp.write_text(json.dumps({"events": events}, indent=2))
-        os.replace(tmp, path)
+        atomic_write_json(_health_path(root), {"events": events})
 
 
 def _read_health_events(root: Path) -> list[dict]:

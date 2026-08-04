@@ -2,6 +2,7 @@
 
 import json
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -223,6 +224,33 @@ class TestClaim:
         result_b = run_b.claim()
         assert result_a != result_b  # exactly one wins
         assert (result_a and not result_b) or (not result_a and result_b)
+
+    def test_losing_claim_writes_nothing(self, runs_dir, monkeypatch):
+        """A process that loses the claim race must not touch the disk.
+
+        The claim is decided by one rename, so the loser has no reason to
+        write. Before Q062 it wrote its updated state to a temp file first —
+        under a name derived only from the run id, so every racing claimer
+        shared one temp path and a winner could rename a file another
+        process was still writing.
+        """
+        _make_run(runs_dir, run_id="cl6", status="waiting",
+                  await_event="approval")
+        winner, loser = WorkflowRun.load("cl6"), WorkflowRun.load("cl6")
+        assert winner.claim()
+
+        writes: list[str] = []
+        real_write_text = Path.write_text
+
+        def record(self, *args, **kwargs):
+            writes.append(str(self))
+            return real_write_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", record)
+        assert loser.claim() is False
+        assert writes == [], f"losing claim wrote {writes}"
+        # ...and left no temp file beside the run.
+        assert [p.name for p in runs_dir.iterdir() if p.name.endswith(".tmp")] == []
 
     def test_save_after_claim_cleans_up_resuming_file(self, runs_dir):
         """save() after claim() removes the orphaned .resuming.json file."""

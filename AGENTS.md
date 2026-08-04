@@ -84,6 +84,23 @@ Bobi-specific deltas on top:
   and does not need a claude leg - add one only when the real brain is where the
   risk actually lives.
 
+- **Durable state goes through `bobi/fsutil.py`.** Any file bobi must still be
+  able to read after an abrupt death - monitor state, the spend window,
+  workflow runs, `config.toml`, the setup checkpoint, pid/port files - is
+  written with `atomic_write_text` / `atomic_write_json`, never a bare
+  `write_text`. Loaders in this repo treat unparseable state as *empty* and
+  reset, so a torn write does not lose one field, it silently drops the whole
+  document. Read-modify-write state (a load, a mutate, a save) additionally
+  takes `fsutil.file_lock`; atomicity alone keeps the file parseable but does
+  not stop a concurrent updater's change from being overwritten. Do not
+  hand-roll a seventh tmp+rename - that duplication is what stopped durability
+  fixes from propagating (D092). **One exception, and it is a real one:** the
+  write lands as a new inode renamed over the target, so the target's mode,
+  ownership, and symlink-ness do not survive. A secret whose confidentiality
+  depends on its mode is created at that mode instead
+  (`config.save_bubble_state` opens `bubble.json` with `0o600` and stays off
+  the helper on purpose).
+
 ## Development Lifecycle
 
 Engineering work in this repo moves through four staged contracts: plan,

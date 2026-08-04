@@ -80,6 +80,8 @@ import time as time_mod
 from datetime import datetime, timezone
 from pathlib import Path
 
+from bobi.fsutil import atomic_write_json
+
 
 def _load_framework_checks() -> dict:
     """Load check runners bundled with the framework (bobi/monitors/*_checks.py)."""
@@ -1678,8 +1680,13 @@ class MonitorScheduler:
             return {}
 
     def _save_state(self) -> None:
+        """Persist last_run/last_spawn atomically.
+
+        ``_load_state`` treats corrupt JSON as 'resetting', so a kill
+        mid-write does not lose one monitor's timestamp — it drops the whole
+        schedule and every monitor re-fires on the next boot.
+        """
         try:
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            self.state_path.write_text(json.dumps(self.state, indent=2))
+            atomic_write_json(self.state_path, self.state)
         except OSError as e:
             log.warning(f"Failed to persist monitor state: {e}")

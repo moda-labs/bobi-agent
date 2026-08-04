@@ -63,6 +63,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from bobi.fsutil import atomic_write_json, atomic_write_text
 from bobi.monitors.schema import Condition
 # Reuse the parse helpers verbatim — no behavior change to tool_poll.
 from bobi.monitors.tool_checks import (
@@ -598,15 +599,12 @@ def _load_trusted_state(name: str) -> dict:
 
 
 def _save_trusted_state(name: str, state: dict) -> None:
-    """Persist the trusted-state sidecar atomically (tmp write + os.replace), so a
-    crash or fleet-churn kill mid-write can't truncate it into corrupt JSON that
+    """Persist the trusted-state sidecar atomically, so a crash or
+    fleet-churn kill mid-write can't truncate it into corrupt JSON that
     _load_trusted_state would discard (dropping the pinned sha256 + envelope =
     losing the security baseline)."""
     try:
-        p = _state_path(name)
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(state, indent=2))
-        os.replace(tmp, p)
+        atomic_write_json(_state_path(name), state)
     except OSError as e:
         log.warning("script_cache %s: couldn't persist trusted state: %s", name, e)
 
@@ -834,11 +832,7 @@ def _pin(name: str, content: str, monitor, fp: str, envelope: CapabilityEnvelope
          state: dict) -> None:
     """Atomically activate a validated+smoked script and record trusted state."""
     headed = _write_header(content, monitor, fp)
-    tmp = _scripts_dir() / f".tmp-{_safe_name(name)}.sh"
-    tmp.write_text(headed)
-    tmp.chmod(tmp.stat().st_mode | stat.S_IEXEC)
-    active = _active_path(name)
-    os.replace(tmp, active)
+    atomic_write_text(_active_path(name), headed, executable=True)
     state["fingerprint"] = fp
     state["sha256"] = _sha256(headed)
     state["envelope"] = envelope.to_json()
