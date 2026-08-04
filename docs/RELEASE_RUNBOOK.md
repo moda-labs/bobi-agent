@@ -118,10 +118,26 @@ The public release workflow must go green:
 - PyPI publish
 - Homebrew formula bump + bottle-URL smoke
 
-Then publish the reference image from THIS repo (`release-image.yml`, dispatched
-with the version): multi-arch build + the `:latest` move when this is the newest
-non-prerelease release. It installs `bobi==<version>` from PyPI, so it must run
-after the publish above.
+Then publish the reference image from THIS repo (`release-image.yml`): multi-arch
+build + the `:latest` move when this is the newest non-prerelease release. It
+installs `bobi==<version>` from PyPI, so it must run after the publish above.
+
+It needs `claude-version` as well as the version — the exact claude CLI the
+release resolved from the floating `stable` channel, so every arch bakes the
+same one. **Do not re-derive it.** `build-wheel` prints the ready-made dispatch
+command to its run summary (and as a `::notice::`); copy it from there:
+
+```bash
+gh run view <release-run-id> --repo moda-labs/bobi-agent \
+  --json jobs --jq '.jobs[] | select(.name=="Build the release wheel") | .url'
+```
+
+If you are recovering an OLD release whose summary has expired, resolve the
+channel with `curl -fsSL https://downloads.claude.ai/claude-code-releases/stable`
+and corroborate it against the previous release's published image
+(`docker run --rm --entrypoint claude ghcr.io/moda-labs/bobi:<prev> --version`):
+agreement means the channel has not moved and the value is what that run
+resolved. That is a recovery path, not the normal one.
 
 Then run the fleet train in `moda-labs/moda-agents` (its own workflows):
 dispatch `release.yml` there with the version. It verifies the wheel and the
@@ -236,14 +252,19 @@ gh run watch <run-id> --repo moda-labs/moda-agents --interval 20
 ```
 
 The deploy run should show a green job for every team the `plan` job lists as
-"Deployments to reconcile" — read that line rather than trusting this list,
-which goes stale as the fleet grows. As of 2026-07-31 it is five:
+"Deployments to reconcile". **That line is the only trustworthy roster** — the
+fleet gains and loses teams between releases, so read it per run:
 
-- `baohua`
-- `basketbot`
-- `eng-team`
-- `roadmap-pm`
-- `zachs-personal-assistant`
+```bash
+gh run view <run-id> --repo moda-labs/moda-agents --log \
+  | grep -m1 "Deployments to reconcile"
+```
+
+This file used to carry a copy of the roster, hedged with "read the plan job
+rather than trusting this list". It was wrong within days — it still named
+`basketbot` two releases after moda-agents#90 decommissioned it. A list nobody
+is supposed to trust is worse than no list, so it is gone rather than
+re-frozen at today's count.
 
 A team can fail here while the release artifacts are perfectly good. Note that
 `bobi deploy` **pauses the old runtime before it validates the new one**, so a
