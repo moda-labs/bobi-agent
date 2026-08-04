@@ -319,6 +319,14 @@ fleet, so treat it as an admin credential, not a read key.
 without it the Worker does not start at all — workerd rejects the script with
 `No such module "node:async_hooks"`, so the bus goes down too, not just MCP.
 
+Optionally set **`MCP_COMMAND_WAIT_MS`** (a plain var, not a secret) to change
+how long an MCP command tool waits server-side for the supervisor's reply
+before handing back a `command_id` to poll. It defaults to `5000`; `0` disables
+waiting entirely. Raise it if your instances are far from your Worker's region
+and commands routinely come back `pending`; lower it if a wedged instance
+holding a tool call for five seconds is worse for your agents than an extra
+round trip. Anything unparseable falls back to the default rather than to zero.
+
 **3. Deploy and verify.**
 
 ```bash
