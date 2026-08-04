@@ -14,6 +14,8 @@ import time
 
 import pytest
 
+from bobi.sdk import DEAD_STATUSES
+
 
 # Bind this file's ``bobi_env`` / ``cli_run`` to the dual-brain (stub + claude)
 # variants, so every lifecycle test below runs once per brain without touching
@@ -232,6 +234,18 @@ class TestManagerMessaging:
         assert len(result.stdout.strip()) > 0
 
 
+# Addressing a manager that is not running fails through one of two honest
+# shapes: no addressable session at all, or a registry entry that is already
+# terminal — and an orderly teardown drops the pid, so `deliver()` names the
+# terminal STATUS rather than the dead process. Deriving the terminal phrasings
+# from DEAD_STATUSES (the same constant deliver() reports from) keeps this
+# assertion pinned to the contract instead of to one incidental wording.
+_NOT_RUNNING_MESSAGES = (
+    "not running", "no active session", "cannot reach", "process is dead",
+    *(f"is {status}" for status in DEAD_STATUSES),
+)
+
+
 @pytest.mark.timeout(30)
 class TestManagerNotRunning:
     """Tests for message/ask when the manager is stopped."""
@@ -243,9 +257,7 @@ class TestManagerNotRunning:
         result = cli_run("message", "should fail", timeout=5)
         output = (result.stdout + result.stderr).lower()
         assert result.returncode != 0
-        assert any(msg in output for msg in [
-            "not running", "no active session", "cannot reach", "process is dead",
-        ])
+        assert any(msg in output for msg in _NOT_RUNNING_MESSAGES), output
 
     def test_ask_when_not_running(self, bobi_env, cli_run):
         pid_file = bobi_env.state_dir / "manager.pid"
