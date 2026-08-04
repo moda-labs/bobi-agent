@@ -57,6 +57,7 @@ from bobi.subagent import (
     run_phase_blocking,
     spawn_adhoc,
 )
+from bobi.sdk import TERMINAL_FAILED
 # The real Session, imported under an alias because SESSION_PATCH below
 # replaces ``bobi.session.Session`` for the duration of a test.
 from bobi.session import Session as _RealSession
@@ -747,6 +748,75 @@ class TestRunAgentSupervisedExceptions:
 
         assert result.success is False
         assert result.error == "subprocess timeout after 60s"
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_overruns_its_timeout_records_a_terminal_failure(self):
+        """D067: the timeout must be enforced *inside* the supervised loop.
+
+        The test above reaches the ``except asyncio.TimeoutError`` handler only
+        because it makes ``connect()`` raise ``TimeoutError`` synthetically —
+        nothing in production does that. The real overrun path is this one: the
+        agent hangs in ``receive_response()`` and the caller's outer
+        ``asyncio.wait_for`` (``run_check_blocking``, subagent.py) cancels it.
+
+        Pre-fix, nothing enforces ``timeout`` inside the coroutine, so the
+        cancellation arrives as ``CancelledError`` — a ``BaseException`` that
+        skips both ``except`` clauses — and the ``TERMINAL_FAILED`` persist
+        never runs: ``state.json`` records neither the terminal failure nor the
+        timeout reason, and the outer ``wait_for`` raises out of this test.
+        """
+        mock_module = MagicMock()
+        mock_module.AssistantMessage = FakeAssistantMessage
+        mock_module.ClaudeAgentOptions = MagicMock()
+        mock_module.ResultMessage = FakeResultMessage
+        mock_module.TextBlock = FakeTextBlock
+
+        class HangingClient(FakeClient):
+            """Connects, then never produces a ResultMessage."""
+
+            async def receive_response(self):
+                while True:
+                    await asyncio.sleep(0.01)
+                yield  # pragma: no cover - keeps this an async generator
+
+        client = HangingClient(rounds=[[]])
+        mock_module.ClaudeSDKClient = MagicMock(return_value=client)
+        registry = MagicMock()
+
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=registry), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
+
+            # The outer wait_for mirrors the sole caller, with the generous
+            # grace the fix gives it: the inner timeout is what must fire.
+            result = await asyncio.wait_for(
+                _run_agent_supervised(
+                    prompt="Do it",
+                    cwd="/tmp/test",
+                    run_key="TEST-OVERRUN",
+                    phase="check",
+                    timeout=0.3,
+                ),
+                timeout=20,
+            )
+
+        assert result.success is False
+        assert result.error == "subprocess timeout after 0.3s"
+        assert client.disconnected, "the hung client was never disconnected"
+
+        terminal_calls = [
+            c for c in registry.mark_terminal.call_args_list
+            if c.args[1] == TERMINAL_FAILED
+        ]
+        assert terminal_calls, (
+            "an overrun run left no terminal record in state.json — the "
+            "reconciler has nothing to re-emit and the entry never names the "
+            "timeout as the reason"
+        )
+        assert "timeout" in terminal_calls[0].kwargs.get("error", "")
 
     @pytest.mark.asyncio
     async def test_disconnect_exception_swallowed(self):
