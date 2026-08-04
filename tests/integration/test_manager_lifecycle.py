@@ -236,7 +236,7 @@ class TestManagerMessaging:
 
 # Addressing a manager that is not running fails through one of two honest
 # shapes: no addressable session at all, or a registry entry that is already
-# terminal — and an orderly teardown drops the pid, so `deliver()` names the
+# terminal - and an orderly teardown drops the pid, so `deliver()` names the
 # terminal STATUS rather than the dead process. Deriving the terminal phrasings
 # from DEAD_STATUSES (the same constant deliver() reports from) keeps this
 # assertion pinned to the contract instead of to one incidental wording.
