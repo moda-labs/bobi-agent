@@ -446,7 +446,12 @@ def test_finish_early_move_on_builds_partial_spec(page, bobi_url):
     expect(page.locator("#uni-meter")).to_have_text("2/5 gathered", timeout=10_000)
     page.click("#uni-finish")
     page.locator("#fin-go").click()
-    expect(page.locator("#genfiles")).to_be_visible(timeout=10_000)
+    # Assert the build's OUTCOME, not its progress list. #genfiles lives on the
+    # building page, which go("done") tears down as soon as the build finishes,
+    # so a fast build retires it before the assertion first polls - the failure
+    # screenshot showed the finished Preview already on screen. .filesdone is
+    # reachable only THROUGH the build, so it proves "Move on at 2/5 really
+    # builds" without the race, the way test_finish_builds_to_file_browser does.
     expect(page.locator(".filesdone")).to_be_visible(timeout=20_000)
 
 

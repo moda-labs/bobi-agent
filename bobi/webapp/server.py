@@ -36,6 +36,7 @@ from bobi.webapp.runtime import (
     TeamLifecycleError,
     TeamPreflightFailed,
     TeamRuntime,
+    UnknownRun,
     UnknownTeam,
 )
 from bobi.webui_common.security import (
@@ -121,6 +122,10 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def _unknown_team(request, exc) -> JSONResponse:
         return JSONResponse({"error": "unknown agent"}, status_code=404)
 
+    @app.exception_handler(UnknownRun)
+    def _unknown_run(request, exc) -> JSONResponse:
+        return JSONResponse({"error": "unknown run"}, status_code=404)
+
     @app.exception_handler(TeamAlreadyRunning)
     def _already_running(request, exc) -> JSONResponse:
         return JSONResponse({"error": "already running", "pid": exc.pid},
@@ -158,17 +163,58 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def agent_spend(name: str) -> JSONResponse:
         return JSONResponse(rt.spend_summary(name))
 
+    # The identity header's read-only view of the team's composition:
+    # description, roles, reach, automation counts, brain, spend cap.
+    @app.get("/api/agents/{name}/overview")
+    def agent_overview(name: str) -> JSONResponse:
+        return JSONResponse(rt.overview(name))
+
     # System health (#733 vertical 2): manager liveness + session statuses;
     # a hosted runtime adds reachability and the sidecar's lifecycle trail.
+    # Normalized on the way out so the state keys the strip reads are present
+    # whatever runtime answered — including one that predates them.
     @app.get("/api/agents/{name}/health")
     def agent_health(name: str) -> JSONResponse:
-        return JSONResponse(rt.health_summary(name))
+        from bobi.webapp.health import normalize
+
+        return JSONResponse(normalize(rt.health_summary(name)))
 
     # Session logs (#733 vertical 3): the full session history with honest
     # terminal outcomes; transcripts drill in via the messages route below.
     @app.get("/api/agents/{name}/sessions")
     def agent_sessions(name: str) -> JSONResponse:
         return JSONResponse(rt.session_log(name))
+
+    # The unified runs view: sessions + workflow runs + monitor runs as one
+    # list. Filters are applied before the page window is selected.
+    @app.get("/api/agents/{name}/runs")
+    def agent_runs(name: str, status: str = "", query: str = "",
+                   offset: int = 0, limit: int = 0) -> JSONResponse:
+        return JSONResponse(rt.runs(
+            name, status=status, query=query, offset=max(0, offset),
+            limit=limit or None))
+
+    # The runs table's one write action. Resume force-continues a suspended
+    # step, so the page confirms first (naming the awaited event) — see the
+    # plan's design deltas. Sync `def`: FastAPI threadpools it, and the work
+    # here is a spawn, never the workflow itself.
+    @app.post("/api/agents/{name}/workflows/runs/{run_id}/resume")
+    def resume_workflow_run(name: str, run_id: str) -> JSONResponse:
+        if not safe_name(run_id):
+            return JSONResponse({"error": "unknown run"}, status_code=404)
+        return JSONResponse(rt.resume_run(name, run_id))
+
+    @app.post("/api/agents/{name}/workflows/runs/{run_id}/remind")
+    def remind_workflow_run(name: str, run_id: str) -> JSONResponse:
+        if not safe_name(run_id):
+            return JSONResponse({"error": "unknown run"}, status_code=404)
+        return JSONResponse(rt.remind_run(name, run_id))
+
+    @app.post("/api/agents/{name}/workflows/runs/{run_id}/close")
+    def close_workflow_run(name: str, run_id: str) -> JSONResponse:
+        if not safe_name(run_id):
+            return JSONResponse({"error": "unknown run"}, status_code=404)
+        return JSONResponse(rt.close_run(name, run_id))
 
     @app.get("/api/agents/{name}/status")
     def agent_status(name: str) -> JSONResponse:
@@ -303,6 +349,22 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
         if not safe_name(session):
             return JSONResponse({"error": "unknown agent"}, status_code=404)
         return JSONResponse({"messages": rt.messages(name, session)})
+
+    # The debugging view of the same transcript: timestamps and tool calls.
+    # `/messages` above is the chat view and stays exactly as it was.
+    @app.get("/api/agents/{name}/subagents/{session}/transcript")
+    def subagent_transcript(name: str, session: str) -> JSONResponse:
+        if not safe_name(session):
+            return JSONResponse({"error": "unknown agent"}, status_code=404)
+        return JSONResponse(rt.transcript(name, session))
+
+    # What a session-less run shows instead of a transcript: the run record
+    # plus the definition of the monitor that produced it.
+    @app.get("/api/agents/{name}/runs/{run_id}/details")
+    def run_details(name: str, run_id: str) -> JSONResponse:
+        if not safe_name(run_id):
+            return JSONResponse({"error": "unknown run"}, status_code=404)
+        return JSONResponse(rt.run_details(name, run_id))
 
     # Submit-then-poll chat: the POST returns a message id immediately and
     # the deliver runs in the background — no request is held open for the

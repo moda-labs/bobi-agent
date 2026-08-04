@@ -40,6 +40,19 @@ class UnknownTeam(TeamRuntimeError):
         super().__init__(f"unknown agent '{name}'")
 
 
+class UnknownRun(TeamRuntimeError):
+    """No run with that id under this team - a 404, not a lifecycle failure.
+
+    Separate from ``UnknownTeam`` because the team resolved fine; it is the
+    run inside it that is gone, which is the ordinary case once a record ages
+    past the retention cap while a browser still holds its row.
+    """
+
+    def __init__(self, run_id: str) -> None:
+        self.run_id = run_id
+        super().__init__(f"unknown run '{run_id}'")
+
+
 class TeamAlreadyRunning(TeamRuntimeError):
     def __init__(self, pid: int) -> None:
         self.pid = pid
@@ -113,6 +126,57 @@ class TeamRuntime(ABC):
     def messages(self, name: str, session: str) -> list[dict]:
         """A session's transcript messages (chat-log fallback)."""
 
+    def transcript(self, name: str, session: str) -> dict:
+        """A session's transcript as a DEBUGGING view: timestamped lines,
+        tool calls included.
+
+        Shape::
+
+            {"session": str,
+             "entries": [{"kind",     # message | tool | tool_result
+                          "role",     # user | agent
+                          "text", "at",        # ISO 8601, "" if unrecorded
+                          "tool",              # "" unless a tool line
+                          "truncated",         # a clipped tool result
+                          "is_error"}, ...],
+             "usage": {"started_at", "ended_at", "tokens", "cost_usd",
+                       "status"}}
+
+        Distinct from ``messages`` on purpose, and ``messages`` is unchanged:
+        that is the CHAT view (two roles, prose only), which is what a
+        conversation panel wants. Debugging a run wants when each turn
+        happened and what the agent DID between saying things. Both read the
+        same transcript; they differ in what they discard.
+
+        ``at`` is empty where the on-disk format records no per-entry
+        timestamp (Codex rollouts), rather than synthesized. ``usage`` feeds
+        the slab header.
+
+        NOT abstract, per this class's sequencing rule.
+        """
+        raise TeamLifecycleError("transcripts are not available on this runtime")
+
+    def run_details(self, name: str, run_id: str) -> dict:
+        """What to show for a run that has no transcript to open.
+
+        Shape (see ``bobi.webapp.details.build_details``)::
+
+            {"kind": "monitor",
+             "run": {...},          # the run record, whole
+             "definition": {...},   # the monitor's definition, {} if gone
+             "session_id": str}     # "" when the firing spawned nothing
+
+        A `$0` cached monitor tick and a firing that failed before its agent
+        started both have a record and no session. They get the record plus
+        the definition of the monitor that produced it - what happened, beside
+        what it was asked to do.
+
+        Raises ``UnknownRun`` when no record carries that id.
+
+        NOT abstract, per this class's sequencing rule.
+        """
+        raise TeamLifecycleError("run details are not available on this runtime")
+
     @abstractmethod
     def chat_submit(self, name: str, session: str, text: str) -> str:
         """Queue *text* for *session*; returns a message id to poll."""
@@ -142,7 +206,40 @@ class TeamRuntime(ABC):
         counts for models that report no dollars (#760), kept separate so an
         estimate is never mistaken for a bill. ``tokens_by_model`` carries the
         raw token volumes - the render fallback when no estimate exists.
+
+        Implementations may add ``script_cache`` (see
+        ``bobi.webapp.savings``): what the cached-script monitor runner did
+        NOT spend. Those are counterfactual dollars and live in their own
+        block for that reason - they are never summed into the recorded or
+        estimated totals above.
         """
+
+    def overview(self, name: str) -> dict:
+        """What a team IS: its description, roles, reach, automations, brain,
+        and spend cap - the identity header's read-only view of composition.
+
+        Shape (see ``bobi.webapp.overview.build_overview``)::
+
+            {"name", "description",
+             "roles": [{"name", "description"}, ...],
+             "chat": {"service", "channels"},
+             "services": [{"name", "events", "required"}, ...],
+             "automations": {"monitors", "paused_monitors", "workflows"},
+             "brain": {"kind", "model", "effort", "max_turns", "gateway"},
+             "spend_cap": {"value", "is_default"},
+             "entry_role": str}
+
+        Read-only by design: composition is edited in setup, and this exists
+        so nobody has to open setup to remember what a team is. Values come
+        from the installed package image, never a source directory - the
+        runtime runs the image, so the image is the truth.
+
+        NOT abstract, for the same reason ``runs`` is not: an out-of-tree
+        subclass in the private bobi-deploy repo implements this ABC, and
+        adding an ``@abstractmethod`` here breaks its CI the moment this
+        merges. It becomes abstract once the hosted runtime implements it.
+        """
+        raise TeamLifecycleError("overview is not available on this runtime")
 
     @abstractmethod
     def fleet_spend(self) -> dict:
@@ -164,6 +261,9 @@ class TeamRuntime(ABC):
 
             {"reachability": "live" | "stale" | "unreachable",
              "last_heartbeat_at": str | None,
+             "state": "running" | "stopped" | "not_responding",
+             "detail": str,          # one line of prose for a human
+             "segments": [{"key", "label", "kind", "value", "note"}, ...],
              "manager": {"status", "pid", "running", "healthy",
                          "restart_count", "last_restart_reason",
                          "last_restart_at", "idle_seconds"},
@@ -174,6 +274,22 @@ class TeamRuntime(ABC):
         null/empty rather than omitted (a local team has no heartbeats and no
         supervisor trail), so render code branches on value, never on key
         presence.
+
+        ``state`` is the agent's own state, and ``not_responding`` is why it
+        exists: a manager process can be alive while the manager is not
+        working, and reporting that as running is the failure this surface
+        cannot afford. ``segments`` is the status strip's telemetry, ordered
+        for display and BEST-EFFORT: a reading this runtime cannot produce is
+        omitted rather than faked, so callers must render the list they are
+        given rather than expecting a fixed set. ``kind`` says how to read
+        ``value`` - ``duration`` (elapsed seconds), ``time`` (epoch seconds),
+        ``count``, ``text`` - and formatting belongs to the client, which
+        knows the viewer's timezone.
+
+        These three keys are newer than this interface. An implementation
+        that predates them may omit them; ``bobi.webapp.health.normalize``
+        completes the payload at the response boundary so the null/empty rule
+        above holds for every runtime. See ``bobi/webapp/health.py``.
         """
 
     @abstractmethod
@@ -206,6 +322,69 @@ class TeamRuntime(ABC):
         ``messages(name, session)`` - a terminal session's transcript stays
         readable as long as its registry entry exists.
         """
+
+    def runs(self, name: str, *, status: str = "", query: str = "",
+             offset: int = 0, limit: int | None = None) -> dict:
+        """One team's runs: sessions, workflow runs, and monitor runs merged
+        into one list, newest first with live runs at the top.
+
+        Shape (see ``bobi.webapp.runs.build_runs``)::
+
+            {"runs": [{"kind",        # session | workflow | monitor
+                       "key",         # stable row identity
+                       "status",      # running|idle|done|failed|crashed|
+                                      # awaiting_action|closed
+                       "title", "origin",       # what it is, what kicked it off
+                       "started_at",            # ISO 8601, "" if unknown
+                       "duration_seconds",      # float | None
+                       "tokens", "cost_usd", "est_cost_usd",
+                       "error",                 # "" unless it failed
+                       "session_id", "run_id",  # "" when the row has neither
+                       "detail"}, ...],         # kind-specific extras
+             "counts": {"all", "running", "awaiting_action", "failed"},
+             "total": int, "offset": int, "limit": int, "query": str,
+             "truncated": bool}
+
+        ``status`` and ``query`` filter before ``offset`` / ``limit`` paginate;
+        ``failed`` covers terminal failures; human gates use
+        ``awaiting_action``.
+        ``counts`` describes the whole set and ``total`` the filtered set.
+
+        NOT abstract on purpose: an out-of-tree subclass in the private
+        bobi-deploy repo implements this ABC, and adding an
+        ``@abstractmethod`` here breaks its CI the moment this merges (see
+        the class docstring's sequencing rule). This becomes abstract once
+        the hosted runtime implements it.
+        """
+        raise TeamLifecycleError("runs are not available on this runtime")
+
+    def resume_run(self, name: str, run_id: str) -> dict:
+        """Resume one suspended workflow run.
+
+        Returns ``{"ok", "accepted", "run_id", "workflow", "await_event"}``.
+        ``accepted`` is the honest word: a workflow run takes as long as it
+        takes, so this returns once the resume is under way and the caller
+        watches ``runs`` for the status to move - the same submit-then-poll
+        discipline chat uses. No request is ever held open for a workflow.
+
+        Raises ``UnknownRun`` when no run carries that id, and
+        ``TeamLifecycleError`` (409) when the run is not in a resumable
+        state. Resuming is single-winner: exactly one resume of a given run
+        proceeds even if two arrive together.
+
+        NOT abstract, per this class's sequencing rule.
+        """
+        raise TeamLifecycleError("resume is not available on this runtime")
+
+    def remind_run(self, name: str, run_id: str) -> dict:
+        """Resend a waiting workflow's user-facing gate notification."""
+        raise TeamLifecycleError(
+            "workflow reminders are not available on this runtime")
+
+    def close_run(self, name: str, run_id: str) -> dict:
+        """Close a waiting workflow without advancing its gate."""
+        raise TeamLifecycleError(
+            "workflow close is not available on this runtime")
 
 
 # --- Local implementation ----------------------------------------------------
@@ -445,6 +624,51 @@ class LocalRuntime(TeamRuntime):
             messages = read_chat(root, session)
         return messages
 
+    def transcript(self, name: str, session: str) -> dict:
+        """The debugging view of the same transcript ``messages`` reads."""
+        from bobi.chat_history import read_transcript_detail
+        from bobi.sdk import load_session_brain, load_session_id
+
+        root = self._resolve(name)
+        entries = read_transcript_detail(
+            load_session_id(session, root=root),
+            brain=load_session_brain(session, root=root),
+        )
+        return {"session": session, "entries": entries,
+                "usage": self._session_usage(root, session)}
+
+    @staticmethod
+    def _session_usage(root: Path, session: str) -> dict:
+        """The slab header's duration/tokens/cost for one session."""
+        from bobi.sdk import SessionRegistry
+
+        entry = SessionRegistry(root).get(session)
+        if entry is None:
+            return {"started_at": 0.0, "ended_at": 0.0, "tokens": 0,
+                    "cost_usd": 0.0, "status": ""}
+        return {
+            "started_at": entry.started_at or 0.0,
+            "ended_at": entry.terminal_at or 0.0,
+            "tokens": sum(
+                int(u.get("input_tokens", 0) or 0)
+                + int(u.get("output_tokens", 0) or 0)
+                for u in (entry.model_usage or {}).values()
+                if isinstance(u, dict)),
+            "cost_usd": round(entry.total_cost_usd or 0.0, 6),
+            "status": entry.status,
+        }
+
+    def run_details(self, name: str, run_id: str) -> dict:
+        """The Details slab for a run with no transcript to open."""
+        from bobi.webapp.details import UnknownRun as DetailsUnknownRun
+        from bobi.webapp.details import build_details
+
+        root = self._resolve(name)
+        try:
+            return build_details(root, run_id)
+        except DetailsUnknownRun:
+            raise UnknownRun(run_id) from None
+
     def _prune_jobs(self) -> None:
         # Caller holds _chat_lock.
         if len(self._chat_jobs) <= 500:
@@ -488,10 +712,20 @@ class LocalRuntime(TeamRuntime):
 
     def spend_summary(self, name: str) -> dict:
         from bobi.costs import rollup_costs
+        from bobi.webapp.savings import script_cache_savings
 
         root = self._resolve(name)
         # sessions_path (not sessions_dir): a read endpoint must not mkdir.
-        return rollup_costs(paths.sessions_path(root)).to_dict()
+        payload = rollup_costs(paths.sessions_path(root)).to_dict()
+        # Counterfactual dollars, kept in their own block so nothing can
+        # accidentally add them to a bill.
+        payload["script_cache"] = script_cache_savings(root)
+        return payload
+
+    def overview(self, name: str) -> dict:
+        from bobi.webapp.overview import build_overview
+
+        return build_overview(self._resolve(name))
 
     def fleet_spend(self) -> dict:
         """Roll up spend across every installed team. Offline: reads each
@@ -531,11 +765,14 @@ class LocalRuntime(TeamRuntime):
     def health_summary(self, name: str) -> dict:
         """Manager liveness + session statuses from this machine's files -
         the same sources the dashboard card and the roster read (manager
-        pidfile, session registry). A local team shares this host, so
-        ``reachability`` is "live" by construction; there is no supervisor
-        here, so the restart fields are null and the lifecycle trail is
-        empty - the hosted runtime fills those from its sidecar."""
+        pidfile, session registry) - plus the manager's own health probe,
+        which is what makes ``state`` a tri-state rather than pid presence
+        rephrased. A local team shares this host, so ``reachability`` is
+        "live" by construction; there is no supervisor here, so the restart
+        fields are null and the lifecycle trail is empty - the hosted runtime
+        fills those from its sidecar."""
         from bobi import service
+        from bobi.webapp import health as health_state
 
         root = self._resolve(name)
         status = service.team_status(root)
@@ -552,23 +789,60 @@ class LocalRuntime(TeamRuntime):
             # Manager pid alive but no registered manager session yet: the
             # boot window. Same fail-open verdict the hosted sidecar reports.
             mgr_status = "starting"
+
+        # The strip's SINCE/EXIT/WAS UP come from the manager's last TERMINAL
+        # record, which by definition is not in the active list - so the
+        # stopped path pays one extra registry read, and only it does.
+        strip_entry = mgr_entry
+        if not running:
+            strip_entry = self._last_manager_record(root, mgr_name)
+
+        # "Last activity" is the agent's last sign of life, not the manager's
+        # alone: a subagent still working is the newest thing that happened.
+        last_activity = max((e.last_activity or 0.0 for e in entries),
+                            default=0.0)
+        state = health_state.build_state(
+            running=running,
+            pid=status.manager_pid,
+            root=root,
+            manager_entry=strip_entry,
+            live_runs=sum(1 for e in entries if e.name != mgr_name),
+            last_activity=last_activity,
+        )
         return {
             "reachability": "live",
             "last_heartbeat_at": None,
+            "state": state["state"],
+            "detail": state["detail"],
+            "segments": state["segments"],
             "manager": {
                 "status": mgr_status,
                 "pid": status.manager_pid,
                 "running": running,
-                "healthy": running,
+                # A wedged manager is not healthy, whatever its pid says.
+                # This is the #887 defect: process-alive was read as healthy.
+                "healthy": running and state["probe_ok"] is not False,
                 "restart_count": None,
                 "last_restart_reason": None,
                 "last_restart_at": None,
-                "idle_seconds": None,
+                "idle_seconds": state["idle_seconds"],
             },
             "sessions": [{"name": e.name, "role": e.role, "status": e.status}
                          for e in entries],
             "lifecycle": [],
         }
+
+    @staticmethod
+    def _last_manager_record(root: Path, mgr_name: str):
+        """The manager's registry entry including terminal ones, or None.
+
+        Read with dead-pid reaping so a manager killed without reporting a
+        terminal status reads as crashed here too, never as still running.
+        """
+        from bobi.sdk import SessionRegistry
+
+        return next((e for e in SessionRegistry(root).list_all(reap_dead=True)
+                     if e.name == mgr_name), None)
 
     def session_log(self, name: str) -> dict:
         """The whole registry, terminal sessions included. ``reap_dead``
@@ -589,3 +863,111 @@ class LocalRuntime(TeamRuntime):
             "counts": session_outcome_counts(entries),
             "truncated": False,
         }
+
+    def resume_run(self, name: str, run_id: str) -> dict:
+        """Resume a suspended workflow run by spawning the CLI resume.
+
+        A SPAWN, not a thread, and the orchestrator says why in its own words
+        (``try_resume_for_event``): ``resume_workflow`` re-stamps the session
+        registry entry with ``os.getpid()`` and the resume timeout, which
+        assumes a dedicated per-run process. Resuming inside this long-lived
+        process would stamp the WEB APP's pid - a reconciler timeout or a
+        ``subagents cancel`` would then signal the web app itself. It would
+        also need a bound runtime root, which this process deliberately does
+        not have.
+
+        The claim lives in the spawned command, not here: a claim held by a
+        caller that then fails to spawn strands the run. This checks the
+        status so the ordinary "not resumable" case is a clean 409 rather
+        than a child that exits in the dark.
+        """
+        import subprocess
+        import sys
+
+        from bobi.workflow.state import WorkflowRun
+
+        root = self._resolve(name)
+        run = next((r for r in WorkflowRun.list_runs(root=root)
+                    if r.run_id == run_id), None)
+        if run is None:
+            raise UnknownRun(run_id)
+        if run.status != "waiting":
+            raise TeamLifecycleError(
+                f"run {run_id} is '{run.status}', not 'waiting'")
+
+        cmd = [sys.executable, "-m", "bobi.cli", "agent",
+               paths.agent_name_for_root(root), "workflows", "resume", run_id]
+        subprocess.Popen(cmd, cwd=str(root), start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Accepted, not finished. A workflow run takes as long as it takes;
+        # the page watches the runs table for the status to move, the same
+        # submit-then-poll discipline chat uses.
+        return {"ok": True, "accepted": True, "run_id": run_id,
+                "workflow": run.workflow_name,
+                "await_event": run.await_event}
+
+    def remind_run(self, name: str, run_id: str) -> dict:
+        from bobi.workflow.orchestrator import remind_workflow
+        from bobi.workflow.state import WorkflowRun
+        from bobi.workflow.triggers import WorkflowDispatcher
+
+        root = self._resolve(name)
+        run = next((r for r in WorkflowRun.list_runs(root=root)
+                    if r.run_id == run_id), None)
+        if run is None:
+            raise UnknownRun(run_id)
+        if run.status != "waiting":
+            raise TeamLifecycleError(
+                f"run {run_id} is '{run.status}', not 'waiting'")
+        dispatcher = WorkflowDispatcher()
+        dispatcher.load_all_workflows(project_path=root)
+        workflow = dispatcher.find_workflow(run.workflow_name)
+        if workflow is None:
+            raise TeamLifecycleError(
+                f"workflow '{run.workflow_name}' is no longer installed")
+        outcome = remind_workflow(run, workflow)
+        if not outcome.delivered:
+            raise TeamLifecycleError(outcome.error)
+        return {"ok": True, "delivered": True, "run_id": run_id,
+                "workflow": run.workflow_name,
+                "await_event": run.await_event}
+
+    def close_run(self, name: str, run_id: str) -> dict:
+        from bobi.sdk import SessionRegistry
+        from bobi.workflow.state import WorkflowRun
+
+        root = self._resolve(name)
+        existing = next((r for r in WorkflowRun.list_runs(root=root)
+                         if r.run_id == run_id), None)
+        if existing is None:
+            raise UnknownRun(run_id)
+        if existing.status != "waiting":
+            raise TeamLifecycleError(
+                f"run {run_id} is '{existing.status}', not 'waiting'")
+        closed = WorkflowRun.close(run_id, root=root)
+        if closed is None:
+            raise TeamLifecycleError(f"run {run_id} is no longer waiting")
+        if closed.session_name:
+            SessionRegistry(root).mark_terminal(
+                closed.session_name, "cancelled",
+                error="workflow closed by operator")
+        return {"ok": True, "closed": True, "run_id": run_id,
+                "workflow": closed.workflow_name}
+
+    def runs(self, name: str, *, status: str = "", query: str = "",
+             offset: int = 0, limit: int | None = None) -> dict:
+        """Fold this machine's three run stores for one team. Every read takes
+        the resolved root explicitly - this process serves every team and
+        binds none of them."""
+        from bobi import service
+        from bobi.webapp.runs import DEFAULT_LIMIT, build_runs
+
+        root = self._resolve(name)
+        return build_runs(
+            root,
+            manager_name=service.manager_session_name(root),
+            status=status or "",
+            query=query or "",
+            offset=max(0, offset),
+            limit=limit if limit and limit > 0 else DEFAULT_LIMIT,
+        )

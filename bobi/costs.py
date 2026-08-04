@@ -154,6 +154,54 @@ def _tok(v) -> int:
     return v if isinstance(v, int) and not isinstance(v, bool) else 0
 
 
+def session_usage(model_usage: dict | None,
+                  recorded_cost: float = 0.0) -> dict:
+    """One session's token volume and its best honest dollar figure.
+
+    The same arithmetic ``rollup_costs`` does fleet-wide, scoped to a single
+    session so a run row can carry "tokens · est cost" — the debugging
+    currency the runs table shows on every row.
+
+    Returns ``{"input_tokens", "cached_input_tokens", "output_tokens",
+    "total_tokens", "cost_usd", "estimated_cost_usd"}``. ``cost_usd`` is
+    provider-reported dollars; ``estimated_cost_usd`` is list-price math over
+    recorded tokens, and only where honesty allows (#760): the model reported
+    no cost, the entry carries the cached/uncached split, and the model is in
+    the price table. The two are never summed here — an estimate must never
+    read as a bill.
+    """
+    usage_by_model = model_usage or {}
+    totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+    estimated = 0.0
+    for key, usage in usage_by_model.items():
+        usage = usage or {}
+        usage_cost = usage.get("cost_usd") or 0.0
+        parts = key.split(":", 1)
+        provider = parts[0] if len(parts) > 1 else "unknown"
+        model = parts[1] if len(parts) > 1 else key
+
+        input_tokens = _tok(usage.get("input_tokens"))
+        output_tokens = _tok(usage.get("output_tokens"))
+        cached_tokens = _tok(usage.get("cached_input_tokens"))
+        totals["input_tokens"] += input_tokens
+        totals["cached_input_tokens"] += cached_tokens
+        totals["output_tokens"] += output_tokens
+
+        if (not recorded_cost and not usage_cost
+                and "cached_input_tokens" in usage
+                and (input_tokens or output_tokens)):
+            estimated += estimate_cost(provider, model,
+                                       input_tokens=input_tokens,
+                                       output_tokens=output_tokens,
+                                       cached_input_tokens=cached_tokens)
+    return {
+        **totals,
+        "total_tokens": totals["input_tokens"] + totals["output_tokens"],
+        "cost_usd": round(recorded_cost or 0.0, 6),
+        "estimated_cost_usd": round(estimated, 6),
+    }
+
+
 def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
     """Aggregate costs across all session state files.
 

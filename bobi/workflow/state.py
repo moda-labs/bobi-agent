@@ -9,8 +9,15 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-def _runs_dir() -> Path:
+def _runs_dir(root: Path | None = None) -> Path:
+    """The runs directory for *root*, or the bound root when omitted.
+
+    Only created on the write paths: a reader (the web app folds these into
+    its runs view) must never mkdir inside someone else's runtime tree.
+    """
     from bobi import paths
+    if root is not None:
+        return paths.state_path(root) / "workflow" / "runs"
     d = paths.state_dir() / "workflow" / "runs"
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -33,8 +40,8 @@ class WorkflowRun:
     run_key: str = ""
     resumed_at: str = ""
 
-    def save(self):
-        path = _runs_dir() / f"{self.run_id}.json"
+    def save(self, root: Path | None = None):
+        path = _runs_dir(root) / f"{self.run_id}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         # Write atomically: serialize first, write to a temp file, then
         # rename over the target. A process killed mid-write (e.g. a
@@ -73,35 +80,72 @@ class WorkflowRun:
         path = _runs_dir() / f"{run_id}.json"
         return cls.from_dict(json.loads(path.read_text()))
 
-    def claim(self) -> bool:
+    def claim(self, root: Path | None = None) -> bool:
         """Atomically claim this run for resume.
 
-        Renames ``<run_id>.json`` → ``<run_id>.resuming.json`` using
-        ``os.replace``.  On POSIX this is atomic — exactly one process
-        wins when multiple try concurrently.  Returns True if claimed,
-        False if another process already claimed it.
+        Atomically takes the canonical file, then validates the persisted state
+        it won before publishing ``<run_id>.resuming.json``. This prevents a
+        stale in-memory object from reclaiming a run that was just closed.
         """
-        src = _runs_dir() / f"{self.run_id}.json"
-        dst = _runs_dir() / f"{self.run_id}.resuming.json"
-        self.status = "resuming"
-        self.resumed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-        data = json.dumps(asdict(self), indent=2)
+        src = _runs_dir(root) / f"{self.run_id}.json"
+        claiming = src.with_name(f"{self.run_id}.claiming.json")
+        dst = src.with_name(f"{self.run_id}.resuming.json")
         try:
-            # Write updated state to a temp, then atomically rename the
-            # source to the .resuming path.  If the source is gone (race
-            # lost), FileNotFoundError is raised by os.replace.
+            os.replace(str(src), str(claiming))
+        except FileNotFoundError:
+            return False
+
+        try:
+            current = type(self).from_dict(json.loads(claiming.read_text()))
+            if current.status != "waiting":
+                os.replace(str(claiming), str(src))
+                return False
+            resumed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+            current.status = self.status = "resuming"
+            current.resumed_at = self.resumed_at = resumed_at
             tmp = src.with_name(f".{self.run_id}.claim.tmp")
-            tmp.write_text(data)
-            os.replace(str(src), str(dst))
-            # Source is now gone; move the tmp content into the .resuming file.
+            tmp.write_text(json.dumps(asdict(current), indent=2))
             os.replace(str(tmp), str(dst))
             return True
+        except Exception:
+            if claiming.exists() and not src.exists():
+                os.replace(str(claiming), str(src))
+            raise
+        finally:
+            if claiming.exists():
+                claiming.unlink()
+
+    @classmethod
+    def close(cls, run_id: str, *, root: Path | None = None) -> WorkflowRun | None:
+        """Atomically close a waiting run, losing cleanly to resume/event."""
+        src = _runs_dir(root) / f"{run_id}.json"
+        closing = src.with_name(f"{run_id}.closing.json")
+        try:
+            os.replace(str(src), str(closing))
         except FileNotFoundError:
-            # Another process already renamed (claimed) the source file.
-            tmp = src.with_name(f".{self.run_id}.claim.tmp")
-            if tmp.exists():
-                tmp.unlink()
-            return False
+            return None
+
+        try:
+            run = cls.from_dict(json.loads(closing.read_text()))
+            if run.status != "waiting":
+                os.replace(str(closing), str(src))
+                return None
+            run.status = "cancelled"
+            run.completed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+            run.await_event = ""
+            run.suspended_at_step = -1
+            data = json.dumps(asdict(run), indent=2)
+            tmp = src.with_name(f".{run_id}.close.tmp")
+            tmp.write_text(data)
+            os.replace(str(tmp), str(src))
+            return run
+        except Exception:
+            if closing.exists() and not src.exists():
+                os.replace(str(closing), str(src))
+            raise
+        finally:
+            if closing.exists():
+                closing.unlink()
 
     @classmethod
     def find_waiting(cls, await_event: str, run_key: str = "",
@@ -133,11 +177,13 @@ class WorkflowRun:
         return None
 
     @classmethod
-    def list_runs(cls, status: str | None = None) -> list[WorkflowRun]:
-        if not _runs_dir().exists():
+    def list_runs(cls, status: str | None = None,
+                  root: Path | None = None) -> list[WorkflowRun]:
+        runs_dir = _runs_dir(root)
+        if not runs_dir.exists():
             return []
         runs = []
-        for path in sorted(_runs_dir().glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        for path in sorted(runs_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
                 data = json.loads(path.read_text())
                 if status and data.get("status") != status:

@@ -14,7 +14,7 @@ def runs_dir(tmp_path, monkeypatch):
     """Redirect _runs_dir to a temp directory for test isolation."""
     d = tmp_path / "runs"
     d.mkdir()
-    monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda: d)
+    monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda root=None: d)
     return d
 
 
@@ -146,7 +146,7 @@ class TestFindWaiting:
 
     def test_returns_none_when_dir_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr("bobi.workflow.state._runs_dir",
-                            lambda: tmp_path / "nonexistent")
+                            lambda root=None: tmp_path / "nonexistent")
         assert WorkflowRun.find_waiting("approval") is None
 
     def test_filters_by_repo(self, runs_dir):
@@ -260,7 +260,7 @@ class TestListRuns:
 
     def test_returns_empty_when_dir_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr("bobi.workflow.state._runs_dir",
-                            lambda: tmp_path / "nonexistent")
+                            lambda root=None: tmp_path / "nonexistent")
         assert WorkflowRun.list_runs() == []
 
     def test_tolerates_corrupt_files(self, runs_dir):

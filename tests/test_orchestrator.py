@@ -1691,13 +1691,13 @@ class TestQAPhase:
 class TestTryResumeForEvent:
     def test_returns_false_when_no_waiting_run(self, tmp_path, monkeypatch):
         runs_dir = tmp_path / "runs"
-        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda: runs_dir)
+        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda root=None: runs_dir)
         assert try_resume_for_event("approval") is False
 
     def test_returns_false_when_workflow_not_found(self, tmp_path, monkeypatch):
         runs_dir = tmp_path / "runs"
         runs_dir.mkdir(parents=True)
-        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda: runs_dir)
+        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda root=None: runs_dir)
 
         run = WorkflowRun.create("nonexistent-wf", {"data": {"run_key": "1"}})
         run.status = "waiting"
@@ -1716,7 +1716,7 @@ class TestTryResumeForEvent:
     def test_resumes_waiting_workflow(self, tmp_path, monkeypatch):
         runs_dir = tmp_path / "runs"
         runs_dir.mkdir(parents=True)
-        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda: runs_dir)
+        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda root=None: runs_dir)
 
         run = WorkflowRun.create("test-wf", {"data": {"run_key": "5"}})
         run.status = "waiting"
@@ -1741,7 +1741,7 @@ class TestTryResumeForEvent:
     def test_filters_by_run_key(self, tmp_path, monkeypatch):
         runs_dir = tmp_path / "runs"
         runs_dir.mkdir(parents=True)
-        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda: runs_dir)
+        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda root=None: runs_dir)
 
         run = WorkflowRun.create("test-wf", {"data": {"run_key": "10"}})
         run.status = "waiting"
@@ -1761,7 +1761,7 @@ class TestResumeWorkflowTimestamps:
         _bind_runtime_root(tmp_path, monkeypatch)
         runs_dir = tmp_path / "runs"
         runs_dir.mkdir(parents=True)
-        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda: runs_dir)
+        monkeypatch.setattr("bobi.workflow.state._runs_dir", lambda root=None: runs_dir)
 
         run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
         run.status = "waiting"

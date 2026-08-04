@@ -139,15 +139,21 @@ def test_headings_lists_and_emphasis_still_render() -> None:
 
 
 def test_renderer_is_not_duplicated_back_into_the_view() -> None:
-    """Q025 — the renderer stays a module, not a closure in the view file.
+    """Q025 — the renderer stays a module, never a closure in a view file.
 
     It is security-critical and only testable while it is importable; a copy
-    pasted back into agent.js would silently escape this suite.
+    pasted into a view would silently escape this suite. The single-agent view
+    renders no agent-reply markdown (chat moved to Slack and the CLI), so it
+    need not import the module — but no view may ever inline its own renderer,
+    and any view that does render markdown must reach it through this module.
     """
-    view = MODULE.parent / "agent.js"
-    src = view.read_text()
-    assert "function renderMarkdown" not in src
-    assert 'from "./markdown.js"' in src
+    for view in sorted(MODULE.parent.glob("*.js")):
+        if view.name == "markdown.js":
+            continue
+        src = view.read_text()
+        assert "function renderMarkdown" not in src, view.name
+        if "renderMarkdown" in src:
+            assert 'from "./markdown.js"' in src, view.name
 
 
 def test_json_roundtrip_payload_is_what_we_think_it_is() -> None:
