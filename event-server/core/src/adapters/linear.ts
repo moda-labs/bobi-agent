@@ -1,13 +1,7 @@
 import type { NormalizedEvent } from "../core.js";
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-	return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
-}
-
-function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
-	const value = record?.[key];
-	return typeof value === "string" ? value : undefined;
-}
+// Q117 — these were defined here, module-locally, so github.ts and
+// chat-sdk-slack.ts grew a bare-cast style instead of reusing them.
+import { asRecord, stringField } from "./payload.js";
 
 export function normalizeLinearWebhook(
 	payload: Record<string, unknown>,

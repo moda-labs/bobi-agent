@@ -274,7 +274,7 @@ export class DiscordGatewayManager {
 					this.clearHeartbeat(conn);
 					const tick = () => {
 						if (!isCurrentGeneration(conn, generation) || !conn.session) return;
-						this.apply(conn, generation, conn.session.onTimer("heartbeat"));
+						this.apply(conn, generation, conn.session.onTimer());
 						const next = scheduleUnrefTimeout(tick, action.intervalMs);
 						conn.heartbeatTimer = next;
 					};

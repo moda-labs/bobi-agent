@@ -144,19 +144,19 @@ describe("DiscordGatewaySession heartbeats", () => {
 		const s = readySession();
 		s.onFrame(dispatch("MESSAGE_CREATE", guildMessage(), 7));
 
-		const [beat] = sent(s.onTimer("heartbeat"));
+		const [beat] = sent(s.onTimer());
 		expect(beat).toEqual({ op: GatewayOp.HEARTBEAT, d: 7 });
 
 		// ACK arrives - the next timer beats again instead of reconnecting.
 		s.onFrame(frame(GatewayOp.HEARTBEAT_ACK));
-		expect(sent(s.onTimer("heartbeat"))).toHaveLength(1);
+		expect(sent(s.onTimer())).toHaveLength(1);
 	});
 
 	it("treats a missed ACK as a zombie connection and resumes", () => {
 		const s = readySession();
-		s.onTimer("heartbeat");
+		s.onTimer();
 		// No ACK before the next timer fires: reconnect, resume-first.
-		expect(s.onTimer("heartbeat")).toEqual([{ kind: "reconnect", resume: true }]);
+		expect(s.onTimer()).toEqual([{ kind: "reconnect", resume: true }]);
 	});
 
 	it("answers a server-requested heartbeat immediately", () => {

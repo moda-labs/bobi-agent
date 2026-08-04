@@ -2935,6 +2935,40 @@ describe("handleSlackWorkspaceRegister", () => {
 		expect(store.delivered).toHaveLength(0);
 	});
 
+	// Q099: these three calls moved from hand-rolled fetch() to the Chat SDK's
+	// callSlackApi, which POSTs a form body where bots.info used to be a GET
+	// with a query string. Pin the resolution itself, and the argument that
+	// now rides in the body, so that wire change cannot regress silently.
+	it("resolves app_id from bots.info and keys the bot map by it", async () => {
+		const store = createMockStorage();
+		const calls: Array<{ url: string; body: string }> = [];
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			calls.push({ url: u, body: String(init?.body ?? "") });
+			if (u.includes("auth.test")) {
+				return fetchOk(200, { ok: true, team_id: "T_RESOLVE", bot_id: "B_RESOLVED" });
+			}
+			if (u.includes("bots.info")) {
+				return fetchOk(200, { ok: true, bot: { app_id: "A_RESOLVED" } });
+			}
+			return fetchOk(200, { ok: true });
+		}));
+
+		// No app_id supplied: it can only come from the bots.info round-trip.
+		const res = await handleSlackWorkspaceRegister(store, {
+			workspace_id: "T_RESOLVE", bot_token: "xoxb-r", signing_secret: "sec-r",
+		}, "bubA");
+
+		expect(res.status).toBe(200);
+		expect((res.body as Record<string, unknown>).app_id).toBe("A_RESOLVED");
+		expect(store.slackWorkspaces.get("T_RESOLVE")?.bots?.A_RESOLVED?.signing_secret)
+			.toBe("sec-r");
+
+		const botsInfo = calls.find((c) => c.url.includes("bots.info"))!;
+		expect(botsInfo).toBeDefined();
+		expect(botsInfo.body).toContain("bot=B_RESOLVED");
+	});
+
 	// D048: mergeBot only protects SEQUENTIAL registrations. The global write
 	// is a read-merge-write across an await, so two bots registering the same
 	// workspace at the same time (a fleet roll restarting both agents) each

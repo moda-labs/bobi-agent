@@ -116,8 +116,8 @@ export class SlackSocketSession {
 		this.acknowledgedEnvelopes.acknowledge(envelopeId);
 	}
 
-	onTimer(kind: "staleness"): SlackSocketAction[] {
-		return kind === "staleness" ? [{ kind: "reconnect" }] : [];
+	onTimer(): SlackSocketAction[] {
+		return [{ kind: "reconnect" }];
 	}
 
 	onSocketClose(): SlackSocketAction[] {

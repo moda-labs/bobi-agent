@@ -672,7 +672,7 @@ export class SlackSocketManager {
 		conn.stalenessTimer = clearScheduledTimeout(conn.stalenessTimer);
 		conn.stalenessTimer = scheduleUnrefTimeout(() => {
 			if (!isCurrentGeneration(conn, generation) || !conn.session) return;
-			this.apply(conn, generation, conn.session, conn.session.onTimer("staleness"));
+			this.apply(conn, generation, conn.session, conn.session.onTimer());
 		}, this.stalenessTimeoutMs);
 	}
 

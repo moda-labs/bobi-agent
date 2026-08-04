@@ -119,7 +119,6 @@ describe("Chat SDK webhook parsing (no credentials)", () => {
 describe("bridgeSlackWebhook → NormalizedEvent", () => {
 	it("produces a valid v2 envelope for app_mention", () => {
 		const result = bridgeSlackWebhook(mentionPayload());
-		expect(result.skip).toBe(false);
 		expect(result.event).not.toBeNull();
 
 		const event = result.event!;
@@ -155,7 +154,7 @@ describe("bridgeSlackWebhook → NormalizedEvent", () => {
 
 	it("handles url_verification with challenge", () => {
 		const result = bridgeSlackWebhook(urlVerificationPayload());
-		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
 		expect(result.challenge).toBe("test_challenge_token");
 		expect(result.event).toBeNull();
 	});
@@ -173,7 +172,6 @@ describe("bridgeSlackWebhook → NormalizedEvent", () => {
 			},
 		});
 		const result = bridgeSlackWebhook(body, "B_SELF");
-		expect(result.skip).toBe(true);
 		expect(result.event).toBeNull();
 	});
 
@@ -191,7 +189,6 @@ describe("bridgeSlackWebhook → NormalizedEvent", () => {
 			},
 		});
 		const result = bridgeSlackWebhook(body, "B_SELF");
-		expect(result.skip).toBe(false);
 		expect(result.event).not.toBeNull();
 	});
 
@@ -207,13 +204,13 @@ describe("bridgeSlackWebhook → NormalizedEvent", () => {
 			},
 		});
 		const result = bridgeSlackWebhook(body);
-		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
 	});
 
 	it("skips non-event_callback payloads", () => {
 		const body = JSON.stringify({ type: "app_rate_limited" });
 		const result = bridgeSlackWebhook(body);
-		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
 	});
 });
 
@@ -270,11 +267,11 @@ describe("bridge normalization behavior", () => {
 			},
 		});
 		const result = bridgeSlackWebhook(body, undefined, "U_BOTUSER");
-		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
 		// A DM mentioning the bot user still delivers (dedup is channel-only).
 		const dm = bridgeSlackWebhook(
 			dmPayload({ text: "<@U_BOTUSER> hi" }), undefined, "U_BOTUSER");
-		expect(dm.skip).toBe(false);
+		expect(dm.event).not.toBeNull();
 	});
 
 	it("filters messages from any of several of our bots", () => {
@@ -291,8 +288,8 @@ describe("bridge normalization behavior", () => {
 				ts: "1718100004.000500",
 			},
 		});
-		expect(bridgeSlackWebhook(body, ["B_FIRST", "B_SECOND"]).skip).toBe(true);
-		expect(bridgeSlackWebhook(body, "B_OTHER").skip).toBe(false);
+		expect(bridgeSlackWebhook(body, ["B_FIRST", "B_SECOND"]).event).toBeNull();
+		expect(bridgeSlackWebhook(body, "B_OTHER").event).not.toBeNull();
 	});
 
 	it("uses event_id as the envelope id", () => {
@@ -380,7 +377,7 @@ describe("bridge normalization behavior", () => {
 			undefined,
 			new Set(["UBOT"]),
 		);
-		expect(result.skip).toBe(false);
+		expect(result.event).not.toBeNull();
 		expect(result.event!.type).toBe("slack.thread_reply");
 	});
 
@@ -404,7 +401,6 @@ describe("bridge normalization behavior", () => {
 			threadReplyPayload({ bot_id: "B_OTHER", text: "third party" }),
 			new Set(["B1", "B2"]),
 		);
-		expect(result.skip).toBe(false);
 		expect(result.event).not.toBeNull();
 		// bot_id must survive onto the normalized event so the circuit breaker
 		// can recognise bot authorship (it reads payload.bot_id).
@@ -426,7 +422,7 @@ describe("bridge normalization behavior", () => {
 			},
 		});
 		const result = bridgeSlackWebhook(body);
-		expect(result.skip).toBe(true);
+		expect(result.event).toBeNull();
 	});
 });
 
@@ -480,9 +476,8 @@ describe("Chat SDK markdown conversion quality", () => {
 describe("bridge result feeds into existing event server", () => {
 	it("result shape matches SlackNormalizationResult", () => {
 		const result = bridgeSlackWebhook(mentionPayload());
-		// Must have: event (NormalizedEvent | null), skip (boolean)
-		// Optional: challenge (string)
-		expect(typeof result.skip).toBe("boolean");
+		// Must have: event (NormalizedEvent | null) — a null event IS the skip
+		// signal (Q101). Optional: challenge (string).
 		expect(result.event === null || typeof result.event === "object").toBe(true);
 
 		if (result.event) {

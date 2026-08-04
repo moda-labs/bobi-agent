@@ -200,8 +200,7 @@ export class DiscordGatewaySession {
 	}
 
 	/** The driver's heartbeat timer fired. */
-	onTimer(kind: "heartbeat"): GatewayAction[] {
-		if (kind !== "heartbeat") return [];
+	onTimer(): GatewayAction[] {
 		if (this.awaitingAck) {
 			// Missed ACK = zombie connection: close with a non-1000 code and
 			// resume (the docs' prescribed recovery).

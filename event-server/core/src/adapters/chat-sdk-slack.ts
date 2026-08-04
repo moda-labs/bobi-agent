@@ -8,6 +8,7 @@
 import { parseSlackWebhookBody } from "@chat-adapter/slack/webhook";
 import type { NormalizedEvent, SlackNormalizationResult } from "../core.js";
 import { slackConversation } from "../conversation.js";
+import { SLACK_FILE_KEYS, asRecord, normalizeAttachments, stringField } from "./payload.js";
 
 export type ChatSdkBridgeResult = SlackNormalizationResult;
 
@@ -56,7 +57,7 @@ export function bridgeSlackWebhook(
 		// Never silent: a parser rejection here drops a user message. Keep the
 		// skip (the route must still 200 so Slack stops retrying) but log it.
 		console.warn(`chat-sdk bridge failed to parse Slack webhook: ${String(err)}`);
-		return { event: null, skip: true };
+		return { event: null };
 	}
 
 	// url_verification — return challenge, skip event processing
@@ -65,18 +66,17 @@ export function bridgeSlackWebhook(
 		return {
 			event: null,
 			challenge: parsed.challenge,
-			skip: true,
 		};
 	}
 
 	// We only process event_callback payloads
 	const raw = payload ?? (JSON.parse(body) as Record<string, unknown>);
 	if (raw.type !== "event_callback") {
-		return { event: null, skip: true };
+		return { event: null };
 	}
 
 	const innerEvent = raw.event as Record<string, unknown> | undefined;
-	if (!innerEvent) return { event: null, skip: true };
+	if (!innerEvent) return { event: null };
 
 	// Skip subtypes (message_changed, message_deleted, etc.) - they are edits
 	// and system notices, not new user messages.
@@ -86,7 +86,7 @@ export function bridgeSlackWebhook(
 	// upload path along with the file extraction below. Channel @mentions with
 	// files survived only because app_mention events carry no subtype.
 	if (innerEvent.subtype && innerEvent.subtype !== "file_share") {
-		return { event: null, skip: true };
+		return { event: null };
 	}
 
 	// Self-loop filter: skip messages authored by ANY of our bots - both to
@@ -97,7 +97,7 @@ export function bridgeSlackWebhook(
 			? new Set([selfBotIds])
 			: new Set(selfBotIds ?? []);
 	if (innerEvent.bot_id && selfSet.has(innerEvent.bot_id as string)) {
-		return { event: null, skip: true };
+		return { event: null };
 	}
 
 	// Classify event type
@@ -115,13 +115,13 @@ export function bridgeSlackWebhook(
 	if (eventType === "app_mention") {
 		slackEventType = "slack.mention";
 	} else if (eventType === "message" && mentionsSelfUser && channelType !== "im" && channelType !== "mpim") {
-		return { event: null, skip: true };
+		return { event: null };
 	} else if (channelType === "im" || channelType === "mpim") {
 		slackEventType = "slack.dm";
 	} else if (threadTs) {
 		slackEventType = "slack.thread_reply";
 	} else {
-		return { event: null, skip: true };
+		return { event: null };
 	}
 
 	const teamId = (raw.team_id as string) || "";
@@ -155,22 +155,7 @@ export function bridgeSlackWebhook(
 
 	// Extract file attachments (images, documents, etc.) from the event.
 	// Slack includes a `files` array on messages with shared files.
-	const rawFiles = innerEvent.files as Array<Record<string, unknown>> | undefined;
-	const files: Array<Record<string, string>> = [];
-	if (Array.isArray(rawFiles)) {
-		for (const f of rawFiles) {
-			const entry: Record<string, string> = {};
-			if (f.id) entry.id = String(f.id);
-			if (f.name) entry.name = String(f.name);
-			if (f.mimetype) entry.mimetype = String(f.mimetype);
-			if (f.filetype) entry.filetype = String(f.filetype);
-			if (f.url_private) entry.url_private = String(f.url_private);
-			if (f.url_private_download)
-				entry.url_private_download = String(f.url_private_download);
-			if (f.size) entry.size = String(f.size);
-			files.push(entry);
-		}
-	}
+	const files = normalizeAttachments(innerEvent.files, SLACK_FILE_KEYS);
 
 	const fields: Record<string, string | number | boolean> = {};
 	if (userId) fields.user_id = userId;
@@ -210,6 +195,5 @@ export function bridgeSlackWebhook(
 				...(files.length > 0 ? { files } : {}),
 			},
 		},
-		skip: false,
 	};
 }

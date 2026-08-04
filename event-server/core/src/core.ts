@@ -21,10 +21,15 @@ export interface NormalizedEvent {
 	bubble_id?: string;
 }
 
+/**
+ * A null `event` IS the skip signal (Q101). There was a separate `skip:
+ * boolean` alongside it, but every return site paired skip:true with
+ * event:null and skip:false with a non-null event, so it only ever gave
+ * consumers an impossible fourth state to reason about.
+ */
 export interface SlackNormalizationResult {
 	event: NormalizedEvent | null;
 	challenge?: string;
-	skip: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +332,7 @@ import { normalizeLinearWebhook } from "./adapters/linear.js";
 import { bridgeSlackWebhook } from "./adapters/chat-sdk-slack.js";
 import { normalizeWhatsAppWebhook } from "./adapters/whatsapp.js";
 import { chunkForChannel, discordApi, getChannelAdapter, slackApiUrl, truncateForChannel, whatsappApi, type OutboundFile } from "./channels.js";
+import { callSlackApi } from "@chat-adapter/slack/api";
 import { parseConversation, type Conversation } from "./conversation.js";
 
 export { normalizeGitHubWebhook as normalizeGitHubPayload } from "./adapters/github.js";
@@ -798,7 +804,7 @@ export async function handleSlackWebhook(
 	if (result.challenge !== undefined) {
 		return { status: 200, body: { challenge: result.challenge } };
 	}
-	if (result.skip || !result.event) {
+	if (!result.event) {
 		return { status: 200, body: { ok: true } };
 	}
 
@@ -2431,12 +2437,19 @@ export async function handleSlackWorkspaceRegister(
 	let botUserId = (body.bot_user_id as string) || undefined;
 	let appId = (body.app_id as string) || undefined;
 	const signingSecret = (body.signing_secret as string) || undefined;
+	// Q099 — through the Chat SDK's api module, which owns URL joining, the
+	// Bearer header, and body encoding, rather than three hand-rolled fetch()
+	// calls in a module that already has a real Slack client in scope.
+	//
+	// The explicit `ok` checks stay: callSlackApi throws only on a non-2xx
+	// HTTP status, and Slack reports method-level failure as HTTP 200 with
+	// {ok: false, error}. Only transport and HTTP errors reach the catch.
+	const slackCall = (method: string, args: Record<string, unknown> = {}) =>
+		callSlackApi(method, args, { apiUrl: slackApiUrl(), token: botToken });
+
 	if (bubbleId) {
 		try {
-			const resp = await fetch(`${slackApiUrl()}auth.test`, {
-				headers: { Authorization: `Bearer ${botToken}` },
-			});
-			const data = (await resp.json()) as Record<string, unknown>;
+			const data = await slackCall("auth.test");
 			if (!data.ok || data.team_id !== workspaceId) {
 				return { status: 403, body: { error: "forbidden" } };
 			}
@@ -2446,10 +2459,7 @@ export async function handleSlackWorkspaceRegister(
 		}
 	} else if (!botId) {
 		try {
-			const resp = await fetch(`${slackApiUrl()}auth.test`, {
-				headers: { Authorization: `Bearer ${botToken}` },
-			});
-			const data = (await resp.json()) as Record<string, unknown>;
+			const data = await slackCall("auth.test");
 			if (data.ok) {
 				botId = data.bot_id as string;
 				botUserId = (data.user_id as string) || botUserId;
@@ -2460,11 +2470,7 @@ export async function handleSlackWorkspaceRegister(
 	}
 	if (!appId && botId) {
 		try {
-			const resp = await fetch(
-				`${slackApiUrl()}bots.info?bot=${encodeURIComponent(botId)}`,
-				{ headers: { Authorization: `Bearer ${botToken}` } },
-			);
-			const data = (await resp.json()) as Record<string, unknown>;
+			const data = await slackCall("bots.info", { bot: botId });
 			if (data.ok) appId = (data.bot as Record<string, unknown>)?.app_id as string;
 		} catch {
 			// best-effort — falls back to bot_id-keyed storage below
