@@ -476,6 +476,45 @@ def test_register_slack_workspaces_posts_bot_token():
                                    "signing_secret": "shhh"}
 
 
+@pytest.mark.parametrize("status", [403, 500])
+def test_register_slack_workspaces_reports_a_rejected_registration(status):
+    """D031 — a rejected registration was logged and returned as success.
+
+    ``signed_request`` never raises on status, so a server that forgot the
+    bubble (403) or failed (500) still fell through to
+    "Registered Slack workspace ..." and returned [team_id]. The
+    bubble-scoped outbound record (#487) and the slack resource grant are
+    never written, so self-reply loop prevention and outbound sends are both
+    silently broken — and because nothing raised, the subagent's unsigned
+    retry path never triggered either. The whatsapp and discord siblings
+    check the status; this one did not.
+    """
+    from bobi.config import Config, ServiceConfig
+    from bobi.events.server import register_slack_workspaces
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "auth.test" in url:
+            return httpx.Response(200, json={
+                "ok": True, "team_id": "T0952",
+                "bot_id": "BSELF", "user_id": "USELF",
+            })
+        if "bots.info" in url:
+            return httpx.Response(200, json={"ok": True, "bot": {"app_id": "A0952"}})
+        if url.endswith("/slack/workspaces"):
+            return httpx.Response(status, json={"error": "no such bubble"})
+        raise AssertionError(f"unexpected url {url}")
+
+    mock_http = httpx.Client(transport=httpx.MockTransport(handler))
+    with patch.object(pooled, '_client', mock_http):
+        cfg = Config(services=[
+            ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"}),
+        ])
+        result = register_slack_workspaces("http://localhost:8080", cfg)
+
+    assert result == []
+
+
 def test_register_slack_workspaces_noop_without_token():
     from bobi.events.server import register_slack_workspaces
     from bobi.config import Config

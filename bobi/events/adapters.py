@@ -99,14 +99,40 @@ def _github_remote_key(repo_path: Path) -> list[str]:
 
 
 def _parse_github_url(url: str) -> str:
-    """Extract org/repo from a GitHub remote URL."""
+    """Extract org/repo from a github.com remote URL, else "".
+
+    The host is compared exactly, not searched for (D075). A substring test
+    made every GitHub Enterprise host — ``github.company.com`` — look like
+    github.com followed by a path, producing a garbage slug ('pany.com/acme')
+    and a subscription topic no event can ever match; it also accepted
+    lookalikes such as ``notgithub.com`` and ``github.com.evil.test``. bobi
+    talks only to github.com here, so anything else yields no slug.
+    """
     url = url.rstrip("/")
     if url.endswith(".git"):
         url = url[:-4]
-    if "github.com" in url:
-        parts = url.split("github.com")[-1].lstrip(":/").split("/")
-        if len(parts) >= 2:
-            return f"{parts[0]}/{parts[1]}"
+
+    rest = url.split("://", 1)[1] if "://" in url else url
+    # Strip any userinfo (git@, user:token@) ahead of the host.
+    head = rest.split("/", 1)[0]
+    if "@" in head:
+        rest = rest.split("@", 1)[1]
+
+    # scp-style `host:org/repo` vs URL-style `host/org/repo`. A numeric
+    # segment after the colon is a port, not the path.
+    head = rest.split("/", 1)[0]
+    if ":" in head:
+        host, _, after = rest.partition(":")
+        first = after.split("/", 1)[0]
+        path = after.split("/", 1)[1] if first.isdigit() else after
+    else:
+        host, _, path = rest.partition("/")
+
+    if host.lower() != "github.com":
+        return ""
+    parts = [p for p in path.split("/") if p]
+    if len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
     return ""
 
 

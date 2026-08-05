@@ -787,8 +787,14 @@ def spawn_adhoc(
     # Resolve MCP servers: caller-supplied override, else config-declared.
     # Done here so all spawn paths (CLI, workflow, subagent) go through one
     # call site.
+    # An empty set is passed through EXPLICITLY, not dropped: this is the path
+    # that resolved the set from the team config, so it is the one entitled to
+    # say "this team declares none" and clear a stale rendered block. A call
+    # site that simply omitted the key means "no opinion" and must leave the
+    # shared config alone (D009).
     _cfg = _load_team_config()
-    merged_mcp = mcp_servers or (_cfg.mcp_servers if _cfg else None)
+    merged_mcp = mcp_servers if mcp_servers is not None else (
+        _cfg.mcp_servers if _cfg else None)
     model = _resolve_launch_model(role, explicit=model, cfg=_cfg)
     effort = _resolve_launch_effort(role, explicit=effort, cfg=_cfg)
 
@@ -803,7 +809,7 @@ def spawn_adhoc(
         extra_options={
             "skills": "all",
             "max_turns": _resolve_launch_max_turns(role, cfg=_cfg),
-            **({"mcp_servers": merged_mcp} if merged_mcp else {}),
+            **({"mcp_servers": merged_mcp} if merged_mcp is not None else {}),
             **({"model": model} if model else {}),
             **({"effort": effort} if effort else {}),
         },

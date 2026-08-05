@@ -54,6 +54,32 @@ class TestGithubDetector:
     def test_parse_non_github_url(self):
         assert _parse_github_url("https://gitlab.com/foo/bar") == ""
 
+    def test_enterprise_host_is_not_github_com(self):
+        """D075 — a substring match makes 'github.company.com' look like
+        github.com plus a path.
+
+        'github.com' matches the host's first ten characters, so splitting on
+        it yields 'pany.com/acme/widget' → slug 'pany.com/acme' and a
+        subscription topic ('github:pany.com/acme') no event can ever match.
+        Grant authorization for it then fails against the real GitHub API and
+        drops the topic with a misleading credential warning. The right answer
+        for a host bobi cannot talk to is no slug at all.
+        """
+        assert _parse_github_url("https://github.company.com/acme/widget.git") == ""
+        assert _parse_github_url("git@github.company.com:acme/widget.git") == ""
+
+    def test_host_suffix_is_not_github_com(self):
+        # An attacker-registerable lookalike must not resolve either.
+        assert _parse_github_url("https://notgithub.com/acme/widget") == ""
+        assert _parse_github_url("https://github.com.evil.test/acme/widget") == ""
+
+    def test_parse_ssh_scheme_url(self):
+        assert _parse_github_url(
+            "ssh://git@github.com/moda-labs/bobi-agent.git") == "moda-labs/bobi-agent"
+
+    def test_parse_url_without_credentials_or_suffix(self):
+        assert _parse_github_url("https://github.com/acme/widget") == "acme/widget"
+
     def test_detect_from_git_remote(self, tmp_path):
         """Auto-detect github:org/repo when project is a git repo."""
         import subprocess
