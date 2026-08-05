@@ -86,13 +86,27 @@ PATH="$HOME/.nvm/versions/node/v24.4.1/bin:$PATH" \
 cd ..
 ```
 
-Commit and push the release bump:
+Commit the release bump and land it **via a PR** — `main` is protected, so
+pushing to it directly is rejected. Work in a worktree, open the PR, and merge
+it once checks are green (0.53.0, 0.54.0 and 0.55.0 all went this way):
 
 ```bash
+git worktree add -b release/<version> .claude/worktrees/release-<version> origin/main
+cd .claude/worktrees/release-<version>
+# ...edit VERSION, pyproject.toml, CHANGELOG.md...
 git add VERSION pyproject.toml CHANGELOG.md
 git commit -m "chore(release): cut <version>"
-git push origin main
+git push -u origin release/<version>
+gh pr create --base main --title "chore(release): cut <version>" --body "..."
 ```
+
+The releaser authors the PR, so the 1-review ruleset is unsatisfiable by them;
+`gh pr merge --squash --admin` is the authorized equivalent of the maintainer's
+own UI click. Note that `--delete-branch` errors with `fatal: 'main' is already
+used by worktree` when main is checked out elsewhere — **the merge still
+succeeds**; verify with `gh pr view` rather than reacting to the message.
+
+Then tag from `main` at the merge commit.
 
 Publish the GitHub Release. This tag/release event builds the wheel, publishes
 to PyPI, and bumps Homebrew. It does NOT run a canary, deploy the event server,
@@ -125,11 +139,16 @@ installs `bobi==<version>` from PyPI, so it must run after the publish above.
 It needs `claude-version` as well as the version — the exact claude CLI the
 release resolved from the floating `stable` channel, so every arch bakes the
 same one. **Do not re-derive it.** `build-wheel` prints the ready-made dispatch
-command to its run summary (and as a `::notice::`); copy it from there:
+command to its run summary (and as a `::notice::`); copy it from there.
+
+A `::notice::` is an **annotation, not log output** — `gh run view --log | grep`
+will never find it. Read it directly:
 
 ```bash
-gh run view <release-run-id> --repo moda-labs/bobi-agent \
-  --json jobs --jq '.jobs[] | select(.name=="Build the release wheel") | .url'
+JOB=$(gh run view <release-run-id> --repo moda-labs/bobi-agent \
+  --json jobs --jq '.jobs[] | select(.name=="Build the release wheel") | .databaseId')
+gh api repos/moda-labs/bobi-agent/check-runs/$JOB/annotations --jq '.[].message'
+# -> version=<version> claude-version=<x.y.z> source-sha=<sha>
 ```
 
 If you are recovering an OLD release whose summary has expired, resolve the
@@ -210,10 +229,16 @@ git pull --ff-only
 git status --short
 ```
 
-Update both pins:
+**There is one pin, and you do not normally edit it by hand.** moda-agents#92
+consolidated the former four-site fan-out into a single
+`.github/fleet-version` holding `BOBI_VERSION=<version>` — deliberately
+*outside* `.github/workflows/`, because `GITHUB_TOKEN` cannot push a change to
+any file under that directory and `version-gate.yml` has to be able to deliver
+its own result. `deploy-agent-teams.yml` and `lint.yml` no longer carry copies;
+ignore any instruction to hand-write three files.
 
-- `.github/workflows/deploy-agent-teams.yml`: `BOBI_VERSION`
-- `.github/workflows/lint.yml`: pinned `pip install "bobi==..."`
+The bump arrives as a PR from `version-gate.yml` (below). Editing
+`.github/fleet-version` by hand is a recovery path, not the normal one.
 
 Worker identity check: if the event-server Worker name or URL changes, move all
 external entry points together before validating the release:
@@ -238,12 +263,12 @@ rm -rf "$tmpdir"
 
 If pip cannot find the just-published version, wait 30-60 seconds and retry.
 
-Commit, push, and dispatch the fleet rebuild:
+Merge the pin PR that `version-gate.yml` opened, then dispatch the fleet
+rebuild. **The roll is a separate decision, not part of the release** — merging
+the pin alone changes nothing on a running box:
 
 ```bash
-git add .github/workflows/deploy-agent-teams.yml .github/workflows/lint.yml
-git commit -m "ops: bump bobi deploy pin to <version>"
-git push origin main
+gh pr merge <pin-pr> --repo moda-labs/moda-agents --squash --admin
 
 gh workflow run "Deploy agent teams" --ref main -f rebuild=true
 gh run list --repo moda-labs/moda-agents --workflow "Deploy agent teams" \
