@@ -152,7 +152,7 @@ Six changes. Each is small; the ordering is the order they matter.
 Everything downstream (pty spawn, scrape, chat post, credential check) takes the **resolved spec as a required argument** rather than re-deriving it from process state.
 
 Required, not defaulted, because the ambient default is actively wrong here: `bobi agent <name> ...` pins `BOBI_BRAIN` to the team's brain before any command body runs (`cli.py:174` `_bind_agent_runtime` -> `_pin_team_brain` -> `set_process_brain_from_config`).
-So inside a codex `tool-login`, `_active_spec()` returns the **claude** spec.
+So inside a codex `auth` run, `_active_spec()` returns the **claude** spec.
 A missed threading site would not crash, it would silently check `~/.claude/.credentials.json`, find the brain's credentials, and report codex as authenticated.
 `cli.py:613` is exactly that shape today, so the new command must not be modelled on it.
 
@@ -179,14 +179,15 @@ So the block runs on exactly one population - subscription-mode, non-codex-brain
 Two details:
 
 - **Ownership.** The entrypoint runs as root until `exec gosu` (line 630), and the recursive `chown` of `$DATA_DIR` is gated on the `.bobi-owned` stamp that every already-deployed machine already has. `mkdir -p "${DATA_DIR}/codex"` alone lands `root:root`, and the app user can then write neither the credential nor the lock file. The block chowns explicitly, mirroring lines 485-486.
-- **Self-healing, local-wins.** If a future codex ever replaces the symlink with a regular file, that file is by definition the *newer* credential, so it wins: `mv -f` onto the volume, then re-link. An earlier draft used `mv -n`, which silently kept the stale volume copy and deleted the fresh one.
+- **Self-healing, local-wins.** If anything ever replaces the symlink with a regular file, that file is by definition the *newer* credential, so it wins: `mv -f` onto the volume, then re-link. An earlier draft used `mv -n`, which silently kept the stale volume copy and deleted the fresh one.
+- **Nothing in bobi may write `auth.json` through the atomic helper.** This repo's `CLAUDE.md` states the hazard exactly: `atomic_write_text` "lands as a new inode renamed over the target, so the target's mode, ownership, and **symlink-ness do not survive**", which is why `config.save_bubble_state` stays off the helper on purpose. A single `atomic_write_json` against `~/.codex/auth.json` would silently convert the link back into a regular file and strand the credential on the ephemeral overlay. So the constraint is written down here, a test asserts it, and the self-heal above is the backstop rather than the plan. The precedent also covers the mode: the credential is created at `0600`, not chmod-ed after.
 
 `CODEX_HOME` stays unset, so codex and `auth_bootstrap.credentials_path()` both resolve through `$HOME` and agree, and `credentials_path()` needs no change (which is why this plan does not touch #861's lines).
 A dangling `~/.codex/auth.json` (volume file not yet created) behaves exactly like a missing file for both `Path.is_file()` and codex, so the pre-login state is correct by construction.
 
 ### C. Make the trigger in-flight, and bound it honestly
 
-New command `bobi agent <name> tool-login codex`, callable by any worker in the container.
+New command `bobi agent <name> auth codex`, callable by any worker in the container.
 
 `--timeout` is the budget for the **whole command**, not just the device poll: the probe, the scrape (`url_timeout`, 120 s today), the channel work, and the poll all draw from it.
 Default **300 s**, comfortably under the harness's 600 s Bash ceiling, and the recovery recipe wraps the call in a real `timeout 420` **and** tells the agent to raise the Bash tool's own `timeout` parameter, whose default is 120 s.
@@ -220,7 +221,7 @@ Classifying every non-zero as "unauthenticated" would page an operator and burn 
 
 The probe decides the exit code, and it also replaces the credential-fingerprint compare-and-swap an earlier draft used for concurrency: a caller that takes the lock probes first and returns immediately if someone else fixed things.
 One mechanism, both jobs, and it answers the only question anyone actually has.
-`--force` therefore no longer means "trust me, skip the check". It means "skip the *presence* pre-check"; the probe still gates entry and exit.
+This removes the presence pre-check entirely rather than making it skippable: the probe is the only gate, and it does not care what is on disk. A `--force` flag that skips a check nobody performs would be a trap, so there is none. `--rebind` (below) is the flag that covers the case people reach for `--force` for.
 
 `"reply OK"` is fixed argv, never caller-controlled, so no review content reaches the probe.
 
@@ -236,11 +237,11 @@ A loser returns **exit 3** immediately and degrades, which is the correct answer
 The same exit 3 carries the cooldown: a stamp beside the lock suppresses starting *another* ceremony within one timeout of the last, so a wedged agent looping on 401s neither spams the login channel nor burns device codes.
 The cooldown is evaluated **after** the probe, so a healthy container always gets exit 0 rather than a spurious exit 3.
 
-The control that stops an operator being pointed at a dead code is the **cancellation message** (below), not the interval.
+The control that stops an operator being pointed at a dead code is **editing the message to its expired state** (below), not the interval: the code stops existing in the channel the moment it stops being pollable.
 
 ### F. Close the arbitrary-destination hole on both commands
 
-`tool-login` has no `--channel`; the destination is always `$BOBI_LOGIN_CHANNEL`.
+`auth` has no `--channel`; the destination is always `$BOBI_LOGIN_CHANNEL`.
 And `--channel` is dropped from the agent-group `login-bootstrap` registration too, because Problem §7 shows it is worker-reachable today and hands an attacker-chosen destination the *brain's* OAuth flow.
 The boot path does not need the flag (it reads `$BOBI_LOGIN_CHANNEL`), and an operator on `fly ssh console` can still set the env var for a one-off.
 
@@ -270,13 +271,14 @@ The bounded block gets both. **One** worker waits, for at most 300 s, inside a s
 ### In scope
 
 1. `bobi/auth_bootstrap.py`: required-spec threading, `run_bootstrap(target=...)`, `AuthProbe`, result object, send-path pre-flight, orphan reaping, tool-target messaging.
-2. `bobi/cli.py`: `tool-login` command (incl. `--status`); `--channel` dropped from the agent-group `login-bootstrap`.
-3. `bobi/fsutil.py`: `file_lock(..., blocking=True)`. Default preserves every existing caller.
-4. Non-blocking single-flight + cooldown, both surfacing as exit 3.
-5. `docker/codex-auth.sh` (new, sourceable) + its call from `docker/docker-entrypoint.sh`: durable `auth.json` symlink on subscription non-codex-brain teams, app-user owned, self-healing; subscription sweep made non-destructive and target-resolving.
-6. `bobi/tool_library/codex/guide.md` + `docs/TOOL_LIBRARY.md`: the recovery contract.
-7. **A companion PR in `moda-agents`** carrying the same recovery contract into `moda-eng-team`'s `tools/codex.md` and deleting its false preflight claim. Not optional; see [Delivery](#delivery-the-bobi-agent-pr-alone-does-not-close-958).
-8. Tests per [Verification](#verification), including a fake-codex stub so the ceremony is testable without an operator.
+2. `bobi/cli.py`: `auth` command (incl. `--status`, `--rebind`, and the specified `--help` text), with `login-bootstrap` kept as a hidden alias; `--channel` dropped from the agent-group registration.
+3. `bobi/doctor.py`: a codex auth row reading the same state file as `--status`.
+4. `bobi/fsutil.py`: `file_lock(..., blocking=True)`. Default preserves every existing caller.
+5. Non-blocking single-flight + cooldown, both surfacing as exit 3.
+6. `docker/codex-auth.sh` (new, sourceable) + its call from `docker/docker-entrypoint.sh`: durable `auth.json` symlink on subscription non-codex-brain teams, app-user owned, self-healing; subscription sweep made non-destructive and target-resolving.
+7. `bobi/tool_library/codex/guide.md` + `docs/TOOL_LIBRARY.md`: the recovery contract.
+8. **A companion PR in `moda-agents`** carrying the same recovery contract into `moda-eng-team`'s `tools/codex.md` and deleting its false preflight claim. Not optional; see [Delivery](#delivery-the-bobi-agent-pr-alone-does-not-close-958).
+9. Tests per [Verification](#verification), including a fake-codex stub so the ceremony is testable without an operator.
 
 ### Out of scope
 
@@ -318,7 +320,7 @@ Existing brain callers pass `_active_spec()` explicitly. A slightly larger diff 
 |---|---|---|
 | `cfg.brain_is_gateway` | refuses every login | **unchanged**: refuses every target |
 | `spec.shadow_env` set | raises | **mode-aware** (below) |
-| `credentials_exist()` pre-check | returns True | unchanged unless `--force`; the **probe** is the real gate (D) |
+| `credentials_exist()` pre-check | returns True | **deleted** on the tool path; the probe is the only gate (D) |
 
 **Gateway, unchanged.** `validate_auth_mode` already fatals on gateway + subscription (entrypoint:155-156), so gateway teams are always `api_key`, where the shadow-env guard refuses anyway. No team shape loses a capability it could otherwise have had, and leaving the predicate alone removes this plan's only adjacency with #863. An earlier draft narrowed the guard to `target == "brain"`; that is dropped, because on a gateway team it would let an agent run `codex login --device-auth` straight against `auth.openai.com` and route model traffic around the audit and spend boundary, with an operator's authorization on it.
 
@@ -329,72 +331,154 @@ Existing brain callers pass `_active_spec()` explicitly. A slightly larger diff 
 
 The real shadowing vector is the *file*, not the env var, which is what the sweep below is for.
 
-### `tool-login`: the wire shape
+### The command: `bobi agent <name> auth [<tool>]`
+
+The CLI mirrors the library layer A already builds. `resolve_spec(target)` treats the brain as one target among several, so the command should too: one verb, an optional target, `brain` implied when omitted.
 
 ```
-bobi agent <name> tool-login <tool> [--force] [--timeout SECONDS]
-bobi agent <name> tool-login <tool> --status
+bobi agent <name> auth [<tool>] [--timeout SECONDS] [--status] [--rebind]
 ```
+
+`login-bootstrap` stays as a **hidden alias**, not a rename. `docker/docker-entrypoint.sh:566` in every already-published image invokes it by name, so breaking it would break rollback to any earlier image. The alias costs one line.
+
+An earlier draft called this `tool-login`. Dropped: it pairs badly with its own sibling (`login-bootstrap` / `tool-login` share a word in opposite orders and differ on two axes at once), and it encodes an internal taxonomy the caller does not have - an agent hitting a 401 knows "codex is not authenticated", not "codex is a tool target".
 
 | Field | Meaning |
 |---|---|
-| `<tool>` | a key in `_SPECS` other than the brain sentinel; today only `codex` |
-| `--force` | skip the "credentials already present" presence pre-check. The probe still gates entry and exit |
+| `<tool>` | a key in `_SPECS`; omitted means the team's brain, which is today's `login-bootstrap` behaviour |
 | `--timeout` | total budget for the whole command: probe, lock, scrape, post, poll. Default 300 |
-| `--status` | print local state - probe result, whether a ceremony is in flight, the in-flight run/machine id, cooldown remaining - and exit. No ceremony, no post |
+| `--status` | print local auth state and exit. Never posts, never spawns, never blocks |
+| `--rebind` | remove the stored credential, then run the ceremony. For a wrong-account binding or a rotation |
 
-There is deliberately **no `--channel`** (F).
+There is deliberately **no `--channel`** (F), and deliberately **no `--force`**.
+`--force` existed to skip a presence pre-check, and D deleted the presence pre-check: the probe is the only gate, and it does not care what is on disk. A flag that skips a check nobody performs is a trap.
+
+`--rebind` is the flag that replaces it, and it closes a real hole rather than a cosmetic one. Ordering step 2 is "probe passes -> exit 0 without a ceremony", so a credential that **works but is bound to the wrong account** could never be replaced through this command. Every credential surface owes an answer to "someone left the team"; this is it.
 
 | Exit | Meaning | Caller does |
 |---|---|---|
-| 0 | probe passes: codex authenticates | run the cross-model pass |
+| 0 | probe passes: the tool authenticates | run the cross-model pass |
 | 2 | ceremony ran, probe still shows unauthenticated | degrade to same-model, record the owed cross-model opinion |
-| 3 | a ceremony is in flight, or one ran within the cooldown | retry `codex` once (it may have just been fixed), else degrade as for 2 |
+| 3 | another worker is already running it, **or** one ran within the cooldown. The distinguishing reason is printed on stderr, because the two call for the same action but read very differently in a log | retry the tool once (it may have just been fixed), else degrade as for 2 |
 | 1 | misconfigured, unusable, or **probe inconclusive**: no login channel, unknown tool, gateway team, `OPENAI_API_KEY` in api_key mode, channel send failed, 429/5xx/outage | report the error; do not retry, and do not page an operator |
 
 `run_bootstrap` today returns a bare `bool` and swallows `TimeoutExpired` into the same `credentials_exist()` result, so it cannot express this. It returns a small result object (`ok`, `reason`), and the CLI maps `reason` to the exit code.
+
+For a command whose entire purpose is a human ceremony at an inconvenient hour, the docstring is the primary interface, so it is specified here rather than left to the implementer:
+
+```
+$ bobi agent eng-team auth codex --help
+
+Ask the operator to authorize a CLI tool over chat, and wait.
+
+    codex authenticates with an OAuth subscription, not an API key. When it
+    401s inside a running container, this posts a device-login request to
+    $BOBI_LOGIN_CHANNEL and blocks until a human authorizes it or the window
+    closes. One login authorizes every worker in the container, including
+    ones already running, and survives a restart.
+
+    The outcome is decided by a real call to the tool, never by a file on
+    disk: a credential can be present and still be dead.
+
+    Exit 0 authorized · 2 nobody authorized in time · 3 another worker is
+    already running it · 1 unusable (no login channel, unknown tool, gateway
+    team, or the tool itself is erroring).
+
+Usage:
+    bobi agent eng-team auth codex             # ask, and wait up to 5m
+    bobi agent eng-team auth codex --status    # what is true now; asks nobody
+    bobi agent eng-team auth codex --rebind    # drop the credential, ask again
+    bobi agent eng-team auth --status          # same, for the team's brain
+
+Options:
+  --timeout SECONDS  How long to hold the run open while the operator gets to
+                     their laptop. Whole-command budget, default 300. At the
+                     deadline the pending code is cancelled in chat, exit 2.
+  --status           Print local auth state and exit. Never posts, never waits.
+  --rebind           Remove the stored credential and run the ceremony. Use when
+                     the wrong account was bound, or to rotate.
+```
+
+`--status` prints state, not a table cell:
+
+```
+$ bobi agent eng-team auth codex --status
+codex        unauthenticated (401, probed 40s ago)
+credential   /data/codex/auth.json  absent
+ceremony     in flight since 00:31:12 UTC, run wf-issue-lifecycle-eng-team-958, pid 4417
+cooldown     n/a
+```
+
+### `doctor` is the front door; `--status` is the detail view
+
+`bobi/doctor.py` already ships `_check_claude_auth()`, which runs a minimal real query and reads a 401 out of stderr - the exact pattern D specifies, already in this repo, already applied to the brain. An operator at 2am runs `doctor`; they do not run a flag on a command they have never heard of.
+
+So `run_doctor()` gains a codex row that reports the last probe result and its age from the same state file `--status` reads. No network in a health check: it reports what is known, and `--status` or a real ceremony refreshes it. One front door, one detail view.
+
+This is also supporting evidence for Q5: the house already agrees that presence is not enough for the brain, because `_check_claude_auth` makes a real call rather than stat-ing `.credentials.json`.
 
 ### Ordering inside the ceremony
 
 Order is a correctness property here, and the current code has it wrong for this use: `run_bootstrap` spawns the pty, scrapes, and only *then* touches the channel. If the post fails, a device code has already been minted and burned, and the URL and code existed only in a subprocess's stderr. Nobody is told a login is pending.
 
 1. **take the lock, non-blocking** - cheapest possible shedding, burns nothing; on failure exit 3
-2. **probe** - if it passes, exit 0 without a ceremony; if inconclusive, exit 1
+2. **probe** - if it passes, exit 0 without a ceremony; if inconclusive, exit 1. `--rebind` removes the credential *before* this step, so a passing probe does not short-circuit a deliberate rotation
 3. **cooldown** - if a ceremony ran within the interval, exit 3
-4. **channel pre-flight**: register, then **post a real heads-up message** ("codex login starting on machine X, run Y - code follows"). This is what actually validates the destination. Registration alone does not: `_register_login_channel` provisions workspace-level credentials and grants and never touches the channel id, so `channel_not_found`, `not_in_channel`, and a missing scope surface only on send. On failure exit 1, having burned nothing. It also gives the operator a few seconds' warning before the code appears.
+4. **channel pre-flight**: register, then **post the message in its "starting" state** ("codex login starting on machine X, run Y - code follows"), keeping the `ts` `channels_send` returns. This is what actually validates the destination. Registration alone does not: `_register_login_channel` provisions workspace-level credentials and grants and never touches the channel id, so `channel_not_found`, `not_in_channel`, and a missing scope surface only on send. On failure exit 1, having burned nothing. It also gives the operator a few seconds' warning before the code appears.
 5. **reap** an orphaned poller from a previous killed run (pidfile beside the lock)
 6. **spawn** the pty, scrape URL + code
-7. **post** the code, with provenance
+7. **edit** that same message (`mode="update"`, `edit_ref=ts`) to carry the URL, code, deadline, and verify line
 8. **poll** until the remaining budget is spent
-9. **reconcile** the symlink (B), **probe again**, post the outcome or the cancellation, exit 0 / 2
+9. **reconcile** the symlink (B), **probe again**, **edit** the message to its terminal state - authorized, expired, or failed - and exit 0 / 2
+
+Steps 4, 7 and 9 are **one message**, not three posts: `channels_send` already takes `mode="update"` with an `edit_ref` and returns the `ts` needed for it, and `_post_login_message` simply discards that `ts` today. Editing in place is what removes a live-looking code from the channel the instant it stops being pollable, so the "dead code in scrollback" problem is deleted rather than mitigated with a third message.
 
 Step 5 exists because `_spawn_login` uses `start_new_session=True` and the `finally` that terminates the child does not run if the caller is SIGKILLed; without reaping, an orphaned `codex login` keeps polling OpenAI's token endpoint, one per killed run. Termination also escalates `terminate` -> `wait` -> `kill`, which it does not today.
 
-A scrape timeout at step 6 still exits 1 after a heads-up has been posted; the heads-up says a code is coming, so the operator sees the failure rather than silence.
+A scrape timeout at step 6 exits 1 and edits the message to its failed state, so the operator who was told a code is coming is told it is not, rather than being left with a promise that never resolves.
 
 ### Notification and provenance
 
 The whole case for blocking rests on an operator responding inside 300 s, and today `_post_login_message` posts a plain, anonymous message.
 
-The tool-target post carries an **@-mention** (`$BOBI_LOGIN_MENTION`, see Q2), the agent name, the Fly machine id, the run id, and a deadline:
+**One message, edited in place - not three.** An earlier draft posted a heads-up, then the code, then a cancellation. `channels_send` already supports `mode="update"` with an `edit_ref`, and returns the `ts` needed to do it; `_post_login_message` merely discards that `ts` today. So the ceremony posts once and edits that message through its states: pending -> authorized, expired, or failed.
+
+That is not just tidier. It **deletes** the dead-code-in-scrollback problem rather than mitigating it with a third post: there is never a live-looking code sitting above a cancellation notice, because the code is gone from the message the moment it stops being pollable.
+
+The pending state carries an **@-mention** (`$BOBI_LOGIN_MENTION`, see Q2), the agent, machine, run, a deadline, a runnable verification, and permission to ignore it:
 
 ```
-🔐 *codex subscription login needed* @<on-call>
-`eng-team` on machine `d8d0926a026d28` (run `wf-issue-lifecycle-…`) hit a codex 401.
+*codex login needed* @<on-call>
+`eng-team` on `d8d0926a026d28` (run `wf-issue-lifecycle-eng-team-958`) hit a codex 401.
 
-Open this link, sign in, then enter the one-time code:
+Open this link, sign in, then enter the code:
 https://auth.openai.com/codex/device
 Code: `9S1A-79NNG`
 
-_Polling until 00:20:14 UTC. Verify with:_ `bobi agent eng-team tool-login codex --status`
+Expires 00:20:14 UTC. Ignoring this costs nothing: the review runs single-model.
+Not sure this is real? `fly ssh console -a moda-eng-team -s d8d0926a026d28 -C "bobi agent eng-team auth codex --status"`
 ```
 
-`device_poll` binds whichever OpenAI account enters the code, and codex's own banner warns *"Continue only if you started this login in Codex. If a website or another person gave you this code, cancel."*
-A bot that routinely hands operators codes trains them past that warning, so an attacker who can post in the channel - or who can prompt-inject an agent - could post a lookalike carrying a code from a login **they** started.
+The verify line is **runnable**, with the app and machine filled in from `$FLY_APP_NAME` and `$FLY_MACHINE_ID` (both present in a worker's environment, verified). An earlier draft told the operator to run `--status` without saying from where, which is a control with an unstated prerequisite: the operator is in Slack, probably on a phone, and cannot reach that machine's shell without the app id.
 
-Provenance in the message text is **not** sufficient against that: anything printed in Slack can be copied into a lookalike. That is why the message points at `--status`, which reads the local lock, pidfile, and cooldown stamp on the machine. A local state file cannot be forged from Slack, so it gives the operator a real out-of-band check rather than a string that looks official. The residual risk is Q3.
+On success the message becomes the receipt an operator actually needs:
 
-On timeout the poller is killed and a **cancellation message** supersedes the post, so a live-looking code never sits in Slack attached to a dead poller. (Authorizing a cancelled code binds nothing locally - the token is never collected - so the cost is a wasted operator action, not a compromise.) The existing boot-worded results (`"✅ … starting up"`, `"❌ … Fallback: fly ssh console"`) are wrong mid-run and get tool-target wording naming `tool-login` as the retry.
+```
+*codex login complete*
+Authorized 00:18:02 UTC. `eng-team` on `d8d0926a026d28` resumed its review.
+Bound account: <as reported by `codex login status`, or "not exposed by codex">
+Wrong account? `… -C "bobi agent eng-team auth codex --rebind"`
+```
+
+On timeout it becomes `*codex login expired* - nobody authorized within 5m. The review ran single-model; the cross-model opinion is recorded as owed.`
+
+**The security control is channel hygiene, and it belongs in the deployment contract.** `device_poll` binds whichever OpenAI account enters the code, and codex's own banner warns *"Continue only if you started this login in Codex. If a website or another person gave you this code, cancel."* A bot that routinely hands operators codes trains them past that warning, so an attacker who could post in the login channel could post a lookalike carrying a code from a login **they** started.
+
+Provenance text does not defend against that - anything printed in Slack can be copied. Neither does `--status` alone, since it requires shell access. What actually defends against it is the one thing the earlier draft left unstated:
+
+> **`$BOBI_LOGIN_CHANNEL` must be a channel only bobi can post to.** Any deployment where a human or a second app can post there has no defence against a lookalike login message, and should not enable agent-triggered login.
+
+That is a stronger control than either mitigation, it works from a phone, and it converts Q3 from an open worry into a stated constraint. `--status` remains the belt-and-braces check for an operator who has shell access and wants one.
 
 ### Durable `auth.json`: `docker/codex-auth.sh`
 
@@ -426,21 +510,28 @@ Two bugs, both from the credential now living behind a link:
 
 ### The recovery contract agents follow
 
+**Precondition, stated above the block rather than commented inside it:** set the Bash tool's `timeout` parameter to **480000** for this call. Its default is 120 s and would kill the ceremony mid-flight. An earlier draft expressed this as a shell comment, which sets nothing - the same class of mistake C already caught once.
+
 ```bash
-# codex 401 -> ask the operator to authorize, then retry once.
-# Set the Bash tool's `timeout` parameter to 480000 (ms) for this call: the default
-# is 120s and would kill the ceremony. `timeout 420` enforces it regardless.
-codex exec -s read-only "$PROMPT" < /dev/null || {
-  timeout 420 bobi agent "$BOBI_AGENT_NAME" tool-login codex --force --timeout 300
+review() { codex exec -s read-only -c 'model_reasoning_effort="high"' "$1" < /dev/null; }
+
+review "$PROMPT" || {
+  bobi agent "$BOBI_INSTANCE" auth codex
   case $? in
-    0)   codex exec -s read-only "$PROMPT" < /dev/null ;;           # authorized: the pass runs
-    3)   codex exec -s read-only "$PROMPT" < /dev/null \
-           || echo "cross-model opinion still owed: login already in flight" ;;
-    2)   echo "cross-model opinion still owed: operator did not authorize in time" ;;
-    *)   echo "codex login unavailable, see the error above" ;;
+    0) review "$PROMPT" ;;                 # authorized: the pass runs
+    3) review "$PROMPT" || OWED="another worker is running the login, or one just finished" ;;
+    2) OWED="operator did not authorize within the login window" ;;
+    *) OWED="codex login is unavailable on this machine (see the error above)" ;;
   esac
 }
+# If $OWED is set: run the pass single-model and record that line verbatim under
+# "cross-model opinion owed:". Do not re-run `auth codex`.
 ```
+
+`review()` is defined once so the two invocations cannot drift, and it carries the same `model_reasoning_effort="high"` the rest of the codex guide uses.
+`$BOBI_INSTANCE` is the agent slot name (`eng-team` here), verified present in a worker's environment and valid as the `bobi agent` argument. There is no `$BOBI_AGENT_NAME`.
+
+No `--force` (deleted), no `--timeout` (300 is the default), and no `timeout 420` wrapper: C already makes `--timeout` the whole-command budget, so wrapping it in a second timeout only says the design does not trust itself.
 
 One Bash call for the login, one turn, no polling.
 
@@ -453,7 +544,7 @@ So the agent-facing half is delivered exclusively by the `moda-agents` companion
 Without it the bobi-agent PR ships a working CLI command that nothing invokes, every agent keeps reading the false "preflighted (installed + authed)" claim, and #958's "Done means" is unmet.
 The library guide is still worth updating for teams that do use `tool_library: [codex]`; it is just not the delivery channel here.
 
-Verification 30 therefore drives the flow **through an agent following the guide**, not a hand-typed `tool-login` - a hand-typed run would pass green while the agent-facing path stayed unreachable.
+Verification 30 therefore drives the flow **through an agent following the guide**, not a hand-typed `auth` run - a hand-typed run would pass green while the agent-facing path stayed unreachable.
 
 ## Relevant files
 
@@ -478,6 +569,8 @@ Verification 30 therefore drives the flow **through an agent following the guide
 - `tests/test_codex_auth_sh.py` - **new, non-docker.** Sources `docker/codex-auth.sh` (which is safe to source, unlike the entrypoint) and drives the function against a temp `HOME`/`DATA_DIR`, with a stub `chown` on `PATH` so a non-root pytest can assert the ownership *call* rather than tautologically asserting its own uid. Runs on every PR.
 - `tests/test_auth_bootstrap.py` additions.
 - `tests/fixtures/fake-codex/` - a stub `codex` that plays back the recorded 0.144.5 device banner, writes a real-shaped `auth.json` when a trigger file appears, and fails the probe with the real 401 text until then. This is what makes the ceremony testable without an operator.
+
+  Worth naming: `CLAUDE.md` records a standing blind spot - *"no canary exercises `auth: subscription`, the mode most fleet teams run, because a fresh subscription volume triggers a device login that blocks on a human"* (`plans/2026-08-01-ci-coverage.md` Q3). A device-login stub that plays back a real banner and completes on a trigger file is the missing half of that. Closing Q3 is not in this plan's scope, but the fixture should be built where that plan can reuse it rather than buried in a test module.
 - `tests/fixtures/codex-device-login.txt`, `tests/fixtures/codex-auth-oauth.json` - the recorded banner, and a real `codex login` output captured for the sweep test rather than hand-written.
 - `plans/2026-08-05-codex-subscription-auth-in-flight.md` - this file.
 
@@ -493,14 +586,15 @@ No frontend, so no QA phase.
 4. The gateway guard fires for **both** targets on a gateway team.
 5. `OPENAI_API_KEY` + `api_key` -> exit 1 naming #522. `OPENAI_API_KEY` + `subscription` -> proceeds, warning logged.
 6. Unknown tool -> exit 1 listing known targets.
-7. `tool-login` has no `--channel`; **`login-bootstrap` no longer has one either** on the agent group, and the boot path still works from `$BOBI_LOGIN_CHANNEL`.
+7. `auth` has no `--channel` and no `--force`; **`login-bootstrap` no longer has a `--channel` either** on the agent group; the `login-bootstrap` alias still resolves so a published image's entrypoint keeps working; the boot path still reads `$BOBI_LOGIN_CHANNEL`.
 
 **Probe** (fake-codex stub)
 
 8. Probe passes at entry -> exit 0, no pty, no post.
 9. Ceremony runs, trigger appears -> exit **0**.
 10. Ceremony runs, no trigger, probe emits the real 401 text -> exit **2**.
-11. **The regression that motivates D:** a pre-existing `auth.json` whose probe 401s, `--force`, operator absent -> exit **2**, not 0, with the file on disk throughout.
+11. **The regression that motivates D:** a pre-existing `auth.json` whose probe 401s, operator absent -> exit **2**, not 0, with the file on disk throughout.
+11b. `--rebind` removes a credential whose probe *passes* and runs the ceremony anyway, which is the only way to replace a wrong-account binding.
 12. Probe exits non-zero with a 429/5xx body -> exit **1**, no ceremony, no post, no page.
 13. Probe hangs -> bounded by its own timeout, classified inconclusive -> exit 1.
 14. Corroborating real-CLI check: a terminated `codex login --device-auth` leaves no `auth.json` (Appendix A), so presence is not accidentally load-bearing.
@@ -521,6 +615,14 @@ No frontend, so no QA phase.
 23. A send failure at the **heads-up** post exits 1 with no pty spawned and no code minted.
 24. Registration succeeds but `chat.postMessage` fails (`channel_not_found`) -> caught at step 4, still no code minted.
 25. `--status` reports in-flight/cooldown/probe state and never spawns or posts.
+
+**Operator-facing surfaces**
+
+25a. The ceremony posts **one** message and edits it: `channels_send(mode="post")` once, then `mode="update"` with the returned `edit_ref` for the authorized / expired / failed states. Asserted by capturing the calls, so a regression back to three posts fails.
+25b. The pending message contains a runnable `fly ssh console -a $FLY_APP_NAME -s $FLY_MACHINE_ID -C "..."` line, and the success message names the bound account or says codex does not expose it.
+25c. `--status` output includes the probe result and its age, the credential path and presence, in-flight run/pid, and cooldown remaining.
+25d. `doctor` grows a codex row that reads the same state file and makes **no** network call.
+25e. `auth.json` is never written through `atomic_write_text` / `atomic_write_json` anywhere in `bobi/` - a source-level assertion, because that helper renames a new inode over the target and would silently destroy the symlink (`CLAUDE.md`, durable-state rule).
 
 **Scraper**
 
@@ -546,7 +648,7 @@ No frontend, so no QA phase.
 
 **Live, operator-verified - the proof of work on the implementation PR**
 
-39. In a real worker container: an **agent following the guide** (not a hand-typed command) hits a codex 401, runs `tool-login`, and the operator authorizes from the Slack post. Screenshot the post and `--status`; show the same still-running worker completing a real `codex exec` adversarial pass.
+39. In a real worker container: an **agent following the guide** (not a hand-typed command) hits a codex 401, runs `auth codex`, and the operator authorizes from the Slack post. Screenshot the single message through all three states (pending -> authorized) and `--status`; show the same still-running worker completing a real `codex exec` adversarial pass.
 40. Restart the machine and show `codex exec` still authenticated. This is the step that fails today.
 
 Tests 1-36 run on every PR; 37-40 do not, and the PR will say so rather than implying the coverage is automatic.
@@ -555,7 +657,7 @@ Tests 1-36 run on every PR; 37-40 do not, and the PR will say so rather than imp
 
 1. **Spec approved.** Gate 1 from Zach. Nothing below starts before it.
 2. **Spec threading + probe.** `resolve_spec`, required spec params, `AuthProbe`, result object. Tests 1-14, 26.
-3. **`tool-login`.** Command, ordering, exit contract, `file_lock(blocking=)`, cooldown, orphan reaping, provenance + `--status`, and the `--channel` removal on both commands. Tests 15-25, 7.
+3. **`auth`.** Command + hidden `login-bootstrap` alias, ordering, exit contract, `file_lock(blocking=)`, cooldown, orphan reaping, one edited message, `--status`, `--rebind`, the doctor row, and the `--channel` removal on both commands. Tests 15-25, 7, 11b.
 4. **Durable `auth.json`.** `docker/codex-auth.sh`, sweep fix, new non-docker harness. Tests 27-36.
 5. **Delivery.** `bobi/tool_library/codex/guide.md`, `docs/TOOL_LIBRARY.md`, and the `moda-agents` companion PR.
 6. **Live proof.** Tests 37-40 on a real container, attached to the PR.
@@ -584,7 +686,9 @@ Recommendation: **in-flight only.** The credential is durable after B, so the ce
 The blocking design's one assumption is that a human sees the post inside 300 s, and a passive message in `#bobi-eng-team` may not clear that bar. Proposal: `BOBI_LOGIN_MENTION` (a user or group id), defaulting to unset; if unset, the post says so and the recommended timeout drops to something that does not pretend. **This is the question that decides whether blocking is the right shape at all** - if nobody can be pinged, fail-cheap is the better design and the plan should change.
 
 **Q3. Is agent-triggered device login an acceptable trust boundary?**
-A worker processing untrusted input can trigger a login post. The mitigations are a fixed destination, a heads-up before the code, provenance, a cancellation message, a cooldown, and `--status` as an unforgeable local check. What remains is the shape itself: a bot asking a human to enter a code is the exact pattern OpenAI's banner warns about, and no in-band control fixes that. The alternative is operator-initiated only, which forfeits in-flight recovery. Recommendation: ship agent-triggered with the mitigations, and revisit if the fleet grows a less trusted input path. **Zach's call.**
+Narrowed since the design review. The real control turned out to be a **deployment constraint, not a mitigation**: `$BOBI_LOGIN_CHANNEL` must be a channel only bobi can post to. Where that holds, a lookalike login message cannot be posted at all, and the question mostly closes. The in-band mitigations (fixed destination, one edited message, cooldown, `--status`) are belt and braces on top.
+
+What is left for you: **do we enforce that constraint, or document it?** Enforcing means `auth` refuses to run when it cannot verify the login channel is bot-only, which is an extra API call and a new failure mode. Documenting means a deployment that gets it wrong is exposed and nothing says so. Recommendation: document it in this release and revisit enforcement once the fleet has been through one ceremony. **Zach's call.**
 
 **Q4. #861 - close it, or leave it?**
 This plan makes the `CODEX_HOME` half of #861 unnecessary. Its `CLAUDE_CONFIG_DIR` half is a real independent bug and should stay open on its own merits. Flagging because "prefer fewer issues" cuts the other way here.
@@ -767,4 +871,8 @@ $ grep -rln docker-entrypoint tests/                               -> tests/inte
 
 *Round 2*, re-reviewing the revision, found that the revision had introduced worse: the narrowed single-file symlink block, run "for every engine", **destroyed the OAuth credential and created a symlink loop on every codex-brained machine** (reproduced above), still leaked a plaintext `OPENAI_API_KEY` onto the volume in api_key mode, and made the subscription sweep rename the link instead of the credential. It also found that `--force`'s sibling command `login-bootstrap --channel` is worker-reachable today, that the probe needed a timeout and a 401 signature rather than a bare exit code, that `fsutil.file_lock` cannot be taken non-blocking without a scoped change, that the "explicit Bash timeout" in the recipe was a comment that sets nothing, and that a provenance string printed in Slack is copyable and so is not a control. All of those are resolved above: B is gated to subscription-mode non-codex-brained teams, the sweep resolves the link, the probe is an `AuthProbe` with three outcomes, `file_lock` gains a parameter, the recipe uses a real `timeout`, and `--status` replaces the provenance string as the operator's actual check.
 
-**Cross-model review is still owed on this spec.** Both rounds were **same-model** (Opus 5) because `codex` 401s in this container, which is the bug this plan specifies. This is the standing gap made concrete: the plan that fixes the missing second opinion could not get a second opinion. Run `codex exec` against this file once the implementation lands, and record the result on the tracking issue.
+*Round 3* was the design leg (the third leg of the house spec-review gate, which the first two rounds had not covered). `gstack-plan-design-review` is `interactive: true` and this session reports `interactive`, so invoking it directly would have blocked on `AskUserQuestion` with no human attached; its mandate was run as a non-blocking lens instead. It scored the operator-facing surfaces harshly and changed five things: the command is now `bobi agent <name> auth [<tool>]` with `login-bootstrap` as a hidden alias (a published image's entrypoint pins the old name, so a rename would break rollback); `--force` is deleted as a flag that skips a check D already removed, and `--rebind` replaces it, closing the wrong-account binding that the probe-passes-exit-0 ordering had made permanent; the three separate Slack messages collapse into one message edited in place, which deletes the dead-code-in-scrollback problem rather than mitigating it; the verify instruction became a runnable `fly ssh console` line, since the previous one silently required shell access the operator does not have from a phone; and `doctor` gains a codex row, because `bobi/doctor.py` already answers this question for the brain with a real call and is the front door an operator actually uses. It also caught that the recipe referenced `$BOBI_AGENT_NAME`, which **does not exist** - the agent slot name is `$BOBI_INSTANCE`, verified.
+
+Reading the worktree's `CLAUDE.md` during that round surfaced two more: the repo's durable-state rule says `atomic_write_text` does not preserve **symlink-ness**, which is a live hazard for change B and is now a written constraint with a test rather than a hypothetical; and `CLAUDE.md` records a standing CI blind spot (no canary exercises `auth: subscription`, because a device login blocks on a human) that this plan's fake-codex stub is the missing half of.
+
+**Cross-model review is still owed on this spec.** All three rounds were **same-model** (Opus 5) because `codex` 401s in this container, which is the bug this plan specifies. This is the standing gap made concrete: the plan that fixes the missing second opinion could not get a second opinion. Run `codex exec` against this file once the implementation lands, and record the result on the tracking issue.
