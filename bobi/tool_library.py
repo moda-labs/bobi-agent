@@ -148,8 +148,7 @@ def resolve_dependencies(merged_yaml: dict) -> list[Dependency]:
     collapses. NB: `brain: codex` no longer implies a codex dependency — the Codex
     CLI ships in the base image (#428), so a codex-brained team bakes nothing
     extra."""
-    deps: list[Dependency] = []
-    seen: set[str] = set()
+    resolved: dict[str, Dependency] = {}
     for item in (merged_yaml.get("tool_library") or []):
         if isinstance(item, str):
             dep = load_entry(item)
@@ -165,11 +164,14 @@ def resolve_dependencies(merged_yaml: dict) -> list[Dependency]:
             raise ComposeError(
                 f"tool_library entry must be a name or mapping, "
                 f"got {type(item).__name__}")
-        if dep.name in seen:
-            continue
-        seen.add(dep.name)
-        deps.append(dep)
-    return deps
+        # LAST declaration wins (D042). compose unions `tool_library:`
+        # base-entries-first, so keeping the first occurrence meant a base
+        # layer's pin overrode a leaf overlay's — the exact inverse of
+        # compose's rule that "the leaf always wins", and silent. Reassigning
+        # an existing key keeps its original position, so install ORDER still
+        # follows the first declaration while the VALUE comes from the last.
+        resolved[dep.name] = dep
+    return list(resolved.values())
 
 
 def resolve_team_dependencies(team_dir: Path, project_path: Path) -> list[Dependency]:
@@ -191,7 +193,18 @@ def resolve_team_dependencies(team_dir: Path, project_path: Path) -> list[Depend
     return resolve_dependencies(merged_yaml)
 
 
-def _expand_dependency(dep: Dependency, merged_yaml: dict, dest: Path) -> None:
+def _layer_shipped(prov, key: str) -> bool:
+    """Whether a team layer contributed *key* during THIS compose run.
+
+    compose records every structured-surface file it copies, so this is an
+    exact answer where the filesystem gives an ambiguous one. No provenance
+    (a direct call outside compose) means no layer shipped anything.
+    """
+    return bool(prov is not None and key in getattr(prov, "items", {}))
+
+
+def _expand_dependency(dep: Dependency, merged_yaml: dict, dest: Path,
+                       prov=None) -> None:
     """Splice one dependency's surfaces into the merged agent.yaml + tools/.
 
     Reuses compose's own merge rules so a dependency behaves exactly like the
@@ -218,11 +231,18 @@ def _expand_dependency(dep: Dependency, merged_yaml: dict, dest: Path) -> None:
     if dep.install:
         merged_yaml["build"] = _merge_build(merged_yaml.get("build"), dep.install)
 
-    # guide: write tools/<name>.md only if the team didn't already ship one
-    # (consistent with the leaf-wins file rule after the structured tools/ merge).
+    # guide: write tools/<name>.md unless a LAYER shipped one in this compose
+    # run (the leaf-wins file rule, after the structured tools/ merge).
+    #
+    # "A layer shipped it" is asked of compose's provenance, not of the
+    # filesystem (D084). `dest` is reused across installs and install clears
+    # only the surfaces some layer contributes — so for a team whose layers
+    # ship no tools/ dir, a plain exists() check saw the PREVIOUS install's
+    # generated guide and read it as a team file, and a catalog guide updated
+    # by a framework upgrade never reached the agent.
     if dep.guide:
         guide_path = dest / "tools" / f"{dep.name}.md"
-        if not guide_path.exists():
+        if not _layer_shipped(prov, f"tools/{dep.name}.md"):
             guide_path.parent.mkdir(parents=True, exist_ok=True)
             guide_path.write_text(dep.guide)
 
@@ -275,16 +295,20 @@ def _expand_dependency(dep: Dependency, merged_yaml: dict, dest: Path) -> None:
         merged_yaml["mcp_servers"] = existing_mcp
 
 
-def expand(merged_yaml: dict, dest: Path) -> None:
+def expand(merged_yaml: dict, dest: Path, prov=None) -> None:
     """Expand `merged_yaml['tool_library']` in place, then drop the key.
 
     Resolves each entry (catalog ref or inline mapping) to a Dependency and
     splices its surfaces in. Idempotent and pure over inputs: an empty/absent
     `tool_library` is a no-op. `tool_library` is consumed at compose, never
     emitted (like `from`/`prune`).
+
+    ``prov`` is compose's provenance for this run — how a guide a team layer
+    actually shipped is told apart from a leftover this code wrote on a
+    previous install into the same reused ``dest`` (D084).
     """
     for dep in resolve_dependencies(merged_yaml):
-        _expand_dependency(dep, merged_yaml, dest)
+        _expand_dependency(dep, merged_yaml, dest, prov)
     merged_yaml.pop("tool_library", None)
 
 

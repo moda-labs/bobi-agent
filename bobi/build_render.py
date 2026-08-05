@@ -234,7 +234,14 @@ def render_team_deps_script(cfg: Config, *, extra_recipes: list[dict] | None = N
         for entry in cfg.requires:
             lines += [
                 f"echo {shlex.quote('verify ' + entry.name)}",
-                f"{as_user} {shlex.quote('BOBI_VERIFY_PHASE=build; ' + entry.check)}",
+                # EXPORTED, not a bare shell assignment (D041): a `success`
+                # check implemented as a program (`check: python3
+                # tools/verify.py`) reads the var from its environment, and an
+                # unexported one is invisible there — so the check took its
+                # runtime branch during the credential-less image build.
+                # dep_bootstrap.preflight puts it in the real env; these are
+                # two evaluations of the ONE `success` contract and must agree.
+                f"{as_user} {shlex.quote('export BOBI_VERIFY_PHASE=build; ' + entry.check)}",
             ]
         lines.append("")
 
