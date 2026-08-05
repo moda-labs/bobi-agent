@@ -95,16 +95,9 @@ def _project_state_dir(project_path: Path) -> Path:
 
 def _parse_local_event_server_port(url: str) -> int | None:
     """Return the local event-server port from a URL, or None for remote URLs."""
-    if not url:
-        return None
-    from urllib.parse import urlparse
+    from .events.server import local_port_from_url
 
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return None
-    if parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
-        return None
-    return parsed.port or (443 if parsed.scheme == "https" else 80)
+    return local_port_from_url(url)
 
 
 def _event_server_port_file(project_path: Path) -> Path:
@@ -117,36 +110,15 @@ def _selected_local_event_server_port(
 ) -> int:
     """Port for the selected runtime's local event server.
 
-    Explicit CLI overrides win, then a live runtime's remembered start port,
-    then the configured local event_server_url, then the default 8080.
+    Explicit CLI overrides win; everything else resolves through the shared
+    definition so doctor probes the same port this starts.
     """
     if override is not None:
         return override
 
-    pid_file = _project_state_dir(project_path) / "event-server.pid"
-    port_file = _event_server_port_file(project_path)
-    if pid_file.exists() and port_file.exists():
-        try:
-            return int(port_file.read_text().strip())
-        except (OSError, ValueError):
-            pass
+    from .events.server import resolve_local_port
 
-    try:
-        from .config import Config
-        configured = Config.load(project_path).event_server_url
-    except Exception:
-        configured = ""
-    if configured:
-        port = _parse_local_event_server_port(configured)
-        if port is not None:
-            return port
-
-    if port_file.exists():
-        try:
-            return int(port_file.read_text().strip())
-        except (OSError, ValueError):
-            pass
-    return 8080
+    return resolve_local_port(project_path)
 
 
 def _ensure_root_bound() -> Path:
