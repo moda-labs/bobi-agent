@@ -132,6 +132,34 @@ class TestBobiNeverImportsBobiDeploy:
             "even dynamically:\n" + "\n".join(offenders)
         )
 
+    def test_no_prose_sends_a_subclass_to_the_archived_repo(self):
+        """The archived ``bobi-deploy`` REPO is not a place code lives.
+
+        Distinct from the two guards above, which catch the private Python
+        package. This catches PROSE - the docstrings that used to tell a
+        reader "the other implementer of this ABC lives in bobi-deploy". That
+        repo is archived, and ``EventBusRuntime`` is now in-tree, so such a
+        line sends whoever reads it to a dead repository. A grep gate rather
+        than a one-time cleanup precisely because the sentence is easy to
+        reintroduce from memory.
+
+        Deliberately narrow: it flags the repo NAME, not the phrase
+        ``bobi deploy``, which is a real CLI command this package documents.
+        """
+        pattern = re.compile(r"bobi-deploy|moda-labs/bobi.deploy")
+        offenders = []
+        for py in sorted(BOBI_PACKAGE.rglob("*.py")):
+            for n, line in enumerate(
+                    py.read_text(encoding="utf-8").splitlines(), 1):
+                if pattern.search(line):
+                    offenders.append(
+                        f"{py.relative_to(REPO_ROOT)}:{n}: {line.strip()}")
+        assert not offenders, (
+            "public bobi/ must not name the archived bobi-deploy repo as a "
+            "place code lives - EventBusRuntime is in bobi/webapp/"
+            "event_bus.py:\n" + "\n".join(offenders)
+        )
+
 
 # Container-build ACTIONS. Restated by the repo reorg (Lane 1, Phase 2).
 #

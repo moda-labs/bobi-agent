@@ -34,6 +34,7 @@ import httpx
 from bobi.webapp.runtime import (
     TeamLifecycleError,
     TeamRuntime,
+    UnknownRun,
     UnknownTeam,
 )
 
@@ -69,6 +70,24 @@ MAX_HEALTH_LIFECYCLE_EVENTS = 50
 # timeout. Fail fast like the spend fan-out legs rather than holding webapp
 # workers for the default 30s.
 DEFAULT_SESSION_LOG_COMMAND_TIMEOUT = 8.0
+# The single-agent view's reads (runs / overview / run_details / the detailed
+# transcript) are the same shape of bet as session_log: a cheap fold of
+# already-written state, polled by an open page, and dropped without a reply
+# by any supervisor older than SUPERVISOR_VERSION 0.2.0. Same short bound, for
+# the same reason - a page left open against a mid-roll box must not pin a
+# webapp worker for 30s per poll.
+DEFAULT_VIEW_COMMAND_TIMEOUT = 8.0
+# The three writes are NOT reads: they are one-shot operator actions, not
+# polled, and resume spawns a process before replying. Give them the default
+# command budget rather than the tight read bound - a write that times out
+# leaves the operator unsure whether it took effect, which is the one outcome
+# worth spending seconds to avoid.
+DEFAULT_RUN_WRITE_COMMAND_TIMEOUT = DEFAULT_COMMAND_TIMEOUT
+# The supervisor version that first answers the six single-agent-view commands
+# (bobi/supervisor/snapshot.py). Below this, an instance drops them silently -
+# so the runtime reads the heartbeat's version to say "too old" rather than
+# blaming the network for a box that is working perfectly.
+MIN_VIEW_SUPERVISOR_VERSION = (0, 2, 0)
 
 
 def encode_name(fleet: str, instance: str) -> str:
@@ -106,6 +125,28 @@ def _is_running(reachability, status) -> bool:
             and status not in (None, "stopped", "exited", "down"))
 
 
+def _version_tuple(raw) -> tuple[int, ...] | None:
+    """A dotted version string as a comparable tuple; None if unreadable.
+
+    Unreadable includes absent: a heartbeat from a sidecar too old to stamp a
+    version is exactly the case this comparison exists to catch, so it must
+    not read as "new enough".
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    parts = []
+    for chunk in raw.strip().split("."):
+        digits = ""
+        for ch in chunk:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts) or None
+
+
 def _pid(v) -> int:
     """A heartbeat pid as an int; 0 for missing or malformed (one bad field
     in a snapshot must not 500 the card or health read)."""
@@ -127,6 +168,9 @@ class EventBusRuntime(TeamRuntime):
                      DEFAULT_FLEET_SPEND_COMMAND_TIMEOUT),
                  session_log_command_timeout: float = (
                      DEFAULT_SESSION_LOG_COMMAND_TIMEOUT),
+                 view_command_timeout: float = DEFAULT_VIEW_COMMAND_TIMEOUT,
+                 run_write_command_timeout: float = (
+                     DEFAULT_RUN_WRITE_COMMAND_TIMEOUT),
                  client: httpx.Client | None = None) -> None:
         self._base = fleet_api_url.rstrip("/")
         self._auth = {"authorization": f"Bearer {operator_token}"}
@@ -138,6 +182,8 @@ class EventBusRuntime(TeamRuntime):
         self._fleet_spend_ttl = fleet_spend_ttl
         self._fleet_spend_command_timeout = fleet_spend_command_timeout
         self._session_log_command_timeout = session_log_command_timeout
+        self._view_command_timeout = view_command_timeout
+        self._run_write_command_timeout = run_write_command_timeout
         self._fleet_spend_cache: tuple[float, dict] | None = None
 
     # --- HTTP + command plumbing ------------------------------------------
@@ -184,8 +230,17 @@ class EventBusRuntime(TeamRuntime):
                 if status == "done":
                     return view.get("result")
                 if status == "error":
-                    raise TeamLifecycleError(
-                        view.get("error") or "command failed")
+                    message = view.get("error") or "command failed"
+                    # The supervisor puts a machine-readable `code` on the
+                    # result of a refusal it blames the caller for, so a
+                    # vanished run maps to the same typed error the local
+                    # runtime raises instead of being flattened into prose.
+                    detail = view.get("result")
+                    code = (detail or {}).get("code") if isinstance(
+                        detail, dict) else None
+                    if code == "unknown_run":
+                        raise UnknownRun(str(detail.get("run_id") or ""))
+                    raise TeamLifecycleError(message)
             elif r.status_code != 404 and r.status_code < 500:
                 # A 4xx other than 404 (bad auth / bad request) is a real,
                 # non-transient error - surface it now. A 404 (result not folded
@@ -201,6 +256,57 @@ class EventBusRuntime(TeamRuntime):
         cid = self._issue_command(fleet, instance, command, args)
         return self._await_command(fleet, instance, cid,
                                    timeout or self._cmd_timeout)
+
+    def _supervisor_version(self, fleet: str, instance: str):
+        """The instance's sidecar version off the heartbeat, or None.
+
+        Best-effort and never fatal: this only ever refines an error message,
+        so a read that fails leaves the caller with the honest generic one.
+        """
+        try:
+            supervisor = self._get_detail(fleet, instance).get("supervisor")
+        except Exception:
+            return None
+        if not isinstance(supervisor, dict):
+            return None
+        return _version_tuple(supervisor.get("version"))
+
+    def _view_command(self, fleet: str, instance: str, command: str,
+                      args: dict | None = None,
+                      timeout: float | None = None):
+        """Issue one of the single-agent-view commands, and say the true thing
+        when it does not come back.
+
+        A supervisor older than ``MIN_VIEW_SUPERVISOR_VERSION`` drops an
+        unknown verb WITHOUT a reply (docs/ADMIN_PROTOCOL.md), so the only
+        symptom available here is a timeout - indistinguishable, at that
+        moment, from a wedged dispatch worker. The fleet is not uniform
+        mid-roll, and reporting a working-but-old box as a timeout sends
+        whoever is on the page hunting a network fault that does not exist.
+
+        So on timeout, and only then, consult the heartbeat's supervisor
+        version: if it predates the command, report it as unavailable and NAME
+        the instance. Otherwise the original timeout stands - guessing "too
+        old" for a box that is merely stuck would be the same lie inverted.
+        """
+        try:
+            return self._command(fleet, instance, command, args,
+                                 timeout=timeout
+                                 or self._view_command_timeout)
+        except TeamLifecycleError as e:
+            if "timed out" not in str(e):
+                raise
+            version = self._supervisor_version(fleet, instance)
+            if version is not None and version >= MIN_VIEW_SUPERVISOR_VERSION:
+                raise
+            seen = ".".join(str(p) for p in version) if version else "unknown"
+            wanted = ".".join(str(p) for p in MIN_VIEW_SUPERVISOR_VERSION)
+            raise TeamLifecycleError(
+                f"'{command}' is unavailable on "
+                f"{encode_name(fleet, instance)}: its supervisor reports "
+                f"version {seen}, and this command needs {wanted}. "
+                f"The instance is running - it is the sidecar that is older "
+                f"than this console.") from None
 
     # --- card shaping -----------------------------------------------------
 
@@ -279,6 +385,91 @@ class EventBusRuntime(TeamRuntime):
         result = self._command(fleet, instance, "transcript",
                                {"session": session})
         return list((result or {}).get("messages") or [])
+
+    def transcript(self, name: str, session: str) -> dict:
+        """The debugging view of a session's transcript.
+
+        Rides the EXISTING ``transcript`` command with ``detail: true`` rather
+        than a new verb: it is the same file, for the same session, and the
+        supervisor widens its reply instead of answering twice. It cannot be
+        built by reshaping ``messages`` - that list is the chat view, tool
+        calls already discarded - so a supervisor that answers without
+        ``entries`` is one that predates the arg, and that is reported as
+        unavailable rather than rendered as a transcript with every tool call
+        mysteriously missing.
+        """
+        fleet, instance = decode_name(name)
+        result = self._view_command(fleet, instance, "transcript",
+                                    {"session": session, "detail": True}) or {}
+        if "entries" not in result:
+            raise TeamLifecycleError(
+                f"the debugging transcript is unavailable on "
+                f"{encode_name(fleet, instance)}: its supervisor answered the "
+                f"chat view only, which carries no tool calls. It needs "
+                f"supervisor "
+                f"{'.'.join(str(p) for p in MIN_VIEW_SUPERVISOR_VERSION)}.")
+        return {
+            "session": result.get("session") or session,
+            "entries": list(result.get("entries") or []),
+            "usage": result.get("usage") or {},
+        }
+
+    def run_details(self, name: str, run_id: str) -> dict:
+        fleet, instance = decode_name(name)
+        result = self._view_command(fleet, instance, "run_details",
+                                    {"run_id": run_id}) or {}
+        return result.get("details") or {}
+
+    def overview(self, name: str) -> dict:
+        fleet, instance = decode_name(name)
+        result = self._view_command(fleet, instance, "overview") or {}
+        return result.get("overview") or {}
+
+    def runs(self, name: str, *, status: str = "", query: str = "",
+             offset: int = 0, limit: int | None = None) -> dict:
+        """The unified runs table for one hosted agent.
+
+        The box folds it (same ``build_runs`` the local runtime calls) and
+        this returns the page whole. Defaults are filled in HERE rather than
+        left to the box so the response shape does not depend on which
+        supervisor answered - a caller reading ``offset``/``limit`` back off
+        the payload gets the numbers it asked for either way.
+        """
+        fleet, instance = decode_name(name)
+        args = {"status": status or "", "query": query or "",
+                "offset": max(0, offset)}
+        if limit and limit > 0:
+            args["limit"] = limit
+        result = self._view_command(fleet, instance, "runs", args) or {}
+        return {
+            "runs": list(result.get("runs") or []),
+            "counts": result.get("counts") or {},
+            "total": int(result.get("total") or 0),
+            "offset": int(result.get("offset") or 0),
+            "limit": int(result.get("limit") or 0),
+            "query": result.get("query") or "",
+            "truncated": bool(result.get("truncated")),
+        }
+
+    # The three writes. Unlike the reads above they are one-shot operator
+    # actions, so they take the full command budget (see
+    # DEFAULT_RUN_WRITE_COMMAND_TIMEOUT) - and `resume` returns `accepted`,
+    # never holding the request open for the workflow itself.
+    def resume_run(self, name: str, run_id: str) -> dict:
+        return self._run_write(name, "resume_run", run_id)
+
+    def remind_run(self, name: str, run_id: str) -> dict:
+        return self._run_write(name, "remind_run", run_id)
+
+    def close_run(self, name: str, run_id: str) -> dict:
+        return self._run_write(name, "close_run", run_id)
+
+    def _run_write(self, name: str, command: str, run_id: str) -> dict:
+        fleet, instance = decode_name(name)
+        result = self._view_command(
+            fleet, instance, command, {"run_id": run_id},
+            timeout=self._run_write_command_timeout)
+        return dict(result or {})
 
     def chat_submit(self, name: str, session: str, text: str) -> str:
         # The command_id IS the message id: the turn runs async on the box (the

@@ -95,11 +95,14 @@ in their own block, beside a bill and never inside one — the same separation
 
 ## Compatibility
 
-`TeamRuntime.overview()` is **not** an `@abstractmethod`, for the same reason
-`runs()` is not: an out-of-tree subclass in the private deploy repo implements
-this ABC, and marking the method abstract here would break its CI the moment
-this merges. It becomes abstract once the hosted runtime implements it. The base
-raises `TeamLifecycleError` meanwhile.
+`TeamRuntime.overview()` **is** an `@abstractmethod`, as of the lane that gave
+the hosted runtime its implementation. Both implementers now live in this repo
+— `LocalRuntime` and `EventBusRuntime` — so a missing method fails this repo's
+own CI in the commit that adds it, and the base no longer carries a
+`TeamLifecycleError` fallback for a subclass nobody could see. The hosted side
+answers from the supervisor's `overview` admin command, which delegates to the
+same `build_overview` this document describes.
 
 `script_cache` is additive to a payload whose other keys are byte-stable for
-older consumers.
+older consumers. It rides the hosted `spend` command too, so the savings block
+renders on both surfaces.

@@ -17,7 +17,7 @@ the reference implementation if you are writing your own operator surface —
 including the parts a first attempt gets wrong, like which poll failures are
 transient and which are not.
 
-- **Version:** `SUPERVISOR_VERSION = "0.1.0"` (`bobi/supervisor/snapshot.py`),
+- **Version:** `SUPERVISOR_VERSION = "0.2.0"` (`bobi/supervisor/snapshot.py`),
   reported on every heartbeat at `supervisor.version`.
 - **Transport:** the bobi event bus. See `docs/EVENT_SERVER.md` for the server,
   `docs/SELF_HOSTED_EVENT_SERVER.md` for running your own.
@@ -122,10 +122,21 @@ A command is published to the deployment's admin topic:
 
 `command_id` is caller-supplied and opaque to the supervisor; it is echoed on
 the result so a caller can correlate. A command whose `command` is not one of
-the nine below, or which carries no `command_id`, is **dropped without a
+the fifteen below, or which carries no `command_id`, is **dropped without a
 reply** (the supervisor logs it locally). An unrecognized command has no
 command to acknowledge, so a consumer must not wait on a result for one — it
 never executes and never answers.
+
+**That silence is what makes `supervisor.version` load-bearing.** A fleet is
+not uniform mid-roll, and an instance running an older sidecar drops a newer
+verb exactly as it drops a misspelled one — so a consumer's only symptom is a
+timeout, indistinguishable at that moment from a wedged dispatch worker.
+Before blaming the network, read `supervisor.version` off the heartbeat
+(`GET /fleet/instances/:fleet/:instance`) and compare it against the version
+that introduced the command. `EventBusRuntime._view_command` does exactly
+this, and reports a too-old instance **by name** rather than as a timeout.
+Bound your polls accordingly: a page polling a command an old box will never
+answer should use a short timeout, not the default.
 
 `args` is coerced to an object when absent or malformed, so a command sent with
 `args` as a string, an array, or `null` still dispatches on its verb rather
@@ -147,6 +158,30 @@ Every reply is published to `fleet/command_result`:
 `"error"`. The server folds the pending command record and its result into one
 operator-facing view: `pending` until the supervisor replies, then
 `done`/`error`.
+
+**A refusal carries a machine-readable `code` on `result`, beside the prose
+`error`.** When the supervisor rejects a command because of what the *caller*
+asked for — a run id that no longer exists, a run that is no longer at a gate
+— `error` stays human prose and `result` carries the reason as a code, so a
+consumer never has to string-match a sentence to tell "gone" from "not right
+now":
+
+```json
+{ "status": "error",
+  "error": "run 01J8... is 'completed', not 'waiting'",
+  "result": { "code": "not_waiting", "run_id": "01J8...", "status": "completed" } }
+```
+
+| `code` | Means |
+|---|---|
+| `unknown_run` | No run with that id under this deployment. Carries `run_id`. |
+| `not_waiting` | The run exists but is not at a gate. Carries `run_id` and its actual `status`. |
+| `action_failed` | The precondition held; the action itself could not complete (e.g. the workflow is no longer installed). Carries `run_id`. |
+| `bad_request` | A required arg was missing or empty. |
+
+An unexpected failure carries no `code` — absence means "this was not your
+fault", which is itself the signal to retry or escalate rather than correct
+the request.
 
 ### Lifecycle commands
 
@@ -172,19 +207,79 @@ an incident.
 | Command | `args` | `result` |
 |---|---|---|
 | `status` | — | the latest heartbeat snapshot, or `{"status": "starting"}` before the first |
-| `transcript` | `{"session": "<name>"}` (optional) | `{"messages": [...]}` |
+| `transcript` | `{"session": "<name>", "detail": bool}` (both optional) | `{"messages": [...]}`, plus `{"session", "entries": [...], "usage": {...}}` when `detail` is set |
 | `roster` | — | `{"subagents": [...]}` |
 | `spend` | — | `{"spend": {...}}` |
 | `session_log` | — | `{"sessions": [...], "counts": {...}, "truncated": bool}` |
+| `runs` | `{"status", "query", "offset", "limit"}` (all optional) | `{"runs": [...], "counts": {...}, "total", "offset", "limit", "query", "truncated"}` |
+| `overview` | — | `{"overview": {...}}` |
+| `run_details` | `{"run_id"}` **required** | `{"details": {...}}` |
 
 These are answered inline from the deployment's local `$BOBI_HOME` through the
 same public `bobi` surfaces the local web UI uses. The sidecar shares the
 manager's host, state directory, and brain config, so they are plain filesystem
 reads — they keep working when the manager is wedged, which is the point.
 
+That sharing is not incidental, it is the design: `runs`, `overview` and
+`run_details` delegate to `bobi.webapp.runs.build_runs`,
+`bobi.webapp.overview.build_overview` and `bobi.webapp.details.build_details`
+— the *same* functions `LocalRuntime` calls. Neither surface re-implements a
+read, so the local page and the hosted page cannot drift apart; there is only
+one implementation to drift from. `tests/test_hosted_single_agent_view.py`
+asserts the payloads are identical for one root.
+
 `session_log` caps its row list (newest first) so the reply fits one bus
 message; `truncated` says whether the cap bit, and `counts` is computed over
 the full set, not the capped rows.
+
+`runs` coerces its pagination args the way the local runtime does: a
+non-positive or unparseable `limit` falls back to the builder default rather
+than failing the command.
+
+**`transcript` and its `detail` arg.** Without `detail`, the reply is
+unchanged: `messages` is the **chat** view — two roles, prose only, tool calls
+discarded. With `detail: true` the reply gains the **debugging** view of the
+same transcript: `entries` (timestamped lines *including* tool calls and their
+results) and `usage` (the slab header's duration/tokens/cost). This is a
+widening rather than a new command because it reads the same file for the same
+session — but it has to be a widening rather than something a consumer derives,
+because nothing downstream can recover a tool call from `messages`. A consumer
+that receives no `entries` is talking to a supervisor older than `0.2.0` and
+should say so, not render the chat view as a debugging transcript with every
+tool call silently missing.
+
+### Run commands
+
+`resume_run`, `remind_run`, and `close_run` act on one **suspended workflow
+run** — the protocol's first run-scoped writes. Each takes a required
+`{"run_id"}`, and each is refused with a `code` (see above) when the run is
+gone or no longer at a gate.
+
+| Command | `result` |
+|---|---|
+| `resume_run` | `{"ok": true, "accepted": true, "run_id", "workflow", "await_event"}` |
+| `remind_run` | `{"ok": true, "delivered": true, "run_id", "workflow", "await_event"}` |
+| `close_run` | `{"ok": true, "closed": true, "run_id", "workflow"}` |
+
+They delegate to `bobi.webapp.run_actions`, the same module `LocalRuntime`
+delegates to, for the same anti-drift reason as the reads.
+
+`accepted` is the honest word, and carries the same discipline `chat` does: a
+workflow run takes as long as it takes, so `resume_run` returns once the resume
+is **under way** and never holds a request open for the workflow. The operator
+watches the `runs` table for the status to move. Note also what resume does
+*not* do — it spawns the CLI resume as a separate process rather than running
+it inline, because resuming re-stamps the run's session registry entry with the
+running process's pid, and a supervisor that stamped its own would later be
+signalled by a reconciler timeout meant for the run.
+
+Two concurrent resumes are safe: neither this command nor the local runtime
+holds the claim (a claim held by a caller that then fails to spawn would strand
+the run), so both spawn and `WorkflowRun.claim` arbitrates — exactly one
+proceeds.
+
+`remind_run` re-sends the gate's notification and does **not** advance the
+workflow. `close_run` abandons the run and marks its session cancelled.
 
 ### `chat`
 
@@ -323,13 +418,17 @@ state read from KV. Browser clients are not supported and CORS is off.
 | `bobi_send_message` | `fleet`, `instance`, `message`, `session?` | A `command_id`. **Never the reply** |
 | `bobi_lifecycle` | `fleet`, `instance`, `action`, `reason` | The `restart`/`stop`/`start` command's view |
 
-Six tools over nine admin commands, because the vocabulary is deliberately
+Six tools over fifteen admin commands, because the vocabulary is deliberately
 **not** one tool per command: `bobi_lifecycle` folds `restart`/`stop`/`start`
 behind an `action` enum, and `status` is already covered by the heartbeat that
 `bobi_instance_detail` returns.
 
-Three commands are **not** exposed as tools in v1 — `roster`, `spend`, and
-`session_log`. Whatever the heartbeat happens to carry (sessions, and spend
+Nine commands are **not** exposed as tools in v1 — `roster`, `spend`,
+`session_log`, and the six that back the single-agent view (`runs`,
+`overview`, `run_details`, `resume_run`, `remind_run`, `close_run`). The three
+writes are the notable omission and a deliberate one: acting on a suspended
+workflow run is an operator decision made while looking at the runs table, and
+v1 of the MCP surface does not put that table in front of an agent. Whatever the heartbeat happens to carry (sessions, and spend
 when the supervisor reports it) is readable through `bobi_instance_detail`;
 the commands themselves are not callable from MCP. They remain available over
 `POST /fleet/instances/:fleet/:instance/commands`, which the hosted console
