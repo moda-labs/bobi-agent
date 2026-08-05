@@ -173,6 +173,51 @@ class TestProjectFromPath:
 
 
 # ---------------------------------------------------------------------------
+# D069 — a hyphen in a repo name survives into `project`
+# ---------------------------------------------------------------------------
+
+class TestHyphenatedProjectName:
+    """Claude encodes a cwd by replacing '/' with '-', which is lossy: the
+    directory '-Users-alice-dev-bobi-agent' could decode to either
+    '/Users/alice/dev/bobi-agent' or '/Users/alice/dev/bobi/agent'. The
+    transcript carries the real cwd, so nothing has to guess."""
+
+    def test_conversation_records_the_transcript_cwd(self, db, tmp_path):
+        f = (tmp_path / "projects" / "-Users-alice-dev-bobi-agent"
+             / "sess-hyphen.jsonl")
+        f.parent.mkdir(parents=True)
+        _write_jsonl(f, [
+            _user_msg("hello", timestamp="2024-01-01T00:00:00",
+                      cwd="/Users/alice/dev/bobi-agent", gitBranch="main"),
+        ])
+        _index_file(db, f)
+        project = db.execute(
+            "SELECT project FROM conversations WHERE session_id = 'sess-hyphen'"
+        ).fetchone()[0]
+        assert project == "/Users/alice/dev/bobi-agent"
+
+    def test_project_filter_matches_a_hyphenated_repo(self, projects_dir):
+        d = projects_dir / "-Users-alice-dev-bobi-agent"
+        d.mkdir()
+        _write_jsonl(d / "sess-a.jsonl", [
+            _user_msg("the deploy is wedged", timestamp="2024-01-01T00:00:00",
+                      cwd="/Users/alice/dev/bobi-agent", gitBranch="main"),
+        ])
+        index()
+        assert search("wedged", project="bobi-agent")
+
+    def test_falls_back_to_the_directory_name_without_a_cwd(self, db, tmp_path):
+        f = tmp_path / "projects" / "-Users-alice-dev-myproject" / "sess-nocwd.jsonl"
+        f.parent.mkdir(parents=True)
+        _write_jsonl(f, [_user_msg("hi", timestamp="2024-01-01T00:00:00")])
+        _index_file(db, f)
+        project = db.execute(
+            "SELECT project FROM conversations WHERE session_id = 'sess-nocwd'"
+        ).fetchone()[0]
+        assert project == "/Users/alice/dev/myproject"
+
+
+# ---------------------------------------------------------------------------
 # _fts_query
 # ---------------------------------------------------------------------------
 
@@ -191,6 +236,41 @@ class TestFtsQuery:
         result = _fts_query("  a   b  ")
         assert '"a"' in result
         assert '"b"' in result
+
+
+# ---------------------------------------------------------------------------
+# D068 — a quote in the query is FTS5 syntax, not text
+# ---------------------------------------------------------------------------
+
+class TestFtsQueryQuoting:
+    def test_embedded_quote_is_doubled(self):
+        # FTS5 escapes a '"' inside a phrase by doubling it. Wrapping the raw
+        # token instead produces '""auth""', which is a syntax error.
+        assert _fts_query('"auth"') == '"""auth"""'
+
+    def test_search_survives_an_unbalanced_quote(self, projects_dir):
+        d = projects_dir / "-proj"
+        d.mkdir()
+        _write_jsonl(d / "sess-q.jsonl", [
+            _user_msg('the 5" display is misaligned',
+                      timestamp="2024-01-01T00:00:00", cwd="/proj"),
+        ])
+        index()
+        # A token carrying an ODD number of quotes is what actually breaks:
+        # wrapping it yields '"5""' and FTS5 raises 'unterminated string'.
+        # (An even count survives by accident — FTS5 reads '""' as an
+        # escaped quote — so the finding's own '"auth"' repro does not fail.)
+        assert search('the 5" display') is not None
+
+    def test_search_with_an_all_whitespace_query_is_empty(self, projects_dir):
+        d = projects_dir / "-proj"
+        d.mkdir()
+        _write_jsonl(d / "sess-w.jsonl", [
+            _user_msg("something", timestamp="2024-01-01T00:00:00", cwd="/proj"),
+        ])
+        index()
+        # An empty MATCH expression is also an FTS5 syntax error.
+        assert search("   ") == []
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +356,29 @@ class TestIndexFile:
 
         count = _index_file(db, f)
         assert count == 1
+
+    def test_completed_trailing_line_is_indexed_on_the_next_pass(self, db, tmp_path):
+        """D022 — the indexer reads transcripts while Claude is mid-append.
+
+        A half-written final line must not count as consumed, or the writer's
+        completion of that same line is never seen and the message is lost
+        from the index (and from the sleep cycle's transcript delta) forever.
+        """
+        f = tmp_path / "proj" / "sess-partial.jsonl"
+        f.parent.mkdir(parents=True)
+        complete = json.dumps(_user_msg("first", timestamp="2024-01-01T00:00:00"))
+        second = json.dumps(_assistant_msg("second", timestamp="2024-01-01T00:00:01"))
+        # Caught mid-append: the second record is only half on disk.
+        f.write_text(complete + "\n" + second[:20])
+
+        assert _index_file(db, f) == 1
+
+        f.write_text(complete + "\n" + second + "\n")
+        assert _index_file(db, f) == 1
+
+        contents = [r[0] for r in db.execute(
+            "SELECT content FROM messages ORDER BY id").fetchall()]
+        assert contents == ["first", "second"]
 
     def test_skips_invalid_json(self, db, tmp_path):
         f = tmp_path / "proj" / "sess5.jsonl"
