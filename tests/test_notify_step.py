@@ -95,6 +95,28 @@ class TestFormatSlackMessage:
     def test_escaped_newlines(self):
         assert format_slack_message("a\\nb") == "a\nb"
 
+    def test_escape_expansion_skips_fenced_code(self):
+        """D076 — a fenced block quotes content the human reads verbatim.
+
+        The escape expansion exists for shell-invoked notifications that carry
+        literal backslash-n; running it across the whole message rewrote the
+        quoted source/JSON/log inside a fence too, silently altering the very
+        thing the fence was protecting. Every other pass in this module
+        (_wrap_markdown_tables, _convert_markdown_outside_code_blocks) is
+        fence-aware; this one was not.
+        """
+        msg = 'before\\nafter\n```\n{"msg": "a\\nb"}\n```\ntail\\nend'
+        result = format_slack_message(msg)
+        assert '{"msg": "a\\nb"}' in result       # untouched inside the fence
+        assert "before\nafter" in result           # still expanded outside it
+        assert "tail\nend" in result
+
+    def test_escape_expansion_skips_tabs_in_fenced_code(self):
+        msg = 'a\\tb\n```\ncol1\\tcol2\n```'
+        result = format_slack_message(msg)
+        assert "col1\\tcol2" in result
+        assert "a\tb" in result
+
     def test_heading_to_bold(self):
         assert format_slack_message("# Hello") == "*Hello*"
 

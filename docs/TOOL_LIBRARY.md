@@ -39,7 +39,10 @@ tool_library:
 
 `tool_library:` is consumed at compose time - it never appears in the frozen
 `agent.yaml`. It merges across the `from:` chain, so a base team's dependency is
-inherited by everything built on it (de-duped by name, first occurrence wins).
+inherited by everything built on it. A name declared more than once resolves to
+its **last** declaration, and layers merge base-first, so a leaf overlay
+overrides a base layer's entry - the same leaf-wins rule the rest of compose
+follows. Install ORDER still follows the first declaration.
 
 ## Two ways to declare a tool
 
@@ -116,7 +119,10 @@ inline (an explicit team `requires:` / `build:` / `host:` wins).
   already declares that name), so the runtime dispatch gate and `bobi agent
   <name> doctor` verify it.
 - **`build:`** - `install` steps accreted + de-duped via the one build merge.
-- **`tools/<name>.md`** - the guide, unless the team already ships that file.
+- **`tools/<name>.md`** - the guide, unless a team layer ships that file in
+  this compose run. "Ships it" is read from compose's provenance, not from the
+  file being present: the install destination is reused, so a guide left by a
+  previous install is refreshed rather than mistaken for a team file.
 - **`host:`** - emitted as a top-level list so deploy surfaces it and doctor
   checks it (see `bobi/host_caps.py`); never materialized into the image.
 - **`mcp_servers:`** - each dependency's `mcp:` spec merged into a top-level
@@ -336,9 +342,10 @@ tool_library:
 ```
 
 The same leaf-wins rule holds for `requires:` (an explicit `requires: [{name:
-...}]` is neither duplicated nor clobbered) and for `host:` (per sysctl key). Two
-*dependencies* clashing on the same MCP server name or sysctl resolve first-wins
-in resolve order.
+...}]` is neither duplicated nor clobbered), for `host:` (per sysctl key), and
+for two dependencies declaring the same NAME (last declaration wins, so the leaf
+layer's does). Two *distinct* dependencies clashing on the same MCP server name
+or sysctl still resolve first-wins in resolve order.
 
 ## MCP servers, rendered per brain
 
@@ -382,7 +389,10 @@ uses.
    a recipe.
 3. **Preflight**: each `success` is verified in the build tier
    (`BOBI_VERIFY_PHASE=build`), per target brain. The snapshot is trusted only
-   when every dependency passes.
+   when every dependency passes. The variable is **exported** on both verify
+   surfaces - the image build's `verify: requires` step and
+   `dep_bootstrap.preflight` - so a check implemented as a program reads the
+   same phase an inline `${BOBI_VERIFY_PHASE:-}` expansion sees.
 4. **Snapshot**: the materialized layer is frozen into the team image.
 5. **Warm boot**: replay the snapshot - no agent runs in production.
 6. **Re-bootstrap**: only when the declared set changes. The image stamps the

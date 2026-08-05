@@ -166,6 +166,78 @@ def test_local_tool_guide_wins(project):
     assert (dest / "tools" / "codex.md").read_text() == "TEAM OWN CODEX GUIDE"
 
 
+def test_leaf_overlay_overrides_a_base_layer_dependency(project):
+    """D042 — the leaf must win, and it could not.
+
+    compose unions `tool_library:` base-entries-first, then
+    resolve_dependencies de-duped by name keeping the FIRST occurrence — so a
+    leaf overlay declaring its own pin for a dependency the base already names
+    was silently dropped and the image baked the base's version. That inverts
+    compose's stated rule ("The leaf always wins"), with no warning.
+    """
+    _team(project, "base",
+          'version: "1.0.0"\nentry_point: director\ntool_library: [codex]\n')
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\nfrom: base\n'
+                 'tool_library:\n'
+                 '  - name: codex\n'
+                 '    success: "codex --version"\n'
+                 '    install:\n'
+                 '      npm: ["@openai/codex@0.150.0"]\n')
+    cfg = _agent_yaml(_compose(project, leaf)[0])
+
+    npm = cfg["build"]["npm"]
+    assert "@openai/codex@0.150.0" in npm
+    assert CODEX_PIN not in npm, "the base layer's pin overrode the leaf's"
+
+
+def test_a_repeated_name_within_one_layer_takes_the_last(project):
+    """The rule is simply "the last declaration wins".
+
+    That is what makes the leaf win, because compose merges base-first — so
+    one rule covers both the cross-layer case above and a name repeated
+    within a single layer.
+    """
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'tool_library:\n'
+                 '  - name: dupe\n'
+                 '    success: "true"\n'
+                 '    install:\n'
+                 '      npm: ["first@1"]\n'
+                 '  - name: dupe\n'
+                 '    success: "true"\n'
+                 '    install:\n'
+                 '      npm: ["second@2"]\n')
+    cfg = _agent_yaml(_compose(project, leaf)[0])
+    assert "second@2" in cfg["build"]["npm"]
+
+
+def test_stale_catalog_guide_is_refreshed_on_reinstall(project):
+    """D084 — `if not guide_path.exists()` cannot tell a team file from our own.
+
+    install clears only the surfaces some layer contributes, so for a team
+    whose layers ship no tools/ dir the previous install's tools/<name>.md
+    survives. The exists() check then read that leftover as a team-shipped
+    file and skipped the write, so a framework upgrade that rewrote the
+    catalog guide never reached the runtime agent — it kept reading the
+    outdated one indefinitely.
+    """
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\ntool_library: [venn]\n')
+    dest = _compose(project, leaf)[0]
+    guide_path = dest / "tools" / "venn.md"
+    catalog = (tool_library.CATALOG_DIR / "venn" / "guide.md").read_text()
+    assert guide_path.read_text() == catalog
+
+    # A previous install's guide, now out of date, left behind in the reused
+    # dest because no layer contributes tools/ for install to clear.
+    guide_path.write_text("STALE GUIDE FROM AN OLDER RELEASE")
+
+    _compose(project, leaf, dest=dest)
+    assert guide_path.read_text() == catalog
+
+
 def test_explicit_requires_wins(project):
     """An explicit team `requires: [{name: codex, ...}]` is neither duplicated nor
     clobbered by the catalog entry (leaf field wins / escape hatch)."""

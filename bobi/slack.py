@@ -87,19 +87,44 @@ def _convert_markdown_line(line: str) -> str:
     return re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', line)
 
 
-def _convert_markdown_outside_code_blocks(text: str) -> str:
-    lines = text.split("\n")
+def _map_outside_code_blocks(text: str, fn) -> str:
+    """Apply *fn* to every line that is not inside a fenced code block.
+
+    Fence lines themselves are passed through untouched. Shared by every
+    transform that must leave quoted content verbatim.
+    """
     converted: list[str] = []
     in_code_block = False
-    for line in lines:
+    for line in text.split("\n"):
         if line.strip().startswith("```"):
             in_code_block = not in_code_block
             converted.append(line)
         elif in_code_block:
             converted.append(line)
         else:
-            converted.append(_convert_markdown_line(line))
+            converted.append(fn(line))
     return "\n".join(converted)
+
+
+def _convert_markdown_outside_code_blocks(text: str) -> str:
+    return _map_outside_code_blocks(text, _convert_markdown_line)
+
+
+def _expand_escapes_outside_code_blocks(text: str) -> str:
+    """Expand shell-style \\n / \\t, but never inside a fenced code block.
+
+    Notifications invoked from a shell carry literal backslash-n that has to
+    become a real newline. Running that across the whole message also rewrote
+    the JSON, source and log output quoted inside a fence — silently altering
+    the content the fence exists to show verbatim (D076). Inline code spans
+    are not protected here, matching every other pass in this module.
+    """
+    def _expand(line: str) -> str:
+        return (line.replace("\\r\\n", "\n")
+                    .replace("\\n", "\n")
+                    .replace("\\t", "\t"))
+
+    return _map_outside_code_blocks(text, _expand)
 
 
 def _has_open_code_fence(text: str) -> bool:
@@ -166,8 +191,8 @@ def _truncate_slack_message(text: str) -> str:
 
 def format_slack_message(text: str) -> str:
     """Convert markdown to Slack mrkdwn and truncate if needed."""
-    # Escaped newlines from shell invocations
-    text = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+    # Escaped newlines from shell invocations — outside code fences only.
+    text = _expand_escapes_outside_code_blocks(text)
     text = _wrap_markdown_tables(text)
     text = _convert_markdown_outside_code_blocks(text)
     text = _truncate_slack_message(text)

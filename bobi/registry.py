@@ -140,15 +140,40 @@ def _write_meta(project_path: Path, name: str, version: str, source: str) -> Non
     _meta_path(project_path, name).write_text(json.dumps(meta, indent=2))
 
 
+class RemoteVersionUnavailable(RuntimeError):
+    """The remote version could not be READ — distinct from a team that has
+    none. Collapsing the two let a transient failure install main (D032)."""
+
+
 def _read_remote_version(name: str, repo: str = DEFAULT_REPO) -> str | None:
-    """Fetch just agent.yaml from GitHub to read the remote version."""
+    """The team's published version, or None when it genuinely declares none.
+
+    Raises :class:`RemoteVersionUnavailable` when the read itself failed
+    (timeout, rate limit, unparseable yaml). Returning None for that too made
+    `fetch` treat a network hiccup as "version-less team" and silently
+    download the rolling `<name>.tar.gz`, which every push to main clobbers —
+    so an ordinary `bobi install <team>` could install unreleased content with
+    no warning (D032).
+    """
     url = f"{GITHUB_RAW}/{repo}/main/agents/{name}/agent.yaml"
     try:
         resp = _urlopen(url, timeout=5)
         data = yaml.safe_load(resp.content)
-        return data.get("version") if data else None
-    except Exception:
-        return None
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            # No agent.yaml at main: either a version-less team or one this
+            # repo does not carry. Both are answered accurately by the asset
+            # fetch that follows ("no published asset"), so this is a real
+            # None, not a failure.
+            return None
+        raise RemoteVersionUnavailable(
+            f"could not read the published version of '{name}' from {repo}: {e}"
+        ) from e
+    except Exception as e:
+        raise RemoteVersionUnavailable(
+            f"could not read the published version of '{name}' from {repo}: {e}"
+        ) from e
+    return data.get("version") if data else None
 
 
 def _read_local_version(project_path: Path, name: str) -> str | None:
@@ -173,7 +198,10 @@ def check_update(project_path: Path, name: str, repo: str | None = None) -> tupl
     local = _read_local_version(project_path, name)
     registries = [repo] if repo else _all_registries(project_path)
     for r in registries:
-        remote = _read_remote_version(name, r)
+        try:
+            remote = _read_remote_version(name, r)
+        except RemoteVersionUnavailable:
+            continue  # this registry is unreachable — try the next one
         if remote:
             return local, remote
     return local, None

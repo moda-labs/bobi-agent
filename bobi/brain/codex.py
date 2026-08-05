@@ -367,13 +367,23 @@ class CodexBrain(GatewayAwareEngine):
         # unchanged) but errors PROPAGATE: a codex team that declares MCP and
         # can't render config would silently run MCP-less, so surface it rather
         # than pass preflight and fail at runtime.
+        #
+        # An ABSENT key is not an empty set (D009). config.toml is shared by
+        # every session on the host and re-read at the start of every `codex
+        # exec`, so treating "this call site said nothing" as "the team has
+        # none" made monitor checks, gates and workflow steps wipe the managed
+        # block out from under the manager and every other live session —
+        # silently, on every monitor interval. Only a caller that resolved the
+        # set from the team config gets to write; everyone else inherits.
         from bobi.brain.codex_config import (
             codex_home, config_has_managed_block, write_codex_config,
         )
-        mcp_servers = opts.get("mcp_servers") or {}
-        home = codex_home()
-        if mcp_servers or config_has_managed_block(home):
-            write_codex_config(mcp_servers, home)
+        declared = opts.get("mcp_servers")
+        mcp_servers = declared or {}
+        if declared is not None:
+            home = codex_home()
+            if mcp_servers or config_has_managed_block(home):
+                write_codex_config(mcp_servers, home)
         config_overrides: list[str] = []
         if gateway_base_url():
             from bobi.brain.gateway_openai import gateway_openai_overrides

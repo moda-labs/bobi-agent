@@ -844,11 +844,21 @@ def app_start(no_browser):
 
 
 @app_group.command("stop")
-def app_stop():
+@click.option("--force", is_flag=True,
+              help="Signal the recorded pid even if it does not answer as the app")
+def app_stop(force):
     """Stop the web app daemon."""
     from bobi.webapp import daemon
 
-    st = daemon.stop()
+    st = daemon.stop(force=force)
+    if st.unverified:
+        click.echo(
+            f"Not running — cleared a stale pid file. Process {st.pid} is "
+            "alive but does not answer as the bobi app (the pid was reused "
+            "after a crash), so it was left alone. Use --force to signal it "
+            "anyway."
+        )
+        return
     click.echo(f"Stopped (pid {st.pid})." if st.pid else "Not running.")
 
 

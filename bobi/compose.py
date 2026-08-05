@@ -335,7 +335,7 @@ def compose(chain: list[ResolvedLayer], dest: Path) -> Provenance:
     # Local import avoids a module-level import cycle (tool_library imports the
     # compose merge helpers).
     from bobi import tool_library
-    tool_library.expand(merged_yaml, dest)
+    tool_library.expand(merged_yaml, dest, prov)
 
     # prune (§4) is applied after merge, across the frozen surfaces + agent.yaml.
     _apply_prune(chain, dest, merged_yaml, prov)

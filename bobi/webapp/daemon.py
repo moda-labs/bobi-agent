@@ -121,6 +121,21 @@ class AppStatus:
     pid: int = 0
     port: int = 0
     url: str = ""
+    # Set by stop() when the recorded pid is alive but did not identify itself
+    # as this app, so nothing was signalled (D037).
+    unverified: bool = False
+
+
+def _is_this_app(pid: int) -> bool:
+    """Whether the live *pid* is this bobi app and not a reused pid.
+
+    Identity is "it answers /api/ping on the recorded port with the local
+    token" — the same proof :func:`status` requires before reporting running.
+    """
+    port = _read_int(_port_path())
+    if not port:
+        return False
+    return _ping(port, ensure_token())
 
 
 def status() -> AppStatus:
@@ -179,8 +194,16 @@ def start(*, open_browser: bool = True) -> AppStatus:
     )
 
 
-def stop() -> AppStatus:
-    """Stop the daemon; returns the pre-stop status."""
+def stop(*, force: bool = False) -> AppStatus:
+    """Stop the daemon; returns the pre-stop status.
+
+    A live pid is not proof the pidfile still describes THIS app. run_foreground
+    only removes the pidfile on a graceful exit, so a crash leaves it pointing
+    at a dead pid the OS is free to reuse — and signalling that blindly kills an
+    unrelated process (D037). Identity is confirmed the same way :func:`status`
+    has always confirmed it: the app answers /api/ping on the recorded port with
+    the local token. ``force`` skips the check for an app wedged past answering.
+    """
     import signal
 
     pid = _read_int(_pid_path())
@@ -188,6 +211,12 @@ def stop() -> AppStatus:
         _pid_path().unlink(missing_ok=True)
         _port_path().unlink(missing_ok=True)
         return AppStatus(running=False)
+    if not force and not _is_this_app(pid):
+        # Alive, but not ours to kill. Clear the stale state so the next
+        # `bobi app start` is not blocked by it, and signal nothing.
+        _pid_path().unlink(missing_ok=True)
+        _port_path().unlink(missing_ok=True)
+        return AppStatus(running=False, pid=pid, unverified=True)
     os.kill(pid, signal.SIGTERM)
     for _ in range(50):
         if not _pid_alive(pid):
