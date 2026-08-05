@@ -1,8 +1,8 @@
-# Fleet repo subscriptions in workspace config
+# Runtime workspace overlay for agent config
 
-Issue: [#953](https://github.com/moda-labs/bobi-agent/issues/953)
+Issue: [#952](https://github.com/moda-labs/bobi-agent/issues/952)
 Status: spec, awaiting approval (Gate 1)
-Date: 2026-08-04
+Created: 2026-08-04. Rewritten 2026-08-05 under Zach's premise constraints.
 
 ## Problem
 
@@ -11,10 +11,8 @@ repository and redeploying.
 
 The bindings live in `agents/moda-eng-team/agent.yaml` in `moda-labs/moda-agents`,
 installed to `run/package/agent.yaml` as a read-only frozen image, in two lists:
-
-- `subscribe:` routes events (`github:<org>/<repo>`, `linear:<TEAM>`, `slack:...`).
-- `managed_repos:` carries a per-repo `tracker:`, and in practice carries write
-  authority (see [Authority](#authority-the-part-not-to-skim)).
+`subscribe:` (routes events) and `managed_repos:` (per-repo `tracker:`, and in
+practice write authority).
 
 Zach, in Slack `C0BAEN48KQR` thread `1785885345.077239`:
 
@@ -26,363 +24,344 @@ Zach, in Slack `C0BAEN48KQR` thread `1785885345.077239`:
 > workspace config? Like when we onboard a new repo, it should subscribe to that
 > repo's events
 
-The destination is decided: workspace config. This spec does not re-open that.
+Measured cost today: yesterday's familystories-ai offboard took a commit in a second
+repository, a pack rebuild, an install and a restart, 22 minutes from merge to effect.
 
-## Evidence
+### The constraints that killed the first design
 
-Read first-hand at `origin/main` `393221b` and in the live runtime.
+This is a rewrite. The previous version proposed a `workspace/repos.yaml` registry plus
+a `bobi agent <name> repos add|remove|list` CLI. Zach rejected the premise:
 
-### The offboarding cost, measured
+> in this design, it looks like pack-specific concepts like repo management have
+> leaked into the main bobi agent framework. bobi-agent should NOT have a CLI
+> command like `bobi agent <name> repos …`, and if we do have `seed_workspace()`
+> it should do it in a general purpose way, not specifically for `managed_repos`
 
-`moda-labs/familystories-ai` was offboarded today. Verified timeline, UTC:
+> TBH I'm not that worried about accidentally deleting human branches, they are
+> always recoverable. I am more worried about anything that links repos to
+> requiring PRs. I think not deleting human branches is more of a policy/prompt thing
 
-| Time | Event |
-|---|---|
-| 21:21:25 | familystories-ai PR #295 cleanup ran (`wf-pr-closed-eng-team-adhoc-797869b1`) |
-| 22:24:09 | offboarding commit `c0ec10a` lands in `moda-labs/moda-agents` |
-| 22:37:54 | new pack installed, `run/package/agent.yaml` rewritten |
-| 22:46:46 | manager restarted (`state/manager.pid`) |
+Binding rulings:
 
-One repo removed cost a commit in a second repository, a pack rebuild, an install, and a
-restart: 22 minutes from merge to effect.
+1. **No repo-specific concepts under `bobi/`.** No `repos` CLI, no `managed_repos`
+   awareness in framework code.
+2. **`seed_workspace()` stays general purpose.** Verified it already is
+   (`bobi/install.py:118`, copy-only-if-absent), so the correct action is to change nothing.
+3. **Write authority moves to workspace with everything else.** Keeping it pack-side
+   would mean managing a repo still needs a PR to the pack repo. This reverses the
+   previous spec's recommendation.
+4. **Branch-delete safety is policy/prompt.** No machinery: no manifest hashing, no
+   drift detection, no install-time reversion.
 
-**Correction to the issue's framing.**
-The issue implied #295 ran while familystories-ai was absent from both lists.
-It did not: the cleanup ran 63 minutes *before* the offboarding commit, so the repo was
-still fully listed.
-The real defect is the four-step, two-repo change process and the 22-minute window where
-source said "offboarded" and the deployment was still subscribed.
+### The tension this resolves
 
-### The divergence that still stands
+Zach wants zero repo-specific concepts in the framework, but subscription routing *is*
+framework machinery. The resolution is to make the framework's contribution **generic**:
+one runtime config layer that knows nothing about repos, and a pack that supplies all
+meaning.
 
-`moda-labs/bobi-agent` and `moda-labs/moda-agents` are in `subscribe:` and absent from
-`managed_repos:`. Deliberate, but invisible, and re-derived from scratch by every cleanup
-run: `wf-pr-closed-eng-team-adhoc-{68e83099, 0cd4f660, e22ecf8f, ade8b87d,
-2d67735b}/handoff-cleanup.yaml`.
-`wf-pr-closed-eng-team-adhoc-1bdd41de` found the same shape twice: `moda-agents` is
-subscribed with no local clone, so its cleanup is a structural no-op that still reports
-"Worktree cleanup complete".
+This also rules out the tempting shortcut of allowlisting `subscribe:` and
+`managed_repos:` by name in the loader. `managed_repos` is not a framework key, so
+naming it in `bobi/` would be exactly the leak ruling 1 forbids. The merge must be
+generic over all keys.
 
-### `managed_repos` has no code consumers
+## Solution
 
-`grep -rn managed_repos` at `origin/main` returns four hits, all unrelated fixture keys in
-`tests/test_memory.py` (52, 55, 62, 66). Zero under `bobi/`.
-In the installed pack, one hit: `package/agent.yaml:125`, in no prompt or role file.
-Agents reach it only by opening `package/agent.yaml` themselves.
+Add one generic primitive: **a workspace overlay merged over the installed `agent.yaml`.**
 
-The pack comment calls it "Advisory tracker binding read by the director prompt".
-Practice promoted it past advisory: the handoffs above treat absence from `managed_repos:`
-as absence of write authority and declined deletes on human branches on that basis.
-Real, load-bearing, and enforced only by agents reading YAML.
-
-### How a subscription reaches a webhook
-
-1. `bobi/events/subscriptions.py:25` `discover_subscriptions()` reads
-   `paths.agent_yaml_path()` = `package_dir(root)/agent.yaml` (`bobi/paths.py:175`),
-   returning explicit `subscribe:` when non-empty (`:42`).
-   Fallbacks are adapter auto-detection (`:47-55`, which scans local git remotes) and
-   finally `[project_path.name]` (`:57`).
-2. `bobi/service.py:533` calls it once in `run_manager_from_config`; `:663` passes it to
-   `spawn_adhoc()`. Second caller: `bobi/supervisor/snapshot.py:99`.
-3. `bobi/events/server.py:609` `authorize_resources()` seeds a per-topic grant. With
-   `filter_unauthorized=True` it **silently drops** an ungranted topic and still succeeds.
-4. `bobi/events/server.py:760` `register()` POSTs `{name, subscriptions}`.
-
-### What is and is not possible live
-
-`PUT /deployments/<id>/subscriptions {"replace": [...]}` exists and preserves deployment
-identity (`bobi/subagent.py:1474`, route at `event-server/worker/src/index.ts:650`).
-`register()` is the wrong primitive for a live change: it supersedes the deployment and
-mints a new id/key.
-
-But three facts block a naive live watcher, all verified:
-
-- **The drain loop never ticks.** `bobi/events/drain.py:252-253` is
-  `while True: event = queue.get()`, a blocking `SimpleQueue.get()` with no timeout. An
-  idle manager never wakes, and the case is circular: the new repo cannot produce the
-  event that would wake the loop that would subscribe to it.
-- **The drain loop is per-session, not per-manager.** `bobi/subagent.py:1546` starts one
-  thread per session, and each session owns its own deployment. A watcher there would make
-  every worker PUT fleet topics onto its inbox-only deployment.
-- **The PUT lives in a closure.** Success sets `active_subscriptions`
-  (`bobi/subagent.py:1483`); the deaf-reconnect path replays that variable (`:1510`).
-  A PUT that does not update it is reverted on the next reconnect.
-
-**There is also no read-back route.** The event server exposes `POST /deployments`,
-`GET /deployments/<id>/subscribe` (WebSocket upgrade only), `PUT .../subscriptions`, and
-`DELETE /deployments/<id>`. Nothing returns a deployment's current subscription set to a
-third process such as the CLI.
-
-### Workspace config already exists as a mechanism
-
-`bobi/paths.py:207` `workspace_dir()` = `<run>/workspace`; `bobi/install.py:118`
-`seed_workspace()` copies pack templates **only if absent** (guard `:134`).
-Framework code reading operator-owned files out of the runtime is established
-(`bobi/prompts/resolver.py:86-97`, `bobi/monitors/scheduler.py:1318`).
-No parallel store is introduced.
-
-## Scope
-
-In scope: a workspace-owned repo registry owning `github:` topics;
-`bobi agent <name> repos add|remove|list`; per-repo tracker moved off `managed_repos:`;
-migration.
-
-Out of scope, each with a reason:
-
-- **Write authority in workspace config.** See Authority. A decision for Zach; the
-  recommendation is not to.
-- **`linear:`/`slack:` topics.** Deployment identity, not repo membership. A Linear team
-  spans repos and does not follow a repo onboarding.
-- **Live reload without a restart.** Blocked by the three facts above. Correct insertion
-  point named below as follow-on.
-- **Server-side verification of what took effect.** No read-back route exists.
-- Revoking resource grants; making write authority code-enforced.
-
-## Design
-
-### The registry file
-
-`<run>/workspace/repos.yaml`:
+`<run>/workspace/config.yaml`
 
 ```yaml
-# Fleet repo subscriptions. Authoritative for github: topics.
-# Write authority is NOT set here - see managed_repos: in the pack.
-repos:
-  - repo: underminedsk/lightweave
-    tracker: github-issues
-  - repo: moda-labs/bobi-agent
-    tracker: github-issues
-```
+# Runtime overlay over package/agent.yaml.
+# A top-level key defined here REPLACES that key entirely. Restart to apply.
+subscribe:
+  - github:underminedsk/lightweave
+  - github:moda-labs/moda-agents
+  - github:moda-labs/bobi-agent
+  - github:moda-labs/moda-skills
+  - slack:T0952RZRZ0X:app:A0BDLA833MW:C0BAEN48KQR
+  - linear:MDS
+  - linear:MOD
 
-Presence means subscribed; there is no `events:` flag and no `write:` flag.
-`tracker` defaults to `github-issues`. Values are concrete: no `${VAR}` interpolation,
-unlike pack `subscribe:` (`bobi/events/subscriptions.py:40`).
-`tracker` does not derive a `linear:<TEAM>` subscription.
-
-**No pack template ships.** The file is created by `repos add` or by the migration below.
-Shipping an empty template would be actively harmful: precedence is existence-based, so
-`seed_workspace` copying an empty file onto a deployment that has not been migrated would
-drop every `github:` topic on install. Absent-by-default also means `seed_workspace` has
-nothing to do here, and fleet membership never re-enters pack source.
-
-### The commands
-
-New `@agent.group("repos")` in `bobi/cli.py`, matching `@agent.group("subagents")` (`:1822`).
-
-```
-bobi agent <name> repos add <org>/<repo> [--tracker github-issues|linear:<TEAM>]
-bobi agent <name> repos remove <org>/<repo>
-bobi agent <name> repos list
-```
-
-`repos list` shows repo, tracker, and a **write-authority column read from the pack's
-`managed_repos:`** so an operator sees in one view that onboarding did not grant write.
-
-There is no `--write` flag. Granting write authority stays a pack PR.
-
-`repos add` validates the `<org>/<repo>` shape and that the GitHub credential can read it,
-writes the file atomically (`os.replace`), then restarts the manager session.
-
-**What the command may claim.** It reports what it wrote and that the restart was
-performed. It does **not** claim the subscription is live, because no route lets it read
-the deployment's actual set back, and `authorize_resources` can drop an ungranted topic
-while still succeeding. The command prints that caveat rather than implying confirmation.
-Adding a `GET /deployments/<id>/subscriptions` route is the follow-on that would let this
-become a real assertion.
-
-### Live effect: a restart is required, and this says so
-
-**A `repos add` takes effect after a manager-session restart. This is not hot reload.**
-
-The reason is the three verified facts above: the drain loop never ticks, it is per-session
-anyway, and the PUT lives in a session closure whose `active_subscriptions` would be
-replayed over any external update.
-
-What this still buys: a restart is not a redeploy. No pack edit, no second repository, no
-rebuild, no install. The 22 minutes in the evidence above was commit-to-install, not the
-restart. `repos add` performs the restart itself, so the operator runs one command.
-
-The cost: the restart bounces the manager session. Detached sub-agent sessions are separate
-processes and survive, and startup reconcile (`bobi/service.py:642`) re-adopts stranded runs.
-
-The follow-on live path, if wanted later, is a dedicated thread started inside
-`_start_event_subscription` so it shares the closure owning `es_deployment`, `es_key`, and
-`active_subscriptions`, guarded on `has_external` so workers never run it. It must update
-`active_subscriptions` on success, and must not copy the existing failure handling: both
-current PUT sites unlink the event cursor and re-register on error
-(`bobi/subagent.py:1435`, `:1486`), which on a repeating watcher would replay history into
-auto-dispatch on every tick.
-
-### Precedence and upgrade safety
-
-The registry is **authoritative, not merged**, for `github:` topics.
-
-- File exists and parses to a `repos:` list: `github:` topics come from it alone; pack
-  `subscribe:` `github:` entries are ignored. This holds for an explicitly empty list,
-  which yields zero `github:` topics and must not fall through to adapter auto-detection
-  or to the directory-name topic (`bobi/events/subscriptions.py:47-57`) - the former would
-  rescan local git remotes and resurrect `run/repo`'s own origin.
-- File absent, unreadable, or unparseable: today's behaviour exactly, and a parse failure
-  keeps the last good set rather than collapsing to empty.
-- Pack `subscribe:` keeps `linear:` and `slack:`.
-
-This designs out the resurrection trap: no union for `github:` topics, so a pack upgrade
-still listing an offboarded repo cannot bring it back. A removal is an absence from an
-authoritative file and needs no tombstone.
-
-### Authority: the part not to skim
-
-`subscribe` and `managed_repos` are different grants and must stay different.
-
-- `subscribe` routes events.
-- `managed_repos` is what a cleanup worker consults before deleting a human's merged
-  remote branch. Destructive and irreversible.
-
-Zach's request couples onboarding to subscription. Correct for events, and implemented here.
-It must not silently widen delete authority: "onboard this repo" naturally reads as "the
-fleet works on it", and one unified entry would hand every new repo the right to delete
-human branches.
-
-**Recommendation: write authority stays in the pack**, for a structural reason.
-`package/agent.yaml` is hashed into `install-manifest.json` (`bobi/install.py:158-160`), so
-`doctor` flags drift; it is overwritten on every install; and changing it requires a
-reviewed PR to a second repo.
-`workspace/` has none of those properties: excluded from the manifest, never overwritten,
-and routinely agent-writable.
-Moving the grant there would let an agent grant itself the right to delete human branches
-by appending a line to a YAML file. A printed CLI warning does not help, because nothing
-forces the grant through the CLI.
-
-**Subscription is not consequence-free either, and this is the thing to flag.**
-The live pack's `auto_dispatch` (`package/agent.yaml:95-111`) arms `issue-lifecycle` on
-`github.issues.assigned` and `pr-closed` on `github.pull_request` closed, both with
-`allow_self_authored: true`, for **every** subscribed repo.
-So adding a line to `workspace/repos.yaml` does not merely route events: after the next
-restart it auto-dispatches workers, including the branch-deleting cleanup workflow, against
-that repo. The only thing standing between that and a destructive act is the same
-prompt-enforced `managed_repos` this spec calls unenforced.
-
-That does not block the change, and it is exactly what Zach asked for. It does mean
-`workspace/repos.yaml` deserves the same operational care as an authority file even though
-it only grants subscription, and it strengthens the case for keeping the authority list
-itself in the PR-gated pack.
-
-**Decision for Zach.** His first message said "add or remove repos from management", which
-could include authority; his second scoped it to subscriptions. This spec implements the
-second and leaves authority in the pack. Moving authority too is a deliberate call with the
-consequences above and should be its own change.
-
-### Limitation: grants are not revoked
-
-Resource grants are bubble-scoped and no revoke path exists anywhere in the codebase.
-`repos add` seeds a standing bubble-wide grant that `repos remove` does not take back, so
-another deployment in the bubble could re-subscribe to an offboarded repo without a fresh
-authorization step. The registry is authoritative for **routing**, not authorization.
-
-### Tracker binding
-
-`tracker:` moves into the registry entry; the pack's `managed_repos:` reduces to a pure
-authority list of repo names. Pack owns authority, workspace owns subscription and tracker.
-
-Honest parity note: `tracker:` has no code consumer today and gains none here. It reaches
-agents exactly as it does now, by an agent opening the file. The director prompt that reads
-it lives in `moda-labs/moda-agents` and must be repointed at `workspace/repos.yaml` in the
-same change. `--tracker linear:<TEAM>` is accepted and recorded, but Linear *event*
-delivery for a new team still requires a pack PR, since `linear:` topics stay pack-side.
-
-## Migration
-
-Written once into the live runtime as `<run>/workspace/repos.yaml`:
-
-```yaml
-repos:
+managed_repos:
   - repo: underminedsk/lightweave
     tracker: github-issues
   - repo: moda-labs/moda-skills
     tracker: github-issues
-  - repo: moda-labs/bobi-agent
-    tracker: github-issues
-  - repo: moda-labs/moda-agents
-    tracker: github-issues
 ```
 
-The pack's `managed_repos:` keeps `underminedsk/lightweave` and `moda-labs/moda-skills`, so
-today's decline behaviour on `bobi-agent` and `moda-agents` human branches is preserved
-exactly. No authority changes.
+The framework merges. It never learns what a repo is. Onboarding becomes: add two lines
+to one workspace file, restart. No pack edit, no PR to `moda-labs/moda-agents`, no
+rebuild, no reinstall.
 
-`linear:MDS`, `linear:MOD`, and the `slack:` topic stay in pack `subscribe:`, so no delivery
-is lost.
+**Not `workspace/agent.yaml`.** `paths.ROOT_MARKER = "agent.yaml"` (`bobi/paths.py:23`)
+and runtime-root detection walks for that filename (`:112`, `:132`, `:140`), so a file
+by that name in the runtime root's subtree is a collision hazard.
 
-`moda-labs/familystories-ai` is **not** in the registry. It was deliberately offboarded
-today at 22:24 UTC in `c0ec10a`, because baohua is its sole engineering team. The registry
-records that as an absence, and authoritative-not-merged means a pack upgrade cannot
-resurrect it. The stale checkout at `run/checkouts/familystories-ai` is left alone.
+### Merge rule: replace, not deep-merge
 
-Ordering matters: the migration file must exist **before** the framework change is deployed,
-because precedence is existence-based. After this has run, the pack's `github:` `subscribe:`
-entries are deleted in a follow-up PR to `moda-labs/moda-agents`.
+**A top-level key present in the overlay replaces the pack's value for that key.**
+One rule, uniformly applied, no per-key logic:
+
+- It keeps the framework free of domain semantics. Deep-merge would need to know which
+  keys are sets, which are ordered, and what identity means for a list element - exactly
+  where repo knowledge would leak in.
+- It closes the resurrection trap by construction. A pack upgrade re-declaring an
+  offboarded repo in `subscribe:` cannot revive it, because the pack's `subscribe:` is
+  never consulted once the overlay defines that key. No tombstones, no second mechanism.
+- It is predictable to a human editing YAML.
+
+**Trade-off, accepted deliberately.** A pack upgrade adding a genuinely new entry to an
+overridden key does not take effect until an operator copies it across. Silent pack-side
+additions to a list the operator now owns are the same class of surprise as silent
+resurrection. The migration therefore copies the *complete* current `subscribe:` list,
+including `slack:` and `linear:`, so the overlay is whole rather than partial.
+
+**Interpolation:** overlay values interpolate `${VAR}` exactly as the pack does
+(`bobi/config.py` `_interpolate_env`). The previous draft proposed keeping the overlay
+literal; that was wrong. `discover_subscriptions` already interpolates whatever
+`subscribe:` list it is handed (`bobi/events/subscriptions.py:40`), so a literal overlay
+would need a *second* code path, and env-var scanning would miss overlay refs. One path,
+one rule.
+
+## Scope
+
+In scope: the shared loader and merge; converting the framework's content readers;
+a read-only effective-config view; a commented seed template; migration; docs; and the
+companion prompt PR in `moda-labs/moda-agents`.
+
+Out of scope, each with a reason:
+
+- **Any `repos` CLI, or any `config set` CLI.** Ruled out. The overlay is a YAML file;
+  humans and the director edit it. Conversational onboarding is the operator surface.
+- **Changes to `seed_workspace()`.** Already general purpose.
+- **Live reload without a restart.** Deferred; correct insertion point named below.
+- **Machinery for branch-delete safety.** Policy/prompt, per ruling 4.
+- **Per-key validation of which keys may be overridden.** That is where repo semantics
+  would leak in. Handled as documentation, per ruling 4.
+
+## Technical approach
+
+### `Config` is the chokepoint
+
+The earlier draft proposed a new `agent_config.py` loader and listed seven call sites to
+convert. That inventory was **wrong**: it omitted `Config.load` (`bobi/config.py:549`,
+via `_project_config_path` at `:279`), which has **42 call sites** in `bobi/` and parses
+`services`, `auto_dispatch`, `brain`, `monitors`, `requires`, `host`, `build`,
+`channels`, `max_concurrent_agents`, `spend_cap`.
+
+Omitting it would produce precisely the divergence the spec claims to prevent, and the
+sharpest form is inside one function: `discover_subscriptions` reads the raw document on
+its primary path (`bobi/events/subscriptions.py:34`) and falls through to
+`Config.load(project_path)` at `:45` for adapter auto-detection. Merged primary,
+unmerged fallback, same function.
+
+So:
+
+```python
+# bobi/agent_config.py
+def load_agent_yaml(project_path: Path) -> dict:
+    """Installed agent.yaml with the runtime workspace overlay applied.
+
+    A top-level key in workspace/config.yaml replaces the pack's value.
+    """
+```
+
+`Config.load` uses it, which carries the merge to all 42 sites for free. The two raw
+readers - `bobi/events/subscriptions.py:34` and `bobi/ingress.py:62` - use the same
+helper. That is one code path for "what does agent.yaml say".
+
+Sites that are **not** content reads and stay as they are:
+`bobi/subagent.py:1591-1592` (`is_file()` root-marker check) and `bobi/doctor.py:253`
+(maps a display name to a path for manifest drift).
+
+`bobi/monitors/registry.py:80` passes a **Path** into `_read_records()` alongside a
+sibling path source, so it needs a records-from-dict path rather than a mechanical
+swap. Called out because "convert the readers" reads as mechanical and this one is not.
+
+`bobi/build_render.py:257` `load_composed_team_config` is **build-time** pack
+composition and is deliberately untouched: this is a runtime layer.
+
+### Failure handling: validate once, at boot
+
+A loader that raises is not enough. Five of the converted sites swallow exceptions
+today - `bobi/events/subscriptions.py:43` is a bare `except Exception: pass` on the
+feature-critical path - so a raise would be silently absorbed and the fleet would
+quietly revert to pack subscriptions, which is the exact failure this change exists to
+prevent.
+
+Therefore: **parse and validate the overlay once at manager startup**, in
+`run_manager_from_config` (`bobi/service.py:500`) before any subscription work, and fail
+the boot loudly with the file, line and reason. Per-site handlers keep their current
+behaviour. An *absent* overlay is normal and means "pack wins" - today's behaviour exactly.
+
+Validation at that point also rejects a non-mapping document and reports unknown-shaped
+entries, which is where an operator's typo actually shows up.
+
+### Read-back: `bobi agent <name> config show`
+
+Generic, read-only, prints the effective merged document with each top-level key marked
+`pack` or `overlay`. This is not a repo concept and does not violate ruling 1.
+
+It exists because without it every human and every prompt hand-merges two files, and
+`doctor.py:253` keeps reporting pack-only truth while the runtime uses something else.
+It is the debuggability counterpart to failing loudly.
+
+### Live effect: a restart is required, and this says so
+
+**Adding a repo takes effect after a manager restart. This is not hot reload.**
+
+`discover_subscriptions` runs once at boot (`bobi/service.py:533`) and the list is handed
+to the spawn (`:663`); the reconnect path re-asserts an in-memory list rather than
+re-reading config (`bobi/events/client.py` `_needs_resubscribe`).
+
+The restart is cheaper than it sounds, and the earlier draft undersold it: the manager
+session is preserved (cleared only on `--fresh`), and the saved-deployment path PUTs the
+newly authorized list against the existing `deployment_id` (`bobi/subagent.py:1425-1435`)
+with the event cursor intact, so events arriving during the gap replay rather than drop.
+
+Two operator consequences the docs must state, not bury:
+
+- A restart can strand in-flight runs. The instruction is "restart, then check the runs
+  table and resume stranded runs" (`docs/RUN_RESUME.md`).
+- The first restart after onboarding a busy repo is when its backlog can fan into
+  auto-dispatch, because `auto_dispatch` (`package/agent.yaml:95-111`) arms
+  `issue-lifecycle` and `pr-closed` with `allow_self_authored: true` for every
+  subscribed repo. Expect worker launches on a newly onboarded repo.
+
+The identity-preserving live path, named so the follow-on need not rediscover it:
+`PUT /deployments/<id>/subscriptions {"replace": [...]}` (`bobi/subagent.py:1474`, route
+`event-server/worker/src/index.ts:650`). `register()` is the wrong primitive - it
+supersedes the deployment and mints a new `deployment_id`/`api_key`. A watcher belongs in
+the manager process next to `MonitorScheduler`, must reassign `active_subscriptions`
+(`:1483`) because `_resubscribe_on_deaf` replays it (`:1510`), and must not re-invoke
+`_start_event_subscription`, whose `except` unlinks the event cursor (`:1435`, `:1486`).
+
+### Authority, in one line as ruled
+
+Write authority moves into the overlay with everything else. Branch-delete safety is
+policy and prompt, not machinery: the guard is the role prompt's decline-on-human-branch
+default, and nothing here enforces or weakens it.
+
+### The companion prompt PR is load-bearing, not a footnote
+
+Verified: `managed_repos` has zero consumers in `bobi/` **and zero in the installed pack
+beyond its own definition** (`run/package/agent.yaml:125`). No role prompt, tool doc,
+workflow or monitor reads it; the director's belief about write authority comes from
+long-term memory.
+
+So moving the list into the overlay changes nothing on its own. Until the prompt reads
+the overlay, there are two lists and the stale one governs. The companion PR in
+`moda-labs/moda-agents` is a **blocking co-deliverable**, and the prompt instruction is
+specified here verbatim rather than left to interpretation:
+
+> Repo management lives in `<run>/workspace/config.yaml`. A top-level key present there
+> replaces the same key in `run/package/agent.yaml`. Read `managed_repos:` from the
+> merged view (`bobi agent <name> config show`), never from `package/agent.yaml` alone.
+
+## Migration
+
+Write `<run>/workspace/config.yaml` once, containing the complete current `subscribe:`
+list and the current `managed_repos:` list, copied from `run/package/agent.yaml` in the
+pack's own order (lightweave, moda-agents, bobi-agent, moda-skills). Behaviour on day one
+is unchanged.
+
+To be precise: consumption is order-insensitive (`bobi/service.py:543`, `:549` are
+membership tests), so this is a semantic no-op rather than a literal byte match.
+
+`moda-labs/familystories-ai` appears in neither list. It was offboarded 2026-08-04
+22:24 UTC (`c0ec10a` in moda-agents) because baohua is its sole engineering team.
+Verified genuinely off: parsing the director's event log by `payload.repository.full_name`
+over a 33-hour window shows 628 familystories events, newest `2026-08-04T21:29:36`, and
+**none** after the 22:37:54 pack reinstall. No ongoing leak. (A substring grep for
+`familystories` inflates this badly - the string appears inside `moda-labs/bobi-agent`
+issue and PR payloads.)
+
+A commented seed template ships in the pack's `workspace/`. This is safe under per-key
+precedence: a template that defines no keys changes nothing, and it is how an operator
+discovers the file and the merge rule exist. `seed_workspace()` copies it only if absent
+and is otherwise untouched.
+
+**Open question for Zach, not decided here.** `bobi-agent` and `moda-agents` are
+subscribed but unmanaged today. Copying verbatim keeps them unmanaged. That is the
+zero-change choice, and once the overlay is live, changing it is a one-line edit with no
+PR - which is the point. Flagged rather than silently promoted.
+
+The pack's `subscribe:` and `managed_repos:` stay in place as the seed layer for a fresh
+deployment that has no overlay yet.
 
 ## Verification plan
 
-- Unit: registry parse; `tracker` default; malformed entries rejected loudly; no `${VAR}`
-  interpolation; parse failure keeps last good rather than collapsing to empty.
-- Unit: `discover_subscriptions` returns registry `github:` topics when the file exists,
-  pack `subscribe:` when absent, and never merges the two classes.
-- Unit: an explicitly **empty** registry yields zero `github:` topics and falls through to
-  neither adapter auto-detection nor the directory-name topic.
-- Unit: `tracker: linear:MOD` adds no `linear:` subscription.
-- Regression, resurrection trap: a pack upgrade still listing an offboarded repo in
-  `subscribe:` does not resubscribe it.
-- Regression, authority trap: nothing in the registry path writes or infers
-  `managed_repos:`; `repos add` leaves pack authority byte-identical.
-- Regression, the install trap: installing a pack onto a runtime with no registry does not
-  change the effective topic set.
-- Unit: `supervisor/snapshot.py:99` reports the registry-derived set.
-- Integration: `repos add` / `list` / `remove` against a temp runtime root, asserting file
-  contents and effective topics at each step, and that the file write is atomic.
-- Integration against the real dependency: drive the local event server through a full
-  manager start and assert the deployment's registered subscription set matches the
-  registry, and that a removed repo is genuinely unsubscribed rather than merely absent
-  from the file. The #488 grant path is where the risk lives, so this one is not a mock.
+- Unit: an overlay key replaces the pack's key; absent keys fall through; an absent
+  overlay is exactly today's behaviour.
+- Unit: `${VAR}` in overlay values interpolates identically to the pack.
+- Unit: a malformed overlay fails manager boot loudly with file and reason, and is not
+  swallowed by `subscriptions.py`'s `except Exception: pass`.
+- Unit: `Config.load` reflects the overlay, so an overridden `auto_dispatch:` or
+  `services:` is honoured rather than half-applied.
+- Unit: `discover_subscriptions`' primary path and its `Config.load` fallback agree.
+- Unit: `find_required_env_vars` over the merged document - an overlay replacing a key
+  that carried `${VAR}` in the pack must not silently stop requiring that secret
+  (`_build_only_names` computes `in_build - elsewhere`, so replacement can flip a var to
+  build-only).
+- Regression, the resurrection trap: pack `subscribe:` re-declaring an offboarded repo
+  does not resubscribe it while the overlay defines `subscribe:`.
+- Regression, the framework-purity constraint: no repo, `managed_repos` or `tracker`
+  semantics appear under `bobi/`. This is a test because it is the constraint most
+  likely to erode.
+- Regression: `seed_workspace()` unchanged; the seed template defines no keys.
+- Integration: a full manager start against the local event server registers exactly the
+  overlay's `subscribe:` set, and a repo removed from the overlay is genuinely
+  unsubscribed after restart rather than merely absent from the file.
+- Integration: the #488 resource-grant path (`bobi/events/server.py:609`) authorizes
+  overlay-sourced topics, and an ungranted topic is reported rather than silently dropped.
 
 ## Implementation plan
 
-1. `bobi/fleet.py`: load, validate, atomically write `workspace/repos.yaml`; derive
-   `github:` topics.
-2. `bobi/events/subscriptions.py`: registry owns `github:` when the file exists, including
-   the empty case; pack keeps `linear:`/`slack:`; parse failure keeps last good.
-3. `bobi/cli.py`: `@agent.group("repos")` with `add`, `remove`, `list`, the pack-sourced
-   authority column, the restart, and the honest no-confirmation caveat.
-4. Migration file written into the live runtime, before deploy.
-5. Docs: `docs/BUILDING_AGENT_TEAMS.md` gains a repo-registry section. Nothing to rewrite:
-   `managed_repos` does not currently appear in `docs/` at all.
-6. Companion PR in `moda-labs/moda-agents`: repoint the director prompt at
-   `workspace/repos.yaml`, reduce `managed_repos:` to an authority list.
+1. `bobi/agent_config.py`: `load_agent_yaml()` with replace semantics and interpolation.
+2. `Config.load` uses it; `events/subscriptions.py:34` and `ingress.py:62` use it;
+   `monitors/registry.py:80` gets a records-from-dict path.
+3. Boot-time overlay validation in `run_manager_from_config` (`bobi/service.py:500`).
+4. `bobi agent <name> config show`.
+5. Commented seed template in the pack's `workspace/`.
+6. Migration overlay written into the live runtime.
+7. Docs: `docs/BUILDING_AGENT_TEAMS.md` gains a runtime-overlay section covering the
+   merge rule, the restart consequences above, and guidance that the overlay is for
+   operational keys - replacing `services:`, `build:` or identity keys is unsupported
+   and will make setup and doctor disagree with the runtime. Nothing to rewrite:
+   `managed_repos` does not appear in `docs/` at `origin/main`.
+8. **Blocking co-deliverable:** companion PR in `moda-labs/moda-agents` with the prompt
+   text above.
 
-## Review status
+Complexity: the feature logic is small; the size is routing every content reader through
+one loader. The earlier "ten parse sites" framing was doubly wrong - two of the ten never
+parse the document, and it missed the one with 42 call sites.
 
-**Same-model adversarial pass: two rounds, run, and this is the twice-revised document.**
+## Review record
 
-Round 1 returned 2 blockers and 6 major findings. The design changed rather than absorbing
-them: write authority stayed in the pack (was a `write:` field in workspace), `linear:`
-derivation was dropped (it contradicted the precedence rule), the `events:` field was
-dropped, the `doctor` check was cut as noise-by-construction, and the restart was replaced
-with a live file-watch.
+**Spec review gate.** The house binding is `/gstack-plan-eng-review`,
+`/gstack-plan-design-review` and `/gstack-plan-ceo-review`. Those skills are interactive
+and cannot run in a headless worker, so the three lenses ran as adversarial passes
+instead - architecture/edge-cases/tests, design/operator-experience, and scope. A
+labelled substitution, not a claim to have run the skills. Not plan-born (no plan
+artifact referenced, no matching bracket prefix), so all three lenses apply.
 
-Round 2 killed that file-watch with 3 further blockers, all verified first-hand here: the
-drain loop never ticks, it is per-session, and there is no read-back route. So this version
-returns to an explicit restart, drops the read-back claim, ships **no** pack template
-(an empty one would unsubscribe an unmigrated fleet on install), and adds the
-`auto_dispatch` finding, which materially changes the risk picture and is the single most
-important thing for a reviewer to look at.
+**What this round changed.** The eng lens found the `Config.load` omission and that loud
+failure was unreachable behind five existing exception handlers; both were verified
+first-hand and the design changed - `Config` is now the chokepoint and validation moved
+to boot. The design lens scored operator experience 3/10 and produced the read-back view,
+the seed template, the filename change off the `ROOT_MARKER` collision, and the restart
+consequences. The scope lens found the companion prompt PR was load-bearing but specified
+in one line, and it is now a blocking co-deliverable with verbatim text. The `${VAR}`
+rule was inverted after two lenses independently showed the stated rationale was backwards.
 
-A citation pass ran separately across both rounds and found four wrong line references, all
-corrected. One was wrong because `run/repo` sits on a parked WIP HEAD whose unmerged edit to
-`docs/BUILDING_AGENT_TEAMS.md` does not exist on `origin/main` - a reminder to cite against
-the ref, not the working tree.
+**Earlier rounds.** Two adversarial rounds on the pre-ruling design returned five
+blockers before Zach's premise ruling replaced it entirely.
 
-**Cross-model pass: still owed.**
-`codex exec` was run in this container and returned
-`401 Unauthorized: Missing bearer or basic authentication` against
-`https://api.openai.com/v1/responses`; there is no fallback LLM key.
-The same-model pass is a fallback, not a substitute. Not faked, not waived.
+**Residual.** This revision has not itself been re-reviewed end to end; the mechanical
+claims behind each change were verified first-hand instead (`ROOT_MARKER`,
+`Config.load`'s 42 call sites, the `subscriptions.py:43` swallow, the `:45` fallback).
+
+**Cross-model pass: still owed.** `codex exec` returns
+`401 Unauthorized: Missing bearer or basic authentication` in this container and there is
+no fallback LLM key. Same-model passes are a fallback, not a substitute.
