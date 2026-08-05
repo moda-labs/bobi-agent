@@ -57,6 +57,26 @@ So the endpoint spawns `bobi agent <name> workflows resume <run_id>` in its own
 session, detached, and returns. Root binding, registry stamping, and the run's
 lifetime all belong to that process.
 
+## Hosted runs take the same path
+
+On a deployed fleet the three endpoints above are backed by the `resume_run` /
+`remind_run` / `close_run` admin commands (`docs/ADMIN_PROTOCOL.md`), executed
+by the supervisor on the box. They are not a second implementation: both the
+local runtime and the supervisor delegate to `bobi.webapp.run_actions`, so
+everything on this page — the `accepted` discipline, the spawn-not-thread rule,
+and the claim that arbitrates a race — holds identically on either surface.
+
+The spawn reasoning applies with particular force there. The supervisor is the
+longest-lived process on the box, and it is the one thing that must keep
+working when the manager is wedged; a resume threaded into it would stamp the
+*supervisor's* pid on the run's registry entry, and a later reconciler timeout
+would signal the supervisor itself.
+
+The `409`s below become command refusals carrying a machine-readable `code`
+(`unknown_run` / `not_waiting`), which the hosted runtime maps back to the same
+`UnknownRun` / `TeamLifecycleError` the local one raises — so the HTTP status
+an operator sees is the same on both.
+
 ## The claim belongs to the process doing the work
 
 Resume is single-winner: `WorkflowRun.claim()` atomically renames

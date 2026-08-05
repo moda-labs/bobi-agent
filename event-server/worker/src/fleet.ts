@@ -342,6 +342,11 @@ export async function buildFleetStatus(
 //   spend       (no args)               -> {spend: {total_cost_usd, ...}}
 //   session_log (no args)               -> {sessions: [...], counts: {...},
 //                                           truncated: bool} (#733 vertical 3)
+// MUST match bobi/supervisor/admin.py's ADMIN_COMMANDS exactly. This list is
+// an ALLOWLIST, not documentation: index.ts rejects anything absent from it
+// with 400 "unknown command", so a verb the supervisor implements but this
+// forgets is unreachable in production while every Python-side test still
+// passes. tests/test_admin_command_parity.py pins the two together.
 export const ADMIN_COMMANDS = [
 	"restart",
 	"stop",
@@ -352,6 +357,14 @@ export const ADMIN_COMMANDS = [
 	"roster",
 	"spend",
 	"session_log",
+	// The single-agent view's read model + the three operator writes it
+	// offers on a waiting workflow run.
+	"runs",
+	"overview",
+	"run_details",
+	"resume_run",
+	"remind_run",
+	"close_run",
 ] as const;
 export type AdminCommand = (typeof ADMIN_COMMANDS)[number];
 

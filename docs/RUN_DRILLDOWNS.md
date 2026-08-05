@@ -97,7 +97,15 @@ ages past the retention cap while a browser still holds its row, which is why
 
 ## Compatibility
 
-`TeamRuntime.transcript()` and `run_details()` are **not** `@abstractmethod`,
-per the ABC's sequencing rule: the private deploy-repo subclass must implement
-them before they can become abstract. The base raises `TeamLifecycleError`
-meanwhile.
+`TeamRuntime.transcript()` and `run_details()` **are** `@abstractmethod`, and
+the base carries no fallback. Both implementers live in this repo, so a
+missing one fails CI here rather than somewhere nobody is looking.
+
+The hosted side answers `run_details` from its own admin command, and
+`transcript` from the existing `transcript` command widened with
+`detail: true`. That widening matters for the distinction this document
+draws: `messages` is the chat view and has already discarded every tool call,
+so the debugging view cannot be derived from it downstream — it has to be read
+from the transcript on the box. A supervisor too old to know the arg replies
+without `entries`, and the hosted runtime reports that as unavailable rather
+than rendering a debugging view with the tool calls silently missing.

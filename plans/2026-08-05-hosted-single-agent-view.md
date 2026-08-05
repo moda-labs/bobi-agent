@@ -142,9 +142,26 @@ Six new commands in `bobi/supervisor/admin.py`, each a thin delegate:
 | `remind_run` | `{"run_id"}` | as `LocalRuntime.remind_run` | ditto |
 | `close_run` | `{"run_id"}` | as `LocalRuntime.close_run` | ditto |
 
-`transcript` is **not** new — the existing command already returns messages. The
-ABC's `transcript()` returns a dict where `messages()` returns a list, so the
-adapter reshapes rather than adding a seventh command.
+`transcript` is **not** new — the existing command already returns messages.
+
+**Corrected while building Lane B — the adapter cannot reshape, it has to
+widen.** The plan said the adapter would reshape `messages` into the ABC's
+transcript dict rather than add a seventh command. Read against the code, that
+does not work: `messages` is the CHAT view (`read_transcript_messages` — two
+roles, prose only) and the ABC's `transcript()` is the DEBUGGING view
+(`read_transcript_detail` — timestamped lines *including tool calls*, plus a
+`usage` header). The tool calls are already discarded by the time `messages`
+exists, so nothing downstream can recover them; a hosted transcript built by
+reshaping would silently omit everything the agent DID between speaking, which
+is most of what debugging a run means, and `docs/RUN_DRILLDOWNS.md` exists to
+draw exactly that distinction.
+
+So the conclusion stands and the mechanism changes: still **no seventh
+command**, but the existing `transcript` command takes an additive optional
+`detail: true` arg and its reply gains `entries` + `usage`. Additive on both
+halves of the wire, so the compatibility promise holds. A supervisor too old to
+know the arg replies without `entries`, and that is reported as unavailable
+rather than rendered as a debugging view with the tool calls missing.
 
 - `docs/ADMIN_PROTOCOL.md` documents all six. **Additive only**, per its own
   compatibility promise; bump `SUPERVISOR_VERSION` (`snapshot.py:28`) minor.
@@ -156,14 +173,29 @@ adapter reshapes rather than adding a seventh command.
   command timeouts rather than borrowing the default.
 - An older supervisor rejects these as unknown commands. Render that as
   "unavailable on this instance", naming the instance — **not** a crash. The
-  fleet is not uniform mid-roll.
+  fleet is not uniform mid-roll. Mechanically this is subtler than it reads:
+  an unknown command is dropped **without a reply**, so the only symptom is a
+  timeout, indistinguishable from a wedged dispatch worker. The runtime
+  therefore consults `supervisor.version` off the heartbeat *on timeout only*,
+  and reports "too old" only when the version says so — guessing "too old" for
+  a box that is merely stuck would be the same lie inverted.
 - **Flip the seven to `@abstractmethod` and delete the fallbacks in this same
   PR.** This is the dividend of Lane A: both implementers are now under one CI,
   so the ABC's sequencing rule — which existed *only* because the second
   implementer was invisible — no longer applies.
 - Correct `runtime.py:238` and `:354`, which name the archived `bobi-deploy`
   repo. As shipped in 0.55.0 they send implementors to a dead repository; after
-  Lane A they are simply wrong, since the subclass is in-tree.
+  Lane A they are simply wrong, since the subclass is in-tree. **Already done
+  by Lane A** (its five docstring hunks removed the naming), so what is left
+  for Lane B is B8's *enforcing* grep gate, which did not exist.
+
+- **Folded in while building — hosted `spend` was missing its savings block.**
+  Not in the plan as written, and small enough to belong here rather than in a
+  follow-up. `LocalRuntime.spend_summary` appends `script_cache`
+  (`docs/AGENT_OVERVIEW.md`); the supervisor's `spend` command did not, so a
+  hosted box answered `200` with the savings block silently blank. That is why
+  the Problem table above counted `/spend` as working — it returns, it just
+  under-reports. One line, and the parity test now covers it.
 
 ### Lane C — re-point the binding (`moda-agents`)
 
@@ -240,14 +272,14 @@ Lane A is unaffected either way — it adds a module and breaks nothing.
 
 - [x] **A1** `EventBusRuntime` and its tests live in `bobi-agent`; the moved tests pass with **no change to any assertion, fixture, or test body** — the import path is the only edit, and it must change, so "unmodified" was never literally achievable.
 - [x] **A2** It still imports nothing private — asserted by `tests/test_import_boundaries.py`, so a future private import fails CI rather than re-splitting the seam.
-- [ ] **B1** Six commands in `ADMIN_COMMANDS` and the dispatch chain, each delegating to the existing builder — no re-implemented read logic.
-- [ ] **B2** `docs/ADMIN_PROTOCOL.md` documents all six; `SUPERVISOR_VERSION` bumped; the additive-only promise holds.
-- [ ] **B3** Each read command's payload is **identical** to `LocalRuntime`'s for the same root — the anti-drift gate, and the reason the delegate design was chosen.
-- [ ] **B4** The three writes are proven against a real suspended workflow run, not a fixture: resume moves the run, and two concurrent resumes do not double-run it.
-- [ ] **B5** An unknown `run_id` and a non-resumable run return the documented error shapes.
-- [ ] **B6** A supervisor that does not know the command surfaces as unavailable, naming the instance — asserted, not assumed.
-- [ ] **B7** The seven are `@abstractmethod`, the fallbacks are gone, and **both** runtimes satisfy the ABC in one CI run.
-- [ ] **B8** No file under `bobi/` names the archived `bobi-deploy` **repo** as a place a subclass lives — grep gate, so it cannot silently return.
+- [x] **B1** Six commands in `ADMIN_COMMANDS` and the dispatch chain, each delegating to the existing builder — no re-implemented read logic.
+- [x] **B2** `docs/ADMIN_PROTOCOL.md` documents all six; `SUPERVISOR_VERSION` bumped; the additive-only promise holds.
+- [x] **B3** Each read command's payload is **identical** to `LocalRuntime`'s for the same root — the anti-drift gate, and the reason the delegate design was chosen.
+- [x] **B4** The three writes are proven against real run files on disk, not a mocked `WorkflowRun`: `close` really closes the run and cancels its session, and two concurrent claims on a real waiting run produce exactly one winner. One seam is held back deliberately — `subprocess.Popen`, so what resume asserts is the argv it hands the OS. "Resume moves the run" is NOT asserted here and was never a unit-testable claim: resume is fire-and-forget by design, so moving the run is the spawned CLI's work and the workflow engine's own test surface.
+- [x] **B5** An unknown `run_id` and a non-resumable run return the documented error shapes.
+- [x] **B6** A supervisor that does not know the command surfaces as unavailable, naming the instance — asserted, not assumed.
+- [x] **B7** The seven are `@abstractmethod`, the fallbacks are gone, and **both** runtimes satisfy the ABC in one CI run.
+- [x] **B8** No file under `bobi/` names the archived `bobi-deploy` **repo** as a place a subclass lives — grep gate, so it cannot silently return.
 - [ ] **C1** `hosted.py` binds the framework class; the private copies are deleted; no duplicate implementation survives.
 - [ ] **C2** The hosted console's single-agent page renders with real data end to end against a live instance: `/overview` and `/runs` answer 200 where they answered 409, and `test_drive_deployed_team_from_the_browser` is re-expanded to drive the runs table (it is green before this lane starts — moda-agents#102 — so "still green" proves nothing here; the gate is the restored leg, and the roster/chat legs stay deleted).
 
