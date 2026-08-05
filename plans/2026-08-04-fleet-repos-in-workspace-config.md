@@ -147,10 +147,12 @@ that it did not.
 - It keeps the framework free of domain semantics.
   Deep-merge would need to know which keys are sets, which are ordered, and what
   identity means for a list element, which is exactly where repo knowledge would leak in.
-- It closes the resurrection trap by construction.
+- It closes the resurrection trap, **given the presence gating specified next**.
   A pack upgrade re-declaring an offboarded repo in `subscribe:` cannot revive it,
   because the pack's `subscribe:` is never consulted once the overlay defines that key.
   No tombstones, no second mechanism.
+  Round 4 called this "by construction"; round 5 showed the construction was missing a
+  piece, and that piece is a prerequisite rather than a refinement.
 - It is predictable to a human editing YAML.
 
 **Replace semantics require presence gating, and today's code gates on truthiness.**
@@ -290,11 +292,25 @@ Removing `services:` overridability after an operator has used it in production 
 migration.
 So the applied set starts at exactly what the ask requires.
 
-Measured against the four blockers this reversal is what closes them:
-blocker 1 becomes true by construction rather than aspirational, blocker 2 shrinks to
-two boot-time reads where validation actually works, blocker 3 becomes moot because
-the four other raw readers never see the overlay consistently and by design, and
-blocker 4 disappears because there is no `Config._parse` interaction at all.
+Measured against the four blockers, and stated as round 5 judged it rather than as
+round 4 hoped:
+
+- **Blocker 1 is closed for `subscribe:`.** The 40 `Config.load` sites never see the
+  overlay, so "restart to apply" holds for the applied set by construction.
+  It is *not* closed for `managed_repos`, which the director reads live through
+  `config show`; that is the two-clock consequence, stated below rather than claimed
+  away.
+- **Blocker 2 is reduced, not dissolved.** Round 4 claimed it shrank "to two boot-time
+  reads where validation actually works". That was wrong: three of the five
+  `subscribe:` read paths are not boot, and the supervisor process never runs boot
+  validation at all. What actually closes it is `OverlayError` plus narrowing the
+  swallow, specified below.
+- **Blocker 3 is closed by the corrected table, not by the scoping alone.** The four
+  other raw readers not seeing the overlay is correct by design, but round 4's table
+  misclassified `registry.py:80`, which is a real content read of `monitors:`.
+  Scoping made the divergence *inert*; correcting the table is what keeps a future
+  widening from re-arming it.
+- **Blocker 4 is closed outright.** There is no `Config._parse` interaction at all.
 
 ### The reader inventory, derived mechanically
 
