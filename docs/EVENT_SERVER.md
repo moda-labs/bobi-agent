@@ -204,6 +204,12 @@ signed body, never from client input**:
   Python forwards the app token only through bubble-signed `POST /slack/workspaces` registration after `/health` reports `mode: local`; there is no event-server environment fallback.
   `/health.slack_socket` reports per-app connection state for doctor.
   The Worker remains webhook-only.
+> These per-source type shapes are what an `auto_dispatch` rule's `event:`
+> must match exactly. They are mirrored in `_EVENT_TYPE_SHAPES`
+> (`bobi/validate.py`) so startup preflight can flag a rule nothing will ever
+> emit; that table is hand-maintained and pinned to these adapters by
+> `tests/test_pack_routing_validation.py`, which fails when the two drift.
+
 - **Linear** (`POST /webhooks/linear`): `type = linear.<type>.<action>`, key
   `linear:<TEAM_KEY>`. Signature (`Linear-Signature`, HMAC-SHA256 of the raw body)
   is verified when `LINEAR_WEBHOOK_SECRET` (local: `BOBI_ES_LINEAR_WEBHOOK_SECRET`)

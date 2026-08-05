@@ -1969,3 +1969,59 @@ class TestNamedException:
 
         from bobi.workflow.orchestrator import _named_exception
         assert _named_exception(e) != ""
+
+
+class TestSessionConstructionFailureIsTerminal:
+    """D029: a raise from _make_session must not escape the honesty guard.
+
+    prepare_brain_runtime (the runtime-guard EPERM class) or an unresolvable
+    agent prompt can raise while the session is being CONSTRUCTED. That call
+    sat before the retry try and before the terminal-honesty try/finally, so
+    the exception left run_workflow entirely: no session.failed, no
+    workflow.failed, and a registry entry stuck 'running' until the dead-man
+    reconciler timed it out and mis-reported it — contradicting the contract
+    WORKFLOW_ENGINE.md states ("the finally emits the truthful terminal event
+    on any failure path").
+    """
+
+    def _run(self, monkeypatch, mark_terminal, tmp_path):
+        _bind_runtime_root(tmp_path / "run", monkeypatch)
+
+        class ExplodingBrain:
+            def make_session(self, **kwargs):
+                raise RuntimeError("runtime guard: EPERM on run/package")
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: ExplodingBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="only", prompt="do it", model="haiku"),
+        ])
+        registry = MagicMock()
+        registry.mark_terminal = mark_terminal
+        emitted = []
+        cwd = "/tmp"
+        with patch("bobi.workflow.orchestrator.get_registry",
+                   return_value=registry), \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event",
+                   side_effect=lambda ev, *a, **k: emitted.append(ev)), \
+             patch("bobi.workflow.orchestrator._setup_worktree",
+                   return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"):
+            result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
+        return result, emitted
+
+    def test_returns_false_instead_of_propagating(self, monkeypatch, tmp_path):
+        result, _ = self._run(monkeypatch, MagicMock(), tmp_path)
+        assert result is False
+
+    def test_marks_the_registry_entry_terminal(self, monkeypatch, tmp_path):
+        """The entry must not be left 'running' with no live process."""
+        mark_terminal = MagicMock()
+        self._run(monkeypatch, mark_terminal, tmp_path)
+        assert mark_terminal.called, "registry entry left stuck 'running'"
+
+    def test_emits_a_terminal_lifecycle_event(self, monkeypatch, tmp_path):
+        _, emitted = self._run(monkeypatch, MagicMock(), tmp_path)
+        assert any("fail" in ev for ev in emitted), emitted

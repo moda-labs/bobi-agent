@@ -696,11 +696,19 @@ async def _run_workflow_async(
     # Try resume, fall back to fresh session
     for attempt in range(2):
         resume_id = (saved_id or None) if attempt == 0 else None
-        client = _make_session(
-            resume_id, agent_name=current_agent, model=current_model,
-            effort=current_effort, max_turns=current_max_turns,
-        )
+        client = None
         try:
+            # Inside the try, not before it (D029). Session construction
+            # itself can raise — prepare_brain_runtime hitting the
+            # runtime-guard EPERM class, or an unresolvable agent prompt —
+            # and out here that exception escaped BOTH this retry and the
+            # terminal-honesty try/finally below, so the run emitted no
+            # session.failed, no workflow.failed, and left its registry entry
+            # stuck "running" until the dead-man reconciler mis-reported it.
+            client = _make_session(
+                resume_id, agent_name=current_agent, model=current_model,
+                effort=current_effort, max_turns=current_max_turns,
+            )
             if resume_id:
                 initial_prompt = None
             elif start_step > 0 and first_prompt_step is not None:
@@ -725,7 +733,9 @@ async def _run_workflow_async(
                 log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
                 save_session_id(session_name, "")
                 try:
-                    await client.disconnect()
+                    # May be None: _make_session itself can be what raised.
+                    if client is not None:
+                        await client.disconnect()
                 except Exception:
                     pass
                 continue

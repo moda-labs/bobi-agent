@@ -15,8 +15,6 @@ When an event arrives, match it to the right workflow:
 | Issue requesting review of existing content | `dogfood-content-review` |
 | PR review with changes requested | `pr-feedback` |
 | PR merged | `pr-merged` |
-| Slack DM requesting content work | pick the workflow that fits |
-| Slack DM asking a question | Answer it directly |
 | Informational event | Note it, no action needed |
 
 ## Agent roles

@@ -117,6 +117,8 @@ def validate_config(project_path: Path) -> ValidationResult:
     checks.extend(_check_monitor_relevance(project_path))
     checks.extend(_check_service_credentials(cfg))
     checks.extend(_check_venn_services(cfg))
+    checks.extend(_check_auto_dispatch_events(cfg))
+    checks.extend(_check_chat_service(cfg))
     checks.extend(_check_mcp_servers(cfg, project_path))
 
     return ValidationResult(
@@ -125,6 +127,112 @@ def validate_config(project_path: Path) -> ValidationResult:
         ok=not any((not c.ok) and c.required for c in checks),
         checks=checks,
     )
+
+
+# Event-type shapes the ingress can actually deliver, by source.
+#
+# Hand-maintained from the event-server adapters: they are TypeScript, so
+# nothing here can import them, and `tests/test_event_type_shapes.py` reads
+# those sources and fails when this table drifts — the same pin the design
+# tokens use.
+#
+# The distinction that matters: GitHub puts the action in ``fields.action``
+# and emits `github.${eventHeader}`, while Linear puts the action IN the type
+# and emits `linear.${dataType}.${action}`. A rule cannot be judged by segment
+# count alone without knowing which source it names — which is why the naive
+# "three segments is wrong" check would reject every legitimate Linear rule.
+_EVENT_TYPE_SHAPES: dict[str, dict] = {
+    "github": {"segments": 2, "action_field": True},
+    "linear": {"segments": 3, "action_field": False},
+    "slack": {"types": {"slack.mention", "slack.dm", "slack.thread_reply"}},
+    "discord": {"types": {"discord.dm", "discord.reply", "discord.mention"}},
+    "whatsapp": {"types": {"whatsapp.message"}},
+}
+
+
+def _unmatchable_reason(event_type: str) -> str:
+    """Why *event_type* can never be delivered, or '' if it can (or unknown).
+
+    Fails OPEN: an unrecognized source yields '' rather than a complaint, so
+    a new adapter — or a pack this table has never heard of — is never
+    blocked by a check that simply has not been taught about it yet.
+    """
+    if not event_type or "/" in event_type:      # system/* is published in-process
+        return ""
+    source = event_type.split(".", 1)[0]
+    shape = _EVENT_TYPE_SHAPES.get(source)
+    if shape is None:
+        return ""
+    known = shape.get("types")
+    if known is not None:
+        if event_type in known:
+            return ""
+        return (f"{source} only ever emits {', '.join(sorted(known))}")
+    want = shape["segments"]
+    got = len(event_type.split("."))
+    if got == want:
+        return ""
+    if got > want and shape.get("action_field"):
+        head, tail = event_type.rsplit(".", 1)
+        return (f"{source} emits '{head}' and carries '{tail}' in fields.action "
+                f"— use 'event: {head}' with 'match: {{action: {tail}}}'")
+    return f"{source} event types have {want} dot-separated parts, this has {got}"
+
+
+def _check_auto_dispatch_events(cfg) -> list[CheckResult]:
+    """Flag auto_dispatch rules whose `event:` no adapter can ever emit.
+
+    A rule that matches nothing fails silently — the deterministic dispatch
+    it was written to guarantee just never happens and the work quietly falls
+    through to whatever the director LLM decides (D017). Nothing in the logs
+    says so, which is what makes it worth a startup check.
+
+    A WARNING, not a blocker. The rule is inert, so the agent is no worse off
+    for starting; whereas making it required would refuse to start any
+    already-deployed team whose installed pack still carries the old spelling,
+    turning a silent dead rule into an outage on upgrade.
+    """
+    checks: list[CheckResult] = []
+    for rule in cfg.auto_dispatch or []:
+        if not isinstance(rule, dict):
+            continue
+        event_type = str(rule.get("event", ""))
+        reason = _unmatchable_reason(event_type)
+        if not reason:
+            continue
+        target = rule.get("workflow") or rule.get("task") or "no workflow"
+        checks.append(CheckResult(
+            name="auto_dispatch event",
+            ok=False,
+            detail=f"'{event_type}' is never emitted ({target} never fires)",
+            hint=reason,
+            required=False,
+        ))
+    return checks
+
+
+def _check_chat_service(cfg) -> list[CheckResult]:
+    """`chat:` must name a service the pack actually declares.
+
+    Ingress subscribes topics from declared services only, so naming an
+    undeclared one means no chat events ever arrive and a reply has no token
+    — while the role prompt goes on routing messages from that channel
+    (D119).
+    """
+    chat = (cfg.chat or "").strip()
+    if not chat or chat == "cli":
+        return []
+    if any(s.name == chat for s in cfg.services):
+        return []
+    declared = ", ".join(s.name for s in cfg.services) or "none"
+    return [CheckResult(
+        name="chat service",
+        ok=False,
+        detail=f"chat: {chat} is not a declared service (declared: {declared})",
+        hint=(f"declare a '{chat}' service with events: true, or drop the "
+              f"chat: line — no {chat} topic is subscribed as it stands"),
+        required=False,
+    )]
 
 
 def _check_entry_point(cfg, project_path: Path) -> CheckResult:
