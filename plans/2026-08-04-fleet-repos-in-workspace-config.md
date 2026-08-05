@@ -2,7 +2,9 @@
 
 Issue: [#952](https://github.com/moda-labs/bobi-agent/issues/952)
 Status: spec, awaiting approval (Gate 1)
-Created: 2026-08-04. Rewritten 2026-08-05 under Zach's premise constraints.
+Created: 2026-08-04.
+Rewritten 2026-08-05 under Zach's premise constraints.
+Revised 2026-08-05 (round 4): the chokepoint decision is reversed, see "Why not `Config.load`".
 
 ## Problem
 
@@ -11,8 +13,8 @@ repository and redeploying.
 
 The bindings live in `agents/moda-eng-team/agent.yaml` in `moda-labs/moda-agents`,
 installed to `run/package/agent.yaml` as a read-only frozen image, in two lists:
-`subscribe:` (routes events) and `managed_repos:` (per-repo `tracker:`, and in
-practice write authority).
+`subscribe:` (`package/agent.yaml:117`, routes events) and `managed_repos:`
+(`:125`, per-repo `tracker:`, and in practice write authority).
 
 Zach, in Slack `C0BAEN48KQR` thread `1785885345.077239`:
 
@@ -29,8 +31,10 @@ repository, a pack rebuild, an install and a restart, 22 minutes from merge to e
 
 ### The constraints that killed the first design
 
-This is a rewrite. The previous version proposed a `workspace/repos.yaml` registry plus
-a `bobi agent <name> repos add|remove|list` CLI. Zach rejected the premise:
+This is a rewrite.
+The first version proposed a `workspace/repos.yaml` registry plus a
+`bobi agent <name> repos add|remove|list` CLI.
+Zach rejected the premise:
 
 > in this design, it looks like pack-specific concepts like repo management have
 > leaked into the main bobi agent framework. bobi-agent should NOT have a CLI
@@ -41,39 +45,36 @@ a `bobi agent <name> repos add|remove|list` CLI. Zach rejected the premise:
 > always recoverable. I am more worried about anything that links repos to
 > requiring PRs. I think not deleting human branches is more of a policy/prompt thing
 
-Binding rulings:
+Binding rulings, settled, not reopened here:
 
-1. **No repo-specific concepts under `bobi/`.** No `repos` CLI, no `managed_repos`
-   awareness in framework code.
-2. **`seed_workspace()` stays general purpose.** Verified it already is
-   (`bobi/install.py:118`, copy-only-if-absent), so the correct action is to change nothing.
-3. **Write authority moves to workspace with everything else.** Keeping it pack-side
-   would mean managing a repo still needs a PR to the pack repo. This reverses the
-   previous spec's recommendation.
-4. **Branch-delete safety is policy/prompt.** No machinery: no manifest hashing, no
-   drift detection, no install-time reversion.
-
-### The tension this resolves
-
-Zach wants zero repo-specific concepts in the framework, but subscription routing *is*
-framework machinery. The resolution is to make the framework's contribution **generic**:
-one runtime config layer that knows nothing about repos, and a pack that supplies all
-meaning.
-
-This also rules out the tempting shortcut of allowlisting `subscribe:` and
-`managed_repos:` by name in the loader. `managed_repos` is not a framework key, so
-naming it in `bobi/` would be exactly the leak ruling 1 forbids. The merge must be
-generic over all keys.
+1. **No repo-specific concepts under `bobi/`.**
+   No `repos` CLI, no `managed_repos` awareness in framework code.
+2. **`seed_workspace()` stays general purpose.**
+   Verified it already is (`bobi/install.py:118-136`, copy-only-if-absent), so the
+   correct action is to change nothing.
+3. **Write authority moves to the workspace with everything else.**
+   Keeping it pack-side would mean managing a repo still needs a PR to the pack repo.
+4. **Branch-delete safety is policy/prompt.**
+   No machinery: no manifest hashing, no drift detection, no install-time reversion.
+5. **`bobi agent <name> config show` is approved.**
+   Zach's test: what matters is whether the *command* is domain-specific, not whether
+   the data it prints is.
+   A generic command printing repo names is fine; a `repos` command is not.
+   It follows the `monitors list` precedent (`bobi/cli.py:2417-2419`).
 
 ## Solution
 
-Add one generic primitive: **a workspace overlay merged over the installed `agent.yaml`.**
+Add one generic primitive: **a runtime workspace overlay over the installed
+`agent.yaml`.**
 
-`<run>/workspace/config.yaml`
+`<run>/workspace/overlay.yaml`
 
 ```yaml
 # Runtime overlay over package/agent.yaml.
-# A top-level key defined here REPLACES that key entirely. Restart to apply.
+# A top-level key here REPLACES that key in the pack.
+# Applied by the runtime: subscribe.  Every other key is data for agents.
+for_agent: moda-eng-team
+
 subscribe:
   - github:underminedsk/lightweave
   - github:moda-labs/moda-agents
@@ -90,278 +91,545 @@ managed_repos:
     tracker: github-issues
 ```
 
-The framework merges. It never learns what a repo is. Onboarding becomes: add two lines
-to one workspace file, restart. No pack edit, no PR to `moda-labs/moda-agents`, no
-rebuild, no reinstall.
+Onboarding becomes: add two lines to one workspace file, restart the manager.
+No pack edit, no PR to `moda-labs/moda-agents`, no rebuild, no reinstall.
 
-**Not `workspace/agent.yaml`.** `paths.ROOT_MARKER = "agent.yaml"` (`bobi/paths.py:23`)
-and runtime-root detection walks for that filename (`:112`, `:132`, `:140`), so a file
-by that name in the runtime root's subtree is a collision hazard.
+**Filename.**
+`overlay.yaml`, not `config.yaml` and not `agent.yaml`.
+`paths.global_config_path()` is already `<home>/config.yaml` (`bobi/paths.py:71-72`),
+named in `bobi/config.py:4-5` as a distinct, deliberately-limited concept, so
+`config.yaml` is taken.
+`agent.yaml` is `paths.ROOT_MARKER` (`bobi/paths.py:23`).
+
+*Correction to the previous revision.*
+It justified avoiding `agent.yaml` by claiming runtime-root detection "walks for that
+filename".
+That is false and is withdrawn.
+`resolve_root` states outright that "The old cwd walk-up is intentionally gone"
+(`bobi/paths.py:123-125`); `list_agents` (`:106`), `resolve_root_for_agent` (`:112`)
+and `resolve_root` (`:132`, `:140`) are all exact-path `is_file()` checks on
+`<root>/package/agent.yaml`.
+A file at `<run>/workspace/agent.yaml` would collide with nothing mechanically.
+The remaining reason to avoid the name is readability, and that is a weaker reason
+than the `config.yaml` collision, so it is not the one the decision rests on.
+
+### What the runtime applies, and what is only data
+
+The overlay carries two kinds of key, and the distinction is the design:
+
+| Kind | Keys | Who reads it |
+|---|---|---|
+| **Applied** | `subscribe` | The framework, at two sites, named below |
+| **Data** | everything else, including `managed_repos` | Agents, and `config show` |
+| **Guard** | `for_agent` | Boot validation only |
+
+`OVERLAY_APPLIED_KEYS` is a frozenset in `bobi/agent_config.py`, initially
+`{"subscribe"}`.
+Adding a key later is one entry, not a new mechanism.
+
+`subscribe:` is a **framework** key: `bobi/events/subscriptions.py` parses it,
+`bobi/ingress.py` parses it, `docs/EVENT_SERVER.md` documents it.
+Naming it in the loader adds no new vocabulary to `bobi/`.
+`managed_repos` is the domain concept, and under this design the framework never
+parses it at all, which satisfies ruling 1 more completely than a generic merge that
+carries it through `Config`.
+
+**Data keys are not silently ignored.**
+Boot logs one line naming exactly which overlay keys were applied and which were
+carried as data, so an operator who expects `services:` to take effect learns at boot
+that it did not.
 
 ### Merge rule: replace, not deep-merge
 
 **A top-level key present in the overlay replaces the pack's value for that key.**
-One rule, uniformly applied, no per-key logic:
 
-- It keeps the framework free of domain semantics. Deep-merge would need to know which
-  keys are sets, which are ordered, and what identity means for a list element - exactly
-  where repo knowledge would leak in.
-- It closes the resurrection trap by construction. A pack upgrade re-declaring an
-  offboarded repo in `subscribe:` cannot revive it, because the pack's `subscribe:` is
-  never consulted once the overlay defines that key. No tombstones, no second mechanism.
+- It keeps the framework free of domain semantics.
+  Deep-merge would need to know which keys are sets, which are ordered, and what
+  identity means for a list element, which is exactly where repo knowledge would leak in.
+- It closes the resurrection trap by construction.
+  A pack upgrade re-declaring an offboarded repo in `subscribe:` cannot revive it,
+  because the pack's `subscribe:` is never consulted once the overlay defines that key.
+  No tombstones, no second mechanism.
 - It is predictable to a human editing YAML.
 
-**Trade-off, accepted deliberately.** A pack upgrade adding a genuinely new entry to an
-overridden key does not take effect until an operator copies it across. Silent pack-side
-additions to a list the operator now owns are the same class of surprise as silent
-resurrection. The migration therefore copies the *complete* current `subscribe:` list,
-including `slack:` and `linear:`, so the overlay is whole rather than partial.
+**Trade-off, accepted deliberately.**
+A pack upgrade adding a genuinely new entry to an overridden key does not take effect
+until an operator copies it across.
+Silent pack-side additions to a list the operator now owns are the same class of
+surprise as silent resurrection.
+The migration therefore copies the *complete* current `subscribe:` list, including
+`slack:` and `linear:`, so the overlay is whole rather than partial.
 
-**Interpolation:** overlay values interpolate `${VAR}` exactly as the pack does
-(`bobi/config.py` `_interpolate_env`). The previous draft proposed keeping the overlay
-literal; that was wrong. `discover_subscriptions` already interpolates whatever
-`subscribe:` list it is handed (`bobi/events/subscriptions.py:40`), so a literal overlay
-would need a *second* code path, and env-var scanning would miss overlay refs. One path,
-one rule.
+**Interpolation:** overlay values interpolate `${VAR}` exactly as the pack does.
+`discover_subscriptions` already interpolates whatever `subscribe:` list it is handed
+(`bobi/events/subscriptions.py:38-40`), so a literal overlay would need a second code
+path.
+The loader returns the merged **uninterpolated** document and each caller interpolates
+as it does today.
 
 ## Scope
 
-In scope: the shared loader and merge; converting the framework's content readers;
-a read-only effective-config view; a commented seed template; migration; docs; and the
-companion prompt PR in `moda-labs/moda-agents`.
+In scope: the merge helper; the two `subscribe:` apply sites; atomic-write and
+loud-boot-failure handling; a read-only effective-config view; a commented seed
+template; migration; docs; and the companion PR in `moda-labs/moda-agents`.
 
 Out of scope, each with a reason:
 
-- **Any `repos` CLI, or any `config set` CLI.** Ruled out. The overlay is a YAML file;
-  humans and the director edit it. Conversational onboarding is the operator surface.
-- **Changes to `seed_workspace()`.** Already general purpose.
-- **Live reload without a restart.** Deferred; correct insertion point named below.
-- **Machinery for branch-delete safety.** Policy/prompt, per ruling 4.
-- **Per-key validation of which keys may be overridden.** That is where repo semantics
-  would leak in. Handled as documentation, per ruling 4.
+- **Any `repos` CLI, or any `config set` CLI.**
+  Ruled out.
+  The overlay is a YAML file; humans and the director edit it.
+- **Changes to `seed_workspace()`.**
+  Already general purpose.
+- **Routing the overlay through `Config.load`.**
+  Reversed this round.
+  Reasons below.
+- **Live reload without a restart.**
+  Deferred; correct insertion point named below.
+- **Machinery for branch-delete safety.**
+  Policy/prompt, per ruling 4.
+- **Promoting `bobi-agent` or `moda-agents` to managed.**
+  Migration is behaviour-preserving.
+  Promotion is a later one-line overlay edit and is not this change.
 
 ## Technical approach
 
-### `Config` is the chokepoint
+### Why not `Config.load`, reversed from the previous revision
 
-The earlier draft proposed a new `agent_config.py` loader and listed seven call sites to
-convert. That inventory was **wrong**: it omitted `Config.load` (`bobi/config.py:549`,
-via `_project_config_path` at `:279`), which has **42 call sites** in `bobi/` and parses
-`services`, `auto_dispatch`, `brain`, `monitors`, `requires`, `host`, `build`,
-`channels`, `max_concurrent_agents`, `spend_cap`.
+The previous revision made `Config.load` the chokepoint so the merge would reach all
+its call sites "for free".
+That is withdrawn.
+The decisive fact, verified first-hand this round:
 
-Omitting it would produce precisely the divergence the spec claims to prevent, and the
-sharpest form is inside one function: `discover_subscriptions` reads the raw document on
-its primary path (`bobi/events/subscriptions.py:34`) and falls through to
-`Config.load(project_path)` at `:45` for adapter auto-detection. Merged primary,
-unmerged fallback, same function.
+**`Config.load` is uncached.**
+`Config.load` (`bobi/config.py:551-556`) calls `_parse`, which calls `_load_yaml`
+(`:243-246`), which is a bare `path.read_text()`.
+There is no `lru_cache`, no memo, nothing else in the module.
+Every call re-reads from disk.
 
-So:
+That has never mattered, because the file it reads cannot change while a process runs:
+the installed pack is read-only on disk (`dr-xr-xr-x` on `run/package/`, `-r--r--r--`
+on `agent.yaml`) and is replaced only by an install, which is followed by a restart.
+**The overlay is operator-writable by construction.**
+Routing it through `Config.load` flips that invariant for all 41 call sites at once,
+and every one of them was written assuming it held.
 
-```python
-# bobi/agent_config.py
-def load_agent_yaml(project_path: Path) -> dict:
-    """Installed agent.yaml with the runtime workspace overlay applied.
+Three consequences follow, and they are what invalidated the previous revision:
 
-    A top-level key in workspace/config.yaml replaces the pack's value.
-    """
+1. **"Restart to apply" would be false.**
+   An overlay edited at 14:00 with a restart planned for 15:00 would be picked up
+   immediately, mid-process, by `subagent.py` (`launch_admission`),
+   `launch_lineage.py` (`max_launch_depth`), `monitors/scheduler.py` (`entry_role`)
+   and every other `Config.load` caller, while `subscribe:` (read once at
+   `service.py:534`) stayed on the old set.
+   The fleet would run half-migrated with no signal.
+
+2. **A torn read would degrade live processes silently.**
+   A non-atomic editor write, or an agent's `Write` mid-flush, leaves the file briefly
+   invalid.
+   A `Config.load` landing in that window raises, and the raise is swallowed into a
+   wrong default: `subagent.py:106-113` returns `None`, `supervisor/snapshot.py:48`
+   and `:105` emit an empty heartbeat, `supervisor/telemetry.py:96` loses the
+   event-server URL.
+   Boot-time validation gives zero coverage, because the edit happens long after boot.
+
+3. **It would expose a surface the spec then had to forbid.**
+   `Config` resolves `services:` (credentials), `brain:`, `build:`, `host:` and
+   `requires:`.
+   The previous revision's own docs step told operators that replacing those
+   "is unsupported".
+   An unsupported-but-reachable surface on the credential and identity path of the
+   whole deployment is the wrong shape.
+
+**Could the caching be fixed instead?**
+Yes, and it was considered: snapshot the overlay read per process so the merged
+document is stable for the process lifetime.
+It is rejected because it buys back only consequence 1.
+Consequence 3 remains by construction, consequence 2 shrinks but does not close
+(subagents and the supervisor sidecar start at arbitrary times, so their first read
+can still land in a torn window), and the cost is a new caching mechanism in the
+config loader plus four additional reader conversions, all to make a surface generic
+that the ask does not need generic.
+
+**Generality is reversible; exposure is not.**
+Adding more applied keys later is one entry in a frozenset.
+Removing `services:` overridability after an operator has used it in production is a
+migration.
+So the applied set starts at exactly what the ask requires.
+
+Measured against the four blockers this reversal is what closes them:
+blocker 1 becomes true by construction rather than aspirational, blocker 2 shrinks to
+two boot-time reads where validation actually works, blocker 3 becomes moot because
+the four other raw readers never see the overlay consistently and by design, and
+blocker 4 disappears because there is no `Config._parse` interaction at all.
+
+### The reader inventory, derived mechanically
+
+The last three revisions each hand-listed the readers and each list came back
+incomplete.
+This one is derived by command, and the command is recorded so the next reader can
+re-derive it rather than trust the table:
+
+```bash
+grep -rn "agent_yaml_path\|ROOT_MARKER" bobi/ --include=*.py | grep -v "^bobi/paths.py"
+grep -rn "Config\.load(" bobi/ --include=*.py
 ```
 
-`Config.load` uses it, which carries the merge to all 42 sites for free. The two raw
-readers - `bobi/events/subscriptions.py:34` and `bobi/ingress.py:62` - use the same
-helper. That is one code path for "what does agent.yaml say".
+Every hit is classified below.
+Nothing is listed that the first command did not produce.
 
-Sites that are **not** content reads and stay as they are:
-`bobi/subagent.py:1591-1592` (`is_file()` root-marker check) and `bobi/doctor.py:253`
-(maps a display name to a path for manifest drift).
+| Site | What it does with the file | Sees the overlay? |
+|---|---|---|
+| `bobi/events/subscriptions.py:34` | reads `subscribe:`, primary path | **yes, applied** |
+| `bobi/ingress.py:62` | reads `subscribe:` | **yes, applied** |
+| `bobi/env.py:34` | reads `brain:` for child env | no, by design |
+| `bobi/setup/actions.py:164` | reads `agent:` for a display name | no, by design |
+| `bobi/monitors/script_cache_checks.py:649` | reads `script_cache:` | no, by design |
+| `bobi/config.py:122` | `find_env_var_refs` scans `${VAR}` | no, but see below |
+| `bobi/config.py:281` | `_project_config_path`, feeds `Config.load` (41 real call sites) | no, by design |
+| `bobi/config.py:668`, `:684` | `_parse_build` resolves a sibling `Dockerfile` | not a content read |
+| `bobi/monitors/registry.py:80` | passes a `Path` into `_read_records()` | not a content read |
+| `bobi/doctor.py:253` | maps a display name to a path | not a content read |
+| `bobi/subagent.py:1591-1592` | `is_file()` root-marker check | not a content read |
 
-`bobi/monitors/registry.py:80` passes a **Path** into `_read_records()` alongside a
-sibling path source, so it needs a records-from-dict path rather than a mechanical
-swap. Called out because "convert the readers" reads as mechanical and this one is not.
+Two corrections to the previous revision are folded in.
+It claimed "the two raw readers"; there are six raw readers, and four of them
+(`env.py`, `setup/actions.py`, `script_cache_checks.py`, `config.py:122`) went
+unlisted.
+It claimed "42 call sites" for `Config.load`; `grep -c` returns 42 but
+`build_render.py:248` is a docstring line, so 41 are real.
 
-`bobi/build_render.py:257` `load_composed_team_config` is **build-time** pack
-composition and is deliberately untouched: this is a runtime layer.
+**This table is the invariant, and it is a test.**
+Under this design the four unlisted raw readers not seeing the overlay is correct
+rather than a divergence, because the overlay cannot set `brain:`, `agent:` or
+`script_cache:` in the first place: a `brain:` key in the overlay is carried as data
+and applied by nobody.
+That is what makes `env.py:34`'s own warning inapplicable here.
+Its docstring (`bobi/env.py:25-27`) says a divergence between it and `Config.load`
+"would pass validate yet pin an empty gateway base URL into every child", and the
+previous revision reproduced exactly that bug class inside its own fix.
+A test asserts that `OVERLAY_APPLIED_KEYS` contains no key read by any of those four
+sites, so widening the set later cannot silently recreate it.
 
-### Failure handling: validate once, at boot
+### `find_env_var_refs`: union, not replace
 
-A loader that raises is not enough. Five of the converted sites swallow exceptions
-today - `bobi/events/subscriptions.py:43` is a bare `except Exception: pass` on the
-feature-critical path - so a raise would be silently absorbed and the fleet would
-quietly revert to pack subscriptions, which is the exact failure this change exists to
-prevent.
+`find_env_var_refs` (`bobi/config.py:114-141`) drives what `bobi validate` requires.
+An overlay `subscribe:` entry carrying `${VAR}` would otherwise not be required, and a
+pack `${VAR}` that the overlay replaces away would still be required.
 
-Therefore: **parse and validate the overlay once at manager startup**, in
-`run_manager_from_config` (`bobi/service.py:500`) before any subscription work, and fail
-the boot loudly with the file, line and reason. Per-site handlers keep their current
-behaviour. An *absent* overlay is normal and means "pack wins" - today's behaviour exactly.
+The fix is a union, not a merge, and it is two changes:
 
-Validation at that point also rejects a non-mapping document and reports unknown-shaped
-entries, which is where an operator's typo actually shows up.
+- `_scan_env_refs` (`bobi/config.py:190-197`) is a regex over raw file **text**, so it
+  scans the overlay's text too and concatenates.
+  No re-serialization of a merged dict is needed.
+- `_build_only_names` (`:144-172`) computes `in_build - elsewhere`.
+  The overlay can never carry `build:` (it is not in the applied set), so its refs join
+  `elsewhere` and nothing joins `in_build`.
+
+Union is the safe direction: a var referenced by either file is required.
+Over-requiring a secret is an operator annoyance; under-requiring one is an outage.
+This matches `_build_only_names`' own documented stance that "a classification bug
+must over-require a secret, never quietly stop requiring one" (`:154-156`).
+
+### Failure handling: atomic write, then fail loudly at boot
+
+Two halves, and neither alone is enough.
+
+**Write side.**
+Every write of the overlay is atomic.
+`bobi/fsutil.py` landed on main in #951 (`atomic_write_text`, `atomic_write_json`,
+`file_lock`) and `CLAUDE.md` now requires durable state to go through it, so this is
+adopting the house mechanism rather than inventing one.
+The migration step writes the overlay with `fsutil.atomic_write_text`.
+The framework has no other writer, because there is no `config set` CLI.
+
+The director is not a framework writer and cannot be made one, so the companion prompt
+carries the requirement in one line: write a sibling temp file and `mv` it over the
+overlay, never edit in place.
+This is stated as a known limit rather than a guarantee: a human with an editor can
+still perform a non-atomic write, and no framework change prevents that.
+
+**Read side.**
+`subscribe:` is read at exactly two sites, both during manager startup
+(`bobi/service.py:534` via `discover_subscriptions`, and
+`bobi/ingress.py:109` via `explicit_subscriptions` inside
+`check_ingress_reachability`).
+A malformed overlay is caught once, at boot, and fails the boot loudly with the file
+and the parse error.
+
+Boot validation lives in `_load_config_or_raise` (`bobi/service.py:248`, called at
+`:484`), **not** in `run_manager_from_config` (`:501`) as the previous revision
+specified.
+That placement was unreachable: `run_team_foreground` (`:474`) already calls
+`_load_config_or_raise` at `:484` and `_validate_or_raise` at `:488` before it reaches
+`:501`, so a malformed overlay would have failed earlier and never reached the
+specified checkpoint.
+
+Validation checks three things and no more: the document is a mapping; `for_agent`, if
+present, matches the pack's `agent:` (`package/agent.yaml:130`); and each applied key
+has the shape its consumer expects.
+
+`bobi/events/subscriptions.py` keeps its bare `except Exception: pass` (`:44-45`) as a
+per-site handler, and that is now correct rather than a hazard, because the overlay it
+would swallow has already been parsed successfully at boot.
+
+**The `for_agent` guard exists for pack swap.**
+`seed_workspace` (`bobi/install.py:118-136`) only adds; nothing removes.
+Installing a different team into the same run root would leave a stale overlay
+replacing keys in a document that no longer means the same thing.
+One line in the overlay and one check at boot turns that from a silent boot disaster
+into a named failure.
 
 ### Read-back: `bobi agent <name> config show`
 
-Generic, read-only, prints the effective merged document with each top-level key marked
-`pack` or `overlay`. This is not a repo concept and does not violate ruling 1.
+Generic, read-only, per ruling 5.
+It prints the effective document with each top-level key marked `pack`, `overlay`, or
+`overlay (data)`.
+`--source` prints the tier column alone; `--json` prints a machine-readable form.
 
-It exists because without it every human and every prompt hand-merges two files, and
-`doctor.py:253` keeps reporting pack-only truth while the runtime uses something else.
-It is the debuggability counterpart to failing loudly.
+**The output is a contract, because a frozen prompt parses it.**
+The companion prompt tells the director to read `managed_repos:` from this command, so
+the format is specified here rather than left to the implementation: keys in the
+merged document's own order, `--json` emitting
+`{"key": {"value": ..., "source": "pack"|"overlay"|"overlay-data"}}`.
+The prompt uses `--json`.
 
-### Live effect: a restart is required, and this says so
+The previous revision justified this command by claiming `doctor.py:253` "keeps
+reporting pack-only truth".
+That is withdrawn: `:253` is inside `_check_runtime_layout` (`:245-258`), a layout
+existence check that reads no file content.
+The real justification is simpler and stands on its own: without it, every human and
+every prompt hand-merges two files.
 
-**Adding a repo takes effect after a manager restart. This is not hot reload.**
+### Live effect: a restart is required, and now that is true
 
-`discover_subscriptions` runs once at boot (`bobi/service.py:533`) and the list is handed
-to the spawn (`:663`); the reconnect path re-asserts an in-memory list rather than
-re-reading config (`bobi/events/client.py` `_needs_resubscribe`).
+**Adding a repo takes effect after a manager restart.
+This is not hot reload.**
 
-The restart is cheaper than it sounds, and the earlier draft undersold it: the manager
-session is preserved (cleared only on `--fresh`), and the saved-deployment path PUTs the
-newly authorized list against the existing `deployment_id` (`bobi/subagent.py:1425-1435`)
-with the event cursor intact, so events arriving during the gap replay rather than drop.
+Under this design the sentence is true by construction, not by convention: the applied
+set is `{subscribe}`, and `subscribe:` is read at `bobi/service.py:534` once, then
+handed to the spawn (`:664`).
+The reconnect path re-asserts an in-memory list rather than re-reading config
+(`bobi/events/client.py` `_needs_resubscribe`).
+
+**One honest exception, named rather than glossed.**
+The supervisor sidecar's `_expectations` (`bobi/supervisor/snapshot.py:88-99`) also
+calls `discover_subscriptions`, on every heartbeat, inside `except Exception: pass`.
+It changes no behaviour; it reports what the manager is expected to be subscribed to,
+and the read model diffs that against traffic to derive silence.
+So between an overlay edit and the restart, the heartbeat reports the intended set
+while the manager holds the old one, and a not-yet-subscribed topic can briefly show
+as silent.
+This is informational, it is the only place the two can disagree, and it is documented
+rather than fixed.
+
+The restart is cheaper than it sounds: the manager session is preserved (cleared only
+on `--fresh`), and the saved-deployment path PUTs the newly authorized list against
+the existing `deployment_id` (`bobi/subagent.py:1422-1431`) with the event cursor
+intact, so events arriving during the gap replay rather than drop.
 
 Two operator consequences the docs must state, not bury:
 
-- A restart can strand in-flight runs. The instruction is "restart, then check the runs
-  table and resume stranded runs" (`docs/RUN_RESUME.md`).
+- A restart can strand in-flight runs.
+  The instruction is "restart, then check the runs table and resume stranded runs"
+  (`docs/RUN_RESUME.md`).
 - The first restart after onboarding a busy repo is when its backlog can fan into
-  auto-dispatch, because `auto_dispatch` (`package/agent.yaml:95-111`) arms
-  `issue-lifecycle` and `pr-closed` with `allow_self_authored: true` for every
-  subscribed repo. Expect worker launches on a newly onboarded repo.
+  auto-dispatch, because `auto_dispatch` (`package/agent.yaml:78`) arms
+  `issue-lifecycle` (`:101-104`) and `pr-closed` (`:105-110`) with
+  `allow_self_authored: true` for every subscribed repo.
+  Expect worker launches on a newly onboarded repo.
 
-The identity-preserving live path, named so the follow-on need not rediscover it:
-`PUT /deployments/<id>/subscriptions {"replace": [...]}` (`bobi/subagent.py:1474`, route
-`event-server/worker/src/index.ts:650`). `register()` is the wrong primitive - it
-supersedes the deployment and mints a new `deployment_id`/`api_key`. A watcher belongs in
-the manager process next to `MonitorScheduler`, must reassign `active_subscriptions`
-(`:1483`) because `_resubscribe_on_deaf` replays it (`:1510`), and must not re-invoke
-`_start_event_subscription`, whose `except` unlinks the event cursor (`:1435`, `:1486`).
+The identity-preserving live path, named so a follow-on need not rediscover it:
+`PUT /deployments/<id>/subscriptions {"replace": [...]}` (`bobi/subagent.py:1473-1474`,
+route `event-server/worker/src/index.ts:650`).
+`register()` is the wrong primitive: it supersedes the deployment and mints a new
+`deployment_id`/`api_key`.
+A watcher belongs in the manager process next to `MonitorScheduler`, must reassign
+`active_subscriptions` (`:1483`) because `_resubscribe_on_deaf` replays it
+(`:1509-1511`), and must not re-invoke the saved-deployment sync path, whose `except`
+unlinks the event cursor (`:1435`).
+Correction to the previous revision: `:1486` does **not** unlink the cursor, it calls
+`_register_with_retry`.
 
 ### Authority, in one line as ruled
 
-Write authority moves into the overlay with everything else. Branch-delete safety is
-policy and prompt, not machinery: the guard is the role prompt's decline-on-human-branch
-default, and nothing here enforces or weakens it.
+Write authority moves into the overlay with everything else.
+Branch-delete safety is policy and prompt, not machinery: the guard is the role
+prompt's decline-on-human-branch default, and nothing here enforces or weakens it.
 
-### The companion prompt PR is load-bearing, not a footnote
+### The companion PR is a blocking co-deliverable
 
-Verified: `managed_repos` has zero consumers in `bobi/` **and zero in the installed pack
-beyond its own definition** (`run/package/agent.yaml:125`). No role prompt, tool doc,
-workflow or monitor reads it; the director's belief about write authority comes from
-long-term memory.
+Verified: `managed_repos` has zero consumers in `bobi/` **and zero in the installed
+pack beyond its own definition** (`run/package/agent.yaml:125`).
+No role prompt, tool doc, workflow or monitor reads it; the director's belief about
+write authority comes from long-term memory.
 
-So moving the list into the overlay changes nothing on its own. Until the prompt reads
-the overlay, there are two lists and the stale one governs. The companion PR in
-`moda-labs/moda-agents` is a **blocking co-deliverable**, and the prompt instruction is
-specified here verbatim rather than left to interpretation:
+So moving the list changes nothing on its own.
+Until the prompt reads the overlay, there are two lists and the stale one governs.
+The PR in `moda-labs/moda-agents` is **blocking**, and it carries two changes, not one:
 
-> Repo management lives in `<run>/workspace/config.yaml`. A top-level key present there
-> replaces the same key in `run/package/agent.yaml`. Read `managed_repos:` from the
-> merged view (`bobi agent <name> config show`), never from `package/agent.yaml` alone.
+1. **The prompt instruction**, specified verbatim rather than left to interpretation:
+
+   > Repo management lives in `<run>/workspace/overlay.yaml`.
+   > A top-level key present there replaces the same key in `run/package/agent.yaml`.
+   > Read `managed_repos:` from the merged view (`bobi agent <name> config show --json`),
+   > never from `package/agent.yaml` alone.
+   > When you edit the overlay, write a sibling temp file and `mv` it over the target.
+   > Never edit it in place.
+
+2. **The seed template**, `agents/moda-eng-team/workspace/overlay.yaml`.
+   The live pack has no `workspace/` directory at all, so this is a new directory in
+   the pack, not a file added to an existing one.
+   The previous revision counted this as part of step 5 and undercounted the pack-side
+   work.
 
 ## Migration
 
-Write `<run>/workspace/config.yaml` once, containing the complete current `subscribe:`
-list and the current `managed_repos:` list, copied from `run/package/agent.yaml` in the
-pack's own order (lightweave, moda-agents, bobi-agent, moda-skills). Behaviour on day one
-is unchanged.
+Write `<run>/workspace/overlay.yaml` once, containing the complete current
+`subscribe:` list and the current `managed_repos:` list, copied from
+`run/package/agent.yaml` in the pack's own order (lightweave, moda-agents,
+bobi-agent, moda-skills), plus `for_agent: moda-eng-team`.
+Behaviour on day one is unchanged.
 
-To be precise: consumption is order-insensitive (`bobi/service.py:543`, `:549` are
+To be precise: consumption is order-insensitive (`bobi/service.py:543-545`, `:549-551` are
 membership tests), so this is a semantic no-op rather than a literal byte match.
 
-`moda-labs/familystories-ai` appears in neither list. It was offboarded 2026-08-04
-22:24 UTC (`c0ec10a` in moda-agents) because baohua is its sole engineering team.
-Verified genuinely off: parsing the director's event log by `payload.repository.full_name`
-over a 33-hour window shows 628 familystories events, newest `2026-08-04T21:29:36`, and
-**none** after the 22:37:54 pack reinstall. No ongoing leak. (A substring grep for
-`familystories` inflates this badly - the string appears inside `moda-labs/bobi-agent`
-issue and PR payloads.)
+`moda-labs/familystories-ai` appears in neither list.
+It was offboarded 2026-08-04 22:24 UTC (`c0ec10a` in moda-agents) because baohua is
+its sole engineering team.
+Verified genuinely off: parsing the director's event log by
+`payload.repository.full_name` over a 33-hour window shows 628 familystories events,
+newest `2026-08-04T21:29:36`, and **none** after the 22:37:54 pack reinstall.
+No ongoing leak.
+(A substring grep for `familystories` inflates this badly, because the string appears
+inside `moda-labs/bobi-agent` issue and PR payloads.)
 
-A commented seed template ships in the pack's `workspace/`. This is safe under per-key
-precedence: a template that defines no keys changes nothing, and it is how an operator
-discovers the file and the merge rule exist. `seed_workspace()` copies it only if absent
-and is otherwise untouched.
+The commented seed template ships in the pack's new `workspace/`.
+It is safe because it defines no keys, and it is how an operator discovers that the
+file and the merge rule exist.
+Its comments carry the applied-key list, so the one thing a template can do that
+documentation cannot is done there: tell the operator, at the point of editing, that
+`services:` will not take effect.
+`seed_workspace()` copies it only if absent and is otherwise untouched.
 
-**Open question for Zach, not decided here.** `bobi-agent` and `moda-agents` are
-subscribed but unmanaged today. Copying verbatim keeps them unmanaged. That is the
-zero-change choice, and once the overlay is live, changing it is a one-line edit with no
-PR - which is the point. Flagged rather than silently promoted.
+The pack's `subscribe:` and `managed_repos:` stay in place as the seed layer for a
+fresh deployment that has no overlay yet.
 
-The pack's `subscribe:` and `managed_repos:` stay in place as the seed layer for a fresh
-deployment that has no overlay yet.
+**The fleet trade, named.**
+For one deployment this is a clear win: 22 minutes and a cross-repo PR become one file
+edit and a restart.
+For N deployments it replaces a PR-reviewed, atomic, version-controlled change with N
+hand edits on N durable volumes (`Dockerfile:283` `VOLUME ["/data"]`), with no drift
+detection and no audit trail.
+That is the deliberate cost of the ask, it is accepted, and the mitigation if the
+fleet grows is to converge the overlays from a source of record rather than to
+re-pack.
 
 ## Verification plan
 
-- Unit: an overlay key replaces the pack's key; absent keys fall through; an absent
-  overlay is exactly today's behaviour.
-- Unit: `${VAR}` in overlay values interpolates identically to the pack.
-- Unit: a malformed overlay fails manager boot loudly with file and reason, and is not
-  swallowed by `subscriptions.py`'s `except Exception: pass`.
-- Unit: `Config.load` reflects the overlay, so an overridden `auto_dispatch:` or
-  `services:` is honoured rather than half-applied.
-- Unit: `discover_subscriptions`' primary path and its `Config.load` fallback agree.
-- Unit: `find_required_env_vars` over the merged document - an overlay replacing a key
-  that carried `${VAR}` in the pack must not silently stop requiring that secret
-  (`_build_only_names` computes `in_build - elsewhere`, so replacement can flip a var to
-  build-only).
+- Unit: an overlay key in the applied set replaces the pack's key; absent keys fall
+  through; an absent overlay is exactly today's behaviour.
+- Unit: an overlay key **outside** the applied set is carried as data and changes no
+  runtime behaviour, and boot names it in the applied-vs-data log line.
+- Unit: `${VAR}` in an overlay `subscribe:` entry interpolates identically to the pack.
+- Unit: a malformed overlay fails manager boot loudly with the file and the reason, at
+  `_load_config_or_raise` (`bobi/service.py:248`), and is not swallowed by
+  `subscriptions.py:44`'s
+  `except Exception: pass`.
+- Unit: `for_agent` mismatching the pack's `agent:` fails boot with a named error.
+- Unit: `find_required_env_vars` unions pack and overlay refs.
+  An overlay `${VAR}` becomes required; a pack `${VAR}` the overlay replaced away stays
+  required.
+- Unit, the invariant behind the reader table: `OVERLAY_APPLIED_KEYS` contains no key
+  read by `env.py:34`, `setup/actions.py:164`, `script_cache_checks.py:649` or
+  `Config.load`.
+  This is the test that stops a future widening from recreating the divergence
+  `env.py:25-27` warns about.
+- Unit: `config show --json` emits the specified shape, and `managed_repos` resolves
+  from the overlay.
+  The frozen prompt parses this output, so the format is under test.
 - Regression, the resurrection trap: pack `subscribe:` re-declaring an offboarded repo
   does not resubscribe it while the overlay defines `subscribe:`.
-- Regression, the framework-purity constraint: no repo, `managed_repos` or `tracker`
-  semantics appear under `bobi/`. This is a test because it is the constraint most
-  likely to erode.
+- Regression, the framework-purity constraint: no `managed_repos` and no `tracker:`
+  **as an agent.yaml key** appear under `bobi/`.
+  Stated as a precise predicate, not prose, because the loose version is untestable:
+  `tracker` already appears at `setup/services.py:307` and eight times in
+  `events/drain.py` (`_AckWatermark`), and `repo` appears in 20+ modules.
+  The predicate is: the literal strings `managed_repos` and `OVERLAY_APPLIED_KEYS`'
+  forbidden members do not appear in `bobi/`.
 - Regression: `seed_workspace()` unchanged; the seed template defines no keys.
-- Integration: a full manager start against the local event server registers exactly the
-  overlay's `subscribe:` set, and a repo removed from the overlay is genuinely
+- Integration: a full manager start against the local event server registers exactly
+  the overlay's `subscribe:` set, and a repo removed from the overlay is genuinely
   unsubscribed after restart rather than merely absent from the file.
-- Integration: the #488 resource-grant path (`bobi/events/server.py:609`) authorizes
-  overlay-sourced topics, and an ungranted topic is reported rather than silently dropped.
+- Integration, the contract blocker 1 falsified: edit the overlay while a manager runs,
+  assert the manager's live subscriptions do **not** change until restart, then assert
+  they do after.
+  The previous revision's restart-only test passed while the bug was live; this one
+  fails against that design and passes against this one.
+- Integration: a torn overlay (truncated mid-write) present at boot fails the boot with
+  a named error rather than starting on pack subscriptions.
+- Integration: the #488 resource-grant path (`bobi/events/server.py:612`) authorizes
+  overlay-sourced topics, and an ungranted topic is reported rather than silently
+  dropped.
 
 ## Implementation plan
 
-1. `bobi/agent_config.py`: `load_agent_yaml()` with replace semantics and interpolation.
-2. `Config.load` uses it; `events/subscriptions.py:34` and `ingress.py:62` use it;
-   `monitors/registry.py:80` gets a records-from-dict path.
-3. Boot-time overlay validation in `run_manager_from_config` (`bobi/service.py:500`).
-4. `bobi agent <name> config show`.
-5. Commented seed template in the pack's `workspace/`.
-6. Migration overlay written into the live runtime.
+1. `bobi/agent_config.py`: `load_agent_yaml(project_path) -> dict` returning the merged
+   **uninterpolated** document, plus `OVERLAY_APPLIED_KEYS` and the validation entry
+   point.
+2. Apply it at the two `subscribe:` sites: `bobi/events/subscriptions.py:34` and
+   `bobi/ingress.py:62`.
+   No other reader changes.
+3. Boot validation in `_load_config_or_raise` (`bobi/service.py:248`, called at `:484`), with the
+   applied-vs-data log line.
+4. `find_env_var_refs` unions the overlay: `_scan_env_refs` concatenates the overlay's
+   text, `_build_only_names` folds overlay refs into `elsewhere`.
+5. `bobi agent <name> config show`, with `--source` and `--json`, following
+   `monitors list` (`bobi/cli.py:2417-2419`).
+6. Migration overlay written into the live runtime with `fsutil.atomic_write_text`.
 7. Docs: `docs/BUILDING_AGENT_TEAMS.md` gains a runtime-overlay section covering the
-   merge rule, the restart consequences above, and guidance that the overlay is for
-   operational keys - replacing `services:`, `build:` or identity keys is unsupported
-   and will make setup and doctor disagree with the runtime. Nothing to rewrite:
-   `managed_repos` does not appear in `docs/` at `origin/main`.
-8. **Blocking co-deliverable:** companion PR in `moda-labs/moda-agents` with the prompt
-   text above.
+   merge rule, the applied-vs-data distinction, the restart consequences above, and the
+   supervisor-heartbeat exception.
+   Nothing to rewrite: `managed_repos` does not appear in `docs/` at `origin/main`.
+8. **Blocking co-deliverable:** the `moda-labs/moda-agents` PR carrying both the prompt
+   text and the `workspace/overlay.yaml` seed template.
 
-Complexity: the feature logic is small; the size is routing every content reader through
-one loader. The earlier "ten parse sites" framing was doubly wrong - two of the ten never
-parse the document, and it missed the one with 42 call sites.
+Complexity is now small.
+The previous revision's size came entirely from routing 41 `Config.load` sites and six
+raw readers through one loader; scoping the applied set to `subscribe:` removes that
+work rather than deferring it.
 
 ## Review record
 
-**Spec review gate.** The house binding is `/gstack-plan-eng-review`,
-`/gstack-plan-design-review` and `/gstack-plan-ceo-review`. Those skills are interactive
-and cannot run in a headless worker, so the three lenses ran as adversarial passes
-instead - architecture/edge-cases/tests, design/operator-experience, and scope. A
-labelled substitution, not a claim to have run the skills. Not plan-born (no plan
-artifact referenced, no matching bracket prefix), so all three lenses apply.
+**Spec review gate.**
+The house binding is `/gstack-plan-eng-review`, `/gstack-plan-design-review` and
+`/gstack-plan-ceo-review`.
+Those skills are interactive and cannot run in a headless worker, so the three lenses
+ran as adversarial passes instead: architecture/edge-cases/tests, design/operator
+experience, and scope.
+A labelled substitution, not a claim to have run the skills.
+Not plan-born (no plan artifact referenced, no matching bracket prefix), so all three
+lenses apply.
 
-**What this round changed.** The eng lens found the `Config.load` omission and that loud
-failure was unreachable behind five existing exception handlers; both were verified
-first-hand and the design changed - `Config` is now the chokepoint and validation moved
-to boot. The design lens scored operator experience 3/10 and produced the read-back view,
-the seed template, the filename change off the `ROOT_MARKER` collision, and the restart
-consequences. The scope lens found the companion prompt PR was load-bearing but specified
-in one line, and it is now a blocking co-deliverable with verbatim text. The `${VAR}`
-rule was inverted after two lenses independently showed the stated rationale was backwards.
+**Round 4 is what produced this revision.**
+It returned four blockers, all rooted in the `Config`-as-chokepoint decision, and the
+decision is reversed above rather than patched.
+Every one of its citations was re-verified first-hand against the rebased tree before
+being acted on, and two of its line numbers had already moved under #951
+(`script_cache_checks.py` 651 to 649, `setup/actions.py` 169 to 171).
+The fabricated `paths.py` walk justification (M1), the `config.yaml` name collision
+(M2), the unreachable validation placement (M3), the `find_env_var_refs` gap (M5), the
+pack-swap guard (M6), the fleet trade (M7), the `doctor.py:253` mischaracterization,
+the `config show` output contract, the uncounted second pack-side deliverable, and the
+`subagent.py`/`agent.yaml` citation drift are all folded in above.
 
-**Earlier rounds.** Two adversarial rounds on the pre-ruling design returned five
+**Earlier rounds.**
+Rounds 1 and 2 ran against the pre-ruling `repos.yaml` design and returned five
 blockers before Zach's premise ruling replaced it entirely.
+Round 3 produced the generic-merge revision this one reverses.
 
-**Residual.** This revision has not itself been re-reviewed end to end; the mechanical
-claims behind each change were verified first-hand instead (`ROOT_MARKER`,
-`Config.load`'s 42 call sites, the `subscriptions.py:43` swallow, the `:45` fallback).
-
-**Cross-model pass: still owed.** `codex exec` returns
-`401 Unauthorized: Missing bearer or basic authentication` in this container and there is
-no fallback LLM key. Same-model passes are a fallback, not a substitute.
+**Cross-model pass: still owed.**
+`codex exec` returns `401 Unauthorized: Missing bearer or basic authentication` in this
+container, `aichat` has no provider config, and there is no fallback LLM key.
+Verified first-hand, not assumed.
+Same-model passes are a fallback, not a substitute, and this is recorded as an
+outstanding debt rather than waived.
