@@ -91,7 +91,12 @@ class TestToolPollScriptCacheIntegration:
         content = script_path.read_text()
         assert "echo" in content
 
-        # --- Step 2: Mutate cached script to return different data ---
+        # --- Step 2: A cached script that no longer matches the command ---
+        # Previously this asserted the mutated output was returned. The cache
+        # is now validated against the command the monitor resolves to today
+        # (D023), so a script that does not match it is discarded — whether it
+        # drifted because the monitor was edited or because someone rewrote
+        # the file.
         new_items = [{"id": "cached-999", "val": "from-cache"}]
         script_path.write_text(
             f"#!/usr/bin/env bash\nset -euo pipefail\n"
@@ -101,8 +106,8 @@ class TestToolPollScriptCacheIntegration:
 
         result2 = sched._check_conditions(monitor, sched._registry_loader())
         assert result2 is not None
-        assert len(result2) == 1
-        assert result2[0].key == "cached-999", "Should use cached script output"
+        assert {c.key for c in result2} == {"item-1", "item-2"}
+        assert "cached-999" not in script_path.read_text()
 
         # --- Step 3: Break the cached script → fallback + self-heal ---
         script_path.write_text("#!/usr/bin/env bash\nexit 1\n")
@@ -130,12 +135,19 @@ class TestToolPollScriptCacheIntegration:
             lambda name: scripts_dir / f"{name.replace('/', '_').replace('..', '_')}.sh",
         )
 
-        items = [{"id": "msg-1"}, {"id": "msg-2"}]
+        # The command reads a file, so the polled data can change while the
+        # command — and therefore the cached script — stays identical. That is
+        # what a real poll looks like, and it is the only way to prove the
+        # CACHED script produced the new items: rewriting the script itself
+        # would just be a command that no longer matches (see test_cache_
+        # lifecycle).
+        data_file = tmp_path / "data.json"
+        data_file.write_text(json.dumps([{"id": "msg-1"}, {"id": "msg-2"}]))
         monitor = Monitor(
             name="reconcile-cache-test",
             check="tool_poll",
             event="monitor/reconcile",
-            extra={"command": f"echo '{json.dumps(items)}'", "id_field": "id"},
+            extra={"command": f"cat {data_file}", "id_field": "id"},
         )
 
         sched, published = _make_scheduler(tmp_path, [monitor])
@@ -152,17 +164,18 @@ class TestToolPollScriptCacheIntegration:
         sched._reconcile(monitor, conds2)
         assert len(published) == 2, "Same IDs should not fire again"
 
-        # Mutate cached script to add a new item
-        new_items = [{"id": "msg-1"}, {"id": "msg-2"}, {"id": "msg-3"}]
         script_path = scripts_dir / "reconcile-cache-test.sh"
-        script_path.write_text(
-            f"#!/usr/bin/env bash\nset -euo pipefail\n"
-            f"echo '{json.dumps(new_items)}'\n"
-        )
-        script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC)
+        assert script_path.exists()
+        cached_before = script_path.read_text()
+
+        # New item appears at the polled source.
+        data_file.write_text(
+            json.dumps([{"id": "msg-1"}, {"id": "msg-2"}, {"id": "msg-3"}]))
 
         conds3 = sched._check_conditions(monitor, sched._registry_loader())
         assert conds3 is not None
         sched._reconcile(monitor, conds3)
         assert len(published) == 3, "New item from cached script should fire"
         assert published[2]["data"]["monitor"] == "reconcile-cache-test"
+        # The cached script served all three polls — it was never re-cached.
+        assert script_path.read_text() == cached_before
