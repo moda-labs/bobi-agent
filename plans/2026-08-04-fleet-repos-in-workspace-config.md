@@ -473,23 +473,25 @@ matches the pack's `agent:` (`package/agent.yaml:130`); each applied key has the
 its consumer expects; and an applied key present with a null value is rejected rather
 than read as empty.
 
-`for_agent` is **required whenever the overlay defines any applied key**, not optional.
-An optional guard does not guard: the pack-swap disaster it exists for happens
-precisely on a hand-written overlay, and the seed template defines no keys, so an
-optional field would be absent exactly when it is needed.
-
-**The `for_agent` guard exists for pack swap.**
+**The `for_agent` guard exists for pack swap, and it is required, not optional.**
 `seed_workspace` (`bobi/install.py:118-136`) only adds; nothing removes.
 Installing a different team into the same run root would leave a stale overlay
 replacing keys in a document that no longer means the same thing.
 One line in the overlay and one check at boot turns that from a silent boot disaster
 into a named failure.
 
+Round 4 made it optional ("if present").
+An optional guard does not guard: the disaster it exists for happens precisely on a
+hand-written overlay, so the field would be absent exactly when it is needed.
+It is therefore **required whenever the overlay defines any applied key**.
+A seed template that defines no applied keys does not need it, which is why the
+template can ship without one.
+
 ### Read-back: `bobi agent <name> config show`
 
 Generic, read-only, per ruling 5.
 It prints the effective document with each top-level key marked `pack`, `overlay`, or
-`overlay (data)`.
+`overlay-data`.
 `--source` prints the tier column alone; `--json` prints a machine-readable form.
 
 **The output is a contract, because a frozen prompt parses it.**
