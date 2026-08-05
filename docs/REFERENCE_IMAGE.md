@@ -142,9 +142,11 @@ readinessProbe:
 ```
 
 `/health` is a cheap in-process liveness check; `/ready` returns `503` until the
-director session reports `running` or `idle`. **Keep the health port private to
-the pod network** — `/health` reports process and session status for operators,
-so it does not belong behind a public Service or Ingress.
+director session reports `running` or `idle`. Both are served concurrently, and
+a connection that does not complete a request is dropped after 10s — one
+stalled or half-open client cannot queue every probe behind it. **Keep the
+health port private to the pod network** — `/health` reports process and session
+status for operators, so it does not belong behind a public Service or Ingress.
 
 ## Build it yourself
 

@@ -188,8 +188,8 @@ def _project_from_path(file_path: Path) -> str:
     """Best-effort project path from the transcript's directory name.
 
     Claude encodes a cwd as its directory name by replacing every '/' with
-    '-', which is LOSSY: '-Users-z-dev-bobi-agent' is equally a decode of
-    '/Users/z/dev/bobi-agent' and of '/Users/z/dev/bobi/agent'. Nothing here
+    '-', which is LOSSY: '-home-z-dev-bobi-agent' is equally a decode of
+    '/home/z/dev/bobi-agent' and of '/home/z/dev/bobi/agent'. Nothing here
     can tell them apart, so this is only the fallback — `_index_file` prefers
     the real cwd the transcript itself carries (D069).
     """

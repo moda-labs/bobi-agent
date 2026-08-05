@@ -97,6 +97,13 @@ without a restart.
   right call interactively with `venn tools search/describe/execute` first.
 - **Native check** (`check:`) - names a deterministic Python runner shipped with
   the framework or the pack's `monitors/*_checks.py`. `script_cache` is one.
+  A runner normally detects inline, on the scheduler thread, which is fine for
+  anything subprocess-bounded (`tool_poll` caps at 60 s). A runner that may
+  call the agent runtime sets `out_of_band = True` on itself; the scheduler
+  then detects on a worker thread and reconciles from there, so a slow
+  regeneration cannot stall the other monitors. `script_cache` sets it. While
+  one is in flight the monitor's later ticks are skipped rather than stacked,
+  and they open no run record - a 20-minute generation is one row, not forty.
 - **Description-only** (`description:`, no command) - when output needs
   interpretation, the scheduler spawns a short-lived check agent that observes
   and returns a verdict. Costs an LLM call per interval; use when diffable JSON
@@ -303,6 +310,11 @@ tick
 
 A self-heal tick is never wasted: the agent both produces this tick's result and
 emits the script for next time.
+
+The whole lifecycle above runs on a worker thread, not the scheduler thread -
+`script_cache` is an `out_of_band` runner (see "Flavors"), because a self-heal
+blocks for as long as the agent takes and the scheduler has only one thread to
+evaluate every other monitor with.
 
 ## What it caches: an LLM wrote this script
 
