@@ -266,10 +266,16 @@ class AdminListener:
             elif command == "status":
                 result = self.telemetry.last_snapshot or {"status": "starting"}
             elif command == "transcript":
-                result = {"messages": self._read_transcript(args.get("session"))}
+                # Built whole before assignment: a failure in the detail half
+                # must not leave `result` holding the messages half beside an
+                # error status, which would publish a partial reply that reads
+                # like a successful one.
+                payload = {"messages": self._read_transcript(
+                    args.get("session"))}
                 if args.get("detail"):
-                    result.update(self._read_transcript_detail(
+                    payload.update(self._read_transcript_detail(
                         args.get("session")))
+                result = payload
             elif command == "roster":
                 result = {"subagents": self._read_roster()}
             elif command == "spend":

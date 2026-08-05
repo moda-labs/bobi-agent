@@ -343,6 +343,41 @@ def test_old_supervisor_surfaces_as_unavailable_naming_the_instance(version):
     assert ".".join(str(p) for p in MIN_VIEW_SUPERVISOR_VERSION) in message
 
 
+def test_the_unavailable_check_does_not_key_off_error_wording():
+    """The classification keys off a TYPE, not a phrase.
+
+    An earlier cut matched `"timed out" in str(e)`, which would go quietly
+    dead the first time someone rephrased the message - and going dead here
+    means silently reverting to blaming the network for every old box. This
+    asserts the timeout is its own exception, and that rewording it changes
+    nothing.
+    """
+    from bobi.webapp import event_bus
+
+    assert issubclass(event_bus._CommandTimeout, TeamLifecycleError)
+    rt = _runtime(_FleetStub("0.1.0"))
+    original = event_bus._CommandTimeout.__init__
+
+    try:
+        # Reword every timeout message; the verdict must not move.
+        event_bus._CommandTimeout.__init__ = (
+            lambda self, msg: original(self, "no reply from the deployment"))
+        with pytest.raises(TeamLifecycleError, match="unavailable"):
+            rt.runs("acme~prod-1")
+    finally:
+        event_bus._CommandTimeout.__init__ = original
+
+
+def test_a_two_component_version_is_not_read_as_older():
+    """"0.2" means unspecified patch, not "below 0.2.0"."""
+    from bobi.webapp.event_bus import _version_tuple
+
+    assert _version_tuple("0.2") >= MIN_VIEW_SUPERVISOR_VERSION
+    assert _version_tuple("0.1.9") < MIN_VIEW_SUPERVISOR_VERSION
+    assert _version_tuple("") is None
+    assert _version_tuple(None) is None
+
+
 def test_a_wedged_current_supervisor_still_reads_as_a_timeout():
     """The inverse, and the reason the version is consulted at all: a box
     NEW enough to know the command but not answering is stuck, and calling

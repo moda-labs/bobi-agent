@@ -125,6 +125,18 @@ def _is_running(reachability, status) -> bool:
             and status not in (None, "stopped", "exited", "down"))
 
 
+class _CommandTimeout(TeamLifecycleError):
+    """A command that was accepted but never answered.
+
+    A subclass, not a new error: every existing caller catches
+    ``TeamLifecycleError`` (the handler's 409, the ``fleet_spend`` fan-out's
+    fault isolation) and must keep doing so. It exists only so the
+    single-agent-view commands can distinguish "no reply" from every other
+    lifecycle failure WITHOUT matching on the wording of a message - a check
+    that would go quietly dead the first time someone rephrased it.
+    """
+
+
 def _version_tuple(raw) -> tuple[int, ...] | None:
     """A dotted version string as a comparable tuple; None if unreadable.
 
@@ -144,7 +156,11 @@ def _version_tuple(raw) -> tuple[int, ...] | None:
         if not digits:
             break
         parts.append(int(digits))
-    return tuple(parts) or None
+    if not parts:
+        return None
+    # Pad to three components so "0.2" compares equal to "0.2.0" rather than
+    # below it - a shorter string means unspecified, not older.
+    return tuple((parts + [0, 0, 0])[:3])
 
 
 def _pid(v) -> int:
@@ -248,7 +264,8 @@ class EventBusRuntime(TeamRuntime):
                 # deadline rather than abort an in-flight command.
                 r.raise_for_status()
             if time.monotonic() >= deadline:
-                raise TeamLifecycleError(f"command timed out after {timeout:.0f}s")
+                raise _CommandTimeout(
+                    f"command timed out after {timeout:.0f}s")
             time.sleep(self._poll_interval)
 
     def _command(self, fleet: str, instance: str, command: str,
@@ -293,9 +310,7 @@ class EventBusRuntime(TeamRuntime):
             return self._command(fleet, instance, command, args,
                                  timeout=timeout
                                  or self._view_command_timeout)
-        except TeamLifecycleError as e:
-            if "timed out" not in str(e):
-                raise
+        except _CommandTimeout:
             version = self._supervisor_version(fleet, instance)
             if version is not None and version >= MIN_VIEW_SUPERVISOR_VERSION:
                 raise
@@ -305,8 +320,9 @@ class EventBusRuntime(TeamRuntime):
                 f"'{command}' is unavailable on "
                 f"{encode_name(fleet, instance)}: its supervisor reports "
                 f"version {seen}, and this command needs {wanted}. "
-                f"The instance is running - it is the sidecar that is older "
-                f"than this console.") from None
+                f"The instance is reachable - the command was accepted, and "
+                f"it is the sidecar that is older than this console."
+            ) from None
 
     # --- card shaping -----------------------------------------------------
 
@@ -430,10 +446,11 @@ class EventBusRuntime(TeamRuntime):
         """The unified runs table for one hosted agent.
 
         The box folds it (same ``build_runs`` the local runtime calls) and
-        this returns the page whole. Defaults are filled in HERE rather than
-        left to the box so the response shape does not depend on which
-        supervisor answered - a caller reading ``offset``/``limit`` back off
-        the payload gets the numbers it asked for either way.
+        this returns the page whole. ``offset``/``limit`` are echoed from the
+        BOX, not from the request: the builder is what applies the default
+        limit, so echoing the request would report a page size that was never
+        used. Every key is defaulted here so a malformed or partial reply
+        degrades to an empty page rather than a KeyError in the renderer.
         """
         fleet, instance = decode_name(name)
         args = {"status": status or "", "query": query or "",
