@@ -10,6 +10,13 @@ This document is the contract. The code on both sides implements it:
 query surface). Neither is private, because a contract with a secret half is
 not a contract.
 
+A working **client** of that surface ships here too: `EventBusRuntime`
+(`bobi/webapp/event_bus.py`) issues commands and polls their results over the
+operator-authed `/fleet` routes, and is what a hosted console runs. Read it as
+the reference implementation if you are writing your own operator surface —
+including the parts a first attempt gets wrong, like which poll failures are
+transient and which are not.
+
 - **Version:** `SUPERVISOR_VERSION = "0.1.0"` (`bobi/supervisor/snapshot.py`),
   reported on every heartbeat at `supervisor.version`.
 - **Transport:** the bobi event bus. See `docs/EVENT_SERVER.md` for the server,

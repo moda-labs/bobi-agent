@@ -155,8 +155,12 @@ KB test surface.
 
 The container recipe (`Dockerfile`, `docker/`) and the Cloudflare Worker event
 tier (`event-server/worker/`) live in THIS repo and are public, alongside the
-three local event-server variants. Moda's own deployment surface - the Fly
-deploy engine, the hosted console, the fleet workflows - is private, in
+three local event-server variants. So does the console, whole: the UI and BOTH
+`TeamRuntime` implementations behind it - `LocalRuntime` for `bobi app`, and
+`EventBusRuntime` (`bobi/webapp/event_bus.py`) for a deployed fleet driven over
+the operator-authed `/fleet` API. Moda's own deployment surface - the Fly
+deploy engine, the fleet workflows, and the hosted app that BINDS
+`EventBusRuntime` to moda's fleet URL and operator token - is private, in
 `moda-labs/moda-agents` under `bobi-deploy/`, and consumes this repo as a
 RELEASED PyPI version (`pip install bobi==<pin>`), never a checkout. The former
 `moda-labs/bobi-deploy` repo is archived; nothing builds or releases from it.

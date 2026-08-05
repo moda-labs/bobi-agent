@@ -198,16 +198,48 @@ Lane A → Lane B → release → Lane C.
 
 Note what changed. The old ordering was a **hard constraint enforced by nothing**
 — a public ABC whose only other implementer sat where CI could not see it, with
-a docstring asking people to remember. After Lane A it is merely a **release
-dependency**, and the dangerous step (the `@abstractmethod` flip) is protected
-by CI instead of by prose.
+a docstring asking people to remember. After Lane A that constraint is
+*half* dissolved: the in-tree `EventBusRuntime` is now covered by this repo's
+CI, so the ABC and its implementer can no longer drift unnoticed here.
+
+**Corrected 2026-08-05 while building Lane A — the other half does not
+dissolve until Lane C, and this changes B7.** `moda-agents` keeps its own
+copy of `EventBusRuntime` until Lane C re-points the binding, and its
+`deploy-package.yml` installs the public repo from a **sibling checkout at
+`dev`** (`.github/actions/setup-public-bobi`, ref defaults to `dev`, which
+this repo's promote-dev job fast-forwards to every green main). So B7's
+`@abstractmethod` flip still reds that repo the moment it merges — Python
+refuses to instantiate the private copy once the seven are abstract, and its
+33 `EventBusRuntime` tests plus `hosted.py` all instantiate it. That is
+precisely the breakage the ABC's sequencing rule exists to prevent, so the
+flip is **not** yet "protected by CI instead of prose".
+
+**Zach's call, 2026-08-05: accept the red canary.** The order stands —
+`A → B → release → C` — B7 stays inside Lane B, and `moda-agents`'
+`deploy-package.yml` goes red from B7's merge until Lane C lands. The
+alternatives were both worse: moving Lane C ahead of B7 makes it consume an
+*unreleased* `bobi`, which is the constraint that put it last in the first
+place; splitting B7 into a fourth step buys a clean window at the cost of an
+extra PR and a flip stranded past a release.
+
+Two obligations follow from choosing this, and **Lane B owns both**:
+
+- **Lane B's PR must state that the canary will go red, and why**, before it
+  merges — a knowingly-red check that nobody announced is indistinguishable
+  from a regression, and the next person to look pays for it. `moda-agents`
+  is a consumer; it never gates this repo's main.
+- **Lane C is the repair, and follows the release promptly.** The length of
+  that window is the entire cost being accepted here, so it is short by
+  intent, not by luck.
+
+Lane A is unaffected either way — it adds a module and breaks nothing.
 
 ## Validation gates
 
 <!-- checklist -->
 
-- [ ] **A1** `EventBusRuntime` and its tests live in `bobi-agent`; the moved tests pass **unmodified**, proving the move was behavior-preserving.
-- [ ] **A2** It still imports nothing private — asserted by `tests/test_import_boundaries.py`, so a future private import fails CI rather than re-splitting the seam.
+- [x] **A1** `EventBusRuntime` and its tests live in `bobi-agent`; the moved tests pass with **no change to any assertion, fixture, or test body** — the import path is the only edit, and it must change, so "unmodified" was never literally achievable.
+- [x] **A2** It still imports nothing private — asserted by `tests/test_import_boundaries.py`, so a future private import fails CI rather than re-splitting the seam.
 - [ ] **B1** Six commands in `ADMIN_COMMANDS` and the dispatch chain, each delegating to the existing builder — no re-implemented read logic.
 - [ ] **B2** `docs/ADMIN_PROTOCOL.md` documents all six; `SUPERVISOR_VERSION` bumped; the additive-only promise holds.
 - [ ] **B3** Each read command's payload is **identical** to `LocalRuntime`'s for the same root — the anti-drift gate, and the reason the delegate design was chosen.

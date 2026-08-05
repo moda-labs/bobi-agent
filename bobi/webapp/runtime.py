@@ -86,16 +86,20 @@ class TeamRuntime(ABC):
     outcome lands on the job) so no request is held open for a minutes-long
     agent reply regardless of what transport an implementation uses.
 
-    Widening this ABC: an out-of-tree subclass lives in a private consumer
-    repo (``EventBusRuntime``), whose CI tracks this repo's
-    ``dev`` channel (auto-advanced to every green main push, #740). Adding
-    an ``@abstractmethod`` here therefore breaks that repo's CI the moment
-    this repo merges - Python rejects instantiating the subclass until it
-    implements the method. Sequencing rule: land the private subclass
-    implementation FIRST, then the abstract method here (an extra method on
-    a subclass is harmless; see the #733 system-health PR pair). Keep new
-    methods read-only-safe and document the wire shape in the docstring, as
-    below - both runtimes must emit it identically, it is rendered once.
+    Widening this ABC: the second implementer, ``EventBusRuntime``, now
+    lives in-tree (``bobi/webapp/event_bus.py``), so this repo's own CI
+    catches a method it fails to implement. That is not yet the whole
+    story - a private consumer still carries a COPY of that class until it
+    re-points at this one, and its CI tracks this repo's ``dev`` channel
+    (auto-advanced to every green main push, #740). So adding an
+    ``@abstractmethod`` here still breaks that consumer the moment this
+    repo merges: Python rejects instantiating its subclass until it
+    implements the method. Sequencing rule, until that copy is gone: land
+    the implementations FIRST, then the abstract method here (an extra
+    method on a subclass is harmless; see the #733 system-health PR pair).
+    Keep new methods read-only-safe and document the wire shape in the
+    docstring, as below - both runtimes must emit it identically, it is
+    rendered once.
     """
 
     @abstractmethod
@@ -234,10 +238,9 @@ class TeamRuntime(ABC):
         from the installed package image, never a source directory - the
         runtime runs the image, so the image is the truth.
 
-        NOT abstract, for the same reason ``runs`` is not: an out-of-tree
-        subclass in the private bobi-deploy repo implements this ABC, and
-        adding an ``@abstractmethod`` here breaks its CI the moment this
-        merges. It becomes abstract once the hosted runtime implements it.
+        NOT abstract, for the same reason ``runs`` is not: see this class's
+        sequencing rule. It becomes abstract once ``EventBusRuntime``
+        implements it and the private consumer's copy is gone.
         """
         raise TeamLifecycleError("overview is not available on this runtime")
 
@@ -350,11 +353,9 @@ class TeamRuntime(ABC):
         ``awaiting_action``.
         ``counts`` describes the whole set and ``total`` the filtered set.
 
-        NOT abstract on purpose: an out-of-tree subclass in the private
-        bobi-deploy repo implements this ABC, and adding an
-        ``@abstractmethod`` here breaks its CI the moment this merges (see
-        the class docstring's sequencing rule). This becomes abstract once
-        the hosted runtime implements it.
+        NOT abstract on purpose: see the class docstring's sequencing rule.
+        This becomes abstract once ``EventBusRuntime`` implements it and the
+        private consumer's copy is gone.
         """
         raise TeamLifecycleError("runs are not available on this runtime")
 
