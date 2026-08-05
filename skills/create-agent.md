@@ -116,9 +116,9 @@ The distinction is per source and there is no universal rule: GitHub emits
 Linear emits `linear.<type>.<action>` with the action *in* the type. A rule
 naming a type nothing emits fails silently — the deterministic dispatch it
 promises simply never happens and the work falls through to whatever the
-director LLM decides. `bobi validate` warns about the shapes it recognizes,
-but it fails open on sources it has not been taught, so it is a safety net
-rather than a guarantee.
+director LLM decides. Startup preflight (`bobi agent <name> start`) warns
+about the shapes it recognizes, but it fails open on sources it has not been
+taught, so it is a safety net rather than a guarantee.
 
 To give the team host tools, skills, or MCP servers, declare them under
 `tool_library:` (a named catalog entry like `- venn`, or an inline dependency

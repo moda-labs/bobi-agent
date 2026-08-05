@@ -206,7 +206,7 @@ signed body, never from client input**:
   The Worker remains webhook-only.
 > These per-source type shapes are what an `auto_dispatch` rule's `event:`
 > must match exactly. They are mirrored in `_EVENT_TYPE_SHAPES`
-> (`bobi/validate.py`) so `bobi validate` can flag a rule nothing will ever
+> (`bobi/validate.py`) so startup preflight can flag a rule nothing will ever
 > emit; that table is hand-maintained and pinned to these adapters by
 > `tests/test_pack_routing_validation.py`, which fails when the two drift.
 
