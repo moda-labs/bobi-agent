@@ -163,6 +163,41 @@ class TestHealthServer:
         data = manager_health.health("http://127.0.0.1:1", timeout=0.5)
         assert data is None
 
+    def test_a_stalled_client_does_not_block_the_next_probe(self, tmp_path):
+        """D045 — one half-open connection must not wedge the endpoint.
+
+        With BOBI_HEALTH_BIND=0.0.0.0 for orchestrator probes, anything that
+        connects and never completes a request (port scanner, stalled proxy)
+        parks the handler in rfile.readline(). On a serial HTTPServer every
+        later probe queues behind it, so the supervisor times out and
+        restarts a perfectly healthy manager.
+        """
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        port = manager_health.start(state_dir, "test-project",
+                                    session_status_fn=lambda: [])
+
+        stalled = socket.create_connection(("127.0.0.1", port), timeout=2)
+        try:
+            # Connected, and deliberately silent — no request line ever sent.
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/health", timeout=5) as resp:
+                data = json.loads(resp.read())
+            assert data["status"] == "ok"
+        finally:
+            stalled.close()
+
+    def test_the_handler_gives_up_on_a_silent_connection(self, tmp_path):
+        """Concurrency alone would leak a thread per stalled connection."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        manager_health.start(state_dir, "test-project",
+                             session_status_fn=lambda: [])
+
+        timeout = manager_health._server.RequestHandlerClass.timeout
+        assert timeout is not None and 0 < timeout <= 30
+
     def test_ready_returns_503_until_manager_running_or_idle(self, tmp_path):
         state_dir = tmp_path / "state"
         state_dir.mkdir()

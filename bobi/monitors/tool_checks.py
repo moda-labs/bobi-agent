@@ -69,20 +69,43 @@ def _script_path(monitor_name: str) -> Path:
     return _scripts_dir() / f"{safe_name}.sh"
 
 
+def _script_body(cmd_parts: list[str]) -> str:
+    """The cached script for *cmd_parts* — quoted for safe shell execution."""
+    quoted = " ".join(shlex.quote(p) for p in cmd_parts)
+    return f"#!/usr/bin/env bash\nset -euo pipefail\n{quoted}\n"
+
+
 def _cache_script(monitor_name: str, cmd_parts: list[str]) -> None:
     """Save the resolved command as a shell script for future runs."""
     path = _script_path(monitor_name)
-    # Quote each part for safe shell execution
-    quoted = " ".join(shlex.quote(p) for p in cmd_parts)
-    path.write_text(f"#!/usr/bin/env bash\nset -euo pipefail\n{quoted}\n")
+    path.write_text(_script_body(cmd_parts))
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-def _run_cached_script(monitor_name: str, timeout: int, env: dict) -> subprocess.CompletedProcess | None:
-    """Try running the cached script.  Returns None if no script exists."""
+def _run_cached_script(monitor_name: str, timeout: int, env: dict,
+                       expected: str | None = None
+                       ) -> subprocess.CompletedProcess | None:
+    """Try running the cached script.  Returns None if no usable script exists.
+
+    A cached script is only usable while it still matches the command the
+    monitor resolves to NOW. It was keyed on monitor name alone, and only
+    ever invalidated by a non-zero exit — so editing a monitor's `command:`
+    (or a venn_poll's service/tool/query) left the old script running
+    happily, and the monitor polled the old target indefinitely with nothing
+    in the logs to say so (D023). The script IS the resolved command, so
+    comparing its bytes needs no separate fingerprint to drift out of sync.
+    """
     path = _script_path(monitor_name)
     if not path.exists():
         return None
+    if expected is not None:
+        try:
+            if path.read_text() != expected:
+                log.info(f"tool_poll monitor {monitor_name}: monitor config "
+                         "changed — discarding the cached script")
+                return None
+        except OSError:
+            return None
     try:
         return subprocess.run(
             [str(path)], capture_output=True, text=True,
@@ -146,9 +169,10 @@ def _run_command(cmd: list[str], env: dict, timeout: int,
     With cache_scripts=True (default), the resolved command is cached as a
     script on success and the cached script is tried first on the next run.
     """
-    # Try cached script first
+    # Try cached script first — but only while it still matches this command.
     if cache_scripts:
-        cached = _run_cached_script(monitor_name, timeout, env)
+        cached = _run_cached_script(monitor_name, timeout, env,
+                                    expected=_script_body(cmd))
         if cached is not None and cached.returncode == 0:
             items = _parse_items(cached.stdout, monitor_name)
             if items is not None:
