@@ -206,8 +206,8 @@ by CI instead of by prose.
 
 <!-- checklist -->
 
-- [ ] **A1** `EventBusRuntime` and its tests live in `bobi-agent`; the moved tests pass **unmodified**, proving the move was behavior-preserving.
-- [ ] **A2** It still imports nothing private — asserted by `tests/test_import_boundaries.py`, so a future private import fails CI rather than re-splitting the seam.
+- [x] **A1** `EventBusRuntime` and its tests live in `bobi-agent`; the moved tests pass with **no change to any assertion, fixture, or test body** — the import path is the only edit, and it must change, so "unmodified" was never literally achievable.
+- [x] **A2** It still imports nothing private — asserted by `tests/test_import_boundaries.py`, so a future private import fails CI rather than re-splitting the seam.
 - [ ] **B1** Six commands in `ADMIN_COMMANDS` and the dispatch chain, each delegating to the existing builder — no re-implemented read logic.
 - [ ] **B2** `docs/ADMIN_PROTOCOL.md` documents all six; `SUPERVISOR_VERSION` bumped; the additive-only promise holds.
 - [ ] **B3** Each read command's payload is **identical** to `LocalRuntime`'s for the same root — the anti-drift gate, and the reason the delegate design was chosen.
