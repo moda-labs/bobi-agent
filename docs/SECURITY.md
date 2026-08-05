@@ -131,6 +131,10 @@ therefore runs untrusted-author code against your credentials.
 
 - **Review a team before installing it**, the same way you would review a dependency
   - especially one from a non-default registry or an arbitrary URL.
+- Trusted does not mean unbounded: compose refuses a `prune:` entry that is a
+  path rather than an item name. An absolute name or a `..` segment would have
+  deleted host files outside the image being frozen, which is beyond what
+  installing a team is understood to do — and a typo away from data loss.
 - The installed `run/package/` image is a frozen build artifact: regenerated
   verbatim on every install, never hand-edited. `bobi agent <name> doctor` flags
   drift against the install manifest.

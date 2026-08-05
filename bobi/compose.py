@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import shutil
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import yaml
 
@@ -744,8 +744,31 @@ def _apply_prune(chain: list[ResolvedLayer], dest: Path, merged_yaml: dict,
         label = _layer_label(layer)
         for surface, names in prune.items():
             for name in names or []:
+                _reject_escaping_prune_name(label, surface, str(name))
                 if not _prune_one(dest, merged_yaml, surface, name):
                     prov.warn(f"{label}: prune {surface}:{name} matched nothing")
+
+
+def _reject_escaping_prune_name(label: str, surface: str, name: str) -> None:
+    """Reject a prune name that would reach outside the staging dir.
+
+    A prune entry names an item on a surface (`codex`, `methodology/old.md`),
+    never a path. `dest / surface / name` with an absolute `name` collapses to
+    that absolute path — pathlib drops the base — and a `..` segment walks out
+    of the image, so `_prune_one`'s unlink/rmtree would delete host files during
+    `bobi agents install`. Packs are trusted code (SECURITY.md), but deleting
+    outside the image being frozen exceeds even that model and turns a typo into
+    host data loss.
+    """
+    p = PurePosixPath(name.replace("\\", "/"))
+    if p.is_absolute() or PureWindowsPath(name).is_absolute() \
+            or ".." in p.parts:
+        raise ComposeError(
+            f"{label}: prune {surface}:{name} is a path, not an item name — a "
+            "prune entry names something on the surface (`codex`, "
+            "`methodology/old.md`). Absolute paths and `..` would delete "
+            "outside the composed image."
+        )
 
 
 def _prune_one(dest: Path, merged_yaml: dict, surface: str, name: str) -> bool:

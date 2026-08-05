@@ -9,6 +9,7 @@ Covers the acceptance criteria of both:
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -386,6 +387,49 @@ def test_prune_nothing_warns(project):
     chain = compose.resolve_chain(leaf, project)
     prov = compose.compose(chain, paths.package_dir(project))
     assert any("does-not-exist" in w for w in prov.warnings)
+
+
+# D040 — a prune entry names an item on a surface, never a path. Absolute and
+# `..` names escaped the staging dir (pathlib drops the base on an absolute
+# join), so composing a team could shutil.rmtree() host files outside the image
+# it is freezing.
+
+@pytest.mark.parametrize("surface,kind", [
+    ("roles", "absolute"),     # dest / "roles" / "/abs" == Path("/abs")
+    ("tools", "absolute"),
+    ("roles", "traversal"),    # dest / "roles" / "../../victim"
+])
+def test_prune_rejects_a_name_that_escapes_the_staging_dir(project, surface, kind):
+    dest = paths.package_dir(project)
+    victim = project / "victim"
+    victim.mkdir()
+    (victim / "keepme.md").write_text("host data")
+    if kind == "absolute":
+        name = str(victim) if surface == "roles" else str(victim / "keepme.md")
+    else:
+        name = os.path.relpath(victim, dest / surface)
+        assert name.startswith("..")
+    _team(project, "core", 'version: "1.0.0"\n',
+          roles={"director": "# Director"}, tools={"github.md": "gh"})
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
+                 f'prune:\n  {surface}: ["{name}"]\n')
+    chain = compose.resolve_chain(leaf, project)
+    with pytest.raises(compose.ComposeError, match="prune"):
+        compose.compose(chain, dest)
+    assert (victim / "keepme.md").read_text() == "host data"
+    assert victim.is_dir()
+
+
+def test_prune_still_accepts_a_relative_name_inside_a_surface(project):
+    # The guard rejects escapes, not the documented nested form
+    # (`prune: {tools: [methodology/old.md]}`).
+    _team(project, "core", 'version: "1.0.0"\n',
+          tools={"methodology/old.md": "x", "github.md": "gh"})
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
+                 'prune:\n  tools: [methodology/old.md]\n')
+    dest, _ = _compose(project, leaf)
+    assert not (dest / "tools" / "methodology" / "old.md").exists()
+    assert (dest / "tools" / "github.md").exists()
 
 
 # --- framework-default monitors (#471) ---------------------------------------

@@ -1445,9 +1445,12 @@ def create_slack_bot(
         # Non-interactive with nothing configured: the bobi cloud.
         event_server = DEFAULT_EVENT_SERVER
 
-    manifest_yaml = render_manifest(
-        app_name, event_server, socket_mode=socket_mode,
-    )
+    try:
+        manifest_yaml = render_manifest(
+            app_name, event_server, socket_mode=socket_mode,
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
     rendered = manifest_to_json(manifest_yaml) if fmt == "json" else manifest_yaml
 
     if output:
