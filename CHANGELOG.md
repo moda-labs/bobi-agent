@@ -1,5 +1,110 @@
 # Changelog
 
+## 0.55.0 - 2026-08-04
+
+Minor release: the dashboard gains a real per-agent page, and the
+review-remediation sweep lands its first three Lane A phases — session
+lifecycle honesty, persistence atomicity, and agent-pack routes that had been
+failing silently.
+
+### Added
+- **The single-agent view (#948, MOD-261).** The machine-scoped dashboard
+  becomes a real per-agent page. Behind it is a **unified runs read model**: a
+  monitor firing, a chat, and a workflow run are one list of runs rather than
+  three unrelated event sprays — which is also why a monitor now records **one
+  run per firing** instead of a spray of events. Agent state becomes a
+  **tri-state** (running / stalled / stopped) rather than a bare pid check, so
+  "the process exists" stops being mistaken for "the agent is working", and the
+  page can surface a stalled workflow run and offer to resume it.
+
+  New per-agent nouns under `/api/agents/{name}`: `GET runs`, `overview`,
+  `health`, `sessions`, `details`, `spend`, and `POST
+  workflows/runs/{run_id}/resume`. The overview also reports what the script
+  cache **did not** spend. Integrates #906, #912, #913, #914, #915, #916, #919
+  and the #941 restyle, which standardizes the surface on the product palette.
+
+### Fixed
+- **A session could not be stopped while its startup turn was still in flight
+  (#949).** `_keep_alive` is created only after the startup drain, so `stop()`
+  silently no-opped, `join(15)` expired, and the thread plus its brain
+  subprocess kept running — a long-lived orchestrator leaked a live,
+  token-burning agent for every timed-out phase while reporting "session failed
+  to start". Setting an event cannot interrupt a turn parked in
+  `await client.receive_response()`, so `_run` is now a cancellable task that
+  `stop()` cancels through the loop, and teardown disconnects the client
+  explicitly rather than relying on a `finally` the startup path never reaches.
+- **`start()` waited out the full timeout after the session thread had already
+  crashed (#949).** A launch that failed in milliseconds measured **30.006s**,
+  and launch paths pass timeouts up to **3600s** — so a phase that could not
+  start stalled dispatch for an hour. Liveness is re-checked only *after*
+  re-reading `_ready`, since a thread may set it and then exit and a naive
+  `is_alive()` poll reports a perfectly good session as failed.
+- **A supervised agent's terminal failure was never persisted (#949).** The
+  `except asyncio.TimeoutError` handler was unreachable — the caller's
+  `wait_for` cancels from outside, and `CancelledError` is a `BaseException` —
+  so `TERMINAL_FAILED` never landed and `state.json` recorded neither the
+  failure nor the timeout reason, leaving the reconciler nothing to re-emit.
+- **Every durable writer now shares one atomic-write helper (#951).** The
+  serialize / write-temp-sibling / `os.replace` pattern had been
+  re-implemented in **six** places with six temp-naming schemes, while a
+  comparable set of state writers used a bare `write_text` and could be
+  truncated by exactly the crash the six copies each guarded against. Because
+  every loader here treats unparseable state as *empty*, the cost is never
+  "lose one field": a torn monitor state file re-fires every monitor, a torn
+  spend file zeroes the window the runaway-loop backstop counts, a torn
+  `setup.json` makes `bobi setup --resume` discard the whole wizard session,
+  and a torn `config.toml` loses the operator's foreign codex keys for good.
+  `bobi/fsutil.py` is now the single implementation (`atomic_write_text`,
+  `atomic_write_json`, `file_lock`); the setup wizard and the spend governor
+  additionally take a lock, and corrupt monitor state now loads as "resetting".
+- **Agent-pack routes that silently matched nothing (#957).** Three shipped
+  packs carried rules that could never fire, and all failed the same way —
+  nothing logged, nothing errored, the deterministic behavior just never
+  happened and the work fell through to whatever the LLM decided.
+  `eng-team`'s `github.issues.assigned` matches a type no adapter emits (GitHub
+  emits `github.<header>` with the action in `fields.action`), so
+  `issue-lifecycle` never fired on assignment — **this is why issue pickup has
+  needed a Slack directive**. The dogfood workflow's `issues_count > 0` used an
+  operator the condition parser does not support and fell through to a bare
+  truthy check, routing a 3-issue audit to `done` and **closing the issue as
+  having passed review**; the replacement is fail-safe, routing a missing count
+  to `fix`. The dogfood pack also declared `chat: slack` with no slack service.
+  Validation now catches this class via a **per-source** event-type table —
+  arity is only meaningful per source, since Linear emits
+  `linear.<dataType>.<action>` with the action *in* the type — and fails open on
+  any adapter it does not recognize. Both new checks are warnings, not startup
+  blockers: an unmatchable rule is inert, but refusing to start every deployed
+  team whose installed pack still carries the old spelling would turn a silent
+  dead rule into a fleet outage on upgrade. `eng-team` 1.5.2 → **1.5.3**,
+  `dogfood-content-review` 1.2.1 → **1.2.2**.
+- **A raise from `_make_session` escaped the workflow orchestrator's
+  terminal-honesty handler (#957).** The registry entry stuck at `running` with
+  no `session.failed` or `workflow.failed` until the dead-man reconciler
+  mis-reported it.
+- **The Worker deploy smoke gated on a version carrying the *previous* run's
+  credentials (#954).** `wrangler deploy` and the `wrangler secret bulk` after
+  it publish two Worker versions and Cloudflare's rollover between them is not
+  atomic — but both report the same `BOBI_RELEASE_SHA`, so a sha-only readiness
+  gate was structurally unable to tell them apart, and the deploy version
+  inherits the prior run's secrets. Readiness is now "the version carrying
+  **this run's** credentials is live, consistently": on 5 consecutive probes the
+  health sha matches, an operator-authenticated route answers 200 to the freshly
+  minted token, and `worker.version_id` holds still. The logic moved out of
+  inline shell into `scripts/await_worker_ready.py` — the gate had survived two
+  previous fixes as untestable shell — and is now driven over real HTTP against
+  a Worker that fakes the rollover. A `concurrency` group also stops two runs
+  from stomping each other's secrets on the shared smoke Worker.
+
+### Changed
+- **`AGENTS.md` states the dated plan-filename convention the repo already
+  follows (#950)** — `plans/<YYYY-MM-DD>-<slug>.md`, the shape the installed
+  stage pack validates and all 11 existing plans already use. Existing undated
+  paths stay valid.
+- **Lane C of the review-remediation plan is 2 PRs, not 3 (#947).** A dated
+  amendment records the 2026-08-04 decision to defer its six remaining web-UI
+  items, since the single-agent work above rewrites those surfaces. None of the
+  six is a security hole; Phase 7's real security cluster shipped in 0.54.0.
+
 ## 0.54.0 - 2026-08-04
 
 Minor release: the MCP fleet-control surface gains the tools that *act*, and a
