@@ -5,6 +5,7 @@ Status: spec, awaiting approval (Gate 1)
 Created: 2026-08-04.
 Rewritten 2026-08-05 under Zach's premise constraints.
 Revised 2026-08-05 (round 4): the chokepoint decision is reversed, see "Why not `Config.load`".
+Revised 2026-08-05 (round 5): presence gating, `OverlayError`, and the two-clock consequence.
 
 ## Problem
 
@@ -152,6 +153,39 @@ that it did not.
   No tombstones, no second mechanism.
 - It is predictable to a human editing YAML.
 
+**Replace semantics require presence gating, and today's code gates on truthiness.**
+This is the sharpest thing round 5 found and it is a prerequisite, not a detail.
+
+`discover_subscriptions` gates on `if explicit:` (`bobi/events/subscriptions.py:42`).
+An empty list is falsy, so control falls through to `:47-57`, which calls
+`Config.load` and then `detect()`.
+`_detect_github` (`bobi/events/adapters.py:59-77`) walks the run root's immediate
+children and derives `github:<slug>` from each one's git remote.
+
+So under a naive replace, an overlay `subscribe: []` does not mean "subscribe to
+nothing".
+It means "auto-detect from git remotes", and `slack:` and `linear:` disappear with it.
+Reproduced against the live tree by injecting the merged value at the read site: a
+pack `subscribe:` yields `['github:moda-labs/moda-skills', 'linear:MOD']`, while a
+merged-empty `subscribe:` yields `['github:moda-labs/familystories-ai']`, a repo
+deliberately offboarded on 2026-08-04.
+That is the resurrection trap the merge rule claims to close, re-armed by the merge
+rule itself.
+
+**Therefore the contract is presence, not truth:** if the merged document *defines*
+`subscribe:`, that value is authoritative even when empty, and the auto-detect
+fallback is skipped.
+Both apply sites must use the same rule.
+They do not today: `ingress.py:75-79` returns `[]` with no fallback while
+`subscriptions.py:42` falls through, so the same overlay currently yields different
+answers at the two sites.
+Making them agree is part of step 2, not a follow-on.
+
+A `subscribe:` key that parses to `None` (the mis-indented-list typo) is a *different*
+case and must fail boot rather than be read as an intentional empty list.
+Validation distinguishes the two: `subscribe: []` is honoured, `subscribe:` with a
+null value is rejected.
+
 **Trade-off, accepted deliberately.**
 A pack upgrade adding a genuinely new entry to an overridden key does not take effect
 until an operator copies it across.
@@ -274,8 +308,13 @@ grep -rn "agent_yaml_path\|ROOT_MARKER" bobi/ --include=*.py | grep -v "^bobi/pa
 grep -rn "Config\.load(" bobi/ --include=*.py
 ```
 
-Every hit is classified below.
-Nothing is listed that the first command did not produce.
+Every hit of the first command is classified below.
+The second command's hits are deliberately collapsed into one row, because none of
+them see the overlay, with one exception that is called out separately: the
+`Config.load` fallback inside the primary apply site
+(`bobi/events/subscriptions.py:48`).
+That fallback is where the previous revision's divergence lived, and it is the one
+grep-2 hit the merge rule has to reason about.
 
 | Site | What it does with the file | Sees the overlay? |
 |---|---|---|
@@ -285,9 +324,10 @@ Nothing is listed that the first command did not produce.
 | `bobi/setup/actions.py:164` | reads `agent:` for a display name | no, by design |
 | `bobi/monitors/script_cache_checks.py:649` | reads `script_cache:` | no, by design |
 | `bobi/config.py:122` | `find_env_var_refs` scans `${VAR}` | no, but see below |
-| `bobi/config.py:281` | `_project_config_path`, feeds `Config.load` (41 real call sites) | no, by design |
+| `bobi/config.py:281` | `_project_config_path`, feeds `Config.load` (40 real call sites) | no, by design |
+| `bobi/events/subscriptions.py:48` | `Config.load` fallback of the primary apply site | no, and it must not be reached; see the merge rule |
 | `bobi/config.py:668`, `:684` | `_parse_build` resolves a sibling `Dockerfile` | not a content read |
-| `bobi/monitors/registry.py:80` | passes a `Path` into `_read_records()` | not a content read |
+| `bobi/monitors/registry.py:80` | `_read_records` (`:38-48`) reads `monitors:` | no, by design |
 | `bobi/doctor.py:253` | maps a display name to a path | not a content read |
 | `bobi/subagent.py:1591-1592` | `is_file()` root-marker check | not a content read |
 
@@ -295,8 +335,8 @@ Two corrections to the previous revision are folded in.
 It claimed "the two raw readers"; there are six raw readers, and four of them
 (`env.py`, `setup/actions.py`, `script_cache_checks.py`, `config.py:122`) went
 unlisted.
-It claimed "42 call sites" for `Config.load`; `grep -c` returns 42 but
-`build_render.py:248` is a docstring line, so 41 are real.
+It claimed "42 call sites" for `Config.load`; `grep -c` returns 42, but **two** of
+those are docstring lines (`build_render.py:248` and `cli.py:188`), so 40 are real.
 
 **This table is the invariant, and it is a test.**
 Under this design the four unlisted raw readers not seeing the overlay is correct
@@ -312,18 +352,41 @@ sites, so widening the set later cannot silently recreate it.
 
 ### `find_env_var_refs`: union, not replace
 
-`find_env_var_refs` (`bobi/config.py:114-141`) drives what `bobi validate` requires.
+`find_env_var_refs` (`bobi/config.py:114-130`) drives what `bobi validate` requires.
 An overlay `subscribe:` entry carrying `${VAR}` would otherwise not be required, and a
 pack `${VAR}` that the overlay replaces away would still be required.
 
-The fix is a union, not a merge, and it is two changes:
+**The union goes in `find_env_var_refs`, and nowhere lower.**
+Round 5 killed the previous revision's placement.
+It put the union in `_scan_env_refs` (`bobi/config.py:190-197`), which is impossible
+and would have been harmful if forced:
 
-- `_scan_env_refs` (`bobi/config.py:190-197`) is a regex over raw file **text**, so it
-  scans the overlay's text too and concatenates.
-  No re-serialization of a merged dict is needed.
-- `_build_only_names` (`:144-172`) computes `in_build - elsewhere`.
-  The overlay can never carry `build:` (it is not in the applied set), so its refs join
-  `elsewhere` and nothing joins `in_build`.
+- `_scan_env_refs(agent_yaml: Path)` receives a bare file path and has no
+  `project_path`, so it cannot locate the overlay at all.
+  `find_env_var_refs(project_path)` (`:114`) is the lowest function that can.
+- Forcing it would corrupt a live cross-repo contract.
+  `scan_required_vars` (`:211`) and `scan_declared_vars` (`:223`) also call
+  `_scan_env_refs`, both documented for "a package file that isn't installed yet"
+  (`:206-207`), and `scan_declared_vars` "doubles as the prune authority and the
+  env-file filter" (`:220-221`).
+  `moda-labs/moda-agents` calls both against *other teams'* source `agent.yaml` files
+  at deploy time.
+  Concatenating this runtime's overlay into that scan would corrupt another team's
+  declared secret surface.
+
+So: `find_env_var_refs` scans the pack, then scans the overlay's text with the same
+`_ENV_VAR_RE`, and unions.
+`_scan_env_refs`, `scan_required_vars` and `scan_declared_vars` are untouched.
+
+`_build_only_names` (`:144-172`) computes `in_build - elsewhere`, and the overlay's
+refs join `elsewhere`.
+
+*Withdrawn premise.*
+The previous revision justified this with "the overlay can never carry `build:` (it is
+not in the applied set)".
+That is false: not being applied does not stop an operator writing `build:` into a
+free-form YAML file, and the scanner has no key awareness.
+The conclusion survives on the safe-direction argument alone, which does not need it.
 
 Union is the safe direction: a var referenced by either file is required.
 Over-requiring a secret is an operator annoyance; under-requiring one is an outage.
@@ -349,12 +412,37 @@ This is stated as a known limit rather than a guarantee: a human with an editor 
 still perform a non-atomic write, and no framework change prevents that.
 
 **Read side.**
-`subscribe:` is read at exactly two sites, both during manager startup
-(`bobi/service.py:534` via `discover_subscriptions`, and
-`bobi/ingress.py:109` via `explicit_subscriptions` inside
-`check_ingress_reachability`).
-A malformed overlay is caught once, at boot, and fails the boot loudly with the file
-and the parse error.
+The previous revision claimed `subscribe:` is read "at exactly two sites, both during
+manager startup".
+That is wrong and is withdrawn.
+There are five call paths and three of them are not boot:
+`discover_subscriptions` from `service.py:534` (boot) and from
+`supervisor/snapshot.py:99` (**every heartbeat, in the supervisor process**);
+`explicit_subscriptions` from `ingress.py:109` inside `check_ingress_reachability`,
+which is reached from `doctor.py:541` (`bobi doctor`, any time) and from
+`service.py:185` in `build_startup_info`.
+
+So a post-boot torn read is reachable, and the supervisor process never calls
+`_load_config_or_raise` at all.
+Boot validation alone does not cover it, and the previous revision's justification for
+leaving the swallow in place was circular.
+
+**The overlay therefore gets a typed error that no site may swallow into a default.**
+`load_agent_yaml` distinguishes two cases: an *absent* overlay is normal and means
+"pack wins", exactly today's behaviour; an overlay that is *present but unparseable*
+raises `OverlayError`.
+
+`bobi/events/subscriptions.py:44-45` must narrow its bare `except Exception: pass` so
+`OverlayError` propagates.
+Leaving it is not an option, because that handler falls through to the auto-detect
+fallback, so a torn overlay would silently produce git-remote subscriptions, the same
+failure the merge rule's presence gating exists to prevent.
+With the narrowing, the supervisor's `except Exception: pass`
+(`supervisor/snapshot.py:97-101`) yields the empty list its docstring promises
+(`:92-93`) rather than a wrong non-empty one, so the heartbeat reports nothing instead
+of reporting fiction.
+
+At boot, `OverlayError` fails the boot loudly with the file and the parse error.
 
 Boot validation lives in `_load_config_or_raise` (`bobi/service.py:248`, called at
 `:484`), **not** in `run_manager_from_config` (`:501`) as the previous revision
@@ -364,13 +452,15 @@ That placement was unreachable: `run_team_foreground` (`:474`) already calls
 `:501`, so a malformed overlay would have failed earlier and never reached the
 specified checkpoint.
 
-Validation checks three things and no more: the document is a mapping; `for_agent`, if
-present, matches the pack's `agent:` (`package/agent.yaml:130`); and each applied key
-has the shape its consumer expects.
+Validation checks four things and no more: the document is a mapping; `for_agent`
+matches the pack's `agent:` (`package/agent.yaml:130`); each applied key has the shape
+its consumer expects; and an applied key present with a null value is rejected rather
+than read as empty.
 
-`bobi/events/subscriptions.py` keeps its bare `except Exception: pass` (`:44-45`) as a
-per-site handler, and that is now correct rather than a hazard, because the overlay it
-would swallow has already been parsed successfully at boot.
+`for_agent` is **required whenever the overlay defines any applied key**, not optional.
+An optional guard does not guard: the pack-swap disaster it exists for happens
+precisely on a hand-written overlay, and the seed template defines no keys, so an
+optional field would be absent exactly when it is needed.
 
 **The `for_agent` guard exists for pack swap.**
 `seed_workspace` (`bobi/install.py:118-136`) only adds; nothing removes.
@@ -392,10 +482,25 @@ the format is specified here rather than left to the implementation: keys in the
 merged document's own order, `--json` emitting
 `{"key": {"value": ..., "source": "pack"|"overlay"|"overlay-data"}}`.
 The prompt uses `--json`.
+One vocabulary for the data tier, `overlay-data`, in both the human and the JSON view.
+
+**It prints the RAW, uninterpolated document.**
+`services:` carries `credentials:` (`package/agent.yaml:10-11`, `:16-18`, `:22-23`), so
+an interpolated view would print `GH_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`
+and `LINEAR_API_KEY` in plaintext to a terminal and into an agent transcript.
+Uninterpolated, those stay `${GH_TOKEN}` and nothing is disclosed, which is also the
+right view for "what does the config say" and matches the merged document the loader
+returns.
+
+**An unparseable overlay makes it exit non-zero with the parse error.**
+It must never degrade to a pack-only view.
+`config show` is not on the boot path, so it never runs boot validation, and the
+director reads *write authority* from its output: silently falling back to the pack's
+`managed_repos` would hand the director a wrong authority list with no signal.
 
 The previous revision justified this command by claiming `doctor.py:253` "keeps
 reporting pack-only truth".
-That is withdrawn: `:253` is inside `_check_runtime_layout` (`:245-258`), a layout
+That is withdrawn: `:253` is inside `_check_runtime_layout` (`:244-258`), a layout
 existence check that reads no file content.
 The real justification is simpler and stands on its own: without it, every human and
 every prompt hand-merges two files.
@@ -411,16 +516,39 @@ handed to the spawn (`:664`).
 The reconnect path re-asserts an in-memory list rather than re-reading config
 (`bobi/events/client.py` `_needs_resubscribe`).
 
-**One honest exception, named rather than glossed.**
-The supervisor sidecar's `_expectations` (`bobi/supervisor/snapshot.py:88-99`) also
-calls `discover_subscriptions`, on every heartbeat, inside `except Exception: pass`.
+**But one file edit now lands on two clocks, and that is a real consequence.**
+The previous revision claimed the supervisor heartbeat was "the only place the two can
+disagree".
+That is wrong and is withdrawn.
+
+`subscribe:` is applied at restart.
+`managed_repos` is read by the director through `config show --json` on the next
+invocation, per the companion prompt.
+So an edit changes *authority* immediately and *event routing* at the restart.
+
+The offboard direction is the dangerous one.
+An operator removes repo X from both lists at T0.
+Authority drops at once; routing persists until the restart.
+In that window the manager is still subscribed to X, and `auto_dispatch` still arms
+`issue-lifecycle` (`package/agent.yaml:101-104`) and `pr-closed` (`:105-110`) with
+`allow_self_authored: true`, so workers can launch against a repo the director now
+believes it does not manage, under a branch-delete guard whose scope is defined by the
+list that already changed.
+The onboard direction is benign: authority arrives before routing does.
+
+The window is bounded by the restart and the mitigation is operational, not
+mechanical: **offboard by editing the overlay and restarting immediately, then confirm
+with `config show`.**
+The docs state this as the offboarding procedure rather than leaving the ordering to
+the operator.
+
+*The smaller exception, for completeness.*
+The supervisor sidecar's `_expectations` (`bobi/supervisor/snapshot.py:88-99`) calls
+`discover_subscriptions` on every heartbeat, inside `except Exception: pass`.
 It changes no behaviour; it reports what the manager is expected to be subscribed to,
 and the read model diffs that against traffic to derive silence.
-So between an overlay edit and the restart, the heartbeat reports the intended set
-while the manager holds the old one, and a not-yet-subscribed topic can briefly show
-as silent.
-This is informational, it is the only place the two can disagree, and it is documented
-rather than fixed.
+Between an edit and the restart it reports the intended set while the manager holds
+the old one, so a not-yet-subscribed topic can briefly show as silent.
 
 The restart is cheaper than it sounds: the manager session is preserved (cleared only
 on `--fresh`), and the saved-deployment path PUTs the newly authorized list against
@@ -455,6 +583,17 @@ Correction to the previous revision: `:1486` does **not** unlink the cursor, it 
 Write authority moves into the overlay with everything else.
 Branch-delete safety is policy and prompt, not machinery: the guard is the role
 prompt's decline-on-human-branch default, and nothing here enforces or weakens it.
+
+**The consequence, named rather than left implicit.**
+Ruling 3 is settled and this does not reopen it, but the spec owes the shape change
+out loud: `<run>/workspace/` is agent-writable (`drwxr-xr-x bobi bobi`, and agents run
+as `bobi`), while `package/agent.yaml` is a read-only frozen image.
+Before, adding a repo to `managed_repos` took a reviewed PR to `moda-labs/moda-agents`
+plus a reinstall.
+After, one unreviewed agent turn writing one line grants it.
+The authority list becomes self-modifiable by the thing it governs, and the guard is
+the same policy/prompt layer ruling 4 places the branch-delete default in.
+Accepted under ruling 3, with no mechanical mitigation, deliberately.
 
 ### The companion PR is a blocking co-deliverable
 
@@ -540,8 +679,12 @@ re-pack.
   An overlay `${VAR}` becomes required; a pack `${VAR}` the overlay replaced away stays
   required.
 - Unit, the invariant behind the reader table: `OVERLAY_APPLIED_KEYS` contains no key
-  read by `env.py:34`, `setup/actions.py:164`, `script_cache_checks.py:649` or
-  `Config.load`.
+  read by `env.py:34`, `setup/actions.py:164`, `script_cache_checks.py:649`,
+  `monitors/registry.py:80` or `Config.load`.
+  `registry.py` is in that list because `_read_records` (`:38-48`) is a raw
+  `yaml.safe_load(...).get("monitors")`, so adding `monitors` to the applied set would
+  diverge three readers at once: `MonitorRegistry.load`, `Config._parse`'s
+  uninterpolated `monitors_raw` (`config.py:564`), and the overlay.
   This is the test that stops a future widening from recreating the divergence
   `env.py:25-27` warns about.
 - Unit: `config show --json` emits the specified shape, and `managed_repos` resolves
@@ -552,7 +695,7 @@ re-pack.
 - Regression, the framework-purity constraint: no `managed_repos` and no `tracker:`
   **as an agent.yaml key** appear under `bobi/`.
   Stated as a precise predicate, not prose, because the loose version is untestable:
-  `tracker` already appears at `setup/services.py:307` and eight times in
+  `tracker` already appears at `setup/services.py:307` and on nine lines of
   `events/drain.py` (`_AckWatermark`), and `repo` appears in 20+ modules.
   The predicate is: the literal strings `managed_repos` and `OVERLAY_APPLIED_KEYS`'
   forbidden members do not appear in `bobi/`.
@@ -560,11 +703,29 @@ re-pack.
 - Integration: a full manager start against the local event server registers exactly
   the overlay's `subscribe:` set, and a repo removed from the overlay is genuinely
   unsubscribed after restart rather than merely absent from the file.
-- Integration, the contract blocker 1 falsified: edit the overlay while a manager runs,
-  assert the manager's live subscriptions do **not** change until restart, then assert
-  they do after.
-  The previous revision's restart-only test passed while the bug was live; this one
-  fails against that design and passes against this one.
+- Integration, the contract blocker 1 falsified.
+  The obvious form of this test is **vacuous** and round 5 caught it: asserting that
+  live *subscriptions* do not change mid-process passes under both designs, because
+  `subscribe:` is captured into a local at `service.py:534` and handed to the spawn at
+  `:664` either way.
+  The assertion has to land on a `Config.load` consumer, which is what the chokepoint
+  design would have made hot: edit the overlay while a manager runs and assert
+  `launch_admission` (`subagent.py:272`), `max_launch_depth` (`launch_lineage.py:244`)
+  and `entry_role` (`monitors/scheduler.py:419`) still resolve to their pack values.
+  That fails against the chokepoint design and passes against this one.
+- Integration, presence gating: a manager booted with an overlay `subscribe: []`
+  subscribes to nothing and does **not** fall through to git-remote auto-detection.
+  This is the test that reproduces the round-5 blocker; without presence gating it
+  returns `github:<whatever run/ happens to contain>`.
+- Unit: an overlay `subscribe:` with a null value (the mis-indented-list typo) fails
+  boot, and is not read as an intentional empty list.
+- Unit: the two apply sites agree on an empty, an absent, and a populated `subscribe:`.
+  They disagree today (`ingress.py:75-79` returns `[]`, `subscriptions.py:42` falls
+  through), so this is a regression test for a difference the overlay would otherwise
+  make visible.
+- Unit: `OverlayError` from a torn overlay propagates through
+  `subscriptions.py:44-45` rather than being swallowed into the auto-detect fallback,
+  and the supervisor's handler yields the empty list its docstring promises.
 - Integration: a torn overlay (truncated mid-write) present at boot fails the boot with
   a named error rather than starting on pack subscriptions.
 - Integration: the #488 resource-grant path (`bobi/events/server.py:612`) authorizes
@@ -577,18 +738,25 @@ re-pack.
    **uninterpolated** document, plus `OVERLAY_APPLIED_KEYS` and the validation entry
    point.
 2. Apply it at the two `subscribe:` sites: `bobi/events/subscriptions.py:34` and
-   `bobi/ingress.py:62`.
+   `bobi/ingress.py:62`, gating on **presence, not truthiness**, so a defined-but-empty
+   `subscribe:` means "nothing" rather than "auto-detect", and the two sites agree.
+   Narrow `subscriptions.py:44-45` so `OverlayError` propagates.
    No other reader changes.
 3. Boot validation in `_load_config_or_raise` (`bobi/service.py:248`, called at `:484`), with the
    applied-vs-data log line.
-4. `find_env_var_refs` unions the overlay: `_scan_env_refs` concatenates the overlay's
-   text, `_build_only_names` folds overlay refs into `elsewhere`.
+4. `find_env_var_refs` (`config.py:114`) unions the overlay's `${VAR}` refs with the
+   pack's, and `_build_only_names` folds overlay refs into `elsewhere`.
+   `_scan_env_refs`, `scan_required_vars` and `scan_declared_vars` are untouched: they
+   serve not-yet-installed packages and a live cross-repo contract.
 5. `bobi agent <name> config show`, with `--source` and `--json`, following
    `monitors list` (`bobi/cli.py:2417-2419`).
 6. Migration overlay written into the live runtime with `fsutil.atomic_write_text`.
 7. Docs: `docs/BUILDING_AGENT_TEAMS.md` gains a runtime-overlay section covering the
-   merge rule, the applied-vs-data distinction, the restart consequences above, and the
-   supervisor-heartbeat exception.
+   merge rule, the applied-vs-data distinction, the restart consequences above, the
+   two-clock offboarding procedure, the supervisor-heartbeat exception, and one more
+   consequence of the env-ref union: an overlay referencing an unset `${VAR}` now fails
+   the whole manager boot at `_validate_or_raise` (`service.py:488`), not just the
+   subscription.
    Nothing to rewrite: `managed_repos` does not appear in `docs/` at `origin/main`.
 8. **Blocking co-deliverable:** the `moda-labs/moda-agents` PR carrying both the prompt
    text and the `workspace/overlay.yaml` seed template.
@@ -614,18 +782,37 @@ lenses apply.
 It returned four blockers, all rooted in the `Config`-as-chokepoint decision, and the
 decision is reversed above rather than patched.
 Every one of its citations was re-verified first-hand against the rebased tree before
-being acted on, and two of its line numbers had already moved under #951
-(`script_cache_checks.py` 651 to 649, `setup/actions.py` 169 to 171).
+being acted on, and `script_cache_checks.py`'s read had already moved from 651 to 649
+under #951.
 The fabricated `paths.py` walk justification (M1), the `config.yaml` name collision
 (M2), the unreachable validation placement (M3), the `find_env_var_refs` gap (M5), the
 pack-swap guard (M6), the fleet trade (M7), the `doctor.py:253` mischaracterization,
 the `config show` output contract, the uncounted second pack-side deliverable, and the
 `subagent.py`/`agent.yaml` citation drift are all folded in above.
 
+**Round 5 reviewed the reversal itself and returned four more blockers.**
+It executed the critical path rather than reasoning about it, and its verdict on
+round 4's four was: B4 genuinely closed, B1 closed for `subscribe:` but reopened on a
+different axis, B2 relocated, B3 not closed.
+All four are folded above:
+
+| Round-5 finding | Disposition |
+|---|---|
+| Empty `subscribe:` falls through to git-remote auto-detection (`subscriptions.py:42` gates on truthiness) | **Accepted.** Presence gating is now part of the merge rule and step 2. |
+| Torn overlay swallowed into that same fallback; the supervisor re-reads post-boot | **Accepted.** `OverlayError`, and `subscriptions.py:44-45` must narrow. The circular "already parsed at boot" justification is withdrawn. |
+| Two clocks: `subscribe:` at restart, `managed_repos` immediately | **Accepted.** "The only place the two can disagree" is withdrawn; the offboard window and its procedure are stated. |
+| The env-ref union cannot live in `_scan_env_refs`, and would corrupt a cross-repo contract | **Accepted.** Moved to `find_env_var_refs`; the false "overlay can never carry `build:`" premise is withdrawn. |
+| The "blocker 1 falsified" test is vacuous under both designs | **Accepted.** Retargeted at `Config.load` consumers. |
+| `config show` had no failure mode and no redaction statement | **Accepted.** Raw/uninterpolated, non-zero exit on an unparseable overlay. |
+| `registry.py:80` misclassified as "not a content read" | **Accepted.** It reads `monitors:` via `_read_records` (`:38-48`); table corrected and it joins the invariant test. |
+| `workspace/` is agent-writable, so the authority list is self-modifiable | **Accepted as a stated consequence** under ruling 3, no mechanical mitigation. |
+| 41 real `Config.load` sites | **Corrected to 40.** Two docstring lines match the grep, not one. |
+| `for_agent` optional; data-tier vocabulary split; `doctor.py:244`; `drain.py` count | **Accepted**, all folded. |
+
 **Earlier rounds.**
 Rounds 1 and 2 ran against the pre-ruling `repos.yaml` design and returned five
 blockers before Zach's premise ruling replaced it entirely.
-Round 3 produced the generic-merge revision this one reverses.
+Round 3 produced the generic-merge revision round 4 reversed.
 
 **Cross-model pass: still owed.**
 `codex exec` returns `401 Unauthorized: Missing bearer or basic authentication` in this
