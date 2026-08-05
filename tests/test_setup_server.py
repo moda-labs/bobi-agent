@@ -1066,6 +1066,76 @@ class TestPanelEdits:
         assert not s.pending_test
         assert s.spec.mcp_servers["substack_mcp"].get("last_test") is None
 
+    # D033 — the probe awaits for up to 60s (the first run resolves deps). The
+    # handler captured `entry` BEFORE that await and wrote the snapshot back
+    # after, so a correction the user saved through /api/mcp/add while the test
+    # was running was silently reverted — which is exactly what a user does when
+    # a connection test is failing. The removal case was guarded; the edit case
+    # was not.
+
+    def test_an_edit_during_the_probe_is_not_reverted(self, project, monkeypatch):
+        import shutil
+        import bobi.setup.mcp_probe as mcp_probe
+        monkeypatch.setattr(shutil, "which", lambda name: "/bin/claude")
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        monkeypatch.setattr(services, "live_venn_catalog", lambda *a, **k: set())
+
+        s = SetupState()
+        c = _client(s, project)
+
+        async def fake_probe(entry, proj, *, call_name=None, **kw):
+            if call_name is None:
+                return {"ok": True, "count": 1, "suggested": "substack_get_profile",
+                        "tools": ["substack_get_profile"]}
+            # The user fixes the command while the test is in flight — the same
+            # mutation /api/mcp/add performs on the shared state.
+            s.spec.mcp_servers = dict(s.spec.mcp_servers or {})
+            s.spec.mcp_servers["substack_mcp"] = {
+                "type": "stdio", "command": "uvx", "args": ["corrected"]}
+            return {"ok": True, "live_ok": True, "output": "ok",
+                    "called": call_name}
+        monkeypatch.setattr(mcp_probe, "probe", fake_probe)
+
+        self._added_substack(s, c)
+        c.post("/api/message", json={"text": "test the substack connection"})
+        body = c.post("/api/message", json={"text": "yes"}).text
+
+        entry = s.spec.mcp_servers["substack_mcp"]
+        assert entry["command"] == "uvx", "the user's correction was reverted"
+        assert entry["args"] == ["corrected"]
+        # And the result of testing the OLD command must not be recorded
+        # against the new one — that would render a never-tested config green.
+        assert entry.get("last_test") is None
+        assert "changed while I was testing" in body
+        card = next(x for x in c.get("/api/connect").json()["cards"]
+                    if x["key"] == "substack_mcp")
+        assert card["status"] != "connected"
+
+    def test_a_removal_during_the_probe_does_not_resurrect_the_entry(
+            self, project, monkeypatch):
+        import shutil
+        import bobi.setup.mcp_probe as mcp_probe
+        monkeypatch.setattr(shutil, "which", lambda name: "/bin/claude")
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        monkeypatch.setattr(services, "live_venn_catalog", lambda *a, **k: set())
+
+        s = SetupState()
+        c = _client(s, project)
+
+        async def fake_probe(entry, proj, *, call_name=None, **kw):
+            if call_name is None:
+                return {"ok": True, "count": 1, "suggested": "substack_get_profile",
+                        "tools": ["substack_get_profile"]}
+            s.spec.mcp_servers = {}          # user deletes it mid-test
+            return {"ok": True, "live_ok": True, "called": call_name}
+        monkeypatch.setattr(mcp_probe, "probe", fake_probe)
+
+        self._added_substack(s, c)
+        c.post("/api/message", json={"text": "test the substack connection"})
+        c.post("/api/message", json={"text": "yes"})
+
+        assert "substack_mcp" not in (s.spec.mcp_servers or {})
+
     def test_ordinary_chat_does_not_trigger_a_test(self, project, monkeypatch):
         # A normal design message must fall through to digestion, not the probe.
         import bobi.setup.mcp_probe as mcp_probe
@@ -1197,6 +1267,26 @@ class TestReviewFiles:
         _, c = self._built(project)
         r = c.get("/api/file", params={"path": "../../../etc/passwd"})
         assert r.status_code == 404
+
+    # D080 — /api/files lists every file under the pack with no suffix filter,
+    # so a logo.png or a latin-1 doc copied into the source tree is directly
+    # reachable from the review UI. read_text() then raised UnicodeDecodeError
+    # and the viewer 500'd instead of saying "that one isn't text".
+
+    def test_read_of_a_non_utf8_file_is_a_clean_error_not_a_500(self, project):
+        s, c = self._built(project)
+        from bobi.setup import actions
+        pack = actions.team_source_dir(project, s).resolve()
+        blob = pack / "logo.png"
+        blob.write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe\x00binary")
+
+        assert "logo.png" in c.get("/api/files").json()["files"], \
+            "the file viewer lists it, so it must be able to answer for it"
+        r = c.get("/api/file", params={"path": "logo.png"})
+
+        assert r.status_code < 500, r.text
+        assert "binary" in r.json().get("error", "").lower() or \
+               r.json().get("binary") is True
 
     def test_reveal_opens_the_source_folder(self, project, monkeypatch):
         import subprocess

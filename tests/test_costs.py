@@ -194,6 +194,43 @@ class TestCostRollup:
         summary = rollup_costs(sessions_dir)
         assert summary.sessions_counted == 0
 
+    # D086 — the fold backs a web endpoint that must not 500 on one malformed
+    # session (its own comment says so, and _tok exists for exactly that on the
+    # token fields). The cost fields had no such guard: a string is truthy, so
+    # `or 0.0` passed it straight into `+=`.
+
+    @pytest.mark.parametrize("bad", ["0.5", None, [], {}, "abc"])
+    def test_a_non_numeric_cost_does_not_crash_the_whole_fold(self, tmp_path,
+                                                              bad):
+        sessions_dir = self._make_sessions(tmp_path, {
+            "good": {"name": "good", "role": "engineer",
+                     "total_cost_usd": 0.25,
+                     "model": "claude-sonnet-4-20250514"},
+            "corrupt": {"name": "corrupt", "role": "engineer",
+                        "total_cost_usd": bad,
+                        "model": "claude-sonnet-4-20250514"},
+        })
+
+        summary = rollup_costs(sessions_dir)
+
+        # The good session still folds; the bad one contributes nothing.
+        assert summary.total_cost_usd == 0.25
+        assert isinstance(summary.total_cost_usd, float)
+
+    def test_a_non_numeric_usage_cost_does_not_crash_the_fold(self, tmp_path):
+        sessions_dir = self._make_sessions(tmp_path, {
+            "corrupt": {
+                "name": "corrupt", "role": "engineer",
+                "model_usage": {"claude-sonnet-4-20250514": {
+                    "cost_usd": "1.5", "input_tokens": 10,
+                    "output_tokens": 5}},
+            },
+        })
+
+        summary = rollup_costs(sessions_dir)
+
+        assert isinstance(summary.total_cost_usd, float)
+
 
 class TestEstimatedRollup:
     """Fold-time dollar estimation for models that report tokens only (#760)."""

@@ -827,3 +827,42 @@ def test_install_versioned_from_team_fetches_base_from_registry(tmp_path, monkey
     lock = json.loads((dest / "compose-lock.json").read_text())
     assert [(c["ref"], c["version"]) for c in lock["chain"]] == \
         [("core@1.0.0", "1.0.0"), (None, "2.0.0")]
+
+
+# D039 — remove-then-re-add is the natural idiom for wholesale-replacing an
+# inherited keyed entry (same-key entries field-merge otherwise). The remove
+# left a None tombstone in `result` but kept the name in `index`, so the re-add
+# deep-merged into None and crashed `bobi agents install` with a raw TypeError.
+
+def test_remove_then_readd_replaces_the_inherited_entry():
+    out = compose._merge_keyed_list(
+        [{"name": "x", "cmd": "a", "stale": "gone"}],
+        [{"name": "x", "remove": True}, {"name": "x", "cmd": "b"}],
+        "name")
+
+    assert out == [{"name": "x", "cmd": "b"}], \
+        "re-add after remove must REPLACE, not field-merge with the removed one"
+
+
+def test_remove_then_readd_through_a_real_compose(project):
+    _team(project, "core", 'version: "1.0.0"\n'
+          'services:\n  - {name: slack, events: true}\n')
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
+                 'services:\n'
+                 '  - {name: slack, remove: true}\n'
+                 '  - {name: slack, events: false}\n')
+
+    dest, _ = _compose(project, leaf)
+
+    cfg = yaml.safe_load((dest / "agent.yaml").read_text())
+    slack = [s for s in cfg["services"] if s.get("name") == "slack"]
+    assert slack == [{"name": "slack", "events": False}]
+
+
+def test_remove_of_an_entry_that_is_readd_free_still_drops_it():
+    out = compose._merge_keyed_list(
+        [{"name": "x", "cmd": "a"}, {"name": "y", "cmd": "c"}],
+        [{"name": "x", "remove": True}],
+        "name")
+
+    assert out == [{"name": "y", "cmd": "c"}]

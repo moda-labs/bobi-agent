@@ -143,6 +143,16 @@ def _persist_ingress_env(project: Path, state: SetupState) -> None:
     actions.write_env(project, env)
 
 
+def _probe_identity(entry: dict) -> dict:
+    """The part of an MCP entry a connection test is actually about.
+
+    Everything except the recorded outcome: if any of it changed while a probe
+    was in flight, the result describes a different connection than the one the
+    user now has.
+    """
+    return {k: v for k, v in (entry or {}).items() if k != "last_test"}
+
+
 def _dedupe_roots(roots: list[Path]) -> list[Path]:
     """Drop any root already contained in another — the usual case, where
     BOBI_HOME is ~/.bobi and so lives under the home directory."""
@@ -668,13 +678,31 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 return
             label = entry.get("label") or key
             yield f"Calling {tool} on {label}…\n\n"
+            tested = _probe_identity(entry)
             result = await mcp_probe.probe(entry, project, call_name=tool)
+            # Re-read the entry AFTER the await. The probe can take up to 60s
+            # (the first run resolves deps), and a user watching a slow test is
+            # very likely editing the very connection being tested — fixing the
+            # command that is failing. Writing the pre-probe snapshot back
+            # reverted that correction silently, and re-added an entry deleted
+            # mid-test. Worse than losing the edit: a result for the OLD command
+            # would mark the NEW one connected, so a config that was never
+            # tested renders green.
+            current = (state.spec.mcp_servers or {}).get(key)
+            if (not isinstance(current, dict) or not current
+                    or _probe_identity(current) != tested):
+                reply = ("That connection changed while I was testing it, so "
+                         "the result doesn’t apply to what you have now. Ask "
+                         "me to test it again.")
+                yield reply
+                _record(user_text, reply)
+                return
             # Persist ONLY coarse status — never raw error/stderr text, which can
             # carry secrets and is served to the browser via /api/state.
-            entry["last_test"] = {"ok": bool(result.get("ok")),
-                                  "live_ok": result.get("live_ok"),
-                                  "called": tool}
-            state.spec.mcp_servers[key] = entry
+            current["last_test"] = {"ok": bool(result.get("ok")),
+                                    "live_ok": result.get("live_ok"),
+                                    "called": tool}
+            state.spec.mcp_servers[key] = current
             if not result.get("ok"):
                 reply = f"✗ Couldn’t start {label}: {result.get('error')}"
                 if result.get("stderr"):
@@ -1417,7 +1445,16 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         target = _safe_target(path)
         if target is None or not target.is_file():
             return JSONResponse({"error": "not found"}, status_code=404)
-        return JSONResponse({"path": path, "content": target.read_text()})
+        try:
+            content = target.read_text()
+        except (UnicodeDecodeError, OSError):
+            # /api/files lists every file under the pack with no suffix filter,
+            # so a logo.png or a latin-1 doc copied into the source tree is one
+            # click away in the review viewer. An unhandled decode error there
+            # was a 500; say what it is instead and let the UI render a stub.
+            return JSONResponse({"path": path, "binary": True,
+                                 "error": "not a text file — nothing to show"})
+        return JSONResponse({"path": path, "content": content})
 
     @app.post("/api/file")
     def write_file(payload: dict) -> JSONResponse:

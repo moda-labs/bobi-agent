@@ -61,7 +61,7 @@
   // (Ctrl-C, closed terminal, crash) the UI must say so and stop pretending to
   // be live — every action would silently fail otherwise. A heartbeat plus
   // fetch-failure detection flips a blocking overlay; it clears itself if the
-  // server comes back (e.g. `bobi setup <name> --resume`).
+  // server comes back (e.g. `bobi setup <name>`, which resumes).
   let _finished = false;        // set when the user intentionally finishes
   let _disconnected = false;
   function markDisconnected() {
@@ -75,7 +75,7 @@
       <div class="disc-dot"></div>
       <h2>Setup server disconnected</h2>
       <p>The local <code>bobi setup</code> server stopped — closed, interrupted, or crashed. Nothing here works until it's back.</p>
-      <div class="disc-cmd"><span class="pr">$</span> bobi setup &lt;name&gt; --resume</div>
+      <div class="disc-cmd"><span class="pr">$</span> bobi setup &lt;name&gt;</div>
       <p class="disc-sub">Run that in your terminal — this page reconnects on its own. Your progress is saved.</p></div>`;
     document.body.appendChild(ov);
   }

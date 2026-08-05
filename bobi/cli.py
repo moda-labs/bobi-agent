@@ -828,17 +828,15 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
 @click.argument("name", required=False)
 @click.option("--model", default=None,
               help="Model for the setup session (alias or full ID).")
-@click.option("--resume", is_flag=True, help="Resume an interrupted setup.")
-def setup(name, model, resume):
+def setup(name, model):
     """Interactively design, build, and install an agent team.
 
     Opens a local web UI (on 127.0.0.1) that goes from an idea to a
     runnable agent team: describe what you want, let bobi suggest what
     it can do on its own, connect services, watch it build the pack, then
-    review and install. Interrupt anytime — `--resume` picks up where you
-    left off.
+    review and install. Interrupt anytime — reopening setup for the same
+    team resumes where you left off.
     """
-    del resume
     from urllib.parse import quote, urlencode
     import webbrowser
 
@@ -2801,12 +2799,29 @@ def event_server_stop():
         click.echo("Event server is not running")
         port_file.unlink(missing_ok=True)
         return
-    pid = int(pid_file.read_text().strip())
+    # The pid file is written by another process and a crash can truncate it
+    # mid-write, so every read here is defensive: an unparseable pid used to
+    # raise out of the command, print a traceback, and leave the stale files
+    # behind — which made every subsequent `stop` fail exactly the same way,
+    # with no way out but deleting the files by hand. Mirrors the manager stop
+    # path ("Invalid PID file — cleaning up.").
     try:
-        os.kill(pid, signal.SIGTERM)
-        click.echo(f"Event server stopped (pid {pid})")
-    except ProcessLookupError:
-        click.echo("Event server was not running (stale PID file)")
+        pid = int(pid_file.read_text().strip())
+    except (ValueError, OSError):
+        click.echo("Invalid event-server PID file — cleaning up.")
+    else:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            click.echo(f"Event server stopped (pid {pid})")
+        except ProcessLookupError:
+            click.echo("Event server was not running (stale PID file)")
+        except PermissionError:
+            # The pid was reused by a process we do not own; signalling it
+            # would be wrong even if we could. Drop our stale files and say so.
+            click.echo(f"Not permitted to signal pid {pid} — it is not ours. "
+                       "Clearing the stale PID file.", err=True)
+        except OSError as e:
+            click.echo(f"Could not signal pid {pid}: {e}", err=True)
     pid_file.unlink(missing_ok=True)
     port_file.unlink(missing_ok=True)
 
@@ -3162,6 +3177,7 @@ def agents_update(name):
         if not cached:
             click.echo("No cached agent teams to update.")
             return
+        failed = 0
         for pack in cached:
             try:
                 local_v, remote_v = check_update(project_path, pack["name"])
@@ -3174,6 +3190,13 @@ def agents_update(name):
                     click.echo(f"  {pack['name']} v{local_v} — could not check remote")
             except Exception as e:
                 click.echo(f"  {pack['name']} — failed: {e}", err=True)
+                failed += 1
+        # Keep going through every pack (one bad registry must not hide the
+        # rest), but report the failure. Without this the update-all form
+        # exited 0 while the named-pack form above exited 1 for the identical
+        # failure, so nothing scripted could tell an update from a no-op.
+        if failed:
+            raise SystemExit(1)
 
 
 @agents.command("add-registry")
@@ -3247,12 +3270,17 @@ def agents_browse():
         raise SystemExit(1)
 
     cached_packs = list_cached(project_path) if project_path else []
-    cached = {p["name"]: p["version"] for p in cached_packs}
+    cached = {p["name"]: str(p["version"]) for p in cached_packs}
 
     click.echo("Available agent teams:\n")
     for pack in remote:
         name = pack["name"]
-        version = pack.get("version", "?")
+        # A registry.yaml is third-party YAML: `version: 1.0` parses as a float,
+        # which `:8s` below rejects with "Unknown format code 's'" — taking down
+        # the whole listing over one row. It also made the local-vs-remote
+        # comparison a silent str-vs-float mismatch, so an installed pack read
+        # as an available upgrade to itself.
+        version = str(pack.get("version", "?"))
         desc = pack.get("description", "")
         registry = pack.get("registry", DEFAULT_REPO)
         local_v = cached.get(name)

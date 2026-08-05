@@ -654,6 +654,12 @@ def _merge_keyed_list(base: list | None, overlay: list | None,
         if entry.get("remove") is True:
             if name in index:
                 result[index[name]] = None  # tombstone; compacted below
+                # Forget the slot too. Leaving the name indexed made a later
+                # re-add — the natural way to wholesale-REPLACE an inherited
+                # entry, since same-key entries otherwise field-merge — deep
+                # merge into the tombstone and crash `bobi agents install` with
+                # a raw TypeError.
+                del index[name]
             continue
         if name in index:
             result[index[name]] = _deep_merge_dict(result[index[name]], entry)

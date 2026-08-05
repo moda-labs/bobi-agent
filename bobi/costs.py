@@ -145,6 +145,19 @@ class CostSummary:
         }
 
 
+def _usd(v) -> float:
+    """A dollar amount usable in arithmetic — the cost-side twin of ``_tok``.
+
+    ``or 0.0`` alone only covers a *null* cost. A string is truthy, so a
+    hand-edited ``"total_cost_usd": "0.5"`` passed straight into ``+=`` and
+    raised TypeError, failing the whole team's fold — and the web endpoint
+    behind it — over one malformed session. ``bool`` is excluded for the same
+    reason as in ``_tok``.
+    """
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) \
+        else 0.0
+
+
 def _tok(v) -> int:
     """A token count usable in arithmetic. isinstance (not just ``or 0``) for
     the same reason the cost fold coerces null: a hand-edited state.json can
@@ -175,7 +188,7 @@ def session_usage(model_usage: dict | None,
     estimated = 0.0
     for key, usage in usage_by_model.items():
         usage = usage or {}
-        usage_cost = usage.get("cost_usd") or 0.0
+        usage_cost = _usd(usage.get("cost_usd"))
         parts = key.split(":", 1)
         provider = parts[0] if len(parts) > 1 else "unknown"
         model = parts[1] if len(parts) > 1 else key
@@ -225,11 +238,12 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
         except (json.JSONDecodeError, OSError):
             continue
 
-        # `or 0.0` (not a get default) so a present-but-null cost - a
-        # hand-edited or partially-written state.json - coerces to 0.0
-        # instead of crashing the arithmetic below (these fold now backs a
-        # web endpoint that must not 500 on one malformed session).
-        cost = data.get("total_cost_usd") or 0.0
+        # `_usd` (not a get default, and not a bare `or 0.0`) so a
+        # present-but-null OR non-numeric cost - a hand-edited or
+        # partially-written state.json - coerces to 0.0 instead of crashing the
+        # arithmetic below (this fold backs a web endpoint that must not 500 on
+        # one malformed session).
+        cost = _usd(data.get("total_cost_usd"))
         model_usage = data.get("model_usage") or {}
         if not cost and not model_usage:
             continue
@@ -245,7 +259,7 @@ def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
         attributed_cost = 0.0
         for key, usage in model_usage.items():
             usage = usage or {}
-            usage_cost = usage.get("cost_usd") or 0.0
+            usage_cost = _usd(usage.get("cost_usd"))
             attributed_cost += usage_cost
             # key format is "provider:model"
             parts = key.split(":", 1)
