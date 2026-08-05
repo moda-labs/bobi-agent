@@ -5,6 +5,7 @@ an injected fake LLM source: no network, no CLI."""
 import json
 import os
 import re
+from pathlib import Path
 
 import pytest
 import yaml
@@ -489,6 +490,20 @@ class TestConnect:
         assert r.status_code == 200
         assert r.json()["value"] == "lin_api_copyme"
         assert c.get("/api/credential/value?var=NOPE_TOKEN").status_code == 404
+
+    def test_credential_value_never_serves_an_ambient_env_var(self, project,
+                                                              monkeypatch):
+        # D081: the endpoint fell back to os.environ for any requested name, so
+        # anything holding the page's nonce could read a secret exported into
+        # the shell that launched `bobi setup` — never saved through setup and
+        # not in run/.env. Only the saved-credential store is copyable.
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "ambient-super-secret")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-ambient")
+        c = _client(SetupState(), project)
+        for var in ("AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY"):
+            r = c.get(f"/api/credential/value?var={var}")
+            assert r.status_code == 404, f"{var} was served from the environment"
+            assert "ambient" not in r.text
 
 
 # --- Venn setup flow: discover account MCPs, apply picks -----------------
@@ -1103,6 +1118,41 @@ class TestPanelEdits:
         c = _client(SetupState(), project, home_root=tmp_path / "home")
         (tmp_path / "home").mkdir()
         r = c.post("/api/mcp/detect", json={"path": "/etc"})
+        assert r.status_code == 400 and "home" in r.json()["error"]
+
+    def test_mcp_detect_accepts_a_project_folder_in_the_users_home(
+            self, project, tmp_path, monkeypatch):
+        # D007: the picker boundary is the user's HOME directory — what the
+        # /api/browse comment and this endpoint's 400 both claim — not
+        # BOBI_HOME. MCP server projects live in ~/dev, never under ~/.bobi, so
+        # confining to BOBI_HOME rejected every real folder with a message the
+        # path already satisfied, and detect could never succeed.
+        # No home_root here: this is the production path, with BOBI_HOME left
+        # where the module fixture put it (tmp_path/.bobi, i.e. ~/.bobi).
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        srv = tmp_path / "dev" / "acme-mcp"
+        (srv / "src" / "acme_mcp").mkdir(parents=True)
+        (srv / "pyproject.toml").write_text(
+            '[project]\nname = "acme-mcp"\nversion = "0.1.0"\n\n'
+            '[project.scripts]\nacme-mcp = "acme_mcp.server:main"\n')
+        (srv / "src" / "acme_mcp" / "__init__.py").write_text("")
+        (srv / "src" / "acme_mcp" / "server.py").write_text(
+            'import os\nT = os.environ.get("ACME_TOKEN", "")\n')
+        c = _client(SetupState(), project)
+        r = c.post("/api/mcp/detect", json={"path": str(srv)})
+        assert r.status_code == 200, r.json()
+        assert r.json()["ok"] is True
+
+    def test_mcp_detect_still_rejects_a_path_outside_the_users_home(
+            self, project, tmp_path, monkeypatch):
+        # Widening the boundary to the real home is not removing it.
+        user_home = tmp_path / "user"
+        user_home.mkdir()
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
+        c = _client(SetupState(), project)
+        r = c.post("/api/mcp/detect", json={"path": str(outside)})
         assert r.status_code == 400 and "home" in r.json()["error"]
 
     def test_connect_surfaces_stdio_card(self, project, monkeypatch):

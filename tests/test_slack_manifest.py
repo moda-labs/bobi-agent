@@ -57,6 +57,40 @@ def test_render_substitutes_name_and_request_url():
     )
 
 
+@pytest.mark.parametrize("name", [
+    "Bobi: Staging",     # a bare ':' makes the whole manifest unparseable
+    "Bobi #1",           # everything after '#' becomes a YAML comment
+    "yes",               # parses as a boolean, not a string
+    "null",              # parses as None
+    "123",               # parses as an int
+    "[bracketed]",       # parses as a list
+    "*anchor",           # parses as an alias reference
+    "O'Brien's Bot",     # a quote inside a quoted scalar
+])
+def test_render_survives_a_name_with_yaml_special_characters(name):
+    # D074: the app name landed in bare scalar positions (`name: ${APP_NAME}`)
+    # with no escaping, so these either crashed manifest_to_dict or silently
+    # created an app under a different name than the user typed.
+    data = manifest_to_dict(render_manifest(name, EVENT_SERVER))
+    assert data["display_information"]["name"] == name
+    assert data["features"]["bot_user"]["display_name"] == name
+
+
+def test_render_rejects_a_name_with_a_line_break():
+    # A line break cannot be represented at both substitution indents; the
+    # template would render valid-looking YAML carrying a different name.
+    with pytest.raises(ValueError, match="line break"):
+        render_manifest("Bobi\nBot", EVENT_SERVER)
+
+
+def test_cli_reports_a_line_break_in_the_name_without_a_traceback():
+    r = CliRunner().invoke(main, ["create-slack-bot", "--app-name", "Bobi\nBot",
+                                  "--no-open"])
+    assert r.exit_code != 0
+    assert "line break" in r.output
+    assert r.exception is None or isinstance(r.exception, SystemExit)
+
+
 def test_default_render_is_byte_identical_to_raw_template_substitution():
     expected = string.Template(TEMPLATE_PATH.read_text()).safe_substitute(
         APP_NAME="Eng Bot",

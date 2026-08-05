@@ -143,6 +143,13 @@ def _persist_ingress_env(project: Path, state: SetupState) -> None:
     actions.write_env(project, env)
 
 
+def _dedupe_roots(roots: list[Path]) -> list[Path]:
+    """Drop any root already contained in another — the usual case, where
+    BOBI_HOME is ~/.bobi and so lives under the home directory."""
+    return [r for r in roots
+            if not any(o != r and (o == r or o in r.parents) for o in roots)]
+
+
 # --- app -----------------------------------------------------------------
 
 def build_app(state: SetupState, project: Path, *, nonce: str,
@@ -166,20 +173,30 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     # <home>/agents/<name>/src; setup scans this root.
     home = (home_root or paths.home_dir()).resolve()
     library = home / "agents"
+    # The folder-picker / scan boundary: the user's home directory, which is
+    # what the picker comment and every rejection message say. It used to be
+    # BOBI_HOME alone — so pointing detect or the picker at a real project
+    # folder (~/dev/acme-mcp, the only place an MCP server ever lives) was
+    # rejected by a message the path already satisfied, and detect could never
+    # succeed. BOBI_HOME joins it as a second root for the installs that put it
+    # outside home; `home_root` (tests, e2e) still stands in for both, keeping
+    # the picker off the real filesystem.
+    picker_roots = [home] if home_root else _dedupe_roots(
+        [Path.home().resolve(), home])
 
     def _within_home(raw: str, default: Path) -> tuple[Path, bool]:
-        """Resolve a user-supplied path and confine it to the home tree — the
+        """Resolve a user-supplied path and confine it to the picker roots — the
         single source of truth for the folder-picker / scan security boundary.
         Relative paths re-base under home (consistent across endpoints). Returns
-        (path, ok); ok is False when the resolved path escaped home, so each
-        caller picks its own policy (reject vs. fall back)."""
+        (path, ok); ok is False when the resolved path escaped every root, so
+        each caller picks its own policy (reject vs. fall back)."""
         if not raw:
             return default, True
         p = Path(raw).expanduser()
         if not p.is_absolute():
             p = home / p
         p = p.resolve()
-        return p, (p == home or home in p.parents)
+        return p, any(p == r or r in p.parents for r in picker_roots)
 
     def _load_machine_config() -> dict:
         cfg_path = paths.ensure_global_config()
@@ -343,10 +360,10 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             library.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
-        default = library if library.is_dir() else home
+        default = library if library.is_dir() else picker_roots[0]
         here, ok = _within_home(request.query_params.get("path") or "", default)
         if not ok:
-            here = home
+            here = picker_roots[0]
         if not here.is_dir():
             return JSONResponse({"error": "not a directory"}, status_code=404)
         try:
@@ -354,7 +371,9 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                           if d.is_dir() and not d.name.startswith("."))
         except OSError:
             dirs = []
-        parent = str(here.parent) if here != home else None
+        # "Up" stops at whichever picker root contains this directory, so the
+        # walk can never be climbed out of the boundary.
+        parent = None if here in picker_roots else str(here.parent)
         return JSONResponse({"path": str(here), "parent": parent, "dirs": dirs})
 
     @app.post("/api/rename")
@@ -1299,10 +1318,17 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # Copy-to-clipboard support: returns a saved credential value to the
         # local page so it can be copied without being shown. Loopback + nonce
         # only; the value already lives in plaintext in .env on this machine.
-        import os
+        #
+        # run/.env is the whole surface, deliberately. This used to fall back to
+        # os.environ for any requested name, which served every secret exported
+        # in the shell that launched setup (AWS_SECRET_ACCESS_KEY,
+        # ANTHROPIC_API_KEY, …) — none of them saved through setup, and outside
+        # the justification above. mcp_probe.py withholds ambient environment
+        # from child processes for the same reason. An ambient-only credential
+        # is simply not copyable; the page shows "nothing to copy".
         from bobi.setup import actions
         var = request.query_params.get("var", "")
-        val = actions.read_env(project).get(var) or os.environ.get(var, "")
+        val = actions.read_env(project).get(var, "")
         if not val:
             return JSONResponse({"error": "not set"}, status_code=404)
         return JSONResponse({"value": val})

@@ -299,6 +299,9 @@ One calm screen, three tabs, each landing in the same chat+cards editor:
 dialog, so **Browse…** opens a small **server-side directory lister** (`/api/browse`),
 **rooted at the user's home** (the library and most dev repos live there; confined
 to home so the page can't list the whole filesystem) and returning absolute paths.
+`$BOBI_HOME` is a second root when it is configured outside the home directory,
+so the library stays reachable either way. The same boundary governs the modify
+scan (`/api/teams`) and the MCP folder detect (`/api/mcp/detect`).
 Default source location is `$BOBI_HOME/agents/<name>/src/`; install targets the
 same named agent's `run/package/`. Anything outside home can still be typed into
 the location field. Source dirs are kept separate from `run/`.
