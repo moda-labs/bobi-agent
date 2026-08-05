@@ -1128,6 +1128,14 @@ def script_cache(monitor, projects: list[Path]) -> list[Condition] | None:
         _save_trusted_state(monitor.name, state)
 
 
+# Self-heal calls the agent runtime through `run_check_blocking`, which blocks
+# for up to ~20 minutes (attempts=2 x CHECK_TIMEOUT=600s). The scheduler runs
+# every check on its single thread, so running this one there stalled every
+# other monitor for the duration (D004). This flag moves detection to its own
+# thread; the runner itself is unchanged, so a regeneration tick still returns
+# the agent's items rather than wasting the tick.
+script_cache.out_of_band = True
+
 # Native check runners, keyed by the monitor's `check` field. Auto-loaded by the
 # scheduler's *_checks.py glob — no scheduler change to register.
 CHECKS = {"script_cache": script_cache}

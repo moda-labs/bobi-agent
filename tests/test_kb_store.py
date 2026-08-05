@@ -518,6 +518,25 @@ class TestFTSQuery:
     def test_empty(self):
         assert _fts_query("") == ""
 
+    def test_embedded_quote_is_doubled(self):
+        # FTS5 escapes a '"' inside a phrase by doubling it. Wrapping a token
+        # that carries an odd number of them yields '"5""' — 'unterminated
+        # string' out of the MATCH (D043).
+        assert _fts_query('5"') == '"5"""'
+
+    def test_search_survives_an_unbalanced_quote(self, store):
+        store.add_text("the 5\" display is misaligned", source="notes.md",
+                       embed_fn=_mock_embed)
+        # `bobi recall-memory 'the 5" display bug'` raised straight out of
+        # apsw before the escape landed.
+        assert store.search('the 5" display') is not None
+
+    def test_search_with_an_all_whitespace_query_is_empty(self, store):
+        store.add_text("something searchable", source="notes.md",
+                       embed_fn=_mock_embed)
+        # An empty MATCH expression is itself an FTS5 syntax error.
+        assert store.search("   ") == []
+
 
 # ---------------------------------------------------------------------------
 # info

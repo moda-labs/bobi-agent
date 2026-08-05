@@ -614,6 +614,123 @@ class TestSchedulerRun:
         assert len(spawned) == 1
 
 
+class TestOutOfBandNativeChecks:
+    """D004 — a check runner that pays for an agent must not hold the tick.
+
+    The scheduler runs on ONE thread: `_loop` -> `tick()` -> `run_monitor` ->
+    `_check_conditions` -> `check(...)` inline. `script_cache`'s self-heal
+    calls `run_check_blocking` (attempts=2 x CHECK_TIMEOUT=600s) from there,
+    so a regeneration stalls every other monitor for up to ~20 minutes:
+    interval monitors drift, and a weekday-gated `at:` slot whose instant
+    passes during the block is treated as a missed-while-down catch-up and
+    skipped entirely.
+    """
+
+    @staticmethod
+    def _blocking_check(release, started, result=None):
+        def check(monitor, projects):
+            started.set()
+            release.wait(10)
+            return result if result is not None else [
+                Condition(key="k1", data={"id": "k1"})]
+        check.out_of_band = True
+        return check
+
+    def test_a_blocking_check_does_not_hold_the_scheduler_thread(self, tmp_path):
+        import threading
+        import time
+
+        started, release = threading.Event(), threading.Event()
+        m = Monitor(name="slow", event="monitor/slow", check="slow_check")
+        sched, injected = _scheduler(tmp_path, [m])
+        sched._checks["slow_check"] = self._blocking_check(release, started)
+
+        t0 = time.monotonic()
+        sched.run_monitor(m, sched._registry_loader(), _fixed_now())
+        elapsed = time.monotonic() - t0
+
+        assert started.wait(5), "the check never ran"
+        assert elapsed < 1.0, f"run_monitor blocked for {elapsed:.1f}s"
+
+        release.set()
+        deadline = time.monotonic() + 5
+        while not injected and time.monotonic() < deadline:
+            time.sleep(0.01)
+        # It still reconciles and publishes — just off the scheduler thread.
+        assert len(injected) == 1
+        assert injected[0]["event"] == "monitor/slow"
+        assert sched.state["slow"]["active"] == ["k1"]
+
+    def test_an_in_flight_check_is_not_started_twice(self, tmp_path):
+        import threading
+
+        started, release = threading.Event(), threading.Event()
+        calls = []
+        m = Monitor(name="slow", event="monitor/slow", check="slow_check")
+        sched, injected = _scheduler(tmp_path, [m])
+        inner = self._blocking_check(release, started)
+
+        def counting(monitor, projects):
+            calls.append(monitor)
+            return inner(monitor, projects)
+        counting.out_of_band = True
+        sched._checks["slow_check"] = counting
+
+        reg = sched._registry_loader()
+        sched.run_monitor(m, reg, _fixed_now())
+        assert started.wait(5)
+        # Ticks keep coming every 30s while a regeneration takes minutes.
+        sched.run_monitor(m, reg, _fixed_now())
+        sched.run_monitor(m, reg, _fixed_now())
+
+        release.set()
+        assert len(calls) == 1
+
+    def test_an_ordinary_native_check_still_runs_inline(self, tmp_path):
+        m = Monitor(name="x", event="monitor/x", check="plain")
+        sched, injected = _scheduler(tmp_path, [m])
+        sched._checks["plain"] = lambda mon, repos: [
+            Condition(key="k", data={"a": 1})]
+        sched.run_monitor(m, sched._registry_loader(), _fixed_now())
+        # No thread, no waiting: it published before run_monitor returned.
+        assert len(injected) == 1
+
+    def test_a_raising_out_of_band_check_clears_its_in_flight_flag(self, tmp_path):
+        import time
+
+        calls = []
+
+        def boom(monitor, projects):
+            calls.append(monitor)
+            raise RuntimeError("generation exploded")
+        boom.out_of_band = True
+
+        m = Monitor(name="x", event="monitor/x", check="boom")
+        sched, injected = _scheduler(tmp_path, [m])
+        sched._checks["boom"] = boom
+        reg = sched._registry_loader()
+
+        sched.run_monitor(m, reg, _fixed_now())
+        deadline = time.monotonic() + 5
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        deadline = time.monotonic() + 5
+        while sched._checks_in_flight and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        sched.run_monitor(m, reg, _fixed_now())
+        deadline = time.monotonic() + 5
+        while len(calls) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(calls) == 2, "a failed run must not wedge the monitor"
+
+    def test_the_script_cache_runner_is_marked_out_of_band(self):
+        from bobi.monitors.script_cache_checks import script_cache
+
+        # The one bundled runner that invokes the agent runtime.
+        assert getattr(script_cache, "out_of_band", False) is True
+
+
 class TestCommandMonitor:
     def test_command_runs_and_fires_events(self, tmp_path):
         m = Monitor(

@@ -123,9 +123,15 @@ def _chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS,
 # ---------------------------------------------------------------------------
 
 def _fts_query(query: str) -> str:
-    tokens = query.split()
-    quoted = [f'"{t}"' for t in tokens if t]
-    return " OR ".join(quoted)
+    """Wrap each whitespace token as an FTS5 phrase.
+
+    A '"' inside a phrase is escaped by DOUBLING it, so a token carrying an
+    odd number of them (`5"`) has to be escaped rather than wrapped — plain
+    wrapping yields `"5""` and apsw raises 'unterminated string' out of
+    `bobi kb search` / `bobi recall-memory` (D043).
+    """
+    return " OR ".join('"' + t.replace('"', '""') + '"'
+                       for t in query.split() if t)
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +523,11 @@ class KBStore:
     def _fts_search(self, conn: apsw.Connection, query: str,
                     limit: int) -> list[dict]:
         fts = _fts_query(query)
+        if not fts:
+            # An empty MATCH expression is an FTS5 syntax error in its own
+            # right, so an all-whitespace query stops here (D043). No tokens
+            # means nothing could have matched anyway.
+            return []
         rows = _fetchall(
             conn,
             """SELECT e.id, e.content, e.source, e.source_hash, e.chunk_index,

@@ -673,6 +673,10 @@ class MonitorScheduler:
         # purpose: a manager restart mid-gate recorded nothing, so re-gating
         # the same items is safe and loses nothing.
         self._gates_in_flight: set[str] = set()
+        # Native checks that declare themselves out-of-band and are still
+        # running. In-memory like _gates_in_flight: a manager restart
+        # mid-check recorded nothing, so re-running it is safe.
+        self._checks_in_flight: set[str] = set()
         # Consecutive indeterminate gate verdicts per monitor, to surface a
         # systematically broken gate (each retry pays for a model call that
         # never lands a verdict). Reset on any successful verdict.
@@ -817,6 +821,15 @@ class MonitorScheduler:
         resolves them, so the record lands when the firing actually finishes,
         not when it was dispatched.
         """
+        if monitor.state_key in self._checks_in_flight:
+            # A previous firing's out-of-band check has not finished. Return
+            # before opening a run record: this tick did no work, and a row
+            # per skipped tick would bury the one that is actually running.
+            # `last_run` stays untouched so an `at:` slot is not marked fired.
+            log.debug(f"Monitor {monitor.name}: check still in flight — "
+                      "skipping this tick")
+            return
+
         sleep_cycle_spawned = False
         tracker = RunTracker(monitor.name, flavor=_run_flavor(monitor))
         self._open_runs[monitor.state_key] = tracker
@@ -831,6 +844,12 @@ class MonitorScheduler:
                 ]
             elif monitor.command:
                 conditions = self._command_conditions(monitor, tracker)
+            elif monitor.check and self._check_is_out_of_band(monitor):
+                # An agent-invoking runner detects off-thread and reconciles
+                # from there, exactly like the description-only flavor.
+                self._spawn_native_check(monitor, registry, tracker)
+                conditions = None
+                in_flight = True
             elif monitor.check:
                 conditions = self._check_conditions(monitor, registry, tracker)
             elif monitor.sleep_cycle:
@@ -1115,6 +1134,61 @@ class MonitorScheduler:
             tracker.close()
 
     # --- detectors ------------------------------------------------------
+
+    def _check_is_out_of_band(self, monitor) -> bool:
+        """Whether this monitor's native check must not run on this thread.
+
+        A runner opts in by setting ``out_of_band = True`` on itself — the
+        same `*_checks.py` glob loads framework and pack runners, so a pack
+        that pays for an agent can declare it without a scheduler change.
+        """
+        return bool(getattr(self._checks.get(monitor.check), "out_of_band", False))
+
+    def _spawn_native_check(self, monitor, registry: MonitorRegistry,
+                            tracker=None) -> None:
+        """Run a native check on its own thread and reconcile from there.
+
+        The scheduler has ONE thread: `_loop` -> `tick` -> `run_monitor`, and
+        `tick` cannot return until every due monitor's detection has. A
+        runner that calls the agent runtime (script_cache's self-heal, via
+        `run_check_blocking` — attempts=2 x CHECK_TIMEOUT=600s) therefore
+        stalled every OTHER monitor for up to ~20 minutes: interval monitors
+        drifted, and a weekday-gated `at:` slot whose instant passed during
+        the block was read as a missed-while-down catch-up and skipped
+        outright (D004). The description-only flavor already detects
+        out-of-band for exactly this reason; this gives native runners the
+        same seam, and reconciliation takes the same state lock the
+        check-waiter threads do.
+        """
+        key = monitor.state_key
+        self._checks_in_flight.add(key)
+        projects = registry.projects_for(monitor)
+
+        def _detect() -> None:
+            try:
+                conditions = self._check_conditions(monitor, registry, tracker)
+                if conditions is None:
+                    log.warning(f"Monitor {monitor.name}: check indeterminate "
+                                "— leaving state untouched, retrying next "
+                                "interval")
+                elif monitor.gated:
+                    if self._reconcile_gated(monitor, conditions, projects,
+                                             tracker):
+                        return  # a gate is in flight; it closes the record
+                else:
+                    self._reconcile(monitor, conditions, tracker)
+            except Exception as e:  # a worker thread must never die silently
+                log.error(f"Monitor {monitor.name}: out-of-band check "
+                          f"failed: {e}")
+                if tracker is not None:
+                    tracker.note_failure(f"check raised: {e}")
+            finally:
+                self._checks_in_flight.discard(key)
+            if tracker is not None:
+                tracker.close()
+
+        threading.Thread(target=_detect, daemon=True,
+                         name=f"monitor-check-{monitor.name}").start()
 
     def _check_conditions(self, monitor, registry: MonitorRegistry,
                           tracker=None) -> list | None:

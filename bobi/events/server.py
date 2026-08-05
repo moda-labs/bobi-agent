@@ -389,6 +389,62 @@ def _is_local_url(url: str) -> bool:
     return host in ("localhost", "127.0.0.1", "::1")
 
 
+def local_port_from_url(url: str) -> int | None:
+    """The local event-server port named by *url*, or None when it is remote."""
+    if not url:
+        return None
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https"):
+        return None
+    if parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+        return None
+    return parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
+def resolve_local_port(project_path: Path) -> int:
+    """Port this runtime's LOCAL event server uses.
+
+    A live runtime's remembered start port wins, then the configured local
+    ``event_server_url``, then a remembered port with no live pid, then the
+    8080 default. The single definition, so `event-server status` and doctor
+    can never disagree about which port to probe (D019).
+    """
+    from bobi import paths
+
+    state = paths.state_path(project_path)
+    pid_file = state / "event-server.pid"
+    port_file = state / "event-server.port"
+
+    def _remembered() -> int | None:
+        try:
+            return int(port_file.read_text().strip())
+        except (OSError, ValueError):
+            return None
+
+    if pid_file.exists() and port_file.exists():
+        port = _remembered()
+        if port is not None:
+            return port
+
+    try:
+        from bobi.config import Config
+        configured = Config.load(project_path).event_server_url
+    except Exception:
+        configured = ""
+    if configured:
+        port = local_port_from_url(configured)
+        if port is not None:
+            return port
+
+    if port_file.exists():
+        port = _remembered()
+        if port is not None:
+            return port
+    return 8080
+
+
 def _run_npm(
     args: list[str],
     es_dir: Path,

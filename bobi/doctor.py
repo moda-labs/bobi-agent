@@ -32,8 +32,7 @@ def run_doctor() -> list[CheckResult]:
 
     results = []
 
-    results.append(_check_claude_cli())
-    results.append(_check_claude_auth())
+    results.extend(_check_brain_cli())
     results.append(_check_local_config())
     results.append(_check_runtime_layout())
     results.append(_check_runtime_write_policy())
@@ -53,6 +52,62 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_long_term_memory())
 
     return results
+
+
+def _team_brain() -> tuple[str, bool]:
+    """This runtime's brain ``(engine, is_gateway)``.
+
+    Falls back to the framework default whenever there is no bound runtime or
+    its config cannot be read — an unreadable config is `_check_local_config`'s
+    story to tell, not this one's.
+    """
+    from bobi.brain import DEFAULT_BRAIN, normalize_brain_kind
+
+    root = bound_root()
+    if not root:
+        return DEFAULT_BRAIN, False
+    try:
+        from bobi.config import Config
+        cfg = Config.load(root)
+    except Exception:
+        return DEFAULT_BRAIN, False
+    return normalize_brain_kind(cfg.brain_kind) or DEFAULT_BRAIN, cfg.brain_is_gateway
+
+
+def _check_brain_cli() -> list[CheckResult]:
+    """Health of the CLI this team's brain actually runs on (D020).
+
+    Demanding the claude binary unconditionally reported a codex team broken
+    (doctor exit 1) on a host that legitimately never had it. The gate is the
+    ENGINE, not gateway-ness: gateway mode is an endpoint property, so a
+    `kind: claude` gateway team still needs the claude CLI — it is the CLI
+    that dials the gateway. What a gateway team does NOT need is vendor auth,
+    which is the gateway's business; the ambient `claude --print hi` probe
+    would be testing this host's personal credentials instead.
+    """
+    engine, is_gateway = _team_brain()
+    if engine == "codex":
+        return [_check_codex_cli()]
+    if engine != "claude":
+        # stub, or an engine this doctor has not been taught about: it has no
+        # host prerequisite to check, and inventing a failure would be a lie.
+        return []
+    results = [_check_claude_cli()]
+    if is_gateway:
+        results.append(CheckResult(
+            "Claude auth", ok=True,
+            detail="gateway endpoint — auth is the gateway's"))
+    else:
+        results.append(_check_claude_auth())
+    return results
+
+
+def _check_codex_cli() -> CheckResult:
+    if shutil.which("codex"):
+        return CheckResult("Codex CLI", ok=True, detail="found")
+    return CheckResult("Codex CLI", ok=False,
+                       detail="not found in PATH",
+                       hint="Install the Codex CLI: https://github.com/openai/codex")
 
 
 def _check_claude_cli() -> CheckResult:
@@ -366,17 +421,27 @@ def _check_bubble_auth() -> CheckResult:
 
 
 def _check_event_server() -> CheckResult:
-    """Probe the event server /health endpoint."""
+    """Probe the event server /health endpoint.
+
+    The URL probed is the one this runtime actually uses (D019): the
+    configured remote server when there is one, otherwise the local port
+    `event-server start` would bind. Probing a hardcoded localhost:8080
+    reported a healthy remote instance 'not running' — a REQUIRED failure,
+    doctor exit 1 — and told the operator to start a local server that was
+    never meant to run.
+    """
     from bobi.config import Config
     from bobi.events.server import (
         NodeRuntimePrerequisiteError,
         _is_local_url,
         health,
+        resolve_local_port,
         resolve_node_runtime,
     )
 
     root = bound_root()
-    needs_local_node = True
+    remote_url = ""
+    url = "http://localhost:8080"
     if root:
         try:
             cfg = Config.load(root)
@@ -390,23 +455,34 @@ def _check_event_server() -> CheckResult:
                 return CheckResult("Event server", ok=True,
                                    detail=f"remote ({cfg.event_server_url})")
             if cfg.event_server_url and not _is_local_url(cfg.event_server_url):
-                needs_local_node = False
+                remote_url = cfg.event_server_url.rstrip("/")
+                url = remote_url
+            else:
+                url = f"http://localhost:{resolve_local_port(root)}"
         except FileNotFoundError:
             pass
 
-    url = "http://localhost:8080"
     if health(url):
-        return CheckResult("Event server", ok=True, detail=url)
-    if needs_local_node:
-        try:
-            resolve_node_runtime()
-        except NodeRuntimePrerequisiteError as exc:
-            return CheckResult(
-                "Event server",
-                ok=False,
-                detail=str(exc),
-                hint="Install Node.js 20+ and ensure `node` is on PATH, then run doctor again.",
-            )
+        detail = f"remote ({remote_url})" if remote_url else url
+        return CheckResult("Event server", ok=True, detail=detail)
+
+    if remote_url:
+        # Nothing local to start, and no local Node prerequisite to report.
+        return CheckResult(
+            "Event server", ok=False,
+            detail=f"remote ({remote_url}) not reachable",
+            hint="Check the event_server_url in agent.yaml and that the "
+                 "remote server is deployed and reachable from this host.")
+
+    try:
+        resolve_node_runtime()
+    except NodeRuntimePrerequisiteError as exc:
+        return CheckResult(
+            "Event server",
+            ok=False,
+            detail=str(exc),
+            hint="Install Node.js 20+ and ensure `node` is on PATH, then run doctor again.",
+        )
     return CheckResult("Event server", ok=False,
                        detail="not running",
                        hint="`bobi agent <name> event-server start` or `bobi agent <name> start` will auto-launch")

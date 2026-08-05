@@ -119,15 +119,27 @@ def _post_embed(port: int, texts: list[str]) -> list[list[float]]:
 
 def embed(texts: list[str]) -> list[list[float]]:
     """Embed a list of texts via the sidecar. Auto-starts if needed."""
+    import httpx
+
     global _verified_port
     port = _verified_port or ensure_running()
     try:
         embeddings = _post_embed(port, texts)
-    except OSError:
+    except httpx.TransportError as e:
         # Sidecar died since the last call — restart once and retry.
+        # httpx.ConnectError and its siblings are NOT OSError subclasses, so
+        # catching OSError here made this whole recovery path dead code and
+        # left _verified_port pinned to the dead port forever (D010).
         _verified_port = None
+        log.info("Embedding sidecar unreachable on port %d (%s) — "
+                 "restarting and retrying", port, e)
         port = ensure_running()
         embeddings = _post_embed(port, texts)
+    except Exception:
+        # Any other failure leaves this port unproven too: keeping it cached
+        # is what stops the next call from ever re-running ensure_running().
+        _verified_port = None
+        raise
     _verified_port = port
     return embeddings
 

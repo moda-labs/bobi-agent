@@ -35,6 +35,106 @@ class TestCheckCLI:
         assert r.ok
 
 
+# --- Brain CLI gating (D020) ---
+
+
+def _install_brain(tmp_path, body: str) -> None:
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text("agent: t\n" + body)
+
+
+class TestCheckBrainCLI:
+    """The team's ENGINE decides which CLI doctor may demand.
+
+    A codex team on a host with no `claude` binary is healthy, and reporting
+    it broken (doctor exit 1) is the whole defect. Gateway mode is an
+    endpoint property, not an engine, so a `kind: claude` gateway team still
+    needs the claude CLI — it is the CLI that dials the gateway.
+    """
+
+    def _names(self, results):
+        return {r.name for r in results}
+
+    @pytest.fixture(autouse=True)
+    def _no_live_auth_probe(self):
+        """`_check_claude_auth` shells out to `claude --print hi` — a real
+        model call, never from a unit test."""
+        from bobi import doctor
+        with patch.object(doctor, "_check_claude_auth",
+                          return_value=CheckResult("Claude auth", ok=True)):
+            yield
+
+    def test_claude_team_checks_the_claude_cli(self, tmp_path):
+        _install_brain(tmp_path, "brain:\n  kind: claude\n")
+        from bobi import doctor
+        with patch.object(doctor, "bound_root", return_value=tmp_path):
+            results = doctor._check_brain_cli()
+        assert self._names(results) == {"Claude CLI", "Claude auth"}
+
+    def test_unconfigured_team_defaults_to_claude(self, tmp_path):
+        _install_brain(tmp_path, "entry_point: manager\n")
+        from bobi import doctor
+        with patch.object(doctor, "bound_root", return_value=tmp_path):
+            results = doctor._check_brain_cli()
+        assert self._names(results) == {"Claude CLI", "Claude auth"}
+
+    def test_codex_team_never_demands_the_claude_cli(self, tmp_path):
+        _install_brain(tmp_path, "brain:\n  kind: codex\n")
+        from bobi import doctor
+        with patch("shutil.which", return_value=None), \
+             patch.object(doctor, "bound_root", return_value=tmp_path):
+            results = doctor._check_brain_cli()
+        assert "Claude CLI" not in self._names(results)
+        assert "Claude auth" not in self._names(results)
+        # It still says something: the codex CLI is this team's real
+        # prerequisite, and it is missing here.
+        codex = [r for r in results if r.name == "Codex CLI"]
+        assert codex and not codex[0].ok
+
+    def test_codex_team_passes_when_the_codex_cli_is_present(self, tmp_path):
+        _install_brain(tmp_path, "brain:\n  kind: codex\n")
+        from bobi import doctor
+        with patch("shutil.which", return_value="/usr/local/bin/codex"), \
+             patch.object(doctor, "bound_root", return_value=tmp_path):
+            results = doctor._check_brain_cli()
+        assert all(r.ok for r in results)
+
+    def test_openai_gateway_team_is_a_codex_engine(self, tmp_path):
+        _install_brain(
+            tmp_path,
+            "brain:\n  kind: codex\n  base_url: http://localhost:4000\n")
+        from bobi import doctor
+        with patch("shutil.which", return_value=None), \
+             patch.object(doctor, "bound_root", return_value=tmp_path):
+            results = doctor._check_brain_cli()
+        assert "Claude CLI" not in self._names(results)
+
+    def test_claude_gateway_team_needs_the_cli_but_not_vendor_auth(self, tmp_path):
+        _install_brain(
+            tmp_path,
+            "brain:\n  kind: claude\n  base_url: http://localhost:4000\n")
+        from bobi import doctor
+        with patch("shutil.which", return_value="/usr/local/bin/claude"), \
+             patch.object(doctor, "bound_root", return_value=tmp_path), \
+             patch.object(
+                 doctor, "_check_claude_auth",
+                 side_effect=AssertionError(
+                     "a gateway team's auth belongs to the gateway, and the "
+                     "ambient `claude --print hi` probe does not carry it")):
+            results = doctor._check_brain_cli()
+        assert "Claude CLI" in self._names(results)
+        assert all(r.ok for r in results)
+
+    def test_no_bound_runtime_keeps_the_default_checks(self):
+        from bobi import doctor
+        with patch.object(doctor, "bound_root", return_value=None), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"), \
+             patch.object(doctor, "_check_claude_auth",
+                          return_value=CheckResult("Claude auth", ok=True)):
+            results = doctor._check_brain_cli()
+        assert self._names(results) == {"Claude CLI", "Claude auth"}
+
+
 # --- Project ---
 
 
@@ -369,10 +469,10 @@ def test_run_doctor_surfaces_slack_socket_mode_check(monkeypatch):
     import bobi.doctor as doctor
 
     ordinary = CheckResult("ordinary", ok=True)
-    list_checks = {"_check_package_requires", "_check_host_caps", "_check_services"}
+    list_checks = {"_check_package_requires", "_check_host_caps",
+                   "_check_services", "_check_brain_cli"}
     for name in (
-        "_check_claude_cli",
-        "_check_claude_auth",
+        "_check_brain_cli",
         "_check_local_config",
         "_check_runtime_layout",
         "_check_runtime_write_policy",
@@ -445,8 +545,105 @@ def test_event_server_check_skips_local_node_for_unregistered_remote(
     result = doctor._check_event_server()
 
     assert result.ok is False
-    assert result.detail == "not running"
     assert "Node.js" not in result.hint
+
+
+# --- Event server URL resolution (D019) ---
+
+
+def _install_event_server(tmp_path, url: str = "") -> None:
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    body = "agent: test\n"
+    if url:
+        body += f"event_server_url: {url}\n"
+    paths.agent_yaml_path(tmp_path).write_text(body)
+
+
+def test_event_server_check_probes_the_configured_remote_url(
+    tmp_path, monkeypatch,
+):
+    """D019 — a remote-configured instance that has not registered yet.
+
+    Falling through to a hardcoded http://localhost:8080 reported the remote
+    server 'not running' (a REQUIRED failure, doctor exit 1) and told the
+    operator to start a local one that was never meant to run.
+    """
+    from bobi import doctor
+
+    _install_event_server(tmp_path, "https://events.example.com")
+    monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+    probed = []
+
+    def fake_health(url, *a, **kw):
+        probed.append(url)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("bobi.events.server.health", fake_health)
+
+    result = doctor._check_event_server()
+
+    assert probed == ["https://events.example.com"]
+    assert result.ok is True
+    assert "events.example.com" in result.detail
+
+
+def test_event_server_check_names_the_remote_url_when_unreachable(
+    tmp_path, monkeypatch,
+):
+    from bobi import doctor
+
+    _install_event_server(tmp_path, "https://events.example.com")
+    monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+    monkeypatch.setattr("bobi.events.server.health", lambda url, *a, **kw: None)
+
+    result = doctor._check_event_server()
+
+    assert result.ok is False
+    assert "events.example.com" in result.detail
+    # Never the local-start advice: there is no local server to start.
+    assert "event-server start" not in result.hint
+
+
+def test_event_server_check_uses_the_running_local_port(tmp_path, monkeypatch):
+    """A local server on a configured non-8080 port is not 'not running'."""
+    from bobi import doctor
+
+    _install_event_server(tmp_path)
+    state = paths.state_dir(tmp_path)
+    (state / "event-server.pid").write_text("4242")
+    (state / "event-server.port").write_text("9090")
+    monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+    probed = []
+
+    def fake_health(url, *a, **kw):
+        probed.append(url)
+        return {"status": "ok"} if url.endswith(":9090") else None
+
+    monkeypatch.setattr("bobi.events.server.health", fake_health)
+
+    result = doctor._check_event_server()
+
+    assert probed == ["http://localhost:9090"]
+    assert result.ok is True
+
+
+def test_event_server_check_uses_the_configured_local_port(tmp_path, monkeypatch):
+    from bobi import doctor
+
+    _install_event_server(tmp_path, "http://localhost:9091")
+    monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+    probed = []
+
+    def fake_health(url, *a, **kw):
+        probed.append(url)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("bobi.events.server.health", fake_health)
+
+    result = doctor._check_event_server()
+
+    assert probed == ["http://localhost:9091"]
+    assert result.ok is True
 
 
 def test_event_server_check_keeps_normal_not_running_hint_when_node_is_ready(
