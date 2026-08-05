@@ -11,12 +11,31 @@ Make the single-agent view from `plans/2026-07-31-single-agent-view.md` (MOD-261
 shipped in 0.55.0) work on the **hosted console** — and, in doing so, ship the
 piece that lets anyone assemble a hosted console at all.
 
-Today the view works only on `LocalRuntime` (`bobi app` against a local
-`$BOBI_HOME`). On the hosted console every panel errors.
+Today the view is whole only on `LocalRuntime` (`bobi app` against a local
+`$BOBI_HOME`). On the hosted console it is **half a page**: what the agent is
+doing right now answers, what it has *done* does not.
 
 ## Problem
 
-Verified against `v0.55.0` and the deployed console on 2026-08-05:
+Verified against `v0.55.0` on 2026-08-05, by driving the real hosted stack
+(Worker + supervisor + stub manager + `EventBusRuntime`) and reading every
+endpoint the page calls — not by inference from the ABC:
+
+| endpoint | hosted | backs |
+|---|---|---|
+| `/health` | **200** | status strip, telemetry |
+| `/status` | **200** | the page title, lifecycle polling |
+| `/spend` | **200** | spend figures |
+| `/overview` | **409** | the identity header's saved / about popovers |
+| `/runs` | **409** | the runs table |
+
+The lifecycle verbs (`start` / `stop` / `restart`) also work, because they are
+existing admin commands. So a hosted agent can be watched and recovered today;
+what is missing is its **history and composition**. Two read models, not five.
+
+That is a smaller user-visible gap than "the page is broken", and it does not
+shrink the work below — every method in the next section still has to be
+implemented — but it should set the urgency honestly.
 
 - **Seven `TeamRuntime` methods are `LocalRuntime`-only.** `runs`, `overview`,
   `run_details`, `transcript`, `resume_run`, `remind_run`, `close_run` are
@@ -24,8 +43,10 @@ Verified against `v0.55.0` and the deployed console on 2026-08-05:
   `raise TeamLifecycleError("… not available on this runtime")`, which
   `webapp/server.py:144` maps to **HTTP 409**.
 - **The routes register unconditionally**, so the console renders the new page
-  and every data call 409s. Confirmed live: the deployed console serves #948's
-  `static/views/agent.js`.
+  and the two calls above 409. The page degrades rather than crashing — it
+  renders "Could not read this agent's runs" and an empty saved chip — which is
+  why this was invisible until someone drove it. Confirmed live: the deployed
+  console serves #948's `static/views/agent.js`.
 - **`EventBusRuntime` cannot reach a filesystem.** Every read goes through
   `_command(fleet, instance, command, args)` to the operator-authed `/fleet`
   route, which speaks the sidecar admin protocol. That protocol's **entire read
@@ -65,7 +86,7 @@ The read builders are **already pure functions over a filesystem root**:
 
 | builder | signature |
 |---|---|
-| `bobi/webapp/runs.py` | `build_runs(root, *, manager_name, status, query, offset, limit)` |
+| `bobi/webapp/runs.py` | `build_runs(root, *, manager_name, status, query, offset, limit, now)` |
 | `bobi/webapp/overview.py` | `build_overview(root)` |
 | `bobi/webapp/details.py` | `build_details(root, run_id)` |
 
@@ -152,12 +173,24 @@ pins a **released** `bobi`:
 - `bobi_deploy/webapp/hosted.py` imports `EventBusRuntime` from
   `bobi.webapp.event_bus`.
 - Delete the moved implementation and tests.
-- Repair
-  `bobi_deploy/tests/test_hosted_webapp_ui.py::test_drive_deployed_team_from_the_browser`,
-  **already failing** on the `dev` channel because 0.55.0's page replaced the
-  layout it asserts (first observed 2026-08-05 on moda-agents#100). It is the
-  only test driving the hosted page end to end and cannot assert anything true
-  until these methods answer.
+- Re-expand
+  `bobi_deploy/tests/test_hosted_webapp_ui.py::test_drive_deployed_team_from_the_browser`
+  onto the runs table.
+
+  It is **green today** and needs no repair: it was red on the `dev` channel
+  from 2026-08-05 (first observed on moda-agents#100) because 0.55.0's page
+  replaced the layout it asserted, and moda-agents#102 re-pointed it. That
+  change is the baseline this lane builds on, so read it before touching this:
+
+  - The **roster** and **chat** legs were deleted, not re-pointed — those
+    features are gone from the product ("chat lives in Slack and the CLI"), so
+    they are never coming back and this lane must not try to restore them.
+  - The **lifecycle** leg survives and is now asserted more strictly (the busy
+    transition, then its reversal), because `restart` / `status` are existing
+    admin commands that already work here.
+  - The **runs** leg is the only one left out, and only because `/runs` 409s.
+    Restoring it is this lane's job, and it is the sole reason this test is
+    narrower than the page.
 
 ## Order
 
@@ -184,7 +217,7 @@ by CI instead of by prose.
 - [ ] **B7** The seven are `@abstractmethod`, the fallbacks are gone, and **both** runtimes satisfy the ABC in one CI run.
 - [ ] **B8** No file under `bobi/` names the archived `bobi-deploy` **repo** as a place a subclass lives — grep gate, so it cannot silently return.
 - [ ] **C1** `hosted.py` binds the framework class; the private copies are deleted; no duplicate implementation survives.
-- [ ] **C2** The hosted console's single-agent page renders with real data end to end against a live instance, and `test_drive_deployed_team_from_the_browser` passes again.
+- [ ] **C2** The hosted console's single-agent page renders with real data end to end against a live instance: `/overview` and `/runs` answer 200 where they answered 409, and `test_drive_deployed_team_from_the_browser` is re-expanded to drive the runs table (it is green before this lane starts — moda-agents#102 — so "still green" proves nothing here; the gate is the restored leg, and the roster/chat legs stay deleted).
 
 ## Amendments
 
