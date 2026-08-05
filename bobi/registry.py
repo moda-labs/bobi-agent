@@ -159,6 +159,16 @@ def _read_remote_version(name: str, repo: str = DEFAULT_REPO) -> str | None:
     try:
         resp = _urlopen(url, timeout=5)
         data = yaml.safe_load(resp.content)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            # No agent.yaml at main: either a version-less team or one this
+            # repo does not carry. Both are answered accurately by the asset
+            # fetch that follows ("no published asset"), so this is a real
+            # None, not a failure.
+            return None
+        raise RemoteVersionUnavailable(
+            f"could not read the published version of '{name}' from {repo}: {e}"
+        ) from e
     except Exception as e:
         raise RemoteVersionUnavailable(
             f"could not read the published version of '{name}' from {repo}: {e}"

@@ -165,8 +165,8 @@ Rewritten 2026-07-26 to prove only the three surviving items (D029, D017, D119).
 
 **Validation gate**
 
-- [ ] Every item above has a test that failed before its fix (or an `[x]`-with-note where re-verification refuted it)
-- [ ] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q && pytest tests/integration -q`
+- [x] Every item above has a test that failed before its fix (or an `[x]`-with-note where re-verification refuted it)
+- [x] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q && pytest tests/integration -q`
 
 ### Phase 5 — Dead-code purge (deletions only; grep-gated)
 

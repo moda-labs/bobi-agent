@@ -235,6 +235,24 @@ def test_unreadable_remote_version_never_downgrades_to_rolling(project,
         "a failed version read must not fall through to the rolling asset")
 
 
+def test_a_missing_agent_yaml_is_not_a_transient_failure(project, monkeypatch):
+    """A 404 is an answer, not a hiccup.
+
+    No agent.yaml at main means the team is version-less or absent from this
+    repo — both of which the asset fetch reports accurately. Only a read that
+    genuinely FAILED (timeout, rate limit, 5xx) may block the fetch, or an
+    ordinary "no such team" turns into a misleading transient-failure error.
+    """
+    _router(monkeypatch, {
+        "agents/registry.yaml": (200, yaml.dump(
+            {"agents": {"ghost": {}}}).encode()),
+        # agent.yaml 404s, and so does every asset.
+    })
+
+    with pytest.raises(RuntimeError, match="no published asset"):
+        registry.fetch(project, "ghost")
+
+
 def test_a_genuinely_versionless_team_is_not_an_error(project, monkeypatch):
     """The legitimate None — a 200 whose agent.yaml carries no version — still
     resolves to the rolling asset. Only the FAILURE case is now an error."""
