@@ -119,11 +119,11 @@ bobi setup my-agent
 This opens a local web UI (on `127.0.0.1` - nothing leaves your machine) that
 takes you from an idea to an installed, runnable agent team. Name it whatever
 you like - the examples below use `my-agent`; if you pick a different name,
-substitute it in every later command. You can interrupt setup anytime and pick
-up where you left off:
+substitute it in every later command. You can interrupt setup anytime; rerunning the same
+command picks up where you left off:
 
 ```bash
-bobi setup my-agent --resume
+bobi setup my-agent
 ```
 
 The client walks you through four phases:

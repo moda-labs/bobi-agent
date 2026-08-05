@@ -295,7 +295,15 @@ def merge_agent_yaml(existing_text: str, state: SetupState, catalog=None) -> str
         for k, v in managed_mcps.items():
             merged_mcps.setdefault(k, v)
         cfg["mcp_servers"] = merged_mcps
-    if state.chat and state.chat != "cli":
+    # `chat` is a setup-MANAGED key, so the overlay owns both directions. Only
+    # writing it meant a team switched from Slack to the command line kept its
+    # inherited `chat: slack` and went on running the Slack adapter against the
+    # user's explicit instruction; only slack->telegram style switches took
+    # effect. An empty state.chat means setup never formed an opinion — leave
+    # whatever the pack declares alone.
+    if state.chat == "cli":
+        cfg.pop("chat", None)
+    elif state.chat:
         cfg["chat"] = state.chat
     return yaml.dump(cfg, sort_keys=False)
 

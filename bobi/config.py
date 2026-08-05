@@ -562,7 +562,7 @@ class Config:
         # verbatim — they may contain ${VAR} or ~ intended for shell
         # expansion, not config interpolation.
         monitors_raw = raw_uninterpolated.get("monitors", [])
-        requires_raw = raw_uninterpolated.get("requires", [])
+        requires_raw = raw_uninterpolated.get("requires") or []
         # host: entries carry a sysctl `key=value` verbatim — no config
         # interpolation (mirrors requires/build).
         host_raw = raw_uninterpolated.get("host", [])
@@ -573,7 +573,7 @@ class Config:
         raw["monitors"] = monitors_raw
 
         services = []
-        for s in raw.get("services", []):
+        for s in raw.get("services") or []:
             if isinstance(s, str):
                 services.append(ServiceConfig(name=s))
             elif isinstance(s, dict):
@@ -604,7 +604,7 @@ class Config:
 
         build = cls._parse_build(build_raw, path)
 
-        event_server = raw.get("event_server", {})
+        event_server = raw.get("event_server") or {}
         if isinstance(event_server, str):
             event_server_url = event_server
         else:
@@ -617,23 +617,25 @@ class Config:
             chat=raw.get("chat", ""),
             services=services,
             event_server_url=raw.get("event_server_url", event_server_url),
-            registries=raw.get("registries", []),
+            registries=raw.get("registries") or [],
             default_role=raw.get("defaults", {}).get("role", "") if isinstance(raw.get("defaults"), dict) else "",
             venn_api_key=raw.get("venn_api_key", ""),
-            mcp_servers=raw.get("mcp_servers", {}),
-            monitors=raw.get("monitors", []),
-            auto_dispatch=raw.get("auto_dispatch", []),
+            mcp_servers=raw.get("mcp_servers") or {},
+            monitors=raw.get("monitors") or [],
+            auto_dispatch=raw.get("auto_dispatch") or [],
             requires=requires,
             host=host_raw if isinstance(host_raw, list) else [],
             build=build,
-            spend_cap=int(raw.get("spend_cap", 0)),
-            max_concurrent_agents=int(raw.get("max_concurrent_agents", 0)),
-            # `max_launch_depth:` with an empty value parses as None, and a
-            # bare int(None) would raise out of Config.load entirely - so a
-            # half-finished edit to this one key would stop the whole team
-            # booting with an error naming neither the key nor the file.
+            # `key:` with an empty value is YAML null, so `raw.get(key, default)`
+            # returns None and the default never applies. Every container and
+            # numeric field therefore reads `or <default>`, not a get-default:
+            # one commented-out value in agent.yaml used to raise out of
+            # Config.load and take down start/status/dispatch with a traceback
+            # naming neither the key nor the file.
+            spend_cap=int(raw.get("spend_cap") or 0),
+            max_concurrent_agents=int(raw.get("max_concurrent_agents") or 0),
             max_launch_depth=int(raw.get("max_launch_depth") or 0),
-            launch_admission=cls._parse_launch_admission(raw.get("launch_admission", {})),
+            launch_admission=cls._parse_launch_admission(raw.get("launch_admission") or {}),
             brain=raw.get("brain", {}) if isinstance(raw.get("brain"), dict) else {},
             roles=raw.get("roles", {}) if isinstance(raw.get("roles"), dict) else {},
         )

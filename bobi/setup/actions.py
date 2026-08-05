@@ -361,15 +361,22 @@ def install_team(state: SetupState, project: Path) -> dict:
     if not pack_dir:
         raise ActionError(f"team source for '{state.team_name}' not found")
 
-    if state.mode == "create":
-        current = source_tree_hash(pack_dir,
-                                   exclude=setup_state_artifacts(project))
-        if not state.validated or current != state.validated_hash:
-            state.validated = False
-            state.save(project)
-            raise ActionError("the team source changed since validate_team "
-                              "last passed — run validate_team again before "
-                              "installing")
+    # Every mode, not just create. The gate used to sit behind
+    # `if state.mode == "create":`, so an open/modify-mode pack could be
+    # installed from source that had changed — or never validated at all —
+    # since validate_team last passed: the review editor clears
+    # validated/validated_hash on every edit, /api/install has no gate of its
+    # own, and this is the only enforcement point. `state._hard_floor` already
+    # requires `validated` for Stage.INSTALL in both modes, and the docstring
+    # above promises the check with no mode caveat.
+    current = source_tree_hash(pack_dir,
+                               exclude=setup_state_artifacts(project))
+    if not state.validated or current != state.validated_hash:
+        state.validated = False
+        state.save(project)
+        raise ActionError("the team source changed since validate_team "
+                          "last passed — run validate_team again before "
+                          "installing")
 
     package = paths.package_dir(project)
     local_source = not pack_dir.is_relative_to(paths.agent_cache_dir())

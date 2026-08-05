@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 
 from bobi.__version__ import __version__
@@ -682,6 +683,46 @@ class TestEventServerCommand:
         assert result.exit_code == 0, result.output
         assert "Event server is still running on port 58405" in result.output
 
+    # D018 — a pid file is written by another process and can be truncated by a
+    # crash mid-write. `int(pid_file.read_text())` sat outside the try, so stop
+    # raised ValueError, printed a traceback, and left the stale files in
+    # place — making every subsequent stop fail the same way. The manager stop
+    # path (cli.py `Invalid PID file — cleaning up.`) already defends against
+    # exactly this.
+
+    @pytest.mark.parametrize("contents", ["", "   ", "not-a-pid", "12345\n67890"])
+    def test_stop_cleans_up_a_corrupt_pid_file(self, bobi_install, contents):
+        pid_file = bobi_install.state_dir / "event-server.pid"
+        port_file = bobi_install.state_dir / "event-server.port"
+        pid_file.write_text(contents)
+        port_file.write_text("58405")
+
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "event-server", "stop"])
+
+        assert result.exception is None or isinstance(result.exception, SystemExit), \
+            f"unhandled traceback: {result.exception!r}"
+        assert "Traceback" not in result.output
+        assert not pid_file.exists(), "stale pid file left behind"
+        assert not port_file.exists(), "stale port file left behind"
+
+    def test_stop_reports_a_pid_it_may_not_signal(self, bobi_install, monkeypatch):
+        # A pid owned by another user: os.kill raises PermissionError, which was
+        # uncaught. Report it and still clear our own stale files.
+        (bobi_install.state_dir / "event-server.pid").write_text("4242")
+        (bobi_install.state_dir / "event-server.port").write_text("58405")
+
+        def deny(pid, sig):
+            raise PermissionError(1, "Operation not permitted")
+        monkeypatch.setattr("os.kill", deny)
+
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "event-server", "stop"])
+
+        assert result.exception is None or isinstance(result.exception, SystemExit), \
+            f"unhandled traceback: {result.exception!r}"
+        assert "Traceback" not in result.output
+
 
 class TestSetupCommand:
     def _home(self, tmp_path, monkeypatch):
@@ -716,7 +757,23 @@ class TestSetupCommand:
     def test_help(self):
         result = CliRunner().invoke(main, ["setup", "--help"])
         assert result.exit_code == 0
-        assert "--resume" in result.output
+        assert "--model" in result.output
+        # Q122/D064 — `--resume` was parsed, advertised in help, documented in
+        # QUICKSTART, then discarded with `del resume`. Setup reopens through
+        # the webapp, which resumes an unfinished session unconditionally
+        # (webapp/server.py), so the flag named the default and promised a
+        # choice that did not exist. Removed rather than left as dead surface.
+        assert "--resume" not in result.output
+        assert "resumes where you left off" in result.output
+
+    def test_resume_flag_is_gone(self, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        self._patch_app(monkeypatch)
+
+        result = CliRunner().invoke(main, ["setup", "alpha", "--resume"])
+
+        assert result.exit_code != 0
+        assert "No such option" in result.output
 
     def test_setup_without_name_opens_create_route(self, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
@@ -727,12 +784,12 @@ class TestSetupCommand:
         assert result.exit_code == 0, result.output
         assert seen["url"] == "http://127.0.0.1:8642/?n=tok#/setup"
 
-    def test_setup_options_are_accepted_for_compatibility(self, tmp_path, monkeypatch):
+    def test_model_option_reaches_the_setup_url(self, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
         seen = self._patch_app(monkeypatch)
 
         result = CliRunner().invoke(
-            main, ["setup", "alpha", "--resume", "--model", "sonnet"])
+            main, ["setup", "alpha", "--model", "sonnet"])
 
         assert result.exit_code == 0, result.output
         assert seen["url"] == (
@@ -794,3 +851,80 @@ class TestMonitorAdd:
         result = self._add(bobi_install, ["x", "--at", "21:00", "--days", "funday"])
         assert result.exit_code != 0
         assert "weekday" in result.output.lower()
+
+
+class TestAgentsUpdateAndBrowse:
+    """D066/D065 — the machine-facing `agents` surface."""
+
+    def test_update_all_exits_nonzero_when_every_pack_fails(self, bobi_install,
+                                                            monkeypatch):
+        # D066: the named-pack path exits 1 on this exact failure, the
+        # update-all path returned 0, so the two forms reported contradictory
+        # exit codes for identical failures and CI could not detect it.
+        monkeypatch.setattr(
+            "bobi.registry.list_cached",
+            lambda p: [{"name": "alpha"}, {"name": "beta"}])
+
+        def boom(*a, **k):
+            raise RuntimeError("registry unreachable")
+        monkeypatch.setattr("bobi.registry.check_update", boom)
+
+        result = CliRunner().invoke(main, ["agents", "update"])
+
+        assert result.exit_code == 1, result.output
+        assert "alpha — failed" in result.output
+        assert "beta — failed" in result.output
+
+    def test_update_all_still_exits_zero_when_a_pack_succeeds(self, bobi_install,
+                                                              monkeypatch):
+        monkeypatch.setattr(
+            "bobi.registry.list_cached",
+            lambda p: [{"name": "alpha"}, {"name": "beta"}])
+
+        def check(project, name, *a, **k):
+            if name == "beta":
+                raise RuntimeError("registry unreachable")
+            return ("1.0.0", "1.0.0")
+        monkeypatch.setattr("bobi.registry.check_update", check)
+
+        result = CliRunner().invoke(main, ["agents", "update"])
+
+        assert result.exit_code == 1, "one failure is still a failure"
+        assert "alpha v1.0.0 — up to date" in result.output
+
+    def test_browse_survives_an_unquoted_numeric_version(self, bobi_install,
+                                                         monkeypatch):
+        # D065: a third-party registry.yaml with `version: 1.0` parses as a
+        # float, and `f"v{version:8s}"` dies with "Unknown format code 's'",
+        # taking down the whole listing instead of one row.
+        monkeypatch.setattr(
+            "bobi.registry.list_remote",
+            lambda *a, **k: [{"name": "numeric", "version": 1.0,
+                              "description": "unquoted version"},
+                             {"name": "ordinary", "version": "2.1.0",
+                              "description": "quoted version"}])
+        monkeypatch.setattr("bobi.registry.list_cached", lambda p: [])
+
+        result = CliRunner().invoke(main, ["agents", "browse"])
+
+        assert result.exception is None or isinstance(result.exception, SystemExit), \
+            f"unhandled traceback: {result.exception!r}"
+        assert result.exit_code == 0, result.output
+        assert "numeric" in result.output and "ordinary" in result.output
+
+    def test_browse_matches_a_local_version_against_a_numeric_remote(
+            self, bobi_install, monkeypatch):
+        # The same coercion fixes the silent str-vs-float mismatch that made an
+        # installed pack read as an available upgrade to itself.
+        monkeypatch.setattr(
+            "bobi.registry.list_remote",
+            lambda *a, **k: [{"name": "numeric", "version": 1.0}])
+        monkeypatch.setattr(
+            "bobi.registry.list_cached",
+            lambda p: [{"name": "numeric", "version": "1.0"}])
+
+        result = CliRunner().invoke(main, ["agents", "browse"])
+
+        assert result.exit_code == 0, result.output
+        assert "[installed]" in result.output
+        assert "available" not in result.output

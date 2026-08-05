@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
+
 from bobi.config import (Config, ServiceConfig, find_env_var_refs,
                          find_required_env_vars, load_deployment_state,
                          load_dotenv, save_deployment_state)
@@ -910,3 +912,46 @@ def test_build_only_applies_to_every_build_step_kind(tmp_path):
 
     assert find_required_env_vars(tmp_path) == []
     assert all(r.build_only for r in find_env_var_refs(tmp_path))
+
+
+# D085 — a key present with an empty value is YAML null, not a missing key, so
+# `raw.get(key, default)` returns None and the default never applies. Every
+# start/status/dispatch path goes through Config.load, so one commented-out
+# value in agent.yaml took the whole team down with a traceback.
+
+@pytest.mark.parametrize("key", ["event_server", "spend_cap", "services",
+                                 "requires"])
+def test_null_valued_key_falls_back_to_the_default(tmp_path, key):
+    _write_agent_yaml(tmp_path, f"""
+        agent: demo
+        {key}:
+    """)
+
+    cfg = Config.load(tmp_path)
+
+    assert cfg.agent == "demo"
+    assert cfg.services == []
+    assert cfg.requires == []
+    assert cfg.spend_cap == 0
+    assert cfg.event_server_url == ""
+
+
+def test_every_top_level_key_survives_a_null_value(tmp_path):
+    """No key may turn Config.load into a traceback when its value is empty.
+
+    Enumerated rather than spot-checked: D085 was filed against two keys and
+    four were actually broken.
+    """
+    keys = ["agent", "version", "entry_point", "chat", "brain", "roles",
+            "services", "requires", "monitors", "workflows", "auto_dispatch",
+            "event_server", "spend_cap", "mcp_servers", "channels",
+            "venn_api_key", "build", "repos", "tools", "skills"]
+    broken = []
+    for key in keys:
+        _write_agent_yaml(tmp_path, f"agent: demo\n{key}:\n")
+        try:
+            Config.load(tmp_path)
+        except Exception as e:            # noqa: BLE001 - reporting every one
+            broken.append(f"{key}: {type(e).__name__}: {e}")
+    assert not broken, "null value crashed Config.load for:\n  " + \
+        "\n  ".join(broken)

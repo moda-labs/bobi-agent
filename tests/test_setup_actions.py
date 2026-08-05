@@ -324,6 +324,57 @@ class TestInstallTeam:
             actions.install_team(build_state, project)
         assert "not found" in str(exc.value)
 
+    # D035 — the freshness gate was inside `if state.mode == "create":`, so an
+    # open-mode pack could be installed from source that had changed (or never
+    # validated at all) since validate_team last passed. The docstring promises
+    # the gate with no mode caveat, /api/install has no gate of its own, and
+    # state._hard_floor requires `validated` for Stage.INSTALL in BOTH modes —
+    # the guard was the only thing missing.
+
+    @pytest.mark.parametrize("mode", ["create", "open"])
+    def test_stale_validation_raises_in_every_mode(self, project, build_state,
+                                                   mode):
+        _write_minimal_pack(project / "agents" / "my-team")
+        build_state.mode = mode
+        build_state.validated = True
+        build_state.validated_hash = "old-hash"
+
+        with pytest.raises(ActionError) as exc:
+            actions.install_team(build_state, project)
+
+        assert "changed since" in str(exc.value)
+        assert build_state.validated is False
+        assert build_state.installed is False
+
+    @pytest.mark.parametrize("mode", ["create", "open"])
+    def test_unvalidated_source_never_installs(self, project, build_state, mode):
+        # The review editor clears validated/validated_hash on every edit, so
+        # this is the shape a mid-edit install actually takes.
+        _write_minimal_pack(project / "agents" / "my-team")
+        build_state.mode = mode
+        build_state.validated = False
+        build_state.validated_hash = ""
+
+        with pytest.raises(ActionError):
+            actions.install_team(build_state, project)
+
+        assert build_state.installed is False
+        assert not paths.agent_yaml_path(project).exists()
+
+    @pytest.mark.parametrize("mode", ["create", "open"])
+    def test_fresh_validation_still_installs_in_every_mode(self, project,
+                                                           build_state, mode):
+        pack = project / "agents" / "my-team"
+        _write_minimal_pack(pack)
+        build_state.mode = mode
+        build_state.validated = True
+        build_state.validated_hash = source_tree_hash(
+            pack, exclude=actions.setup_state_artifacts(project))
+
+        payload = actions.install_team(build_state, project)
+
+        assert payload["installed"] == "my-team"
+
 
 # --- run_preflight -------------------------------------------------------
 
