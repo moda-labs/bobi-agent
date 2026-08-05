@@ -214,11 +214,25 @@ refuses to instantiate the private copy once the seven are abstract, and its
 precisely the breakage the ABC's sequencing rule exists to prevent, so the
 flip is **not** yet "protected by CI instead of prose".
 
-The ordering fork this opens is **unresolved and needs a human call**:
-either move Lane C before B7 (Lane C then consumes an unreleased `bobi`,
-which is why the plan deferred it), or split B7 out of Lane B into a
-fourth step after Lane C, or accept a knowingly-red `moda-agents` canary
-for the window between B7 and Lane C. Lane A is unaffected either way.
+**Zach's call, 2026-08-05: accept the red canary.** The order stands —
+`A → B → release → C` — B7 stays inside Lane B, and `moda-agents`'
+`deploy-package.yml` goes red from B7's merge until Lane C lands. The
+alternatives were both worse: moving Lane C ahead of B7 makes it consume an
+*unreleased* `bobi`, which is the constraint that put it last in the first
+place; splitting B7 into a fourth step buys a clean window at the cost of an
+extra PR and a flip stranded past a release.
+
+Two obligations follow from choosing this, and **Lane B owns both**:
+
+- **Lane B's PR must state that the canary will go red, and why**, before it
+  merges — a knowingly-red check that nobody announced is indistinguishable
+  from a regression, and the next person to look pays for it. `moda-agents`
+  is a consumer; it never gates this repo's main.
+- **Lane C is the repair, and follows the release promptly.** The length of
+  that window is the entire cost being accepted here, so it is short by
+  intent, not by luck.
+
+Lane A is unaffected either way — it adds a module and breaks nothing.
 
 ## Validation gates
 
