@@ -280,9 +280,38 @@ Lane A is unaffected either way — it adds a module and breaks nothing.
 - [x] **B6** A supervisor that does not know the command surfaces as unavailable, naming the instance — asserted, not assumed.
 - [x] **B7** The seven are `@abstractmethod`, the fallbacks are gone, and **both** runtimes satisfy the ABC in one CI run.
 - [x] **B8** No file under `bobi/` names the archived `bobi-deploy` **repo** as a place a subclass lives — grep gate, so it cannot silently return.
-- [ ] **C1** `hosted.py` binds the framework class; the private copies are deleted; no duplicate implementation survives.
-- [ ] **C2** The hosted console's single-agent page renders with real data end to end against a live instance: `/overview` and `/runs` answer 200 where they answered 409, and `test_drive_deployed_team_from_the_browser` is re-expanded to drive the runs table (it is green before this lane starts — moda-agents#102 — so "still green" proves nothing here; the gate is the restored leg, and the roster/chat legs stay deleted).
+- [x] **C1** `hosted.py` binds the framework class; the private copies are deleted; no duplicate implementation survives — and that last clause is now a test (`test_eventbus_runtime_is_the_public_class_not_a_local_copy`), asserting class IDENTITY rather than name, because a re-vendored copy would import cleanly under the same name.
+- [x] **C2** `/overview` and `/runs` answer 200 where they answered 409, and `test_drive_deployed_team_from_the_browser` drives the runs table again (roster/chat legs stay deleted). The restored leg asserts the manager's own session by `manager · entry point` — a string the fold prints only when the supervisor resolved the live manager and matched it against the registry, so a 409 or a merely-parseable payload fails it. Proven non-vacuous three ways: it failed on this exact leg before the fix, a bogus origin string fails it, and it is the reason the Worker fork below was found.
 
 ## Amendments
 
-_None yet._
+### 2026-08-05 — Lane C also had to delete a private Worker fork
+
+Found while building C2, not planned: `runs`/`overview` came back `400 unknown
+command` from the e2e's Worker. Not the public one — that allows all six verbs —
+but a **private fork** at `bobi-deploy/event-server/` that `e2e_harness.py`
+booted. Repo-reorg Lane 3 moved production's deploy onto the public sources and
+left the fork on disk with the harness pointed at it; frozen since the
+subtree-import commit, it was missing `mcp.ts` (0.53.0) and all six verbs
+(0.56.0).
+
+So the marquee full-stack e2e spent three releases proving the stack against a
+Worker production had left behind, green throughout. Lane C deletes the fork and
+re-points the harness at `bobi-agent/event-server/worker`. This was not optional
+scope: C2 cannot go green while the Worker under test lacks the verbs.
+
+It also generalises Lane A's finding. The plan framed the duplicate-implementer
+hazard as a Python one (`EventBusRuntime` subclassing a public ABC where public
+CI could not see it); the same hazard existed in TypeScript, one layer down, and
+nothing in the plan would have caught it. `moda-agents` now carries a guard
+(`test_e2e_harness_wiring.py`) that fails if either the harness path drifts or a
+fork returns — needed because every e2e there is gated on `EVENT_SERVER.exists()`
+and would otherwise **skip to green**.
+
+### 2026-08-05 — C2's "live instance" clause, resolved
+
+C2 said "against a live instance". Zach's call: the automated full-stack browser
+proof (real Worker under workerd, real supervisor, stub brain, real Chromium)
+closes the gate, since it drives the same code path as production against the
+same Worker sources and the remaining delta is the deploy itself. No hosted
+redeploy was required to close this plan.
