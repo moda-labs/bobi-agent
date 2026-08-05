@@ -198,9 +198,27 @@ Lane A → Lane B → release → Lane C.
 
 Note what changed. The old ordering was a **hard constraint enforced by nothing**
 — a public ABC whose only other implementer sat where CI could not see it, with
-a docstring asking people to remember. After Lane A it is merely a **release
-dependency**, and the dangerous step (the `@abstractmethod` flip) is protected
-by CI instead of by prose.
+a docstring asking people to remember. After Lane A that constraint is
+*half* dissolved: the in-tree `EventBusRuntime` is now covered by this repo's
+CI, so the ABC and its implementer can no longer drift unnoticed here.
+
+**Corrected 2026-08-05 while building Lane A — the other half does not
+dissolve until Lane C, and this changes B7.** `moda-agents` keeps its own
+copy of `EventBusRuntime` until Lane C re-points the binding, and its
+`deploy-package.yml` installs the public repo from a **sibling checkout at
+`dev`** (`.github/actions/setup-public-bobi`, ref defaults to `dev`, which
+this repo's promote-dev job fast-forwards to every green main). So B7's
+`@abstractmethod` flip still reds that repo the moment it merges — Python
+refuses to instantiate the private copy once the seven are abstract, and its
+33 `EventBusRuntime` tests plus `hosted.py` all instantiate it. That is
+precisely the breakage the ABC's sequencing rule exists to prevent, so the
+flip is **not** yet "protected by CI instead of prose".
+
+The ordering fork this opens is **unresolved and needs a human call**:
+either move Lane C before B7 (Lane C then consumes an unreleased `bobi`,
+which is why the plan deferred it), or split B7 out of Lane B into a
+fourth step after Lane C, or accept a knowingly-red `moda-agents` canary
+for the window between B7 and Lane C. Lane A is unaffected either way.
 
 ## Validation gates
 
