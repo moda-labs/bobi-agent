@@ -1,5 +1,107 @@
 # Changelog
 
+## 0.56.0 - 2026-08-05
+
+Minor release: the single-agent page that 0.55.0 gave the local dashboard now
+works on a **hosted** fleet too — the runtime that connects the published
+pieces moves into the framework, and the six read/write commands the hosted
+page was missing are added to the admin protocol. Plus the review-remediation
+sweep's Phase 4 security and user-surface batches.
+
+### ⚠ Breaking for out-of-tree `TeamRuntime` implementations
+
+Seven `TeamRuntime` methods — `runs`, `overview`, `run_details`, `resume_run`,
+`remind_run`, `close_run` and the widened `transcript` — are now
+`@abstractmethod`, and their base-class fallbacks are deleted. A subclass that
+does not implement all seven **cannot be instantiated**. Both in-tree
+implementations (`LocalRuntime`, `EventBusRuntime`) satisfy the ABC; anyone
+carrying a private subclass must implement them or delegate to the shared
+builders, which are importable for exactly that reason.
+
+### Added
+- **`EventBusRuntime` is part of the framework (#967, #963).** This repo
+  shipped the sidecar (`bobi/supervisor/`), the Cloudflare event bus
+  (`event-server/worker/`) and the console UI (`bobi/webapp/`) while
+  withholding the ~470 lines that connect them, so every published piece could
+  be self-hosted and a hosted console still could not be assembled. The class
+  now lives at `bobi/webapp/event_bus.py` as a pure move — the only diff
+  against its former home is five docstring phrases that became false once the
+  file changed repos, and two import lines in its tests.
+- **The hosted single-agent page gains history and composition (#968, #963).**
+  `/overview` and `/runs` answered 409 on a hosted agent while `/health`,
+  `/status`, `/spend` and the lifecycle verbs answered 200 — an agent could be
+  watched and recovered, but what it had *done* and what it was *made of* were
+  missing. Six new admin commands (`runs`, `overview`, `run_details`,
+  `resume_run`, `remind_run`, `close_run`), each a thin delegate to the same
+  pure builder `LocalRuntime` already calls, so there is one read
+  implementation and the two runtimes cannot drift. `SUPERVISOR_VERSION` moves
+  **0.1.0 → 0.2.0** (additive, per the compatibility promise).
+- **`transcript` takes an optional `detail: true`.** The chat view (`messages`)
+  has already discarded every tool call, so a hosted debugging transcript built
+  by reshaping it would silently omit most of what an agent *did* between
+  speaking. The reply gains `entries` + `usage`; a supervisor too old to know
+  the argument replies without `entries`, and that is reported as unavailable
+  rather than rendered as a debugging view with the tool calls missing.
+
+### Fixed
+- **A `prune:` entry could delete host files (#961).** Prune names an item on a
+  surface, never a path, but nothing validated it: an absolute name collapsed
+  the staging join to that absolute path, and a `..` segment walked out of the
+  staging directory, so `bobi agents install` `rmtree`'d host directories.
+  Compose now raises `ComposeError`.
+- **`/api/credential/value` served ambient secrets (#961).** The setup wizard's
+  endpoint fell back to `os.environ` for any requested name, so anything
+  holding the page's per-launch nonce could read a secret merely exported in
+  the launching shell — never saved through setup and outside the endpoint's
+  own justification. `run/.env` is now the whole surface.
+- **The setup picker confined paths to the wrong tree (#961).** The boundary
+  was BOBI_HOME rather than the user's home directory that the comment,
+  DESIGN.md and the 400 message all claimed, so `/api/mcp/detect` rejected
+  every real project folder with a message the path already satisfied.
+- **An unescaped Slack app name broke the manifest (#961).** `Bobi: Staging`
+  rendered an unparseable manifest and `Bobi #1` silently created an app named
+  `Bobi`; names are now emitted through the YAML emitter, byte-identically for
+  ordinary ones.
+- **A commented-out line in `agent.yaml` took down every start/status/dispatch
+  path (#965).** A key present with an empty value is YAML null, so
+  `raw.get(key, default)` returned None and the default never applied —
+  `services:`, `requires:`, `event_server:` and `spend_cap:` all crashed with a
+  traceback naming neither the key nor the file.
+- **The setup wizard silently discarded an MCP edit made during a probe
+  (#965).** The handler captured the entry, awaited a probe of up to 60s, then
+  wrote that stale snapshot back — and a result for the *old* command would
+  have marked the *new* one connected, rendering a never-tested config green.
+- **`event-server stop` wedged on a truncated pid file (#965).** It raised on
+  garbage and on `PermissionError`, leaving the stale files behind so every
+  later stop failed identically.
+- **`agents update` exited 0 when every pack failed (#965)**, while the
+  named-pack form exited 1 for the identical failure.
+- **`agents browse` died on an unquoted `version: 1.0` (#965)**, taking down
+  the whole listing over one row; the same coercion fixes a str-vs-float
+  comparison that made an installed pack read as an upgrade to itself.
+- **One malformed session crashed a team's cost rollup (#965).** The fold's
+  comment promised it must not 500 on one bad session and the token fields were
+  guarded; the cost fields were not, and a string is truthy.
+- **Remove-then-re-add crashed `bobi agents install` (#965)** — the natural
+  idiom for wholesale-replacing an inherited keyed entry deep-merged into the
+  tombstone and raised a raw TypeError.
+- **An open-mode pack could install from unvalidated source (#965).** The
+  validation-freshness gate sat behind `if state.mode == "create":` although
+  DESIGN.md already called a fresh validation to install a hard floor.
+- **Switching a team off Slack left it running the Slack adapter (#965).**
+  `chat` is a setup-managed overlay key but the overlay only ever wrote it.
+- **One binary file 500'd the setup review viewer (#965)** — `/api/file` had no
+  decode handling while `/api/files` lists binaries with no suffix filter.
+
+### Changed
+- **`--resume` is removed from `bobi setup` (#965).** The webapp resumes an
+  unfinished session unconditionally, so the flag named the default. All four
+  documentation sites are corrected, including the disconnect overlay that
+  printed the now-erroring command to users.
+- **The public/private line is documented where it is enforced (#967).**
+  `AGENTS.md` and `docs/ADMIN_PROTOCOL.md` record which side each piece lives
+  on and point at the reference client.
+
 ## 0.55.0 - 2026-08-04
 
 Minor release: the dashboard gains a real per-agent page, and the
