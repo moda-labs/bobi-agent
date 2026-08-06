@@ -20,9 +20,11 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
+from urllib.parse import quote
 
 import pytest
 
@@ -211,6 +213,84 @@ class _BobiApp:
         self._thread.join(timeout=5)
 
 
+# --- the web app (`bobi app`) ----------------------------------------------
+#
+# A different server over a different tree from the setup fixture above.
+# `bobi.webapp.server.build_app` resolves the target agent from the request
+# path on every call, so it serves a whole `$BOBI_HOME/agents/` tree rather
+# than the one project dir setup is bound to. `bobi_install`
+# (tests/conftest.py, inherited here by conftest scoping) seeds exactly that
+# tree with one installed agent — but boots no server. The web app's e2e
+# fixture is the composition of the two.
+
+WEBAPP_TOKEN = "e2e-webapp-token"
+
+
+def _free_port() -> int:
+    """A loopback port nothing is listening on."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+class _WebApp:
+    """A booted `bobi app` server over a seeded BOBI_HOME.
+
+    Carries the page URL, the install it serves, and the one knob the agent
+    page's state tri-state needs: a manager that is really there.
+    """
+
+    def __init__(self, base, install, srv, thread):
+        self.base = base
+        self.install = install
+        self.agent = install.agent_name
+        self._srv = srv
+        self._thread = thread
+        self._procs = []
+
+    # The SPA is hash-routed, so every route below is the same page load.
+    @property
+    def url(self) -> str:
+        return self.base + "/#/"
+
+    def agent_url(self, name: str | None = None) -> str:
+        return self.base + "/#/agents/" + quote(name or self.agent, safe="")
+
+    def run_manager(self, *, responsive: bool = True) -> int:
+        """Make this agent read as `running` — or, wedged, `not_responding`.
+
+        `webapp/health.py` asks two real questions: is the recorded pid alive,
+        and does the manager's health endpoint answer. So this writes a pidfile
+        for a process that really is alive and, for the wedged case, a port
+        file for a port that really is closed. Nothing is stubbed — the state
+        comes out of the same fold the strip renders in production.
+        """
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(600)"])
+        self._procs.append(proc)
+        state = self.install.state_dir
+        (state / "manager.pid").write_text(str(proc.pid))
+        port_file = state / "manager-health.port"
+        if responsive:
+            # No port file at all: `probe()` returns "never asked", which is
+            # RUNNING on the pidfile view. A manager without a health server
+            # must not read as wedged.
+            port_file.unlink(missing_ok=True)
+        else:
+            port_file.write_text(str(_free_port()))
+        return proc.pid
+
+    def stop(self):
+        for proc in self._procs:
+            proc.kill()
+            proc.wait(timeout=5)
+        self._srv.should_exit = True
+        self._thread.join(timeout=5)
+
+
 @pytest.fixture
 def bobi_app(tmp_path):
     """Boot the `bobi app` web UI - the OTHER surface sharing chrome.css -
@@ -233,5 +313,34 @@ def bobi_app(tmp_path):
 
     base, srv, thread = _serve(app_server.build_app(token=APP_TOKEN))
     handle = _BobiApp(base + "/", APP_AGENT, srv, thread)
+    yield handle
+    handle.stop()
+
+
+@pytest.fixture
+def webapp(bobi_install):
+    """Boot the web app over `bobi_install`'s seeded home on a free loopback
+    port; yield a _WebApp handle. Torn down after the test."""
+    from bobi.webapp import server as webapp_server
+
+    app = webapp_server.build_app(token=WEBAPP_TOKEN)
+
+    port = _free_port()
+    config = uvicorn.Config(app, host="127.0.0.1", port=port,
+                            log_level="warning")
+    srv = uvicorn.Server(config)
+    srv.install_signal_handlers = lambda: None      # we're off the main thread
+    thread = threading.Thread(target=srv.run, daemon=True)
+    thread.start()
+
+    base = f"http://127.0.0.1:{port}"
+    for _ in range(200):                            # wait until it answers
+        try:
+            urllib.request.urlopen(base + "/", timeout=0.5)
+            break
+        except Exception:
+            time.sleep(0.05)
+
+    handle = _WebApp(base, bobi_install, srv, thread)
     yield handle
     handle.stop()
