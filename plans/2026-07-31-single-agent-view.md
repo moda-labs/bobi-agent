@@ -253,8 +253,9 @@ first. Implementation stacks on an integration branch
 **U7 — the page** *(Phase 3 UI — replaces the current agent view)*
 - [x] Status strip (three states, glow semantics, preflight-report
       failure state) + start/stop/restart wiring.
-- [x] Identity header: SAVED + ABOUT popovers (hover + tap). Edit design
-      via `/api/setup/open` is cut from scope — see Amendments.
+- [x] Identity header: SAVED + ABOUT popovers (hover + tap), Edit design
+      via `/api/setup/open`.
+      (Edit design is cut from scope - see Amendments 2026-08-05.)
 - [x] Runs table: tabs + counts, origin sub-lines, outcome/error notes,
       polling (reuse existing 4s/10s + backoff pattern).
 - [x] Transcript/Details dark slab (row click; Esc closes).
@@ -271,8 +272,8 @@ first. Implementation stacks on an integration branch
 - [x] Docs updated in-PR: `README.md` (agent page description),
       `docs/MONITORS.md` (run records), `DESIGN.md` (agent view section
       supersedes the old panel description).
-- [x] Empty states: zero runs, zero failures, fresh agent (per-tab empty
-      copy in `agent.js`'s `renderRuns()`).
+- [x] Empty states: zero runs, zero failures, fresh agent.
+      (Per-tab empty copy lives in `agent.js`'s `renderRuns()`.)
 - Testable: the Manual QA script passes end-to-end.
 
 Verification bar: brain-agnostic admin/read-model surface — stub-brain
@@ -301,8 +302,11 @@ Seed via the U8 script into an isolated `BOBI_HOME`, start the agent and
    gracefully.
 6. **Popovers:** SAVED matches `bobi agent costs` (+ script-cache line);
    ABOUT matches `agent.yaml`/roles; both open on hover and on tap.
-7. **Empty states:** fresh agent renders sanely (no runs, no failures).
-8. **Polling:** leave the page open through a monitor tick — the new run
+7. **Edit design:** lands in the setup editor for this team; Back
+   returns to a live page.
+   (Cut from scope - see Amendments 2026-08-05; skip this step.)
+8. **Empty states:** fresh agent renders sanely (no runs, no failures).
+9. **Polling:** leave the page open through a monitor tick — the new run
    appears without reload; stop the app daemon — the page surfaces the
    disconnect rather than freezing silently.
 
