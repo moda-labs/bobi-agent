@@ -44,7 +44,7 @@ def test_top_level_help_is_machine_scoped():
     assert "agent" in result.output
     assert "agents" in result.output
     assert "setup" in result.output
-    for removed in [" start", " stop", " status", " workflows", " monitors"]:
+    for removed in [" start", " stop", " status", " workflows", " monitors", " otel"]:
         assert removed not in result.output
 
 
@@ -60,7 +60,7 @@ def test_agent_help_lists_runtime_commands(bobi_install):
     result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "--help"])
     assert result.exit_code == 0, result.output
     for cmd in ["start", "stop", "status", "workflows", "monitors",
-                "subagents", "event-server", "login-bootstrap"]:
+                "subagents", "event-server", "login-bootstrap", "otel"]:
         assert cmd in result.output
 
 

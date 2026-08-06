@@ -1996,7 +1996,11 @@ def otel():
     pass
 
 
-@otel.command("metric")
+# `ignore_unknown_options` is what lets a leading-dash argument through the
+# parser at all: without it `otel metric queue.delta -3` dies as "No such
+# option '-3'" and the negative-value rules below are unreachable. A mistyped
+# real option still fails loudly, as "unexpected extra arguments".
+@otel.command("metric", context_settings={"ignore_unknown_options": True})
 @click.argument("name")
 @click.argument("value")
 @click.option("--kind", type=click.Choice(["counter", "gauge", "histogram"]),
@@ -2057,7 +2061,9 @@ def otel_metric(ctx, name, value, kind, temporality, attrs, unit, description):
     click.echo(f"Recorded {name}={parsed} ({kind}) to {cfg.url}")
 
 
-@otel.command("log")
+# Same reason as `metric`: an agent-authored body may legitimately start with
+# a dash, and that must not read as an option.
+@otel.command("log", context_settings={"ignore_unknown_options": True})
 @click.argument("body", required=False)
 @click.option("--severity", type=click.Choice(["debug", "info", "warn", "error", "fatal"]),
               default="info", help="Severity (default: info)")
