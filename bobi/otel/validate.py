@@ -15,7 +15,10 @@ from __future__ import annotations
 import math
 import re
 
-METRIC_NAME_RE = re.compile(r"^[a-zA-Z0-9_.]{1,64}$")
+# A leading digit is the one shape no downstream normalization repairs:
+# Prometheus names are `[a-zA-Z_:][a-zA-Z0-9_:]*`, and while the exporter maps
+# `.` to `_`, it cannot invent a first character - so `5xx_count` is refused.
+METRIC_NAME_RE = re.compile(r"^[a-zA-Z_.][a-zA-Z0-9_.]{0,63}$")
 
 # Framework resource attributes are the labels this feature exists to make
 # trustworthy, and `le` / `quantile` / `__name__` corrupt Prometheus series on
@@ -47,8 +50,8 @@ def validate_metric_name(name: str) -> str:
     """
     if not METRIC_NAME_RE.match(name):
         raise OtelUsageError(
-            "Metric name must match ^[a-zA-Z0-9_.]{1,64}$ - an unbounded name "
-            "is an active-series explosion, not a label."
+            "Metric name must match ^[a-zA-Z_.][a-zA-Z0-9_.]{0,63}$ - an "
+            "unbounded name is an active-series explosion, not a label."
         )
     return name
 

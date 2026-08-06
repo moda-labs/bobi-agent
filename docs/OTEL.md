@@ -259,7 +259,8 @@ prefixed with the literal `remote response (untrusted):`.
 
 ### Bounds, and what they do not bound
 
-Metric names match `^[a-zA-Z0-9_.]{1,64}$`; at most 20 attributes, keys <=64
+Metric names match `^[a-zA-Z_.][a-zA-Z0-9_.]{0,63}$` (no leading digit, which
+Prometheus names forbid); at most 20 attributes, keys <=64
 bytes and values <=256 bytes; log bodies <=8192 bytes (refused, never
 truncated); values must be finite; `service.*`, `bobi.*`, `host.*`, `cloud.*`,
 `k8s.*`, `le`, `quantile`, and `__*` attribute keys are rejected.

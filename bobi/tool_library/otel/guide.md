@@ -43,7 +43,8 @@ bobi agent <name> otel metric tickets.total 128 --temporality cumulative
 - `1` is sent as an integer and `1.0` as a double. They are different wire
   types, so keep one metric name on one form.
 
-Metric names must match `^[a-zA-Z0-9_.]{1,64}$`.
+Metric names must match `^[a-zA-Z_.][a-zA-Z0-9_.]{0,63}$` - no leading digit,
+because Prometheus names cannot start with one.
 
 ## Record a log
 

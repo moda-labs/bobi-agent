@@ -339,6 +339,20 @@ def test_validate_metric_name_rejects_unbounded_names(name):
         validate_metric_name(name)
 
 
+@pytest.mark.parametrize("name", ["5xx_count", "0", "4dot4.seconds"])
+def test_validate_metric_name_rejects_a_leading_digit(name):
+    """Prometheus names are `[a-zA-Z_:][a-zA-Z0-9_:]*`, and the `.`-to-`_`
+    exporter mapping cannot invent a first character, so a leading digit is
+    unrepairable downstream."""
+    from bobi.otel.validate import OtelUsageError, validate_metric_name
+
+    with pytest.raises(OtelUsageError):
+        validate_metric_name(name)
+    # The bound still admits every previously-valid shape, first char included.
+    for ok in ("m", "_m", ".m", "tickets.processed", "m" * 64, "m5"):
+        assert validate_metric_name(ok) == ok
+
+
 @pytest.mark.parametrize("raw", ["lots", "inf", "-inf", "nan", ""])
 def test_validate_value_rejects_non_finite_and_non_numeric(raw):
     from bobi.otel.validate import OtelUsageError, validate_value
