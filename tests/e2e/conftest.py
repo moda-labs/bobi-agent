@@ -8,6 +8,10 @@ the file inspector — is deterministic and fast. Playwright drives a real
 Chromium through the actual nonce + Host-guard security path.
 
 Skips cleanly when Playwright isn't installed (the unit job doesn't need it).
+
+`bobi_app` boots the OTHER local web UI the same way. It is here only so the
+shared top bar can be asserted on both surfaces at once; the web app's own
+coverage is a separate ticket.
 """
 
 from __future__ import annotations
@@ -30,6 +34,8 @@ from bobi.setup.state import SetupState  # noqa: E402
 from bobi.setup.webui import server  # noqa: E402
 
 NONCE = "e2e-nonce"
+APP_TOKEN = "e2e-app-token"
+APP_AGENT = "topbar-e2e"
 
 
 def _fake_llm():
@@ -129,27 +135,12 @@ class _Bobi:
         self._thread.join(timeout=5)
 
 
-@pytest.fixture
-def bobi(tmp_path):
-    """Boot the setup server with a fake LLM on a free loopback port; yield a
-    _Bobi handle. Torn down after the test."""
-    home = tmp_path / "home"
-    os.environ["BOBI_HOME"] = str(home)
+def _serve(app):
+    """Run `app` under uvicorn on a free loopback port in a daemon thread.
 
-    project = home / "agents" / "setup-e2e" / "run"
-    project.mkdir(parents=True)
-    (project / "workspace").mkdir()
-    subprocess.run(["git", "init"], cwd=project, capture_output=True)
-
-    # A stand-in BOBI_HOME so the agent-source library and folder picker stay
-    # off the real filesystem. A couple of real subfolders give the picker
-    # something to browse — dotfiles are hidden.
-    (home / "agents").mkdir(parents=True, exist_ok=True)
-    (home / "projects").mkdir()
-
-    app = server.build_app(SetupState(), project, nonce=NONCE,
-                           stream_fn=_fake_llm(), home_root=home)
-
+    Returns (base_url, server, thread) once the port answers. Shared by both
+    surfaces so the setup UI and the web app boot the same way.
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("127.0.0.1", 0))
@@ -169,6 +160,30 @@ def bobi(tmp_path):
             break
         except Exception:
             time.sleep(0.05)
+    return base, srv, thread
+
+
+@pytest.fixture
+def bobi(tmp_path):
+    """Boot the setup server with a fake LLM on a free loopback port; yield a
+    _Bobi handle. Torn down after the test."""
+    home = tmp_path / "home"
+    os.environ["BOBI_HOME"] = str(home)
+
+    project = home / "agents" / "setup-e2e" / "run"
+    project.mkdir(parents=True)
+    (project / "workspace").mkdir()
+    subprocess.run(["git", "init"], cwd=project, capture_output=True)
+
+    # A stand-in BOBI_HOME so the agent-source library and folder picker stay
+    # off the real filesystem. A couple of real subfolders give the picker
+    # something to browse - dotfiles are hidden.
+    (home / "agents").mkdir(parents=True, exist_ok=True)
+    (home / "projects").mkdir()
+
+    app = server.build_app(SetupState(), project, nonce=NONCE,
+                           stream_fn=_fake_llm(), home_root=home)
+    base, srv, thread = _serve(app)
 
     handle = _Bobi(f"{base}/?n={NONCE}", home, project, srv, thread)
     yield handle
@@ -179,3 +194,44 @@ def bobi(tmp_path):
 def bobi_url(bobi):
     """The page URL alone — what most tests need."""
     return bobi.url
+
+
+class _BobiApp:
+    """A booted `bobi app` web UI: the dashboard URL, plus the route of the one
+    installed agent (the web app's only view that fills the back slot)."""
+    def __init__(self, url, agent, srv, thread):
+        self.url = url
+        self.agent = agent
+        self.agent_url = f"{url}#/agents/{agent}"
+        self._srv = srv
+        self._thread = thread
+
+    def stop(self):
+        self._srv.should_exit = True
+        self._thread.join(timeout=5)
+
+
+@pytest.fixture
+def bobi_app(tmp_path):
+    """Boot the `bobi app` web UI - the OTHER surface sharing chrome.css -
+    against an isolated BOBI_HOME holding one installed agent.
+
+    Only the shared top bar is under test from here; the web app's own
+    coverage is a separate ticket. The setup server takes its home as an
+    explicit `home_root`, so both fixtures can be alive at once without
+    fighting over BOBI_HOME (which only this surface reads per request).
+    """
+    from bobi.webapp import server as app_server
+
+    home = tmp_path / "apphome"
+    pkg = home / "agents" / APP_AGENT / "run" / "package"
+    pkg.mkdir(parents=True)
+    (pkg / "agent.yaml").write_text(
+        f"agent: {APP_AGENT}\nversion: 0.1.0\nentry_point: lead\n")
+    (pkg / "agent.md").write_text(f"# {APP_AGENT}\n\nWatch the repo.\n")
+    os.environ["BOBI_HOME"] = str(home)
+
+    base, srv, thread = _serve(app_server.build_app(token=APP_TOKEN))
+    handle = _BobiApp(base + "/", APP_AGENT, srv, thread)
+    yield handle
+    handle.stop()
