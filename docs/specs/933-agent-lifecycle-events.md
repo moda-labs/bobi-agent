@@ -4,11 +4,16 @@ Spec for [#933](https://github.com/moda-labs/bobi-agent/issues/933).
 Status: awaiting build approval (Gate 1).
 
 Every code citation below was produced by running the printed command against
-`origin/main` at `5d2cf04` and reading the hit.
-No line number in this document was written by hand.
-Revision 3 rebased the spec onto `5d2cf04` and re-derived every reference: the
-previous revision was based on `b5388bb`, which predates #979 (14 zero-consumer
-names deleted) and #980 (OTel telemetry), and most of its citations had drifted.
+`origin/main` at `6d7c72f` and reading the hit.
+No line number in this document was written by hand, with **one marked
+exception**: §6 E carries a single context row the printed pattern cannot
+match, labelled where it appears.
+Revision 4 rebased the spec onto `6d7c72f` (#982, the expired rename compat
+layers) and re-resolved every citation into the eight files that commit
+touched; revision 3 had rebased onto `5d2cf04` from `b5388bb`, which predates
+#979 and #980 and whose citations had mostly drifted. §10 records what each
+pass actually verified and, where a claim was carried forward on a stale
+confirmation, says so.
 
 ## 1. Problem
 
@@ -337,8 +342,18 @@ likely. §5.3 therefore does not reuse this pattern unmodified.
 
 - **launchd parity on macOS.**
   There is no launchd integration in this repo to confirm effects through:
-  `rg -ni 'launchd|launchctl|LaunchAgents|KeepAlive' bobi/` returns nothing,
-  and `_has_systemd_service` (`bobi/cli.py:279`) has no macOS counterpart, so
+  `rg -ni 'launchd|launchctl|LaunchAgents' bobi/` returns nothing, exit 1.
+  **`KeepAlive` is deliberately outside that pattern**, and the caveat belongs
+  in the open rather than in the omission: adding it returns **19** hits
+  (`bobi/events/client.py`, `bobi/session.py`, `bobi/http.py`), every one of
+  them a lowercase network/session `keepalive` and none of them launchd's plist
+  key. Case-sensitive `KeepAlive` across the whole tree matches only the
+  Cloudflare-generated `event-server/worker/worker-configuration.d.ts`. So the
+  conclusion - no launchd integration here - holds on both greps; only the
+  narrow one is honest to print as returning nothing. Revision 3 printed the
+  wide pattern and reported it empty; §10's fourth pass (CW2) records the
+  correction.
+  `_has_systemd_service` (`bobi/cli.py:279`) has no macOS counterpart, so
   `bobi agent stop|restart` signals the process directly and a KeepAlive job
   respawns it underneath. That is a real bug and it is already tracked as
   **MOD-352** ("launchd lifecycle parity: `bobi agent stop|restart` fight a
@@ -507,6 +522,18 @@ lock timeout is logged and swallowed. A journal failure must never fail a
 start, a stop, or a supervisor restart decision - the record exists to explain
 operations, not to gate them.
 
+**Not every lost line costs the same, and the asymmetry is named rather than
+averaged away.** A lost `manager_stopped` is recoverable: §5.3's reconciler
+sees a `manager_started` whose generation is dead and writes the stop that went
+missing. A lost `manager_stop_failed` is **not**. `still_running` and
+`permission_denied` are precisely the outcomes where the target generation is
+*still alive*, so reconciliation never fires and the operator-facing failure
+signal vanishes with no trace at all. It takes a wedged lock holder **and** a
+stop failure inside the same two seconds, so the probability is low and the
+answer stays fail-open - but the expiry log line must name the event it
+dropped, so the one class of loss the journal cannot self-heal survives in the
+log instead.
+
 The `try` must wrap **the lock acquisition too**, not just the write inside it.
 `file_lock` does `lock_path.parent.mkdir(...)` and `open(lock_path, "a+")`
 before it yields (`bobi/fsutil.py:178-179`), so on a read-only state directory
@@ -572,8 +599,8 @@ The manager already has the seam. `run_manager_from_config` registers a
 `_cleanup` at `bobi/service.py:562-575` and installs a SIGTERM handler that
 calls it at `bobi/service.py:577-582`.
 That path already runs on `systemctl stop`, on `systemctl restart`, on
-`stop_team`'s SIGTERM, on a container stop, on a supervisor respawn, and on a
-bare `kill`, because all of them deliver SIGTERM to the manager process.
+`stop_team`'s **non-force** SIGTERM, on a supervisor respawn, and on a bare
+`kill`, because each of those delivers SIGTERM to the manager process itself.
 `_cleanup` even already guards on generation identity in its own small way, only
 unlinking the pid file when it still holds this process's pid
 (`bobi/service.py:565`).
@@ -595,6 +622,44 @@ records the operator's `correlation_id` and intent, which the manager never
 knows. §5.5 merges the two views of one stop into one row.
 It reads the target's start token **before** signalling, since after the exit
 there is no process left to read one from.
+
+**Two paths reach the manager differently, and neither is waved through.**
+
+- **`bobi agent stop --force` sends SIGKILL, not SIGTERM**
+  (`bobi/service.py:693`: `sig = signal.SIGKILL if force else signal.SIGTERM`),
+  so `_cleanup` never runs on it. That generation's stop comes from
+  `stop_team`'s own writer, and from reconciliation if even that is lost. No
+  design gap - but "every `kill`" would be the wrong summary, and §9 already
+  names SIGKILL as the class reconciliation exists for.
+- **A container stop signals the supervisor, not the manager.** PID 1 in the
+  reference image is the supervisor sidecar: `docker/docker-entrypoint.sh`
+  `exec`s `bobi agent <name> supervise -- --foreground` (`:630`, `:632`) behind
+  `Dockerfile:305`'s `ENTRYPOINT`. The manager gets SIGTERM one hop later, and
+  the hop is deliberate: the supervisor's `_on_term` forwards the signal
+  straight to the child (`bobi/supervisor/supervision.py:633`, handler
+  installed at `:637-639`) specifically so the manager begins its graceful
+  shutdown immediately rather than after the current poll sleep returns, and
+  the run loop's `finally` then calls `_terminate_child` (`:693`). That works.
+  Its documented exception is the one this journal must not misreport:
+  `_kill_child`'s own comment records that "a *wedged* manager may be too stuck
+  to run its own SIGTERM cleanup before term_grace elapses and we SIGKILL it"
+  (`:302-303`; `proc.terminate()` at `:316`, `term_grace` default `10.0`
+  seconds at `bobi/supervisor/config.py:68`). So a **wedged** manager in a
+  container journals no stop of its own, and reconciliation covers it exactly
+  as it covers SIGKILL.
+
+**One startup window has no handler at all, and closing it is free.**
+`manager.pid` is written at `bobi/service.py:560`, but
+`signal.signal(signal.SIGTERM, _handle_term)` is not installed until `:582`. A
+SIGTERM landing between them takes the **default** disposition: the process
+dies with no `_cleanup`, no journal entry, and a pid file on disk that outlives
+it. The window is milliseconds wide and the next start reconciles it, but "the
+generation itself is the primary observer of its ending" is simply false inside
+it, so it is named here rather than left to be discovered by whoever debugs it.
+**Implementation note, part of §8 step 3:** move the `_cleanup` definition,
+`atexit.register`, and the `signal.signal` call *above* the pid-file write.
+`_cleanup` closes over only `state_dir` (`:553`) and `pid_str` (`:559`), both
+already bound before `:560`, so the reorder is mechanical and costs nothing.
 
 **The shutdown write happens once, and one flag enforces it.**
 `_cleanup` is reached twice on the SIGTERM path: `_handle_term` calls it
@@ -628,8 +693,11 @@ On Linux that is a `/proc` read either way, but on macOS the token comes from a
 `ps` subprocess (§5.1), and forking during shutdown - inside a SIGTERM handler,
 on a path that may already be under memory pressure - is not something to do
 for a log line. Caching at boot means the shutdown path only ever formats a
-value it already holds. The reconciler is then the sole caller that reads
-*another* process's token, and it runs at start time, not shutdown.
+value it already holds. Two callers do read *another* process's token -
+`stop_team` before it signals (above) and the reconciler - and the property
+that carries the safety argument is not that there is only one of them, it is
+that **neither runs in a signal handler**: `stop_team` runs in the CLI process,
+the reconciler at start time. Nothing on the shutdown path forks.
 
 **The start confirmer.** A daemon thread started in `run_manager_from_config`
 just before the blocking `spawn_adhoc` call (`bobi/service.py:657`).
@@ -704,10 +772,17 @@ keeps the design's "confirmed effects" claim true rather than aspirational.
 One id per operator *operation*, in the contract's existing field (F1).
 
 **Format:** `uuid.uuid4().hex` - 32 lowercase hex characters, no dashes.
-That is the repo's existing id shape (`bobi/webapp/runtime.py:689`,
-`bobi/subagent.py:1065`, `bobi/monitors/run_records.py:119`), it needs no
-dependency, and it needs no sortability because ordering comes from `at`
-(§5.5), never from the id.
+`uuid4().hex` is the repo's existing id primitive, and the repo uses it at two
+widths: **full 32** where the id is only ever machine-joined
+(`bobi/webapp/runtime.py:689`, `message_id`; `bobi/events/signing.py:72`,
+`nonce`), and **truncated** where a human reads or types it
+(`bobi/subagent.py:1060` is `.hex[:8]`; `bobi/monitors/run_records.py:119` is
+`.hex[:12]`). A correlation id is joined by `fold()` and never typed, so it
+takes the full width - stated as a choice between the repo's two shapes rather
+than as "the" shape, which is what revision 3 called it while citing two
+truncated sites as evidence.
+It needs no dependency, and it needs no sortability because ordering comes from
+`at` (§5.5), never from the id.
 Hosted operations do not mint one at all: they carry the admin `command_id`
 verbatim, whatever shape the console chose, and the field is typed as an opaque
 string so both coexist.
@@ -821,16 +896,26 @@ both compared as epoch seconds.
 The previous revision claimed this matched `listLifecycle` by keying on
 `generated_at`. It does not, and the mismatch matters:
 `listLifecycle` sorts on `received_at` descending
-(`event-server/worker/src/fleet.ts:185`), which is server receipt time, and
-the Worker calls it "authoritative for reachability" (`:55`).
+(`event-server/worker/src/fleet.ts:185`), which is server receipt time.
+One attribution to get right, because revision 3 got it wrong:
+`FleetLifecycleRecord.received_at` (`:65`) carries **no comment of its own**;
+the "server receipt epoch ms - authoritative for reachability" gloss sits on
+the *heartbeat* struct, `FleetInstanceRecord.received_at` (`:55`). Same field
+name, same server-receipt meaning, different struct - and the ordering argument
+below rests on the field, not on the comment.
 Local rows have no `received_at` at all - §5.6 sets it null, because nothing
 received them.
 So a single key cannot order both sources, and the honest rule is the fallback
 one above. Its properties are worth stating because they are the reason to
 prefer it over picking one key and pretending:
 
-- on a hosted-only list every row has `received_at`, so it reproduces
-  `listLifecycle`'s order exactly;
+- on a hosted-only list every row has `received_at`, so the **ordering** is
+  `listLifecycle`'s exactly. The **row count** is not, and that is the fold
+  working rather than a discrepancy: once F2's correlation threading lands, a
+  hosted stop+start sharing one `command_id` collapses into a single
+  `manager_restarted` row (rule 1), so the projection returns fewer rows than
+  `listLifecycle` returns records. Ordering parity, not list identity - §7's
+  test is worded to assert the former;
 - on a local-only list no row has one, so it orders by the box's own clock,
   which is the only clock those entries ever had;
 - on a merged list each row is placed by the best timestamp it carries, and
@@ -891,15 +976,40 @@ agent's strip says STOPPED and nothing else. That is the whole truth about it -
 inventing SINCE/EXIT/WAS UP would not be." A never-run agent has an empty
 journal, so it keeps showing nothing, and that test passes unchanged.
 
-**Blast radius, measured:** adding this segment breaks **exactly one** test -
-`tests/test_webapp_health.py:188-189`, which asserts the exact ordered key list
-`["uptime", "manager_pid", "live_runs", "last_activity"]`. It must be updated
-in the same commit, and where `last_transition` lands in that list is a
-display-order decision to make deliberately rather than by append.
-The other three `segments == []` assertions do **not** break, checked
-individually rather than assumed: the two endpoint/never-run tests run against
-a bare `bobi_install` (a fresh isolated home with no prior run, hence an empty
-journal), and `TestNormalize` exercises only the defaults `normalize` fills.
+**Blast radius, measured by running the tests: zero.** No existing test changes,
+and the reason is the omission rule in the paragraph above rather than luck.
+
+The assertion that looks like it should break is
+`tests/test_webapp_health.py:188-189` - `TestRunningSegments::test_full_set`
+(`:176-189`) - which pins the exact ordered key list
+`["uptime", "manager_pid", "live_runs", "last_activity"]`. It does not break.
+That test runs against the bare `bobi_install` fixture, a fully isolated fresh
+home under `tmp_path` (`tests/conftest.py:252-272`), and seeds only a pidfile
+and two session files (`:177-181`). It writes **no** lifecycle journal, and
+cannot: `run/state/lifecycle.jsonl` does not exist until this spec is built. So
+the journal is empty, the segment is omitted, and the list is unchanged.
+The other three `segments == []` assertions do not break either, for the same
+reason: the two endpoint/never-run tests also run on a bare `bobi_install`, and
+`TestNormalize` exercises only the defaults `normalize` fills.
+
+**The trap this replaces, stated so nobody re-walks into it.** Revision 3
+claimed a blast radius of exactly one test and instructed §7 to add
+`last_transition` to that ordered key list. Doing that turns a currently-green
+test **red**, because for that fixture the key can never appear. Verified both
+directions on `6d7c72f`: unmodified, `test_full_set` passes; with
+`"last_transition"` appended to the list exactly as revision 3 prescribed, it
+fails with
+`AssertionError: assert ['uptime', ..., 'last_activity'] == ['uptime', ..., 'last_transition']`.
+Do not edit that assertion.
+
+**The real work is a new test, and it is where the display position gets
+decided.** No existing test can reach the populated path, so where
+`last_transition` lands in the ordered list is unpinned by the suite today.
+§7 therefore adds a test that seeds a journal under the fixture's `state_dir`
+and asserts the full ordered key list *including* `last_transition` at its
+chosen position. That decision is still made deliberately rather than by
+append - it is just made in a new test rather than by rewriting an old one that
+proves something different.
 
 **`GET /api/agents/{name}/events`.** The event-queue read model, added beside
 the existing `/runs` route (`bobi/webapp/server.py:190`) with a
@@ -1123,9 +1233,15 @@ $ rg -n -g '*.py' '\.lifecycle\(|_emit_lifecycle\(|_note_restart\(' bobi/ | wc -
 16
 ```
 
+16 hits, all classified below. The table has **17** rows: one row is a
+**(context, not a hit)** entry the printed pattern cannot match, marked as such,
+because the fan-out this spec joins is invisible without it. That is the only
+hand-added line in §6, and it is counted here rather than left to be found by
+subtracting.
+
 | Hit | Classification |
 |---|---|
-| `bobi/supervisor/supervision.py:206` | `_MultiObserver.lifecycle`; **`JournalObserver` joins this fan-out** |
+| `bobi/supervisor/supervision.py:206` | **(context, not a hit)** `def lifecycle` on `_MultiObserver` - no leading dot, so `\.lifecycle\(` cannot match it. Listed because **`JournalObserver` joins this fan-out** |
 | `bobi/supervisor/supervision.py:209` | the per-observer call inside it; unchanged |
 | `bobi/supervisor/supervision.py:349` `budget_exhausted` | journaled; minted id (not operator-initiated) |
 | `bobi/supervisor/supervision.py:380` `def _note_restart` | **gains `correlation_id` passthrough** |
@@ -1198,7 +1314,9 @@ know it was deliberate.
   collapse to one row taking `at` from the manager and `reason` from the
   operator (§5.5). Two stops for *different* generations stay two rows
 - ordering: a mixed list orders on `received_at` where present and `at`
-  otherwise, and a hosted-only list reproduces `listLifecycle`'s order
+  otherwise, and a hosted-only list reproduces `listLifecycle`'s **order** -
+  asserted on the sequence of timestamps, not on row count, since a correlated
+  hosted stop+start legitimately folds two records into one row (§5.5)
 - `detail` renders each event in `VERB`, and an unknown event renders as its
   de-underscored name rather than raising
 - a write to a read-only directory is logged and swallowed, not raised
@@ -1246,10 +1364,16 @@ are where `LocalRuntime` and `EventBusRuntime` are exercised today; there is no
 - `?limit=` clips and sets `truncated`
 - the `last_transition` segment appears when the journal has entries and is
   absent (not faked) when it is empty, per `segments`' best-effort contract
-- **update** `test_webapp_health.py:188-189`'s ordered key list to include
-  `last_transition` at its chosen display position - the one test this spec
-  knowingly breaks (§5.6), updated in the same commit rather than discovered by
-  a red CI run
+- **a new populated-journal test pins the display position**: seed a journal
+  under the `bobi_install` fixture's `state_dir`, then assert the full ordered
+  key list *including* `last_transition` where it was decided to go. This is
+  the only place the ordering is pinned, because no existing test can reach the
+  populated path
+- **leave `test_webapp_health.py:188-189` alone.** It stays green unmodified -
+  its fixture writes no journal, so the segment is correctly omitted (§5.6).
+  Revision 3 instructed the opposite; appending `last_transition` to that list
+  reddens it, verified by making exactly that edit and running it. If CI ever
+  shows that assertion failing, the omission rule broke, not the assertion
 
 **`tests/test_webapp_server.py`** (extend)
 - `GET /api/agents/{name}/events` returns 200 with the documented shape and
@@ -1297,6 +1421,9 @@ Ordered so each step is independently green.
 3. The manager's own stop entry in `_cleanup`, and the start confirmer in
    `run_manager_from_config`. This is the pair that makes the systemd case work
    (F4), so it lands before anything that depends on stops being recorded.
+   Also in this step, and mechanical: move `_cleanup`, `atexit.register`, and
+   the `signal.signal` call **above** the `manager.pid` write, closing the
+   handler-less startup window §5.3 names.
 4. `service.stop_team` writes stop and stop-failure entries; `child_agent_env`
    strips the correlation var.
 5. Restart correlation on both unmanaged local paths; start-failure entries at
@@ -1370,15 +1497,15 @@ Other risks:
 
 ## 10. Review record
 
-This spec has been through three review passes; the findings below are folded
+This spec has been through four review passes; the findings below are folded
 into the design above, not appended to it.
 
 **Second-opinion tooling is unavailable in this environment and is not being
 claimed.** `codex exec` returns `401 Unauthorized` and `aichat` has no
 configured gateway (no `OPENROUTER_API_KEY` / `OPENAI_API_KEY` in the
-environment). No cross-model pass was run at any revision. Revision 3's inputs
-are an independent read-only verifier with full repo access, and direct
-re-derivation against the tree; both are named as what they are.
+environment). No cross-model pass was run at any revision. The inputs to
+revisions 3 and 4 are an independent read-only verifier with full repo access,
+and direct re-derivation against the tree; both are named as what they are.
 
 ### First pass
 
@@ -1415,8 +1542,10 @@ text produced two more.
 
 An independent read-only verifier with full repo access re-checked the spec
 against `origin/main` at `5d2cf04` and returned `revise_before_gate_1`. It
-confirmed F11, V4, V6, and the CI-env claim as exact, and confirmed F12's
-finding by executing the two named tests.
+confirmed F11, V6, and the CI-env claim as exact, and confirmed F12's finding
+by executing the two named tests.
+It also re-confirmed **V4**, which was wrong; the fourth pass overturned it and
+§10's fourth-pass section records how a confirmation survived two passes.
 
 R1-R10 are its defects and D1-D4 are director rulings. **S1-S3 are defects in
 this pass's own fixes**, found by re-reading the revised §5.3 rather than by
@@ -1427,13 +1556,13 @@ record that only ever finds faults in earlier revisions is not a review record.
 
 | # | Finding | Resolution |
 |---|---|---|
-| R1 | **The confirmed-effect model was wrong under systemd.** `bobi agent stop` and `restart` return at `bobi/cli.py:1031-1034,1074-1089` without ever reaching `stop_team`, the spec's only stop writer, so a systemd box would journal no stops at all. Rev 2's line 385 claimed the confirmer covered systemd. | The model changed, not a caveat added. §5.3 makes the **manager itself** the primary stop writer, in the `_cleanup`/SIGTERM path it already has (`bobi/service.py:562-582`), which every service manager and every `kill` goes through. `stop_team` stays for the outcomes only it can see. Recorded as F4; §7 tests the direct-SIGTERM case explicitly. |
+| R1 | **The confirmed-effect model was wrong under systemd.** `bobi agent stop` and `restart` return at `bobi/cli.py:1031-1034,1074-1089` without ever reaching `stop_team`, the spec's only stop writer, so a systemd box would journal no stops at all. Rev 2's line 385 claimed the confirmer covered systemd. | The model changed, not a caveat added. §5.3 makes the **manager itself** the primary stop writer, in the `_cleanup`/SIGTERM path it already has (`bobi/service.py:562-582`), which `systemctl stop`, `systemctl restart`, a bare `kill`, `stop_team`'s non-force path, and a supervisor respawn all go through. `stop_team` stays for the outcomes only it can see. Recorded as F4; §7 tests the direct-SIGTERM case explicitly. Revision 4 narrowed "every service manager and every `kill`" to that enumeration and named the two paths it overstated (P2 below). |
 | R2 | **launchd appeared zero times in 903 lines**, though MOD-352 records that `bobi agent stop\|restart` fight it and that a KeepAlive respawn makes "process exited" different from "service stopped". | Two answers. Scoped **out** in §4 with the reason stated and MOD-352/#925 named: there is no launchd integration in this repo to confirm effects through (grep is clean). And §5.3 now states the boundary generally - the journal records process generations, never service-manager intent - which is what makes the design correct under launchd, systemd, and container restart policies alike without modelling any of them. F13 supplies the evidence: no unit ships here, so no `Restart=` is knowable. |
 | R3 | **F9 was false.** `tests/test_cli.py:414` is `TestEventsCommand`, five tests on the display path. The `rg '_show_events' tests/` that produced the claim was a false negative - the tests drive the click command. | F9 rewritten as the opposite finding: the command **is** covered, and those five tests are the acceptance bar for moving the fold into a module. §7 says so. |
 | R4 | **§5.5's ordering parity claim was wrong.** `listLifecycle` sorts on `received_at` (`event-server/worker/src/fleet.ts:185`), not `generated_at`, and local rows have no `received_at` at all. | §5.5 now specifies `received_at` when present, `at` otherwise, and states what that means on hosted-only, local-only, and merged lists - including that a merged ordering is approximate, rather than claiming a parity the data cannot support. |
 | R5 | **The `supervisor/identity.py:60-91` citation was stale, and the alternative §5.1 rejected had already landed in #980.** | §5.1 rewritten: `bobi/identity.py:67-98` is now a plain core module, so the function-local import and the rejected-alternative paragraph are both gone. The design got simpler. |
 | R6 | **Inventories A (25 of 28 hits) and C (11 of 14) were incomplete**, while the PR body claimed every inventory was mechanical and every hit classified. | Both completed from re-run commands, with the added rows marked. §6's preamble now states one row per hit, not per file, and the PR body's claim is corrected rather than left standing. |
-| R7 | **Line drift across `cli.py`, `paths.py`, `inbox.py`, and more**, from the `b5388bb` base. | The branch was rebased onto `5d2cf04` and every citation re-derived from a printed command. |
+| R7 | **Line drift across `cli.py`, `paths.py`, `inbox.py`, and more**, from the `b5388bb` base. | The branch was rebased onto `5d2cf04` and every citation re-derived from a printed command. Revision 4 rebased again onto `6d7c72f` and re-resolved the citations into #982's eight files (P6 below); the claim decays every time main moves, so the base is pinned in the header and re-checked at each revision rather than asserted once. |
 | R8 | **P2, half-fixed in rev 2:** the wording moved from "lock timeout" to "lock failure" but `file_lock` still blocks unboundedly, so a wedged holder could hang a start or a stop. | New F14 and a bounded acquisition in §5.2: an optional `timeout` on the shared helper, defaulting to today's behaviour, with the journal passing 2s and treating expiry as a skipped write. §7 pins it with a test that hangs without the bound. |
 | R9 | **F12's own citation was invented** - `supervisor/identity.py:70-91` is wrong at both commits, though the finding it supports is real and was proven by execution. | Finding kept, citation replaced with the printed grep over `bobi/identity.py`, and the error named in F12 so the correction is auditable. |
 | R10 | **Rev 2 claimed `app.css:449-451` was dead CSS from the five-panel page** and listed fixing it as a deliverable. | False, found while re-deriving inventory B: those lines are a live comment explaining an adjacency selector. The claim is corrected in §6 B and the deliverable dropped from §8. |
@@ -1443,7 +1572,56 @@ record that only ever finds faults in earlier revisions is not a review record.
 | D4 | Director ruling: specify four cheap unspecified items rather than deferring - prune order, the `detail` template, which `origin` each supervisor edge carries, and the id format. | §5.2 (prune order, age before count, with the reason), §5.6 (the `detail` template plus its unknown-event fallback), §5.5 (`origin` is who wrote it, never who asked, enumerated across all eleven supervisor emit sites), §5.4 (`uuid4().hex`, and why hosted ids stay opaque). |
 | S1 | Found while re-reading R1's own fix: **`_cleanup` runs twice on the SIGTERM path**, once from `_handle_term` and once from `atexit` (`bobi/service.py:575-580`). Every step in it is idempotent today, so the double call is invisible - but a journal append is not, and the fix for R1 would have recorded two `manager_stopped` lines for one termination. | §5.3 adds a once-only flag set under the journal's lock, and §7 tests the double invocation directly. §5.5's generation grouping is named as the second line of defence rather than relied on as the first. |
 | S2 | Same re-read: the start confirmer is a daemon thread that can still be waiting when SIGTERM lands, so it could append `manager_started` **after** its own generation's `manager_stopped`. | The confirmer checks S1's flag before writing and stays silent if shutdown has begun - correct, because a generation that never reached readiness did not start. Tested in §7. |
-| S3 | Same re-read: reading the start token at shutdown means forking `ps` inside a signal handler on macOS (§5.1). | The manager reads and caches its own token at boot, so the shutdown path only formats a held value. The reconciler stays the only caller that reads another process's token, and it runs at start time. |
+| S3 | Same re-read: reading the start token at shutdown means forking `ps` inside a signal handler on macOS (§5.1). | The manager reads and caches its own token at boot, so the shutdown path only formats a held value. Revision 4 corrected the second clause: `stop_team` reads another process's token too (§5.3), so the safety property is that **no** reader runs in a signal handler, not that there is only one reader (CW3 below). |
+
+### Fourth pass
+
+An independent read-only verifier re-checked the spec at `8906150`, this time
+**mechanically resolving all 176 `file:line` citations** rather than
+spot-checking, re-running all six §6 inventory commands, and executing S1, F12,
+and the flock threading assumption. It returned `revise_before_gate_1` on three
+confirmed defects and five precision concerns, then re-ran the whole sweep
+against `6d7c72f` after main advanced, adding P6.
+
+**The citation layer came back clean** - all 176 resolve to what the text
+claims, across `bobi/`, `event-server/`, `tests/`, `docs/`, and `plans/`. That
+is the defect class that sank passes 1 and 2, and it is now the part of this
+spec that has been checked hardest. What remained wrong was three factual
+claims and five slips, none of them structural: §5.3's generation model, S1's
+flag, S2's race closure, R8's bounded lock, and D1's start-token guard all
+survived, two of them by execution.
+
+**CW1 is recorded as a carried defect, not as a fresh one, because that is the
+more useful fact.** The false blast-radius claim is verbatim in revision 2. The
+third pass recorded it as "V4 - CONFIRMED EXACT". Revision 3 then *strengthened*
+the confidence wording around it ("measured", "checked individually rather than
+assumed") without ever re-running the assertion the claim was about - and what
+pass 2 actually verified was that the *other three* `segments == []` assertions
+do not break, which is true and is a different question. So a wrong claim
+gained authority across three passes while nobody executed the one test it
+named. The lesson the spec keeps rather than the finding: a confirmation is
+only worth what was run, and "checked individually" has to mean a command with
+an exit code behind it. Revision 4 verified CW1 in both directions by running
+the test - green unmodified, red with revision 3's prescribed edit applied.
+
+| # | Finding | Resolution |
+|---|---|---|
+| CW1 | **The blast-radius claim was false and load-bearing.** §5.6 and §7 claimed the new segment breaks exactly one test, `test_webapp_health.py:188-189`, and §7 instructed the implementer to add `last_transition` to its ordered key list. That contradicts the omission rule eight lines above it: `TestRunningSegments::test_full_set` runs on a bare `bobi_install` (`tests/conftest.py:252-272`), writes no journal, so the segment is omitted and the assertion passes untouched. Following §7 literally turns a green test red. | Blast radius corrected to **zero** in §5.6, with the omission rule named as the reason and the failed edit quoted. §7 now says explicitly to leave that assertion alone and adds the real work: a **new** populated-journal test, which is also the only place the segment's display position gets pinned. Both directions verified by execution at `6d7c72f`. |
+| CW2 | **§4's printed launchd grep did not return what §4 said it returned.** `rg -ni 'launchd\|launchctl\|LaunchAgents\|KeepAlive' bobi/` returns **19** hits, not nothing - all lowercase network/session `keepalive` in `events/client.py`, `session.py`, `http.py`. The conclusion survives, the evidence did not, and the spec's opening promise is that every printed command was run. | §4 now prints the command that actually returns nothing (`rg -ni 'launchd\|launchctl\|LaunchAgents' bobi/`, exit 1) and states the `KeepAlive` caveat in the open: why it is excluded, what including it returns, and that case-sensitive `KeepAlive` tree-wide matches only a Cloudflare-generated `.d.ts`. R2's scope-out is unchanged and still sound. |
+| CW3 | **S3 contradicted §5.3 thirty lines above it.** S3 called the reconciler "the sole caller" that reads another process's start token; §5.3 says `stop_team` reads the target's token before signalling. Both cannot be true. | The safety claim was never "only one reader" - it is that **no** reader runs in a signal handler (`stop_team` in the CLI process, the reconciler at start time). §5.3 and S3's row now say that instead. Design unchanged. |
+| P1 | **Inventory E printed 16 and tabled 17.** The extra row, `supervision.py:206`, is `def lifecycle` - no leading dot, so `\.lifecycle\(` cannot match it. All 16 real hits were classified, so coverage was complete, but the row was hand-added and unmarked under a preamble promising "one row per hit" and "no list written by hand". | The row is marked **(context, not a hit)** with the reason, and E's preamble states the 16-plus-1 reconciliation. Widening the pattern was the alternative and was rejected: `def lifecycle\(` pulls in three unrelated observer definitions and would trade one marked row for three unwanted ones. The header's no-hand-written-line promise now carries this one named exception. |
+| P2 | **R1's "every service manager and every `kill`" overstated two paths.** `bobi agent stop --force` sends SIGKILL directly (`service.py:693`) and never reaches `_cleanup`; and a container stop signals **PID 1 = the supervisor sidecar**, not the manager, which gets SIGTERM one hop later via `_on_term`'s forward (`supervision.py:633`). | §5.3 enumerates the paths that do reach `_cleanup` instead of generalising, and adds a subsection for the two that do not - including `_kill_child`'s own recorded exception that a **wedged** manager can be SIGKILLed before its cleanup runs (`:302-303`, `term_grace` 10.0s at `supervisor/config.py:68`). Both are covered by `stop_team`'s writer and reconciliation; no design change, a correct sentence. |
+| P3 | **A startup window with a pid file and no handler.** `manager.pid` is written at `service.py:560`; the SIGTERM handler is installed at `:582`. A signal in between takes the default disposition: no `_cleanup`, no entry, and a pid file outliving the process. | Named in §5.3 rather than left to be discovered, with the fix specified as part of §8 step 3: install the handler **before** writing the pid file. `_cleanup` closes over only `state_dir` (`:553`) and `pid_str` (`:559`), so the reorder is mechanical and free. |
+| P4 | **A timed-out `manager_stop_failed` is the one lost line reconciliation cannot recover.** §5.2's fail-open paragraph treated all lost lines alike. A lost `manager_stopped` is reconciled on next start; `still_running` and `permission_denied` are exactly the cases where the generation is **still alive**, so the reconciler never fires and the failure signal disappears. | §5.2 now distinguishes the two loss classes and requires the expiry log line to name the dropped event, so the unrecoverable class survives in the log. Still fail-open: it needs a wedged holder *and* a stop failure in the same two seconds. |
+| P5 | **Three precision slips.** §5.4 called `uuid4().hex` "the repo's existing id shape - 32 lowercase hex" while two of its three cited sites are truncated (`.hex[:8]`, `.hex[:12]`). §5.5 attributed the "authoritative for reachability" comment to the lifecycle record's `received_at`; it is on `FleetInstanceRecord` (`fleet.ts:55`), the heartbeat - the lifecycle one is `:65`, uncommented. And "reproduces `listLifecycle`'s order exactly" is true of ordering but not row count once F2's threading collapses a correlated hosted stop+start into one row. | §5.4 now presents the repo's **two** widths and says why this id takes the full one, citing `webapp/runtime.py:689` and `events/signing.py:72` for full-32. §5.5 attributes the comment to the right struct and separates ordering parity from list identity. §7's ordering test is reworded to assert the timestamp sequence, not the row count. |
+| P6 | **One citation drifted when main advanced.** `bobi/subagent.py:1065` moved to `:1060` under #982. The only drift among 176, and it compounds P5, which had already flagged that same citation as substantively wrong. | The branch is rebased onto `6d7c72f`, the header's base pin updated, and the citation both moved and re-characterised by P5's fix. The other three citations into #982's files (`doctor.py:638`, `paths.py:207-208`, `plans/2026-07-22-review-remediation.md:204`) were re-resolved and are still exact. #982 deleted expired rename compat layers; nothing this spec cites depends on one. |
+
+**Cross-model second opinion: still not run, still not claimed.** `codex` returns
+401 and `aichat` has no configured gateway in this environment, unchanged from
+revision 3. Revision 4's inputs are the independent verifier above and direct
+re-derivation against the tree - including the two test executions behind CW1,
+which are the kind of evidence a cross-model pass would not have supplied
+anyway.
 
 ## 11. Tracking
 
