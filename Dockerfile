@@ -10,8 +10,13 @@
 #
 # ONE Dockerfile, three BUILD modes (BOBI_BUILD build-arg) — the runtime stage
 # is shared, so there's nothing to keep in sync:
-#   * source (default) — build the wheel from a repo checkout (`COPY . .`). Dev +
-#     the repo's own CI, so unreleased branch code is tested.
+#   * source (default) — build the wheel from a repo checkout (`COPY . .`).
+#     CURRENTLY UNBUILDABLE, and nothing uses it: `.dockerignore` drops both
+#     `.git` and `event-server/dist`, so hatch_build.py finds neither a VCS
+#     checkout nor a prebuilt event-server artifact, takes the rebuild path,
+#     and needs Node inside `python:3.11-slim` — where there is none, because
+#     this image is deliberately Node-free. Dev and the repo's own CI both use
+#     `wheel` instead; that is the mode that tests unreleased branch code.
 #   * pypi             — install a published `bobi==$BOBI_VERSION` from
 #     PyPI; the build context is just this file + docker/. This is what binary-mode
 #     `bobi deploy` uses, so deploying needs no checkout (DEPLOY_INTERFACE.md).

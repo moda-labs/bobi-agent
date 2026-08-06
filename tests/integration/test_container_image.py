@@ -11,6 +11,11 @@ ANTHROPIC_API_KEY is present).
 
 Gated on a working Docker daemon, so they no-op in environments without one.
 Set BOBI_TEST_IMAGE=<tag> to reuse an already-built image and skip the build.
+
+Building the image here needs Node.js major 20 EXACTLY on PATH, because
+staging the wheel runs hatch_build.py's embedded-event-server build. Node 22
+and 24 are both rejected outright. Reusing a prebuilt image via
+BOBI_TEST_IMAGE needs no Node at all.
 """
 from __future__ import annotations
 
@@ -18,6 +23,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -55,16 +61,52 @@ def _run(*args: str, **kw) -> subprocess.CompletedProcess:
     )
 
 
+def _stage_wheel() -> None:
+    """Build the wheel into `dist/`, the way the release pipeline stages it.
+
+    Wheel mode installs `dist/*.whl` and the Dockerfile expects EXACTLY one, so
+    clear the directory first: a stale wheel from an earlier version would make
+    `pip install /dist/*.whl` install two, and which one wins is arbitrary.
+    """
+    dist = REPO_ROOT / "dist"
+    for stale in dist.glob("*.whl"):
+        stale.unlink()
+    proc = _run(
+        sys.executable, "-m", "build", "--wheel", "--outdir", str(dist),
+        cwd=str(REPO_ROOT), timeout=900,
+    )
+    if proc.returncode != 0:
+        pytest.fail(
+            "could not build the wheel to stage into the image build context.\n"
+            "This build runs hatch_build.py, which needs Node.js major 20 "
+            "EXACTLY on PATH (not 22, not 24) to build the embedded event "
+            f"server.\n\nstdout:\n{proc.stdout}\n\nstderr:\n{proc.stderr}"
+        )
+
+
 @pytest.fixture(scope="session")
 def image() -> str:
-    """Build (or reuse) the instance image; return its tag."""
+    """Build (or reuse) the instance image; return its tag.
+
+    Builds in WHEEL mode - the mode the release pipeline and this repo's own
+    CI use - not the Dockerfile's nominal `source` default.
+
+    Source mode cannot build in ANY repo: `.dockerignore` drops both `.git`
+    and `event-server/dist`, so hatch_build.py's `initialize` finds neither a
+    VCS checkout nor a prebuilt artifact, takes the rebuild path, and needs
+    Node inside `python:3.11-slim` - where there is none, by design (the image
+    is deliberately Node-free). Defaulting to it made this entire module look
+    environment-blocked when it was really asking for an impossible build.
+    """
     prebuilt = os.environ.get("BOBI_TEST_IMAGE")
     if prebuilt:
         return prebuilt
 
+    _stage_wheel()
     tag = "bobi:pytest"
     proc = _run(
-        "docker", "build", "-t", tag, str(REPO_ROOT),
+        "docker", "build", "--build-arg", "BOBI_BUILD=wheel",
+        "-t", tag, str(REPO_ROOT),
         timeout=1800,
     )
     if proc.returncode != 0:
