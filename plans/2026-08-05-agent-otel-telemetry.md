@@ -700,7 +700,7 @@ addresses.
 
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
-| A | #TBD | 1-5 | The whole feature: identity promotion, exporter, hardening, CLI, distribution, collector proof | solo | built |
+| A | #TBD | 1-5 | The whole feature: identity promotion, exporter, hardening, CLI, distribution, collector proof | solo | open |
 
 **Lanes:** One lane — the null topology and the default. A single coherent
 deliverable in a single repo whose phases are sequential in BUILD order (with
