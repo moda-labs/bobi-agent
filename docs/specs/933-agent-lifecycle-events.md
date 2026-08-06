@@ -19,6 +19,12 @@ predates #979 and #980 and whose citations had mostly drifted. §10 records what
 each pass actually verified and, where a claim was carried forward on a stale
 confirmation, says so.
 
+Revision 5 folds in the requester's ruling on `manager_start_failed` (§9.3,
+Luke, 2026-08-06) and restructures §9 so the one item still blocking Gate 1 -
+pid reuse in reconciliation - is at the top rather than inside a risk list.
+No citation moved, no rebase, no code touched: the branch is still one file
+under `docs/specs/`.
+
 ## 1. Problem
 
 The event timeline shows inbound events, manager decisions, and session
@@ -483,6 +489,13 @@ distinct event and not a `manager_stopped` with a flag:
 | `manager_stop_failed` | the process would not exit, or could not be signalled |
 | `manager_restart_failed` | derived: a restart whose start phase never landed |
 
+**`manager_start_failed` is one event with no sub-state.**
+A start that never came up and a start that came up and then died before
+readiness both write `manager_start_failed`.
+The difference, where it is knowable at all, lives in the free-text `reason`
+and is never a second event name and never a distinguishing field.
+That is the requester's ruling, recorded with its attribution in §9.3.
+
 ### 5.2 The journal file
 
 `run/state/lifecycle.jsonl`, one JSON object per line, newest last.
@@ -566,7 +579,7 @@ start down. The guard goes outside.
 worker, and the supervisor can all append.
 
 **Retention** is `MAX_LIFECYCLE_ENTRIES = 500` plus a time bound
-`LIFECYCLE_RETENTION_S`, whose value is an open decision escalated in §9 and
+`LIFECYCLE_RETENTION_S`, whose value is an open decision escalated in §9.2 and
 **not settled by this spec**.
 Pruning happens **at write time only**, under the same lock the append holds,
 and only when the file exceeds the entry cap. Read paths never mutate.
@@ -643,7 +656,7 @@ there is no process left to read one from.
   (`bobi/service.py:693`: `sig = signal.SIGKILL if force else signal.SIGTERM`),
   so `_cleanup` never runs on it. That generation's stop comes from
   `stop_team`'s own writer, and from reconciliation if even that is lost. No
-  design gap - but "every `kill`" would be the wrong summary, and §9 already
+  design gap - but "every `kill`" would be the wrong summary, and §9.4 already
   names SIGKILL as the class reconciliation exists for.
 - **A container stop signals the supervisor, not the manager.** PID 1 in the
   reference image is the supervisor sidecar: `docker/docker-entrypoint.sh`
@@ -722,6 +735,14 @@ the two predicates the issue's wording names. On success it writes
 `manager_start_failed` with the timeout's reason. It is a daemon thread so it
 can never hold shutdown, and it is fail-open.
 
+**The timeout arm covers both start-failure modes on purpose.**
+A manager that never came up and a manager that came up and then died before
+the waiters returned reach the confirmer identically - the waiters expire - and
+both write plain `manager_start_failed` (§5.1).
+The requester ruled against splitting them (§9.3), so the confirmer needs no
+child-watching, and F3's boundary holds unchanged: no local path watches the
+child today and none is added here.
+
 Why the manager and not the requester: F3. The requester returns before
 readiness on every local path, and changing that would make `bobi agent x
 start` block for up to 30s and terminate a slow-but-healthy manager on timeout
@@ -762,13 +783,13 @@ degrades to (1) alone and the reconciled entry carries
 `reason: "reconciled-unverified"` so the weaker basis is visible in the trail
 rather than assumed away.
 
-**This coupling is worth naming because it changes with a number §9 escalates.**
+**This coupling is worth naming because it changes with a number §9.2 escalates.**
 Pid-reuse exposure scales directly with retention: the longer the newest
 `manager_started` may sit unreconciled, the more likely its pid has been
 recycled. At the 48h bound the start-token check is cheap insurance. If
 retention grows to a week or a month, it stops being insurance and becomes
 load-bearing - the reconciler would be wrong often enough to matter without it.
-Whichever retention §9's decision picks, the check ships.
+Whichever retention §9.2's decision picks, the check ships.
 
 **What the journal deliberately does not claim.** Whether a *service manager*
 intends the agent to stay down. F13: this repo ships no unit for the manager,
@@ -1079,7 +1100,7 @@ supervisor's window count and is null for local rows because a local agent has
 no restart budget; `truncated` is true when the limit clipped rows;
 `retention_seconds` reports the journal's configured bound so a client can say
 how far back "all of it" goes - the `172800` above is option A's value and
-moves with §9's decision, which is exactly why the field is in the response
+moves with §9.2's decision, which is exactly why the field is in the response
 rather than assumed by the client. `?limit=` defaults to 100, matching `runs.py`'s
 `DEFAULT_LIMIT` (`bobi/webapp/runs.py:51`). Unknown fields are ignored by
 consumers, per the protocol's compatibility promise.
@@ -1357,6 +1378,9 @@ know it was deliberate.
   row, not two
 - the start confirmer writes `manager_started` once both waiters return, and
   `manager_start_failed` on either timeout
+- **a generation that comes up and then dies before readiness writes the same
+  `manager_start_failed`** - same event name, no distinguishing field - which
+  pins §9.3's ruling as a test rather than leaving it in prose
 - `child_agent_env` strips an inherited `BOBI_LIFECYCLE_CORRELATION_ID`
 
 **`tests/test_fsutil.py`** (extend)
@@ -1452,7 +1476,55 @@ Ordered so each step is independently green.
 
 ## 9. Risks and open questions
 
-**Open decision for the requester: the local retention bound.**
+**What Gate 1 still has to rule on.** One blocker, one open decision, one
+already settled:
+
+| # | Item | State |
+|---|---|---|
+| 1 | pid reuse in reconciliation (§9.1) | **OPEN - blocker.** The one finding from the independent adversarial review that survived triage. Awaiting a human ruling. |
+| 2 | the local retention bound `LIFECYCLE_RETENTION_S` (§9.2) | **OPEN - decision.** Two options tabled, with a recommendation the spec has no standing to impose. |
+| 3 | `manager_start_failed` granularity (§9.3) | **RESOLVED** by the requester, 2026-08-06. Folded into §5.1, §5.3, and §7. |
+
+### 9.1 Blocker: pid reuse in reconciliation
+
+**The finding.** Reconciliation (§5.3) has to answer "is the manager from that
+`manager_started` entry still alive?", and the entry it asks about may be a full
+retention window old.
+The repo's only liveness idiom is a bare `os.kill(pid, 0)`, at five sites
+(F15), and every one of those checks a pid written seconds earlier.
+Reused unmodified here it is wrong: Linux recycles pids from a 32768-wide
+space, so a stale pid can be alive and belong to something else entirely, the
+reconciler reads "the manager is still running", the reconciled stop is never
+written, and the failure is silent and looks exactly like a healthy box.
+
+Reported as the single genuine blocker by an independent adversarial review, in
+[this comment on #933](https://github.com/moda-labs/bobi-agent/issues/933#issuecomment-5200490941)
+(2026-08-06).
+The other three findings that review called blockers did not survive contact
+with the code; the per-finding triage is in the same comment.
+
+**What this spec proposes**, folded in per D1 rather than deferred, so the
+approver is ruling on a design and not on a hole:
+
+- §5.1 defines `generation` as a pid **plus** an opaque `start_token` - field 22
+  of `/proc/<pid>/stat` on Linux, `ps -o lstart=` elsewhere, `null` where
+  neither is available, compared for equality and never parsed;
+- §5.3 requires **both** pid liveness and a matching token before it will call a
+  generation live, and degrades to `reason: "reconciled-unverified"` when the
+  token is absent or unreadable, so the weaker basis is visible in the trail
+  rather than assumed away;
+- the guard's weight is coupled to §9.2's number: at a 48h retention it is cheap
+  insurance, at a week or a month it is load-bearing. It ships either way.
+
+**What the gate has to decide.** Accept that guard as the answer, or direct a
+different one - the alternatives are to fix `os.kill(pid, 0)` repo-wide as its
+own unit of work, or to accept the bare check and its silent-miss risk.
+D1 is a *director* ruling to fold the fix in now rather than defer it; it is not
+the human ruling at the gate, this spec does not treat it as one, and nothing is
+implemented until Gate 1 clears.
+
+### 9.2 Open decision for the requester: the local retention bound
+
 This is escalated deliberately rather than decided here, because the two
 options serve different people and the spec has no standing to pick.
 
@@ -1479,7 +1551,37 @@ horizon. But this is a recommendation, not a decision, and implementation
 should not start on this constant until the requester picks. Either way it is
 one constant and one comment.
 
-Other risks:
+### 9.3 Resolved: `manager_start_failed` stays one event
+
+**Ruling by the requester, Luke (@lukelin10), 2026-08-06**, on the open question
+this spec raised - should `manager_start_failed` distinguish "never came up"
+from "came up then died during startup"?
+
+> No keep it simple and just call it manager_start_failed for now
+
+[#933 comment, 2026-08-06](https://github.com/moda-labs/bobi-agent/issues/933#issuecomment-5209101390).
+
+**What the spec does with it - one event, no sub-state, in every place it
+appears:**
+
+- §5.1's vocabulary table keeps a single `manager_start_failed` row and now says
+  explicitly that there is no sub-state;
+- §5.3's start confirmer writes it from the timeout arm for both cases, and the
+  child-watching a distinction would have required is not added - no local path
+  watches the child today (F3);
+- §5.6's `detail` template keeps exactly one `VERB` entry for it, "start failed";
+- §7 pins the ruling with a test: a generation that comes up and then dies
+  before readiness produces the same event as one that never came up.
+
+The cost the ruling accepts, stated once here so it is not rediscovered later as
+a defect: a start that got a process up and then lost it reads as "start failed"
+rather than "started then crashed".
+The "for now" is the requester's own.
+If the reason string proves misleading in practice, splitting it later is
+additive under the protocol's compatibility promise
+(`docs/ADMIN_PROTOCOL.md:27-30`) and needs no migration.
+
+### 9.4 Other risks
 
 - **The manager now writes to disk during shutdown.** `_cleanup` runs on the
   SIGTERM path, so the journal write sits between the signal and the exit. It
@@ -1502,18 +1604,17 @@ Other risks:
 - **A supervised box now records each edge twice** (journal + bus). That is the
   point (durability), and the fold collapses them on read. It does cost one
   small file write per edge.
-- **Open question for the requester:** should `manager_start_failed` also fire
-  when a manager boots successfully and then dies during startup, before the
-  confirmer's waiters return? As specced, that produces a
-  `manager_start_failed` from the timeout, which reads as "start failed" rather
-  than "started then crashed". Distinguishing them needs the requester to watch
-  the child, which no local path does today (F3). Recommendation: ship as
-  specced and revisit if the reason string proves misleading in practice.
+- **A manager that boots and then dies before readiness is journaled as a plain
+  `manager_start_failed`**, from the confirmer's timeout. That is a known and
+  accepted imprecision, not an open question: §9.3 carries the requester's
+  ruling and the cost it accepts.
 
 ## 10. Review record
 
 This spec has been through four review passes; the findings below are folded
 into the design above, not appended to it.
+Revision 5 adds no fifth pass and no new finding: it folds one requester ruling
+(§9.3) and restructures §9. The record below is unchanged.
 
 **Second-opinion tooling is unavailable in this environment and is not being
 claimed.** `codex exec` returns `401 Unauthorized` and `aichat` has no
@@ -1582,7 +1683,7 @@ record that only ever finds faults in earlier revisions is not a review record.
 | R9 | **F12's own citation was invented** - `supervisor/identity.py:70-91` is wrong at both commits, though the finding it supports is real and was proven by execution. | Finding kept, citation replaced with the printed grep over `bobi/identity.py`, and the error named in F12 so the correction is auditable. |
 | R10 | **Rev 2 claimed `app.css:449-451` was dead CSS from the five-panel page** and listed fixing it as a deliverable. | False, found while re-deriving inventory B: those lines are a live comment explaining an adjacency selector. The claim is corrected in §6 B and the deliverable dropped from §8. |
 | D1 | Director ruling: fold **pid reuse** in now, do not defer to the gate. The reconciler is the repo's first caller to check a pid up to a retention window old (F15). | §5.3 requires both pid liveness and a matching start token, §5.1 defines the generation, and the retention coupling is stated where it will be re-read: the check gets more load-bearing as the window grows. |
-| D2 | Director ruling: **retention is escalated**, present both options and recommend. | §9 leads with the decision table, states plainly that matching the Worker's TTL is a choice rather than a constraint, and recommends 7 days without settling it. |
+| D2 | Director ruling: **retention is escalated**, present both options and recommend. | §9.2 tables both options, states plainly that matching the Worker's TTL is a choice rather than a constraint, and recommends 7 days without settling it. |
 | D3 | Director ruling: the "Linear access is unavailable" claim is **false** and has been corrected four times. | Deleted. §11 now records the actual state. |
 | D4 | Director ruling: specify four cheap unspecified items rather than deferring - prune order, the `detail` template, which `origin` each supervisor edge carries, and the id format. | §5.2 (prune order, age before count, with the reason), §5.6 (the `detail` template plus its unknown-event fallback), §5.5 (`origin` is who wrote it, never who asked, enumerated across all eleven supervisor emit sites), §5.4 (`uuid4().hex`, and why hosted ids stay opaque). |
 | S1 | Found while re-reading R1's own fix: **`_cleanup` runs twice on the SIGTERM path**, once from `_handle_term` and once from `atexit` (`bobi/service.py:575-580`). Every step in it is idempotent today, so the double call is invisible - but a journal append is not, and the fix for R1 would have recorded two `manager_stopped` lines for one termination. | §5.3 adds a once-only flag set under the journal's lock, and §7 tests the double invocation directly. §5.5's generation grouping is named as the second line of defence rather than relied on as the first. |
