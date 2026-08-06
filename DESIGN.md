@@ -581,8 +581,10 @@ port 8642) serving a shell with a hash router:
   supersedes the roster+chat page this route used to render): a light
   header carrying a **status strip** (a violet RUNNING / STOPPED / NOT
   RESPONDING badge, best-effort telemetry segments, the recovery action)
-  and the **identity** (description, SAVED and ABOUT hover-or-tap popovers,
-  Edit design), and below it **one runs table** folding sessions, workflow
+  and the **identity** (description, SAVED and ABOUT hover-or-tap popovers;
+  composition is read-only here, per the Non-goals in the U7/U8 plan —
+  editing stays in `#/setup`), and below it **one runs table** folding
+  sessions, workflow
   runs and monitor runs with ALL / RUNNING / FAILED tabs. A row opens the
   dark slab: a transcript when it has a session, details when it does not.
   State reads through the system palette - violet for the live/running
