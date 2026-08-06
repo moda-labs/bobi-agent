@@ -177,14 +177,6 @@ class KBStore:
             raise FileNotFoundError(f"KB '{name}' does not exist at {self._db_path}")
         self._conn: apsw.Connection | None = None
 
-    @staticmethod
-    def kb_dir() -> Path:
-        return _kb_dir()
-
-    @staticmethod
-    def db_path_for(name: str) -> Path:
-        return _kb_dir() / f"{name}.db"
-
     def _connect(self) -> apsw.Connection:
         """Open the connection lazily and reuse it for the store's lifetime."""
         if self._conn is None:

@@ -166,12 +166,6 @@ def format_long_term_memory_prompt(content: str) -> str:
     )
 
 
-def reference_memory_path(root: Path | None = None) -> Path:
-    """Return the cold, human-readable reference memory path."""
-    from bobi import paths
-    return paths.workspace_dir(root) / "memory" / "reference.md"
-
-
 def cold_memory_kb_path(root: Path | None = None) -> Path:
     """Return the team-scoped cold-memory KB database path."""
     from bobi import paths

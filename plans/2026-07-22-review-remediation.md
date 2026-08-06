@@ -172,9 +172,9 @@ Rewritten 2026-07-26 to prove only the three surviving items (D029, D017, D119).
 
 Includes Q4's expired compat layers and Q3's flag removal once decided. For config keys parsed-but-never-read (Q022: `registries`/`default_role`/`chat`): delete the parse OR wire the read — deleting is the default unless Phase 2's D119 fix gave `chat:` a real consumer.
 
-- [ ] **Q080** `bobi/brain/__init__.py:105` — The public BRAIN_MODEL_ENV compatibility alias has zero importers in the repo, tests, and the private deploy repo.
-- [ ] **Q078** `bobi/brain/claude.py:27` — BrainCapabilities is imported but unused in both brain/claude.py and brain/codex.py — a #789 refactor leftover.
-- [ ] **Q077** `bobi/brain/claude.py:125` — The trailing `if last_error is not None: raise last_error` after the connect retry loop is unreachable.
+- [x] **Q080** `bobi/brain/__init__.py:105` — The public BRAIN_MODEL_ENV compatibility alias has zero importers in the repo, tests, and the private deploy repo.
+- [x] **Q078** `bobi/brain/claude.py:27` — BrainCapabilities is imported but unused in both brain/claude.py and brain/codex.py — a #789 refactor leftover.
+- [x] **Q077** `bobi/brain/claude.py:125` — The trailing `if last_error is not None: raise last_error` after the connect retry loop is unreachable.
 - [ ] **D061** `bobi/cli.py:348` — _list_agent_packs in cli.py is a byte-for-byte duplicate of service.py's _list_agent_packs, and the cli copy is dead code.
 - [ ] **D062** `bobi/cli.py:958` — Dead helpers _find_pid_path (line 948), _stop_manager_pid (line 958) and _run_from_config (line 364) duplicate the live stop/start paths in…
 - [ ] **Q008** `bobi/cli.py:1594` — Six unreachable `if not project_path:` guards / else-branches follow `_detect_project_root()` (or `paths.home_dir()`), which can never return a falsy…
@@ -182,24 +182,24 @@ Includes Q4's expired compat layers and Q3's flag removal once decided. For conf
 - [x] **Q125** `bobi/config.py:409` — Config.brain_small_model property has zero callers — the one real consumer bypasses it and reads the raw brain dict. *(unverified — re-verify first)*
 - [ ] **Q038** `bobi/config.py:510` — Config.default_role is parsed from agent.yaml's `defaults.role` but never read by anything, so the key is silently ignored.
 - [ ] **Q045** `bobi/doctor.py:517` — `_check_policy` is a self-described 'deprecated compatibility wrapper for one release' with zero production callers, several releases after the…
-- [ ] **Q053** `bobi/history.py:15` — SESSIONS_DIR module constant is never referenced.
+- [x] **Q053** `bobi/history.py:15` — SESSIONS_DIR module constant is never referenced.
 - [ ] **Q013** `bobi/history.py:447` — context_for_events (49 lines) has zero production callers — only tests exercise it.
-- [ ] **Q048** `bobi/history.py:498` — start_background_indexer has zero callers anywhere in the repo, including tests.
-- [ ] **Q052** `bobi/inbox.py:102` — Inbox._closed is written in __init__ and close() but never read anywhere.
-- [ ] **Q094** `bobi/kb/store.py:174` — KBStore.kb_dir() and KBStore.db_path_for() static methods have zero callers in the repo, including tests.
-- [ ] **D083** `bobi/mcp/__init__.py:1` — bobi/mcp is an empty leftover package whose docstring claims 'Built-in MCP servers shipped with bobi' while it contains no servers and nothing…
-- [ ] **Q121** `bobi/memory.py:169` — reference_memory_path() has zero callers; the one place that needs the reference.md path (monitors/scheduler.py:1126) hand-builds it inline instead. *(unverified — re-verify first)*
+- [x] **Q048** `bobi/history.py:498` — start_background_indexer has zero callers anywhere in the repo, including tests.
+- [x] **Q052** `bobi/inbox.py:102` — Inbox._closed is written in __init__ and close() but never read anywhere.
+- [x] **Q094** `bobi/kb/store.py:174` — KBStore.kb_dir() and KBStore.db_path_for() static methods have zero callers in the repo, including tests.
+- [x] **D083** `bobi/mcp/__init__.py:1` — bobi/mcp is an empty leftover package whose docstring claims 'Built-in MCP servers shipped with bobi' while it contains no servers and nothing…
+- [x] **Q121** `bobi/memory.py:169` — reference_memory_path() has zero callers; the one place that needs the reference.md path (monitors/scheduler.py:1126) hand-builds it inline instead. *(unverified — re-verify first)*
 - [ ] **Q030** `bobi/memory.py:381` — The policy->long_term_memory deprecation aliases (memory.MAX_POLICY_CHARS/load_policy/format_policy_prompt, paths.policy_path/policy_cursor_path,…
 - [ ] **Q014** `bobi/monitors/scheduler.py:567` — The rest of the curator→sleep-cycle compat layer is five releases past its stated one-release window: _default_spawn_curator (567), the spawn_curator…
 - [ ] **Q055** `bobi/monitors/scheduler.py:1097` — Three deprecated curator wrappers — _load_curator_prompt (1097), _on_curator_result (1414), _publish_policy_updated (1452) — have zero callers…
 - [ ] **Q057** `bobi/monitors/script_cache_checks.py:1046` — approve_pending's scripts_dir parameter is never read — the body resolves all paths via _pending_path/_pin/_scripts_dir — yet tests pass a directory…
-- [ ] **Q095** `bobi/paths.py:91` — paths.agent_runtime_root is a pure alias of agent_run_root with zero callers.
-- [ ] **Q118** `bobi/paths.py:183` — compose_lock_path() has zero callers; every compose-lock consumer builds `<dest>/compose-lock.json` inline against its own base dir. *(unverified — re-verify first)*
-- [ ] **Q119** `bobi/paths.py:282` — worktrees_dir() points at state_dir()/worktrees, a location nothing in the codebase uses — workflow worktrees actually live under the repo's… *(unverified — re-verify first)*
+- [x] **Q095** `bobi/paths.py:91` — paths.agent_runtime_root is a pure alias of agent_run_root with zero callers.
+- [x] **Q118** `bobi/paths.py:183` — compose_lock_path() has zero callers; every compose-lock consumer builds `<dest>/compose-lock.json` inline against its own base dir. *(unverified — re-verify first)*
+- [x] **Q119** `bobi/paths.py:282` — worktrees_dir() points at state_dir()/worktrees, a location nothing in the codebase uses — workflow worktrees actually live under the repo's… *(unverified — re-verify first)*
 - [ ] **Q102** `bobi/prompts/resolver.py:194` — _load_policy_section() is a private 'deprecated alias for one release' with zero callers — a private name cannot serve external compat, so it was…
-- [ ] **Q081** `bobi/sdk.py:42` — TERMINAL_STATUSES tuple is defined but never read anywhere.
-- [ ] **Q079** `bobi/sdk.py:71` — Module constant CLAUDE_CLI has zero readers anywhere and forces a shutil.which() at import time.
-- [ ] **Q113** `bobi/sdk.py:198` — sdk.state_dir() wrapper (delegating to paths.state_dir) has zero callers. *(plausible — re-verify first)*
+- [f] state:falsified **Q081** `bobi/sdk.py:42` — TERMINAL_STATUSES tuple is defined but never read anywhere.
+- [x] **Q079** `bobi/sdk.py:71` — Module constant CLAUDE_CLI has zero readers anywhere and forces a shutil.which() at import time.
+- [x] **Q113** `bobi/sdk.py:198` — sdk.state_dir() wrapper (delegating to paths.state_dir) has zero callers. *(plausible — re-verify first)*
 - [ ] **Q082** `bobi/sdk.py:456` — SessionRegistry.log_path's only caller is its own unit test.
 - [ ] **Q031** `bobi/service.py:709` — service.restart_team has zero callers anywhere in the repo, including tests.
 - [ ] **Q054** `bobi/session.py:17` — session.py imports hashlib (line 17) and Path (line 22) but uses neither.
@@ -595,6 +595,10 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   Only three parts were pack-specific (the email-service section, the agent-name assertion, the workflow-list assertion); the pack was merely the team it installed.
   Retargeting it to a surviving pack was offered and **declined by Zach on 2026-08-05** in favour of deleting it.
   The manual rendering-fidelity step it carried for the Slack soak was preserved into the `tests/integration/test_slack_live.py` docstring, which had pointed at the battery's Section 3c; the pytest half of that soak is unaffected.
+
+- **2026-08-06** (Lane B build session): **Phase 5 batch 1 — 14 items shipped, and one item falsified.** Every item was re-derived by grep against `main` @ `14d9276` before deletion, not trusted from the appendix; line numbers had drifted on several (Q045 517→731, D061 348→321, Q030's memory aliases 381 exact). Shipped `[x]`: Q080, Q078, Q077, Q053, Q048, Q052, Q094, D083, Q121, Q095, Q118, Q119, Q113, Q079. All fourteen were zero-consumer at HEAD; the suite ran **4262 passed / 1 skipped** with **zero test edits**, matching the pre-change baseline exactly, which is the deletion proof for this batch.
+  **Q081 is marked `[f]` — the finding is false at HEAD.** It claims `sdk.TERMINAL_STATUSES` "is defined but never read anywhere". It has a real production consumer: `bobi/webapp/health.py:154` imports it and reads it at :160 to decide the status strip's `Exit` segment (`docs/AGENT_STATE.md`). The consumer post-dates the review tree (`58aba2c`), so the finding was true when written and is not now. **Do not delete `TERMINAL_STATUSES`.**
+  Two other appendix claims were confirmed stale in the same sweep and are recorded here so the next batch does not re-derive them: **Q032's `chat` clause is false** (three consumers — `bobi/validate.py:222`, `bobi/webapp/overview.py:125`, `bobi/setup/open_mode.py:250` — and both surviving packs declare `chat: slack`; Phase 5's own preamble defers to exactly this test, so only `registries` and `default_role` are deletable there), and Phase 5's "Q3's flag removal once decided" **already shipped** in Lane A as Q122/D064, so it carries no work.
 
 ## Notes
 
