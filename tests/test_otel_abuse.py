@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import http.server
 import threading
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -82,11 +83,6 @@ def stub():
     for server in servers:
         server.shutdown()
         server.server_close()
-
-
-@pytest.fixture(autouse=True)
-def _reset_emission_cap(monkeypatch):
-    monkeypatch.setattr(otel_export, "_emitted", 0)
 
 
 # ------------------------------------------------ credential origin-pinning
@@ -281,6 +277,72 @@ def test_a_hostile_partial_success_message_is_sanitized(monkeypatch):
     assert message.count("X") <= otel_export.MAX_REMOTE_EXCERPT_BYTES
 
 
+# ------------------------------- the validators, without a CLI layer in the way
+
+
+@pytest.mark.parametrize("key", [
+    "service.name", "bobi.fleet", "bobi.agent", "host.id", "cloud.region",
+    "k8s.node.name", "le", "quantile", "__name__",
+])
+def test_validate_attrs_rejects_reserved_keys(key):
+    from bobi.otel.validate import OtelUsageError, validate_attrs
+
+    with pytest.raises(OtelUsageError, match="reserved"):
+        validate_attrs([f"{key}=forged"])
+
+
+def test_validate_attrs_enforces_count_and_size_bounds():
+    from bobi.otel.validate import OtelUsageError, validate_attrs
+
+    with pytest.raises(OtelUsageError, match="At most 20"):
+        validate_attrs([f"k{i}=v" for i in range(21)])
+    with pytest.raises(OtelUsageError, match="64 bytes"):
+        validate_attrs([f"{'k' * 65}=v"])
+    with pytest.raises(OtelUsageError, match="256 bytes"):
+        validate_attrs([f"k={'v' * 257}"])
+    # Byte bounds, not character bounds: a 3-byte glyph counts as three.
+    with pytest.raises(OtelUsageError, match="256 bytes"):
+        validate_attrs([f"k={'€' * 100}"])
+
+
+def test_validate_attrs_splits_on_the_first_equals_and_takes_the_last_duplicate():
+    from bobi.otel.validate import validate_attrs
+
+    assert validate_attrs(["note=a=b", "q=1", "q=2"]) == {"note": "a=b", "q": "2"}
+
+
+@pytest.mark.parametrize("name", ["m" * 65, "metric name", "metric-name", "m{x}", ""])
+def test_validate_metric_name_rejects_unbounded_names(name):
+    from bobi.otel.validate import OtelUsageError, validate_metric_name
+
+    with pytest.raises(OtelUsageError):
+        validate_metric_name(name)
+
+
+@pytest.mark.parametrize("raw", ["lots", "inf", "-inf", "nan", ""])
+def test_validate_value_rejects_non_finite_and_non_numeric(raw):
+    from bobi.otel.validate import OtelUsageError, validate_value
+
+    with pytest.raises(OtelUsageError):
+        validate_value(raw)
+
+
+def test_an_oversized_log_body_is_refused_not_truncated(bobi_install, monkeypatch, stub):
+    """The body reads from stdin by design, so without a bound it is the one
+    unbounded field in a list that caps everything else."""
+    from bobi.otel.validate import MAX_BODY_BYTES
+
+    collector = stub()
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT",
+                       collector.url.replace("/v1/metrics", ""))
+    result = _run("log", "x" * (MAX_BODY_BYTES + 1))
+    assert result.exit_code != 0
+    assert "8192-byte bound" in result.output
+    # Refused, not clipped: a silently truncated observation reads as complete.
+    assert collector.received == []
+    assert _run("log", "x" * MAX_BODY_BYTES).exit_code == 0
+
+
 # ---------------------------------------------------- reserved keys, bounds
 
 
@@ -334,22 +396,31 @@ def test_over_long_attribute_key_and_value_are_rejected(bobi_install, monkeypatc
     assert _run("metric", "m", "1", "--attr", f"k={'v' * 257}").exit_code != 0
 
 
-def test_the_emission_cap_bounds_a_retry_loop(monkeypatch):
-    """Loud failures with no backoff mean a model that fails retries; the cap
-    is what stops a transient 429 from becoming a hot loop."""
-    monkeypatch.setattr("bobi.http.post", lambda url, **kw: None)
-    monkeypatch.setattr(otel_export, "MAX_EMISSIONS_PER_PROCESS", 3)
-    monkeypatch.setattr(otel_export, "_post", lambda cfg, payload: None)
-    cfg = otel_config.SignalConfig(signal="metrics", url="https://c.test/v1/metrics")
-    for _ in range(3):
-        otel_export.export_metric(cfg, otel_export.MetricSpec(name="m", value=1), {})
-    with pytest.raises(otel_export.OtelEmissionCapExceeded):
-        otel_export.export_metric(cfg, otel_export.MetricSpec(name="m", value=1), {})
+def test_v1_bounds_shape_not_rate_deliberately():
+    """The absence of an emission cap is a DECISION, not an oversight.
+
+    A per-process counter would bound nothing - each invocation is a fresh
+    process emitting one data point - and a cross-invocation limiter needs the
+    durable state the no-spool decision rules out. Assert the absence so a
+    later reader does not "restore" an incoherent control, and assert the
+    residual is documented where an operator will read it.
+    """
+    assert not hasattr(otel_export, "MAX_EMISSIONS_PER_PROCESS")
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "OTEL.md").read_text()
+    assert "bound shape, not rate" in doc
+    assert "write-only" in doc and "ingest quota" in doc
 
 
-def test_there_is_no_endpoint_flag(bobi_install):
-    """An --endpoint flag would make `check` a convenient SSRF/port prober,
-    and env-only is what makes origin-pinning meaningful."""
-    for command in ("metric", "log", "check"):
-        result = _run(command, "--help")
-        assert "--endpoint" not in result.output
+def test_there_is_no_endpoint_option_on_any_command():
+    """An --endpoint flag would make `check` a convenient SSRF/port prober, and
+    env-only configuration is what makes origin-pinning meaningful.
+
+    Inspects the declared parameters rather than `--help` text, so a later
+    ergonomics change cannot quietly reintroduce it behind a hidden option.
+    """
+    from bobi.cli import otel as otel_group
+
+    banned = {"endpoint", "url", "target", "host"}
+    for name, command in otel_group.commands.items():
+        declared = {p.name for p in command.params}
+        assert not (declared & banned), f"otel {name} declares {declared & banned}"

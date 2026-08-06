@@ -57,6 +57,13 @@ Severities: `debug`, `info`, `warn`, `error`, `fatal`. The body is sent
 verbatim and is never parsed as JSON. Omit the argument to read it from stdin,
 so a multi-line body needs no shell quoting.
 
+**The body leaves this box for a third-party vendor**, so keep it to the
+observation itself: no secrets, no credentials, no personal data, and no
+pasted file contents. It is capped at 8192 bytes and an over-long body is
+refused, not truncated - record the summary here and leave the detail in the
+transcript. This is where a varying id belongs (a ticket, a run, a URL), since
+those must not go in a metric attribute.
+
 ## Attributes
 
 ```bash
@@ -84,9 +91,9 @@ output.
 
 An export that does not reach the collector exits non-zero and says why. There
 is no retry and no spool: a failed emission is gone. Do **not** loop on
-failure - there is a per-process emission cap that will start rejecting your
-calls, and a retry storm against a struggling collector is the failure mode
-this design is guarding against. Report the failure and move on.
+failure. Nothing in bobi rate-limits you, so a retry storm reaches your
+operator's collector in full - it is the failure mode this design most depends
+on you not causing. Report the failure and move on.
 
 Unconfigured (no endpoint on this box) is reported separately from a real
 export failure. Treat it as "this operator does not collect telemetry", not as

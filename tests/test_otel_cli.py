@@ -124,10 +124,19 @@ def test_a_log_body_may_start_with_a_dash(configured, sent):
 
 
 def test_temporality_with_gauge_is_a_usage_error_not_a_silent_ignore(configured, sent):
+    """Keyed off whether --temporality was TYPED, not off its value."""
     result = _run("metric", "m", "1", "--kind", "gauge", "--temporality", "delta")
     assert result.exit_code != 0
     assert "Gauge carries no aggregation temporality" in result.output
     assert not sent
+
+
+def test_a_gauge_without_temporality_is_accepted(configured, sent):
+    """The option's `delta` default is always present. Rejecting on the VALUE
+    would reject every gauge, including the one `otel check --send` emits."""
+    result = _run("metric", "m", "1", "--kind", "gauge")
+    assert result.exit_code == 0, result.output
+    assert sent[0]["spec"].kind == "gauge"
 
 
 def test_cumulative_temporality_reaches_the_spec(configured, sent):

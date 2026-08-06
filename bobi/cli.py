@@ -1871,69 +1871,21 @@ def subagents_cancel(ref):
 # above: no @main.group, no re-parent list entry, and therefore no window in
 # which `bobi otel` leaks as a top-level command.
 
-_OTEL_METRIC_NAME_RE = re.compile(r"^[a-zA-Z0-9_.]{1,64}$")
-# Framework attributes are the labels this feature exists to make trustworthy,
-# and `le`/`quantile`/`__name__` corrupt Prometheus series on ingest.
-_OTEL_RESERVED_ATTR_PREFIXES = ("service.", "bobi.", "host.", "cloud.", "k8s.", "__")
-_OTEL_RESERVED_ATTR_KEYS = {"le", "quantile"}
-_OTEL_MAX_ATTRS = 20
-_OTEL_MAX_ATTR_KEY_BYTES = 64
-_OTEL_MAX_ATTR_VALUE_BYTES = 256
 
+@contextmanager
+def _otel_usage_errors():
+    """Surface the library's input bounds as click's own usage errors.
 
-def _otel_parse_attrs(pairs: tuple[str, ...]) -> dict[str, str]:
-    """Parse repeated ``--attr k=v`` into a bounded, non-forging attribute set.
-
-    Splits on the FIRST ``=`` so a value may contain more. Every value is
-    emitted as a string; no numeric or boolean inference happens anywhere.
+    The validators live in ``bobi.otel.validate`` so the abuse suite can prove
+    them without a CLI layer; this is the one place their error type is
+    translated.
     """
-    attrs: dict[str, str] = {}
-    for pair in pairs:
-        key, sep, value = pair.partition("=")
-        if not sep:
-            raise click.UsageError(f"--attr must be key=value, got {pair!r}.")
-        key = key.strip()
-        if not key:
-            raise click.UsageError(f"--attr key must not be empty, got {pair!r}.")
-        if key in _OTEL_RESERVED_ATTR_KEYS or key.startswith(_OTEL_RESERVED_ATTR_PREFIXES):
-            raise click.UsageError(
-                f"--attr key {key!r} is reserved. Framework identity "
-                "(service.*, bobi.*, host.*, cloud.*, k8s.*) is stamped by bobi, "
-                "and le/quantile/__* corrupt Prometheus series."
-            )
-        if len(key.encode("utf-8")) > _OTEL_MAX_ATTR_KEY_BYTES:
-            raise click.UsageError(
-                f"--attr key {key!r} exceeds {_OTEL_MAX_ATTR_KEY_BYTES} bytes."
-            )
-        if len(value.encode("utf-8")) > _OTEL_MAX_ATTR_VALUE_BYTES:
-            raise click.UsageError(
-                f"--attr value for {key!r} exceeds "
-                f"{_OTEL_MAX_ATTR_VALUE_BYTES} bytes."
-            )
-        attrs[key] = value
-    if len(attrs) > _OTEL_MAX_ATTRS:
-        raise click.UsageError(
-            f"At most {_OTEL_MAX_ATTRS} --attr pairs; got {len(attrs)}. "
-            "Attributes become time-series labels: high cardinality is a "
-            "billing and availability hazard."
-        )
-    return attrs
+    from bobi.otel.validate import OtelUsageError
 
-
-def _otel_parse_value(raw: str) -> int | float:
-    """``1`` is an int and ``1.0`` a double - different wire types, by design."""
-    import math
-
-    text = raw.strip()
-    if re.fullmatch(r"[+-]?\d+", text):
-        return int(text)
     try:
-        value = float(text)
-    except ValueError:
-        raise click.UsageError(f"<value> must be a number, got {raw!r}.") from None
-    if not math.isfinite(value):
-        raise click.UsageError(f"<value> must be finite, got {raw!r}.")
-    return value
+        yield
+    except OtelUsageError as exc:
+        raise click.UsageError(str(exc)) from None
 
 
 def _otel_context(ctx) -> tuple[Path, str]:
@@ -2006,8 +1958,8 @@ def otel():
 @click.option("--kind", type=click.Choice(["counter", "gauge", "histogram"]),
               default="counter", help="Instrument type (default: counter)")
 @click.option("--temporality", type=click.Choice(["delta", "cumulative"]),
-              default=None,
-              help="Aggregation temporality for counter/histogram (default: delta)")
+              default="delta",
+              help="Aggregation temporality for counter/histogram")
 @click.option("--attr", "attrs", multiple=True,
               help="Attribute as key=value. Repeatable. Always sent as a string.")
 @click.option("--unit", default="", help="UCUM unit, e.g. s, By, 1")
@@ -2027,20 +1979,24 @@ def otel_metric(ctx, name, value, kind, temporality, attrs, unit, description):
         bobi agent eng otel metric tickets.total 128 --temporality cumulative
     """
     from bobi.otel.export import MetricSpec, export_metric
+    from bobi.otel.validate import validate_attrs, validate_metric_name, validate_value
 
-    if not _OTEL_METRIC_NAME_RE.match(name):
-        raise click.UsageError(
-            "Metric name must match ^[a-zA-Z0-9_.]{1,64}$ - an unbounded name "
-            "is an active-series explosion, not a label."
-        )
-    if temporality is not None and kind == "gauge":
+    # Whether --temporality was TYPED, not what it holds: the option always
+    # carries its `delta` default, so a value check would reject every gauge.
+    if (kind == "gauge"
+            and ctx.get_parameter_source("temporality")
+            is click.core.ParameterSource.COMMANDLINE):
         # Gauge's only field is `data_points`; there is nowhere for a
         # temporality to go, so accepting one would silently drop it.
         raise click.UsageError(
             "--temporality does not apply to --kind gauge: a Gauge carries no "
             "aggregation temporality on the wire."
         )
-    parsed = _otel_parse_value(value)
+
+    with _otel_usage_errors():
+        validate_metric_name(name)
+        parsed = validate_value(value)
+        attributes = validate_attrs(attrs)
     if kind == "counter" and parsed < 0:
         raise click.UsageError(
             "--kind counter is monotonic; use --kind gauge for a value that "
@@ -2051,10 +2007,10 @@ def otel_metric(ctx, name, value, kind, temporality, attrs, unit, description):
         name=name,
         value=parsed,
         kind=kind,
-        temporality=temporality or "delta",
+        temporality=temporality,
         unit=unit,
         description=description,
-        attributes=_otel_parse_attrs(attrs),
+        attributes=attributes,
     )
     cfg, resource = _otel_resolve(ctx, "metrics")
     _otel_send(export_metric, cfg, spec, resource)
@@ -2083,16 +2039,18 @@ def otel_log(ctx, body, severity, attrs):
         printf 'line one\\nline two\\n' | bobi agent eng otel log
     """
     from bobi.otel.export import LogSpec, export_log
+    from bobi.otel.validate import validate_attrs, validate_body
 
     if body is None:
         stdin = click.get_text_stream("stdin")
         if stdin.isatty():
             raise click.UsageError("Provide the log body as an argument or on stdin.")
         body = stdin.read()
-    if not body.strip():
-        raise click.UsageError("Provide the log body as an argument or on stdin.")
 
-    spec = LogSpec(body=body, severity=severity, attributes=_otel_parse_attrs(attrs))
+    with _otel_usage_errors():
+        body = validate_body(body)
+        attributes = validate_attrs(attrs)
+    spec = LogSpec(body=body, severity=severity, attributes=attributes)
     cfg, resource = _otel_resolve(ctx, "logs")
     _otel_send(export_log, cfg, spec, resource)
     click.echo(f"Recorded {severity} log to {cfg.url}")

@@ -21,11 +21,12 @@ from bobi.otel.config import SignalConfig
 
 CONTENT_TYPE = "application/x-protobuf"
 
-# A one-shot CLI an LLM may call several times per turn, with loud failures and
-# no backoff: a model that observes a failure retries, so the cap is what stops
-# a transient 429 from becoming a hot loop, and `otel metric "m$(uuidgen)" 1`
-# in a loop from becoming an active-series explosion.
-MAX_EMISSIONS_PER_PROCESS = 100
+# There is deliberately NO emission-rate cap here. Each invocation is a fresh
+# process emitting one data point, so a per-process counter would bound
+# nothing, and a cross-invocation limiter needs exactly the durable state the
+# disk-spool rejection rules out. v1 bounds SHAPE (bobi/otel/validate.py), not
+# RATE; docs/OTEL.md records the residual and the mitigations that do work - a
+# revocable write-only token and a collector- or vendor-side ingest quota.
 
 # Remote bytes reach the agent's context through stderr, so they are a
 # second-order prompt-injection channel and a context-exhaustion lever.
@@ -42,15 +43,9 @@ SEVERITY_NUMBERS = {
 
 _CONTROL_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|[\x00-\x08\x0b-\x1f\x7f]")
 
-_emitted = 0
-
 
 class OtelExportError(Exception):
     """An export did not satisfy the success contract."""
-
-
-class OtelEmissionCapExceeded(OtelExportError):
-    """This process already emitted its allowance."""
 
 
 @dataclass(frozen=True)
@@ -311,23 +306,11 @@ def _origin_of(url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}" if parts.scheme else parts.netloc
 
 
-def _count_emission() -> None:
-    global _emitted
-    if _emitted >= MAX_EMISSIONS_PER_PROCESS:
-        raise OtelEmissionCapExceeded(
-            f"This process already emitted {MAX_EMISSIONS_PER_PROCESS} OTLP "
-            "signals, its per-process cap. Emit fewer, coarser measurements."
-        )
-    _emitted += 1
-
-
 def export_metric(cfg: SignalConfig, spec: MetricSpec, resource_attrs: dict[str, str]) -> None:
     """Build and POST one metric. Raises :class:`OtelExportError` on failure."""
-    _count_emission()
     _post(cfg, build_metric_request(spec, resource_attrs).SerializeToString())
 
 
 def export_log(cfg: SignalConfig, spec: LogSpec, resource_attrs: dict[str, str]) -> None:
     """Build and POST one log record. Raises :class:`OtelExportError` on failure."""
-    _count_emission()
     _post(cfg, build_log_request(spec, resource_attrs).SerializeToString())

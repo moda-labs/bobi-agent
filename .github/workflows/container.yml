@@ -38,6 +38,14 @@ on:
       - "bobi/tool_library.py"
       - "bobi/dep_bootstrap.py"
       - "bobi/supervisor/**"
+      # The OTLP exporter and its collector proof (#978). Without these four
+      # the lane fires on the PR that adds them (`pyproject.toml` and
+      # `bobi/cli.py` are already listed) and never again on an exporter
+      # change - the #909 vacuous-lane shape exactly.
+      - "bobi/otel/**"
+      - "bobi/http.py"
+      - "bobi/identity.py"
+      - "tests/integration/test_otel_collector.py"
   pull_request:
     branches: [main]
     # `labeled`/`unlabeled` so adding the `ci:live` label triggers a run that
@@ -158,8 +166,8 @@ jobs:
         run: |
           python scripts/assert_junit_ran.py otel-collector.xml \
             --expect-passed 4 \
-            --require test_collector_accepts_a_metric_and_renders_its_identity \
-            --require test_collector_accepts_a_log_record \
+            --require test_collector_accepts_metric \
+            --require test_collector_accepts_log \
             --require test_collector_rejects_a_bare_resource_metrics_body \
             --require test_the_cli_reaches_the_collector_end_to_end
 

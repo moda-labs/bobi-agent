@@ -222,7 +222,6 @@ def sent(monkeypatch):
         return box["response"]
 
     monkeypatch.setattr("bobi.http.post", fake_post)
-    monkeypatch.setattr(otel_export, "_emitted", 0)
     return calls, box
 
 
@@ -398,18 +397,6 @@ def test_per_signal_headers_override_the_base(tmp_path, monkeypatch):
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "api-key=logs")
     assert otel_config.resolve_config(tmp_path, "metrics").headers == {"api-key": "base"}
     assert otel_config.resolve_config(tmp_path, "logs").headers == {"api-key": "logs"}
-
-
-# ------------------------------------------------------------ emission cap
-
-
-def test_per_process_emission_cap_is_enforced(sent, monkeypatch):
-    monkeypatch.setattr(otel_export, "MAX_EMISSIONS_PER_PROCESS", 2)
-    cfg = _cfg()
-    otel_export.export_metric(cfg, MetricSpec(name="m", value=1), RESOURCE)
-    otel_export.export_metric(cfg, MetricSpec(name="m", value=1), RESOURCE)
-    with pytest.raises(otel_export.OtelEmissionCapExceeded):
-        otel_export.export_metric(cfg, MetricSpec(name="m", value=1), RESOURCE)
 
 
 # -------------------------------------------------------------- sanitizing

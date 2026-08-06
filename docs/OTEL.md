@@ -257,19 +257,37 @@ input reaching the agent's context.
 It is capped at 200 bytes, stripped of control characters and ANSI escapes, and
 prefixed with the literal `remote response (untrusted):`.
 
-### Bounds
+### Bounds, and what they do not bound
 
 Metric names match `^[a-zA-Z0-9_.]{1,64}$`; at most 20 attributes, keys <=64
-bytes and values <=256 bytes; values must be finite; `service.*`, `bobi.*`,
-`host.*`, `cloud.*`, `k8s.*`, `le`, `quantile`, and `__*` attribute keys are
-rejected.
-There is a per-process emission cap.
+bytes and values <=256 bytes; log bodies <=8192 bytes (refused, never
+truncated); values must be finite; `service.*`, `bobi.*`, `host.*`, `cloud.*`,
+`k8s.*`, `le`, `quantile`, and `__*` attribute keys are rejected.
 
-These are cost controls as much as security ones.
-Failures here are loud and there is no backoff, so a model that observes a
-failure retries; the cap is what keeps a transient 429 from becoming a hot loop,
-and the name bound is what keeps `otel metric "m$(uuidgen)" 1` from becoming an
-active-series explosion on your bill.
+**These bound shape, not rate, and that is deliberate.**
+Read the residual plainly before you enable this:
+
+- The name regex constrains *shape*, not *distinctness*: `uuidgen | tr -d -`
+  passes it.
+- Nothing bounds distinct attribute **values**, which is where cardinality
+  actually explodes.
+- There is no emission-rate limit. Each invocation is a fresh process emitting
+  one data point, so a per-process cap would bound nothing, and a
+  cross-invocation limiter needs exactly the durable state the no-spool
+  decision rules out.
+- Failures are loud with no backoff, so a model that observes a failure
+  retries - as a fresh process each time.
+
+The mitigations that actually work are operator-side, and you should have both
+before pointing a fleet at a metered backend:
+
+1. A **revocable, write-only, per-instance** ingest token, so a runaway is
+   stopped by revoking one credential rather than by redeploying agents.
+2. A **collector- or vendor-side ingest quota** - a rate limit on the receiver,
+   or a spend cap on the tenant. Running your own collector in front of the
+   vendor is the cheapest place to put one.
+
+Rate limiting inside bobi is a deferred follow-up.
 
 ## What this is not
 

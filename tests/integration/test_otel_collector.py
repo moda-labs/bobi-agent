@@ -199,18 +199,16 @@ def collector(tmp_path_factory):
 def exporting(collector, tmp_path, monkeypatch):
     """Point the real exporter at the running collector."""
     from bobi.otel import config as otel_config
-    from bobi.otel import export as otel_export
 
     for name in list(os.environ):
         if name.startswith("OTEL_"):
             monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint)
-    monkeypatch.setattr(otel_export, "_emitted", 0)
     return otel_config
 
 
 @requires_collector
-def test_collector_accepts_a_metric_and_renders_its_identity(
+def test_collector_accepts_metric(
     collector, exporting, tmp_path
 ):
     from bobi.otel.export import MetricSpec, export_metric
@@ -248,7 +246,7 @@ def test_collector_accepts_a_metric_and_renders_its_identity(
 
 
 @requires_collector
-def test_collector_accepts_a_log_record(collector, exporting, tmp_path):
+def test_collector_accepts_log(collector, exporting, tmp_path):
     from bobi.otel.export import LogSpec, export_log
 
     marker = f"collector log probe {os.getpid()}"

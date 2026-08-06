@@ -39,8 +39,8 @@ DEPLOY_MCP_CALL = "test_deployed_worker_mcp_tool_call"
 DEPLOY_MCP_CLOSED = "test_deployed_worker_mcp_route_is_closed_without_a_token"
 # The OTLP lane (#978) spends no credentials, but it is gated the same way -
 # every test skips without a collector - so it carries the same ran-assertion.
-OTEL_METRIC = "test_collector_accepts_a_metric_and_renders_its_identity"
-OTEL_LOG = "test_collector_accepts_a_log_record"
+OTEL_METRIC = "test_collector_accepts_metric"
+OTEL_LOG = "test_collector_accepts_log"
 OTEL_WRONG_TYPE = "test_collector_rejects_a_bare_resource_metrics_body"
 OTEL_CLI = "test_the_cli_reaches_the_collector_end_to_end"
 
