@@ -343,17 +343,12 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         return JSONResponse({"dir": str(target),
                              "teams": open_mode.list_teams_in(target)})
 
-    # Internal/test packs that shouldn't surface as user-facing templates.
-    _HIDDEN_TEMPLATES = {"dogfood-content-review"}
-
     @app.get("/api/registry")
     def registry_teams() -> dict:
         # Network-backed and lazy — only fetched to populate the intro's
         # template list, so the intro screen never blocks on it.
         from bobi.setup import open_mode
-        teams = [t for t in open_mode.list_registry_teams(project)
-                 if t.get("name") not in _HIDDEN_TEMPLATES]
-        return {"teams": teams}
+        return {"teams": open_mode.list_registry_teams(project)}
 
     @app.get("/api/browse")
     def browse(request: Request) -> JSONResponse:
