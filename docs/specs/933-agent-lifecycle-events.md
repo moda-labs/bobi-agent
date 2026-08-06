@@ -136,6 +136,37 @@ $ rg -n 'state_path\((.*)\) / "' bobi/*.py bobi/**/*.py
 `long_term_memory_cursor`, `sessions`, and one re-read of
 `manager-health.port`. Plus the `events-*.jsonl` glob (`bobi/cli.py:1906`,
 `bobi/doctor.py:638`), which `lifecycle.jsonl` does not match.
+Neither does the `lifecycle.jsonl.lock` sibling `file_lock` will create (§5.2).
+
+**F11. Both `TeamRuntime` implementers are in-tree, so widening the ABC is
+safe.**
+
+```
+$ rg -n 'TeamRuntime\)|\(TeamRuntime' bobi/ tests/ agents/
+```
+
+Two subclasses, `LocalRuntime` (`bobi/webapp/runtime.py:551`) and
+`EventBusRuntime` (`bobi/webapp/event_bus.py:175`); every other hit is an
+exception type deriving from `TeamRuntimeError`. No test defines a subclass.
+That is exactly the condition the ABC's own widening rule requires before a new
+`@abstractmethod` may be added (`bobi/webapp/runtime.py:89-104`), so §5.6's
+`events()` cannot break an implementer this repo cannot see.
+
+**F12. The host's own deployment identity leaks into tests.**
+A container running as a deployed agent exports `BOBI_INSTANCE`, `BOBI_FLEET`,
+and `FLY_APP_NAME`, and `resolve_deployment_identity` reads exactly those
+(`bobi/supervisor/identity.py:70-91`). On such a host,
+`tests/test_supervisor_alerting.py::TestSoftAlert::test_second_charged_restart_posts_once`
+and `::TestExhaustionAlert::test_at_cap_alert_is_marked_terminal` fail against
+unmodified `main`, because they assert on a fixture instance name and get the
+host's. Proven rather than inferred: re-running those two with
+`env -u BOBI_INSTANCE -u BOBI_AGENT -u FLY_APP_NAME` passes both.
+
+This matters here because §5.1 reuses that same function for the journal's
+`deployment` block, so it is a standing requirement on the tests this spec
+adds (§7), not a curiosity. With those vars cleared, the function returns
+`{"fleet": "default", "instance": "<run-root basename>", "platform":
+"unknown", ...}` - the local case §5.1 depends on, confirmed by running it.
 
 **F9. `bobi agent events` has no test coverage.**
 `rg -n '_show_events' tests/` returns nothing.
@@ -228,7 +259,9 @@ A journal entry **is** a `fleet/lifecycle` payload
 - `deployment` comes from `resolve_deployment_identity`
   (`bobi/supervisor/identity.py:60-91`), which already resolves for an
   unsupervised local agent (`fleet: "default"`, `instance` from the run-root
-  basename, `platform: "unknown"`). One definition, not two.
+  basename, `platform: "unknown"`) - run, not assumed (F12). One definition,
+  not two. Note F12's other half: the same function makes the host's identity
+  leak into any test that does not clear the env.
   `bobi/manager_lifecycle.py` imports it **function-locally**, matching the repo's
   pervasive lazy-import style, so a core module never pays the sidecar's import
   cost at startup. Rejected alternative: hoist identity to `bobi/identity.py`
@@ -271,6 +304,18 @@ Serializing every writer against the same lock closes that race; there is no
 version of this design where a plain append and an atomic rewrite coexist
 safely on one path.
 
+`fsutil.file_lock` is the right primitive here rather than a hand-rolled one
+for a reason worth stating, because it is the reason the fix works at all: it
+takes the lock on a **companion `<name>.lock` file, not on the target**, and
+its own docstring gives the rationale - "the target is replaced by rename on
+every write, [so] a lock held on the old inode would protect nothing once the
+first writer landed". Verified by reading the running implementation, not the
+call site.
+
+Consequence to expect: the journal creates a sibling
+`run/state/lifecycle.jsonl.lock`. That is a new file in `state/` and it
+collides with nothing (F8).
+
 The cost is nil in practice. Lifecycle writes are a handful per day, not per
 second, and the lock is held for one `json.dumps` and one `write`.
 
@@ -278,9 +323,23 @@ second, and the lock is held for one `json.dumps` and one `write`.
 worker, and the supervisor can all append.
 
 **Every write is fail-open.** A read-only state directory, a full disk, or a
-lock timeout is logged and swallowed. A journal failure must never fail a
+lock failure is logged and swallowed. A journal failure must never fail a
 start, a stop, or a supervisor restart decision - the record exists to explain
 operations, not to gate them.
+
+The `try` must wrap **the lock acquisition too**, not just the write inside it.
+`file_lock` does `lock_path.parent.mkdir(...)` and `open(lock_path, "a+")`
+before it yields, so on a read-only state directory it raises *before* any
+guarded body runs. The naive shape
+
+```python
+with file_lock(path):        # raises here, uncaught
+    try: ...
+    except Exception: log.debug(...)
+```
+
+is fail-*closed* on exactly the case the rule exists for, and it would take a
+start down. The guard goes outside.
 
 **Retention** is `LIFECYCLE_RETENTION_S = 48 * 60 * 60`, chosen to equal the
 Worker's `LIFECYCLE_TTL_S` (`event-server/worker/src/fleet.ts:120`) so the two
@@ -466,6 +525,24 @@ new frontend code, zero new components, and no design-system decision**, which
 is exactly why it does not reopen F10's non-goal. The status strip's job is
 already "is this thing running"; why it last changed belongs there.
 
+**The segment is omitted, never faked, when the journal is empty.** That is not
+a preference; the suite already enforces it.
+`test_webapp_health.py::test_never_run_agent_has_no_segments` asserts
+`segments == []` for a fresh agent and says why in its own comment: "A fresh
+agent's strip says STOPPED and nothing else. That is the whole truth about it -
+inventing SINCE/EXIT/WAS UP would not be." A never-run agent has an empty
+journal, so it keeps showing nothing, and that test passes unchanged.
+
+**Blast radius, measured:** adding this segment breaks **exactly one** test -
+`tests/test_webapp_health.py:188`, which asserts the exact ordered key list
+`["uptime", "manager_pid", "live_runs", "last_activity"]`. It must be updated
+in the same commit, and where `last_transition` lands in that list is a
+display-order decision to make deliberately rather than by append.
+The other three `segments == []` assertions do **not** break, checked
+individually rather than assumed: the two endpoint/never-run tests run against
+a bare `bobi_install` (a fresh isolated home with no prior run, hence an empty
+journal), and `TestNormalize` exercises only the defaults `normalize` fills.
+
 **`GET /api/agents/{name}/events`.** The event-queue read model, added beside
 the existing `/runs` route (`bobi/webapp/server.py:190`) with a
 `TeamRuntime.events()` abstract method implemented by both runtimes in the same
@@ -640,6 +717,22 @@ $ rg -n -g 'bobi/**/*.py' '\.lifecycle\(|_emit_lifecycle\(|_note_restart\('
 
 Unit and integration, in `tests/`. The acceptance criteria map one-to-one.
 
+**Standing requirement on every test below that touches the `deployment`
+block:** clear `BOBI_INSTANCE`, `BOBI_AGENT`, `BOBI_FLEET`, and `FLY_APP_NAME`
+with `monkeypatch.delenv(..., raising=False)`. Per F12 the host's own identity
+otherwise leaks in, and the failure mode is the bad one: a test that passes for
+the wrong reason on one host and fails on another. Two tests on `main` already
+fail this way on a deployed host.
+
+This lands as a shared `conftest.py` fixture so no future test has to remember,
+and that carries **one named side effect** rather than a silent drive-by: the
+two `test_supervisor_alerting.py` tests F12 identifies stop failing when the
+suite is run on a deployed host. Verified as safe to include: no workflow under
+`.github/workflows/` exports any of those variables, so CI behaviour is
+unchanged either way and this only makes local runs on a deployed box honest.
+Flagged because a reviewer seeing two unrelated tests change colour deserves to
+know it was deliberate.
+
 **`tests/test_manager_lifecycle_journal.py`** (new)
 - append then read round-trips the canonical payload shape
 - two concurrent appenders both land, neither line is torn
@@ -685,6 +778,10 @@ are where `LocalRuntime` and `EventBusRuntime` are exercised today; there is no
 - `?limit=` clips and sets `truncated`
 - the `last_transition` segment appears when the journal has entries and is
   absent (not faked) when it is empty, per `segments`' best-effort contract
+- **update** `test_webapp_health.py:188`'s ordered key list to include
+  `last_transition` at its chosen display position - the one test this spec
+  knowingly breaks (§5.6), updated in the same commit rather than discovered by
+  a red CI run
 
 **`tests/test_webapp_server.py`** (extend)
 - `GET /api/agents/{name}/events` returns 200 with the documented shape and
@@ -779,6 +876,21 @@ challenge checked against real code rather than argued from memory.
 | m4 | Does `--fresh` wipe the journal? | Verified it does not (`bobi/service.py:145-155`); stated in §5.2. |
 | m5 | Does the hosted `events()` need the spend cache's TTL treatment? | No - one KV read, no box round-trip. Stated in §5.6. |
 | m6 | `/events` returns only one `kind` today; why not `/lifecycle`? | Rejected alternative recorded in §5.6 with the reason. |
+
+### Second pass
+
+After the first pass the spec's premises were re-checked **by running them**
+rather than re-reading them, using the worktree's venv. Four became findings
+the design now carries, and re-reviewing the revised text produced two more.
+
+| # | Finding | Resolution |
+|---|---|---|
+| V1 | Is widening `TeamRuntime` with `events()` actually safe, or is there an implementer this repo cannot see? | Ran the grep: exactly two subclasses, both in-tree. Recorded as F11 - the ABC's widening rule is satisfied. |
+| V2 | Does `file_lock` survive the prune's inode swap, or does B1's fix only look right? | It locks a **companion `.lock` file**, precisely so it does. §5.2 now records that, and the new `lifecycle.jsonl.lock` sibling it creates. |
+| V3 | Does `resolve_deployment_identity` really resolve for an unsupervised local agent? | Ran it with the fleet env cleared: `fleet: "default"`, instance from the run-root basename. §5.1 no longer asserts this, it cites a run. |
+| V4 | How many tests does the new `segments` entry break? | Exactly one - `test_webapp_health.py:188`'s ordered key list. The three other `segments == []` assertions were each checked and do not break. §5.6 and §7 both name it, so it is updated in the same commit rather than found by red CI. |
+| V5 | The host's identity leaks into tests via the same function §5.1 reuses. | New F12, with a standing `delenv` requirement on §7's tests and a shared fixture, whose one side effect is named. |
+| V6 | Re-reading revised §5.2: a `try` *inside* `with file_lock(...)` is fail-CLOSED, because the lock acquisition itself raises first on a read-only state dir. | §5.2 now shows the wrong shape explicitly and states the guard goes outside. This would have taken a start down on exactly the case the fail-open rule exists for. |
 
 ## 11. Tracking
 
