@@ -643,6 +643,10 @@ parallel cut — the sequential estimate is one agent session, not calendar
 scale. One lane means one dispatch issue, one PR, one review, and no fuse or
 convergence gate.
 
+Lane A's dispatch issue is **#978**, filed 2026-08-05. (The table's
+`#TBD` cell predates the split and is frozen by the insertion-only rule;
+this line supersedes it.)
+
 ## Amendments
 
 - **2026-08-05** (create): plan drafted.
@@ -655,6 +659,10 @@ convergence gate.
   `tool_library`); registration switches to `@agent.group("otel")` per the
   `subagents` pattern; a Security model section was added; and the identity
   resolver is promoted to `bobi/identity.py`.
+- **2026-08-05** (split): approved and merged as `b1aca66`; split into one
+  lane, dispatched as #978 (marker mode `solo`). No parallel cut was justified
+  — the phases are strictly sequential and the sequential estimate is a single
+  agent session.
 
 ## Notes
 
