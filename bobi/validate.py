@@ -74,11 +74,6 @@ class ValidationResult:
     ok: bool
     checks: list[CheckResult] = field(default_factory=list)
 
-    @property
-    def errors(self) -> list[CheckResult]:
-        """All failed checks — both blocking (required) and warnings."""
-        return [c for c in self.checks if not c.ok]
-
     def format(self) -> str:
         unicode = supports_unicode()
         lines = []

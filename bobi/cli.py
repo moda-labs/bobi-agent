@@ -319,38 +319,6 @@ def _resolve_agent_pack(name: str, project_path: Path) -> Path | None:
     return None
 
 
-def _list_agent_packs(project_path: Path) -> list[tuple[str, str]]:
-    """List available agent teams with their source."""
-    packs: dict[str, str] = {}
-    for agents_dir, label in [
-        (paths.agent_cache_dir(), "cached"),
-        (paths.agents_root(), "installed"),
-        (project_path / "agents", "local"),
-    ]:
-        if agents_dir.is_dir():
-            for d in sorted(agents_dir.iterdir()):
-                if (d / "agent.yaml").is_file() or (d / "src" / "agent.yaml").is_file():
-                    packs[d.name] = label
-    return [(name, source) for name, source in sorted(packs.items())]
-
-
-
-def _run_from_config(project_path: Path, cfg: "Config",
-                     extra_subscribe: list[str] | None = None,
-                     foreground: bool = False) -> None:
-    """Start an agent from a Config object.
-
-    When *foreground* is True the process is running as PID 1 in a
-    container: logs go to stdout/stderr, the health endpoint is started,
-    and SIGTERM triggers a graceful shutdown within the container's grace
-    period.
-    """
-    from bobi.service import run_manager_from_config
-    return run_manager_from_config(
-        project_path, cfg, extra_subscribe=extra_subscribe, foreground=foreground
-    )
-
-
 @main.command(context_settings={"ignore_unknown_options": True})
 @click.argument("start_args", nargs=-1, type=click.UNPROCESSED)
 @click.pass_context
@@ -967,58 +935,6 @@ def _clear_manager_session(project_path: Path) -> None:
     click.echo("Cleared manager session — starting fresh.")
 
 
-def _find_pid_path() -> Path | None:
-    """Find the PID file for the selected Bobi Agent's manager."""
-    project_path = _detect_project_root()
-    if project_path:
-        p = _project_state_dir(project_path) / "manager.pid"
-        if p.exists():
-            return p
-    return None
-
-
-def _stop_manager_pid(pid_path: Path, force: bool) -> None:
-    """Kill the manager process at pid_path."""
-    import signal
-    import time
-
-    try:
-        pid = int(pid_path.read_text().strip())
-    except (ValueError, OSError):
-        click.echo("Invalid PID file — cleaning up.")
-        pid_path.unlink(missing_ok=True)
-        return
-
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        click.echo(f"Process {pid} not found — cleaning up stale PID file.")
-        pid_path.unlink(missing_ok=True)
-        return
-    except PermissionError:
-        click.echo(f"No permission to signal process {pid}.", err=True)
-        return
-
-    sig = signal.SIGKILL if force else signal.SIGTERM
-    click.echo(f"Stopping bobi (pid {pid})...")
-    os.kill(pid, sig)
-
-    for _ in range(30):
-        time.sleep(0.2)
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            pid_path.unlink(missing_ok=True)
-            click.echo("Stopped.")
-            return
-
-    if not force:
-        click.echo("Process didn't exit — try: bobi agent <name> stop --force")
-    else:
-        pid_path.unlink(missing_ok=True)
-        click.echo("Killed.")
-
-
 @main.command()
 @click.option("--force", is_flag=True, help="Send SIGKILL if SIGTERM doesn't work")
 def stop(force):
@@ -1535,8 +1451,7 @@ def _find_transcript(session: str) -> Path | None:
     from bobi.sdk import get_registry, session_log_path
 
     if session == "manager":
-        project = _detect_project_root()
-        session = _manager_session_name(project) if project else "bobi-manager"
+        session = _manager_session_name(_detect_project_root())
 
     # Primary: session dir log
     session_log = session_log_path(session)
@@ -1646,10 +1561,6 @@ def _print_transcript_entry(line: str) -> None:
 def status():
     """Show active agents — manager + engineer sub-agents."""
     project_path = _detect_project_root()
-
-    if not project_path:
-        click.echo("No Bobi Agent runtime selected. Use `bobi agents list`, then `bobi agent <name> status`.")
-        raise SystemExit(1)
 
     from bobi.service import team_status
 
@@ -2750,9 +2661,6 @@ def monitor_add(name, interval, at_times, tz, days, notify, description, event, 
     from .runtime_guard import with_mutable_runtime_package
 
     project_path = _detect_project_root()
-    if not project_path:
-        click.echo("No Bobi Agent runtime selected.", err=True)
-        raise SystemExit(1)
 
     at_list = list(at_times)
     day_list = [d for d in _re.split(r"[,\s]+", days.strip()) if d]
@@ -2816,13 +2724,10 @@ def monitor_pause(name):
     from .runtime_guard import with_mutable_runtime_package
 
     project_path = _detect_project_root()
-    if project_path:
-        with with_mutable_runtime_package(project_path):
-            paused = MonitorRegistry.pause(name, project_path)
-    else:
+    with with_mutable_runtime_package(project_path):
         paused = MonitorRegistry.pause(name, project_path)
     if paused:
-        where = str(paths.package_dir(project_path) / "monitors.yaml") if project_path else "package/monitors.yaml"
+        where = str(paths.package_dir(project_path) / "monitors.yaml")
         click.echo(f"Paused monitor '{name}' (enabled: false in {where})")
     else:
         click.echo(f"No monitor named '{name}' found.", err=True)
@@ -2843,10 +2748,7 @@ def monitor_remove(name):
     from .runtime_guard import with_mutable_runtime_package
 
     project_path = _detect_project_root()
-    if project_path:
-        with with_mutable_runtime_package(project_path):
-            result = MonitorRegistry.remove(name, project_path)
-    else:
+    with with_mutable_runtime_package(project_path):
         result = MonitorRegistry.remove(name, project_path)
     if result == "removed":
         click.echo(f"Removed monitor '{name}'.")
@@ -3044,9 +2946,6 @@ def event_server_stop():
     """Stop the local event server."""
     import signal
     project_path = _detect_project_root()
-    if not project_path:
-        click.echo("Not inside a bobi project.", err=True)
-        raise SystemExit(1)
     pid_file = _project_state_dir(project_path) / "event-server.pid"
     port_file = _event_server_port_file(project_path)
     if not pid_file.exists():
@@ -3523,7 +3422,7 @@ def agents_browse():
         click.echo("Could not fetch remote registry.", err=True)
         raise SystemExit(1)
 
-    cached_packs = list_cached(project_path) if project_path else []
+    cached_packs = list_cached(project_path)
     cached = {p["name"]: str(p["version"]) for p in cached_packs}
 
     click.echo("Available agent teams:\n")

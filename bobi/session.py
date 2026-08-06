@@ -14,13 +14,11 @@ subscribes to (the manager also subscribes to external resource topics).
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import os
 import queue
 import time
 import threading
-from pathlib import Path
 
 from bobi.brain import AssistantText, TurnResult, get_brain
 from bobi.inbox import Inbox, Message
