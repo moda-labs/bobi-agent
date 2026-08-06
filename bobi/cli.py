@@ -1914,7 +1914,7 @@ def _otel_resolve(ctx, signal: str):
         raise SystemExit(1)
     if cfg.credential_withheld:
         click.echo(
-            f"Withheld configured OTLP headers: the endpoint in use ({cfg.url}) "
+            f"Withheld configured OTLP headers: the endpoint in use ({cfg.safe_url}) "
             "is not the origin run/.env's credential was configured for.",
             err=True,
         )
@@ -2014,7 +2014,7 @@ def otel_metric(ctx, name, value, kind, temporality, attrs, unit, description):
     )
     cfg, resource = _otel_resolve(ctx, "metrics")
     _otel_send(export_metric, cfg, spec, resource)
-    click.echo(f"Recorded {name}={parsed} ({kind}) to {cfg.url}")
+    click.echo(f"Recorded {name}={parsed} ({kind}) to {cfg.safe_url}")
 
 
 # Same reason as `metric`: an agent-authored body may legitimately start with
@@ -2053,7 +2053,7 @@ def otel_log(ctx, body, severity, attrs):
     spec = LogSpec(body=body, severity=severity, attributes=attributes)
     cfg, resource = _otel_resolve(ctx, "logs")
     _otel_send(export_log, cfg, spec, resource)
-    click.echo(f"Recorded {severity} log to {cfg.url}")
+    click.echo(f"Recorded {severity} log to {cfg.safe_url}")
 
 
 @otel.command("check")
@@ -2098,7 +2098,7 @@ def otel_check(ctx, send):
 
     for signal in ("metrics", "logs"):
         cfg = configs.get(signal)
-        click.echo(f"{signal + ' url:':<14}{cfg.url if cfg else '(unresolved)'}")
+        click.echo(f"{signal + ' url:':<14}{cfg.safe_url if cfg else '(unresolved)'}")
 
     metrics_cfg = configs.get("metrics")
     if metrics_cfg is not None:
@@ -2136,7 +2136,7 @@ def otel_check(ctx, send):
         attributes={},
     )
     _otel_send(export_metric, metrics_cfg, spec, resource_attributes(root, name))
-    click.echo(f"sent bobi.otel.check to {metrics_cfg.url}")
+    click.echo(f"sent bobi.otel.check to {metrics_cfg.safe_url}")
 
 
 @main.command()

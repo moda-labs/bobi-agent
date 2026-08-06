@@ -64,6 +64,11 @@ class SignalConfig:
     # The var the headers came from, for `otel check`'s name-only rendering.
     headers_var: str = ""
 
+    @property
+    def safe_url(self) -> str:
+        """The URL with any ``user:password@`` removed. Use for ALL output."""
+        return redact_url_userinfo(self.url)
+
 
 def signal_endpoint_var(signal: str) -> str:
     return f"OTEL_EXPORTER_OTLP_{signal.upper()}_ENDPOINT"
@@ -110,6 +115,30 @@ def _endpoint_from(env: dict[str, str], signal: str) -> str | None:
     # Operators paste Grafana Cloud's documented `https://.../otlp/` with the
     # trailing slash; naive concatenation gives `//v1/metrics` -> 404.
     return base.rstrip("/") + _SIGNAL_PATHS[signal]
+
+
+def redact_url_userinfo(url: str) -> str:
+    """Strip ``user:password@`` from a URL before it is echoed anywhere.
+
+    Every message this package prints names the endpoint, and that output
+    becomes a ``tool_result`` in the agent's transcript and is rendered in the
+    operator console. A collector behind HTTP basic auth is configured as
+    ``https://user:token@collector.example/otlp``, so echoing the URL verbatim
+    would leak the credential on the BENIGN path - the same leak the
+    header-name-only rule exists to prevent, through a different field.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return "<unparseable url>"
+    if not parts.username and not parts.password:
+        return url
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urllib.parse.urlunsplit(
+        (parts.scheme, f"<redacted>@{host}", parts.path, parts.query, parts.fragment)
+    )
 
 
 def _origin(url: str | None) -> tuple[str, str, int | None] | None:

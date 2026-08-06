@@ -274,20 +274,20 @@ def _post(cfg: SignalConfig, payload: bytes) -> None:
             follow_redirects=False,
         )
     except httpx.HTTPError as exc:
-        raise OtelExportError(f"OTLP export to {cfg.url} failed: {exc}") from exc
+        raise OtelExportError(f"OTLP export to {cfg.safe_url} failed: {exc}") from exc
 
     if 300 <= response.status_code < 400:
         location = response.headers.get("location", "")
         target = _origin_of(location) or "an undisclosed host"
         raise OtelExportError(
-            f"OTLP export to {cfg.url} was redirected ({response.status_code}) "
+            f"OTLP export to {cfg.safe_url} was redirected ({response.status_code}) "
             f"to {target}; refusing to forward credentials. Point "
             f"OTEL_EXPORTER_OTLP_ENDPOINT at the final URL."
         )
 
     if not (200 <= response.status_code < 300):
         raise OtelExportError(
-            f"OTLP export to {cfg.url} failed with HTTP "
+            f"OTLP export to {cfg.safe_url} failed with HTTP "
             f"{response.status_code}. {sanitize_remote(response.content)}"
         )
 

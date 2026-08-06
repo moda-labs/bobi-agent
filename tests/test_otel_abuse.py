@@ -214,6 +214,26 @@ def test_check_prints_header_names_never_values(bobi_install, monkeypatch, capfd
         assert SECRET not in stream
 
 
+def test_a_credential_embedded_in_the_endpoint_is_never_echoed(bobi_install, monkeypatch):
+    """A collector behind HTTP basic auth is configured as
+    `https://user:token@host/otlp`, and every message this command prints names
+    the endpoint. Echoing it verbatim would leak the credential on the BENIGN
+    path - the header-name-only rule via a different field."""
+    _write_env(
+        bobi_install,
+        OTEL_EXPORTER_OTLP_ENDPOINT=f"https://ingest:{SECRET}@collector.example/otlp",
+    )
+    check = _run("check")
+    assert check.exit_code == 0, check.output
+    assert SECRET not in check.output
+    assert "<redacted>@collector.example" in check.output
+
+    # And on the failure path, where the URL is named again.
+    export = _run("metric", "m", "1")
+    assert export.exit_code == 1
+    assert SECRET not in export.output
+
+
 def test_a_failing_export_never_echoes_the_credential(bobi_install, stub):
     front = stub(behavior="redirect", redirect_to="https://elsewhere.example/v1/metrics")
     _write_env(
