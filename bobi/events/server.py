@@ -562,22 +562,20 @@ def ensure_running(port: int, webhook_secret: str | None = None,
         env["BOBI_ES_SLACK_SIGNING_SECRET"] = resolved_slack_signing_secret
     if resolved_linear_webhook_secret:
         env["BOBI_ES_LINEAR_WEBHOOK_SECRET"] = resolved_linear_webhook_secret
-    # WhatsApp inbound verification (#656): the runtime .env carries the
-    # unprefixed vars (the connector card captures them); the local server
-    # reads only BOBI_ES_*.
-    if env.get("WHATSAPP_APP_SECRET"):
-        env["BOBI_ES_WHATSAPP_APP_SECRET"] = env["WHATSAPP_APP_SECRET"]
-    if env.get("WHATSAPP_VERIFY_TOKEN"):
-        env["BOBI_ES_WHATSAPP_VERIFY_TOKEN"] = env["WHATSAPP_VERIFY_TOKEN"]
-    # Discord Gateway (#2): the local server holds the persistent inbound
-    # WebSocket, so it needs the bot credential at boot. Same unprefixed ->
-    # BOBI_ES_* re-map as WhatsApp.
-    if env.get("DISCORD_BOT_TOKEN"):
-        env["BOBI_ES_DISCORD_BOT_TOKEN"] = env["DISCORD_BOT_TOKEN"]
-    if env.get("DISCORD_APPLICATION_ID"):
-        env["BOBI_ES_DISCORD_APPLICATION_ID"] = env["DISCORD_APPLICATION_ID"]
-    if env.get("DISCORD_MESSAGE_CONTENT"):
-        env["BOBI_ES_DISCORD_MESSAGE_CONTENT"] = env["DISCORD_MESSAGE_CONTENT"]
+    # The runtime .env carries these unprefixed (the connector cards capture
+    # them); the local server reads only BOBI_ES_*. WhatsApp (#656) needs them
+    # for inbound webhook verification; Discord (#2) because the local server
+    # holds the persistent inbound Gateway WebSocket and needs the bot
+    # credential at boot. Adding the next channel's vars is one line here.
+    for var in (
+        "WHATSAPP_APP_SECRET",
+        "WHATSAPP_VERIFY_TOKEN",
+        "DISCORD_BOT_TOKEN",
+        "DISCORD_APPLICATION_ID",
+        "DISCORD_MESSAGE_CONTENT",
+    ):
+        if env.get(var):
+            env[f"BOBI_ES_{var}"] = env[var]
     if bind:
         env["BOBI_ES_BIND"] = bind
     if extra_env:
@@ -711,6 +709,20 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
 
     kept: list[str] = []
     unbacked: list[str] = []
+
+    def mark_unbacked(sub: str) -> None:
+        """Record a topic with no resource grant.
+
+        The four ways a topic ends up here (credential missing, registration
+        did not back it, transport error, server denied) share one rule, and
+        it lives here so a fifth cannot get it wrong: an unbacked topic is
+        always reported, and is kept in the subscription set only when this
+        call is not filtering.
+        """
+        unbacked.append(sub)
+        if not filter_unauthorized:
+            kept.append(sub)
+
     for sub in subscribe:
         service = sub.split(":", 1)[0] if ":" in sub else ""
         if service in ("github", "linear", "slack", "whatsapp", "discord") and ":" in sub:
@@ -730,9 +742,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                     "subscriptions (a resource grant is required, #488)",
                     service, sub, action,
                 )
-                unbacked.append(sub)
-                if not filter_unauthorized:
-                    kept.append(sub)
+                mark_unbacked(sub)
                 continue
         if service not in _RESOURCE_CRED_KEYS:
             # Non-global, or slack/whatsapp/discord (granted via their
@@ -752,9 +762,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                 "session's subscriptions (a resource grant is required, #488)",
                 service, sub, action,
             )
-            unbacked.append(sub)
-            if not filter_unauthorized:
-                kept.append(sub)
+            mark_unbacked(sub)
             continue
         try:
             granted = _authorize_one_resource(
@@ -766,9 +774,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                 "Resource authorize failed for %r: %s — %s",
                 sub, type(e).__name__, action,
             )
-            unbacked.append(sub)
-            if not filter_unauthorized:
-                kept.append(sub)
+            mark_unbacked(sub)
             continue
         if granted:
             kept.append(sub)
@@ -779,9 +785,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                 "%s credential cannot read it; %s subscriptions (#488)",
                 sub, service, action,
             )
-            unbacked.append(sub)
-            if not filter_unauthorized:
-                kept.append(sub)
+            mark_unbacked(sub)
     if unbacked:
         action = "dropped" if filter_unauthorized else "kept"
         log.warning(
@@ -937,55 +941,6 @@ def deregister(base_url: str, deployment_id: str, api_key: str) -> bool:
         return False
 
 
-def _slack_auth_info(token: str) -> tuple[str, str, str]:
-    """Resolve (team_id, bot_id, bot_user_id) from a bot token via auth.test."""
-    from bobi import http as pooled
-
-    try:
-        resp = pooled.get(
-            "https://slack.com/api/auth.test",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=5.0,
-        )
-        data = resp.json()
-        if data.get("ok"):
-            return (
-                data.get("team_id", "") or "",
-                data.get("bot_id", "") or "",
-                data.get("user_id", "") or "",
-            )
-    except Exception as e:  # best-effort — never block startup
-        log.debug("Slack auth.test failed during workspace registration: %s", e)
-    return "", "", ""
-
-
-def _slack_app_id(token: str, bot_id: str) -> str:
-    """Resolve api_app_id from a bot id via bots.info.
-
-    ``auth.test`` does not return the app id, but the event server keys each
-    bot's record by ``api_app_id`` (the only id unique per app AND present on
-    every inbound event) so two bots can share one workspace. Best-effort.
-    """
-    if not bot_id:
-        return ""
-    from urllib.parse import quote
-
-    from bobi import http as pooled
-
-    try:
-        resp = pooled.get(
-            f"https://slack.com/api/bots.info?bot={quote(bot_id)}",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=5.0,
-        )
-        data = resp.json()
-        if data.get("ok"):
-            return (data.get("bot", {}) or {}).get("app_id", "") or ""
-    except Exception as e:  # best-effort — server can fall back to bot_id keying
-        log.debug("Slack bots.info failed during workspace registration: %s", e)
-    return ""
-
-
 def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
                               bubble_key: str = "") -> list[str]:
     """Register the agent's Slack workspace(s) with the event server.
@@ -1019,10 +974,12 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
         app_token = str(cfg.credential("slack", "app_token") or "").strip()
     except Exception:
         app_token = ""
-    team_id, bot_id, bot_user_id = _slack_auth_info(token)
+    from bobi.slack import resolve_app_id, resolve_auth_info
+
+    team_id, bot_id, bot_user_id = resolve_auth_info(token)
     if not team_id:
         return []
-    app_id = _slack_app_id(token, bot_id)
+    app_id = resolve_app_id(token, bot_id)
     try:
         # Send bot_id explicitly when known: the server's own auth.test
         # fallback is best-effort, and a registration without bot_id

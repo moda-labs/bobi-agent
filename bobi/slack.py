@@ -4,7 +4,9 @@ Agent replies no longer go through here: since #190 Phase 2 they flow
 through the event server's channel gateway (``bobi/events/gateway.py``),
 which owns formatting and delivery. What remains is the direct-token
 path used by system notifications (supervisor sidecar, monitors, workflow
-orchestrator, auth bootstrap) and channel-reference resolution for setup.
+orchestrator, auth bootstrap), channel-reference resolution for setup, and
+workspace-identity lookups (``resolve_auth_info`` / ``resolve_app_id``) for
+registration, subscription auto-detection, and doctor.
 
 All errors are raised unless documented otherwise — callers decide
 how to handle failures.
@@ -237,6 +239,60 @@ def _workspace_label(token: str, *, timeout: float = 10) -> str:
     team = result.get("team") or "unknown workspace"
     team_id = result.get("team_id") or "unknown team"
     return f"{team} ({team_id})"
+
+
+def resolve_auth_info(token: str) -> tuple[str, str, str]:
+    """Resolve (team_id, bot_id, bot_user_id) from a bot token via auth.test.
+
+    Best-effort by contract, unlike the rest of this module: every caller
+    (workspace registration, subscription auto-detection, doctor, login-channel
+    bootstrap) treats an unresolvable identity as "not configured" rather than
+    an error, and registration in particular must never block startup. Returns
+    empty strings on any failure. Deliberately hand-builds the request instead
+    of using :func:`_slack_api`, which raises on a non-ok response.
+    """
+    try:
+        resp = pooled.get(
+            "https://slack.com/api/auth.test",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5.0,
+        )
+        data = resp.json()
+        if data.get("ok"):
+            return (
+                data.get("team_id", "") or "",
+                data.get("bot_id", "") or "",
+                data.get("user_id", "") or "",
+            )
+    except Exception as e:  # best-effort — never block startup
+        log.debug("Slack auth.test failed: %s", e)
+    return "", "", ""
+
+
+def resolve_app_id(token: str, bot_id: str) -> str:
+    """Resolve api_app_id from a bot id via bots.info.
+
+    ``auth.test`` does not return the app id, but the event server keys each
+    bot's record by ``api_app_id`` (the only id unique per app AND present on
+    every inbound event) so two bots can share one workspace. Best-effort,
+    same contract as :func:`resolve_auth_info`.
+    """
+    if not bot_id:
+        return ""
+    from urllib.parse import quote
+
+    try:
+        resp = pooled.get(
+            f"https://slack.com/api/bots.info?bot={quote(bot_id)}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5.0,
+        )
+        data = resp.json()
+        if data.get("ok"):
+            return (data.get("bot", {}) or {}).get("app_id", "") or ""
+    except Exception as e:  # best-effort — callers fall back to bot_id keying
+        log.debug("Slack bots.info failed: %s", e)
+    return ""
 
 
 def _user_matches(member: dict, handle: str) -> bool:

@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -1319,16 +1318,9 @@ def _resolve_repo_root(ctx: VariableContext) -> str | None:
     # remote URL contains the slug so we don't run git ops against the
     # wrong repo (e.g. an event for org/other-repo hitting the install root).
     if (root / ".git").exists():
-        try:
-            origin_url = subprocess.run(
-                ["git", "-C", str(root), "remote", "get-url", "origin"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            ).stdout.strip()
-        except Exception:
-            origin_url = ""
-        if _remote_matches_slug(origin_url, repo_slug):
+        from bobi.gitutil import origin_url
+
+        if _remote_matches_slug(origin_url(root), repo_slug):
             return str(root)
 
     return None
