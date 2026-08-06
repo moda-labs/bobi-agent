@@ -99,7 +99,6 @@ class Inbox:
         self._queue: queue.PriorityQueue[tuple[int, int, Message]] = (
             queue.PriorityQueue())
         self._counter = itertools.count()
-        self._closed = False
 
     def start(self) -> None:
         """Make the inbox addressable in-process for its drain loop."""
@@ -147,7 +146,6 @@ class Inbox:
 
     def close(self) -> None:
         """Stop being addressable; drop the queue."""
-        self._closed = True
         unregister_local_inbox(self.session_name)
 
 

@@ -73,10 +73,6 @@ def _resolve_cli_path() -> str:
     return "claude"
 
 
-# Resolved once at import for back-compat; get_cli_path() re-resolves on demand.
-CLAUDE_CLI = _resolve_cli_path()
-
-
 def compute_manifest_hash(project_path: Path | None = None) -> str:
     """Compute a stable hash of the install-manifest.json file list.
 
@@ -213,11 +209,6 @@ def session_log_path(name: str, *, root: Path | None = None) -> Path:
     p = _sessions_dir(root) / name / "log.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
-
-
-def state_dir(project_path: Path | None = None) -> Path:
-    """Runtime state directory (delegates to bobi.paths)."""
-    return paths.state_dir(project_path)
 
 
 def get_cli_path() -> str:

@@ -26,7 +26,6 @@ from typing import Any, AsyncIterator
 from bobi.brain.base import (
     ERROR_KIND_MAX_TURNS,
     AssistantText,
-    BrainCapabilities,
     BrainCost,
     BrainMessage,
     BrainSession,
@@ -99,7 +98,6 @@ class _ClaudeSession:
             DEFAULT_CONNECT_BACKOFF_SECONDS,
         )
 
-        last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             if attempt > 1:
                 self._client = self._new_client()
@@ -107,7 +105,6 @@ class _ClaudeSession:
                 await self._connect_once(prompt)
                 return
             except Exception as exc:
-                last_error = exc
                 should_retry = attempt < attempts and _is_initialize_timeout(exc)
                 if not should_retry:
                     raise
@@ -123,9 +120,6 @@ class _ClaudeSession:
                 )
                 if backoff > 0:
                     await asyncio.sleep(backoff * attempt)
-
-        if last_error is not None:
-            raise last_error
 
     async def _connect_once(self, prompt: str | None = None) -> None:
         # Match the historical call shape: a bare connect() when there is no

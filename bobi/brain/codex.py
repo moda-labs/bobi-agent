@@ -33,7 +33,6 @@ from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
     AssistantText,
-    BrainCapabilities,
     BrainCost,
     BrainMessage,
     BrainSession,

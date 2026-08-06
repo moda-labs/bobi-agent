@@ -12,7 +12,6 @@ from pathlib import Path
 
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
-SESSIONS_DIR = CLAUDE_DIR / "sessions"
 def _db_path() -> Path:
     from bobi import paths
     return paths.state_dir() / "history.db"
@@ -539,25 +538,3 @@ def context_for_events(events: list[dict], max_results: int = 5) -> str:
         lines.append("")
 
     return "\n".join(lines)
-
-
-def start_background_indexer(interval: int = 120):
-    """Start a background thread that re-indexes every `interval` seconds."""
-    import logging
-    import threading
-
-    log = logging.getLogger(__name__)
-
-    def _loop():
-        while True:
-            try:
-                stats = index()
-                if stats["new_messages"] > 0:
-                    log.debug(f"History indexer: +{stats['new_messages']} messages")
-            except Exception as e:
-                log.warning(f"History indexer error: {e}")
-            time.sleep(interval)
-
-    t = threading.Thread(target=_loop, daemon=True, name="history-indexer")
-    t.start()
-    return t

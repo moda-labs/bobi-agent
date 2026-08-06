@@ -102,9 +102,6 @@ def session_brain_label(kind: str | None = None) -> str:
 # stale ambient value from another installation cannot leak across sessions.
 BRAIN_ENV = "BOBI_BRAIN"
 _BRAIN_MODEL_ENV = "BOBI_BRAIN_MODEL"
-# Compatibility for older external code that imported the constant directly.
-# Bobi internals should use the helpers below so model env handling stays here.
-BRAIN_MODEL_ENV = _BRAIN_MODEL_ENV
 _BRAIN_EFFORT_ENV = "BOBI_BRAIN_EFFORT"
 
 
