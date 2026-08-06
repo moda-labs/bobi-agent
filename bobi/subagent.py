@@ -691,11 +691,6 @@ def _load_long_term_memory_prompt() -> str:
         return ""
 
 
-def _load_policy_prompt() -> str:
-    """Deprecated alias for one release."""
-    return _load_long_term_memory_prompt()
-
-
 def adhoc_session_name(task: str, name: str | None = None) -> str:
     """The session name :func:`spawn_adhoc` will use for this task.
 
@@ -1802,24 +1797,6 @@ def _parse_check_verdict(text: str) -> dict | None:
     "nothing found".
     """
     return _last_verdict_object(text, lambda p: "finding" in p)
-
-
-def _parse_check_output(text: str) -> tuple[bool, str, dict]:
-    """Extract the trailing JSON verdict as (finding, summary, details).
-
-    Back-compat shim over _parse_check_verdict: defaults to (False, "", {})
-    when no verdict is present. Callers that must distinguish a missing verdict
-    from an explicit finding=false should use _parse_check_verdict directly.
-    """
-    verdict = _parse_check_verdict(text)
-    if verdict is None:
-        return False, "", {}
-    finding = bool(verdict.get("finding"))
-    summary = str(verdict.get("summary", "")) if finding else ""
-    details = verdict.get("details") or {}
-    if not isinstance(details, dict):
-        details = {}
-    return finding, summary, details
 
 
 def run_check_blocking(

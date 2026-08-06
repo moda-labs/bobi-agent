@@ -45,7 +45,6 @@ from bobi.subagent import (
     _emit_session_finished,
     _emit_session_started,
     _make_defer_hook,
-    _parse_check_output,
     _parse_check_verdict,
     _parse_gate_verdict,
     _run_agent_supervised,
@@ -1349,53 +1348,6 @@ class TestBuildCheckPrompt:
     def test_includes_extra_context(self):
         prompt = _build_check_prompt("Check it", extra={"url": "https://x.test"})
         assert "https://x.test" in prompt
-
-
-# ---------------------------------------------------------------------------
-# Tests: _parse_check_output
-# ---------------------------------------------------------------------------
-
-class TestParseCheckOutput:
-    def test_finding_true_with_summary_and_details(self):
-        text = 'Looks bad.\n{"finding": true, "summary": "down", "details": {"status": 503}}'
-        finding, summary, details = _parse_check_output(text)
-        assert finding is True
-        assert summary == "down"
-        assert details == {"status": 503}
-
-    def test_finding_false(self):
-        finding, summary, details = _parse_check_output('All good.\n{"finding": false}')
-        assert finding is False
-        assert summary == ""
-        assert details == {}
-
-    def test_picks_last_verdict_json(self):
-        text = ('{"finding": false}\n'
-                'reconsidering...\n'
-                '{"finding": true, "summary": "actually down"}')
-        finding, summary, _ = _parse_check_output(text)
-        assert finding is True
-        assert summary == "actually down"
-
-    def test_ignores_non_verdict_json(self):
-        text = '{"unrelated": 1}\nfinal\n{"finding": true, "summary": "x"}'
-        finding, summary, _ = _parse_check_output(text)
-        assert finding is True
-        assert summary == "x"
-
-    def test_no_json_defaults_to_no_finding(self):
-        finding, summary, details = _parse_check_output("just prose, no json")
-        assert finding is False
-        assert summary == ""
-        assert details == {}
-
-    def test_empty_text(self):
-        assert _parse_check_output("") == (False, "", {})
-
-    def test_non_dict_details_coerced_to_empty(self):
-        text = '{"finding": true, "summary": "x", "details": "oops"}'
-        _, _, details = _parse_check_output(text)
-        assert details == {}
 
 
 class TestParseCheckVerdict:

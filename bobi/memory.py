@@ -371,13 +371,3 @@ def collect_legacy_journals(state_dir: Path, budget: int) -> str:
     return "\n\n".join(parts)
 
 
-# Deprecated aliases kept for one release while installed packages catch up.
-MAX_POLICY_CHARS = MAX_MEMORY_CHARS
-
-
-def load_policy(state_dir: Path) -> str:
-    return load_long_term_memory(state_dir)
-
-
-def format_policy_prompt(content: str) -> str:
-    return format_long_term_memory_prompt(content)

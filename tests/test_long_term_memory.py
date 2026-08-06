@@ -116,7 +116,7 @@ class TestFormatLongTermMemoryPrompt:
 
 class TestPolicyPaths:
     def test_policy_path_under_state(self, tmp_path):
-        assert paths.policy_path(tmp_path) == tmp_path / "state" / "long_term_memory.md"
+        assert paths.long_term_memory_path(tmp_path) == tmp_path / "state" / "long_term_memory.md"
 
     def test_cursor_path_under_state(self, tmp_path):
         assert paths.long_term_memory_cursor_path(tmp_path) == (
@@ -124,7 +124,7 @@ class TestPolicyPaths:
         )
 
     def test_policy_path_does_not_mkdir(self, tmp_path):
-        _ = paths.policy_path(tmp_path)
+        _ = paths.long_term_memory_path(tmp_path)
         # path-only constructor must not create the state dir (read-only safe)
         assert not (tmp_path / "state").exists()
 
@@ -185,8 +185,8 @@ class TestSubagentMemoryInjection:
 class TestDoctorPolicyCheck:
     def test_ok_when_no_policy(self, tmp_path):
         with patch("bobi.doctor.bound_root", return_value=tmp_path):
-            from bobi.doctor import _check_policy
-            r = _check_policy()
+            from bobi.doctor import _check_long_term_memory
+            r = _check_long_term_memory()
         assert r.ok
 
     def test_ok_when_sleep_cycle_due_tick_had_no_work(self, tmp_path):
@@ -196,8 +196,8 @@ class TestDoctorPolicyCheck:
             "sleep-cycle": {"last_run": "2026-07-08T13:33:00+00:00"}
         }))
         with patch("bobi.doctor.bound_root", return_value=tmp_path):
-            from bobi.doctor import _check_policy
-            r = _check_policy()
+            from bobi.doctor import _check_long_term_memory
+            r = _check_long_term_memory()
         assert r.ok
 
     def test_flags_sleep_cycle_spawn_without_policy_or_cursor(self, tmp_path):
@@ -210,8 +210,8 @@ class TestDoctorPolicyCheck:
             }
         }))
         with patch("bobi.doctor.bound_root", return_value=tmp_path):
-            from bobi.doctor import _check_policy
-            r = _check_policy()
+            from bobi.doctor import _check_long_term_memory
+            r = _check_long_term_memory()
         assert not r.ok
         assert "sleep-cycle has spawned" in r.detail
 
@@ -219,8 +219,8 @@ class TestDoctorPolicyCheck:
         state = paths.state_path(tmp_path)
         _write_policy(state, "## Facts\n\nsmall and bounded")
         with patch("bobi.doctor.bound_root", return_value=tmp_path):
-            from bobi.doctor import _check_policy
-            r = _check_policy()
+            from bobi.doctor import _check_long_term_memory
+            r = _check_long_term_memory()
         assert r.ok
         assert "long_term_memory.md present" in r.detail
 
@@ -229,7 +229,7 @@ class TestDoctorPolicyCheck:
         state = paths.state_path(tmp_path)
         _write_policy(state, "x" * (MAX_MEMORY_CHARS + 100))
         with patch("bobi.doctor.bound_root", return_value=tmp_path):
-            from bobi.doctor import _check_policy
-            r = _check_policy()
+            from bobi.doctor import _check_long_term_memory
+            r = _check_long_term_memory()
         assert not r.ok
         assert "over" in r.detail

@@ -186,8 +186,8 @@ class TestCheckPolicy:
             patch("bobi.doctor.bound_root", return_value=tmp_path),
             patch("bobi.history.messages_since", return_value=[]),
         ):
-            from bobi.doctor import _check_policy
-            r = _check_policy()
+            from bobi.doctor import _check_long_term_memory
+            r = _check_long_term_memory()
         assert r.ok
         assert "no long_term_memory.md yet" in r.detail
 
@@ -197,8 +197,8 @@ class TestCheckPolicy:
             patch("bobi.doctor.bound_root", return_value=tmp_path),
             patch("bobi.history.messages_since", return_value=rows),
         ):
-            from bobi.doctor import _check_policy
-            r = _check_policy()
+            from bobi.doctor import _check_long_term_memory
+            r = _check_long_term_memory()
         assert not r.ok
         assert "pending" in r.detail
         assert "sleep cycle appears stalled" in r.hint
