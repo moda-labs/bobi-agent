@@ -1,6 +1,6 @@
 # Agent-authored OTel telemetry (`bobi agent <name> otel`)
 
-> **Status:** Draft
+> **Status:** Approved
 > **Tracking issue:** moda-labs/bobi-agent#976 · **Created:** 2026-08-05 · **Last amended:** — (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
@@ -111,8 +111,12 @@ Fixed envelope decisions, so no implementer has to invent them:
   A negative `<value>` is a `click.UsageError` for `counter`.
 - `--kind gauge` → `Metric.gauge`. **`Gauge` carries no
   `aggregation_temporality` field** (verified: its only field is
-  `data_points`), so `--temporality` combined with `--kind gauge` is a
-  `click.UsageError`, never a silent ignore.
+  `data_points`), so `--temporality` **explicitly passed** alongside
+  `--kind gauge` is a `click.UsageError`, never a silent ignore. Detect that
+  with `ctx.get_parameter_source("temporality") is
+  ParameterSource.COMMANDLINE` — **not** by inspecting the value. The option's
+  `delta` default is always present, so a value check would reject every
+  gauge, including the one `otel check --send` emits.
 - `--kind histogram` → `Metric.histogram` with the selected temporality and a
   single-observation `HistogramDataPoint`: `count=1, sum=v, min=v, max=v,
   explicit_bounds=[], bucket_counts=[1]`. This is deliberately a degenerate
@@ -156,7 +160,7 @@ implemented at `bobi/config.py:98-111` and propagated to every spawned agent by
   supported. `grpc` is a **misconfigured** error naming the var — not a silent
   HTTP attempt against a gRPC port.
 - `OTEL_EXPORTER_OTLP_TIMEOUT` (milliseconds) honored; default **10000ms**,
-  matching `bobi/http.py:34` `_TIMEOUT`.
+  matching `bobi/http.py:33` `_TIMEOUT`.
 - `OTEL_EXPORTER_OTLP_HEADERS` (and `_METRICS_HEADERS` / `_LOGS_HEADERS`,
   which override per signal) parse per W3C Baggage: split on `,`, then
   `partition("=")` on the **first** `=`, then `urllib.parse.unquote` and strip
@@ -231,7 +235,7 @@ discipline would be importing the shape and not the rigor.
    successful.
 3. **No secrets in output.** `otel check` prints header **names** with values
    rendered as `<set>` — never a value. Tool output becomes a `tool_result` in
-   the transcript, which `docs/RUN_DRILLDOWNS.md:31-50` renders (clipped, not
+   the transcript, which `docs/RUN_DRILLDOWNS.md:38` renders, clipped at `:50-51` but not
    redacted) in the console. This leaks on the *benign* path: an agent
    debugging a 401 in good faith prints it.
 4. **Remote output is untrusted and bounded.** A non-2xx body (or
@@ -248,12 +252,21 @@ discipline would be importing the shape and not the rigor.
    ingest.
 6. **Bounded cardinality and volume.** Metric name must match
    `^[a-zA-Z0-9_.]{1,64}$`; at most 20 attributes; keys ≤64 bytes, values ≤256
-   bytes; numeric values must be finite; a per-process emission cap. Without
-   bounds, `otel metric "m$(uuidgen)" 1` in a loop is an active-series
-   explosion — a billing DoS and a tenant-wide degradation for every other
-   service on the stack. Note the loud-failure design *amplifies* this: a model
-   that observes a failure retries, and there is no backoff, so a transient 429
-   becomes a hot loop. The cap is what bounds it.
+   bytes; numeric values must be finite. Without bounds,
+   `otel metric "m$(uuidgen)" 1` in a loop is an active-series explosion — a
+   billing DoS and a tenant-wide degradation for every other service on the
+   stack. Note the loud-failure design *amplifies* this: a model that observes
+   a failure retries with no backoff, so a transient 429 becomes a hot loop
+   **of separate processes**. v1 bounds **shape, not rate**, and says so
+   deliberately: a per-process emission cap would bound nothing — each
+   invocation is a fresh process emitting one data point — and a
+   cross-invocation limiter needs exactly the durable state the spool
+   rejection rules out. Note too that the name regex constrains shape, not
+   distinctness (`uuidgen | tr -d -` passes it), and nothing bounds distinct
+   attribute *values*, which is where cardinality actually explodes. The
+   unbounded-rate residual is recorded in `docs/OTEL.md` with the mitigations
+   that do work — a revocable write-only token, and a collector- or
+   vendor-side ingest quota — and rate limiting is a deferred follow-up.
 7. **Credential scope guidance.** `docs/SECURITY.md:157-160` accepts that a
    prompt-injected agent could exfiltrate "its own **instance's** tokens,
    mitigated by scoped per-instance tokens." A Grafana Cloud OTLP token is
@@ -329,9 +342,9 @@ container-build verb.
   error-handling shape; `_validate_event_publish_topic` (`:1996-2016`) is the
   validation shape. Helpers: `_detect_project_root()` (`:73-88`), the
   stdin-or-flag payload idiom (`:1976-1993`), `ctx.obj["agent"]` (`:275`).
-- `bobi/http.py` — pooled `httpx.Client`; `follow_redirects=True` at `:50`,
-  `post()` at `:58-71` (accepts `content: bytes`, `headers`, `timeout`),
-  `_TIMEOUT` at `:34`. **Modified**: gains a `follow_redirects` parameter.
+- `bobi/http.py` — pooled `httpx.Client`; `follow_redirects=True` at `:51`,
+  `post()` at `:57-69` (accepts `content: bytes`, `headers`, `timeout`),
+  `_TIMEOUT` at `:33`. **Modified**: gains a `follow_redirects` parameter.
 - `bobi/supervisor/identity.py:60-91` — `resolve_deployment_identity()`.
   **Modified**: promoted per Decisions D3.
 - `bobi/supervisor/__init__.py` — eagerly imports `.config` and
@@ -341,23 +354,29 @@ container-build verb.
   tool_library install.
 - `bobi/env.py:125-165` — `child_agent_env()`.
 - `bobi/__version__.py` — `service.version` source.
-- `Dockerfile:72-74` — derives the image's install list from
+- `Dockerfile:72-74` (`builder-source`) and `:111-113` (`wheel`, a shipped
+  mode) — derive the image's install list from
   `[project.dependencies]` via `tomllib`, which is why a core dep needs **no**
   Dockerfile change.
 - `docs/SECURITY.md:157-160` — the accepted-risk paragraph this feature
   exceeds. **Modified** in Phase 4.
-- `docs/RUN_DRILLDOWNS.md:31-50` — tool results render in the console;
+- `docs/RUN_DRILLDOWNS.md:38` (render) and `:50-51` (clipping) — tool
+  results reach the console;
   the reason `check` must redact.
 - `tests/test_cli.py:41-49` (`test_top_level_help_is_machine_scoped`),
-  `:58-64` (`test_agent_help_lists_runtime_commands`).
+  `:59-64` (`test_agent_help_lists_runtime_commands`).
 - `tests/test_tool_guides.py:241` — hardcoded set of groups whose
   sub-subcommands are contract-checked; `otel` must be added or a typo'd
   command in `skills/bobi.md` ships unchecked.
 - `tests/test_import_boundaries.py:184-193` — `_CONTAINER_BUILD_RE`, scanning
   every file under `bobi/`.
-- `tests/conftest.py:46-63` — autouse `_isolate_environ` snapshots but does
+- `tests/conftest.py:46-62` — autouse `_isolate_environ` snapshots but does
   **not** clear `os.environ`.
-- `.github/workflows/ci.yml:87,282` — the unit jobs.
+- `.github/workflows/ci.yml:87` (`unit-tests`) and `:282`
+  (`integration-fast`, NOT a unit job) — both already
+  `pip install -e ".[dev,kb]"`, so a core dep needs no edit. Read-only here.
+- `.github/workflows/container.yml` — **Modified**: gains the collector-proof
+  step and four entries in its `paths: &image_paths` anchor (Phase 5).
 - `skills/bobi.md`, `CLAUDE.md` — reference surfaces.
 
 ### New
@@ -369,6 +388,9 @@ container-build verb.
   imports, so `otel check` works on a box where nothing else does.
 - `bobi/otel/resource.py` — resource attribute set from identity + agent/team
   + `OTEL_RESOURCE_ATTRIBUTES`.
+- `bobi/otel/validate.py` — metric-name / attribute / value validators
+  raising `OtelUsageError`. In the library rather than the CLI so the abuse
+  suite can prove them without a CLI layer.
 - `bobi/otel/export.py` — request envelope construction and POST. No existing
   module can absorb it: `events/publish` speaks bobi's signed-envelope
   protocol to bobi's own bus.
@@ -454,9 +476,13 @@ command fails, fix the cause and re-run.
 
 - [ ] `pytest tests/test_otel_export.py -q` green, with **no module-level
       skip** — the suite must execute in CI, not skip to green
-- [ ] `pytest tests/test_supervisor*.py tests/ -k identity -q` green — the
-      strictest gate in this phase, proving the D3 promotion changed no
-      sidecar behavior
+- [ ] `pytest tests/test_supervisor_alerting.py tests/test_supervisor_telemetry.py -q`
+      green — **unfiltered**, all 36 tests. The strictest gate in this phase,
+      proving the D3 promotion changed no sidecar behavior. Do NOT add `-k`:
+      it is global, so `pytest tests/test_supervisor*.py tests/ -k identity`
+      collects 11 tests and silently deselects 25 of the 36
+- [ ] `pytest tests/ -k identity -q` green (11 tests) — the identity surface
+      across the rest of the suite
 - [ ] `python -c "from bobi.supervisor.identity import resolve_deployment_identity"`
       still works (compatibility re-export intact)
 - [ ] Emitted bytes decode as `ExportMetricsServiceRequest` (not
@@ -475,10 +501,14 @@ command fails, fix the cause and re-run.
 - [ ] Origin-pinning: when the process-env endpoint disagrees with
       `run/.env`'s on scheme/host/port, send no configured headers and print
       the withheld-credential notice.
-- [ ] Reserved attribute keys rejected with `click.UsageError`; framework
-      attributes applied last.
-- [ ] Bounds: metric name `^[a-zA-Z0-9_.]{1,64}$`, ≤20 attributes, keys ≤64
-      bytes, values ≤256 bytes, finite numerics, per-process emission cap.
+- [ ] `bobi/otel/validate.py`: `validate_metric_name`
+      (`^[a-zA-Z0-9_.]{1,64}$`), `validate_attrs` (reserved-key set, ≤20
+      attributes, keys ≤64 bytes, values ≤256 bytes), `validate_value`
+      (finite). Each raises `OtelUsageError`. These live in the **library**,
+      not the CLI, so `tests/test_otel_abuse.py` proves them without a CLI
+      layer — Phase 3's handlers catch `OtelUsageError` and re-raise as
+      `click.UsageError`. Deliberately no emission-rate cap (Security §6).
+- [ ] Framework resource attributes applied last, after the `--attr` merge.
 
 **Validation gate**
 
@@ -486,7 +516,8 @@ command fails, fix the cause and re-run.
 - [ ] A stub that 307s to a second host receives **none** of the configured
       headers
 - [ ] Endpoint overridden via process env → stub receives zero configured
-      headers, and the notice is printed
+      headers, and the withheld-credential notice is present on the returned
+      result object (Phase 3 gates that the CLI prints it)
 - [ ] A 500 response whose body carries ASCII control characters and a fake
       instruction is capped at 200 bytes, stripped, and prefixed
       `remote response (untrusted):`
@@ -515,10 +546,14 @@ command fails, fix the cause and re-run.
       series; exit 0 only on the full success contract.
 - [ ] Docstrings end with the `Usage:` block convention — this is what the
       agent reads via `--help`.
-- [ ] Add `otel` to `tests/test_cli.py:58-64`'s asserted list, and `" otel"`
+- [ ] Add `otel` to `tests/test_cli.py:59-64`'s asserted list, and `" otel"`
       to the `removed` list in `test_top_level_help_is_machine_scoped`
       (`:41-49`) so its absence from top level is enforced, not incidental.
 - [ ] Add `otel` to the checked-group set at `tests/test_tool_guides.py:241`.
+- [ ] **No `--endpoint` / `--url` option on any of the three commands** — a
+      stated SSRF control and what makes origin-pinning meaningful. Asserted
+      in `tests/test_otel_abuse.py` by inspecting the commands' `.params`, so
+      a later ergonomics change cannot quietly reintroduce it.
 
 **Validation gate**
 
@@ -534,8 +569,21 @@ command fails, fix the cause and re-run.
 
 ### Phase 4 — Distribution and docs
 
-- [ ] `bobi/tool_library/otel/tool.yaml` — guide-only, no `install:`;
-      `success:` exercises the interpreter the CLI uses.
+- [ ] `bobi/tool_library/otel/tool.yaml` — guide-only, no `install:`. The
+      `success:` key is REQUIRED (`bobi/tool_library.py::_build_dependency`
+      raises `ComposeError` without it) and both obvious candidates are wrong:
+      `otel check` exits 1 when unconfigured, so build-verify would fail on
+      every box without an endpoint; and bare `python3` resolves to the system
+      interpreter under Codex tool shells, which `Dockerfile:259-264`
+      documents as sanitizing PATH and dropping `/opt/venv/bin`. Route the
+      probe through the `bobi` entrypoint so it proves the group loads and the
+      proto import resolves under the CLI's own interpreter, requiring no
+      endpoint — e.g.
+      `bobi agent "${BOBI_AGENT:-$(basename "$BOBI_ROOT")}" otel --help >/dev/null 2>&1`.
+- [ ] Confirm a guide-only entry does not dispatch the bootstrap agent at
+      build time — `docs/TOOL_LIBRARY.md:388` calls a guide-only dep
+      "materialized by the bootstrap agent", and this one has nothing to
+      materialize.
 - [ ] `bobi/tool_library/otel/guide.md` — agent-facing: metric vs log, the
       all-values-are-strings rule, reserved keys, bounds, that failures are
       loud, and **never interpolate a secret into `--attr`** (argv is visible
@@ -559,6 +607,9 @@ command fails, fix the cause and re-run.
 - [ ] `bobi skill bobi` output contains the `otel` section
 - [ ] A team declaring `tool_library: [otel]` expands to `tools/otel.md` in its
       installed package image
+- [ ] `docs/SECURITY.md`'s deployed-instance section names the OTLP
+      credential's stack-vs-instance scope, and `docs/OTEL.md`'s FIRST
+      operator instruction is to mint a write-only, per-instance ingest token
 
 ### Phase 5 — Collector verification
 
@@ -567,12 +618,27 @@ command fails, fix the cause and re-run.
       `verbosity: detailed`, POST one metric and one log through the real code
       path, assert the collector **accepted** both and that its rendered output
       carries the expected resource attributes.
-- [ ] Give it a CI home and name it in the plan: mark `docker` and add it to
-      the job that actually runs docker-marked tests (`container.yml`), since
-      `integration-fast` deselects that marker and an unhomed container test is
-      a third vacuous surface.
-- [ ] Guard the premise the way this repo already does: the lane must prove it
-      RAN, not skip to green.
+- [ ] Mark the test `docker` so `integration-fast` (`ci.yml:322`,
+      `-m "not claude and not docker"`) deselects it. The marker is NOT its CI
+      home — no job runs a docker-marked sweep.
+- [ ] Give it a real CI home: its OWN step in `container.yml`'s
+      `container-image` job, which runs one NAMED FILE
+      (`pytest tests/integration/test_container_image.py -m "docker and not live"`),
+      so a new file is otherwise picked up by nothing:
+      `pytest tests/integration/test_otel_collector.py -m docker -v --timeout=300
+      --junitxml=otel-collector.xml`. Unconditional — it spends no model credits.
+- [ ] Add `bobi/otel/**`, `bobi/http.py`, `bobi/identity.py`, and
+      `tests/integration/test_otel_collector.py` to `container.yml`'s
+      `paths: &image_paths` anchor. Without this the lane fires on THIS PR
+      (`pyproject.toml` and `bobi/cli.py` are already listed) and never again
+      on an exporter change — the #909 vacuous-lane shape exactly.
+- [ ] Prove it RAN: `python scripts/assert_junit_ran.py otel-collector.xml
+      --expect-passed 2 --require test_collector_accepts_metric
+      --require test_collector_accepts_log`, and extend
+      `tests/test_ci_live_wiring.py` so deleting the step fails CI.
+- [ ] Harness: `subprocess` + `docker run otel/opentelemetry-collector`
+      (`testcontainers` is not in `[dev]`). `_CONTAINER_BUILD_RE` scans only
+      `bobi/`, so a docker-invoking harness under `tests/` is fine.
 - [ ] Manual verification in an isolated `BOBI_HOME` against a real installed
       agent: emit a counter and a log, confirm identity attributes.
 
@@ -594,7 +660,9 @@ telemetry code exists).
 
 - `tests/test_otel_export.py` — envelope construction. Round-trips emitted
   bytes as `ExportMetricsServiceRequest` / `ExportLogsServiceRequest` and
-  asserts structure, resource attributes, temporality, severity mapping,
+  asserts structure, resource attributes, temporality, the degenerate
+  histogram data-point shape (`count=1, sum=v, min=v, max=v,
+  explicit_bounds=[], bucket_counts=[1]`), severity mapping,
   int-vs-double selection, omit-nulls, and the `partial_success` failure path.
   **No module-level skip**: `opentelemetry-proto` is a core dep, so a missing
   import is a genuine failure, not a reason to skip.
@@ -602,7 +670,7 @@ telemetry code exists).
   `BOBI_HOME`, `paths.bind_root(None)` bracket. Every test must
   `monkeypatch.delenv` the full `OTEL_*` set plus `BOBI_FLEET`,
   `BOBI_INSTANCE`, `BOBI_MACHINE_ID`, `BOBI_REGION`, `BOBI_NODE`, `FLY_*`,
-  `KUBERNETES_SERVICE_HOST`, `POD_NAME`, `NODE_NAME` — `tests/conftest.py:46-63`
+  `KUBERNETES_SERVICE_HOST`, `POD_NAME`, `NODE_NAME` — `tests/conftest.py:46-62`
   snapshots but does not clear the environment, so a developer with a real
   OTLP endpoint set would otherwise see failures.
   Patch **`bobi.otel.export.export_metric`** (the function in its defining
@@ -635,7 +703,10 @@ addresses.
 | A | #TBD | 1-5 | The whole feature: identity promotion, exporter, hardening, CLI, distribution, collector proof | solo | open |
 
 **Lanes:** One lane — the null topology and the default. A single coherent
-deliverable in a single repo whose phases are strictly sequential: the CLI
+deliverable in a single repo whose phases are sequential in BUILD order (with
+one deliberate exception: Phase 2 defines the validators in
+`bobi/otel/validate.py` but Phase 3's CLI is what surfaces them as
+`click.UsageError`, so Phase 2's user-facing proof completes in Phase 3): the CLI
 cannot be written before the exporter it calls, hardening changes the exporter's
 transport, distribution documents a surface that must exist, and the collector
 proof needs all of it. No wall-clock justification exists for a same-repo
@@ -673,6 +744,21 @@ this line supersedes it.)
   Draft rather than accreted as superseding amendments a builder would have to
   reconcile. Dispatch issue #978 is marked blocked until it returns to
   Approved.
+- **2026-08-05** (corrections): six blocking defects fixed in place and the
+  plan returned to **Approved**. `--temporality` now keys off
+  `ParameterSource.COMMANDLINE` so a `delta` default no longer rejects every
+  gauge; the incoherent per-process emission cap is replaced by an explicit
+  shape-not-rate bound with the residual and its real mitigations recorded;
+  Phase 5 gains a genuine CI home (its own step in `container.yml`'s
+  `container-image` job plus four `paths:` anchor entries and an
+  `assert_junit_ran.py` guard) after the marker-sweep job it named was found
+  not to exist; Phase 1's supervisor gate is unfiltered (36 tests, not the 11
+  a global `-k` collected); validators move to `bobi/otel/validate.py` so
+  Phase 2's proof no longer depends on Phase 3's CLI; and the required
+  tool_library `success:` probe is specified against the two candidates that
+  fail. Citation drift corrected throughout — including two of the review's
+  own proposed line numbers, which were verified wrong (`bobi/env.py` ends at
+  165, and `post()` at 69).
 
 ## Notes
 
