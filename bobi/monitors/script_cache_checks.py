@@ -1037,7 +1037,7 @@ def _queue_review(monitor, candidate: str, vr: ValidationResult, state: dict) ->
     }, state)
 
 
-def approve_pending(monitor, scripts_dir: Path | None = None) -> bool:
+def approve_pending(monitor) -> bool:
     """Promote a queued ``pending/<name>.sh`` to active (CLI approve-script).
 
     Re-validates the pending script, smoke-runs it, then atomically pins it and

@@ -610,19 +610,13 @@ Write for the agent that will make the calls:
 
 
 def tools_prompt(state: SetupState, conn) -> str:
-    var = conn.credential_var or _env_var_fallback(conn.name)
+    var = conn.credential_var
     return (f"{_spec_brief(state)}\n\n"
             f"Write tools/{slug(conn.key)}.md — the usage guide for "
             f"**{conn.name}**, which this team reaches through its own API "
             f"(Venn does not cover it). The team stores its API key in the env "
             f"var {var}; reference it as ${{{var}}}, never a literal key. Focus "
             f"on the parts of {conn.name}'s API the team needs for its goal.")
-
-
-def _env_var_fallback(name: str) -> str:
-    import re
-    s = re.sub(r"[^A-Z0-9]+", "_", (name or "").strip().upper()).strip("_")
-    return f"{s or 'SERVICE'}_API_KEY"
 
 
 def custom_services(state: SetupState, catalog=None) -> list:

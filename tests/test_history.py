@@ -16,7 +16,6 @@ from bobi.history import (
     _index_file,
     _init_db,
     _project_from_path,
-    context_for_events,
     conversations,
     index,
     messages_since,
@@ -862,83 +861,6 @@ class TestSessionMessages:
         _write_jsonl(proj / "s1.jsonl", [_user_msg("a", timestamp="2024-01-01T00:00:00")])
         index()
         assert session_messages("nonexistent") == []
-
-
-# ---------------------------------------------------------------------------
-# context_for_events()
-# ---------------------------------------------------------------------------
-
-class TestContextForEvents:
-    def test_returns_context_for_matching_events(self, projects_dir):
-        proj = projects_dir / "-Users-alice-dev"
-        proj.mkdir()
-        _write_jsonl(proj / "s1.jsonl", [
-            _user_msg("fix the login authentication flow", timestamp="2024-01-01T00:00:00"),
-        ])
-        index()
-
-        events = [{"data": {"title": "login authentication"}}]
-        ctx = context_for_events(events)
-        assert "Prior conversation context" in ctx
-        assert "login" in ctx.lower() or "authentication" in ctx.lower()
-
-    def test_returns_empty_for_no_matches(self, projects_dir):
-        proj = projects_dir / "-Users-alice-dev"
-        proj.mkdir()
-        _write_jsonl(proj / "s1.jsonl", [
-            _user_msg("hello world", timestamp="2024-01-01T00:00:00"),
-        ])
-        index()
-
-        events = [{"data": {"title": "zzz_nonexistent_term_zzz"}}]
-        ctx = context_for_events(events)
-        assert ctx == ""
-
-    def test_empty_events(self, projects_dir):
-        assert context_for_events([]) == ""
-
-    def test_no_db_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(history, "_db_path", lambda: tmp_path / "nonexistent.db")
-        assert context_for_events([{"data": {"title": "test"}}]) == ""
-
-    def test_extracts_issue_id(self, projects_dir):
-        proj = projects_dir / "-Users-alice-dev"
-        proj.mkdir()
-        _write_jsonl(proj / "s1.jsonl", [
-            _user_msg("working on BET-42 ticket", timestamp="2024-01-01T00:00:00"),
-        ])
-        index()
-
-        events = [{"data": {"run_key": "BET-42"}}]
-        ctx = context_for_events(events)
-        assert "BET-42" in ctx
-
-    def test_truncates_long_text(self, projects_dir):
-        proj = projects_dir / "-Users-alice-dev"
-        proj.mkdir()
-        _write_jsonl(proj / "s1.jsonl", [
-            _user_msg("unique_marker " + "x" * 300, timestamp="2024-01-01T00:00:00"),
-        ])
-        index()
-
-        events = [{"data": {"text": "unique_marker " + "x" * 300}}]
-        ctx = context_for_events(events)
-        assert "unique_marker" in ctx
-
-    def test_deduplicates_results(self, projects_dir):
-        proj = projects_dir / "-Users-alice-dev"
-        proj.mkdir()
-        _write_jsonl(proj / "s1.jsonl", [
-            _user_msg("dedupe_target_word", timestamp="2024-01-01T00:00:00"),
-        ])
-        index()
-
-        events = [
-            {"data": {"title": "dedupe_target_word"}},
-            {"data": {"text": "dedupe_target_word"}},
-        ]
-        ctx = context_for_events(events)
-        assert ctx.count("dedupe_target_word") == 1
 
 
 # ---------------------------------------------------------------------------

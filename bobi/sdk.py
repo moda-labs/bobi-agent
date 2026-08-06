@@ -617,9 +617,6 @@ class SessionRegistry:
     def handoff_path(self, name: str, step: str) -> Path:
         return session_handoff_path(name, step, root=self._root)
 
-    def log_path(self, name: str) -> Path:
-        return session_log_path(name, root=self._root)
-
 
 _registry: SessionRegistry | None = None
 
