@@ -215,25 +215,15 @@ class _BobiApp:
 
 # --- the web app (`bobi app`) ----------------------------------------------
 #
-# A different server over a different tree from the setup fixture above.
 # `bobi.webapp.server.build_app` resolves the target agent from the request
 # path on every call, so it serves a whole `$BOBI_HOME/agents/` tree rather
 # than the one project dir setup is bound to. `bobi_install`
 # (tests/conftest.py, inherited here by conftest scoping) seeds exactly that
 # tree with one installed agent, but boots no server. The web app's e2e
-# fixture is the composition of the two.
+# fixture is the composition of the two, booted through the same `_serve` as
+# every other surface in this file.
 
 WEBAPP_TOKEN = "e2e-webapp-token"
-
-
-def _free_port() -> int:
-    """A loopback port nothing is listening on."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
 
 
 class _WebApp:
@@ -280,7 +270,13 @@ class _WebApp:
             # must not read as wedged.
             port_file.unlink(missing_ok=True)
         else:
-            port_file.write_text(str(_free_port()))
+            # Bound only long enough to learn the number, then released, so
+            # connecting to it really does fail. This is the one port here
+            # that must NOT be served - `_serve` is the other direction.
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(("127.0.0.1", 0))
+            port_file.write_text(str(sock.getsockname()[1]))
+            sock.close()
         return proc.pid
 
     def stop(self):
@@ -326,24 +322,7 @@ def webapp(bobi_install):
     port; yield a _WebApp handle. Torn down after the test."""
     from bobi.webapp import server as webapp_server
 
-    app = webapp_server.build_app(token=WEBAPP_TOKEN)
-
-    port = _free_port()
-    config = uvicorn.Config(app, host="127.0.0.1", port=port,
-                            log_level="warning")
-    srv = uvicorn.Server(config)
-    srv.install_signal_handlers = lambda: None      # we're off the main thread
-    thread = threading.Thread(target=srv.run, daemon=True)
-    thread.start()
-
-    base = f"http://127.0.0.1:{port}"
-    for _ in range(200):                            # wait until it answers
-        try:
-            urllib.request.urlopen(base + "/", timeout=0.5)
-            break
-        except Exception:
-            time.sleep(0.05)
-
+    base, srv, thread = _serve(webapp_server.build_app(token=WEBAPP_TOKEN))
     handle = _WebApp(base, bobi_install, srv, thread)
     yield handle
     handle.stop()
