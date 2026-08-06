@@ -719,16 +719,6 @@ def stop_team(project_path: Path, *, force: bool = False) -> StopResult:
     return StopResult(**result_kwargs)
 
 
-def restart_team(
-    project_path: Path,
-    *,
-    fresh: bool = False,
-    wait_timeout: float = 30,
-) -> LaunchResult:
-    stop_team(project_path)
-    return start_team(project_path, fresh=fresh, wait_timeout=wait_timeout)
-
-
 def team_status(project_path: Path) -> TeamStatus:
     """Return manager and active-agent status without formatting."""
     project_path = Path(project_path)

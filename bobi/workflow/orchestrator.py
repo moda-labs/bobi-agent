@@ -19,7 +19,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import yaml
 
@@ -29,7 +29,6 @@ from bobi.sdk import (
     TERMINAL_COMPLETED, TERMINAL_FAILED, ACTIVE_STATUSES,
 )
 from bobi.subagent import (
-    AgentResult,
     _emit_lifecycle_event,
     _network_drop_error,
     _timeout_error,
@@ -755,7 +754,6 @@ async def _run_workflow_async(
         registry.update(session_name, status="running")
 
         step_idx = start_step
-        failed_step = ""
 
         def _exhaust_step(step: StepDef) -> tuple[int, str]:
             error = (
@@ -791,7 +789,6 @@ async def _run_workflow_async(
                 if exhausted_jump >= 0:
                     step_idx = exhausted_jump
                     continue
-                failed_step = step.name
                 run_failed, failure_error = True, error
                 _emit_step_failed(run_key, workflow.name, step.name, error)
                 return False
@@ -813,7 +810,6 @@ async def _run_workflow_async(
                             if exhausted_jump >= 0:
                                 step_idx = exhausted_jump
                                 continue
-                            failed_step = step.name
                             run_failed, failure_error = True, error
                             _emit_step_failed(
                                 run_key, workflow.name, step.name, error,
@@ -855,7 +851,6 @@ async def _run_workflow_async(
                     and next_step is not None
                     and next_step.await_event
                 ):
-                    failed_step = step.name
                     error = (
                         "workflow.notify_undeliverable: "
                         f"{outcome.error}; refusing to arm await step "
@@ -1006,7 +1001,6 @@ async def _run_workflow_async(
                         client, session_name, run_key, model=current_model,
                     )
                     if drain.error:
-                        failed_step = step.name
                         run_failed, failure_error = True, drain.error
                         _emit_step_failed(
                             run_key, workflow.name, step.name, drain.error,
@@ -1095,7 +1089,6 @@ async def _run_workflow_async(
                 )
 
             if drain.final_text is None:
-                failed_step = step.name
                 run_failed, failure_error = True, drain.error
                 _emit_step_failed(run_key, workflow.name, step.name,
                                   drain.error)
@@ -1120,7 +1113,6 @@ async def _run_workflow_async(
                 missing = _validate_handoff(step, handoff)
 
             if missing:
-                failed_step = step.name
                 error = f"Handoff missing required fields after retries: {missing}"
                 run_failed, failure_error = True, error
                 _emit_step_failed(run_key, workflow.name, step.name, error)

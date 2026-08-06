@@ -175,12 +175,12 @@ Includes Q4's expired compat layers and Q3's flag removal once decided. For conf
 - [x] **Q080** `bobi/brain/__init__.py:105` — The public BRAIN_MODEL_ENV compatibility alias has zero importers in the repo, tests, and the private deploy repo.
 - [x] **Q078** `bobi/brain/claude.py:27` — BrainCapabilities is imported but unused in both brain/claude.py and brain/codex.py — a #789 refactor leftover.
 - [x] **Q077** `bobi/brain/claude.py:125` — The trailing `if last_error is not None: raise last_error` after the connect retry loop is unreachable.
-- [ ] **D061** `bobi/cli.py:348` — _list_agent_packs in cli.py is a byte-for-byte duplicate of service.py's _list_agent_packs, and the cli copy is dead code.
-- [ ] **D062** `bobi/cli.py:958` — Dead helpers _find_pid_path (line 948), _stop_manager_pid (line 958) and _run_from_config (line 364) duplicate the live stop/start paths in…
-- [ ] **Q008** `bobi/cli.py:1594` — Six unreachable `if not project_path:` guards / else-branches follow `_detect_project_root()` (or `paths.home_dir()`), which can never return a falsy…
-- [ ] **Q032** `bobi/config.py:317` — Config fields `registries`, `default_role`, and `chat` are parsed from agent.yaml but never read by any production code.
+- [x] **D061** `bobi/cli.py:348` — _list_agent_packs in cli.py is a byte-for-byte duplicate of service.py's _list_agent_packs, and the cli copy is dead code.
+- [x] **D062** `bobi/cli.py:958` — Dead helpers _find_pid_path (line 948), _stop_manager_pid (line 958) and _run_from_config (line 364) duplicate the live stop/start paths in…
+- [x] **Q008** `bobi/cli.py:1594` — Six unreachable `if not project_path:` guards / else-branches follow `_detect_project_root()` (or `paths.home_dir()`), which can never return a falsy…
+- [x] **Q032** `bobi/config.py:317` — Config fields `registries`, `default_role`, and `chat` are parsed from agent.yaml but never read by any production code.
 - [x] **Q125** `bobi/config.py:409` — Config.brain_small_model property has zero callers — the one real consumer bypasses it and reads the raw brain dict. *(unverified — re-verify first)*
-- [ ] **Q038** `bobi/config.py:510` — Config.default_role is parsed from agent.yaml's `defaults.role` but never read by anything, so the key is silently ignored.
+- [x] **Q038** `bobi/config.py:510` — Config.default_role is parsed from agent.yaml's `defaults.role` but never read by anything, so the key is silently ignored.
 - [x] **Q045** `bobi/doctor.py:517` — `_check_policy` is a self-described 'deprecated compatibility wrapper for one release' with zero production callers, several releases after the…
 - [x] **Q053** `bobi/history.py:15` — SESSIONS_DIR module constant is never referenced.
 - [ ] **Q013** `bobi/history.py:447` — context_for_events (49 lines) has zero production callers — only tests exercise it.
@@ -201,8 +201,8 @@ Includes Q4's expired compat layers and Q3's flag removal once decided. For conf
 - [x] **Q079** `bobi/sdk.py:71` — Module constant CLAUDE_CLI has zero readers anywhere and forces a shutil.which() at import time.
 - [x] **Q113** `bobi/sdk.py:198` — sdk.state_dir() wrapper (delegating to paths.state_dir) has zero callers. *(plausible — re-verify first)*
 - [ ] **Q082** `bobi/sdk.py:456` — SessionRegistry.log_path's only caller is its own unit test.
-- [ ] **Q031** `bobi/service.py:709` — service.restart_team has zero callers anywhere in the repo, including tests.
-- [ ] **Q054** `bobi/session.py:17` — session.py imports hashlib (line 17) and Path (line 22) but uses neither.
+- [x] **Q031** `bobi/service.py:709` — service.restart_team has zero callers anywhere in the repo, including tests.
+- [x] **Q054** `bobi/session.py:17` — session.py imports hashlib (line 17) and Path (line 22) but uses neither.
 - [ ] **Q037** `bobi/setup/__init__.py:19` — run_setup() has zero callers; the `bobi setup` CLI command now opens the webapp daemon URL instead, leaving the setup package's only public entry…
 - [ ] **Q120** `bobi/setup/actions.py:108` — default_secret_prompt() — a click-based masked terminal prompt — has zero callers since setup became web-UI-driven. *(unverified — re-verify first)*
 - [ ] **Q065** `bobi/setup/actions.py:161` — installed_team_name has no production callers — only its own unit tests reference it.
@@ -211,8 +211,8 @@ Includes Q4's expired compat layers and Q3's flag removal once decided. For conf
 - [x] **Q068** `bobi/setup/llm.py:23` — The _delta_text re-export from bobi.brain.claude exists only so a test can import it from the old location; no production code uses llm._delta_text.
 - [x] **Q049** `bobi/subagent.py:658` — _load_policy_prompt, the 'deprecated alias for one release' from the policy→long_term_memory rename, has zero callers and has outlived several…
 - [x] **Q050** `bobi/subagent.py:1687` — _parse_check_output is a back-compat shim with zero production callers, while run_check_blocking re-inlines its exact verdict→(finding, summary,…
-- [ ] **Q086** `bobi/validate.py:77` — ValidationResult.errors property has zero callers anywhere.
-- [ ] **Q059** `bobi/workflow/orchestrator.py:592` — failed_step is assigned at 7 sites in _run_workflow_async and never read; the Any and AgentResult imports are also unused.
+- [x] **Q086** `bobi/validate.py:77` — ValidationResult.errors property has zero callers anywhere.
+- [x] **Q059** `bobi/workflow/orchestrator.py:592` — failed_step is assigned at 7 sites in _run_workflow_async and never read; the Any and AgentResult imports are also unused.
 
 **Validation gate**
 
@@ -603,6 +603,11 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
 - **2026-08-06** (Lane B build session): **Phase 5 batch 2 — the expired rename compat layers, 8 items.** Every alias deleted here was a pure one-line delegation to the name that replaced it, all re-derived against `main` @ `f2ae789`. Shipped `[x]`: Q014, Q055 (the curator→sleep-cycle layer: `_default_spawn_curator`, the `spawn_curator=` constructor kwarg, the `self.spawn_curator` attribute, and the `_load_curator_prompt` / `_on_curator_result` / `_publish_policy_updated` methods), Q030, Q045, Q049, Q102 (the policy→long_term_memory layer: `memory.MAX_POLICY_CHARS` / `load_policy` / `format_policy_prompt`, `paths.policy_path` / `policy_cursor_path`, `doctor._check_policy`, `subagent._load_policy_prompt`, `resolver._load_policy_section`), Q068 (`setup.llm`'s `_delta_text` re-export), and Q050 (`subagent._parse_check_output`).
   **Tests were retargeted, not deleted, wherever the alias was the only route to live behaviour.** `_default_spawn_curator`'s tests were the only coverage of `_default_spawn_sleep_cycle`, and `_check_policy`'s were the only coverage of `_check_long_term_memory` — the one check of the two that `doctor` actually registers. Deleting those tests would have silently dropped real coverage, so they now call the surviving name directly. Only `_parse_check_output`'s own 7 tests were deleted, because `run_check_blocking` carries its own copy of the verdict conversion and `TestParseCheckVerdict` already covers the live parser.
   Suite: **4255 passed / 1 skipped**, exactly 7 below the 4262 baseline — the 7 deleted shim tests and nothing else.
+
+- **2026-08-06** (Lane B build session): **Phase 5 batch 3 — the cli/config/service dead-code cluster, 9 items.** Re-derived against `main` @ `b5388bb`. Shipped `[x]`: D061 (cli's duplicate `_list_agent_packs`), D062 (`_run_from_config`, `_find_pid_path`, `_stop_manager_pid`), Q008 (the unreachable `project_path` guards), Q032, Q038, Q031, Q054, Q086, Q059.
+  **Q008's count in the finding is wrong but its analysis is right: there are seven sites, not six** — the finding's own prose lists seven while the headline says six. All seven confirmed unreachable at HEAD, because `_detect_project_root()` returns a `Path` or raises `click.UsageError`, and `paths.home_dir()` always returns a `Path`: `status`, `monitor_add`, `monitor_pause` (else-branch **and** the `where` ternary), `monitor_remove` (else-branch), `event_server_stop`, `_find_transcript` (the `else "bobi-manager"` arm), `agents_browse` (the `if project_path else []` after `home_dir()`). `_try_detect_project_root()` is the genuinely nullable helper and its one caller was left alone.
+  **Q032 shipped partially, and deliberately so.** Only `registries` and `default_role` were deleted; **`chat` was kept**, per the falsification recorded in batch 1's amendment. `Config.registries` was the dead one — `registry.py:77` reads `raw.get("registries")` off its own dict and never touches the dataclass field, so registry resolution is untouched.
+  Suite: **4262 passed / 1 skipped** with **zero test edits** — identical to the baseline.
 
 ## Notes
 
