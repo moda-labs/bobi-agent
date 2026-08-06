@@ -625,17 +625,10 @@ def _default_spawn_sleep_cycle(monitor, cwd: str | None, task: str, on_result,
     )
 
 
-def _default_spawn_curator(monitor, cwd: str | None, task: str, on_result,
-                           publish=None) -> None:
-    """Deprecated compatibility wrapper for one release."""
-    _default_spawn_sleep_cycle(monitor, cwd, task, on_result, publish=publish)
-
-
 class MonitorScheduler:
     def __init__(self, publish=None, state_path: Path | None = None,
                  now=None, registry_loader=None, spawn_check=None,
                  project_path: Path | None = None, spawn_sleep_cycle=None,
-                 spawn_curator=None,
                  spawn_gate=None):
         self.publish = publish or _default_publish
         # The injectable spawn hooks keep their 3-/4-argument signatures so
@@ -647,12 +640,11 @@ class MonitorScheduler:
                 monitor, cwd, on_verdict, publish=self.publish,
                 on_error=self._run_error_sink(monitor))
         )
-        self.spawn_sleep_cycle = spawn_sleep_cycle or spawn_curator or (
+        self.spawn_sleep_cycle = spawn_sleep_cycle or (
             lambda monitor, cwd, task, on_result: _default_spawn_sleep_cycle(
                 monitor, cwd, task, on_result, publish=self.publish,
                 on_error=self._run_error_sink(monitor))
         )
-        self.spawn_curator = self.spawn_sleep_cycle
         self.spawn_gate = spawn_gate or (
             lambda monitor, cwd, items, on_verdict: _default_spawn_gate(
                 monitor, cwd, items, on_verdict, publish=self.publish,
@@ -1361,10 +1353,6 @@ class MonitorScheduler:
             log.error("Sleep-cycle prompt missing at %s", SLEEP_CYCLE_PATH)
             return ""
 
-    def _load_curator_prompt(self, root) -> str:
-        """Deprecated compatibility wrapper for one release."""
-        return self._load_sleep_cycle_prompt(root)
-
     def _spawn_sleep_cycle(self, monitor, projects: list[Path],
                            tracker=None) -> bool:
         """Window the transcript delta, apply the input cap, and launch the
@@ -1696,11 +1684,6 @@ class MonitorScheduler:
                 monitor, "reference-kb-index-failed", detail, tracker)
             return None
 
-    def _on_curator_result(self, monitor, result: dict | None,
-                           highest_id: int | None, cursor_path: Path) -> None:
-        """Deprecated compatibility wrapper for one release."""
-        self._on_sleep_cycle_result(monitor, result, highest_id, cursor_path)
-
     def _publish_memory_updated(self, monitor, result: dict, tracker=None) -> None:
         """Publish the completion event directly (bypassing _reconcile dedup).
 
@@ -1737,10 +1720,6 @@ class MonitorScheduler:
             log.warning("Monitor %s failed to publish %s", monitor.name, event)
             if tracker is not None:
                 tracker.note_failure(f"failed to publish {event}")
-
-    def _publish_policy_updated(self, monitor, result: dict) -> None:
-        """Deprecated compatibility wrapper for one release."""
-        self._publish_memory_updated(monitor, result)
 
     # --- state persistence ---------------------------------------------
 

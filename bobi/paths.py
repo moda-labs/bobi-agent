@@ -247,16 +247,6 @@ def migrate_long_term_memory_state(root: Path | None = None) -> None:
         return
 
 
-def policy_path(root: Path | None = None) -> Path:
-    """Deprecated alias for one release; use long_term_memory_path."""
-    return long_term_memory_path(root)
-
-
-def policy_cursor_path(root: Path | None = None) -> Path:
-    """Deprecated alias for one release; use long_term_memory_cursor_path."""
-    return long_term_memory_cursor_path(root)
-
-
 def sessions_path(root: Path | None = None) -> Path:
     """The sessions dir path without creating it.
 

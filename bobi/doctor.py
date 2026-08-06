@@ -728,6 +728,3 @@ def _check_long_term_memory() -> CheckResult:
         detail=f"long_term_memory.md present ({size} chars, under {MAX_MEMORY_CHARS} cap)")
 
 
-def _check_policy() -> CheckResult:
-    """Deprecated compatibility wrapper for one release."""
-    return _check_long_term_memory()
