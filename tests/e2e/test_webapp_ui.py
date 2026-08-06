@@ -1,9 +1,10 @@
 """End-to-end browser tests for the `bobi app` web UI (Playwright).
 
 Sibling of `test_setup_ui.py`, over the other local surface. That suite drives
-one project's onboarding wizard; this one drives the machine-scoped app — the
-dashboard of every installed agent, and the single-agent page: status band,
-telemetry, the one runs table, the run modal, and the two write actions.
+one project's onboarding wizard; this one drives the machine-scoped app. Two
+surfaces: the dashboard of every installed agent, and the single-agent page
+(status band, telemetry, the one runs table, the run modal, both write
+actions).
 
 Everything is real. A seeded `$BOBI_HOME` on disk, `bobi.webapp.server`'s
 FastAPI app booted on a loopback port, and Chromium driven through the same
@@ -23,7 +24,9 @@ Skips cleanly when Playwright isn't installed (the unit job doesn't need it).
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 
 import pytest
 
@@ -61,7 +64,7 @@ def _seed_runs(install):
     """One row of each shape the table has to render.
 
     Timestamps come from `test_webapp_runs`' fixed NOW, which is comfortably
-    more than a day in the past — so the waiting workflow really has sat past
+    more than a day in the past, so the waiting workflow really has sat past
     `AWAITING_ACTION_AFTER_SECONDS` and is elevated by the same clock
     comparison production uses, not by a status word written by hand.
     """
@@ -99,16 +102,28 @@ def _entry(kind, content, at):
                        "message": {"content": content}})
 
 
+def _record_requests(page, pattern=None, method=""):
+    """Collect the URLs the page requests from now on, as a live list."""
+    seen = []
+
+    def note(request):
+        if method and request.method != method:
+            return
+        if pattern is None or pattern.search(request.url):
+            seen.append(request.url)
+
+    page.on("request", note)
+    return seen
+
+
 def _stub_claude(tmp_path, monkeypatch):
     """Put a `claude` on PATH.
 
     `/api/setup/open` refuses to start onboarding without the Claude Code CLI,
     which the e2e container does not ship. The check is `shutil.which`, so the
-    honest way to test the create tile's routing is to satisfy exactly that —
-    opening a session never invokes the CLI.
+    honest way to test the create tile's routing is to satisfy exactly that.
+    Opening a session never invokes the CLI.
     """
-    import os
-
     bindir = tmp_path / "claude-bin"
     bindir.mkdir(exist_ok=True)
     stub = bindir / "claude"
@@ -211,7 +226,6 @@ class TestStatusBand:
     def test_a_failed_start_surfaces_its_preflight_report(self, webapp, page):
         # A team whose entry-point role is missing fails preflight, so `start`
         # answers 409 with the report and never spawns anything.
-        import shutil
         shutil.rmtree(webapp.install.repo_path / "package" / "roles" / "director")
 
         _agent(page, webapp)
@@ -266,7 +280,7 @@ class TestRunsTable:
         _agent(page, webapp)
 
         tabs = page.locator(".tabs .tab")
-        # `all` stays bare on purpose — the section count beside the table is
+        # `all` stays bare on purpose: the section count beside the table is
         # already the all-count, and printing it twice reads as two facts.
         expect(tabs).to_have_text(
             ["all", "running · 0", "awaiting action · 1", "failed · 1"])
@@ -285,9 +299,14 @@ class TestRunsTable:
         _agent(page, webapp)
         expect(page.locator(".runs tbody tr")).to_have_count(4)
 
-        page.locator(".runs-search").fill("migration")
-        # 250ms debounce: the request is not sent per keystroke.
+        # Typed a key at a time, as a person does. The 250ms debounce is the
+        # difference between one read and nine, so the count of searching
+        # reads is the assertion, not a comment claiming there is a debounce.
+        searches = _record_requests(page, re.compile(r"/runs\?.*query="))
+        page.locator(".runs-search").press_sequentially("migration", delay=25)
         expect(page.locator(".runs tbody tr")).to_have_count(1)
+        assert len(searches) == 1, searches
+
         expect(page.locator(".runs tbody tr .r-title")).to_have_text(
             "Ship the migration")
         expect(page.locator(".pager-summary")).to_have_text("1–1 of 1 matches")
@@ -389,7 +408,7 @@ class TestRunModal:
         expect(lines.nth(0).locator(".txt")).to_have_text("fix the flaky test")
         expect(lines.nth(1).locator(".who")).to_have_text("agent")
         expect(lines.nth(1).locator(".txt")).to_have_text("found the race")
-        # A tool call is its own line — the thing the chat view throws away.
+        # A tool call is its own line: the thing the chat view throws away.
         expect(lines.nth(2)).to_have_class("tr-line tool")
         expect(lines.nth(2).locator(".txt")).to_have_text(
             "Bash: pytest -q tests/test_flaky.py")
@@ -407,19 +426,18 @@ class TestRunModal:
 
     def test_a_session_less_workflow_row_renders_without_a_fetch(
             self, webapp, page):
-        # Its row already carries the whole story — what step, what event, how
-        # long — and the details endpoint only serves monitor records anyway.
+        # Its row already carries the whole story (what step, what event,
+        # how long), and the details endpoint only serves monitor records.
         _seed_runs(webapp.install)
         _agent(page, webapp)
 
-        requested = []
-        page.on("request", lambda r: requested.append(r.url))
+        fetched = _record_requests(page, DETAILS_URL)
         page.locator(".runs tbody tr", has_text="adhoc").click()
         expect(page.locator("[data-el=slabKind]")).to_have_text("details")
         body = page.locator(".transcript")
         expect(body).to_contain_text("Awaiting action")
         expect(body).to_contain_text("human_approval")
-        assert not [url for url in requested if DETAILS_URL.search(url)]
+        assert not fetched
 
     @pytest.mark.parametrize("how", ["button", "backdrop", "escape"])
     def test_the_modal_closes_three_ways(self, webapp, page, how):
@@ -449,7 +467,7 @@ class TestWriteActions:
 
     def test_remind_reflects_sent_and_returns_to_remind(self, webapp, page):
         # A real reminder is a real Slack post, which this process cannot make
-        # offline — so only the delivery is answered at the wire. What is under
+        # offline, so only the delivery is answered at the wire. What is under
         # test is the button's own lifecycle, which is browser-side entirely.
         page.route(REMIND_URL, lambda route: route.fulfill(
             status=200, content_type="application/json",
@@ -483,16 +501,18 @@ class TestWriteActions:
 
         asked = []
         page.on("dialog", lambda d: (asked.append(d.message), d.dismiss()))
-        posted = []
-        page.on("request", lambda r: posted.append(r.url)
-                if r.method == "POST" else None)
+        posted = _record_requests(page, re.compile(r"/close$"), method="POST")
 
         self._gate_row(page).locator("button", has_text="Close").click()
+        assert asked and "Closing ends this workflow" in asked[0]
+
+        # Past a full 4s poll cycle, so "nothing happened" is a fact rather
+        # than a race won. Drop the `if (!confirmed) return` guard and the run
+        # is closed inside this window and the row says so.
+        page.wait_for_timeout(5000)
+        assert not posted
         expect(self._gate_row(page).locator("button", has_text="Close")
                ).to_be_enabled()
-        assert asked and "Closing ends this workflow" in asked[0]
-        assert not [url for url in posted if url.endswith("/close")]
-        # And the run is untouched.
         expect(self._gate_row(page).locator(".rstat span:not(.rdot)")
                ).to_have_text("Awaiting action")
 

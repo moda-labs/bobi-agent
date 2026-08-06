@@ -220,7 +220,7 @@ class _BobiApp:
 # path on every call, so it serves a whole `$BOBI_HOME/agents/` tree rather
 # than the one project dir setup is bound to. `bobi_install`
 # (tests/conftest.py, inherited here by conftest scoping) seeds exactly that
-# tree with one installed agent — but boots no server. The web app's e2e
+# tree with one installed agent, but boots no server. The web app's e2e
 # fixture is the composition of the two.
 
 WEBAPP_TOKEN = "e2e-webapp-token"
@@ -260,12 +260,12 @@ class _WebApp:
         return self.base + "/#/agents/" + quote(name or self.agent, safe="")
 
     def run_manager(self, *, responsive: bool = True) -> int:
-        """Make this agent read as `running` — or, wedged, `not_responding`.
+        """Make this agent read as `running` (or, wedged, `not_responding`).
 
         `webapp/health.py` asks two real questions: is the recorded pid alive,
         and does the manager's health endpoint answer. So this writes a pidfile
         for a process that really is alive and, for the wedged case, a port
-        file for a port that really is closed. Nothing is stubbed — the state
+        file for a port that really is closed. Nothing is stubbed: the state
         comes out of the same fold the strip renders in production.
         """
         proc = subprocess.Popen(
@@ -284,7 +284,7 @@ class _WebApp:
         return proc.pid
 
     def stop(self):
-        """Kill the server (and any stand-in manager). Idempotent — a test
+        """Kill the server (and any stand-in manager). Idempotent: a test
         that stops the server to watch the page notice is torn down again."""
         while self._procs:
             proc = self._procs.pop()
