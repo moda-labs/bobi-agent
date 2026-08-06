@@ -32,6 +32,12 @@ dependencies = [
     "claude-agent-sdk>=0.2.87",
     "mcp>=1.23.0",
     "apsw>=3.40",
+    # OTLP wire types for `bobi agent <name> otel`. A core dependency, not an
+    # extra: no CI job installs extras, so the collector suite would skip to
+    # green. The >=1.44 floor also matters - opentelemetry-proto pinned
+    # `protobuf<7` through 1.42.x, so an older release lets pip satisfy
+    # `[kb]`'s onnxruntime by DOWNGRADING protobuf onto a different ABI.
+    "opentelemetry-proto>=1.44,<2",
 ]
 
 [project.urls]

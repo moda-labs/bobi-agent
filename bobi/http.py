@@ -55,8 +55,16 @@ def client() -> httpx.Client:
 
 
 def post(url: str, *, json: dict | None = None, content: bytes | None = None,
-         headers: dict | None = None, timeout: float | None = None) -> httpx.Response:
-    """POST with connection pooling and bounded concurrency."""
+         headers: dict | None = None, timeout: float | None = None,
+         follow_redirects: bool = True) -> httpx.Response:
+    """POST with connection pooling and bounded concurrency.
+
+    ``follow_redirects`` defaults to the shared client's ``True``, so every
+    existing caller is unaffected. Pass ``False`` when the request carries a
+    credential in a CUSTOM header: httpx strips only ``Authorization`` and
+    ``Cookie`` on a cross-origin redirect, so a vendor key travels verbatim to
+    whatever host the redirect names.
+    """
     kwargs: dict = {}
     if json is not None:
         kwargs["json"] = json
@@ -66,6 +74,8 @@ def post(url: str, *, json: dict | None = None, content: bytes | None = None,
         kwargs["headers"] = headers
     if timeout is not None:
         kwargs["timeout"] = timeout
+    if not follow_redirects:
+        kwargs["follow_redirects"] = False
     return client().post(url, **kwargs)
 
 

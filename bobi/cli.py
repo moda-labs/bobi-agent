@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -1865,6 +1866,313 @@ def subagents_cancel(ref):
     else:
         click.echo(f"No running sub-agent for {ref}")
 
+
+# `otel` is registered directly on the `agent` group, the `subagents` pattern
+# above: no @main.group, no re-parent list entry, and therefore no window in
+# which `bobi otel` leaks as a top-level command.
+
+_OTEL_METRIC_NAME_RE = re.compile(r"^[a-zA-Z0-9_.]{1,64}$")
+# Framework attributes are the labels this feature exists to make trustworthy,
+# and `le`/`quantile`/`__name__` corrupt Prometheus series on ingest.
+_OTEL_RESERVED_ATTR_PREFIXES = ("service.", "bobi.", "host.", "cloud.", "k8s.", "__")
+_OTEL_RESERVED_ATTR_KEYS = {"le", "quantile"}
+_OTEL_MAX_ATTRS = 20
+_OTEL_MAX_ATTR_KEY_BYTES = 64
+_OTEL_MAX_ATTR_VALUE_BYTES = 256
+
+
+def _otel_parse_attrs(pairs: tuple[str, ...]) -> dict[str, str]:
+    """Parse repeated ``--attr k=v`` into a bounded, non-forging attribute set.
+
+    Splits on the FIRST ``=`` so a value may contain more. Every value is
+    emitted as a string; no numeric or boolean inference happens anywhere.
+    """
+    attrs: dict[str, str] = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep:
+            raise click.UsageError(f"--attr must be key=value, got {pair!r}.")
+        key = key.strip()
+        if not key:
+            raise click.UsageError(f"--attr key must not be empty, got {pair!r}.")
+        if key in _OTEL_RESERVED_ATTR_KEYS or key.startswith(_OTEL_RESERVED_ATTR_PREFIXES):
+            raise click.UsageError(
+                f"--attr key {key!r} is reserved. Framework identity "
+                "(service.*, bobi.*, host.*, cloud.*, k8s.*) is stamped by bobi, "
+                "and le/quantile/__* corrupt Prometheus series."
+            )
+        if len(key.encode("utf-8")) > _OTEL_MAX_ATTR_KEY_BYTES:
+            raise click.UsageError(
+                f"--attr key {key!r} exceeds {_OTEL_MAX_ATTR_KEY_BYTES} bytes."
+            )
+        if len(value.encode("utf-8")) > _OTEL_MAX_ATTR_VALUE_BYTES:
+            raise click.UsageError(
+                f"--attr value for {key!r} exceeds "
+                f"{_OTEL_MAX_ATTR_VALUE_BYTES} bytes."
+            )
+        attrs[key] = value
+    if len(attrs) > _OTEL_MAX_ATTRS:
+        raise click.UsageError(
+            f"At most {_OTEL_MAX_ATTRS} --attr pairs; got {len(attrs)}. "
+            "Attributes become time-series labels: high cardinality is a "
+            "billing and availability hazard."
+        )
+    return attrs
+
+
+def _otel_parse_value(raw: str) -> int | float:
+    """``1`` is an int and ``1.0`` a double - different wire types, by design."""
+    import math
+
+    text = raw.strip()
+    if re.fullmatch(r"[+-]?\d+", text):
+        return int(text)
+    try:
+        value = float(text)
+    except ValueError:
+        raise click.UsageError(f"<value> must be a number, got {raw!r}.") from None
+    if not math.isfinite(value):
+        raise click.UsageError(f"<value> must be finite, got {raw!r}.")
+    return value
+
+
+def _otel_context(ctx) -> tuple[Path, str]:
+    """The bound runtime root and the agent name the labels are stamped with."""
+    root = _detect_project_root()
+    name = (ctx.obj or {}).get("agent")
+    if not name:
+        # The group invoked outside its `agent` parent, which a CliRunner can do.
+        name = paths.agent_name_for_root(root)
+    return root, name
+
+
+def _otel_resolve(ctx, signal: str):
+    """Resolve config + resource attributes, or exit with a typed diagnosis."""
+    from bobi.otel import config as otel_config
+    from bobi.otel.resource import resource_attributes
+
+    root, name = _otel_context(ctx)
+    try:
+        cfg = otel_config.resolve_config(root, signal)
+    except otel_config.OtelUnconfigured as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1)
+    except otel_config.OtelMisconfigured as exc:
+        click.echo(f"OTLP configuration is unusable: {exc}", err=True)
+        raise SystemExit(1)
+    if cfg.credential_withheld:
+        click.echo(
+            f"Withheld configured OTLP headers: the endpoint in use ({cfg.url}) "
+            "is not the origin run/.env's credential was configured for.",
+            err=True,
+        )
+    return cfg, resource_attributes(root, name)
+
+
+def _otel_send(export, cfg, spec, attrs) -> None:
+    """Run one export, turning any failure into a loud, bounded diagnosis."""
+    from bobi.otel.export import OtelExportError
+
+    try:
+        export(cfg, spec, attrs)
+    except OtelExportError as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1)
+
+
+@agent.group("otel")
+def otel():
+    """Record agent-authored telemetry to an OTLP endpoint.
+
+    Emits one metric or one log record per invocation, stamped with the fleet
+    identity an agent cannot resolve for itself. Configure the destination with
+    OTEL_EXPORTER_OTLP_ENDPOINT; see docs/OTEL.md.
+
+    Usage:
+        bobi agent eng otel check
+        bobi agent eng otel metric tickets.processed 42
+        bobi agent eng otel log "reconciled the backlog"
+    """
+    pass
+
+
+@otel.command("metric")
+@click.argument("name")
+@click.argument("value")
+@click.option("--kind", type=click.Choice(["counter", "gauge", "histogram"]),
+              default="counter", help="Instrument type (default: counter)")
+@click.option("--temporality", type=click.Choice(["delta", "cumulative"]),
+              default=None,
+              help="Aggregation temporality for counter/histogram (default: delta)")
+@click.option("--attr", "attrs", multiple=True,
+              help="Attribute as key=value. Repeatable. Always sent as a string.")
+@click.option("--unit", default="", help="UCUM unit, e.g. s, By, 1")
+@click.option("--desc", "description", default="", help="Human-readable description")
+@click.pass_context
+def otel_metric(ctx, name, value, kind, temporality, attrs, unit, description):
+    """Record one measurement to the OTLP metrics endpoint.
+
+    `1` is sent as an integer and `1.0` as a double - different wire types, so
+    keep one series on one form. Attributes become time-series labels: keep
+    them low-cardinality and never put an id or a secret in one.
+
+    Usage:
+        bobi agent eng otel metric tickets.processed 42
+        bobi agent eng otel metric queue.depth 7 --kind gauge
+        bobi agent eng otel metric task.seconds 12.5 --kind histogram --unit s
+        bobi agent eng otel metric tickets.total 128 --temporality cumulative
+    """
+    from bobi.otel.export import MetricSpec, export_metric
+
+    if not _OTEL_METRIC_NAME_RE.match(name):
+        raise click.UsageError(
+            "Metric name must match ^[a-zA-Z0-9_.]{1,64}$ - an unbounded name "
+            "is an active-series explosion, not a label."
+        )
+    if temporality is not None and kind == "gauge":
+        # Gauge's only field is `data_points`; there is nowhere for a
+        # temporality to go, so accepting one would silently drop it.
+        raise click.UsageError(
+            "--temporality does not apply to --kind gauge: a Gauge carries no "
+            "aggregation temporality on the wire."
+        )
+    parsed = _otel_parse_value(value)
+    if kind == "counter" and parsed < 0:
+        raise click.UsageError(
+            "--kind counter is monotonic; use --kind gauge for a value that "
+            "can fall."
+        )
+
+    spec = MetricSpec(
+        name=name,
+        value=parsed,
+        kind=kind,
+        temporality=temporality or "delta",
+        unit=unit,
+        description=description,
+        attributes=_otel_parse_attrs(attrs),
+    )
+    cfg, resource = _otel_resolve(ctx, "metrics")
+    _otel_send(export_metric, cfg, spec, resource)
+    click.echo(f"Recorded {name}={parsed} ({kind}) to {cfg.url}")
+
+
+@otel.command("log")
+@click.argument("body", required=False)
+@click.option("--severity", type=click.Choice(["debug", "info", "warn", "error", "fatal"]),
+              default="info", help="Severity (default: info)")
+@click.option("--attr", "attrs", multiple=True,
+              help="Attribute as key=value. Repeatable. Always sent as a string.")
+@click.pass_context
+def otel_log(ctx, body, severity, attrs):
+    """Record one log record to the OTLP logs endpoint.
+
+    The body is sent verbatim and is never parsed as JSON. It leaves this box
+    for a third party, so never put a secret or personal data in it. If <body>
+    is omitted it is read from stdin, so a multi-line body needs no quoting.
+
+    Usage:
+        bobi agent eng otel log "reconciled 42 tickets"
+        bobi agent eng otel log "upstream 502" --severity error
+        printf 'line one\\nline two\\n' | bobi agent eng otel log
+    """
+    from bobi.otel.export import LogSpec, export_log
+
+    if body is None:
+        stdin = click.get_text_stream("stdin")
+        if stdin.isatty():
+            raise click.UsageError("Provide the log body as an argument or on stdin.")
+        body = stdin.read()
+    if not body.strip():
+        raise click.UsageError("Provide the log body as an argument or on stdin.")
+
+    spec = LogSpec(body=body, severity=severity, attributes=_otel_parse_attrs(attrs))
+    cfg, resource = _otel_resolve(ctx, "logs")
+    _otel_send(export_log, cfg, spec, resource)
+    click.echo(f"Recorded {severity} log to {cfg.url}")
+
+
+@otel.command("check")
+@click.option("--send", is_flag=True,
+              help="Also export one throwaway gauge through the real path")
+@click.pass_context
+def otel_check(ctx, send):
+    """Report how OTLP export is configured on this box.
+
+    Without --send this makes NO network call and says so: OTLP has no health
+    endpoint, and a GET returns 405 from a Collector, which proves nothing.
+    Header values are never printed - only their names - because this output
+    lands in the agent's transcript and is rendered in the console.
+
+    Exit 0 when configured, 1 otherwise.
+
+    Usage:
+        bobi agent eng otel check
+        bobi agent eng otel check --send
+    """
+    from bobi.otel import config as otel_config
+    from bobi.otel.export import MetricSpec, export_metric
+    from bobi.otel.resource import resource_attributes
+
+    root, name = _otel_context(ctx)
+
+    try:
+        import opentelemetry.proto  # noqa: F401
+        click.echo("wire format:  opentelemetry.proto importable")
+    except ImportError as exc:
+        click.echo(f"wire format:  UNAVAILABLE ({exc})")
+
+    configs: dict[str, otel_config.SignalConfig] = {}
+    problems: list[str] = []
+    for signal in ("metrics", "logs"):
+        try:
+            configs[signal] = otel_config.resolve_config(root, signal)
+        except otel_config.OtelUnconfigured as exc:
+            problems.append(str(exc))
+        except otel_config.OtelMisconfigured as exc:
+            problems.append(f"{signal}: {exc}")
+
+    for signal in ("metrics", "logs"):
+        cfg = configs.get(signal)
+        click.echo(f"{signal + ' url:':<14}{cfg.url if cfg else '(unresolved)'}")
+
+    metrics_cfg = configs.get("metrics")
+    if metrics_cfg is not None:
+        # Names only. A value here would leak on the BENIGN path: an agent
+        # debugging a 401 in good faith prints its own write token.
+        names = ", ".join(f"{key}=<set>" for key in sorted(metrics_cfg.headers)) or "(none)"
+        click.echo(f"headers:      {names}")
+        if metrics_cfg.credential_withheld:
+            click.echo(
+                "headers:      WITHHELD - the endpoint in use is not the "
+                "origin run/.env's credential was configured for"
+            )
+        click.echo(f"timeout:      {metrics_cfg.timeout_s:g}s")
+
+    click.echo("resource attributes:")
+    for key, value in sorted(resource_attributes(root, name).items()):
+        click.echo(f"  {key}={value}")
+
+    if problems:
+        for problem in dict.fromkeys(problems):
+            click.echo(problem, err=True)
+        raise SystemExit(1)
+
+    if not send:
+        click.echo("no request sent (pass --send to export a throwaway gauge)")
+        return
+
+    assert metrics_cfg is not None
+    spec = MetricSpec(
+        name="bobi.otel.check",
+        value=1,
+        kind="gauge",
+        unit="1",
+        description="bobi otel check probe",
+        attributes={},
+    )
+    _otel_send(export_metric, metrics_cfg, spec, resource_attributes(root, name))
+    click.echo(f"sent bobi.otel.check to {metrics_cfg.url}")
 
 
 @main.command()
