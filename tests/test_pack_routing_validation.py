@@ -1,4 +1,4 @@
-"""Phase 2: agent-pack routing correctness (D015, D017, D119).
+"""Phase 2: agent-pack routing correctness (D017, D119).
 
 Each test here fails against the pre-fix tree. The shipped packs are asserted
 directly rather than through a fixture copy — a dead route in a pack we
@@ -136,16 +136,14 @@ class TestChatServiceCheck:
 # --- the shipped packs ----------------------------------------------------
 
 class TestShippedPacksRoute:
-    @pytest.mark.parametrize("pack", ["eng-team", "dogfood-content-review",
-                                      "personal-assistant"])
+    @pytest.mark.parametrize("pack", ["eng-team", "personal-assistant"])
     def test_no_pack_carries_an_unmatchable_dispatch_rule(self, pack):
         raw = _pack(pack)
         cfg = _Cfg(auto_dispatch=raw.get("auto_dispatch", []))
         bad = [c.detail for c in _check_auto_dispatch_events(cfg)]
         assert bad == [], f"{pack}: {bad}"
 
-    @pytest.mark.parametrize("pack", ["eng-team", "dogfood-content-review",
-                                      "personal-assistant"])
+    @pytest.mark.parametrize("pack", ["eng-team", "personal-assistant"])
     def test_no_pack_names_an_undeclared_chat_service(self, pack):
         raw = _pack(pack)
         cfg = _Cfg(chat=raw.get("chat", ""),
@@ -167,24 +165,6 @@ class TestShippedPacksRoute:
         }
         matched = [r for r in rules if r.matches(event)]
         assert [r.workflow for r in matched] == ["issue-lifecycle"]
-
-    def test_dogfood_route_condition_uses_a_supported_operator(self):
-        """D015: `>` falls through to the bare-truthy check, which is False
-        for every count except the accidental 1 — so a 3-issue audit routed
-        to `done` and closed the issue as passing review."""
-        from bobi.workflow.variables import VariableContext
-
-        wf = yaml.safe_load(
-            (AGENTS / "dogfood-content-review" / "workflows"
-             / "dogfood-content-review.yaml").read_text())
-        conditions = re.findall(r'issues_count[^"\']*', str(wf))
-        assert conditions, "the route condition disappeared"
-        assert not any(">" in c or "<" in c for c in conditions), conditions
-
-        for count, should_fix in (("0", False), ("1", True), ("3", True)):
-            ctx = VariableContext()
-            ctx.set_flat("issues_count", count)
-            assert ctx.evaluate_condition("issues_count != 0") is should_fix, count
 
 
 # --- the drift pin --------------------------------------------------------

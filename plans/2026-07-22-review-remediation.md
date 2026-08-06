@@ -568,6 +568,34 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   - **D029** confirmed. Fixed by moving `_make_session` inside the retry `try` (the loser path now null-checks `client`, since session construction itself can be what raised).
   - **Both packs' versions bumped in lockstep with `agents/registry.yaml`** — the repo's version-agreement test enforces this, and an exact-pin consumer would otherwise fetch a stale immutable tarball.
 
+- **2026-08-05** (Zach, on #821): **`agents/dogfood-content-review` is deleted**, answering the Lane B question the 2026-08-05 D015 note above referred out of Lane A.
+  The pack goes with `tests/test_dogfood_content_review_pack.py`, its rows in `tests/test_pack_routing_validation.py`, its `agents/registry.yaml` entry, the `_HIDDEN_TEMPLATES` filter in `bobi/setup/webui/server.py` that existed only to hide it, and `.claude/commands/dogfood.md`.
+
+  **This plan's convergence gate is corrected here rather than edited in place**, per the review-surface rule that a gate command which turned out to be wrong is fixed by amendment.
+  The gate above reads "plus the in-repo dogfood run (isolated `BOBI_HOME`, dogfood-content-review pack: agent boots, event round-trips, the D015 fix-step route actually takes)".
+  That clause is void: the pack, the route, and the battery that drove it no longer exist.
+  **The gate is now:** full `pytest tests/ -q` + `cd event-server && npm test` green on main after the last lane merges, plus a real-agent smoke on any surviving pack (`agents/eng-team` or `agents/personal-assistant`) in an isolated `BOBI_HOME` proving the agent boots and an event round-trips.
+  The D015 fix-step clause is dropped outright, not retargeted, because no surviving pack carries that route.
+
+  **Consequence for D015 (Phase 2), recorded so the item is not later read as live coverage:** its fix shipped in `agents/dogfood-content-review/workflows/dogfood-content-review.yaml`, which this amendment deletes, so the fix is now moot.
+  The 2026-08-05 note above already flagged it as "correct but cosmetic".
+  The engine-level semantics it pinned survive as `tests/test_variables.py::TestConditionEquality::test_count_not_equal_zero`, carried over when the pack test was removed: `issues_count != 0` is True for "1" and "3" and False for "0", where the defective `> 0` returns False for "3".
+  That was the actual D015 symptom, so the regression stays pinned even though the pack that suffered it is gone.
+  D015's `[x]` marker stands as a record of what shipped; it is not re-opened.
+
+  **The stated rationale does not survive measurement, and that is recorded rather than glossed.** The option Zach chose was labelled "advance the deletion trigger".
+  Measured on `c073c1d` before building: the trigger is a conjunction, and `agents/eng-team` holds open **both** clauses by itself.
+  It is the only pack with `auto_dispatch` rules naming a workflow (6 of them), **and** it ships `workflows/`.
+  The example packs hold open only the second clause, which eng-team already holds open.
+  So this deletion advances the trigger by **zero** clauses; the engine stays undeletable until eng-team migrates off it, which is `plans/2026-07-26-checklist-execution-model.md` Phase 4, which never started.
+  The deletion is still correct on dead-weight grounds alone (no `auto_dispatch` block at all, no CI workflow references it, last substantive change 2026-07-01), which is why it proceeded.
+  **`agents/personal-assistant` is untouched** - no decision was taken on it, and it also ships an unused `workflows/`.
+
+  **`.claude/commands/dogfood.md` went too, and it was more than a pack test.** It was a 420-line whole-repo manual integration battery: install/config/paths, runtime lifecycle, 16 local event-server tests, Cloudflare Worker parity, the live-Slack soak for #190/#643, workflows/roles, SDK, real-Claude manager comms, doctor, monitors, event pipeline, and Fly rollout.
+  Only three parts were pack-specific (the email-service section, the agent-name assertion, the workflow-list assertion); the pack was merely the team it installed.
+  Retargeting it to a surviving pack was offered and **declined by Zach on 2026-08-05** in favour of deleting it.
+  The manual rendering-fidelity step it carried for the Slack soak was preserved into the `tests/integration/test_slack_live.py` docstring, which had pointed at the battery's Section 3c; the pytest half of that soak is unaffected.
+
 ## Notes
 
 - **Deferred to a successor structural-refactor plan** (explicitly out of scope here; do not partially attempt): Q001/Q040 (cli.py command-tree rewiring), Q002 (subagent.py event-subscription extraction, ~370 lines + 10 test monkeypatch sites), Q003 (`_run_workflow_async` decomposition), Q103 (run_phase_blocking/spawn_adhoc skeleton unification), Q106 (events/server.py split), Q004 (local.ts route table), Q036 (core.ts god-file split), Q005/Q111/Q129 (shared integration-test harness). The appendix entries carry the verifier traces for when that plan is written.
