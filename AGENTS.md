@@ -153,6 +153,41 @@ unit suites and includes the knowledge-base dependencies imported during test
 collection. Use `.[dev]` only for focused e2e work that does not collect the
 KB test surface.
 
+### Node, and the two versions that cannot share a shell
+
+Day-to-day work needs no Node at all: `pip install -e .` is an *editable*
+install, and `hatch_build.py` returns early for those, so the embedded event
+server is never built.
+
+Two tasks do need it, at **two incompatible versions**:
+
+| Task | Node | Why |
+|---|---|---|
+| Any non-editable wheel build, and therefore `tests/integration/test_container_image.py` and `tests/integration/test_packaged_event_server.py` | **20 exactly** | `hatch_build.py::_require_build_node` rejects any other major outright, 22 and 24 included |
+| The Worker/wrangler suites (`event-server/`) | **22+** | wrangler refuses anything below 22 |
+
+There is deliberately no `.nvmrc`: a single pin would be wrong for one of the
+two. Select per task, e.g. `nvm use 20` before a container run. This is also
+why no CI job runs both — see the pinning comments in `container.yml` and
+`ci.yml`.
+
+A **fresh worktree also needs the event-server's npm deps**, separately from
+the Python install:
+
+```bash
+cd event-server && npm ci
+```
+
+Several integration tests spawn a Node stub that resolves `ws` through
+`NODE_PATH=event-server/node_modules`. Without it the stub cannot start and
+the test fails 15s later as `gateway stub did not come up`, which reads like a
+timeout rather than a missing dependency.
+
+Between them, those two prerequisites are the entire reason
+`test_container_image.py` and `test_packaged_event_server.py` were long
+believed unable to run locally. Both run fine with Node 20 selected and
+`npm ci` done; there is no deeper obstacle.
+
 The container recipe (`Dockerfile`, `docker/`) and the Cloudflare Worker event
 tier (`event-server/worker/`) live in THIS repo and are public, alongside the
 three local event-server variants. So does the console, whole: the UI and BOTH
