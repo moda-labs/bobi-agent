@@ -2,7 +2,7 @@ import { SELF, env } from "cloudflare:test";
 import { describe, it, expect, beforeEach } from "vitest";
 
 import capture from "./fixtures-claude-code-mcp.json";
-import { MCP_SERVER_NAME, MCP_SERVER_VERSION } from "../src/mcp";
+import { MCP_SERVER_NAME, MCP_SERVER_VERSION, handleMcpRequest } from "../src/mcp";
 import { DEFAULT_COMMAND_WAIT_MS, adminTopic, commandWaitMsFromEnv } from "../src/fleet";
 import { type Bubble, mintBubble, publishSigned, registerSigned } from "./bubble-helpers";
 
@@ -61,29 +61,35 @@ function findCaptured(method: string, predicate?: (body: string) => boolean): Ca
  * Worker that had only the read half.
  */
 function callTool(name: string, args: Record<string, unknown>, token: string | null = OPERATOR): Promise<Response> {
-	const template = findCaptured("tools/call");
-	return replay(
-		{
-			...template,
-			body: JSON.stringify({
-				jsonrpc: "2.0",
-				id: 4242,
-				method: "tools/call",
-				params: { name, arguments: args },
-			}),
-		},
-		token,
-	);
+	return replay(toolCall(name, args), token);
 }
 
-/** Replay one captured request verbatim, with only the bearer swapped in. */
-function replay(req: CapturedRequest, token: string | null = OPERATOR): Promise<Response> {
+/** The captured tools/call request, carrying a synthetic body for `name`. */
+function toolCall(name: string, args: Record<string, unknown>): CapturedRequest {
+	return {
+		...findCaptured("tools/call"),
+		body: JSON.stringify({
+			jsonrpc: "2.0",
+			id: 4242,
+			method: "tools/call",
+			params: { name, arguments: args },
+		}),
+	};
+}
+
+/** One captured request as a Request, with only the bearer swapped in. */
+function capturedRequest(req: CapturedRequest, token: string | null = OPERATOR): Request {
 	const headers: Record<string, string> = { "content-type": "application/json" };
 	for (const [k, v] of Object.entries(req.headers)) {
 		if (v !== null && v !== undefined) headers[k] = v;
 	}
 	if (token !== null) headers.authorization = `Bearer ${token}`;
-	return SELF.fetch(MCP_URL, { method: "POST", headers, body: req.body });
+	return new Request(MCP_URL, { method: "POST", headers, body: req.body });
+}
+
+/** Replay one captured request verbatim through the Worker's own routing. */
+function replay(req: CapturedRequest, token: string | null = OPERATOR): Promise<Response> {
+	return SELF.fetch(capturedRequest(req, token));
 }
 
 /**
@@ -531,15 +537,20 @@ async function expectNoCommandRecorded(fleet: string, instance: string): Promise
 }
 
 describe("/mcp write tools", () => {
-	// The explicit timeouts on the two pending-lifecycle tests ARE an assertion:
-	// they are below the 5s production default and above the 1.5s the suite
-	// configures, so a build that stopped honouring MCP_COMMAND_WAIT_MS fails
-	// here. Without them the only thing killing that mutant is vitest's own 5000ms
-	// default - which someone raising the runner timeout would silently disable,
-	// taking a documented self-hoster contract with it.
-	const WITHIN_CONFIGURED_WAIT = { timeout: 3_000 };
+	// Several tests here leave a command unanswered, so each one spends the
+	// configured wait (1.5s in this suite - see vitest.config.mts). That the
+	// route takes its budget from MCP_COMMAND_WAIT_MS rather than the 5s
+	// production default is asserted at the bottom of this file, by counting
+	// the polls it makes.
+	//
+	// It used to be asserted HERE, by a 3s per-test timeout sitting between the
+	// two values. That reads as an assertion but measures the runner: the
+	// budget has to cover setup, the wait, and every scheduling delay in
+	// between, which left ~1.4s of headroom over the wait itself. A loaded CI
+	// runner closed that gap and turned main red on a build with nothing wrong
+	// with it (run 31056001778). A poll count cannot flake.
 
-	it("bobi_lifecycle issues the command and records the reason on the trail", WITHIN_CONFIGURED_WAIT, async () => {
+	it("bobi_lifecycle issues the command and records the reason on the trail", async () => {
 		const { fleet, instance } = await liveInstance("lc");
 
 		const res = await callTool("bobi_lifecycle", {
@@ -564,7 +575,7 @@ describe("/mcp write tools", () => {
 		});
 	});
 
-	it("bobi_lifecycle says plainly that a pending restart is not a failure", WITHIN_CONFIGURED_WAIT, async () => {
+	it("bobi_lifecycle says plainly that a pending restart is not a failure", async () => {
 		const { fleet, instance } = await liveInstance("lcnote");
 		const res = await callTool("bobi_lifecycle", { fleet, instance, action: "restart", reason: "r" });
 		const body = JSON.parse(await toolText(res));
@@ -652,7 +663,7 @@ describe("/mcp write tools", () => {
 		expect(result.content[2].text).toContain("END OF UNTRUSTED CONTENT");
 	});
 
-	it("does not label a pending transcript as untrusted content", WITHIN_CONFIGURED_WAIT, async () => {
+	it("does not label a pending transcript as untrusted content", async () => {
 		// Nothing answers, so the wait expires. The warning must be reserved for
 		// blocks that actually carry third-party text - crying wolf on an empty
 		// stub is how an agent learns to ignore it.
@@ -744,5 +755,66 @@ describe("bounded wait configuration", () => {
 		for (const bad of ["", "abc", "-1", "NaN"]) {
 			expect(commandWaitMsFromEnv(bad), `for ${JSON.stringify(bad)}`).toBe(5_000);
 		}
+	});
+});
+
+/**
+ * Tally the route's reads of one command's RESULT record.
+ *
+ * `awaitCommandResult` polls `buildCommandView`, which is one read of this key
+ * per poll - so the count IS the wait's behaviour, observable without a
+ * stopwatch. Everything else delegates to the real binding, so the route still
+ * runs against real KV; only the reads are counted.
+ */
+function countingEvents(inner: KVNamespace): { binding: KVNamespace; resultReads: () => number } {
+	let reads = 0;
+	const binding = {
+		get(key: string, options?: unknown) {
+			// A key rename in createFleetKVStorage surfaces here as a count of
+			// zero, which fails the assertion below rather than passing vacuously.
+			if (key.startsWith("fleet_command_result:")) reads += 1;
+			return (inner.get as (k: string, o?: unknown) => Promise<unknown>)(key, options);
+		},
+		put: inner.put.bind(inner),
+		list: inner.list.bind(inner),
+		delete: inner.delete.bind(inner),
+		getWithMetadata: inner.getWithMetadata.bind(inner),
+	} as unknown as KVNamespace;
+	return { binding, resultReads: () => reads };
+}
+
+describe("the wait the route actually uses", () => {
+	// What the ROUTE does with the binding, as distinct from what
+	// `commandWaitMsFromEnv` returns for it: `handleMcpRequest` builds both its
+	// storage and its budget out of the env it is handed, so handing it a
+	// wrapped binding and a zero budget makes that wiring observable.
+	//
+	// Counted, never timed. The natural assertion - "an unanswered command
+	// answers within N ms" - measures the runner's load as much as the code's
+	// behaviour, and a budget tight enough to catch the 5s default is tight
+	// enough to fail on a busy runner (run 31056001778). A poll count is the
+	// same contract with none of that.
+	it("takes its budget from MCP_COMMAND_WAIT_MS, not the 5s production default", async () => {
+		const { fleet, instance } = await liveInstance("waitenv");
+		const events = countingEvents(env.EVENTS);
+
+		// Delivery is stubbed to one subscriber: what happens AFTER a delivered
+		// command is this test's subject, and the issue outcomes that precede it
+		// have their own tests above.
+		const res = await handleMcpRequest(
+			capturedRequest(toolCall("bobi_lifecycle", { fleet, instance, action: "restart", reason: "wait wiring" })),
+			{ ...env, EVENTS: events.binding, MCP_COMMAND_WAIT_MS: "0" },
+			async () => 1,
+		);
+
+		// Nothing answers, so the answer is the same `pending` every other
+		// unanswered command returns - reached without waiting.
+		const body = JSON.parse(await toolText(res));
+		expect(body.status).toBe("pending");
+		expect(body.command_id).toBeTruthy();
+
+		// A zero budget reads once and answers. A build that ignored the binding
+		// would spend the 5s default polling this one key roughly twenty times.
+		expect(events.resultReads()).toBe(1);
 	});
 });
