@@ -1,0 +1,27 @@
+# OTLP telemetry dependency (#428 unified model, #978).
+#
+# GUIDE-ONLY, with no `install:` on purpose: `opentelemetry-proto` is a CORE
+# dependency in [project.dependencies], so `pip install bobi` already carries
+# the wire types and the image derives its install list from that same list.
+# There is nothing left to install; the entry exists to ship the agent-facing
+# guide and to make the missing-wire-types case a doctor finding rather than a
+# traceback at emit time.
+#
+# `success:` is REQUIRED (tool_library.py::_build_dependency raises
+# ComposeError without it), and both obvious candidates are wrong:
+#
+#   * `otel check` exits 1 when unconfigured, so build-verify would fail on
+#     every box without an endpoint - which is a normal state, not a fault.
+#   * a bare `python3 -c 'import opentelemetry.proto'` resolves to the SYSTEM
+#     interpreter under a Codex tool shell, which sanitizes PATH and drops
+#     /opt/venv/bin - so it would probe an interpreter the CLI never uses.
+#
+# Routing through the `bobi` entrypoint proves both things that matter (the
+# group loads, and the proto import resolves under the CLI's own interpreter)
+# and needs no endpoint.
+#
+# A team still needs OTEL_EXPORTER_OTLP_ENDPOINT in run/.env; the command
+# reports "unconfigured" (not "broken") without one. See docs/OTEL.md.
+success: bobi agent "${BOBI_AGENT:-$(basename "$BOBI_ROOT")}" otel --help >/dev/null 2>&1
+why: Record agent-authored metrics and logs to an OTLP endpoint via `bobi agent <name> otel` (tools/otel.md). Destination comes from OTEL_EXPORTER_OTLP_ENDPOINT in run/.env.
+fix: pip install --upgrade 'bobi' && echo 'Set OTEL_EXPORTER_OTLP_ENDPOINT in run/.env'

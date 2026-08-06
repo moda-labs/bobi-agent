@@ -238,7 +238,7 @@ def _subcommand_error(group, tokens: tuple[str, ...], prefix: str) -> str | None
         next_token = tokens[1]
         if not next_token.startswith("-") and next_token in child.commands:
             return None
-        if not next_token.startswith("-") and subcommand in {"subagents", "workflows", "monitors", "roles", "transcript", "kb", "event-server"}:
+        if not next_token.startswith("-") and subcommand in {"subagents", "workflows", "monitors", "roles", "transcript", "kb", "event-server", "otel"}:
             return f"`{prefix} {subcommand} {next_token}` is not a public command"
     return None
 

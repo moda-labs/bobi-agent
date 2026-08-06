@@ -133,6 +133,28 @@ def _no_event_server_io(request, monkeypatch):
     )
     yield
 
+
+# Identity vars the deployment resolver reads. `_isolate_environ` above
+# snapshots the environment but does NOT clear it, so on a developer box that
+# really exports these the otel suites would assert against the developer's
+# fleet instead of the fixture's.
+_OTEL_IDENTITY_VARS = (
+    "BOBI_FLEET", "BOBI_INSTANCE", "BOBI_AGENT", "BOBI_MACHINE_ID",
+    "BOBI_REGION", "BOBI_NODE", "FLY_APP_NAME", "FLY_MACHINE_ID", "FLY_REGION",
+    "KUBERNETES_SERVICE_HOST", "POD_NAME", "NODE_NAME", "OTEL_SERVICE_NAME",
+)
+
+
+@pytest.fixture
+def otel_clean_env(monkeypatch):
+    """Clear every OTEL_* and identity var the otel suites assert against."""
+    for name in list(os.environ):
+        if name.startswith("OTEL_"):
+            monkeypatch.delenv(name, raising=False)
+    for name in _OTEL_IDENTITY_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
 import yaml
 
 TEST_AGENT_NAME = "test-agent"

@@ -158,6 +158,16 @@ therefore runs untrusted-author code against your credentials.
   prompt-injected agent could exfiltrate its own instance's tokens. This is an
   accepted internal-only risk today, mitigated by scoped per-instance tokens; an
   egress proxy is tracked for any non-employee/tenant use (epic #395).
+- **An OTLP ingest token must be write-only and per-instance.** The accepted risk
+  directly above is bounded by "its own instance's tokens", and a vendor OTLP
+  token breaks that bound: a Grafana Cloud OTLP credential is typically
+  **stack-scoped** and identical on every box, so one exfiltrated from one
+  instance reaches the organization's whole observability plane - a change to
+  the model, not an instance of it. A team enabling `bobi agent <name> otel`
+  therefore mints a write-only token scoped to one instance, never a
+  stack-admin token and never one shared across the fleet. The command's own
+  controls (credential origin-pinning, no redirects on export, header values
+  never printed) are documented in `docs/OTEL.md`.
 
 ## What's enforced vs. v1 boundaries
 
