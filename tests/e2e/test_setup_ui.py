@@ -491,3 +491,153 @@ def test_slack_step_saves_channel_and_close_ends_setup(page, bobi_url):
     page.click("#ns-close")
     expect(page.get_by_role("heading", name="is installed")).to_be_visible(
         timeout=10_000)
+
+
+# --- the shared top bar --------------------------------------------------
+#
+# The reskin moved every back affordance out of the page body and the chat
+# column into the single `#navback` slot of the global bar (`app.js`
+# setNavBack), and gave that bar the same shape on `bobi setup` and the web app
+# via the shared `chrome.css`. Both are behavioural contracts nothing asserted,
+# and the second already regressed once inside the reskin: a `.backbtn`
+# font-size in the setup sheet overrode the shared 15px, so the back link was a
+# different size depending on which surface you were on.
+
+
+def test_back_from_intro_returns_to_welcome(page, bobi_url):
+    page.goto(bobi_url)
+    page.click("#welcome-go")
+    expect(page.locator(".phead h1")).to_have_text("Build an agent team")
+    expect(page.locator(".titlebar .navback .backbtn")).to_be_visible()
+    page.click(".titlebar .navback .backbtn")
+    expect(page.locator("#welcome-go")).to_be_visible(timeout=5_000)
+
+
+def test_back_from_editor_returns_to_intro(page, bobi_url):
+    page.goto(bobi_url)
+    page.click("#welcome-go")
+    page.click("[data-newteam]")
+    page.wait_for_selector("#chinput", timeout=5_000)
+    expect(page.locator(".titlebar .navback .backbtn")).to_be_visible()
+    page.click(".titlebar .navback .backbtn")
+    expect(page.locator(".phead h1")).to_have_text("Build an agent team",
+                                                   timeout=5_000)
+
+
+def test_nav_slot_never_leaks_between_screens(page, bobi_url):
+    # One slot serving every screen only works if each screen refills it. The
+    # welcome on-ramp has nowhere to go back to, so it must be EMPTY there -
+    # both on arrival and again on the way back from a screen that filled it.
+    # Wait for the screen to be up first: an empty slot on a page that has not
+    # rendered yet proves nothing.
+    page.goto(bobi_url)
+    expect(page.locator("#welcome-go")).to_be_visible()
+    expect(page.locator(".titlebar .navback")).to_have_text("")
+    page.click("#welcome-go")
+    expect(page.locator(".titlebar .navback")).to_contain_text("back")
+    page.click(".titlebar .navback .backbtn")
+    expect(page.locator("#welcome-go")).to_be_visible(timeout=5_000)
+    expect(page.locator(".titlebar .navback")).to_have_text("")
+
+
+def _top_bar_contract(page):
+    """Assert the parts every Bobi surface's top bar must expose, and return
+    the computed size of its back affordance.
+
+    `bobi setup` names the header `.titlebar` and the web app names it `.bar`;
+    everything inside is the shared contract from `chrome.css`.
+    """
+    bar = page.locator("header.titlebar, header.bar")
+    expect(bar).to_have_count(1)
+    expect(bar.locator(".navleft .navback")).to_have_count(1)
+    expect(bar.locator(".navleft .page-name")).not_to_be_empty()
+    # The lockup always travels with its byline.
+    expect(bar.locator(".lockup .byline")).to_be_visible()
+    back = bar.locator(".navback .navback-link")
+    expect(back).to_be_visible()
+    return back.evaluate("el => getComputedStyle(el).fontSize")
+
+
+def test_top_bar_contract_is_identical_on_both_surfaces(page, bobi_url, bobi_app):
+    # `bobi setup` and the web app are separate pages, so without the shared
+    # sheet the top level of the UI changes shape as you move between them.
+    # Same parts, same place, and - the half that actually drifted - the back
+    # affordance the same SIZE on both.
+    page.goto(bobi_url)
+    page.click("#welcome-go")                       # a screen that owns a back
+    setup_back = _top_bar_contract(page)
+    expect(page.locator("header.titlebar .page-name")).to_have_text("setup")
+
+    page.goto(bobi_app.agent_url)                   # the web app's back route
+    app_back = _top_bar_contract(page)
+    expect(page.locator("header.bar .page-name")).to_have_text(bobi_app.agent)
+
+    # 15px, from chrome.css - not the 13.5px the setup sheet once overrode it
+    # with, and not the 13.333px a bare <button> falls back to.
+    assert setup_back == app_back == "15px"
+
+
+# The brand faces, from tokens.css (--font-display / --font-sans / --font-mono).
+BRAND_FONTS = {"Geist", "Inter", "Geist Mono"}
+
+# Everything the browser actually paints as type: visible elements carrying
+# their own text, plus every control - a <button> the sheet forgot inherits
+# nothing, which is the shape the bug below took.
+_RENDERED_TYPE = """() => {
+  const out = [];
+  for (const el of document.querySelectorAll("body *")) {
+    const cs = getComputedStyle(el);
+    if (cs.visibility === "hidden" || !el.getClientRects().length) continue;
+    const owns = [...el.childNodes]
+      .some(n => n.nodeType === 3 && n.textContent.trim());
+    if (!owns && !el.matches("button, a, input, select, textarea")) continue;
+    out.push({
+      el: el.tagName.toLowerCase() +
+          (el.getAttribute("class") ? "." + el.getAttribute("class") : ""),
+      text: (el.textContent || "").trim().slice(0, 30),
+      size: parseFloat(cs.fontSize),
+      color: cs.color,
+      font: cs.fontFamily.split(",")[0].replace(/^["']|["']$/g, ""),
+    });
+  }
+  return out;
+}"""
+
+
+def _assert_styled_type(page, screen):
+    """Fail if anything on `screen` renders as unstyled type: below 11px, in
+    pure black, or off the brand faces. Names every offender - a bare repr of
+    the list gets truncated by pytest exactly when it matters."""
+    bad = [e for e in page.evaluate(_RENDERED_TYPE)
+           if e["size"] < 11
+           or e["color"] == "rgb(0, 0, 0)"
+           or e["font"] not in BRAND_FONTS]
+    assert not bad, (f"unstyled type on the {screen} screen:\n"
+                     + "\n".join(f"  {e}" for e in bad))
+
+
+def test_rendered_type_never_falls_back_to_browser_defaults(page, bobi,
+                                                            monkeypatch):
+    # The intro's template rows shipped as bare <button>s - 13.333px in pure
+    # #000, the UA default - through several fully green runs, because nothing
+    # looked at rendered type. 11px is the smallest thing the system draws
+    # (the byline); pure black and a non-brand face are never correct.
+    # The registry is faked in-process so the audit covers a template row.
+    from bobi.setup import open_mode
+
+    monkeypatch.setattr(open_mode, "list_registry_teams", lambda proj: [
+        {"name": "eng-team", "description": "An engineering team.",
+         "official": True, "registry": "test"}])
+
+    page.goto(bobi.url)
+    expect(page.locator("#welcome-go")).to_be_visible()
+    _assert_styled_type(page, "welcome")
+
+    page.click("#welcome-go")
+    expect(page.locator("[data-template='eng-team']")).to_be_visible(
+        timeout=5_000)
+    _assert_styled_type(page, "intro")
+
+    page.click("[data-newteam]")
+    expect(page.locator("#chinput")).to_be_visible(timeout=5_000)
+    _assert_styled_type(page, "editor")
