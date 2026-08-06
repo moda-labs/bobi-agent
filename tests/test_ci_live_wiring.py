@@ -37,6 +37,12 @@ DEPLOY_ROUNDTRIP = "test_deployed_worker_publish_subscribe_roundtrip"
 # flags. Drop this from the lane and the flag goes back to being unproven.
 DEPLOY_MCP_CALL = "test_deployed_worker_mcp_tool_call"
 DEPLOY_MCP_CLOSED = "test_deployed_worker_mcp_route_is_closed_without_a_token"
+# The OTLP lane (#978) spends no credentials, but it is gated the same way -
+# every test skips without a collector - so it carries the same ran-assertion.
+OTEL_METRIC = "test_collector_accepts_a_metric_and_renders_its_identity"
+OTEL_LOG = "test_collector_accepts_a_log_record"
+OTEL_WRONG_TYPE = "test_collector_rejects_a_bare_resource_metrics_body"
+OTEL_CLI = "test_the_cli_reaches_the_collector_end_to_end"
 
 
 def _steps(workflow: str, job: str) -> list[dict]:
@@ -142,6 +148,14 @@ def test_live_lane_installs_the_wrangler_harness_it_needs():
             4,
             (DEPLOY_HEALTH, DEPLOY_ROUNDTRIP, DEPLOY_MCP_CALL, DEPLOY_MCP_CLOSED),
         ),
+        (
+            "container.yml",
+            "container-image",
+            "Assert the collector round-trip actually ran",
+            "otel-collector.xml",
+            4,
+            (OTEL_METRIC, OTEL_LOG, OTEL_WRONG_TYPE, OTEL_CLI),
+        ),
     ],
 )
 def test_each_live_lane_asserts_it_ran(workflow, job, step_name, junit, expect_passed, required):
@@ -200,6 +214,10 @@ def test_required_test_names_exist_in_the_suites_they_gate():
     smoke = (REPO_ROOT / "tests" / "integration" / "test_worker_deploy_smoke.py").read_text()
     for name in (DEPLOY_HEALTH, DEPLOY_ROUNDTRIP):
         assert f"def {name}(" in smoke
+
+    collector = (REPO_ROOT / "tests" / "integration" / "test_otel_collector.py").read_text()
+    for name in (OTEL_METRIC, OTEL_LOG, OTEL_WRONG_TYPE, OTEL_CLI):
+        assert f"def {name}(" in collector
 
 
 def test_live_marker_is_still_defined():

@@ -134,6 +134,36 @@ jobs:
         run: pytest tests/integration/test_container_image.py -m "docker and not live" -v --timeout=400
 
       # ------------------------------------------------------------------
+      # OTLP COLLECTOR LANE (#978). The acceptance bar for the otel exporter
+      # is a REAL collector: a protobuf round-trip that encodes and decodes
+      # with the same wrong message type passes while the wire shape is wrong,
+      # which is exactly the error this feature's own plan review caught.
+      #
+      # It lives here rather than in `integration-fast` because the suite is
+      # `docker`-marked, and that job deselects the marker — an unhomed
+      # container test is a third vacuous surface.
+      #
+      # No credentials, no spend: a public collector image with a `debug`
+      # exporter, so unlike the live lane below it runs on every push.
+      - name: Run the OTLP collector round-trip
+        run: |
+          pytest tests/integration/test_otel_collector.py \
+            -m docker -v --timeout=300 \
+            --junitxml=otel-collector.xml
+
+      - name: Assert the collector round-trip actually ran
+        # Same ran-assertion as the live lane: every test in the suite carries
+        # a skipif on collector availability, so an image pull failure or a
+        # renamed marker would otherwise skip the whole lane to green.
+        run: |
+          python scripts/assert_junit_ran.py otel-collector.xml \
+            --expect-passed 4 \
+            --require test_collector_accepts_a_metric_and_renders_its_identity \
+            --require test_collector_accepts_a_log_record \
+            --require test_collector_rejects_a_bare_resource_metrics_body \
+            --require test_the_cli_reaches_the_collector_end_to_end
+
+      # ------------------------------------------------------------------
       # LIVE LANE — the only place in this repo where a real brain executes.
       #
       # `test_image_ask_roundtrip` (Claude) and `test_image_codex_ask_roundtrip`

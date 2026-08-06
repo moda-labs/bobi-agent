@@ -1,0 +1,18 @@
+# OTLP telemetry dependency (#428 unified model, #978).
+#
+# GUIDE-ONLY, with no `install:` on purpose: `opentelemetry-proto` is a CORE
+# dependency in [project.dependencies], so `pip install bobi` already carries
+# the wire types and the image derives its install list from that same list.
+# There is nothing left to install; the entry exists to ship the agent-facing
+# guide and to make the missing-wire-types case a doctor finding rather than a
+# traceback at emit time.
+#
+# The probe imports `bobi` alongside the wire types on purpose: that is what
+# pins it to the interpreter the CLI actually runs under, rather than to
+# whatever `python3` happens to resolve to first.
+#
+# A team still needs OTEL_EXPORTER_OTLP_ENDPOINT in run/.env; the command
+# reports "unconfigured" (not "broken") without one. See docs/OTEL.md.
+success: python3 -c 'import bobi, opentelemetry.proto' >/dev/null 2>&1
+why: Record agent-authored metrics and logs to an OTLP endpoint via `bobi agent <name> otel` (tools/otel.md). Destination comes from OTEL_EXPORTER_OTLP_ENDPOINT in run/.env.
+fix: pip install --upgrade 'bobi' && echo 'Set OTEL_EXPORTER_OTLP_ENDPOINT in run/.env'

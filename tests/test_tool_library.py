@@ -154,6 +154,22 @@ def test_gstack_catalog_entry_bakes_browser_toolchain(project):
     assert (dest / "tools" / "gstack.md").is_file()
 
 
+def test_otel_catalog_entry_is_guide_only(project):
+    """`opentelemetry-proto` is a CORE bobi dependency, so the otel entry has
+    nothing to install: it contributes a guide and a doctor check, and must add
+    no build steps at all."""
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'tool_library: [otel]\n')
+    dest = _compose(project, leaf)[0]
+    cfg = _agent_yaml(dest)
+    assert "build" not in cfg
+    assert any(r["name"] == "otel" for r in cfg["requires"])
+    guide = dest / "tools" / "otel.md"
+    assert guide.is_file()
+    assert "otel metric" in guide.read_text()
+
+
 # --- local / explicit wins (escape hatches) ----------------------------------
 
 
