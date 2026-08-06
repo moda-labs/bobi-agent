@@ -1,6 +1,6 @@
 # Agent-authored OTel telemetry (`bobi agent <name> otel`)
 
-> **Status:** Approved
+> **Status:** Draft
 > **Tracking issue:** moda-labs/bobi-agent#976 · **Created:** 2026-08-05 · **Last amended:** — (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
@@ -663,6 +663,16 @@ this line supersedes it.)
   lane, dispatched as #978 (marker mode `solo`). No parallel cut was justified
   — the phases are strictly sequential and the sequential estimate is a single
   agent session.
+- **2026-08-05** (split self-review): returned to **Draft**. The Split-stage
+  implementer self-review found six blocking defects surviving the reviewed
+  plan — a temporality default that rejects every gauge, an emission cap that
+  bounds nothing, a Phase 5 CI home that does not exist, a Phase 1 gate that
+  collects 11 tests instead of 36, a Phase 2 gate circular on Phase 3, and an
+  unspecifiable tool_library `success:` probe. Nothing had been built against
+  this plan (no bot PR existed), so the corrections are made in place under
+  Draft rather than accreted as superseding amendments a builder would have to
+  reconcile. Dispatch issue #978 is marked blocked until it returns to
+  Approved.
 
 ## Notes
 
