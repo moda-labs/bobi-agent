@@ -183,7 +183,7 @@ Includes Q4's expired compat layers and Q3's flag removal once decided. For conf
 - [x] **Q038** `bobi/config.py:510` — Config.default_role is parsed from agent.yaml's `defaults.role` but never read by anything, so the key is silently ignored.
 - [x] **Q045** `bobi/doctor.py:517` — `_check_policy` is a self-described 'deprecated compatibility wrapper for one release' with zero production callers, several releases after the…
 - [x] **Q053** `bobi/history.py:15` — SESSIONS_DIR module constant is never referenced.
-- [ ] **Q013** `bobi/history.py:447` — context_for_events (49 lines) has zero production callers — only tests exercise it.
+- [x] **Q013** `bobi/history.py:447` — context_for_events (49 lines) has zero production callers — only tests exercise it.
 - [x] **Q048** `bobi/history.py:498` — start_background_indexer has zero callers anywhere in the repo, including tests.
 - [x] **Q052** `bobi/inbox.py:102` — Inbox._closed is written in __init__ and close() but never read anywhere.
 - [x] **Q094** `bobi/kb/store.py:174` — KBStore.kb_dir() and KBStore.db_path_for() static methods have zero callers in the repo, including tests.
@@ -192,7 +192,7 @@ Includes Q4's expired compat layers and Q3's flag removal once decided. For conf
 - [x] **Q030** `bobi/memory.py:381` — The policy->long_term_memory deprecation aliases (memory.MAX_POLICY_CHARS/load_policy/format_policy_prompt, paths.policy_path/policy_cursor_path,…
 - [x] **Q014** `bobi/monitors/scheduler.py:567` — The rest of the curator→sleep-cycle compat layer is five releases past its stated one-release window: _default_spawn_curator (567), the spawn_curator…
 - [x] **Q055** `bobi/monitors/scheduler.py:1097` — Three deprecated curator wrappers — _load_curator_prompt (1097), _on_curator_result (1414), _publish_policy_updated (1452) — have zero callers…
-- [ ] **Q057** `bobi/monitors/script_cache_checks.py:1046` — approve_pending's scripts_dir parameter is never read — the body resolves all paths via _pending_path/_pin/_scripts_dir — yet tests pass a directory…
+- [x] **Q057** `bobi/monitors/script_cache_checks.py:1046` — approve_pending's scripts_dir parameter is never read — the body resolves all paths via _pending_path/_pin/_scripts_dir — yet tests pass a directory…
 - [x] **Q095** `bobi/paths.py:91` — paths.agent_runtime_root is a pure alias of agent_run_root with zero callers.
 - [x] **Q118** `bobi/paths.py:183` — compose_lock_path() has zero callers; every compose-lock consumer builds `<dest>/compose-lock.json` inline against its own base dir. *(unverified — re-verify first)*
 - [x] **Q119** `bobi/paths.py:282` — worktrees_dir() points at state_dir()/worktrees, a location nothing in the codebase uses — workflow worktrees actually live under the repo's… *(unverified — re-verify first)*
@@ -200,14 +200,14 @@ Includes Q4's expired compat layers and Q3's flag removal once decided. For conf
 - [f] state:falsified **Q081** `bobi/sdk.py:42` — TERMINAL_STATUSES tuple is defined but never read anywhere.
 - [x] **Q079** `bobi/sdk.py:71` — Module constant CLAUDE_CLI has zero readers anywhere and forces a shutil.which() at import time.
 - [x] **Q113** `bobi/sdk.py:198` — sdk.state_dir() wrapper (delegating to paths.state_dir) has zero callers. *(plausible — re-verify first)*
-- [ ] **Q082** `bobi/sdk.py:456` — SessionRegistry.log_path's only caller is its own unit test.
+- [x] **Q082** `bobi/sdk.py:456` — SessionRegistry.log_path's only caller is its own unit test.
 - [x] **Q031** `bobi/service.py:709` — service.restart_team has zero callers anywhere in the repo, including tests.
 - [x] **Q054** `bobi/session.py:17` — session.py imports hashlib (line 17) and Path (line 22) but uses neither.
-- [ ] **Q037** `bobi/setup/__init__.py:19` — run_setup() has zero callers; the `bobi setup` CLI command now opens the webapp daemon URL instead, leaving the setup package's only public entry…
-- [ ] **Q120** `bobi/setup/actions.py:108` — default_secret_prompt() — a click-based masked terminal prompt — has zero callers since setup became web-UI-driven. *(unverified — re-verify first)*
-- [ ] **Q065** `bobi/setup/actions.py:161` — installed_team_name has no production callers — only its own unit tests reference it.
-- [ ] **Q066** `bobi/setup/actions.py:173` — resolve_or_fetch has no production callers — only its own unit tests reference it.
-- [ ] **Q067** `bobi/setup/authoring.py:614` — _env_var_fallback is an unreachable fallback: the `conn.credential_var or _env_var_fallback(...)` branch in tools_prompt can never fire.
+- [x] **Q037** `bobi/setup/__init__.py:19` — run_setup() has zero callers; the `bobi setup` CLI command now opens the webapp daemon URL instead, leaving the setup package's only public entry…
+- [x] **Q120** `bobi/setup/actions.py:108` — default_secret_prompt() — a click-based masked terminal prompt — has zero callers since setup became web-UI-driven. *(unverified — re-verify first)*
+- [x] **Q065** `bobi/setup/actions.py:161` — installed_team_name has no production callers — only its own unit tests reference it.
+- [x] **Q066** `bobi/setup/actions.py:173` — resolve_or_fetch has no production callers — only its own unit tests reference it.
+- [x] **Q067** `bobi/setup/authoring.py:614` — _env_var_fallback is an unreachable fallback: the `conn.credential_var or _env_var_fallback(...)` branch in tools_prompt can never fire.
 - [x] **Q068** `bobi/setup/llm.py:23` — The _delta_text re-export from bobi.brain.claude exists only so a test can import it from the old location; no production code uses llm._delta_text.
 - [x] **Q049** `bobi/subagent.py:658` — _load_policy_prompt, the 'deprecated alias for one release' from the policy→long_term_memory rename, has zero callers and has outlived several…
 - [x] **Q050** `bobi/subagent.py:1687` — _parse_check_output is a back-compat shim with zero production callers, while run_check_blocking re-inlines its exact verdict→(finding, summary,…
@@ -216,8 +216,8 @@ Includes Q4's expired compat layers and Q3's flag removal once decided. For conf
 
 **Validation gate**
 
-- [ ] For every deleted name: `grep -rn "<name>" bobi/ tests/ agents/ docs/ skills/ event-server/` returns nothing (or only the changelog-adjacent mention the PR itself adds)
-- [ ] `pytest tests/ -q` (full suite incl. integration) green with zero test edits other than deleting tests of deleted code
+- [x] For every deleted name: `grep -rn "<name>" bobi/ tests/ agents/ docs/ skills/ event-server/` returns nothing (or only the changelog-adjacent mention the PR itself adds)
+- [x] `pytest tests/ -q` (full suite incl. integration) green with zero test edits other than deleting tests of deleted code
 
 ### Phase 6 — Consolidations & simplifications (behavior-preserving)
 
@@ -608,6 +608,13 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   **Q008's count in the finding is wrong but its analysis is right: there are seven sites, not six** — the finding's own prose lists seven while the headline says six. All seven confirmed unreachable at HEAD, because `_detect_project_root()` returns a `Path` or raises `click.UsageError`, and `paths.home_dir()` always returns a `Path`: `status`, `monitor_add`, `monitor_pause` (else-branch **and** the `where` ternary), `monitor_remove` (else-branch), `event_server_stop`, `_find_transcript` (the `else "bobi-manager"` arm), `agents_browse` (the `if project_path else []` after `home_dir()`). `_try_detect_project_root()` is the genuinely nullable helper and its one caller was left alone.
   **Q032 shipped partially, and deliberately so.** Only `registries` and `default_role` were deleted; **`chat` was kept**, per the falsification recorded in batch 1's amendment. `Config.registries` was the dead one — `registry.py:77` reads `raw.get("registries")` off its own dict and never touches the dataclass field, so registry resolution is untouched.
   Suite: **4262 passed / 1 skipped** with **zero test edits** — identical to the baseline.
+
+- **2026-08-06** (Lane B build session): **Phase 5 batch 4 — the setup-package cluster plus three stragglers, 8 items; Phase 5 is now closed.** Re-derived against `main` @ `b5388bb`. Shipped `[x]`: Q037, Q120, Q065, Q066, Q067 (setup), Q013, Q082, Q057.
+  **Q067's unreachability was derived, not assumed.** `tools_prompt` is only ever reached from `custom_services()`, which filters `conn.kind == "custom"`; every custom connector is built by `services._custom_connector`, which always constructs one non-optional `Secret(_env_var_for(clean), …)`; and `_env_var_for` is **byte-identical** to `_env_var_fallback`, ending in `f"{s or 'SERVICE'}_API_KEY"` and so never returning empty. `Connector.credential_var` therefore cannot be falsy on this path, and the `or` arm was a duplicate of the function it would have fallen back to.
+  Deleting the three `setup/actions.py` helpers left `click` with no remaining use in that module, and deleting `run_setup` left `Path` unused in `setup/__init__.py`; both imports went with them.
+  Suite: **4250 passed / 1 skipped**, 12 below baseline, and `git diff -- tests/ | grep -c '^-    def test_'` is exactly **12** — every one of them a test of code deleted here (7 for `context_for_events`, 4 for the two setup helpers, 1 for `SessionRegistry.log_path`). Q057's two call sites were edited rather than deleted, since they test `approve_pending`'s real behaviour and only passed an argument the body never read.
+  **Phase 5's two validation-gate boxes are flipped, with the measurement stated exactly.** Gate 1 (grep) was run per batch over `bobi/ tests/ agents/ docs/ skills/ event-server/ scripts/` and is clean for all 40 deleted names. Gate 2 was satisfied by a real full-suite run on this batch's tree — unit **4250 passed / 1 skipped** plus integration **354 passed / 20 skipped, 0 failures, 0 errors** (17m03s, Node 20 + `event-server && npm ci`). That integration number is the handoff's 329 baseline **plus** the 25 tests that used to error, confirming `#975`'s fix holds.
+  **Two honest qualifications on gate 2.** First, the green was measured per batch against `main`, not on the union of all four — no single tree ever held all 40 deletions at once, so the union is proven by post-merge CI on the last merge commit, not by this run. Second, the gate says "zero test edits other than deleting tests of deleted code", and that is narrower than what shipped: batch 2 **retargeted** `_default_spawn_curator`'s and `_check_policy`'s tests onto the surviving names, and batch 4 dropped an ignored argument at two `approve_pending` call sites. Those edits were deliberate — in each case the deleted alias was the only route a test took to live behaviour, so deleting the test would have dropped real coverage rather than dead coverage. The gate's spirit is met; its literal wording is not, and this records the difference rather than papering over it.
 
 ## Notes
 

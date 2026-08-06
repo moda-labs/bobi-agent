@@ -25,7 +25,6 @@ import re
 from pathlib import Path
 from typing import Callable
 
-import click
 import yaml
 
 from bobi import paths
@@ -106,15 +105,6 @@ class ActionError(Exception):
 
 # --- terminal / masking helpers ------------------------------------------
 
-def default_secret_prompt(var_name: str, service: str, instructions: str) -> str:
-    """Masked terminal prompt — the value never reaches the model."""
-    click.echo()
-    if instructions:
-        click.secho(f"  {service}: {instructions}", fg="cyan")
-    return click.prompt(f"  {var_name}", hide_input=True, default="",
-                        show_default=False)
-
-
 def mask(value: str) -> str:
     if len(value) > 12:
         return f"{value[:4]}…{value[-4:]}"
@@ -157,29 +147,6 @@ def team_source_dir(project: Path, state: SetupState) -> Path:
         p = Path(state.source_dir)
         return p if p.is_absolute() else paths.home_dir() / p
     return paths.agent_source_dir(state.team_name)
-
-
-def installed_team_name(project: Path) -> str | None:
-    """Name of the team installed in run/package/, or None."""
-    agent_yaml = paths.agent_yaml_path(project)
-    if not agent_yaml.exists():
-        return None
-    try:
-        return (yaml.safe_load(agent_yaml.read_text()) or {}).get(
-            "agent", "an agent team")
-    except yaml.YAMLError:
-        return "an agent team"
-
-
-def resolve_or_fetch(name: str, project: Path) -> Path | None:
-    """Resolve a team locally, then fetch it from a registry if needed."""
-    from bobi.cli import _resolve_agent_pack
-    pack_dir = _resolve_agent_pack(name, project)
-    if pack_dir:
-        return pack_dir
-    from bobi.registry import fetch
-    fetch(project, name)
-    return _resolve_agent_pack(name, project)
 
 
 # --- credential capture ---------------------------------------------------

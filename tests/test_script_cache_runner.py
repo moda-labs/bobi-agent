@@ -309,7 +309,7 @@ class TestApprovalModes:
              patch.object(sc, "generate_candidate", _gen([{"id": "x"}], script=s1)):
             script_cache(m, [Path("/repo")])  # review → queued to pending/
             assert (scripts_dir / "pending" / "email-watch.sh").exists()
-            approve_pending(m, scripts_dir)   # human promotes it
+            approve_pending(m)   # human promotes it
             assert (scripts_dir / "email-watch.sc.sh").exists()
             assert _state(scripts_dir).get("envelope")
             # force a self-heal (integrity fail) with an in-envelope repair
@@ -328,7 +328,7 @@ class TestApprovalModes:
         with patch.object(sc, "_smoke_ok", return_value=True), \
              patch.object(sc, "generate_candidate", _gen([{"id": "x"}], script=s1)):
             script_cache(m, [Path("/repo")])
-            approve_pending(m, scripts_dir)  # consumes the pending file
+            approve_pending(m)  # consumes the pending file
             assert not (scripts_dir / "pending" / "email-watch.sh").exists()
             (scripts_dir / "email-watch.sc.sh").write_text("broken")
             # self-heal introduces curl (a NEW binary/host) → must re-enter review

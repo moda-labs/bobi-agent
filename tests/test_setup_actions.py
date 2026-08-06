@@ -135,36 +135,6 @@ class TestEnvHelpers:
         assert actions.mask("short") == "•••"
 
 
-# --- installed_team_name -------------------------------------------------
-
-class TestInstalledTeamName:
-    def test_none_when_no_install(self, project):
-        assert actions.installed_team_name(project) is None
-
-    def test_reads_agent_name(self, project):
-        from bobi import paths
-        agent_yaml = paths.agent_yaml_path(project)
-        agent_yaml.parent.mkdir(parents=True, exist_ok=True)
-        agent_yaml.write_text(yaml.dump({"agent": "eng-team"}))
-        assert actions.installed_team_name(project) == "eng-team"
-
-
-# --- resolve_or_fetch ----------------------------------------------------
-
-class TestResolveOrFetch:
-    def test_resolves_local_pack_without_fetching(self, project, monkeypatch):
-        _write_minimal_pack(project / "agents" / "local-team")
-        def boom(*a, **k):
-            raise AssertionError("should not fetch a locally-resolvable team")
-        monkeypatch.setattr("bobi.registry.fetch", boom)
-        resolved = actions.resolve_or_fetch("local-team", project)
-        assert resolved == project / "agents" / "local-team"
-
-    def test_returns_none_when_unresolvable(self, project, monkeypatch):
-        monkeypatch.setattr("bobi.registry.fetch", lambda *a, **k: None)
-        assert actions.resolve_or_fetch("ghost-team", project) is None
-
-
 # --- save_credential -----------------------------------------------------
 
 class TestSaveCredential:
