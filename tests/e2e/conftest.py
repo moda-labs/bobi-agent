@@ -284,7 +284,10 @@ class _WebApp:
         return proc.pid
 
     def stop(self):
-        for proc in self._procs:
+        """Kill the server (and any stand-in manager). Idempotent — a test
+        that stops the server to watch the page notice is torn down again."""
+        while self._procs:
+            proc = self._procs.pop()
             proc.kill()
             proc.wait(timeout=5)
         self._srv.should_exit = True
