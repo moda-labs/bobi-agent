@@ -94,41 +94,6 @@ def _project_state_dir(project_path: Path) -> Path:
     return paths.state_dir(project_path)
 
 
-def _parse_local_event_server_port(url: str) -> int | None:
-    """Return the local event-server port from a URL, or None for remote URLs."""
-    from .events.server import local_port_from_url
-
-    return local_port_from_url(url)
-
-
-def _event_server_port_file(project_path: Path) -> Path:
-    return _project_state_dir(project_path) / "event-server.port"
-
-
-def _selected_local_event_server_port(
-    project_path: Path,
-    override: int | None = None,
-) -> int:
-    """Port for the selected runtime's local event server.
-
-    Explicit CLI overrides win; everything else resolves through the shared
-    definition so doctor probes the same port this starts.
-    """
-    if override is not None:
-        return override
-
-    from .events.server import resolve_local_port
-
-    return resolve_local_port(project_path)
-
-
-def _ensure_root_bound() -> Path:
-    """Bind the installation root if no entry point has yet — the call is
-    for its side effect. Raises a clean UsageError outside an install."""
-    root = paths.bound_root()
-    return root if root is not None else _detect_project_root()
-
-
 def _try_detect_project_root() -> Path | None:
     """Best-effort runtime binding from inherited BOBI_ROOT only."""
     try:
@@ -912,29 +877,6 @@ def ui(ctx, deployment, app, local_port, remote_port, no_browser, check):
     click.echo(f"bobi app is running at {target} (pid {st.pid})")
 
 
-def _manager_session_name(project_path: Path, role: str | None = None) -> str:
-    """Session name of the project's entry-point agent.
-
-    The single definition of the manager naming convention — start, --fresh,
-    and transcript lookup all resolve the same name through here.
-    """
-    from bobi.service import manager_session_name
-    return manager_session_name(project_path, role)
-
-
-def _clear_manager_session(project_path: Path) -> None:
-    """Wipe saved session ID so the manager starts a fresh conversation.
-
-    Also drops the bubble credential and per-session deployment/cursor state:
-    a fresh start mints a NEW bubble, and keeping stale deployment_state (whose
-    api_key points at a now-orphaned deployment in the old bubble) would split
-    the restarted sessions across bubbles.
-    """
-    from bobi.service import clear_manager_session
-    clear_manager_session(project_path)
-    click.echo("Cleared manager session — starting fresh.")
-
-
 @main.command()
 @click.option("--force", is_flag=True, help="Send SIGKILL if SIGTERM doesn't work")
 def stop(force):
@@ -949,7 +891,7 @@ def stop(force):
         _systemctl("stop")
         return
 
-    project_path = _ensure_root_bound()
+    project_path = _detect_project_root()
     from bobi.service import stop_team
 
     result = stop_team(project_path, force=force)
@@ -992,7 +934,14 @@ def restart(fresh):
         # here, not after the service has already been restarted.
         project_path = _detect_project_root()
         if fresh:
-            _clear_manager_session(project_path)
+            # Wipes the saved session ID, the bubble credential, and the
+            # per-session deployment/cursor state together: a fresh start mints
+            # a NEW bubble, and stale deployment_state (whose api_key points at
+            # a now-orphaned deployment in the old bubble) would split the
+            # restarted sessions across bubbles.
+            from bobi.service import clear_manager_session
+            clear_manager_session(project_path)
+            click.echo("Cleared manager session — starting fresh.")
         click.echo("Restarting via systemd...")
         _systemctl("restart")
         result = subprocess.run(
@@ -1090,8 +1039,7 @@ def compact(to):
 @main.command(hidden=True)
 @click.argument("question", required=True)
 @click.option("--timeout", default=300, type=int, help="Timeout in seconds")
-@click.option("--source", default="engineer", help="Source identifier")
-def ask(question, timeout, source):
+def ask(question, timeout):
     """Ask the manager a question (alias for: message --wait)."""
     from bobi.service import MessageDeliveryError, send_message
 
@@ -1099,7 +1047,7 @@ def ask(question, timeout, source):
     try:
         result = send_message(
             project_path, question, wait=True, session="manager",
-            timeout=timeout, sender=source,
+            timeout=timeout, sender="engineer",
         )
         click.echo(result.response)
     except MessageDeliveryError as exc:
@@ -1401,7 +1349,7 @@ def create_slack_bot(
 @main.group()
 def transcript():
     """Session transcripts — view, search, and index conversation history."""
-    _ensure_root_bound()
+    _detect_project_root()
 
 
 @transcript.command("show")
@@ -1451,7 +1399,8 @@ def _find_transcript(session: str) -> Path | None:
     from bobi.sdk import get_registry, session_log_path
 
     if session == "manager":
-        session = _manager_session_name(_detect_project_root())
+        from bobi.service import manager_session_name
+        session = manager_session_name(_detect_project_root())
 
     # Primary: session dir log
     session_log = session_log_path(session)
@@ -1624,20 +1573,23 @@ def doctor(browser, fix):
     all_ok = True
     warnings = 0
     sandbox_failure = False
+    # Every result here is a bobi.doctor.CheckResult — browser.run_doctor()
+    # constructs the same dataclass, and doctor._check_services() converts
+    # bobi.validate's look-alike into it at the boundary. Both fields are
+    # declared with defaults, so plain attribute access is total.
     for r in results:
-        required = getattr(r, "required", True)
         # ✓ ok / ✗ blocking failure / ⚠ non-blocking warning (optional service),
         # with [OK]/[ERROR]/[WARN] fallback on unicode-stripped terminals.
-        mark = status_glyph(r.ok, required, unicode=unicode)
+        mark = status_glyph(r.ok, r.required, unicode=unicode)
         click.echo(f"  {mark} {r.name}: {r.detail}")
         if not r.ok:
-            if required:
+            if r.required:
                 all_ok = False
             else:
                 warnings += 1
             if r.hint:
                 click.echo(f"      → {r.hint}")
-            if browser and hasattr(r, "sandbox_error") and r.sandbox_error:
+            if browser and r.sandbox_error:
                 sandbox_failure = True
 
     if all_ok:
@@ -1723,7 +1675,7 @@ def subagents():
 @subagents.command("list")
 def subagents_list():
     """List active sub-agents from the selected Bobi Agent runtime."""
-    _ensure_root_bound()
+    _detect_project_root()
     from bobi.subagent import list_agents as _list_agents
 
     active = _list_agents()
@@ -1741,7 +1693,7 @@ def subagents_list():
 @click.argument("ref")
 def subagents_show(ref):
     """Show details for a specific sub-agent."""
-    _ensure_root_bound()
+    _detect_project_root()
     import time as _time
     from bobi.subagent import find_agent
 
@@ -1769,7 +1721,7 @@ def subagents_show(ref):
 @click.argument("ref")
 def subagents_cancel(ref):
     """Cancel a running sub-agent."""
-    _ensure_root_bound()
+    _detect_project_root()
     from bobi.subagent import cancel_agent
 
     if cancel_agent(ref):
@@ -2436,7 +2388,7 @@ def workflow_status():
     Usage:
         bobi agent eng workflows status
     """
-    _ensure_root_bound()
+    _detect_project_root()
     from .workflow.state import WorkflowRun
     runs = WorkflowRun.list_runs()
     if not runs:
@@ -2465,7 +2417,7 @@ def workflow_resume(run_id, timeout):
     Usage:
         bobi agent eng workflows resume abc123
     """
-    _ensure_root_bound()
+    _detect_project_root()
     from .workflow.state import WorkflowRun
     from .workflow.triggers import WorkflowDispatcher
     from .workflow.orchestrator import resume_workflow
@@ -2907,13 +2859,16 @@ def event_server_cmd():
 def event_server_start(foreground, port):
     """Start the local event server."""
     project_path = _detect_project_root()
-    es_port = _selected_local_event_server_port(project_path, port)
 
     from bobi.events.server import (
         NodeRuntimePrerequisiteError,
         PackagedEventServerArtifactError,
         ensure_running,
+        resolve_local_port,
     )
+    # An explicit --port wins; everything else resolves through the shared
+    # definition, so doctor probes the same port this starts.
+    es_port = port if port is not None else resolve_local_port(project_path)
     try:
         result = ensure_running(es_port, project_path=project_path)
     except (
@@ -2945,9 +2900,11 @@ def event_server_start(foreground, port):
 def event_server_stop():
     """Stop the local event server."""
     import signal
+    from bobi.events.server import local_port_file
+
     project_path = _detect_project_root()
     pid_file = _project_state_dir(project_path) / "event-server.pid"
-    port_file = _event_server_port_file(project_path)
+    port_file = local_port_file(project_path)
     if not pid_file.exists():
         click.echo("Event server is not running")
         port_file.unlink(missing_ok=True)
@@ -2993,18 +2950,18 @@ def event_server_restart(ctx, port):
 @event_server_cmd.command("status")
 def event_server_status():
     """Show event server status."""
-    from bobi.events.server import health
+    from bobi.events.server import health, local_port_from_url, resolve_local_port
     project_path = _detect_project_root()
     try:
         from .config import Config
         configured = Config.load(project_path).event_server_url
     except Exception:
         configured = ""
-    if configured and _parse_local_event_server_port(configured) is None:
+    if configured and local_port_from_url(configured) is None:
         click.echo(f"Event server: remote ({configured})")
         return
 
-    es_port = _selected_local_event_server_port(project_path)
+    es_port = resolve_local_port(project_path)
     data = health(f"http://localhost:{es_port}")
     if data:
         click.echo(f"Event server: running on port {es_port}")
@@ -3078,6 +3035,26 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
                     model=model, effort=effort, fresh=fresh)
 
 
+def _parse_requested_by(requested_by: str | None) -> dict:
+    """Decode `--requested-by`, exiting with its own message on bad input.
+
+    Both dispatch paths need this: `_dispatch_agent` hands the RAW string to
+    `_run_agent_wait` rather than a decoded dict, so the wait path parses it
+    for itself.
+    """
+    if not requested_by:
+        return {}
+    try:
+        parsed = json.loads(requested_by)
+    except json.JSONDecodeError:
+        click.echo("--requested-by must be valid JSON", err=True)
+        raise SystemExit(1)
+    if not isinstance(parsed, dict):
+        click.echo("--requested-by must be a JSON object", err=True)
+        raise SystemExit(1)
+    return parsed
+
+
 def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
                     as_check=False, post_event=None, requested_by=None,
                     interactive=True, persistent=False, subscribe=None,
@@ -3128,18 +3105,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
                             model=model, effort=effort, fresh=fresh)
         return
 
-    requester: dict = {}
-    if requested_by:
-        try:
-            parsed = json.loads(requested_by)
-            if isinstance(parsed, dict):
-                requester = parsed
-            else:
-                click.echo("--requested-by must be a JSON object", err=True)
-                raise SystemExit(1)
-        except json.JSONDecodeError:
-            click.echo("--requested-by must be valid JSON", err=True)
-            raise SystemExit(1)
+    requester = _parse_requested_by(requested_by)
 
     from .subagent import launch_agent
     with _launch_refusal_is_readable():
@@ -3202,18 +3168,7 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
         click.echo("--wait cannot be used with --persistent", err=True)
         raise SystemExit(1)
 
-    requester: dict = {}
-    if requested_by:
-        try:
-            parsed = json.loads(requested_by)
-            if isinstance(parsed, dict):
-                requester = parsed
-            else:
-                click.echo("--requested-by must be a JSON object", err=True)
-                raise SystemExit(1)
-        except json.JSONDecodeError:
-            click.echo("--requested-by must be valid JSON", err=True)
-            raise SystemExit(1)
+    requester = _parse_requested_by(requested_by)
 
     # --wait runs the agent IN THIS PROCESS, so there is no child env to stamp:
     # the chain goes into our own environment, which is what any `bobi` command
@@ -3273,18 +3228,14 @@ def _run_check(cwd: str, task: str, timeout: int, post_event: str | None) -> Non
         raise SystemExit(1)
 
     if post_event and result.finding:
+        from bobi.events.publish import post_event as publish_event
+
         data = {"summary": result.summary, "text": result.summary, **result.details}
-        if _post_event(post_event, data):
+        if publish_event(post_event, data, project_path=_detect_project_root()):
             click.echo(f"Posted event: {post_event}")
         else:
             click.echo(f"Could not post event: {post_event}", err=True)
             raise SystemExit(1)
-
-
-def _post_event(event_type: str, data: dict) -> bool:
-    """Post a synthetic event to the event server (see events/publish.py)."""
-    from bobi.events.publish import post_event
-    return post_event(event_type, data, project_path=_detect_project_root())
 
 
 @agents.command("update")
@@ -3473,7 +3424,7 @@ def kb_create(name):
         bobi agent <name> kb create docs
     """
     from bobi.kb.store import KBStore
-    _ensure_root_bound()
+    _detect_project_root()
     try:
         store = KBStore.create(name)
         click.echo(f"Created KB '{name}'")
@@ -3496,7 +3447,7 @@ def kb_add(name, file_path, text):
     """
     from bobi.kb.store import KBStore
     from bobi.kb.embedder import embed
-    _ensure_root_bound()
+    _detect_project_root()
 
     try:
         store = KBStore(name)
@@ -3534,7 +3485,7 @@ def kb_search(name, query, limit, mode):
     """
     from bobi.kb.store import KBStore
     from bobi.kb.embedder import embed
-    _ensure_root_bound()
+    _detect_project_root()
 
     try:
         store = KBStore(name)
@@ -3566,7 +3517,7 @@ def kb_list():
         bobi agent <name> kb list
     """
     from bobi.kb.store import KBStore
-    _ensure_root_bound()
+    _detect_project_root()
 
     kbs = KBStore.list_kbs()
     if not kbs:
@@ -3585,7 +3536,7 @@ def kb_info(name):
         bobi agent <name> kb info docs
     """
     from bobi.kb.store import KBStore
-    _ensure_root_bound()
+    _detect_project_root()
 
     try:
         store = KBStore(name)
@@ -3615,7 +3566,7 @@ def kb_remove(name):
         bobi agent <name> kb remove docs
     """
     from bobi.kb.store import KBStore
-    _ensure_root_bound()
+    _detect_project_root()
 
     try:
         KBStore.remove(name)
@@ -3638,7 +3589,7 @@ def recall_memory(query, limit):
     from bobi.kb.embedder import embed
     from bobi.memory import cold_memory_kb_name
 
-    _ensure_root_bound()
+    _detect_project_root()
     name = cold_memory_kb_name()
     try:
         store = KBStore(name)

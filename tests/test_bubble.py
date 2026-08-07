@@ -3,7 +3,7 @@
 Covers ensure_bubble's lock-protected mint, the compare-and-swap re-mint on
 server restart (force_remint_of), concurrent convergence on one bubble,
 cleartext-remote refusal, BubbleRejected on 403, and the --fresh wipe in
-_clear_manager_session. The live round-trips are covered by
+service.clear_manager_session. The live round-trips are covered by
 tests/integration/test_event_server.py::TestBubbleIsolation.
 """
 
@@ -115,7 +115,7 @@ def test_post_register_raises_bubble_rejected_on_403(project):
 
 
 def test_clear_manager_session_wipes_bubble_and_state(project):
-    from bobi.cli import _clear_manager_session
+    from bobi.service import clear_manager_session
 
     # Seed bubble + per-session deployment + cursor state.
     save_bubble_state(project, "bub_1", "bkey_1")
@@ -127,7 +127,7 @@ def test_clear_manager_session_wipes_bubble_and_state(project):
     # save_session_id resolves the bound process root (CLI binds it); not under
     # test here — patch it so we exercise only the wipe.
     with patch("bobi.sdk.save_session_id"):
-        _clear_manager_session(project)
+        clear_manager_session(project)
 
     assert load_bubble_state(project) == {}
     assert not (bubble_state_path(project).parent / "deployments").exists()

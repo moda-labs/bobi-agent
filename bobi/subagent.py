@@ -1272,7 +1272,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     from bobi.events.server import (
         ensure_running, ensure_bubble, register, register_slack_workspaces,
         register_whatsapp_numbers, register_discord_apps, authorize_resources,
-        BubbleRejected,
+        local_port_from_url, BubbleRejected,
     )
 
     cfg = Config.load(project_path)
@@ -1375,15 +1375,6 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
             f"after {attempts} attempts: {last_err}"
         ) from last_err
 
-    def _local_port(url: str) -> int | None:
-        from urllib.parse import urlparse
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return None
-        if parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
-            return None
-        return parsed.port or (443 if parsed.scheme == "https" else 80)
-
     if not es_url:
         es_port = 8080
         es_url = f"http://localhost:{es_port}"
@@ -1393,7 +1384,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         elif result == "connected":
             log.info("Connected to existing local event server on port %d", es_port)
         es_deployment, es_key = _register_with_retry(es_url)
-    elif (es_port := _local_port(es_url)) is not None:
+    elif (es_port := local_port_from_url(es_url)) is not None:
         result = ensure_running(es_port, project_path=project_path)
         if result == "started":
             log.info("Configured local event server started on port %d", es_port)

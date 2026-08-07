@@ -711,9 +711,9 @@ def stop_team(project_path: Path, *, force: bool = False) -> StopResult:
 
     stop_embedder(project_path)
 
-    from bobi.events.server import health
+    from bobi.events.server import health, resolve_local_port
 
-    es_port = _selected_local_event_server_port(project_path)
+    es_port = resolve_local_port(project_path)
     result_kwargs["event_server_port"] = es_port
     result_kwargs["event_server_running"] = bool(health(f"http://localhost:{es_port}"))
     return StopResult(**result_kwargs)
@@ -813,52 +813,3 @@ def ask(
     return result
 
 
-def _parse_local_event_server_port(url: str) -> int | None:
-    if not url:
-        return None
-    from urllib.parse import urlparse
-
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return None
-    if parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
-        return None
-    return parsed.port or (443 if parsed.scheme == "https" else 80)
-
-
-def _event_server_port_file(project_path: Path) -> Path:
-    return paths.state_dir(project_path) / "event-server.port"
-
-
-def _selected_local_event_server_port(
-    project_path: Path,
-    override: int | None = None,
-) -> int:
-    if override is not None:
-        return override
-
-    pid_file = paths.state_dir(project_path) / "event-server.pid"
-    port_file = _event_server_port_file(project_path)
-    if pid_file.exists() and port_file.exists():
-        try:
-            return int(port_file.read_text().strip())
-        except (OSError, ValueError):
-            pass
-
-    try:
-        from bobi.config import Config
-
-        configured = Config.load(project_path).event_server_url
-    except Exception:
-        configured = ""
-    if configured:
-        port = _parse_local_event_server_port(configured)
-        if port is not None:
-            return port
-
-    if port_file.exists():
-        try:
-            return int(port_file.read_text().strip())
-        except (OSError, ValueError):
-            pass
-    return 8080
