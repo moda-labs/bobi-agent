@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from bobi import paths
+from bobi import slack as slack_mod
 from bobi.events import artifact
 from bobi.events import server as es
 
@@ -793,8 +794,8 @@ def _capture_post(monkeypatch):
         return _Resp()
 
     monkeypatch.setattr(pooled, "request", fake_request)
-    monkeypatch.setattr(es, "_slack_auth_info", lambda token: ("T_TEAM", "B_BOT", "U_BOT"))
-    monkeypatch.setattr(es, "_slack_app_id", lambda token, bot_id: "A_APP")
+    monkeypatch.setattr(slack_mod, "resolve_auth_info", lambda token: ("T_TEAM", "B_BOT", "U_BOT"))
+    monkeypatch.setattr(slack_mod, "resolve_app_id", lambda token, bot_id: "A_APP")
     return captured
 
 
@@ -972,9 +973,9 @@ def test_slack_registration_never_logs_app_token_on_failure(
         es, "health", lambda url: {"status": "ok", "mode": "local"},
     )
     monkeypatch.setattr(
-        es, "_slack_auth_info", lambda token: ("T_TEAM", "B_BOT", "U_BOT"),
+        slack_mod, "resolve_auth_info", lambda token: ("T_TEAM", "B_BOT", "U_BOT"),
     )
-    monkeypatch.setattr(es, "_slack_app_id", lambda token, bot_id: "A_APP")
+    monkeypatch.setattr(slack_mod, "resolve_app_id", lambda token, bot_id: "A_APP")
     import bobi.http as pooled
     monkeypatch.setattr(
         pooled,
