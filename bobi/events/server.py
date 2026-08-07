@@ -403,6 +403,18 @@ def local_port_from_url(url: str) -> int | None:
     return parsed.port or (443 if parsed.scheme == "https" else 80)
 
 
+def local_port_file(project_path: Path | None) -> Path:
+    """Where the local event server remembers the port it came up on.
+
+    Resolves the path only — it does not create the state directory, so a
+    reader cannot bring state into being just by asking where it lives.
+    Writers go through ``atomic_write_text``, which creates the parent.
+    """
+    from bobi import paths
+
+    return paths.state_path(project_path) / "event-server.port"
+
+
 def resolve_local_port(project_path: Path) -> int:
     """Port this runtime's LOCAL event server uses.
 
@@ -415,7 +427,7 @@ def resolve_local_port(project_path: Path) -> int:
 
     state = paths.state_path(project_path)
     pid_file = state / "event-server.pid"
-    port_file = state / "event-server.port"
+    port_file = local_port_file(project_path)
 
     def _remembered() -> int | None:
         try:
@@ -524,10 +536,7 @@ def ensure_running(port: int, webhook_secret: str | None = None,
 
     if health(f"http://localhost:{port}"):
         if project_path is not None:
-            from bobi import paths
-            atomic_write_text(
-                paths.state_dir(project_path) / "event-server.port", str(port)
-            )
+            atomic_write_text(local_port_file(project_path), str(port))
         log.info(f"Event server already running on port {port}")
         return "connected"
 
@@ -597,7 +606,7 @@ def ensure_running(port: int, webhook_secret: str | None = None,
     for _ in range(30):
         time.sleep(0.5)
         if health(f"http://localhost:{port}"):
-            atomic_write_text(state / "event-server.port", str(port))
+            atomic_write_text(local_port_file(project_path), str(port))
             log.info(f"Event server started on port {port} (pid {proc.pid})")
             return "started"
     log.error("Event server failed to start within 15 seconds")
