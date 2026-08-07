@@ -117,9 +117,11 @@ def _probe_event_server(url: str) -> tuple[bool, str]:
     if not (200 <= resp.status_code < 300):
         return False, f"/health returned HTTP {resp.status_code}"
     try:
-        # Capped like the urlopen read(4096) this replaced: a Bobi health body
-        # is tiny, and an unbounded read here would be an unauthenticated
-        # remote host deciding how much we buffer.
+        # Sliced to match the urlopen read(4096) this replaced, so an oversized
+        # body still fails as "not Bobi JSON" rather than parsing. It does NOT
+        # bound what we buffer — httpx has already read the whole response by
+        # the time we get here; only a streaming request could cap that, and a
+        # health payload is tiny enough not to warrant one.
         payload = json.loads(resp.content[:4096].decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False, "/health did not return Bobi JSON"
