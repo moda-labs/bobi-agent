@@ -1,8 +1,9 @@
-"""Connection-test probe: transport dispatch + env resolution.
+"""Connection-test probe: transport dispatch, env resolution, and the
+test-a-connection dialogue.
 
 The real handshake spawns a subprocess, so the live path is validated manually;
-here we cover the pure logic (which transport runs, env assembly) without
-launching anything.
+here we cover the pure logic (which transport runs, env assembly, the two
+conversation turns) without launching anything.
 """
 
 import anyio
@@ -192,3 +193,84 @@ class TestScrubResult:
         out = mcp_probe._scrub_result({"output": "abc"}, {"env_vars": ["TOK"]},
                                       tmp_path)
         assert out["output"] == "abc"
+
+
+class TestTestConnectionDialogue:
+    """The two dialogue turns, driven directly.
+
+    These used to be closures inside the /api/message route, reachable only
+    through a TestClient. As module-level generators they can be run on a bare
+    SetupState — the route's only remaining job is SSE-wrapping the chunks.
+    """
+
+    @staticmethod
+    def _drain(gen):
+        chunks = []
+
+        async def run():
+            async for c in gen:
+                chunks.append(c)
+        anyio.run(run)
+        return "".join(chunks)
+
+    @staticmethod
+    def _state():
+        from bobi.setup.state import SetupState
+        return SetupState()
+
+    def test_no_connections_configured_says_so_and_records_the_turn(self, tmp_path):
+        s = self._state()
+        out = self._drain(mcp_probe.propose_test(
+            s, tmp_path, "test the connection", {"intent": True, "none": True}))
+        assert "no MCP connections" in out
+        # The exchange lands in history exactly once, user turn then reply.
+        assert [m["role"] for m in s.messages] == ["user", "assistant"]
+        assert s.messages[0]["content"] == "test the connection"
+
+    def test_ambiguous_lists_the_candidates(self, tmp_path):
+        s = self._state()
+        out = self._drain(mcp_probe.propose_test(
+            s, tmp_path, "test it",
+            {"intent": True, "ambiguous": True, "candidates": ["a", "b"]}))
+        assert "a, b" in out
+
+    def test_cancel_clears_the_pending_proposal(self, tmp_path):
+        s = self._state()
+        s.pending_test = {"key": "k", "proposed": "t", "tools": ["t"]}
+        out = self._drain(mcp_probe.resolve_pending(
+            s, tmp_path, "no thanks", {"action": "cancel"}))
+        assert "skipped" in out.lower()
+        assert s.pending_test == {}
+
+    def test_write_tool_is_refused_and_the_proposal_survives(self, tmp_path):
+        # Refusing must not clear pending_test — the user still gets to pick a
+        # read-only tool without re-running the listing probe.
+        s = self._state()
+        s.pending_test = {"key": "k", "proposed": "get_x", "tools": ["get_x"]}
+        out = self._drain(mcp_probe.resolve_pending(
+            s, tmp_path, "call delete_all",
+            {"action": "refuse_write", "tool": "delete_all"}))
+        assert "delete_all" in out and "won’t" in out
+        assert s.pending_test["proposed"] == "get_x"
+
+    def test_removed_connection_is_not_tested(self, tmp_path, monkeypatch):
+        # The entry vanished between proposal and confirmation.
+        s = self._state()
+        s.pending_test = {"key": "gone", "proposed": "get_x", "tools": ["get_x"]}
+        called = []
+        monkeypatch.setattr(mcp_probe, "probe",
+                            lambda *a, **k: called.append(a) or {})
+        out = self._drain(mcp_probe.resolve_pending(
+            s, tmp_path, "yes", {"action": "run", "tool": "get_x"}))
+        assert "isn’t there anymore" in out
+        assert called == []          # nothing was launched
+
+    def test_probe_identity_ignores_only_the_recorded_outcome(self):
+        entry = {"command": "uv", "args": "run x", "last_test": {"ok": True}}
+        assert mcp_probe._probe_identity(entry) == {"command": "uv",
+                                                    "args": "run x"}
+        # A command edit is a different connection; a new verdict is not.
+        assert (mcp_probe._probe_identity({**entry, "last_test": {"ok": False}})
+                == mcp_probe._probe_identity(entry))
+        assert (mcp_probe._probe_identity({**entry, "command": "npx"})
+                != mcp_probe._probe_identity(entry))
