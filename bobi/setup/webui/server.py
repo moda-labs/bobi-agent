@@ -112,7 +112,12 @@ def _probe_event_server(url: str) -> tuple[bool, str]:
                         timeout=8)
     except httpx.TimeoutException:
         return False, "timed out reaching /health"
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, httpx.InvalidURL) as e:
+        # InvalidURL is NOT an HTTPError — it inherits straight from Exception.
+        # `_validate_public_event_server_url` only checks scheme + netloc, so a
+        # host that parses but cannot be a host ("https://256.256.256.256")
+        # reaches here; urlopen used to fold that into its gaierror path, and
+        # letting it escape would 500 the verify endpoint on a typo.
         return False, f"could not reach /health: {e}"
     if not (200 <= resp.status_code < 300):
         return False, f"/health returned HTTP {resp.status_code}"

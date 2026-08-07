@@ -231,6 +231,17 @@ class TestIngressEndpoint:
         ok, err = server._probe_event_server("https://e.example.com")
         assert ok is False and err.startswith("could not reach /health:")
 
+    def test_unroutable_host_is_an_error_not_a_500(self):
+        # NOT stubbed — this exercises the real client. httpx.InvalidURL does
+        # not inherit from httpx.HTTPError, so a host that passes the
+        # scheme+netloc validator but cannot be a host used to escape the
+        # probe and 500 the verify endpoint. urlopen folded it into gaierror.
+        url = "https://256.256.256.256"
+        assert server._validate_public_event_server_url(url) is None
+        ok, err = server._probe_event_server(url)
+        assert ok is False
+        assert err.startswith("could not reach /health:")
+
     def test_local_ingress_verified_and_removes_event_server_env(self, project):
         (project / ".env").write_text("BOBI_EVENT_SERVER=https://old.example\n")
         os.environ["BOBI_EVENT_SERVER"] = "https://old.example"
