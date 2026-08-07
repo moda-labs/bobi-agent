@@ -20,6 +20,7 @@ BOBI_TEST_IMAGE needs no Node at all.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -354,6 +355,129 @@ def test_subscription_mode_rejects_api_key(image: str):
     )
     assert proc.returncode != 0
     assert "overrides subscription auth" in (proc.stdout + proc.stderr)
+
+
+def _subscription_bootstrap_logs(
+    image: str,
+    tmp_path: Path,
+    brain: str,
+    credential: dict,
+) -> str:
+    """Boot through the real entrypoint and return its auth-decision logs."""
+    import time
+
+    team = REPO_ROOT / "tests" / "fixtures" / f"{brain}-smoke"
+    data = tmp_path / f"data-{brain}"
+    cred_dir = data / brain
+    cred_dir.mkdir(parents=True)
+    cred_file = ".credentials.json" if brain == "claude" else "auth.json"
+    (cred_dir / cred_file).write_text(json.dumps(credential))
+
+    name = f"bobi-subscription-credentials-{brain}"
+    _run("docker", "rm", "-f", name)
+    try:
+        up = _run(
+            "docker", "run", "-d", "--name", name,
+            "-e", "BOBI_AUTH=subscription",
+            "-e", f"BOBI_AGENT={brain}-smoke",
+            "-e", "BOBI_EVENT_SERVER=http://127.0.0.1:9",
+            "-e", "BOBI_TEAM=/mnt/team",
+            "-v", f"{data}:/data",
+            "-v", f"{team}:/mnt/team:ro",
+            image,
+        )
+        assert up.returncode == 0, up.stderr
+
+        deadline = time.time() + 45
+        text = ""
+        while time.time() < deadline:
+            logs = _run("docker", "logs", name)
+            text = logs.stdout + logs.stderr
+            if ("running login bootstrap" in text
+                    or "skipping login bootstrap" in text
+                    or "FATAL:" in text):
+                break
+            time.sleep(0.5)
+        return text
+    finally:
+        _run("docker", "rm", "-f", name)
+
+
+@requires_docker
+@pytest.mark.timeout(1900)
+@pytest.mark.parametrize(
+    ("brain", "credential", "reason"),
+    [
+        (
+            "claude",
+            {"claudeAiOauth": {"accessToken": "", "refreshToken": ""}},
+            "refresh token is missing or blank",
+        ),
+        (
+            "codex",
+            {"OPENAI_API_KEY": None, "tokens": {"refresh_token": ""}},
+            "refresh token is missing or blank",
+        ),
+    ],
+)
+def test_subscription_bootstrap_runs_for_invalid_credentials(
+    image: str,
+    tmp_path: Path,
+    brain: str,
+    credential: dict,
+    reason: str,
+):
+    text = _subscription_bootstrap_logs(
+        image, tmp_path, brain, credential,
+    )
+
+    assert f"credentials invalid: {reason}" in text, text
+    assert "running login bootstrap" in text, text
+
+
+@requires_docker
+@pytest.mark.timeout(1900)
+@pytest.mark.parametrize(
+    ("brain", "credential", "reason"),
+    [
+        (
+            "claude",
+            {
+                "claudeAiOauth": {
+                    "accessToken": "access",
+                    "refreshToken": "refresh",
+                    "refreshTokenExpiresAt": 4_102_444_800_000,
+                },
+            },
+            "refresh token is present and unexpired",
+        ),
+        (
+            "codex",
+            {
+                "OPENAI_API_KEY": None,
+                "tokens": {
+                    "id_token": "id",
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                },
+            },
+            "refresh token is present",
+        ),
+    ],
+)
+def test_subscription_bootstrap_skips_valid_credentials(
+    image: str,
+    tmp_path: Path,
+    brain: str,
+    credential: dict,
+    reason: str,
+):
+    text = _subscription_bootstrap_logs(
+        image, tmp_path, brain, credential,
+    )
+
+    assert f"credentials valid: {reason}" in text, text
+    assert "skipping login bootstrap" in text, text
 
 
 @requires_docker

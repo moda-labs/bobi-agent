@@ -21,7 +21,9 @@ tests/test_auth_bootstrap.py.
 """
 from __future__ import annotations
 
+import json
 import logging
+import math
 import os
 import re
 import select
@@ -63,6 +65,14 @@ class SubscriptionLogin:
 
 
 @dataclass(frozen=True)
+class CredentialStatus:
+    """Local structural validity of a subscription credential file."""
+
+    valid: bool
+    reason: str
+
+
+@dataclass(frozen=True)
 class LoginChannel:
     """Destination and subscription details for the bootstrap chat channel."""
 
@@ -101,6 +111,59 @@ def _active_spec() -> SubscriptionLogin:
     return _SPECS.get(kind, _SPECS["claude"])
 
 
+def subscription_credentials_status(
+    path: Path,
+    kind: str,
+    *,
+    now_ms: float | None = None,
+) -> CredentialStatus:
+    """Check whether a stored OAuth credential can refresh without a network call."""
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return CredentialStatus(False, "credential file is missing")
+    except json.JSONDecodeError:
+        return CredentialStatus(False, "credential JSON is malformed")
+    except OSError:
+        return CredentialStatus(False, "credential file is unreadable")
+
+    if not isinstance(data, dict):
+        return CredentialStatus(False, "credential JSON root is not an object")
+
+    if kind == "claude":
+        oauth = data.get("claudeAiOauth")
+        if not isinstance(oauth, dict):
+            return CredentialStatus(False, "claudeAiOauth is missing or malformed")
+        refresh_token = oauth.get("refreshToken")
+        if not isinstance(refresh_token, str) or not refresh_token.strip():
+            return CredentialStatus(False, "refresh token is missing or blank")
+
+        expires_at = oauth.get("refreshTokenExpiresAt")
+        if expires_at is None:
+            return CredentialStatus(True, "refresh token is present")
+        if (isinstance(expires_at, bool)
+                or not isinstance(expires_at, (int, float))
+                or not math.isfinite(expires_at)):
+            return CredentialStatus(False, "refresh token expiry is malformed")
+        current_ms = time.time() * 1000 if now_ms is None else now_ms
+        if expires_at <= current_ms:
+            return CredentialStatus(False, "refresh token is expired")
+        return CredentialStatus(True, "refresh token is present and unexpired")
+
+    if kind == "codex":
+        tokens = data.get("tokens")
+        if not isinstance(tokens, dict):
+            return CredentialStatus(False, "tokens is missing or malformed")
+        refresh_token = tokens.get("refresh_token")
+        if not isinstance(refresh_token, str) or not refresh_token.strip():
+            return CredentialStatus(False, "refresh token is missing or blank")
+        # Codex's real OAuth schema has no refresh-token expiry field. An
+        # expired access token is recoverable as long as this token is present.
+        return CredentialStatus(True, "refresh token is present")
+
+    return CredentialStatus(False, f"unsupported credential schema '{kind}'")
+
+
 def credentials_path(home: Path | None = None) -> Path:
     """Path to the active brain's subscription OAuth credentials on the volume."""
     base = home or Path(os.environ.get("HOME", str(Path.home())))
@@ -108,7 +171,11 @@ def credentials_path(home: Path | None = None) -> Path:
 
 
 def credentials_exist(home: Path | None = None) -> bool:
-    return credentials_path(home).is_file()
+    """True when the active brain has locally refreshable subscription OAuth."""
+    spec = _active_spec()
+    return subscription_credentials_status(
+        credentials_path(home), spec.kind,
+    ).valid
 
 
 def needs_bootstrap(home: Path | None = None) -> bool:
@@ -594,3 +661,23 @@ def run_bootstrap(
     except Exception as exc:  # noqa: BLE001 — best-effort status post
         log.warning("Could not post bootstrap result to chat channel: %s", exc)
     return ok
+
+
+def _credential_status_cli(argv: list[str] | None = None) -> int:
+    """Machine-facing local check used by the container entrypoint."""
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("command", choices=["credential-status"])
+    parser.add_argument("kind", choices=sorted(_SPECS))
+    parser.add_argument("path", type=Path)
+    args = parser.parse_args(argv)
+
+    status = subscription_credentials_status(args.path, args.kind)
+    state = "valid" if status.valid else "invalid"
+    print(f"credentials {state}: {status.reason}")
+    return 0 if status.valid else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_credential_status_cli())

@@ -7,6 +7,7 @@ integration concern (deployed env, alongside C10/C12).
 """
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -27,11 +28,18 @@ def test_credentials_path_follows_home(tmp_path):
     assert ab.credentials_path(tmp_path) == tmp_path / ".claude" / ".credentials.json"
 
 
-def test_credentials_exist(tmp_path):
+def test_credentials_exist_requires_structurally_valid_claude_oauth(tmp_path):
     assert not ab.credentials_exist(tmp_path)
     creds = tmp_path / ".claude" / ".credentials.json"
     creds.parent.mkdir(parents=True)
     creds.write_text("{}")
+    assert not ab.credentials_exist(tmp_path)
+    creds.write_text(json.dumps({
+        "claudeAiOauth": {
+            "accessToken": "access",
+            "refreshToken": "refresh",
+        },
+    }))
     assert ab.credentials_exist(tmp_path)
 
 
@@ -42,7 +50,164 @@ def test_needs_bootstrap_only_in_subscription_mode(tmp_path, monkeypatch):
     assert ab.needs_bootstrap(tmp_path) is True
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude" / ".credentials.json").write_text("{}")
+    assert ab.needs_bootstrap(tmp_path) is True
+    (tmp_path / ".claude" / ".credentials.json").write_text(json.dumps({
+        "claudeAiOauth": {"refreshToken": "refresh"},
+    }))
     assert ab.needs_bootstrap(tmp_path) is False
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (None, "credential file is missing"),
+        ("{not-json", "credential JSON is malformed"),
+        ("[]", "credential JSON root is not an object"),
+        ("{}", "claudeAiOauth is missing or malformed"),
+        (json.dumps({"claudeAiOauth": {}}),
+         "refresh token is missing or blank"),
+        (json.dumps({"claudeAiOauth": {"refreshToken": "   "}}),
+         "refresh token is missing or blank"),
+        (json.dumps({
+            "claudeAiOauth": {
+                "refreshToken": "refresh",
+                "refreshTokenExpiresAt": "tomorrow",
+            },
+        }), "refresh token expiry is malformed"),
+        ('{"claudeAiOauth":{"refreshToken":"refresh",'
+         '"refreshTokenExpiresAt":NaN}}',
+         "refresh token expiry is malformed"),
+        (json.dumps({
+            "claudeAiOauth": {
+                "refreshToken": "refresh",
+                "refreshTokenExpiresAt": 1_699_999_999_999,
+            },
+        }), "refresh token is expired"),
+    ],
+)
+def test_claude_subscription_credentials_reject_unusable_shapes(
+    tmp_path, payload, reason,
+):
+    path = tmp_path / ".claude" / ".credentials.json"
+    if payload is not None:
+        path.parent.mkdir(parents=True)
+        path.write_text(payload)
+
+    status = ab.subscription_credentials_status(
+        path, "claude", now_ms=1_700_000_000_000,
+    )
+
+    assert status.valid is False
+    assert status.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("oauth", "reason"),
+    [
+        (
+            {"accessToken": "", "refreshToken": "refresh"},
+            "refresh token is present",
+        ),
+        (
+            {
+                "accessToken": "access",
+                "refreshToken": "refresh",
+                "refreshTokenExpiresAt": 1_700_000_000_001,
+            },
+            "refresh token is present and unexpired",
+        ),
+    ],
+)
+def test_claude_subscription_credentials_accept_recoverable_shapes(
+    tmp_path, oauth, reason,
+):
+    path = tmp_path / ".claude" / ".credentials.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"claudeAiOauth": oauth}))
+
+    status = ab.subscription_credentials_status(
+        path, "claude", now_ms=1_700_000_000_000,
+    )
+
+    assert status.valid is True
+    assert status.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (None, "credential file is missing"),
+        ("{not-json", "credential JSON is malformed"),
+        ("[]", "credential JSON root is not an object"),
+        ("{}", "tokens is missing or malformed"),
+        (json.dumps({"tokens": {}}), "refresh token is missing or blank"),
+        (json.dumps({"tokens": {"refresh_token": "  "}}),
+         "refresh token is missing or blank"),
+    ],
+)
+def test_codex_subscription_credentials_reject_unusable_shapes(
+    tmp_path, payload, reason,
+):
+    path = tmp_path / ".codex" / "auth.json"
+    if payload is not None:
+        path.parent.mkdir(parents=True)
+        path.write_text(payload)
+
+    status = ab.subscription_credentials_status(path, "codex")
+
+    assert status.valid is False
+    assert status.reason == reason
+
+
+def test_codex_subscription_credentials_accept_real_oauth_shape(tmp_path):
+    path = tmp_path / ".codex" / "auth.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "OPENAI_API_KEY": None,
+        "auth_mode": "apikey",
+        "tokens": {
+            "id_token": "id",
+            "access_token": "",
+            "refresh_token": "refresh",
+            "account_id": "account",
+        },
+        "last_refresh": "2026-08-06T00:00:00Z",
+    }))
+
+    status = ab.subscription_credentials_status(path, "codex")
+
+    assert status.valid is True
+    assert status.reason == "refresh token is present"
+
+
+def test_credential_status_cli_reports_invalid_reason(tmp_path, capsys):
+    path = tmp_path / ".claude" / ".credentials.json"
+
+    exit_code = ab._credential_status_cli([
+        "credential-status", "claude", str(path),
+    ])
+
+    assert exit_code == 1
+    assert capsys.readouterr().out.strip() == (
+        "credentials invalid: credential file is missing"
+    )
+
+
+def test_credential_status_cli_reports_valid_reason(tmp_path, capsys):
+    path = tmp_path / ".codex" / "auth.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "tokens": {"refresh_token": "refresh"},
+    }))
+
+    exit_code = ab._credential_status_cli([
+        "credential-status", "codex", str(path),
+    ])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == (
+        "credentials valid: refresh token is present"
+    )
 
 
 # --- URL scraping -----------------------------------------------------------
@@ -369,7 +534,9 @@ def test_run_bootstrap_happy_path(slack_config, monkeypatch):
         # Simulate the human pasting the code; claude then writes creds.
         os.makedirs(os.path.dirname(creds), exist_ok=True)
         with open(creds, "w") as f:
-            f.write("{}")
+            f.write(json.dumps({
+                "claudeAiOauth": {"refreshToken": "refresh"},
+            }))
         return "the-code"
 
     ok = ab.run_bootstrap(
@@ -434,7 +601,9 @@ def test_run_bootstrap_posts_to_discord_conversation(discord_config, monkeypatch
         )
         os.makedirs(os.path.dirname(creds), exist_ok=True)
         with open(creds, "w") as f:
-            f.write("{}")
+            f.write(json.dumps({
+                "claudeAiOauth": {"refreshToken": "refresh"},
+            }))
         return "the-code"
 
     ok = ab.run_bootstrap(
@@ -547,7 +716,9 @@ def test_run_bootstrap_skips_when_creds_present(slack_config, monkeypatch):
     creds = os.path.join(os.environ["HOME"], ".claude", ".credentials.json")
     os.makedirs(os.path.dirname(creds), exist_ok=True)
     with open(creds, "w") as f:
-        f.write("{}")
+        f.write(json.dumps({
+            "claudeAiOauth": {"refreshToken": "refresh"},
+        }))
 
     called = {"spawn": False}
 
@@ -840,7 +1011,9 @@ def test_run_bootstrap_codex_device_poll(slack_config, monkeypatch):
             # The CLI polls, the human authorizes, codex writes auth.json.
             os.makedirs(os.path.dirname(creds), exist_ok=True)
             with open(creds, "w") as f:
-                f.write("{}")
+                f.write(json.dumps({
+                    "tokens": {"refresh_token": "refresh"},
+                }))
             return 0
 
     def fake_spawn(home):

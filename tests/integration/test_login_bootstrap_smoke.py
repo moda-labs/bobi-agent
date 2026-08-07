@@ -208,7 +208,10 @@ _FAKE_CLAUDE = textwrap.dedent(
     sys.stdout.flush()
     code = sys.stdin.readline().strip()   # blocks until _write_line feeds stdin
     creds.parent.mkdir(parents=True, exist_ok=True)
-    creds.write_text(json.dumps({"received_code": code, "claudeAiOauth": {"accessToken": "x"}}))
+    creds.write_text(json.dumps({
+        "received_code": code,
+        "claudeAiOauth": {"accessToken": "x", "refreshToken": "refresh"},
+    }))
     sys.stdout.write("Login successful.\\r\\n")
     sys.stdout.flush()
     """
