@@ -660,7 +660,9 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
 
   **Q069's rewrite changed a control-flow shape the finding does not mention.** `urlopen` raises `HTTPError` on 4xx/5xx; `httpx` does not. So the non-2xx path moves from an exception handler to the inline status check, and the previously near-dead `if not (200 <= status < 300)` branch becomes the live one. Every user-visible error string is unchanged. The 4096-byte read cap was kept rather than switching to `resp.json()`: an unauthenticated remote host should not decide how much we buffer. The one test that reached this function patched `server.urlopen`, so it was **retargeted** onto `bobi.http.get` and extended to cover the reshaped branches.
 
-  Suite: **4388 passed / 1 skipped**, exactly the `90e1459` baseline of 4378 plus the ten tests added here. No test was deleted; one was retargeted.
+  **The Q069 transport swap regressed an error path, caught by this session's own review.** `httpx.InvalidURL` inherits from `Exception`, not `httpx.HTTPError`, and `_validate_public_event_server_url` checks only scheme and netloc — so `https://256.256.256.256` reached the probe and raised out of it, 500-ing `/api/ingress/verify` where `main` returned a friendly `(False, …)` from urlopen's gaierror path. Fixed, with an unstubbed regression test that drives the real client so it fails on the pre-fix code. The general lesson for the remaining batches: **swapping a transport swaps its exception hierarchy**, and the new one's non-obvious members (`InvalidURL` sits outside `HTTPError`) are where behavior preservation actually breaks.
+
+  Suite: **4394 passed / 1 skipped**, exactly the `90e1459` baseline of 4378 plus the sixteen tests added here. No test was deleted; one was retargeted.
 
 ## Notes
 
