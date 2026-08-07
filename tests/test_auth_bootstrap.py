@@ -641,6 +641,121 @@ def test_wait_for_code_subscribes_to_app_qualified_slack_topic(slack_config, mon
     assert registered["topics"] == ["slack:T123:app:A123"]
 
 
+def test_register_login_channel_remints_after_stale_bubble_rejection(
+    slack_config,
+    monkeypatch,
+):
+    """An empty channel registration only permits a re-mint after a signed
+    JOIN proves that the persisted bubble is stale (#868 / MOD-307)."""
+    import bobi.events.server as server_mod
+
+    ensure_calls = []
+    workspace_bubbles = []
+
+    def fake_ensure(es_url, project_path, force_remint_of=""):
+        ensure_calls.append(force_remint_of)
+        if force_remint_of:
+            assert force_remint_of == "bub-old"
+            return {"bubble_id": "bub-new", "bubble_key": "key-new"}
+        return {"bubble_id": "bub-old", "bubble_key": "key-old"}
+
+    def fake_register_workspaces(es_url, cfg, bubble_id="", bubble_key=""):
+        workspace_bubbles.append((bubble_id, bubble_key))
+        return [] if bubble_id == "bub-old" else ["T123"]
+
+    def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
+        assert topics == []
+        assert (bubble_id, bubble_key) == ("bub-old", "key-old")
+        raise server_mod.BubbleRejected("stale bubble")
+
+    monkeypatch.setattr(server_mod, "ensure_bubble", fake_ensure)
+    monkeypatch.setattr(server_mod, "register_slack_workspaces", fake_register_workspaces)
+    monkeypatch.setattr(server_mod, "register", fake_register)
+
+    bubble = ab._register_login_channel(
+        slack_config,
+        ab.Config.load(slack_config),
+        ab.LoginChannel(
+            destination="slack:T123:dm:D0LOGIN",
+            source="slack",
+            topic="slack:T123:app:A123",
+        ),
+    )
+
+    assert bubble == {"bubble_id": "bub-new", "bubble_key": "key-new"}
+    assert ensure_calls == ["", "bub-old"]
+    assert workspace_bubbles == [
+        ("bub-old", "key-old"),
+        ("bub-new", "key-new"),
+    ]
+
+
+def test_wait_for_code_recovers_if_bubble_stales_after_channel_registration(
+    slack_config,
+    monkeypatch,
+):
+    """If the server restarts between channel registration and listener JOIN,
+    re-mint, recreate the channel grant, and retry the listener once."""
+    import bobi.events.client as client_mod
+    import bobi.events.server as server_mod
+
+    current_bubble = {"id": "bub-old", "key": "key-old"}
+    workspace_bubbles = []
+    listener_bubbles = []
+
+    def fake_ensure(es_url, project_path, force_remint_of=""):
+        if force_remint_of:
+            assert force_remint_of == "bub-old"
+            current_bubble.update(id="bub-new", key="key-new")
+        return {
+            "bubble_id": current_bubble["id"],
+            "bubble_key": current_bubble["key"],
+        }
+
+    def fake_register_workspaces(es_url, cfg, bubble_id="", bubble_key=""):
+        workspace_bubbles.append((bubble_id, bubble_key))
+        return ["T123"]
+
+    def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
+        listener_bubbles.append((bubble_id, bubble_key, list(topics)))
+        if bubble_id == "bub-old":
+            raise server_mod.BubbleRejected("stale bubble")
+        return "dep", "api-key"
+
+    class FakeClient:
+        def __init__(self, es_url, deployment_id, api_key, queue):
+            self.queue = queue
+
+        def start(self):
+            self.queue.put({
+                "source": "slack",
+                "text": "the-code",
+                "fields": {"channel": "D0LOGIN"},
+            })
+
+        def wait_connected(self, timeout):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(server_mod, "ensure_bubble", fake_ensure)
+    monkeypatch.setattr(server_mod, "register_slack_workspaces", fake_register_workspaces)
+    monkeypatch.setattr(server_mod, "register", fake_register)
+    monkeypatch.setattr(client_mod, "EventServerClient", FakeClient)
+    monkeypatch.setattr(ab, "_slack_topic", lambda cfg: "slack:T123:app:A123")
+
+    assert ab._wait_for_code(slack_config, "D0LOGIN", timeout=1) == "the-code"
+    assert workspace_bubbles == [
+        ("bub-old", "key-old"),
+        ("bub-new", "key-new"),
+    ]
+    assert listener_bubbles == [
+        ("bub-old", "key-old", ["slack:T123:app:A123"]),
+        ("bub-new", "key-new", ["slack:T123:app:A123"]),
+    ]
+
+
 def test_wait_for_code_subscribes_to_discord_app_topic(discord_config, monkeypatch):
     import bobi.events.client as client_mod
     import bobi.events.server as server_mod
