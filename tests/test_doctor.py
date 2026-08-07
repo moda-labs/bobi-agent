@@ -275,10 +275,10 @@ def _run_slack_socket_check(
         patch("bobi.doctor.bound_root", return_value=tmp_path),
         patch("bobi.events.server.health", health_probe),
         patch(
-            "bobi.events.server._slack_auth_info",
+            "bobi.slack.resolve_auth_info",
             return_value=("T_TEAM", "B_BOT", "U_BOT"),
         ),
-        patch("bobi.events.server._slack_app_id", return_value="A_APP"),
+        patch("bobi.slack.resolve_app_id", return_value="A_APP"),
     ):
         from bobi.doctor import _check_slack_socket_mode
         result = _check_slack_socket_mode()

@@ -272,13 +272,13 @@ def _parse_conversation(ref: str) -> tuple[str, str, str, str] | None:
 
 
 def _slack_topic(cfg: Config) -> str:
-    from bobi.events.server import _slack_app_id, _slack_auth_info
+    from bobi.slack import resolve_app_id, resolve_auth_info
 
     token = cfg.credential("slack", "bot_token")
-    team_id, bot_id, _ = _slack_auth_info(token)
+    team_id, bot_id, _ = resolve_auth_info(token)
     if not team_id:
         raise RuntimeError("could not resolve Slack team_id from bot_token.")
-    app_id = _slack_app_id(token, bot_id)
+    app_id = resolve_app_id(token, bot_id)
     return f"slack:{team_id}:app:{app_id}" if app_id else f"slack:{team_id}"
 
 

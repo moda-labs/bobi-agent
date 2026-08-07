@@ -495,7 +495,8 @@ def _check_slack_socket_mode() -> CheckResult | None:
         return None
 
     from bobi.config import Config
-    from bobi.events.server import _slack_app_id, _slack_auth_info, health
+    from bobi.events.server import health
+    from bobi.slack import resolve_app_id, resolve_auth_info
 
     try:
         cfg = Config.load(root)
@@ -548,8 +549,8 @@ def _check_slack_socket_mode() -> CheckResult | None:
             required=False,
         )
 
-    _team_id, bot_id, _bot_user_id = _slack_auth_info(bot_token)
-    app_id = _slack_app_id(bot_token, bot_id)
+    _team_id, bot_id, _bot_user_id = resolve_auth_info(bot_token)
+    app_id = resolve_app_id(bot_token, bot_id)
     if not app_id:
         return CheckResult(
             "Slack Socket Mode",
