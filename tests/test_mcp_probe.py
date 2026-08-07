@@ -156,3 +156,39 @@ class TestEnvResolution:
     def test_no_declared_vars_just_process_env(self, tmp_path):
         env = mcp_probe._resolved_env({}, tmp_path)
         assert "PATH" in env   # inherits the process environment
+
+    def test_exported_var_beats_env_file_like_the_running_agent(
+            self, tmp_path, monkeypatch):
+        # The probe must hand the child the credential `bobi agent start`
+        # would run with. config.load_dotenv never overwrites an existing
+        # os.environ entry, so an exported value wins over run/.env.
+        from bobi.setup import actions
+        monkeypatch.setattr(actions, "read_env", lambda p: {"TOK": "from-dotenv"})
+        monkeypatch.setenv("TOK", "from-shell")
+        env = mcp_probe._resolved_env({"env_vars": ["TOK"]}, tmp_path)
+        assert env["TOK"] == "from-shell"
+
+
+class TestScrubResult:
+    def test_redacts_both_copies_when_the_two_sources_disagree(
+            self, tmp_path, monkeypatch):
+        # The losing copy is still a live secret on this machine, and the
+        # probe's own output is the thing most likely to echo it.
+        from bobi.setup import actions
+        monkeypatch.setattr(actions, "read_env",
+                            lambda p: {"TOK": "dotenv-secret-value"})
+        monkeypatch.setenv("TOK", "shell-secret-value")
+        out = mcp_probe._scrub_result(
+            {"output": "saw dotenv-secret-value and shell-secret-value"},
+            {"env_vars": ["TOK"]}, tmp_path)
+        assert "dotenv-secret-value" not in out["output"]
+        assert "shell-secret-value" not in out["output"]
+
+    def test_short_values_are_not_redacted(self, tmp_path, monkeypatch):
+        # Below the 8-char floor a "secret" is too generic to blank safely.
+        from bobi.setup import actions
+        monkeypatch.setattr(actions, "read_env", lambda p: {"TOK": "abc"})
+        monkeypatch.delenv("TOK", raising=False)
+        out = mcp_probe._scrub_result({"output": "abc"}, {"env_vars": ["TOK"]},
+                                      tmp_path)
+        assert out["output"] == "abc"

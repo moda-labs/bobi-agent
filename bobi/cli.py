@@ -17,6 +17,7 @@ import click
 from bobi import paths
 from bobi.install import (
     install_pack as _install_pack,
+    resolve_agent_pack as _resolve_agent_pack,
     write_install_gitignore as _write_install_gitignore,
 )
 
@@ -267,21 +268,6 @@ def _systemctl(action: str) -> bool:
     return True
 
 
-
-
-def _resolve_agent_pack(name: str, project_path: Path) -> Path | None:
-    """Find a Bobi Agent source/package by name."""
-    source = paths.agent_source_dir(name)
-    if (source / "agent.yaml").is_file():
-        return source
-    cached = paths.agent_cache_dir() / name
-    if (cached / "agent.yaml").is_file():
-        return cached
-    # Repo/deploy authoring still supports local checked-in agent packages.
-    visible = project_path / "agents" / name
-    if (visible / "agent.yaml").is_file():
-        return visible
-    return None
 
 
 @main.command(context_settings={"ignore_unknown_options": True})

@@ -37,14 +37,14 @@ _ENV_PASSTHROUGH_PREFIXES = ("XDG_", "LC_", "UV_")
 
 def _resolved_env(entry: dict, project: Path) -> dict:
     """A MINIMAL child environment: a safe base (PATH/HOME/locale/proxies) plus
-    only the connection's declared vars, read from .env (the saved secret) or the
-    live environment. Other ambient secrets are intentionally withheld."""
-    from bobi.setup.actions import read_env
+    only the connection's declared vars, resolved the way the running agent
+    resolves them (`actions.env_value`). Other ambient secrets are
+    intentionally withheld."""
+    from bobi.setup.actions import env_value
     env = {k: v for k, v in os.environ.items()
            if k in _ENV_PASSTHROUGH or k.startswith(_ENV_PASSTHROUGH_PREFIXES)}
-    saved = read_env(project)
     for var in entry.get("env_vars") or []:
-        v = saved.get(var) or os.environ.get(var)
+        v = env_value(project, var)
         if v:
             env[var] = v
     return env
@@ -208,12 +208,11 @@ async def _probe_stdio(entry: dict, project: Path, timeout: float,
 async def _probe_http(entry: dict, project: Path, timeout: float,
                       call_name) -> dict:
     from mcp.client.streamable_http import streamablehttp_client
-    from bobi.setup.actions import read_env
+    from bobi.setup.actions import env_value
     url = (entry.get("url") or "").strip()
     headers: dict = {}
     if entry.get("auth") == "api_key" and entry.get("secret_var"):
-        v = read_env(project).get(entry["secret_var"]) or \
-            os.environ.get(entry["secret_var"])
+        v = env_value(project, entry["secret_var"])
         if v:
             headers["Authorization"] = f"Bearer {v}"
     try:
@@ -314,15 +313,21 @@ def _scrub_result(result: dict, entry: dict, project: Path) -> dict:
     """Strip secrets from any human-facing text the probe surfaces (the server
     runs under the child's real credentials, and a misbehaving server can echo a
     cookie/token in its output or stderr). Replaces the connection's own secret
-    values, then runs the shape-based redactor."""
+    values, then runs the shape-based redactor.
+
+    Both candidate values are scrubbed — the exported one AND the one in
+    `run/.env` — never just whichever `env_value` resolves to. A redactor that
+    picked by precedence would blank the losing copy and echo the winning one
+    verbatim the moment the two disagreed, which is precisely the case a
+    redactor exists for."""
     from bobi.setup.actions import read_env, redact_secrets
     saved = read_env(project)
     values = []
     for var in (entry.get("env_vars") or []) + ([entry["secret_var"]]
                                                 if entry.get("secret_var") else []):
-        v = saved.get(var) or os.environ.get(var)
-        if v and len(v) >= 8:
-            values.append(v)
+        for v in (saved.get(var), os.environ.get(var)):
+            if v and len(v) >= 8 and v not in values:
+                values.append(v)
 
     def scrub(text):
         if not text:

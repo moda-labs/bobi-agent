@@ -23,11 +23,9 @@ import json
 import os
 from pathlib import Path
 from typing import AsyncIterator
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request as UrlRequest
-from urllib.request import urlopen
 
+import httpx
 import yaml
 
 # Imported at module level (not inside build_app) so that, under
@@ -36,8 +34,8 @@ import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from bobi import paths
-from bobi.setup.state import STAGE_ORDER, SetupState, Stage
+from bobi import http, paths
+from bobi.setup.state import SPEC_SLOTS, STAGE_ORDER, SetupState, Stage
 from bobi.webui_common.launcher import serve_local
 from bobi.webui_common.security import (
     WEBUI_TOKEN_HEADER,
@@ -81,8 +79,7 @@ def serialize_state(state: SetupState) -> dict:
             # User-added MCP connections — names/command/args/url only (never
             # secret VALUES), so the UI can repopulate the edit form.
             "mcp_servers": spec.mcp_servers,
-            "readiness": {s: spec.readiness_for(s).value
-                          for s in ("goal", "roles", "autonomous", "services")},
+            "readiness": {s: spec.readiness_for(s).value for s in SPEC_SLOTS},
         },
         "summary": state.summary,
         "messages": state.messages,
@@ -106,29 +103,31 @@ def _validate_public_event_server_url(url: str) -> str | None:
 
 
 def _probe_event_server(url: str) -> tuple[bool, str]:
+    # Not events.server.health(): this wants the extra `auth == "hmac"` check
+    # and a per-failure error string to show in the wizard. Only the transport
+    # is shared — bobi.http is the house outbound client (see its docstring).
     health_url = url.rstrip("/") + "/health"
-    req = UrlRequest(health_url, headers={"accept": "application/json"})
     try:
-        with urlopen(req, timeout=8) as resp:
-            if not (200 <= resp.status < 300):
-                return False, f"/health returned HTTP {resp.status}"
-            try:
-                payload = json.loads(resp.read(4096).decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return False, "/health did not return Bobi JSON"
-            if (isinstance(payload, dict)
-                    and payload.get("status") == "ok"
-                    and payload.get("auth") == "hmac"):
-                return True, ""
-            return False, "/health did not look like a Bobi event server"
-    except HTTPError as e:
-        return False, f"/health returned HTTP {e.code}"
-    except URLError as e:
-        return False, f"could not reach /health: {e.reason}"
-    except TimeoutError:
+        resp = http.get(health_url, headers={"accept": "application/json"},
+                        timeout=8)
+    except httpx.TimeoutException:
         return False, "timed out reaching /health"
-    except OSError as e:
+    except httpx.HTTPError as e:
         return False, f"could not reach /health: {e}"
+    if not (200 <= resp.status_code < 300):
+        return False, f"/health returned HTTP {resp.status_code}"
+    try:
+        # Capped like the urlopen read(4096) this replaced: a Bobi health body
+        # is tiny, and an unbounded read here would be an unauthenticated
+        # remote host deciding how much we buffer.
+        payload = json.loads(resp.content[:4096].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False, "/health did not return Bobi JSON"
+    if (isinstance(payload, dict)
+            and payload.get("status") == "ok"
+            and payload.get("auth") == "hmac"):
+        return True, ""
+    return False, "/health did not look like a Bobi event server"
 
 
 def _persist_ingress_env(project: Path, state: SetupState) -> None:
@@ -1087,8 +1086,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                     if var not in env_vars:
                         env_vars.append(var)
                     if val:
-                        actions.save_credential(state, project, var, name, "",
-                                                prompt_fn=lambda *_: val)
+                        actions.save_credential(state, project, var, val)
             except actions.ActionError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
             entry: dict = {"type": "stdio", "command": command, "args": args,
@@ -1111,8 +1109,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                     entry["secret_var"] = var
                     api_key = payload.get("api_key", "")
                     if api_key:
-                        actions.save_credential(state, project, var, name, "",
-                                                prompt_fn=lambda *_: api_key)
+                        actions.save_credential(state, project, var, api_key)
             except actions.ActionError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -1188,8 +1185,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         except VennError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         try:
-            actions.save_credential(state, project, "VENN_API_KEY", "venn", "",
-                                    prompt_fn=lambda *_: key)
+            actions.save_credential(state, project, "VENN_API_KEY", key)
         except actions.ActionError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         data["state"] = serialize_state(state)
@@ -1251,11 +1247,8 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
 
     # --- slack finalization (the post-install next-steps screen) --------
     def _env_value(var: str) -> str:
-        # Same precedence as runtime resolution (config.load_dotenv and
-        # venn_key): an exported environment variable wins over .env.
-        import os
         from bobi.setup import actions
-        return os.environ.get(var) or actions.read_env(project).get(var, "")
+        return actions.env_value(project, var)
 
     @app.post("/api/slack/channel")
     def slack_channel(payload: dict) -> JSONResponse:
@@ -1293,8 +1286,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                     status_code=400)
             value = raw
         try:
-            actions.save_credential(state, project, "SLACK_CHANNELS", "slack",
-                                    "", prompt_fn=lambda *_: value)
+            actions.save_credential(state, project, "SLACK_CHANNELS", value)
         except actions.ActionError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         return JSONResponse({"ok": True, "channel": value,
@@ -1362,9 +1354,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         value = payload.get("value", "")
         try:
             result = actions.save_credential(
-                state, project, payload.get("var_name", ""),
-                payload.get("service", ""), payload.get("instructions", ""),
-                prompt_fn=lambda *_: value)
+                state, project, payload.get("var_name", ""), value)
         except actions.ActionError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         return JSONResponse(result)

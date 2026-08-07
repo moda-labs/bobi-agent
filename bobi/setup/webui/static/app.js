@@ -1314,7 +1314,7 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
     for (const input of inputs) {
       const v = input.dataset.secret;
       const r = await postJSON("/api/credential", {
-        var_name: v, service: cardKey, value: input.value.trim(),
+        var_name: v, value: input.value.trim(),
       });
       if (!r.ok) { toast(r.data.error || `couldn't save ${v}`); return; }
       editSecrets.delete(v);
