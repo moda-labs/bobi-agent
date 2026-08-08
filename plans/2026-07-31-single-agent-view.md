@@ -255,6 +255,7 @@ first. Implementation stacks on an integration branch
       failure state) + start/stop/restart wiring.
 - [x] Identity header: SAVED + ABOUT popovers (hover + tap), Edit design
       via `/api/setup/open`.
+      (Edit design is cut from scope - see Amendments 2026-08-05.)
 - [x] Runs table: tabs + counts, origin sub-lines, outcome/error notes,
       polling (reuse existing 4s/10s + backoff pattern).
 - [x] Transcript/Details dark slab (row click; Esc closes).
@@ -268,10 +269,11 @@ first. Implementation stacks on an integration branch
       state the page renders: completed/failed/crashed sessions, a live
       run, completed + stalled workflow runs, monitor records in all
       three outcomes, script-cache state, spend history.
-- [ ] Docs updated in-PR: `README.md` (agent page description),
+- [x] Docs updated in-PR: `README.md` (agent page description),
       `docs/MONITORS.md` (run records), `DESIGN.md` (agent view section
       supersedes the old panel description).
-- [ ] Empty states: zero runs, zero failures, fresh agent.
+- [x] Empty states: zero runs, zero failures, fresh agent.
+      (Per-tab empty copy lives in `agent.js`'s `renderRuns()`.)
 - Testable: the Manual QA script passes end-to-end.
 
 Verification bar: brain-agnostic admin/read-model surface — stub-brain
@@ -302,6 +304,7 @@ Seed via the U8 script into an isolated `BOBI_HOME`, start the agent and
    ABOUT matches `agent.yaml`/roles; both open on hover and on tap.
 7. **Edit design:** lands in the setup editor for this team; Back
    returns to a live page.
+   (Cut from scope - see Amendments 2026-08-05; skip this step.)
 8. **Empty states:** fresh agent renders sanely (no runs, no failures).
 9. **Polling:** leave the page open through a monitor tick — the new run
    appears without reload; stop the app daemon — the page surfaces the
@@ -425,3 +428,14 @@ placeholder rather than replacing it. Last amended: **2026-08-01**.)*
   `completed`, a status that path never writes, so the suite stayed green
   while one of the three specified states was empty in practice. Contract
   documented in `docs/AGENT_STATE.md`.
+- **2026-08-05** (post-closure review, MOD-261): **Edit design via
+  `/api/setup/open` is cut from U7, not deferred.** The U7 checklist had
+  it checked off, and `DESIGN.md` claimed the identity header carried it,
+  but neither was ever built — `agent.js` imports only the formatters
+  module and never calls `openSetup()`. The Non-goals list already named
+  "config editing (setup owns composition)," and the ABOUT card's own copy
+  ends "Composition is read-only here," so this checklist line was a
+  drafting error rather than an intended, unfinished feature. The single
+  entry point out of the page stays `back.href = "#/"`; editing composition
+  remains a `#/setup` job. `DESIGN.md` and the Manual QA script are
+  corrected in the same change as this amendment.

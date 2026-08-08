@@ -145,6 +145,14 @@ conversation, launch it, and chat with its agents, all in the browser:
 bobi app start        # runs in the background; stop/restart/status manage it
 ```
 
+Open an agent from the dashboard for its own page: a status strip
+(running / stopped / not responding, with start/stop/restart), spend and
+health at a glance, and one runs table folding sessions, workflow runs,
+and monitor firings behind ALL / RUNNING / FAILED tabs. Click a row for a
+transcript or run details; a stalled workflow run can be resumed from
+there too. Composition (the agent's `agent.yaml`, roles, and prompts)
+stays read-only on this page - edit it through `bobi setup`.
+
 Prefer to design your own agent from scratch in a standalone wizard? Run:
 
 ```bash
