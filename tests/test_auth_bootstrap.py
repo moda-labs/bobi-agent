@@ -7,6 +7,7 @@ integration concern (deployed env, alongside C10/C12).
 """
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -27,11 +28,18 @@ def test_credentials_path_follows_home(tmp_path):
     assert ab.credentials_path(tmp_path) == tmp_path / ".claude" / ".credentials.json"
 
 
-def test_credentials_exist(tmp_path):
+def test_credentials_exist_requires_structurally_valid_claude_oauth(tmp_path):
     assert not ab.credentials_exist(tmp_path)
     creds = tmp_path / ".claude" / ".credentials.json"
     creds.parent.mkdir(parents=True)
     creds.write_text("{}")
+    assert not ab.credentials_exist(tmp_path)
+    creds.write_text(json.dumps({
+        "claudeAiOauth": {
+            "accessToken": "access",
+            "refreshToken": "refresh",
+        },
+    }))
     assert ab.credentials_exist(tmp_path)
 
 
@@ -42,7 +50,164 @@ def test_needs_bootstrap_only_in_subscription_mode(tmp_path, monkeypatch):
     assert ab.needs_bootstrap(tmp_path) is True
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude" / ".credentials.json").write_text("{}")
+    assert ab.needs_bootstrap(tmp_path) is True
+    (tmp_path / ".claude" / ".credentials.json").write_text(json.dumps({
+        "claudeAiOauth": {"refreshToken": "refresh"},
+    }))
     assert ab.needs_bootstrap(tmp_path) is False
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (None, "credential file is missing"),
+        ("{not-json", "credential JSON is malformed"),
+        ("[]", "credential JSON root is not an object"),
+        ("{}", "claudeAiOauth is missing or malformed"),
+        (json.dumps({"claudeAiOauth": {}}),
+         "refresh token is missing or blank"),
+        (json.dumps({"claudeAiOauth": {"refreshToken": "   "}}),
+         "refresh token is missing or blank"),
+        (json.dumps({
+            "claudeAiOauth": {
+                "refreshToken": "refresh",
+                "refreshTokenExpiresAt": "tomorrow",
+            },
+        }), "refresh token expiry is malformed"),
+        ('{"claudeAiOauth":{"refreshToken":"refresh",'
+         '"refreshTokenExpiresAt":NaN}}',
+         "refresh token expiry is malformed"),
+        (json.dumps({
+            "claudeAiOauth": {
+                "refreshToken": "refresh",
+                "refreshTokenExpiresAt": 1_699_999_999_999,
+            },
+        }), "refresh token is expired"),
+    ],
+)
+def test_claude_subscription_credentials_reject_unusable_shapes(
+    tmp_path, payload, reason,
+):
+    path = tmp_path / ".claude" / ".credentials.json"
+    if payload is not None:
+        path.parent.mkdir(parents=True)
+        path.write_text(payload)
+
+    status = ab.subscription_credentials_status(
+        path, "claude", now_ms=1_700_000_000_000,
+    )
+
+    assert status.valid is False
+    assert status.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("oauth", "reason"),
+    [
+        (
+            {"accessToken": "", "refreshToken": "refresh"},
+            "refresh token is present",
+        ),
+        (
+            {
+                "accessToken": "access",
+                "refreshToken": "refresh",
+                "refreshTokenExpiresAt": 1_700_000_000_001,
+            },
+            "refresh token is present and unexpired",
+        ),
+    ],
+)
+def test_claude_subscription_credentials_accept_recoverable_shapes(
+    tmp_path, oauth, reason,
+):
+    path = tmp_path / ".claude" / ".credentials.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"claudeAiOauth": oauth}))
+
+    status = ab.subscription_credentials_status(
+        path, "claude", now_ms=1_700_000_000_000,
+    )
+
+    assert status.valid is True
+    assert status.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (None, "credential file is missing"),
+        ("{not-json", "credential JSON is malformed"),
+        ("[]", "credential JSON root is not an object"),
+        ("{}", "tokens is missing or malformed"),
+        (json.dumps({"tokens": {}}), "refresh token is missing or blank"),
+        (json.dumps({"tokens": {"refresh_token": "  "}}),
+         "refresh token is missing or blank"),
+    ],
+)
+def test_codex_subscription_credentials_reject_unusable_shapes(
+    tmp_path, payload, reason,
+):
+    path = tmp_path / ".codex" / "auth.json"
+    if payload is not None:
+        path.parent.mkdir(parents=True)
+        path.write_text(payload)
+
+    status = ab.subscription_credentials_status(path, "codex")
+
+    assert status.valid is False
+    assert status.reason == reason
+
+
+def test_codex_subscription_credentials_accept_real_oauth_shape(tmp_path):
+    path = tmp_path / ".codex" / "auth.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "OPENAI_API_KEY": None,
+        "auth_mode": "apikey",
+        "tokens": {
+            "id_token": "id",
+            "access_token": "",
+            "refresh_token": "refresh",
+            "account_id": "account",
+        },
+        "last_refresh": "2026-08-06T00:00:00Z",
+    }))
+
+    status = ab.subscription_credentials_status(path, "codex")
+
+    assert status.valid is True
+    assert status.reason == "refresh token is present"
+
+
+def test_credential_status_cli_reports_invalid_reason(tmp_path, capsys):
+    path = tmp_path / ".claude" / ".credentials.json"
+
+    exit_code = ab._credential_status_cli([
+        "credential-status", "claude", str(path),
+    ])
+
+    assert exit_code == 1
+    assert capsys.readouterr().out.strip() == (
+        "credentials invalid: credential file is missing"
+    )
+
+
+def test_credential_status_cli_reports_valid_reason(tmp_path, capsys):
+    path = tmp_path / ".codex" / "auth.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "tokens": {"refresh_token": "refresh"},
+    }))
+
+    exit_code = ab._credential_status_cli([
+        "credential-status", "codex", str(path),
+    ])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == (
+        "credentials valid: refresh token is present"
+    )
 
 
 # --- URL scraping -----------------------------------------------------------
@@ -369,7 +534,9 @@ def test_run_bootstrap_happy_path(slack_config, monkeypatch):
         # Simulate the human pasting the code; claude then writes creds.
         os.makedirs(os.path.dirname(creds), exist_ok=True)
         with open(creds, "w") as f:
-            f.write("{}")
+            f.write(json.dumps({
+                "claudeAiOauth": {"refreshToken": "refresh"},
+            }))
         return "the-code"
 
     ok = ab.run_bootstrap(
@@ -434,7 +601,9 @@ def test_run_bootstrap_posts_to_discord_conversation(discord_config, monkeypatch
         )
         os.makedirs(os.path.dirname(creds), exist_ok=True)
         with open(creds, "w") as f:
-            f.write("{}")
+            f.write(json.dumps({
+                "claudeAiOauth": {"refreshToken": "refresh"},
+            }))
         return "the-code"
 
     ok = ab.run_bootstrap(
@@ -547,7 +716,9 @@ def test_run_bootstrap_skips_when_creds_present(slack_config, monkeypatch):
     creds = os.path.join(os.environ["HOME"], ".claude", ".credentials.json")
     os.makedirs(os.path.dirname(creds), exist_ok=True)
     with open(creds, "w") as f:
-        f.write("{}")
+        f.write(json.dumps({
+            "claudeAiOauth": {"refreshToken": "refresh"},
+        }))
 
     called = {"spawn": False}
 
@@ -639,6 +810,121 @@ def test_wait_for_code_subscribes_to_app_qualified_slack_topic(slack_config, mon
 
     assert ab._wait_for_code(slack_config, "D0LOGIN", timeout=1) == "the-code"
     assert registered["topics"] == ["slack:T123:app:A123"]
+
+
+def test_register_login_channel_remints_after_stale_bubble_rejection(
+    slack_config,
+    monkeypatch,
+):
+    """An empty channel registration only permits a re-mint after a signed
+    JOIN proves that the persisted bubble is stale (#868 / MOD-307)."""
+    import bobi.events.server as server_mod
+
+    ensure_calls = []
+    workspace_bubbles = []
+
+    def fake_ensure(es_url, project_path, force_remint_of=""):
+        ensure_calls.append(force_remint_of)
+        if force_remint_of:
+            assert force_remint_of == "bub-old"
+            return {"bubble_id": "bub-new", "bubble_key": "key-new"}
+        return {"bubble_id": "bub-old", "bubble_key": "key-old"}
+
+    def fake_register_workspaces(es_url, cfg, bubble_id="", bubble_key=""):
+        workspace_bubbles.append((bubble_id, bubble_key))
+        return [] if bubble_id == "bub-old" else ["T123"]
+
+    def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
+        assert topics == []
+        assert (bubble_id, bubble_key) == ("bub-old", "key-old")
+        raise server_mod.BubbleRejected("stale bubble")
+
+    monkeypatch.setattr(server_mod, "ensure_bubble", fake_ensure)
+    monkeypatch.setattr(server_mod, "register_slack_workspaces", fake_register_workspaces)
+    monkeypatch.setattr(server_mod, "register", fake_register)
+
+    bubble = ab._register_login_channel(
+        slack_config,
+        ab.Config.load(slack_config),
+        ab.LoginChannel(
+            destination="slack:T123:dm:D0LOGIN",
+            source="slack",
+            topic="slack:T123:app:A123",
+        ),
+    )
+
+    assert bubble == {"bubble_id": "bub-new", "bubble_key": "key-new"}
+    assert ensure_calls == ["", "bub-old"]
+    assert workspace_bubbles == [
+        ("bub-old", "key-old"),
+        ("bub-new", "key-new"),
+    ]
+
+
+def test_wait_for_code_recovers_if_bubble_stales_after_channel_registration(
+    slack_config,
+    monkeypatch,
+):
+    """If the server restarts between channel registration and listener JOIN,
+    re-mint, recreate the channel grant, and retry the listener once."""
+    import bobi.events.client as client_mod
+    import bobi.events.server as server_mod
+
+    current_bubble = {"id": "bub-old", "key": "key-old"}
+    workspace_bubbles = []
+    listener_bubbles = []
+
+    def fake_ensure(es_url, project_path, force_remint_of=""):
+        if force_remint_of:
+            assert force_remint_of == "bub-old"
+            current_bubble.update(id="bub-new", key="key-new")
+        return {
+            "bubble_id": current_bubble["id"],
+            "bubble_key": current_bubble["key"],
+        }
+
+    def fake_register_workspaces(es_url, cfg, bubble_id="", bubble_key=""):
+        workspace_bubbles.append((bubble_id, bubble_key))
+        return ["T123"]
+
+    def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
+        listener_bubbles.append((bubble_id, bubble_key, list(topics)))
+        if bubble_id == "bub-old":
+            raise server_mod.BubbleRejected("stale bubble")
+        return "dep", "api-key"
+
+    class FakeClient:
+        def __init__(self, es_url, deployment_id, api_key, queue):
+            self.queue = queue
+
+        def start(self):
+            self.queue.put({
+                "source": "slack",
+                "text": "the-code",
+                "fields": {"channel": "D0LOGIN"},
+            })
+
+        def wait_connected(self, timeout):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(server_mod, "ensure_bubble", fake_ensure)
+    monkeypatch.setattr(server_mod, "register_slack_workspaces", fake_register_workspaces)
+    monkeypatch.setattr(server_mod, "register", fake_register)
+    monkeypatch.setattr(client_mod, "EventServerClient", FakeClient)
+    monkeypatch.setattr(ab, "_slack_topic", lambda cfg: "slack:T123:app:A123")
+
+    assert ab._wait_for_code(slack_config, "D0LOGIN", timeout=1) == "the-code"
+    assert workspace_bubbles == [
+        ("bub-old", "key-old"),
+        ("bub-new", "key-new"),
+    ]
+    assert listener_bubbles == [
+        ("bub-old", "key-old", ["slack:T123:app:A123"]),
+        ("bub-new", "key-new", ["slack:T123:app:A123"]),
+    ]
 
 
 def test_wait_for_code_subscribes_to_discord_app_topic(discord_config, monkeypatch):
@@ -842,7 +1128,9 @@ def test_run_bootstrap_codex_device_poll(slack_config, monkeypatch):
             # The CLI polls, the human authorizes, codex writes auth.json.
             os.makedirs(os.path.dirname(creds), exist_ok=True)
             with open(creds, "w") as f:
-                f.write("{}")
+                f.write(json.dumps({
+                    "tokens": {"refresh_token": "refresh"},
+                }))
             return 0
 
     def fake_spawn(home):

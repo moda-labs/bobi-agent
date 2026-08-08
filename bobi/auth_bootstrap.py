@@ -21,7 +21,9 @@ tests/test_auth_bootstrap.py.
 """
 from __future__ import annotations
 
+import json
 import logging
+import math
 import os
 import re
 import select
@@ -59,7 +61,15 @@ class SubscriptionLogin:
     shadow_env: str                  # the API key that would silently outrank subscription auth
     flow: str                        # "paste_back" (claude) | "device_poll" (codex)
     url_re: re.Pattern               # scrape the sign-in URL from pty output
-    code_re: "re.Pattern | None" = None  # device_poll: also scrape the one-time code
+    code_re: re.Pattern | None = None  # device_poll: also scrape the one-time code
+
+
+@dataclass(frozen=True)
+class CredentialStatus:
+    """Local structural validity of a subscription credential file."""
+
+    valid: bool
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -101,6 +111,59 @@ def _active_spec() -> SubscriptionLogin:
     return _SPECS.get(kind, _SPECS["claude"])
 
 
+def subscription_credentials_status(
+    path: Path,
+    kind: str,
+    *,
+    now_ms: float | None = None,
+) -> CredentialStatus:
+    """Check whether a stored OAuth credential can refresh without a network call."""
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return CredentialStatus(False, "credential file is missing")
+    except json.JSONDecodeError:
+        return CredentialStatus(False, "credential JSON is malformed")
+    except OSError:
+        return CredentialStatus(False, "credential file is unreadable")
+
+    if not isinstance(data, dict):
+        return CredentialStatus(False, "credential JSON root is not an object")
+
+    if kind == "claude":
+        oauth = data.get("claudeAiOauth")
+        if not isinstance(oauth, dict):
+            return CredentialStatus(False, "claudeAiOauth is missing or malformed")
+        refresh_token = oauth.get("refreshToken")
+        if not isinstance(refresh_token, str) or not refresh_token.strip():
+            return CredentialStatus(False, "refresh token is missing or blank")
+
+        expires_at = oauth.get("refreshTokenExpiresAt")
+        if expires_at is None:
+            return CredentialStatus(True, "refresh token is present")
+        if (isinstance(expires_at, bool)
+                or not isinstance(expires_at, (int, float))
+                or not math.isfinite(expires_at)):
+            return CredentialStatus(False, "refresh token expiry is malformed")
+        current_ms = time.time() * 1000 if now_ms is None else now_ms
+        if expires_at <= current_ms:
+            return CredentialStatus(False, "refresh token is expired")
+        return CredentialStatus(True, "refresh token is present and unexpired")
+
+    if kind == "codex":
+        tokens = data.get("tokens")
+        if not isinstance(tokens, dict):
+            return CredentialStatus(False, "tokens is missing or malformed")
+        refresh_token = tokens.get("refresh_token")
+        if not isinstance(refresh_token, str) or not refresh_token.strip():
+            return CredentialStatus(False, "refresh token is missing or blank")
+        # Codex's real OAuth schema has no refresh-token expiry field. An
+        # expired access token is recoverable as long as this token is present.
+        return CredentialStatus(True, "refresh token is present")
+
+    return CredentialStatus(False, f"unsupported credential schema '{kind}'")
+
+
 def credentials_path(home: Path | None = None) -> Path:
     """Path to the active brain's subscription OAuth credentials on the volume."""
     base = home or Path(os.environ.get("HOME", str(Path.home())))
@@ -108,7 +171,11 @@ def credentials_path(home: Path | None = None) -> Path:
 
 
 def credentials_exist(home: Path | None = None) -> bool:
-    return credentials_path(home).is_file()
+    """True when the active brain has locally refreshable subscription OAuth."""
+    spec = _active_spec()
+    return subscription_credentials_status(
+        credentials_path(home), spec.kind,
+    ).valid
 
 
 def needs_bootstrap(home: Path | None = None) -> bool:
@@ -245,10 +312,21 @@ def _resolve_login_channel(cfg: Config, raw: str) -> LoginChannel:
     )
 
 
-def _register_login_channel(project_path: Path, cfg: Config, channel: LoginChannel) -> None:
-    """Ensure channel-gateway credentials and resource grants exist."""
+def _register_login_channel(project_path: Path, cfg: Config,
+                            channel: LoginChannel) -> dict:
+    """Ensure channel credentials/grants exist and return their live bubble.
+
+    Channel registration is intentionally best-effort in the general event
+    startup path: it returns an empty list for both invalid upstream credentials
+    and a rejected bubble signature. Login bootstrap cannot treat those cases
+    alike. When registration is empty, probe the bubble with a signed JOIN; only
+    a :class:`BubbleRejected` permits a compare-and-swap re-mint and one retry.
+    """
     from bobi.events.server import (
+        BubbleRejected,
+        deregister,
         ensure_bubble,
+        register,
         register_discord_apps,
         register_slack_workspaces,
         register_whatsapp_numbers,
@@ -260,29 +338,44 @@ def _register_login_channel(project_path: Path, cfg: Config, channel: LoginChann
             "event_server_url is not configured — cannot post the login URL "
             "through the channel gateway."
         )
+    def register_channel(bubble: dict) -> list[str]:
+        kwargs = {
+            "bubble_id": bubble["bubble_id"],
+            "bubble_key": bubble["bubble_key"],
+        }
+        if channel.source == "slack":
+            return register_slack_workspaces(es_url, cfg, **kwargs)
+        if channel.source == "discord":
+            return register_discord_apps(es_url, cfg, **kwargs)
+        if channel.source == "whatsapp":
+            return register_whatsapp_numbers(es_url, cfg, **kwargs)
+        return []
+
     bubble = ensure_bubble(es_url, project_path)
-    if channel.source == "slack":
-        registered = register_slack_workspaces(
-            es_url, cfg,
-            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
-        )
-    elif channel.source == "discord":
-        registered = register_discord_apps(
-            es_url, cfg,
-            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
-        )
-    elif channel.source == "whatsapp":
-        registered = register_whatsapp_numbers(
-            es_url, cfg,
-            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
-        )
-    else:
-        registered = []
+    registered = register_channel(bubble)
+    if not registered:
+        # A channel endpoint's 403 may mean either stale bubble auth or invalid
+        # upstream channel credentials. A signed empty-subscription JOIN tests
+        # only bubble membership, so a valid bubble never gets rotated merely
+        # because Slack/Discord/WhatsApp configuration is wrong.
+        try:
+            probe_id, probe_key = register(
+                es_url, "login-bootstrap-bubble-probe", [],
+                bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+            )
+        except BubbleRejected:
+            bubble = ensure_bubble(
+                es_url, project_path, force_remint_of=bubble["bubble_id"],
+            )
+            registered = register_channel(bubble)
+        else:
+            deregister(es_url, probe_id, probe_key)
     if not registered:
         raise RuntimeError(
             f"could not register {channel.source} credentials for "
             "subscription login bootstrap."
         )
+    return bubble
 
 
 def _post_login_message(project_path: Path, cfg: Config, channel: LoginChannel,
@@ -389,8 +482,10 @@ def _extract_code(event: dict, channel: LoginChannel | str) -> str | None:
         expected_conversation, event.get("conversation"), expected_source
     ):
         return None
-    fields = event.get("fields") if isinstance(event.get("fields"), dict) else {}
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    raw_fields = event.get("fields")
+    fields = raw_fields if isinstance(raw_fields, dict) else {}
+    raw_payload = event.get("payload")
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
     ev_channel = fields.get("channel") or payload.get("channel")
     # Filter to the login channel; a workspace subscription sees every channel.
     if expected_channel and ev_channel and ev_channel != expected_channel:
@@ -414,7 +509,7 @@ def _wait_for_code(project_path: Path, channel: LoginChannel | str,
     from queue import Empty, SimpleQueue
 
     from bobi.events.client import EventServerClient
-    from bobi.events.server import ensure_bubble, register
+    from bobi.events.server import BubbleRejected, ensure_bubble, register
 
     cfg = Config.load(project_path)
     es_url = cfg.event_server_url
@@ -433,15 +528,27 @@ def _wait_for_code(project_path: Path, channel: LoginChannel | str,
             legacy_slack_channel=login_channel.legacy_slack_channel,
         )
 
-    # Resolve the bubble first so chat registration can be signed. Signed
-    # registration also creates the bubble-scoped record outbound send needs.
-    bubble = ensure_bubble(es_url, project_path)
-    _register_login_channel(project_path, cfg, login_channel)
-
-    deployment_id, api_key = register(
-        es_url, "login-bootstrap", [login_channel.topic],
-        bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
-    )
+    # Signed channel registration creates the resource grant required by the
+    # global chat topic. It also returns the bubble it recovered to if the
+    # server forgot the persisted one after a restart.
+    bubble = _register_login_channel(project_path, cfg, login_channel)
+    try:
+        deployment_id, api_key = register(
+            es_url, "login-bootstrap", [login_channel.topic],
+            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+        )
+    except BubbleRejected:
+        # The server can restart between channel registration and this JOIN.
+        # Re-mint with the CAS guard, then recreate the bubble-scoped channel
+        # credential/grant before retrying the listener exactly once.
+        ensure_bubble(
+            es_url, project_path, force_remint_of=bubble["bubble_id"],
+        )
+        bubble = _register_login_channel(project_path, cfg, login_channel)
+        deployment_id, api_key = register(
+            es_url, "login-bootstrap", [login_channel.topic],
+            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+        )
 
     q: SimpleQueue = SimpleQueue()
     client = EventServerClient(es_url, deployment_id, api_key, queue=q)
@@ -594,3 +701,23 @@ def run_bootstrap(
     except Exception as exc:  # noqa: BLE001 — best-effort status post
         log.warning("Could not post bootstrap result to chat channel: %s", exc)
     return ok
+
+
+def _credential_status_cli(argv: list[str] | None = None) -> int:
+    """Machine-facing local check used by the container entrypoint."""
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("command", choices=["credential-status"])
+    parser.add_argument("kind", choices=sorted(_SPECS))
+    parser.add_argument("path", type=Path)
+    args = parser.parse_args(argv)
+
+    status = subscription_credentials_status(args.path, args.kind)
+    state = "valid" if status.valid else "invalid"
+    print(f"credentials {state}: {status.reason}")
+    return 0 if status.valid else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_credential_status_cli())
