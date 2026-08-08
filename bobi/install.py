@@ -17,6 +17,26 @@ import yaml
 from bobi import paths
 
 
+def resolve_agent_pack(name: str, project_path: Path) -> Path | None:
+    """Find a Bobi Agent source/package by name.
+
+    Lives here, next to the installer it feeds, so a caller that needs to
+    locate a pack does not have to import the CLI (and with it click and
+    truststore's SSL injection) to reach a pure path lookup.
+    """
+    source = paths.agent_source_dir(name)
+    if (source / "agent.yaml").is_file():
+        return source
+    cached = paths.agent_cache_dir() / name
+    if (cached / "agent.yaml").is_file():
+        return cached
+    # Repo/deploy authoring still supports local checked-in agent packages.
+    visible = project_path / "agents" / name
+    if (visible / "agent.yaml").is_file():
+        return visible
+    return None
+
+
 def install_pack(pack_dir: Path, project_path: Path,
                  local_source: bool = True, *, pinned: bool = False) -> None:
     """Compose the pack's `from:` chain into run/package/ for runtime use.

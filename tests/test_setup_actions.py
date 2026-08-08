@@ -145,8 +145,7 @@ class TestSaveCredential:
         state = SetupState()
         secret = "xoxb-very-secret-value-12345"
         payload = actions.save_credential(
-            state, project, "SLACK_BOT_TOKEN", "slack", "paste it",
-            prompt_fn=lambda v, s, i: secret)
+            state, project, "SLACK_BOT_TOKEN", secret)
         assert payload["saved"] is True
         assert secret not in str(payload)
         assert payload["masked"] == actions.mask(secret)
@@ -158,8 +157,7 @@ class TestSaveCredential:
     def test_empty_input_is_skip(self, project):
         state = SetupState()
         payload = actions.save_credential(
-            state, project, "LINEAR_API_KEY", "linear", "",
-            prompt_fn=lambda v, s, i: "")
+            state, project, "LINEAR_API_KEY", "")
         assert payload == {"saved": False, "skipped": True, "var": "LINEAR_API_KEY"}
         assert not actions.env_path(project).exists()
 
@@ -167,28 +165,25 @@ class TestSaveCredential:
         monkeypatch.setenv("NEW_VAR", "placeholder")
         monkeypatch.delenv("NEW_VAR")
         actions.write_env(project, {"EXISTING": "keep"})
-        actions.save_credential(state := SetupState(), project, "NEW_VAR", "", "",
-                                prompt_fn=lambda v, s, i: "val")
+        actions.save_credential(state := SetupState(), project, "NEW_VAR", "val")
         env = actions.read_env(project)
         assert env == {"EXISTING": "keep", "NEW_VAR": "val"}
 
     def test_refreshes_process_environment(self, project, monkeypatch):
         monkeypatch.setenv("LINEAR_API_KEY", "stale-value")
         actions.save_credential(SetupState(), project, "LINEAR_API_KEY",
-                                "linear", "", prompt_fn=lambda v, s, i: "fresh")
+                                "fresh")
         assert os.environ["LINEAR_API_KEY"] == "fresh"
 
 
     def test_bad_var_name_raises(self, project):
         with pytest.raises(ActionError):
-            actions.save_credential(SetupState(), project, "not-a-var", "", "",
-                                    prompt_fn=lambda v, s, i: "x")
+            actions.save_credential(SetupState(), project, "not-a-var", "x")
 
     def test_framework_var_raises(self, project):
         with pytest.raises(ActionError):
             actions.save_credential(SetupState(), project,
-                                    "BOBI_VENN_API_BASE", "", "",
-                                    prompt_fn=lambda v, s, i: "x")
+                                    "BOBI_VENN_API_BASE", "x")
 
 
 # --- validate_team / validate_pack ---------------------------------------

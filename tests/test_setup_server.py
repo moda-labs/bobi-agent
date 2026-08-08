@@ -7,6 +7,7 @@ import os
 import re
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 from fastapi.testclient import TestClient
@@ -183,20 +184,16 @@ class TestSerializeState:
 
 
 class TestIngressEndpoint:
-    class _HealthResponse:
-        status = 200
-
-        def __init__(self, body):
-            self._body = body
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            return False
-
-        def read(self, _limit):
-            return self._body
+    @staticmethod
+    def _serves(monkeypatch, resp):
+        """Point the probe's transport at `resp` — an httpx.Response to return,
+        or an exception to raise. The probe goes through bobi.http (the house
+        outbound client), so that is what gets stubbed."""
+        def fake_get(*a, **k):
+            if isinstance(resp, Exception):
+                raise resp
+            return resp
+        monkeypatch.setattr(server.http, "get", fake_get)
 
     def test_ingress_verify_is_the_only_mutation_endpoint(self, project):
         c = _client(SetupState(), project)
@@ -204,21 +201,46 @@ class TestIngressEndpoint:
         assert r.status_code == 404
 
     def test_probe_requires_bobi_health_payload(self, monkeypatch):
-        monkeypatch.setattr(
-            server,
-            "urlopen",
-            lambda *a, **k: self._HealthResponse(b'{"status":"ok","auth":"hmac"}'),
-        )
+        self._serves(monkeypatch,
+                     httpx.Response(200, content=b'{"status":"ok","auth":"hmac"}'))
         assert server._probe_event_server("https://events.example.com") == (True, "")
 
-        monkeypatch.setattr(
-            server,
-            "urlopen",
-            lambda *a, **k: self._HealthResponse(b'{"status":"ok"}'),
-        )
+        # status ok but no hmac auth — not a Bobi event server.
+        self._serves(monkeypatch, httpx.Response(200, content=b'{"status":"ok"}'))
         ok, err = server._probe_event_server("https://events.example.com")
         assert ok is False
         assert "Bobi event server" in err
+
+    def test_probe_reports_transport_and_status_failures(self, monkeypatch):
+        # httpx does not raise on 4xx/5xx the way urlopen did, so the status
+        # check — not an exception handler — is what reports a bad response.
+        self._serves(monkeypatch, httpx.Response(502, content=b""))
+        assert server._probe_event_server("https://e.example.com") == (
+            False, "/health returned HTTP 502")
+
+        self._serves(monkeypatch, httpx.Response(200, content=b"<html>not json"))
+        ok, err = server._probe_event_server("https://e.example.com")
+        assert ok is False and err == "/health did not return Bobi JSON"
+
+        self._serves(monkeypatch, httpx.ConnectTimeout("slow"))
+        assert server._probe_event_server("https://e.example.com") == (
+            False, "timed out reaching /health")
+
+        # Every other httpx transport failure is reachable, not a crash.
+        self._serves(monkeypatch, httpx.ConnectError("refused"))
+        ok, err = server._probe_event_server("https://e.example.com")
+        assert ok is False and err.startswith("could not reach /health:")
+
+    def test_unroutable_host_is_an_error_not_a_500(self):
+        # NOT stubbed — this exercises the real client. httpx.InvalidURL does
+        # not inherit from httpx.HTTPError, so a host that passes the
+        # scheme+netloc validator but cannot be a host used to escape the
+        # probe and 500 the verify endpoint. urlopen folded it into gaierror.
+        url = "https://256.256.256.256"
+        assert server._validate_public_event_server_url(url) is None
+        ok, err = server._probe_event_server(url)
+        assert ok is False
+        assert err.startswith("could not reach /health:")
 
     def test_local_ingress_verified_and_removes_event_server_env(self, project):
         (project / ".env").write_text("BOBI_EVENT_SERVER=https://old.example\n")

@@ -10,6 +10,12 @@ effects — and it surfaces the tool names so the user sees what they'll get.
 
 Read-only: we never call a tool (no writes, no data fetched). Returns
 {"ok": True, "tools": [...], "count": N} or {"ok": False, "error": ..., ...}.
+
+This module owns the WHOLE test-a-connection exchange, not just the probe:
+the intent/confirmation matchers and the two dialogue turns that pair with
+them (`propose_test`, `resolve_pending`). The turns used to be closures inside
+the `/api/message` route, which split one conversation across two modules and
+made it reachable only through a TestClient.
 """
 
 from __future__ import annotations
@@ -37,14 +43,14 @@ _ENV_PASSTHROUGH_PREFIXES = ("XDG_", "LC_", "UV_")
 
 def _resolved_env(entry: dict, project: Path) -> dict:
     """A MINIMAL child environment: a safe base (PATH/HOME/locale/proxies) plus
-    only the connection's declared vars, read from .env (the saved secret) or the
-    live environment. Other ambient secrets are intentionally withheld."""
-    from bobi.setup.actions import read_env
+    only the connection's declared vars, resolved the way the running agent
+    resolves them (`actions.env_value`). Other ambient secrets are
+    intentionally withheld."""
+    from bobi.setup.actions import env_value
     env = {k: v for k, v in os.environ.items()
            if k in _ENV_PASSTHROUGH or k.startswith(_ENV_PASSTHROUGH_PREFIXES)}
-    saved = read_env(project)
     for var in entry.get("env_vars") or []:
-        v = saved.get(var) or os.environ.get(var)
+        v = env_value(project, var)
         if v:
             env[var] = v
     return env
@@ -208,12 +214,11 @@ async def _probe_stdio(entry: dict, project: Path, timeout: float,
 async def _probe_http(entry: dict, project: Path, timeout: float,
                       call_name) -> dict:
     from mcp.client.streamable_http import streamablehttp_client
-    from bobi.setup.actions import read_env
+    from bobi.setup.actions import env_value
     url = (entry.get("url") or "").strip()
     headers: dict = {}
     if entry.get("auth") == "api_key" and entry.get("secret_var"):
-        v = read_env(project).get(entry["secret_var"]) or \
-            os.environ.get(entry["secret_var"])
+        v = env_value(project, entry["secret_var"])
         if v:
             headers["Authorization"] = f"Bearer {v}"
     try:
@@ -314,15 +319,21 @@ def _scrub_result(result: dict, entry: dict, project: Path) -> dict:
     """Strip secrets from any human-facing text the probe surfaces (the server
     runs under the child's real credentials, and a misbehaving server can echo a
     cookie/token in its output or stderr). Replaces the connection's own secret
-    values, then runs the shape-based redactor."""
+    values, then runs the shape-based redactor.
+
+    Both candidate values are scrubbed — the exported one AND the one in
+    `run/.env` — never just whichever `env_value` resolves to. A redactor that
+    picked by precedence would blank the losing copy and echo the winning one
+    verbatim the moment the two disagreed, which is precisely the case a
+    redactor exists for."""
     from bobi.setup.actions import read_env, redact_secrets
     saved = read_env(project)
     values = []
     for var in (entry.get("env_vars") or []) + ([entry["secret_var"]]
                                                 if entry.get("secret_var") else []):
-        v = saved.get(var) or os.environ.get(var)
-        if v and len(v) >= 8:
-            values.append(v)
+        for v in (saved.get(var), os.environ.get(var)):
+            if v and len(v) >= 8 and v not in values:
+                values.append(v)
 
     def scrub(text):
         if not text:
@@ -350,3 +361,159 @@ async def probe(entry: dict, project: Path, *, call_name: str | None = None,
         return {"ok": False,
                 "error": "connection has neither a command nor a URL to test."}
     return _scrub_result(result, entry, project)
+
+
+# --- the test-a-connection dialogue --------------------------------------
+#
+# Two turns, paired with the matchers above: `match_connection_test` routes a
+# user message here, `propose_test` lists the server's tools and proposes a
+# read-only one, `match_test_confirmation` reads the answer, and
+# `resolve_pending` runs it. Both are plain async generators yielding text
+# chunks — the route wraps them in SSE, so the whole conversation is testable
+# without a TestClient.
+
+
+def _record(state, project: Path, user_text: str, reply: str) -> None:
+    state.messages.append({"role": "user", "content": user_text})
+    state.messages.append({"role": "assistant", "content": reply})
+    state.save(project)
+
+
+def _probe_identity(entry: dict) -> dict:
+    """The part of an MCP entry a connection test is actually about.
+
+    Everything except the recorded outcome: if any of it changed while a probe
+    was in flight, the result describes a different connection than the one the
+    user now has.
+    """
+    return {k: v for k, v in (entry or {}).items() if k != "last_test"}
+
+
+async def propose_test(state, project: Path, user_text: str, hit: dict):
+    """First turn: launch the server, list its tools, and PROPOSE a safe
+    read-only tool to call — the user confirms before anything runs."""
+    if hit.get("none"):
+        reply = ("There are no MCP connections set up yet to test. Add "
+                 "one with “add a connection,” then ask me to test it.")
+        yield reply
+        _record(state, project, user_text, reply)
+        return
+    if hit.get("ambiguous"):
+        reply = ("Which connection should I test? You have: "
+                 + ", ".join(hit.get("candidates") or []) + ".")
+        yield reply
+        _record(state, project, user_text, reply)
+        return
+    key = hit["key"]
+    entry = (state.spec.mcp_servers or {}).get(key) or {}
+    label = entry.get("label") or key
+    yield (f"Starting {label} and listing its tools (first run can take "
+           "a moment)…\n\n")
+    result = await probe(entry, project)   # list only, no call
+    if not result.get("ok"):
+        reply = f"✗ Couldn’t start {label}: {result.get('error')}"
+        if result.get("stderr"):
+            reply += f"\n\nServer output:\n{result['stderr'][:600]}"
+        state.pending_test = {}
+        yield reply
+        _record(state, project, user_text, reply)
+        return
+    tools = result.get("tools") or []
+    proposed = result.get("suggested")
+    state.pending_test = {"key": key, "proposed": proposed, "tools": tools}
+    state.save(project)
+    shown = ", ".join(tools[:10]) + (" …" if len(tools) > 10 else "")
+    if proposed:
+        reply = (f"{label} is up — {len(tools)} tools available.\n\n"
+                 f"To verify the connection end-to-end I'll call "
+                 f"{proposed} (read-only, no arguments). Reply “yes” "
+                 f"to run it, name another tool, or say no.\n\n"
+                 f"Tools: {shown}")
+    else:
+        reply = (f"{label} is up — {len(tools)} tools available, but I "
+                 f"couldn’t spot a clearly safe read-only one to call. "
+                 f"Name a tool to try (no arguments will be sent): {shown}")
+    yield reply
+    _record(state, project, user_text, reply)
+
+
+async def resolve_pending(state, project: Path, user_text: str, decision: dict):
+    """Second turn: the user confirmed (or named a tool / declined).
+    Run the chosen tool and report — this is the real connection test."""
+    pending = state.pending_test or {}
+    if decision["action"] == "cancel":
+        state.pending_test = {}
+        reply = "Okay — skipped the test. Ask again whenever you’re ready."
+        yield reply
+        _record(state, project, user_text, reply)
+        return
+    if decision["action"] == "refuse_write":
+        # User named a tool that looks like it writes/changes data — never
+        # run it as a connection test. Keep the proposal open.
+        reply = (f"{decision.get('tool')} looks like it writes or changes "
+                 f"data, so I won’t call it as a test. Pick a read-only "
+                 f"tool, or reply “yes” to run the proposed one.")
+        yield reply
+        _record(state, project, user_text, reply)
+        return
+    tool = decision.get("tool")
+    if not tool:
+        reply = ("Name a tool to call (no arguments will be sent): "
+                 + ", ".join(pending.get("tools") or []))
+        yield reply
+        _record(state, project, user_text, reply)
+        return
+    key = pending.get("key")
+    entry = (state.spec.mcp_servers or {}).get(key)
+    state.pending_test = {}
+    # The connection may have been edited or removed between the proposal
+    # and now — don't test a stale/empty key.
+    if not isinstance(entry, dict) or not entry:
+        reply = ("That connection isn’t there anymore — it may have been "
+                 "removed or changed. Ask me to test it again.")
+        yield reply
+        _record(state, project, user_text, reply)
+        return
+    label = entry.get("label") or key
+    yield f"Calling {tool} on {label}…\n\n"
+    tested = _probe_identity(entry)
+    result = await probe(entry, project, call_name=tool)
+    # Re-read the entry AFTER the await. The probe can take up to 60s
+    # (the first run resolves deps), and a user watching a slow test is
+    # very likely editing the very connection being tested — fixing the
+    # command that is failing. Writing the pre-probe snapshot back
+    # reverted that correction silently, and re-added an entry deleted
+    # mid-test. Worse than losing the edit: a result for the OLD command
+    # would mark the NEW one connected, so a config that was never
+    # tested renders green.
+    current = (state.spec.mcp_servers or {}).get(key)
+    if (not isinstance(current, dict) or not current
+            or _probe_identity(current) != tested):
+        reply = ("That connection changed while I was testing it, so "
+                 "the result doesn’t apply to what you have now. Ask "
+                 "me to test it again.")
+        yield reply
+        _record(state, project, user_text, reply)
+        return
+    # Persist ONLY coarse status — never raw error/stderr text, which can
+    # carry secrets and is served to the browser via /api/state.
+    current["last_test"] = {"ok": bool(result.get("ok")),
+                            "live_ok": result.get("live_ok"),
+                            "called": tool}
+    state.spec.mcp_servers[key] = current
+    if not result.get("ok"):
+        reply = f"✗ Couldn’t start {label}: {result.get('error')}"
+        if result.get("stderr"):
+            reply += f"\n\nServer output:\n{result['stderr'][:600]}"
+    elif result.get("live_ok"):
+        out = (result.get("output") or "").strip()
+        snippet = f"\n\nResponse: {out}" if out else ""
+        reply = (f"✓ Called {tool} on {label} — it worked. The "
+                 f"connection is live.{snippet}")
+    else:
+        reply = (f"⚠ {label} starts, but calling {tool} failed: "
+                 f"{result.get('live_error')}\n\nThat usually means "
+                 f"credentials aren’t set or aren’t valid yet — add them "
+                 f"with “edit” on the connection, then re-test.")
+    yield reply
+    _record(state, project, user_text, reply)

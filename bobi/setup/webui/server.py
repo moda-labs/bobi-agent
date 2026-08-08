@@ -23,11 +23,9 @@ import json
 import os
 from pathlib import Path
 from typing import AsyncIterator
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request as UrlRequest
-from urllib.request import urlopen
 
+import httpx
 import yaml
 
 # Imported at module level (not inside build_app) so that, under
@@ -36,8 +34,8 @@ import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from bobi import paths
-from bobi.setup.state import STAGE_ORDER, SetupState, Stage
+from bobi import http, paths
+from bobi.setup.state import SPEC_SLOTS, STAGE_ORDER, SetupState, Stage
 from bobi.webui_common.launcher import serve_local
 from bobi.webui_common.security import (
     WEBUI_TOKEN_HEADER,
@@ -81,8 +79,7 @@ def serialize_state(state: SetupState) -> dict:
             # User-added MCP connections — names/command/args/url only (never
             # secret VALUES), so the UI can repopulate the edit form.
             "mcp_servers": spec.mcp_servers,
-            "readiness": {s: spec.readiness_for(s).value
-                          for s in ("goal", "roles", "autonomous", "services")},
+            "readiness": {s: spec.readiness_for(s).value for s in SPEC_SLOTS},
         },
         "summary": state.summary,
         "messages": state.messages,
@@ -106,29 +103,38 @@ def _validate_public_event_server_url(url: str) -> str | None:
 
 
 def _probe_event_server(url: str) -> tuple[bool, str]:
+    # Not events.server.health(): this wants the extra `auth == "hmac"` check
+    # and a per-failure error string to show in the wizard. Only the transport
+    # is shared — bobi.http is the house outbound client (see its docstring).
     health_url = url.rstrip("/") + "/health"
-    req = UrlRequest(health_url, headers={"accept": "application/json"})
     try:
-        with urlopen(req, timeout=8) as resp:
-            if not (200 <= resp.status < 300):
-                return False, f"/health returned HTTP {resp.status}"
-            try:
-                payload = json.loads(resp.read(4096).decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return False, "/health did not return Bobi JSON"
-            if (isinstance(payload, dict)
-                    and payload.get("status") == "ok"
-                    and payload.get("auth") == "hmac"):
-                return True, ""
-            return False, "/health did not look like a Bobi event server"
-    except HTTPError as e:
-        return False, f"/health returned HTTP {e.code}"
-    except URLError as e:
-        return False, f"could not reach /health: {e.reason}"
-    except TimeoutError:
+        resp = http.get(health_url, headers={"accept": "application/json"},
+                        timeout=8)
+    except httpx.TimeoutException:
         return False, "timed out reaching /health"
-    except OSError as e:
+    except (httpx.HTTPError, httpx.InvalidURL) as e:
+        # InvalidURL is NOT an HTTPError — it inherits straight from Exception.
+        # `_validate_public_event_server_url` only checks scheme + netloc, so a
+        # host that parses but cannot be a host ("https://256.256.256.256")
+        # reaches here; urlopen used to fold that into its gaierror path, and
+        # letting it escape would 500 the verify endpoint on a typo.
         return False, f"could not reach /health: {e}"
+    if not (200 <= resp.status_code < 300):
+        return False, f"/health returned HTTP {resp.status_code}"
+    try:
+        # Sliced to match the urlopen read(4096) this replaced, so an oversized
+        # body still fails as "not Bobi JSON" rather than parsing. It does NOT
+        # bound what we buffer — httpx has already read the whole response by
+        # the time we get here; only a streaming request could cap that, and a
+        # health payload is tiny enough not to warrant one.
+        payload = json.loads(resp.content[:4096].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False, "/health did not return Bobi JSON"
+    if (isinstance(payload, dict)
+            and payload.get("status") == "ok"
+            and payload.get("auth") == "hmac"):
+        return True, ""
+    return False, "/health did not look like a Bobi event server"
 
 
 def _persist_ingress_env(project: Path, state: SetupState) -> None:
@@ -141,16 +147,6 @@ def _persist_ingress_env(project: Path, state: SetupState) -> None:
         env["BOBI_EVENT_SERVER"] = state.ingress.url
         os.environ["BOBI_EVENT_SERVER"] = state.ingress.url
     actions.write_env(project, env)
-
-
-def _probe_identity(entry: dict) -> dict:
-    """The part of an MCP entry a connection test is actually about.
-
-    Everything except the recorded outcome: if any of it changed while a probe
-    was in flight, the result describes a different connection than the one the
-    user now has.
-    """
-    return {k: v for k, v in (entry or {}).items() if k != "last_test"}
 
 
 def _dedupe_roots(roots: list[Path]) -> list[Path]:
@@ -580,141 +576,6 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         body = await request.json()
         text = (body.get("text") or "").strip()
 
-        def _record(user_text, reply):
-            state.messages.append({"role": "user", "content": user_text})
-            state.messages.append({"role": "assistant", "content": reply})
-            state.save(project)
-
-        async def _propose_test(user_text: str, hit: dict):
-            """First turn: launch the server, list its tools, and PROPOSE a safe
-            read-only tool to call — the user confirms before anything runs."""
-            from bobi.setup import mcp_probe
-            if hit.get("none"):
-                reply = ("There are no MCP connections set up yet to test. Add "
-                         "one with “add a connection,” then ask me to test it.")
-                yield reply
-                _record(user_text, reply)
-                return
-            if hit.get("ambiguous"):
-                reply = ("Which connection should I test? You have: "
-                         + ", ".join(hit.get("candidates") or []) + ".")
-                yield reply
-                _record(user_text, reply)
-                return
-            key = hit["key"]
-            entry = (state.spec.mcp_servers or {}).get(key) or {}
-            label = entry.get("label") or key
-            yield (f"Starting {label} and listing its tools (first run can take "
-                   "a moment)…\n\n")
-            result = await mcp_probe.probe(entry, project)   # list only, no call
-            if not result.get("ok"):
-                reply = f"✗ Couldn’t start {label}: {result.get('error')}"
-                if result.get("stderr"):
-                    reply += f"\n\nServer output:\n{result['stderr'][:600]}"
-                state.pending_test = {}
-                yield reply
-                _record(user_text, reply)
-                return
-            tools = result.get("tools") or []
-            proposed = result.get("suggested")
-            state.pending_test = {"key": key, "proposed": proposed, "tools": tools}
-            state.save(project)
-            shown = ", ".join(tools[:10]) + (" …" if len(tools) > 10 else "")
-            if proposed:
-                reply = (f"{label} is up — {len(tools)} tools available.\n\n"
-                         f"To verify the connection end-to-end I'll call "
-                         f"{proposed} (read-only, no arguments). Reply “yes” "
-                         f"to run it, name another tool, or say no.\n\n"
-                         f"Tools: {shown}")
-            else:
-                reply = (f"{label} is up — {len(tools)} tools available, but I "
-                         f"couldn’t spot a clearly safe read-only one to call. "
-                         f"Name a tool to try (no arguments will be sent): {shown}")
-            yield reply
-            _record(user_text, reply)
-
-        async def _resolve_pending(user_text: str, decision: dict):
-            """Second turn: the user confirmed (or named a tool / declined).
-            Run the chosen tool and report — this is the real connection test."""
-            from bobi.setup import mcp_probe
-            pending = state.pending_test or {}
-            if decision["action"] == "cancel":
-                state.pending_test = {}
-                reply = "Okay — skipped the test. Ask again whenever you’re ready."
-                yield reply
-                _record(user_text, reply)
-                return
-            if decision["action"] == "refuse_write":
-                # User named a tool that looks like it writes/changes data — never
-                # run it as a connection test. Keep the proposal open.
-                reply = (f"{decision.get('tool')} looks like it writes or changes "
-                         f"data, so I won’t call it as a test. Pick a read-only "
-                         f"tool, or reply “yes” to run the proposed one.")
-                yield reply
-                _record(user_text, reply)
-                return
-            tool = decision.get("tool")
-            if not tool:
-                reply = ("Name a tool to call (no arguments will be sent): "
-                         + ", ".join(pending.get("tools") or []))
-                yield reply
-                _record(user_text, reply)
-                return
-            key = pending.get("key")
-            entry = (state.spec.mcp_servers or {}).get(key)
-            state.pending_test = {}
-            # The connection may have been edited or removed between the proposal
-            # and now — don't test a stale/empty key.
-            if not isinstance(entry, dict) or not entry:
-                reply = ("That connection isn’t there anymore — it may have been "
-                         "removed or changed. Ask me to test it again.")
-                yield reply
-                _record(user_text, reply)
-                return
-            label = entry.get("label") or key
-            yield f"Calling {tool} on {label}…\n\n"
-            tested = _probe_identity(entry)
-            result = await mcp_probe.probe(entry, project, call_name=tool)
-            # Re-read the entry AFTER the await. The probe can take up to 60s
-            # (the first run resolves deps), and a user watching a slow test is
-            # very likely editing the very connection being tested — fixing the
-            # command that is failing. Writing the pre-probe snapshot back
-            # reverted that correction silently, and re-added an entry deleted
-            # mid-test. Worse than losing the edit: a result for the OLD command
-            # would mark the NEW one connected, so a config that was never
-            # tested renders green.
-            current = (state.spec.mcp_servers or {}).get(key)
-            if (not isinstance(current, dict) or not current
-                    or _probe_identity(current) != tested):
-                reply = ("That connection changed while I was testing it, so "
-                         "the result doesn’t apply to what you have now. Ask "
-                         "me to test it again.")
-                yield reply
-                _record(user_text, reply)
-                return
-            # Persist ONLY coarse status — never raw error/stderr text, which can
-            # carry secrets and is served to the browser via /api/state.
-            current["last_test"] = {"ok": bool(result.get("ok")),
-                                    "live_ok": result.get("live_ok"),
-                                    "called": tool}
-            state.spec.mcp_servers[key] = current
-            if not result.get("ok"):
-                reply = f"✗ Couldn’t start {label}: {result.get('error')}"
-                if result.get("stderr"):
-                    reply += f"\n\nServer output:\n{result['stderr'][:600]}"
-            elif result.get("live_ok"):
-                out = (result.get("output") or "").strip()
-                snippet = f"\n\nResponse: {out}" if out else ""
-                reply = (f"✓ Called {tool} on {label} — it worked. The "
-                         f"connection is live.{snippet}")
-            else:
-                reply = (f"⚠ {label} starts, but calling {tool} failed: "
-                         f"{result.get('live_error')}\n\nThat usually means "
-                         f"credentials aren’t set or aren’t valid yet — add them "
-                         f"with “edit” on the connection, then re-test.")
-            yield reply
-            _record(user_text, reply)
-
         async def gen() -> AsyncIterator[str]:
             if not text:
                 yield _sse("error", {"message": "empty message"})
@@ -751,7 +612,8 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 decision = mcp_probe.match_test_confirmation(
                     clean, state.pending_test)
                 if decision["action"] != "none":
-                    async for chunk in _resolve_pending(clean, decision):
+                    async for chunk in mcp_probe.resolve_pending(
+                            state, project, clean, decision):
                         yield _sse("delta", {"text": chunk})
                     yield _sse("state", serialize_state(state))
                     return
@@ -761,7 +623,8 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             # can't reach the team's servers, so we handle it here).
             hit = mcp_probe.match_connection_test(clean, state.spec.mcp_servers)
             if hit.get("intent"):
-                async for chunk in _propose_test(clean, hit):
+                async for chunk in mcp_probe.propose_test(
+                        state, project, clean, hit):
                     yield _sse("delta", {"text": chunk})
                 yield _sse("state", serialize_state(state))
                 return
@@ -1087,8 +950,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                     if var not in env_vars:
                         env_vars.append(var)
                     if val:
-                        actions.save_credential(state, project, var, name, "",
-                                                prompt_fn=lambda *_: val)
+                        actions.save_credential(state, project, var, val)
             except actions.ActionError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
             entry: dict = {"type": "stdio", "command": command, "args": args,
@@ -1111,8 +973,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                     entry["secret_var"] = var
                     api_key = payload.get("api_key", "")
                     if api_key:
-                        actions.save_credential(state, project, var, name, "",
-                                                prompt_fn=lambda *_: api_key)
+                        actions.save_credential(state, project, var, api_key)
             except actions.ActionError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -1188,8 +1049,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         except VennError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         try:
-            actions.save_credential(state, project, "VENN_API_KEY", "venn", "",
-                                    prompt_fn=lambda *_: key)
+            actions.save_credential(state, project, "VENN_API_KEY", key)
         except actions.ActionError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         data["state"] = serialize_state(state)
@@ -1251,11 +1111,8 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
 
     # --- slack finalization (the post-install next-steps screen) --------
     def _env_value(var: str) -> str:
-        # Same precedence as runtime resolution (config.load_dotenv and
-        # venn_key): an exported environment variable wins over .env.
-        import os
         from bobi.setup import actions
-        return os.environ.get(var) or actions.read_env(project).get(var, "")
+        return actions.env_value(project, var)
 
     @app.post("/api/slack/channel")
     def slack_channel(payload: dict) -> JSONResponse:
@@ -1293,8 +1150,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                     status_code=400)
             value = raw
         try:
-            actions.save_credential(state, project, "SLACK_CHANNELS", "slack",
-                                    "", prompt_fn=lambda *_: value)
+            actions.save_credential(state, project, "SLACK_CHANNELS", value)
         except actions.ActionError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         return JSONResponse({"ok": True, "channel": value,
@@ -1362,9 +1218,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         value = payload.get("value", "")
         try:
             result = actions.save_credential(
-                state, project, payload.get("var_name", ""),
-                payload.get("service", ""), payload.get("instructions", ""),
-                prompt_fn=lambda *_: value)
+                state, project, payload.get("var_name", ""), value)
         except actions.ActionError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         return JSONResponse(result)
