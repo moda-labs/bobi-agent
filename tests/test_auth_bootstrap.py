@@ -504,7 +504,22 @@ def whatsapp_config(tmp_path, monkeypatch):
     return project
 
 
-def test_run_bootstrap_happy_path(slack_config, monkeypatch):
+@pytest.mark.parametrize(
+    "brain_block",
+    [
+        "",
+        "brain:\n  kind: claude\n  base_url: https://gateway.example\n",
+    ],
+    ids=["native-claude", "gateway-base-url-subscription"],
+)
+def test_run_bootstrap_happy_path(slack_config, monkeypatch, brain_block):
+    from bobi import paths
+
+    if brain_block:
+        agent_yaml = paths.agent_yaml_path(slack_config)
+        agent_yaml.write_text(agent_yaml.read_text() + brain_block)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+
     posts = []
     written = []
     home = slack_config  # unused; creds keyed off $HOME
@@ -736,16 +751,16 @@ def test_run_bootstrap_refuses_with_api_key_set(slack_config, monkeypatch):
         ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
 
 
-def test_run_bootstrap_refuses_gateway_brain(slack_config, monkeypatch):
-    """A gateway team has no subscription login; the claude-spec fallback
-    would silently drive a real `claude auth login` for it (#655)."""
+def test_run_bootstrap_refuses_gateway_brain_with_auth_token(slack_config, monkeypatch):
+    """An explicit gateway token must not be replaced by subscription auth."""
     from bobi import paths
 
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "gateway-token")
     paths.agent_yaml_path(slack_config).write_text(
         paths.agent_yaml_path(slack_config).read_text()
-        + "brain:\n  kind: gateway\n  base_url: http://localhost:4000\n"
+        + "brain:\n  kind: claude\n  base_url: http://localhost:4000\n"
     )
-    with pytest.raises(RuntimeError, match="gateway"):
+    with pytest.raises(RuntimeError, match="ANTHROPIC_AUTH_TOKEN"):
         ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
 
 

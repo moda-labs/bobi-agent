@@ -104,7 +104,7 @@ rather than guessing.
 | `BOBI_TEAM` | on first boot* | team to install, by bundled/registry name |
 | `BOBI_TEAM_URL` | on first boot* | public `.tar.gz` URL of one team package; takes precedence over `BOBI_TEAM` |
 | `ANTHROPIC_API_KEY` | native Claude, `api_key` mode | **must be absent** in `subscription` mode |
-| `ANTHROPIC_AUTH_TOKEN` | authenticated Claude gateway | bearer token, accepted *instead of* `ANTHROPIC_API_KEY`; rejected for native Claude |
+| `ANTHROPIC_AUTH_TOKEN` | authenticated Claude gateway | bearer token, accepted *instead of* `ANTHROPIC_API_KEY`; omit when the gateway accepts Claude subscription OAuth |
 | `BOBI_GATEWAY_API_KEY` | Codex gateway | key consumed by Codex's configured provider |
 | `BOBI_EVENT_SERVER` | yes | event-server URL (`https://`); the client derives `wss://` from it |
 | `BOBI_FLEET` | no | operator/fleet namespace stamp |

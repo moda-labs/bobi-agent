@@ -10,9 +10,12 @@ normalization; the only difference is the per-session environment merged in by
 ``brain.base_url``), the small/fast model default, and never letting an
 ambient real ``ANTHROPIC_API_KEY`` reach the gateway.
 
-Gateway auth is ``ANTHROPIC_AUTH_TOKEN`` only, sourced from the runtime
+Gateway auth normally uses ``ANTHROPIC_AUTH_TOKEN``, sourced from the runtime
 ``.env`` or the parent environment and inherited by the CLI subprocess
-untouched. Ollama needs none; LiteLLM typically wants its master key.
+untouched. Ollama needs none; LiteLLM typically wants its master key. A proxy
+that accepts Claude subscription OAuth can instead run with
+``BOBI_AUTH=subscription`` and no gateway token; the CLI then inherits the
+subscription credentials while Bobi keeps the endpoint pin.
 
 This module also hosts the pieces BOTH engines share: the base-url pin
 helpers and the :class:`GatewayAwareEngine` mixin that flips ``provider`` /

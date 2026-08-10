@@ -32,7 +32,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from bobi.brain import BRAIN_ENV, set_process_brain
+from bobi.brain import (
+    BRAIN_ENV,
+    DEFAULT_BRAIN,
+    normalize_brain_kind,
+    set_process_brain,
+)
 from bobi.config import Config
 from bobi.slack import post_slack_message
 
@@ -601,13 +606,18 @@ def run_bootstrap(
     # all the right ones. Loading cfg here also seeds BOBI_BRAIN for the
     # spec lookups below (and the spawned login subprocess).
     cfg = Config.load(project_path)
-    if cfg.brain_is_gateway:
-        # No spec fallback: _active_spec would silently drive the CLAUDE
-        # subscription login for a team that authenticates with gateway-specific
-        # credentials (or nothing) - mirror the DeployError (#655/#777).
+    configured_engine = normalize_brain_kind(cfg.brain_kind) or DEFAULT_BRAIN
+    if cfg.brain_is_gateway and (
+        configured_engine != "claude"
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    ):
+        # A Claude gateway can deliberately use subscription OAuth when the
+        # endpoint accepts it. Other gateways, or a configured gateway token,
+        # must keep using the gateway-specific credential path.
         raise RuntimeError(
-            "subscription login does not apply to a gateway team - a gateway "
-            "authenticates with gateway credentials in the runtime .env."
+            "subscription login applies only to a Claude gateway without "
+            "ANTHROPIC_AUTH_TOKEN; this gateway authenticates with gateway "
+            "credentials in the runtime .env."
         )
     set_process_brain(cfg.brain_kind)
     spec = _active_spec()

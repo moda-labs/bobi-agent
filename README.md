@@ -195,8 +195,11 @@ brain:
   model: qwen3:14b               # gateway-native model id
 ```
 
-If the gateway needs auth, put `ANTHROPIC_AUTH_TOKEN` in the team's runtime
-`.env`. See `skills/create-agent.md` for the details.
+If the gateway needs its own auth, put `ANTHROPIC_AUTH_TOKEN` in the team's
+runtime `.env`. A proxy that accepts Claude subscription OAuth can instead use
+`BOBI_AUTH=subscription` with no `ANTHROPIC_AUTH_TOKEN`; `login-bootstrap`
+creates the subscription credentials while preserving the gateway endpoint.
+See `skills/create-agent.md` for the details.
 
 For an **OpenAI-compatible** gateway, use the codex engine instead:
 
