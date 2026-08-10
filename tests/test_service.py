@@ -142,7 +142,10 @@ def test_startup_info_warns_when_inbound_events_use_local_ingress(bobi_install):
     assert info.event_server_url == "localhost:8080"
     assert "slack" in info.ingress_warning
     assert "public HTTPS ingress" in info.ingress_warning
-    assert "event_server_url" in info.ingress_hint
+    # The hint names the authored spelling (`event_server:`), not the
+    # parses-but-unused `event_server_url:` alias — see bobi/ingress.py (Q109).
+    assert "Set event_server in agent.yaml" in info.ingress_hint
+    assert "event_server_url" not in info.ingress_hint
 
 
 def test_startup_info_warns_for_explicit_start_subscription(bobi_install):

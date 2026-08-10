@@ -223,7 +223,10 @@ class TestCheckIngressReachability:
         assert not r.required
         assert "slack" in r.detail
         assert "public HTTPS ingress" in r.detail
-        assert "event_server_url" in r.hint
+        # The hint names the authored spelling (`event_server:`), not the
+        # parses-but-unused `event_server_url:` alias — bobi/ingress.py (Q109).
+        assert "Set event_server in agent.yaml" in r.hint
+        assert "event_server_url" not in r.hint
 
     def test_passes_for_remote_event_server(self, tmp_path):
         paths.package_dir(tmp_path).mkdir(parents=True)
