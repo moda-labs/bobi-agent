@@ -115,7 +115,7 @@ class TestEnsureRunning:
 
     def test_cold_start(self, state_dir, monkeypatch):
         monkeypatch.setattr(
-            "bobi.sdk.get_project_root",
+            "bobi.paths.bound_root",
             lambda: state_dir.parent.parent,
         )
         call_count = 0
@@ -139,7 +139,7 @@ class TestEnsureRunning:
 
     def test_timeout_raises(self, state_dir, monkeypatch):
         monkeypatch.setattr(
-            "bobi.sdk.get_project_root",
+            "bobi.paths.bound_root",
             lambda: state_dir.parent.parent,
         )
         with patch.object(embedder, "_check_health", return_value=False), \

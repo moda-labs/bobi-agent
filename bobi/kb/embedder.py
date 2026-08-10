@@ -75,8 +75,8 @@ def ensure_running() -> int:
     _pid_path().unlink(missing_ok=True)
     _port_path().unlink(missing_ok=True)
 
-    from bobi.sdk import get_project_root
-    project_root = get_project_root()
+    from bobi.paths import bound_root
+    project_root = bound_root()
     if not project_root:
         raise RuntimeError("project root not set")
 

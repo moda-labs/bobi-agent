@@ -405,3 +405,39 @@ class TestSchedulerRecordsOutOfBandRuns:
         assert gates == []
         assert len(run_records.load("inbox")) == 1
         assert run_records.load("inbox")[0].outcome == QUIET
+
+
+# === The shared timestamp reader ===
+
+
+class TestParseIso:
+    """`_parse_iso` is the one reader for timestamps `_now_iso` writes.
+
+    It lives here, next to the writer, because the scheduler and the
+    script_cache runner both read back state this package wrote and used to
+    each carry their own copy of the parser.
+    """
+
+    def test_accepts_the_z_suffix_and_an_explicit_offset(self):
+        for value in ("2026-07-31T12:00:00Z", "2026-07-31T12:00:00+00:00"):
+            dt = run_records._parse_iso(value)
+            assert dt == datetime(2026, 7, 31, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_round_trips_what_now_iso_writes(self):
+        assert run_records._parse_iso(run_records._now_iso()) is not None
+
+    def test_defaults_a_naive_timestamp_to_utc(self):
+        dt = run_records._parse_iso("2026-07-31T12:00:00")
+        assert dt.tzinfo == timezone.utc
+
+    @pytest.mark.parametrize("value", ["", None, "not-a-timestamp"])
+    def test_unparseable_reads_as_absent(self, value):
+        assert run_records._parse_iso(value) is None
+
+    def test_a_non_string_in_state_reads_as_absent_rather_than_raising(self):
+        # These strings come back out of JSON state documents, which can hold
+        # anything after a torn write or a hand edit. Both callers treat an
+        # unreadable timestamp as "no timestamp"; neither can survive an
+        # AttributeError escaping the parser.
+        assert run_records._parse_iso(1753963200) is None
+        assert run_records._parse_iso({"at": "2026-07-31T12:00:00Z"}) is None

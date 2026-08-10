@@ -403,3 +403,79 @@ class TestObservability:
         assert st["fallback_runs"] == 1
         assert st["total_agent_cost_usd"] == pytest.approx(0.05)
         assert st["last_mode"] == "cached"
+
+
+# ---------------------------------------------------------------------------
+# Policy resolution + the helpers shared with tool_checks
+# ---------------------------------------------------------------------------
+
+
+class TestSharedScriptPaths:
+    """script_cache and tool_poll write into the same `scripts/` directory.
+
+    They must agree on where it is and on how a monitor name becomes a file
+    stem, or each subsystem stops seeing the other's cached scripts. One
+    definition, imported — not two that happen to match.
+    """
+
+    def test_both_subsystems_use_the_same_helpers(self):
+        from bobi.monitors import tool_checks
+
+        assert sc._scripts_dir is tool_checks._scripts_dir
+        assert sc._safe_name is tool_checks._safe_name
+
+    def test_the_run_ledger_sanitizer_is_deliberately_a_different_one(self):
+        # run_records keys a different directory (monitor_runs/) with a
+        # whitelist rule, and the two disagree on names containing a space.
+        # Nothing reads one subsystem's stems with the other's rule.
+        from bobi.monitors import run_records
+
+        assert sc._safe_name is not run_records._safe_name
+        assert sc._safe_name("a b") == "a b"
+        assert run_records._safe_name("a b") == "a_b"
+
+
+class TestNotifyChannelResolution:
+    """`notify_channel` resolves at `_policy`, like every other config key.
+
+    It used to be resolved inline inside `_slack_notify`, which re-read and
+    re-parsed agent.yaml on every single notification.
+    """
+
+    def test_per_monitor_extra_supplies_the_channel(self):
+        with patch.object(sc, "_install_policy", return_value={}):
+            assert sc._policy(_monitor(notify_channel="#ops"))["notify_channel"] == "#ops"
+
+    def test_install_level_config_supplies_it_when_the_monitor_does_not(self):
+        with patch.object(sc, "_install_policy", return_value={"notify_channel": "#fleet"}):
+            assert sc._policy(_monitor())["notify_channel"] == "#fleet"
+
+    def test_per_monitor_extra_overrides_install_level(self):
+        with patch.object(sc, "_install_policy", return_value={"notify_channel": "#fleet"}):
+            resolved = sc._policy(_monitor(notify_channel="#ops"))["notify_channel"]
+        assert resolved == "#ops"
+
+    def test_absent_everywhere_resolves_to_none(self):
+        with patch.object(sc, "_install_policy", return_value={}):
+            assert sc._policy(_monitor())["notify_channel"] is None
+
+    def test_slack_notify_reads_the_resolved_value_without_re_reading_agent_yaml(
+            self, monkeypatch):
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+        posted = []
+        with patch("bobi.slack.post_slack_message",
+                   side_effect=lambda t, c, x: posted.append((t, c, x))), \
+             patch.object(sc, "_install_policy") as install_policy:
+            sc._slack_notify(_monitor(), "monitor/script.failing",
+                             {"reason": "boom"}, {"notify_channel": "#ops"})
+        assert [c for _, c, _ in posted] == ["#ops"]
+        install_policy.assert_not_called()
+
+    def test_slack_notify_stays_silent_with_no_channel_resolved(self, monkeypatch):
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+        posted = []
+        with patch("bobi.slack.post_slack_message",
+                   side_effect=lambda t, c, x: posted.append(c)):
+            sc._slack_notify(_monitor(), "monitor/script.failing",
+                             {"reason": "boom"}, {"notify_channel": None})
+        assert posted == []

@@ -26,9 +26,9 @@ _MONITOR_ERROR_REPEAT_PUSH_EVERY = 3
 def _get_project_root():
     """Resolve the project root, or None if unavailable."""
     try:
-        from bobi.sdk import get_project_root
+        from bobi.paths import bound_root
 
-        return get_project_root() or None
+        return bound_root() or None
     except Exception:
         return None
 

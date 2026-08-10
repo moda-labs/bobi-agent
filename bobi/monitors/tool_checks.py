@@ -57,16 +57,31 @@ TOOL_TIMEOUT = 60
 # ---------------------------------------------------------------------------
 
 def _scripts_dir() -> Path:
-    """Directory for cached monitor scripts."""
+    """Directory for cached monitor scripts.
+
+    Shared with :mod:`bobi.monitors.script_cache_checks`, which writes its
+    ``.sc.sh`` / ``.state.json`` artifacts alongside these ``.sh`` files. The
+    two subsystems must resolve to the same directory or neither can see the
+    other's cached scripts, so there is one definition, here.
+    """
     from bobi import paths
     d = paths.state_dir() / "scripts"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
+def _safe_name(monitor_name: str) -> str:
+    """Filesystem-safe stem for a monitor name, within :func:`_scripts_dir`.
+
+    Shared with script_cache_checks for the same reason the directory is: the
+    two subsystems key their cached artifacts off this stem, and a name that
+    sanitized differently in one would orphan the other's files.
+    """
+    return monitor_name.replace("/", "_").replace("..", "_")
+
+
 def _script_path(monitor_name: str) -> Path:
-    safe_name = monitor_name.replace("/", "_").replace("..", "_")
-    return _scripts_dir() / f"{safe_name}.sh"
+    return _scripts_dir() / f"{_safe_name(monitor_name)}.sh"
 
 
 def _script_body(cmd_parts: list[str]) -> str:

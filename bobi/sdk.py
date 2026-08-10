@@ -696,10 +696,7 @@ def load_resumable_session_id(name: str, model: str) -> str:
         return ""
     brain = get_brain()
     active_label = session_brain_label()
-    brain_path = _sessions_dir() / f"{name}.brain"
-    recorded_brain = (
-        brain_path.read_text().strip() if brain_path.exists() else ""
-    )
+    recorded_brain = load_session_brain(name)
     if recorded_brain and recorded_brain != active_label:
         # A resume token is only meaningful to the brain configuration that
         # minted it - engine AND endpoint (see session_brain_label).

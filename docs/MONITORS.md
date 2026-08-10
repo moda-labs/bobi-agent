@@ -358,6 +358,7 @@ per-monitor `extra` key overrides them:
 | `http_hosts` | `[]` | host allowlist when `allow_http` is on |
 | `max_age` | unset | refresh a pinned script older than this |
 | `on_persistent_failure` | `degrade` | `degrade` (backoff) or `pause` after repeated regen failures |
+| `notify_channel` | unset | Slack channel for a best-effort direct message, additive to the event publish (needs `SLACK_BOT_TOKEN`) |
 
 ## Pinning, trust, and the capability envelope
 
