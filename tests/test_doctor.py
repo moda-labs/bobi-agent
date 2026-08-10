@@ -351,6 +351,19 @@ class TestCheckSlackSocketMode:
         assert "connected" in result.detail.lower()
         assert "A_APP" in result.detail
 
+    def test_reports_users_read_when_app_identity_is_missing(self, tmp_path):
+        _write_slack_socket_config(tmp_path)
+        import bobi.slack
+        with patch(
+            "bobi.slack.require_app_identity",
+            side_effect=bobi.slack.SlackAppIdentityError("users:read is required"),
+        ):
+            result = _run_slack_socket_check(tmp_path, {
+                "status": "ok", "mode": "local", "slack_socket": [],
+            })
+        assert not result.ok
+        assert "users:read" in result.hint
+
     @pytest.mark.parametrize("entry", [
         pytest.param(
             {"application_id": "A_APP", "state": "backoff"},

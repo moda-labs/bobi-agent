@@ -496,7 +496,7 @@ def _check_slack_socket_mode() -> CheckResult | None:
 
     from bobi.config import Config
     from bobi.events.server import health
-    from bobi.slack import resolve_app_id, resolve_auth_info
+    from bobi.slack import SlackAppIdentityError, require_app_identity
 
     try:
         cfg = Config.load(root)
@@ -549,14 +549,14 @@ def _check_slack_socket_mode() -> CheckResult | None:
             required=False,
         )
 
-    _team_id, bot_id, _bot_user_id = resolve_auth_info(bot_token)
-    app_id = resolve_app_id(bot_token, bot_id)
-    if not app_id:
+    try:
+        _team_id, _bot_id, _bot_user_id, app_id = require_app_identity(bot_token)
+    except SlackAppIdentityError as e:
         return CheckResult(
             "Slack Socket Mode",
             ok=False,
             detail="configured Slack app identity is unavailable",
-            hint="Check SLACK_BOT_TOKEN, then restart the agent and run doctor again.",
+            hint=str(e),
             required=False,
         )
 
@@ -727,5 +727,4 @@ def _check_long_term_memory() -> CheckResult:
     return CheckResult(
         "Long-term memory", ok=True,
         detail=f"long_term_memory.md present ({size} chars, under {MAX_MEMORY_CHARS} cap)")
-
 

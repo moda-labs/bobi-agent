@@ -55,10 +55,16 @@ consumes, so you never have to reason about them:
 | `message.channels` / `message.groups` (with `thread_ts`) | `slack.thread_reply` | `channels:history` / `groups:history` |
 
 Plus `chat:write` (post replies), `files:read`/`files:write` (attachments),
-`users:read` (resolve names), `channels:read`/`groups:read` (list channels, so a
+`users:read` (**required** by `bots.info` for app-qualified event routing, and
+also used to resolve names), `channels:read`/`groups:read` (list channels, so a
 `#name` login channel resolves), and `im:write` (open a DM — proactive messages
 like briefings, nudges, and the subscription login link). Thirteen bot scopes in
 all; `bobi/templates/slack-app.manifest.yaml` is the source of truth.
+
+If `users:read` is added to an existing app, reinstall the app to the workspace
+and refresh `SLACK_BOT_TOKEN`. Bobi intentionally refuses a workspace-only
+fallback because it can deliver one Slack app's events to another app in the
+same workspace.
 
 ## 2. Install to workspace
 
