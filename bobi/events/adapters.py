@@ -181,7 +181,7 @@ def _detect_slack(project_path: Path, cfg: "Config") -> list[str]:
     (``#support`` or ``support``) — names are resolved to IDs
     automatically via the Slack API.
     """
-    from bobi.slack import resolve_app_id, resolve_auth_info
+    from bobi.slack import SlackAppIdentityError, require_app_identity
 
     token = cfg.credential("slack", "bot_token")
     if not token:
@@ -189,17 +189,17 @@ def _detect_slack(project_path: Path, cfg: "Config") -> list[str]:
     svc = next((s for s in cfg.services if s.name == "slack"), None)
     channels = svc.channels if svc else []
     try:
-        team_id, bot_id, _ = resolve_auth_info(token)
-        if team_id:
-            if channels:
-                channels = _resolve_channel_names(token, channels)
-            app_id = resolve_app_id(token, bot_id)
-            keys = _slack_keys(team_id, channels, app_id)
-            log.info(
-                f"Auto-detected Slack workspace {team_id}; "
-                f"subscribing: {keys}"
-            )
-            return keys
+        team_id, _bot_id, _bot_user_id, app_id = require_app_identity(token)
+        if channels:
+            channels = _resolve_channel_names(token, channels)
+        keys = _slack_keys(team_id, channels, app_id)
+        log.info(
+            f"Auto-detected Slack workspace {team_id}; "
+            f"subscribing: {keys}"
+        )
+        return keys
+    except SlackAppIdentityError as e:
+        log.warning("Slack event subscription disabled: %s", e)
     except Exception as e:
         log.debug(f"Slack auto-detection failed: {e}")
     return []

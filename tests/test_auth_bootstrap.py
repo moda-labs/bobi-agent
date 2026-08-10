@@ -1027,49 +1027,14 @@ def test_wait_for_code_subscribes_to_whatsapp_number_topic(whatsapp_config, monk
     assert registered["topics"] == ["whatsapp:111222333444555666"]
 
 
-def test_wait_for_code_falls_back_to_legacy_slack_topic(slack_config, monkeypatch):
-    import bobi.events.client as client_mod
-    import bobi.events.server as server_mod
+def test_wait_for_code_refuses_missing_slack_app_identity(slack_config, monkeypatch):
     import bobi.slack as slack_mod
 
-    registered = {}
-
-    monkeypatch.setattr(
-        server_mod,
-        "ensure_bubble",
-        lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"},
-    )
-    monkeypatch.setattr(server_mod, "register_slack_workspaces", lambda *a, **k: ["T123"])
-    monkeypatch.setattr(slack_mod, "resolve_auth_info", lambda token: ("T123", "", ""))
+    monkeypatch.setattr(slack_mod, "resolve_auth_info", lambda token: ("T123", "B123", "U123"))
     monkeypatch.setattr(slack_mod, "resolve_app_id", lambda token, bot_id: "")
 
-    def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
-        registered["topics"] = topics
-        return "dep", "api-key"
-
-    monkeypatch.setattr(server_mod, "register", fake_register)
-
-    class FakeClient:
-        def __init__(self, es_url, deployment_id, api_key, queue):
-            self.queue = queue
-
-        def start(self):
-            self.queue.put({
-                "source": "slack",
-                "text": "the-code",
-                "fields": {"channel": "D0LOGIN"},
-            })
-
-        def wait_connected(self, timeout):
-            return None
-
-        def stop(self):
-            return None
-
-    monkeypatch.setattr(client_mod, "EventServerClient", FakeClient)
-
-    assert ab._wait_for_code(slack_config, "D0LOGIN", timeout=1) == "the-code"
-    assert registered["topics"] == ["slack:T123"]
+    with pytest.raises(slack_mod.SlackAppIdentityError, match="users:read"):
+        ab._wait_for_code(slack_config, "D0LOGIN", timeout=1)
 
 
 # --- Codex brain: device-auth (poll) flow (#485) ----------------------------

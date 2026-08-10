@@ -95,8 +95,9 @@ class TestGithubDetector:
 
 class TestSlackDetector:
 
-    def test_detect_with_token(self, tmp_path):
-        responses = [_mock_httpx_response({"ok": True, "team_id": "T123ABC"})]
+    def test_detect_without_app_identity_disables_subscription(self, tmp_path, caplog):
+        responses = [_mock_httpx_response({"ok": True, "team_id": "T123ABC",
+                                           "bot_id": "B123"})]
         call_idx = iter(range(len(responses)))
 
         def _handler(request):
@@ -110,7 +111,8 @@ class TestSlackDetector:
                 ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"}),
             ])
             keys = detect("slack", tmp_path, cfg)
-        assert keys == ["slack:T123ABC"]
+        assert keys == []
+        assert "users:read" in caplog.text
 
     def test_detect_with_token_uses_app_qualified_topic(self, tmp_path):
         responses = [
@@ -140,7 +142,10 @@ class TestSlackDetector:
         assert keys == []
 
     def test_detect_scopes_to_configured_channels(self, tmp_path):
-        responses = [_mock_httpx_response({"ok": True, "team_id": "T123ABC"})]
+        responses = [
+            _mock_httpx_response({"ok": True, "team_id": "T123ABC", "bot_id": "B123"}),
+            _mock_httpx_response({"ok": True, "bot": {"app_id": "A123"}}),
+        ]
         call_idx = iter(range(len(responses)))
 
         def _handler(request):
@@ -155,8 +160,10 @@ class TestSlackDetector:
                               channels=["C0SUPPORT", "C0ALERTS"]),
             ])
             keys = detect("slack", tmp_path, cfg)
-        # per-channel keys, not the whole workspace
-        assert keys == ["slack:T123ABC:C0SUPPORT", "slack:T123ABC:C0ALERTS"]
+        assert keys == [
+            "slack:T123ABC:app:A123:C0SUPPORT",
+            "slack:T123ABC:app:A123:C0ALERTS",
+        ]
 
     def test_detect_scopes_configured_channels_to_app(self, tmp_path):
         responses = [
@@ -187,7 +194,10 @@ class TestSlackDetector:
         # auth.test → team_id; then one conversations.list lookup per name.
         def _handler(request):
             if "auth.test" in str(request.url):
-                return _mock_httpx_response({"ok": True, "team_id": "T123ABC"})
+                return _mock_httpx_response({"ok": True, "team_id": "T123ABC",
+                                             "bot_id": "B123"})
+            if "bots.info" in str(request.url):
+                return _mock_httpx_response({"ok": True, "bot": {"app_id": "A123"}})
             return _mock_httpx_response({
                 "ok": True,
                 "channels": [
@@ -206,7 +216,10 @@ class TestSlackDetector:
                               channels=["#support", "general"]),
             ])
             keys = detect("slack", tmp_path, cfg)
-        assert keys == ["slack:T123ABC:C_SUPPORT", "slack:T123ABC:C_GENERAL"]
+        assert keys == [
+            "slack:T123ABC:app:A123:C_SUPPORT",
+            "slack:T123ABC:app:A123:C_GENERAL",
+        ]
 
     def test_detect_drops_all_subscriptions_when_lookup_transport_fails(self, tmp_path):
         """A transport failure mid-resolution must not widen the subscription.

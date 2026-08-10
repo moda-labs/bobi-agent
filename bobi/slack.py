@@ -22,6 +22,10 @@ from bobi import http as pooled
 log = logging.getLogger(__name__)
 
 
+class SlackAppIdentityError(RuntimeError):
+    """The configured bot token cannot resolve an app-qualified identity."""
+
+
 # ---------------------------------------------------------------------------
 # Formatting
 # ---------------------------------------------------------------------------
@@ -290,9 +294,33 @@ def resolve_app_id(token: str, bot_id: str) -> str:
         data = resp.json()
         if data.get("ok"):
             return (data.get("bot", {}) or {}).get("app_id", "") or ""
-    except Exception as e:  # best-effort — callers fall back to bot_id keying
+    except Exception as e:  # best-effort — callers decide whether fallback is safe
         log.debug("Slack bots.info failed: %s", e)
     return ""
+
+
+def require_app_identity(token: str) -> tuple[str, str, str, str]:
+    """Return ``(team_id, bot_id, bot_user_id, app_id)`` or fail actionably.
+
+    Inbound Slack routing is app-qualified whenever Slack supplies
+    ``api_app_id``. Falling back to a workspace-only subscription would either
+    drop those events or cross-deliver them between apps in the same workspace,
+    so subscription paths must require the complete identity.
+    """
+    team_id, bot_id, bot_user_id = resolve_auth_info(token)
+    if not team_id or not bot_id:
+        raise SlackAppIdentityError(
+            "could not resolve Slack bot identity via auth.test; verify that "
+            "SLACK_BOT_TOKEN is a valid Bot User OAuth Token."
+        )
+    app_id = resolve_app_id(token, bot_id)
+    if not app_id:
+        raise SlackAppIdentityError(
+            "could not resolve Slack app_id via bots.info. The bot token needs "
+            "the users:read scope for app-qualified event routing; add the "
+            "scope, reinstall the Slack app, and refresh SLACK_BOT_TOKEN."
+        )
+    return team_id, bot_id, bot_user_id, app_id
 
 
 def _user_matches(member: dict, handle: str) -> bool:
