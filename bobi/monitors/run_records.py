@@ -62,12 +62,38 @@ def _runs_dir(root: Path | None = None) -> Path:
 
 
 def _safe_name(monitor_name: str) -> str:
-    """Filesystem-safe stem for a monitor name (same shape script_cache uses)."""
+    """Filesystem-safe stem for a monitor name, within :func:`_runs_dir`.
+
+    Deliberately NOT the sanitizer script_cache/tool_checks share: this is a
+    whitelist (with a fallback for a name that sanitizes away to nothing),
+    theirs is a two-character blacklist, and the two disagree on names
+    containing e.g. a space. They may differ freely because they key artifacts
+    in different directories — ``monitor_runs/`` here, ``scripts/`` there — and
+    nothing reads one subsystem's stems with the other's rule.
+    """
     return re.sub(r"[^A-Za-z0-9_.-]", "_", monitor_name) or "monitor"
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    """Read back a timestamp written in this package, defaulting naive to UTC.
+
+    The reader lives next to :func:`_now_iso`, the writer, so the accepted
+    format has one definition. Anything unparseable reads as absent — including
+    a non-string pulled out of a JSON state document, which is why
+    ``AttributeError`` is caught alongside ``ValueError``: state files in this
+    package are treated as empty when they do not parse, never as fatal.
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 @dataclass

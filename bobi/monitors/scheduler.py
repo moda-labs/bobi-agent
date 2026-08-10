@@ -77,28 +77,25 @@ import sys
 import threading
 import tempfile
 import time as time_mod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bobi.fsutil import atomic_write_json
 
 
 def _load_framework_checks() -> dict:
-    """Load check runners bundled with the framework (bobi/monitors/*_checks.py)."""
+    """Load check runners bundled with the framework (bobi/monitors/*_checks.py).
+
+    These files are ordinary submodules of this package and are globbed under
+    their canonical names, so ``import_module`` already does the
+    sys.modules-cache-then-load dance. The spec/loader machinery in
+    :func:`_load_checks` is for the pack-level ``bobi_checks.*`` files, which
+    have no importable package parent — it is needed there, not here.
+    """
     checks: dict = {}
     framework_dir = Path(__file__).parent
     for py_file in framework_dir.glob("*_checks.py"):
-        module_name = f"bobi.monitors.{py_file.stem}"
-        if module_name in sys.modules:
-            mod = sys.modules[module_name]
-        else:
-            spec = importlib.util.spec_from_file_location(module_name, py_file)
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                sys.modules[module_name] = mod
-                spec.loader.exec_module(mod)
-            else:
-                continue
+        mod = importlib.import_module(f"bobi.monitors.{py_file.stem}")
         if hasattr(mod, "CHECKS"):
             checks.update(mod.CHECKS)
     return checks
@@ -148,19 +145,8 @@ def _load_checks(project_path: Path | None = None) -> dict:
                 all_checks.update(mod.CHECKS)
     return all_checks
 
-def _parse_iso(value: str):
-    from datetime import datetime as _dt, timezone as _tz
-    if not value:
-        return None
-    try:
-        dt = _dt.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=_tz.utc)
-    return dt
 from .registry import MonitorRegistry
-from .run_records import RunTracker
+from .run_records import RunTracker, _parse_iso
 from .schema import Condition
 
 log = logging.getLogger(__name__)
@@ -468,9 +454,6 @@ def _write_gate_request(monitor, items: list) -> str | None:
     the verdict callback. Also sweeps orphaned request files left by a manager
     that died mid-gate, so raw payloads never accumulate at rest.
     """
-    import tempfile
-    import time as time_mod
-
     from bobi import paths
     from bobi.subagent import GATE_ITEM_CHARS
 
@@ -778,8 +761,6 @@ class MonitorScheduler:
         local date, so DST shifts stay correct) to the most recent allowed
         weekday at/before `now`. Empty `days:` ⇒ every weekday eligible, which
         reduces to the original "most recent at-time within the last day"."""
-        from datetime import timedelta
-
         local = now.astimezone(monitor.tzinfo)
         weekdays = monitor.weekdays  # empty set ⇒ no gating (every day)
         base_date = local.date()
@@ -895,6 +876,24 @@ class MonitorScheduler:
                                publish=self.publish)
         if tracker is not None:
             tracker.note_failure(f"{reason}: {detail}" if detail else reason)
+
+    def _sleep_cycle_turn_back(self, monitor, reason: str, detail: str,
+                               tracker=None) -> None:
+        """Log and record a validation that turned the sleep cycle back.
+
+        The caller returns immediately after, leaving the cursor where it was
+        so the same transcript delta is retried next interval — the shared
+        shape of every artifact/budget check in
+        :meth:`_apply_sleep_cycle_result`. The log line lives here so the next
+        validation gate is one call, not another copy of it.
+
+        Not every :meth:`_sleep_cycle_error` caller turns back this way: the
+        KB-sync paths log without the retry note (or with it conditionally),
+        so the line stays out of that method.
+        """
+        log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
+                    monitor.name, detail)
+        self._sleep_cycle_error(monitor, reason, detail, tracker)
 
     def _run_error_sink(self, monitor):
         """A `(reason, detail)` sink bound to the firing being dispatched.
@@ -1535,9 +1534,7 @@ class MonitorScheduler:
                 f"compaction_required={compaction_required}; "
                 f"updated={bool(result.get('updated'))}"
             )
-            log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
-                        monitor.name, detail)
-            self._sleep_cycle_error(
+            self._sleep_cycle_turn_back(
                 monitor, "memory-artifact-unreadable", detail, tracker)
             return
         if actual_chars > MAX_MEMORY_CHARS:
@@ -1547,9 +1544,7 @@ class MonitorScheduler:
                 f"compaction_required={compaction_required}; "
                 f"updated={bool(result.get('updated'))}"
             )
-            log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
-                        monitor.name, detail)
-            self._sleep_cycle_error(
+            self._sleep_cycle_turn_back(
                 monitor, "memory-cap-exceeded", detail, tracker)
             return
         if actual_chars > WORKING_MEMORY_CHARS and (
@@ -1562,9 +1557,7 @@ class MonitorScheduler:
                 f"compaction_required={compaction_required}; "
                 f"updated={bool(result.get('updated'))}"
             )
-            log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
-                        monitor.name, detail)
-            self._sleep_cycle_error(
+            self._sleep_cycle_turn_back(
                 monitor, "memory-working-budget-exceeded", detail, tracker)
             return
         reference_changed_required = bool(
@@ -1579,9 +1572,7 @@ class MonitorScheduler:
                     f"workspace/memory/reference.md artifact unreadable at {ref_path}: {e}; "
                     f"demoted={result.get('demoted')}"
                 )
-                log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
-                            monitor.name, detail)
-                self._sleep_cycle_error(
+                self._sleep_cycle_turn_back(
                     monitor, "reference-artifact-unreadable", detail, tracker)
                 return
             if not reference.strip() or "## " not in reference:
@@ -1589,9 +1580,7 @@ class MonitorScheduler:
                     f"workspace/memory/reference.md artifact invalid at {ref_path}; "
                     f"demoted={result.get('demoted')}"
                 )
-                log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
-                            monitor.name, detail)
-                self._sleep_cycle_error(
+                self._sleep_cycle_turn_back(
                     monitor, "reference-artifact-invalid", detail, tracker)
                 return
             after_hash = hashlib.sha256(reference.encode()).hexdigest()
@@ -1601,9 +1590,7 @@ class MonitorScheduler:
                     f"demoted={result.get('demoted', 0)}; "
                     f"reference_updated={bool(result.get('reference_updated'))}"
                 )
-                log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
-                            monitor.name, detail)
-                self._sleep_cycle_error(
+                self._sleep_cycle_turn_back(
                     monitor, "reference-artifact-unchanged", detail, tracker)
                 return
             memory_content = path.read_text() if path.is_file() else ""
@@ -1614,9 +1601,7 @@ class MonitorScheduler:
                     f"demoted={result.get('demoted', 0)}; "
                     f"reference_updated={bool(result.get('reference_updated'))}"
                 )
-                log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
-                            monitor.name, detail)
-                self._sleep_cycle_error(
+                self._sleep_cycle_turn_back(
                     monitor, "reference-pointer-missing", detail, tracker)
                 return
             sync = self._sync_reference_kb_or_publish_error(
