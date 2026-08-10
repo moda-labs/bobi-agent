@@ -452,7 +452,13 @@ def _conversation_matches(expected: str, actual: object, source: str) -> bool:
 
 
 def _paste_back_instruction(channel: LoginChannel) -> str:
-    if channel.source == "discord" and ":channel:" in channel.destination:
+    is_channel = (
+        channel.source in {"discord", "slack"}
+        and ":channel:" in channel.destination
+    ) or (
+        channel.source == "slack" and bool(channel.legacy_slack_channel)
+    )
+    if is_channel:
         return (
             "Open this URL, authorize, then reply to this message with the "
             "code, or @mention the bot with the code:\n"
