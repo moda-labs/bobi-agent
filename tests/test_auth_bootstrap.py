@@ -381,6 +381,40 @@ def test_paste_back_instruction_for_discord_server_channel_mentions_reply():
     assert "@mention the bot" in instruction
 
 
+@pytest.mark.parametrize(
+    "channel",
+    [
+        ab.LoginChannel(
+            destination="slack:T123:channel:C456",
+            source="slack",
+            topic="slack:T123:app:A123",
+        ),
+        ab.LoginChannel(
+            destination="C456",
+            source="slack",
+            topic="slack:T123:app:A123",
+            legacy_slack_channel="C456",
+        ),
+    ],
+)
+def test_paste_back_instruction_for_slack_channel_mentions_reply(channel):
+    instruction = ab._paste_back_instruction(channel)
+    assert "reply to this message" in instruction
+    assert "@mention the bot" in instruction
+    assert "in this channel" not in instruction
+
+
+def test_paste_back_instruction_for_slack_dm_stays_in_channel():
+    channel = ab.LoginChannel(
+        destination="slack:T123:dm:D456",
+        source="slack",
+        topic="slack:T123:app:A123",
+    )
+    instruction = ab._paste_back_instruction(channel)
+    assert "in this channel" in instruction
+    assert "@mention the bot" not in instruction
+
+
 def test_extract_code_from_real_adapter_dm_shape():
     """Reproduces the prod bug: the Slack adapter (event-server/core/src/
     adapters/chat-sdk-slack.ts) emits `text` at the TOP LEVEL and in `payload`, with `fields`
@@ -548,7 +582,10 @@ def test_run_bootstrap_happy_path(slack_config, monkeypatch):
     assert ok is True
     assert written == ["the-code"]
     # First post = URL prompt; final post = success.
-    assert any("oauth/authorize" in p[2] for p in posts)
+    prompt = next(p[2] for p in posts if "oauth/authorize" in p[2])
+    assert "reply to this message" in prompt
+    assert "@mention the bot" in prompt
+    assert "in this channel" not in prompt
     assert any("complete" in p[2] for p in posts)
     assert all(p[1] == "C0LOGIN42" for p in posts)
 
