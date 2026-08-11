@@ -983,12 +983,13 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
         app_token = str(cfg.credential("slack", "app_token") or "").strip()
     except Exception:
         app_token = ""
-    from bobi.slack import resolve_app_id, resolve_auth_info
+    from bobi.slack import SlackAppIdentityError, require_app_identity
 
-    team_id, bot_id, bot_user_id = resolve_auth_info(token)
-    if not team_id:
+    try:
+        team_id, bot_id, bot_user_id, app_id = require_app_identity(token)
+    except SlackAppIdentityError as e:
+        log.warning("Slack workspace registration skipped: %s", e)
         return []
-    app_id = resolve_app_id(token, bot_id)
     try:
         # Send bot_id explicitly when known: the server's own auth.test
         # fallback is best-effort, and a registration without bot_id

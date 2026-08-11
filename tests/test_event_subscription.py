@@ -525,3 +525,26 @@ def test_register_slack_workspaces_noop_without_token():
 
     with patch.object(pooled, '_client', mock_http):
         assert register_slack_workspaces("http://localhost:8080", Config()) == []
+
+
+def test_register_slack_workspaces_skips_missing_app_identity(monkeypatch, caplog):
+    from bobi.config import Config, ServiceConfig
+    from bobi.events.server import register_slack_workspaces
+    import bobi.events.signing as signing_mod
+    import bobi.slack as slack_mod
+
+    monkeypatch.setattr(
+        signing_mod,
+        "signed_request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("an unresolved Slack app must not be registered")
+        ),
+    )
+    monkeypatch.setattr(slack_mod, "resolve_auth_info",
+                        lambda token: ("T0952", "BSELF", "USELF"))
+    monkeypatch.setattr(slack_mod, "resolve_app_id", lambda token, bot_id: "")
+    cfg = Config(services=[
+        ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"}),
+    ])
+    assert register_slack_workspaces("http://localhost:8080", cfg) == []
+    assert "users:read" in caplog.text

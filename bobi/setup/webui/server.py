@@ -1169,9 +1169,10 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         if not channel:
             return JSONResponse({"error": "save a channel first"},
                                 status_code=400)
-        from bobi.slack import post_slack_message
+        from bobi.slack import post_slack_message, require_app_identity
         team = state.team_name or "your bobi team"
         try:
+            require_app_identity(token)
             post_slack_message(
                 token, channel,
                 f"Test message from bobi setup — {team} can post here. "

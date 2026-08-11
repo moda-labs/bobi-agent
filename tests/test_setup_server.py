@@ -2093,6 +2093,10 @@ class TestSlackFinalize:
         calls = []
         import bobi.slack
 
+        monkeypatch.setattr(
+            bobi.slack, "require_app_identity",
+            lambda token: ("T111", "B111", "U111", "A111"),
+        )
         def fake_post(token, channel, text, *a, **kw):
             calls.append((token, channel, text))
             return {"ok": True}
@@ -2102,6 +2106,24 @@ class TestSlackFinalize:
         assert r.status_code == 200
         assert calls[0][1] == "C111"
         assert "crew" in calls[0][2]
+
+    def test_test_rejects_missing_app_identity(self, project, monkeypatch):
+        import os
+        os.environ["SLACK_BOT_TOKEN"] = "xoxb-test"
+        os.environ["SLACK_CHANNELS"] = "C111"
+        import bobi.slack
+
+        def missing_identity(token):
+            raise bobi.slack.SlackAppIdentityError("users:read is required")
+
+        monkeypatch.setattr(
+            bobi.slack, "require_app_identity",
+            missing_identity,
+        )
+        c = _client(SetupState(team_name="crew"), project)
+        r = c.post("/api/slack/test")
+        assert r.status_code == 502
+        assert "users:read" in r.json()["error"]
 
 
 class TestShutdown:

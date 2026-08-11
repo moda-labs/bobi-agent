@@ -35,7 +35,7 @@ oauth_config:
       - im:write             # open/start a DM — proactive messages to a user
                              # (briefings, nudges, subscription login link)
       - mpim:history         # multi-person DMs
-      - users:read           # resolve user names
+      - users:read           # required by bots.info for app-qualified routing
 settings:
   event_subscriptions:
     request_url: ${EVENT_SERVER}/webhooks/slack

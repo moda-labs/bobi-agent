@@ -1760,7 +1760,7 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
           <p class="ns-lede">${ingUrl ? "" : "After you deploy, "}Slack needs to know where to send events — then your team is reachable in your workspace.</p>
           <ol class="ns-list">
             ${urlSteps}
-            <li>Install the app to your workspace with the scopes below (the <span class="mono">bobi create-slack-bot</span> manifest prefills them).</li>
+            <li>Install the app to your workspace with the scopes below (the <span class="mono">bobi create-slack-bot</span> manifest prefills them). Keep <span class="mono">users:read</span>: Bobi requires it to identify the app for inbound routing.</li>
             <li>Invite the bot to a dedicated channel (<span class="mono">/invite @your-bot</span>), then save that channel here.</li>
           </ol>
           <div class="scopes">${SLACK_SCOPES.map(s => `<b>${esc(s)}</b>`).join("")}</div>
