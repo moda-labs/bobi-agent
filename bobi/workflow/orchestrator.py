@@ -1327,17 +1327,46 @@ def _resolve_repo_root(ctx: VariableContext) -> str | None:
 
 
 def _cleanup_worktree_action(ctx: VariableContext, cwd: str) -> dict:
-    """Native action: clean up the worktree for a closed PR's head branch."""
-    from bobi.workflow.cleanup import cleanup_worktree
+    """Native action: clean up the worktree for a closed PR's head branch.
+
+    The merge verdict comes from a LIVE read of the PR, never from the event
+    payload that launched the run - that payload is a snapshot of the moment
+    the webhook fired, and a `pull_request.closed` event fires for a PR closed
+    WITHOUT merging too (an abandoned PR, or one auto-closed by its base
+    branch being deleted). Deleting that head destroys the only copy of the
+    work, so anything short of "GitHub says merged, just now" preserves it.
+
+    Every return carries ``merged_live``: it is what the workflow routes on,
+    so an early return that omitted it would route as if the PR had merged.
+    """
+    from bobi.workflow import cleanup as cleanup_mod
 
     head_branch = ctx.resolve("${{ input.head_branch }}") if "input" in ctx.scopes else ""
     if not head_branch or head_branch.startswith("${{"):
-        return {"status": "skipped", "reason": "no head_branch in input"}
+        return {"status": "skipped", "reason": "no head_branch in input",
+                "merged_live": False}
 
     repo_root = _resolve_repo_root(ctx)
     if repo_root is None:
-        return {"status": "error", "reason": "could not resolve target repo from input"}
-    return cleanup_worktree(repo_root, head_branch)
+        return {"status": "error", "merged_live": False,
+                "reason": "could not resolve target repo from input"}
+
+    repo_slug = ctx.resolve("${{ input.repo }}")
+    pr_number = ctx.resolve("${{ input.pr_number }}")
+    merge_state = cleanup_mod.pr_merge_state(repo_slug, pr_number)
+    merged = merge_state.get("merged") is True
+
+    result = cleanup_mod.cleanup_worktree(repo_root, head_branch, merged=merged)
+    result["merged_live"] = merged
+    if merge_state.get("error"):
+        result["merge_state_error"] = merge_state["error"]
+        # `reason` is what reaches a human in the notify message. "not merged"
+        # would be a claim we cannot make: we could not read the PR at all.
+        result["reason"] = (
+            "could not read the PR's merge state, so nothing was deleted: "
+            f"{merge_state['error']}"
+        )
+    return result
 
 
 # Registry of native action functions.

@@ -90,19 +90,9 @@ def _all_registries(project_path: Path) -> list[str]:
 
 def _github_token() -> str:
     """Get a GitHub token from env or gh CLI."""
-    import os
-    token = os.environ.get("GITHUB_TOKEN", "")
-    if not token:
-        try:
-            import subprocess
-            result = subprocess.run(
-                ["gh", "auth", "token"], capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0:
-                token = result.stdout.strip()
-        except Exception:
-            pass
-    return token
+    from bobi.gitutil import github_token
+
+    return github_token()
 
 
 def _urlopen(url: str, timeout: int = 10) -> httpx.Response:
