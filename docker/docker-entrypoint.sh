@@ -152,8 +152,10 @@ validate_auth_mode() {
            && [ -n "${!BRAIN_AUTH_TOKEN_KEY:-}" ]; then
         fatal "BOBI_AUTH=subscription but ${BRAIN_AUTH_TOKEN_KEY} is set; it overrides subscription auth. Unset it."
       fi
-      [ "${ENTRYPOINT_IS_GATEWAY}" != "1" ] \
-        || fatal "BOBI_AUTH=subscription does not apply to a gateway brain; use BOBI_AUTH=api_key."
+      if [ "${ENTRYPOINT_IS_GATEWAY}" = "1" ] \
+         && [ "${ENTRYPOINT_ENGINE}" != "claude" ]; then
+        fatal "BOBI_AUTH=subscription applies only to Claude gateways; use BOBI_AUTH=api_key for Codex gateways."
+      fi
       ;;
     *)
       fatal "unknown BOBI_AUTH='${BOBI_AUTH}' (expected api_key|subscription)."

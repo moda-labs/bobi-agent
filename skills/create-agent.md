@@ -277,12 +277,15 @@ brain:
 
 Gateway auth is `ANTHROPIC_AUTH_TOKEN` in the runtime `.env`, and it is
 optional - Ollama serves unauthenticated; LiteLLM typically wants its master
-key. An ambient real `ANTHROPIC_API_KEY` is never sent to a gateway. Model
-names are the backend's own: the Claude aliases below only mean something if
-the gateway serves models by those names. Cross-model session continuation is
-disabled for gateways (a model switch starts fresh and re-injects context),
-and costs reported through a gateway are nominal, attributed to provider
-`gateway` in `bobi agent <name> costs`.
+key. If the gateway accepts Claude subscription OAuth, set
+`BOBI_AUTH=subscription` and leave `ANTHROPIC_AUTH_TOKEN` unset;
+`bobi agent <name> login-bootstrap` then creates the OAuth credentials without
+removing the `base_url` pin. An ambient real `ANTHROPIC_API_KEY` is never sent
+to a gateway. Model names are the backend's own: the Claude aliases below only
+mean something if the gateway serves models by those names. Cross-model
+session continuation is disabled for gateways (a model switch starts fresh
+and re-injects context), and costs reported through a gateway are nominal,
+attributed to provider `gateway` in `bobi agent <name> costs`.
 
 For an OpenAI-compatible gateway, use the codex engine:
 
