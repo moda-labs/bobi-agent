@@ -62,11 +62,12 @@ class SubscriptionLogin:
 
     kind: str
     login_cmd: tuple[str, ...]       # the CLI that drives the OAuth flow
-    creds_relpath: tuple[str, ...]   # OAuth credential file, relative to $HOME
+    creds_relpath: tuple[str, ...]   # OAuth credential fallback relative to $HOME
     shadow_env: str                  # the API key that would silently outrank subscription auth
     flow: str                        # "paste_back" (claude) | "device_poll" (codex)
     url_re: re.Pattern               # scrape the sign-in URL from pty output
     code_re: re.Pattern | None = None  # device_poll: also scrape the one-time code
+    credentials_dir_env: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,7 @@ _SPECS: dict[str, SubscriptionLogin] = {
         flow="paste_back",
         # e.g. https://claude.com/cai/oauth/authorize?code=true&client_id=...
         url_re=re.compile(r"https://\S+/oauth/authorize\S+"),
+        credentials_dir_env="CLAUDE_CONFIG_DIR",
     ),
     "codex": SubscriptionLogin(
         kind="codex",
@@ -106,6 +108,7 @@ _SPECS: dict[str, SubscriptionLogin] = {
         # Codex prints a fixed device URL + a one-time code "XXXX-XXXXX".
         url_re=re.compile(r"https://auth\.openai\.com/codex/device\S*"),
         code_re=re.compile(r"\b([A-Z0-9]{4}-[A-Z0-9]{5})\b"),
+        credentials_dir_env="CODEX_HOME",
     ),
 }
 
@@ -170,9 +173,19 @@ def subscription_credentials_status(
 
 
 def credentials_path(home: Path | None = None) -> Path:
-    """Path to the active brain's subscription OAuth credentials on the volume."""
+    """Path to the active brain's subscription OAuth credentials on the volume.
+
+    Claude and Codex each support a provider-specific config directory override.
+    Use it when present; otherwise retain the historical ``$HOME``-relative
+    fallback used by local callers and tests.
+    """
+    spec = _active_spec()
+    if spec.credentials_dir_env:
+        configured_dir = os.environ.get(spec.credentials_dir_env)
+        if configured_dir:
+            return Path(configured_dir, spec.creds_relpath[-1])
     base = home or Path(os.environ.get("HOME", str(Path.home())))
-    return Path(base, *_active_spec().creds_relpath)
+    return Path(base, *spec.creds_relpath)
 
 
 def credentials_exist(home: Path | None = None) -> bool:

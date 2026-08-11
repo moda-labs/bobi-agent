@@ -20,6 +20,8 @@ def default_claude_brain(monkeypatch):
     from bobi.brain import BRAIN_ENV
 
     monkeypatch.setenv(BRAIN_ENV, "claude")
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
 
 
 # --- credentials / needs_bootstrap ------------------------------------------
@@ -41,6 +43,23 @@ def test_credentials_exist_requires_structurally_valid_claude_oauth(tmp_path):
         },
     }))
     assert ab.credentials_exist(tmp_path)
+
+
+def test_credentials_exist_honors_claude_config_dir(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    config_dir = tmp_path / "claude-volume"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    creds = config_dir / ".credentials.json"
+    creds.parent.mkdir(parents=True)
+    creds.write_text(json.dumps({
+        "claudeAiOauth": {"accessToken": "access", "refreshToken": "refresh"},
+    }))
+
+    assert ab.credentials_path(home) == creds
+    assert ab.credentials_exist(home) is True
+    monkeypatch.setenv("BOBI_AUTH", "subscription")
+    assert ab.needs_bootstrap(home) is False
 
 
 def test_needs_bootstrap_only_in_subscription_mode(tmp_path, monkeypatch):
@@ -566,10 +585,10 @@ def test_run_bootstrap_happy_path(
 
     posts = []
     written = []
-    home = slack_config  # unused; creds keyed off $HOME
 
-    home_dir = os.environ["HOME"]
-    creds = os.path.join(home_dir, ".claude", ".credentials.json")
+    config_dir = slack_config.parent / "claude-volume"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    creds = config_dir / ".credentials.json"
 
     class FakeProc:
         def poll(self):
@@ -591,11 +610,10 @@ def test_run_bootstrap_happy_path(
 
     def fake_wait(project_path, channel, timeout):
         # Simulate the human pasting the code; claude then writes creds.
-        os.makedirs(os.path.dirname(creds), exist_ok=True)
-        with open(creds, "w") as f:
-            f.write(json.dumps({
-                "claudeAiOauth": {"refreshToken": "refresh"},
-            }))
+        creds.parent.mkdir(parents=True)
+        creds.write_text(json.dumps({
+            "claudeAiOauth": {"refreshToken": "refresh"},
+        }))
         return "the-code"
 
     ok = ab.run_bootstrap(
@@ -776,12 +794,13 @@ def test_ensure_discord_paste_back_ready_allows_internal_local_hostname(
 
 
 def test_run_bootstrap_skips_when_creds_present(slack_config, monkeypatch):
-    creds = os.path.join(os.environ["HOME"], ".claude", ".credentials.json")
-    os.makedirs(os.path.dirname(creds), exist_ok=True)
-    with open(creds, "w") as f:
-        f.write(json.dumps({
-            "claudeAiOauth": {"refreshToken": "refresh"},
-        }))
+    config_dir = slack_config.parent / "claude-volume"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    creds = config_dir / ".credentials.json"
+    creds.parent.mkdir(parents=True)
+    creds.write_text(json.dumps({
+        "claudeAiOauth": {"refreshToken": "refresh"},
+    }))
 
     called = {"spawn": False}
 
@@ -1113,6 +1132,15 @@ def test_credentials_path_for_codex(tmp_path, monkeypatch):
 
     monkeypatch.setenv(BRAIN_ENV, "codex")
     assert ab.credentials_path(tmp_path) == tmp_path / ".codex" / "auth.json"
+
+
+def test_credentials_path_for_codex_honors_codex_home(tmp_path, monkeypatch):
+    from bobi.brain import BRAIN_ENV
+
+    monkeypatch.setenv(BRAIN_ENV, "codex")
+    codex_home = tmp_path / "codex-volume"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    assert ab.credentials_path(tmp_path) == codex_home / "auth.json"
 
 
 def test_scrape_login_codex_gets_url_and_code():
