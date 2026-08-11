@@ -290,6 +290,64 @@ def test_gateway_auth_token_passes_post_install_auth_gate(
 
 @requires_docker
 @pytest.mark.timeout(120)
+def test_subscription_claude_gateway_passes_post_install_auth_gate(
+    image: str,
+    tmp_path: Path,
+):
+    """A Claude gateway may use durable subscription OAuth credentials."""
+    import time
+
+    team = tmp_path / "team"
+    shutil.copytree(REPO_ROOT / "tests" / "fixtures" / "claude-smoke", team)
+    agent_yaml = team / "agent.yaml"
+    agent_yaml.write_text(
+        agent_yaml.read_text()
+        + "\nbrain:\n"
+        + "  kind: claude\n"
+        + "  base_url: http://127.0.0.1:9\n"
+    )
+
+    vol = tmp_path / "data"
+    creds = vol / "claude" / ".credentials.json"
+    creds.parent.mkdir(parents=True)
+    creds.write_text(json.dumps({
+        "claudeAiOauth": {"refreshToken": "refresh"},
+    }))
+
+    name = "bobi-gateway-subscription"
+    _run("docker", "rm", "-f", name)
+    try:
+        up = _run(
+            "docker", "run", "-d", "--name", name,
+            "-e", "BOBI_AUTH=subscription",
+            "-e", "BOBI_AGENT=claude-smoke",
+            "-e", "BOBI_EVENT_SERVER=http://127.0.0.1:9",
+            "-e", "BOBI_TEAM=/mnt/team",
+            "-v", f"{vol}:/data",
+            "-v", f"{team}:/mnt/team:ro",
+            image,
+        )
+        assert up.returncode == 0, up.stderr
+
+        deadline = time.time() + 30
+        text = ""
+        while time.time() < deadline:
+            logs = _run("docker", "logs", name)
+            text = logs.stdout + logs.stderr
+            if "Starting manager under the supervisor sidecar" in text:
+                break
+            if "FATAL:" in text:
+                break
+            time.sleep(1)
+
+        assert "refresh token is present" in text, text
+        assert "Starting manager under the supervisor sidecar" in text, text
+    finally:
+        _run("docker", "rm", "-f", name)
+
+
+@requires_docker
+@pytest.mark.timeout(120)
 def test_credentialless_claude_gateway_passes_post_install_auth_gate(
     image: str,
     tmp_path: Path,

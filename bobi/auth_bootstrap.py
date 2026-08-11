@@ -36,7 +36,7 @@ from bobi.brain import (
     BRAIN_ENV,
     DEFAULT_BRAIN,
     normalize_brain_kind,
-    set_process_brain,
+    set_process_brain_from_config,
 )
 from bobi.config import Config
 from bobi.slack import post_slack_message
@@ -619,7 +619,7 @@ def run_bootstrap(
             "ANTHROPIC_AUTH_TOKEN; this gateway authenticates with gateway "
             "credentials in the runtime .env."
         )
-    set_process_brain(cfg.brain_kind)
+    set_process_brain_from_config(cfg)
     spec = _active_spec()
 
     home = Path(os.environ.get("HOME", str(Path.home())))
