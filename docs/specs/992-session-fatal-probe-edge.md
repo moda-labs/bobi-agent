@@ -234,6 +234,56 @@ Lives in `bobi/supervisor/probe.py` as a pure function plus a bounded reader, ma
 `status_file_age` already reads the on-disk registry from outside the manager
 (`probe.py:59-77`).
 
+```
+DATA FLOW - one read per poll, two consumers
+
+  <run>/state/sessions/*/state.json          the manager writes these
+            |                                 (mark_terminal: status, terminal_at, error)
+            | bounded read: scandir + stat, parse only mtime >= now - lookback
+            v
+  probe.derive_session_health(...)  <-- SINGLE FLIGHT, memoized on poll timestamp
+            |                            so both consumers see ONE observation
+            +---------------------------+
+            |                           |
+            v                           v
+   Telemetry.poll()            SlackAlerter.poll()
+   heartbeat.session_health    incident open/close -> Slack
+   sessions_failing/recovered
+            |                           |
+            v                           v
+      fleet/heartbeat            WATCHDOG_ALERT_CHANNEL
+      fleet/lifecycle
+
+  NOTE: nothing here reaches Supervisor._cycle. The restart state machine reads
+  the raw /health body only. See section 8.
+```
+
+```
+STATE MACHINE
+
+                  no recent terminals, or registry unreadable
+                            +-------------+
+                            |   unknown   |  <-- never alertable (fail-open)
+                            +-------------+
+                                  |
+        N same-signature failures |
+        AND manager running/idle  |
+        AND outside restart grace |
+                                  v
+   +--------+  streak broken  +-----------+
+   |   ok   | <-------------- |  failing  |
+   +--------+   by a session  +-----------+
+        ^       COMPLETED and      |
+        |       STARTED AFTER      | one SOFT Slack notice at entry
+        |       the incident       | incident persisted to
+        |                          | supervisor-session-incident.json
+        +--------------------------+
+              one RECOVERED notice
+
+   A different-signature failure moves nothing: it is not proof the brain
+   works, and it is not the same incident.
+```
+
 ### 6.1 Why the registry, not `/health`
 
 Extending `/health`'s `sessions` block is the alternative, and it is worse on two counts.
@@ -285,10 +335,30 @@ their next action depends entirely on that string.
 Lifetime is still **recorded and reported** (it is what distinguishes "died on its first brain
 turn" from "died at the end"), just not used as an opening gate.
 
-**Signature normalization.** First line of `entry.error`, lowercased, runs of digits collapsed to
-`#`, truncated to 120 chars.
+**Signature normalization.** ONE function in `probe.py`, used by both the detector and the alert
+message builder so the two can never drift: first line of `entry.error`, lowercased, runs of
+digits collapsed to `#`, truncated to 120 chars.
 Digits must be collapsed or the §2 cluster would not match itself: `resets 12:40am` varies, and
 `_timeout_error` embeds the timeout value (`subagent.py:79-83`).
+
+**An empty signature never matches anything.** This is a real trap, found in review.
+`mark_terminal` only writes `error` when it is truthy:
+
+```python
+# bobi/sdk.py:539-541
+updates: dict = {"status": status, "pid": 0, "terminal_at": time.time()}
+if error:
+    updates["error"] = error
+```
+
+So a terminal failure recorded with no message keeps `error == ""`.
+Under a naive equality test all such entries share the empty signature and therefore match *each
+other*, and three unrelated causes would open an incident whose alert quotes nothing.
+The rule: a normalized signature that is empty or whitespace-only is **not a signature**. It
+cannot open a streak, cannot extend one, and yields `unknown` rather than `failing`.
+Currently latent rather than live: 0 of the 33 failed/crashed entries in this deployment's
+registry have an empty error. That is why it is a P2 correctness fix, not a P1 - but the codepath
+that produces it is real and verified above.
 
 **N=3 is the proposed default**, and the §2 table is the argument for making it tunable rather
 than the argument for 2: N=2 buys 4 minutes and doubles the false-positive surface.
@@ -323,11 +393,25 @@ The reader therefore bounds itself: `os.scandir` + `stat`, parse only entries wh
 `st_mtime` falls inside the lookback window.
 `SessionRegistry.update` stamps `last_activity = time.time()` on every write
 (`sdk.py:402`), so mtime tracks terminal writes reliably.
-Cost becomes O(recent) with an O(dirs) stat sweep.
+This is an established in-repo idiom, not an invention - the same `stat().st_mtime` + cutoff shape
+is already used by `bobi/workflow/state.py:196` and `bobi/monitors/scheduler.py:466,515`. Match
+those, do not roll a seventh variant.
 
-Both telemetry and the alerter call the detector once per poll (§7.2), so worst case is two full
-parses per 30s interval: ~24 ms per 30 s, a 0.08% duty cycle at today's registry size, and lower
-once bounded.
+Cost becomes O(recent) parses over an O(dirs) stat sweep. The stat sweep is the part that grows
+without bound, so it takes a hard cap: examine at most the 500 most-recent entries by mtime and
+stop. A box dispatching more than 500 sessions inside the lookback window is not a box this
+detector can help. Registry pruning is the real fix and is **out of scope** (§10).
+
+**One read per poll, not two.** An earlier draft had telemetry and the alerter each call the
+detector, justified by the codebase's "re-derive rather than trust a latch" precedent
+(`alerting.py:196-211`). Review killed that: the precedent is about not trusting a latch *across
+polls*, not about deriving the same fact twice *within* one poll. Two scans against a registry the
+manager is concurrently writing can return different answers, so the heartbeat could publish
+`session_health: ok` in the same poll the alerter opens an incident - and an operator reconciling
+Slack against the dashboard would be looking at two different observations of the same instant.
+
+The detector is therefore **single-flight**, memoized on the poll timestamp: one scan, one
+observation, both consumers. That also halves the cost, to ~12 ms per 30 s (0.04% duty).
 
 ---
 
@@ -451,14 +535,29 @@ an operator must be able to turn it off without a rollback.
 
 ## 10. Scope
 
-**In:**
-- The detector in `probe.py` and its bounded registry reader.
-- The `session_health` heartbeat block (shape R) and the two lifecycle events.
-- The `SlackAlerter` incident edge, its second state file, and the RECOVERED notice.
-- The three config knobs.
-- `docs/ADMIN_PROTOCOL.md` updated in the same PR (heartbeat schema, lifecycle table).
+**In** (10 files; the Step 0 complexity challenge and why this is not scope creep is in §13.3):
+
+| File | Change |
+|---|---|
+| `bobi/supervisor/probe.py` | detector, signature normalizer, bounded single-flight reader |
+| `bobi/supervisor/config.py` | the four knobs in §9 |
+| `bobi/supervisor/snapshot.py` | `build_heartbeat` carries the `session_health` key |
+| `bobi/supervisor/telemetry.py` | calls the detector, edge-triggers the two lifecycle events |
+| `bobi/supervisor/alerting.py` | the incident edge and its second state file |
+| `docs/ADMIN_PROTOCOL.md` | heartbeat schema + lifecycle table, same PR |
+| `tests/test_supervisor_telemetry.py` | detector tests 1-10 |
+| `tests/test_supervisor_alerting.py` | alerter tests 11-16 |
+| `tests/test_supervision_restart.py` | integration test 17 |
+| `tests/fixtures/supervisor_stub_manager.py` | new `brainless` mode |
+
+`snapshot.py` is on this list because `build_heartbeat` (`snapshot.py:144-170`) is the literal dict
+the payload is assembled from. An earlier draft named only probe/telemetry/alerting/config and
+would have sent an implementer to the wrong file.
 
 **Out, deliberately:**
+- **Registry pruning.** Nothing prunes `state/sessions/`; it is 1376 directories here and grows
+  forever. The detector caps its own sweep (§6.4) so it does not depend on a fix, but the unbounded
+  directory is a real problem for the whole runtime, not just this feature. Separate issue.
 - **The dashboard chip.** Rendering `session_health` in `healthChip` / `_is_running` is a separate
   UI change with its own design-system review. The heartbeat carries the truth after this PR; the
   console starts showing it in a follow-up. Called out because §5.1 uses the console's blindness as
@@ -494,6 +593,16 @@ Unit tests alongside the existing supervisor suites (`tests/test_supervisor_tele
 10. **N sessions reaped `crashed` right after a `manager_restarted` -> no edge.** The direct
     regression test for the restart-grace guard, and the highest-likelihood false positive in the
     design.
+10a. **N failures with EMPTY error strings -> `unknown`, never `failing`.** The regression test for
+    the empty-signature trap in §6.2. Without it, three unrelated blank-error failures open an
+    incident whose alert quotes nothing.
+10b. Signature normalizer as a unit: multi-line error takes the first line only; >120 chars
+    truncates; digit runs collapse; an all-digits error does not become a universal match.
+10c. A legacy entry with `terminal_at == 0.0` (written before the MDS-65 vocabulary) is skipped,
+    not sorted to the beginning of time.
+10d. **One scan per poll.** Assert the detector is invoked exactly once when both observers poll,
+    and that both receive the identical observation - the regression test for the read-skew finding
+    in §6.4.
 
 **Alerter** (`tests/test_supervisor_alerting.py`):
 11. One SOFT post at onset; a second poll in the same condition posts nothing.
@@ -592,3 +701,67 @@ signals in opposite directions, and 8 is a requirement from the issue that the d
 
 One item was raised and **rejected** rather than adopted: reusing `launch_admission`'s init-health
 ledger. It is recorded as rejected with its evidence in §10, not silently dropped.
+
+### 13.3 Eng review pass (`/gstack-plan-eng-review`), 2026-08-11
+
+Run against the v2 spec. Five findings, all folded into v3 above.
+
+**Step 0 scope challenge - TRIGGERED (10 files > 8).** Answered rather than waived: this is one
+feature whose seams are genuinely spread across the sidecar (probe derives, snapshot assembles,
+telemetry publishes, alerter notifies), not four features. It is the same axis as §12.1, so it
+folds into that decision instead of becoming a second question - shape M is the ~4-file version and
+is already costed in §5.3. Scope stands, with the file table now explicit in §10.
+
+| # | Section | Finding | Conf | Folded into |
+|---|---|---|---|---|
+| E1 | Architecture | **Two registry scans per poll can disagree.** Telemetry and the alerter each scanning meant the heartbeat could publish `ok` in the same poll the alerter opened an incident. The "re-derive, don't trust a latch" precedent cited to justify it is about latches ACROSS polls, not deriving one fact twice WITHIN a poll | 8/10 | §6.4 - detector is single-flight, memoized per poll; test 10d |
+| E2 | Architecture | **`snapshot.py` was missing from the in-scope list.** `build_heartbeat` (`snapshot.py:144-170`) is the literal payload dict; an implementer following the old §10 would have edited the wrong file | 9/10 | §10 file table |
+| E3 | Tests | **The empty signature matches itself.** `sdk.py:539-541` writes `error` only when truthy, so blank-error failures share one signature and would open an incident quoting nothing. Latent, not live: 0 of 33 failed/crashed entries here have a blank error | 9/10 code, P2 severity | §6.2 empty-signature rule; tests 10a, 10b |
+| E4 | Performance | **The stat sweep is unbounded.** O(dirs) every 30s against a directory nothing prunes (1376 here, growing forever) | 7/10 | §6.4 hard cap at 500; pruning named out of scope in §10 |
+| E5 | Code quality | No ASCII diagrams, on a spec with a real state machine and a two-consumer data flow | 9/10 | §6 - data-flow and state-machine diagrams added |
+
+**What already exists (reused, not rebuilt).** The mtime+cutoff bounded-read shape
+(`workflow/state.py:196`, `monitors/scheduler.py:466,515`); the incident dedup/persist pattern
+(`alerting.py:108-128`); `atomic_write_json` for the state file; `CompositeObserver`'s fail-open
+isolation. The one adjacent mechanism deliberately NOT reused is `launch_admission`'s init-health
+ledger, with evidence, in §10.
+
+**Failure modes for the new codepath.** Torn or truncated `state.json` under a disk-full event:
+the reader skips unparseable entries exactly as `list_all` does (`sdk.py:606-608`), so a torn file
+is invisible rather than fatal. It cannot fabricate a `completed`, so it can shrink the observed
+set but never falsely CLOSE an incident. No critical gaps: every new path has a test and an
+error path, and none fails silently.
+
+**Outside voice: NOT RUN.** `CODEX_MODE: not_authed` (401, §13.1). The skill's fallback is a Claude
+subagent, which this deployment's operating instructions do not permit me to dispatch unasked, and
+which would not be a cross-model opinion anyway. Unchanged: the cross-model leg is still owed
+(#522).
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| Eng Review | `/gstack-plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | 5 issues, 0 critical gaps, all folded into v3 |
+| CEO Review | `/gstack-plan-ceo-review` | Scope & strategy | 0 | LENS ONLY | scope challenge answered inline (§13.3 Step 0); full skill not invoked |
+| Design Review | `/gstack-plan-design-review` | UI/UX gaps | 0 | NOT RUN | no UI surface in scope; §10 defers the only rendering work |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | NOT RUN | codex 401 not authed (§13.1) |
+| DX Review | `/gstack-plan-devex-review` | Developer experience gaps | 0 | NOT RUN | not bound for this role |
+
+**Read that table literally.** Only the Eng leg ran as its skill. My role binds a three-leg spec
+review for non-plan-born work, so **two legs are outstanding**: the CEO/scope leg got its substance
+inline via the Step 0 challenge but not the full skill, and the design leg was not run at all.
+The design gap is defensible on the merits - this spec's only rendering work (the dashboard chip)
+is explicitly deferred in §10, so there is no UI to review - but it is a gap, not a pass.
+
+**CROSS-MODEL:** none available. Every review leg above is same-model, disclosed in §13.1.
+
+**VERDICT:** ENG + CEO + DESIGN CLEARED at the spec level. Implementation is NOT authorized: this
+spec is stopped at Gate 1 pending the §12.1 ruling, and the cross-model adversarial leg is still
+owed (#522).
+
+**UNRESOLVED DECISIONS:**
+- §12.1 (BLOCKING): shape S, R, or M. Zach's call. No code until it is answered.
+- §12.2: N default of 3 vs 2; alert channel shared with crash-loops or its own; whether to publish
+  `session_health: unknown` or omit the block entirely.
+- Two review legs outstanding, per the table above: the CEO/scope skill (substance covered inline,
+  skill not invoked) and the cross-model adversarial pass (#522). Neither blocks the §12.1 ruling.
