@@ -22,6 +22,32 @@ def _normalize_explicit_subscriptions(value) -> list[str]:
             if isinstance(item, str) and item.strip()]
 
 
+def explicit_subscriptions(project_path: Path) -> list[str]:
+    """Return agent.yaml's explicit `subscribe:` keys, env-interpolated.
+
+    The ONE parser for the `subscribe:` surface (D078). `discover_subscriptions`
+    reads it as its highest-precedence source and `bobi.ingress` reads it to
+    decide which topics a reachability warning must cover; when each had its own
+    copy, a schema change could make the warning disagree with what the session
+    actually subscribes to.
+
+    Errors are NOT swallowed here — the two callers want different things from a
+    malformed agent.yaml, so each decides for itself.
+    """
+    from bobi import paths
+    from bobi.config import _interpolate_env, project_env
+
+    agent_yaml = paths.agent_yaml_path(project_path)
+    if not agent_yaml.exists():
+        return []
+    raw = yaml.safe_load(agent_yaml.read_text()) or {}
+    if not isinstance(raw, dict):
+        return []
+    return _normalize_explicit_subscriptions(
+        _interpolate_env(raw.get("subscribe", []), project_env(project_path))
+    )
+
+
 def discover_subscriptions(project_path: Path) -> list[str]:
     """Build subscription keys by auto-detecting event sources.
 
@@ -30,19 +56,14 @@ def discover_subscriptions(project_path: Path) -> list[str]:
     2. agent.yaml services with events: true (adapters auto-detect keys)
     3. Fallback to project directory name
     """
-    from bobi import paths
-    agent_yaml = paths.agent_yaml_path(project_path)
-    if agent_yaml.exists():
-        try:
-            from bobi.config import _interpolate_env, project_env
-            raw = yaml.safe_load(agent_yaml.read_text()) or {}
-            explicit = _normalize_explicit_subscriptions(
-                _interpolate_env(raw.get("subscribe", []), project_env(project_path))
-            )
-            if explicit:
-                return explicit
-        except Exception:
-            pass
+    try:
+        explicit = explicit_subscriptions(project_path)
+        if explicit:
+            return explicit
+    except Exception:
+        # An unreadable agent.yaml falls through to auto-detection rather than
+        # failing the whole discovery — the pre-consolidation behavior here.
+        pass
 
     from bobi.config import Config
     cfg = Config.load(project_path)

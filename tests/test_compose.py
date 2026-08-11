@@ -599,6 +599,99 @@ def test_merge_workspace_leaf_wins(project):
     assert (dest / "workspace" / "shared.md").read_text() == "base-only"
 
 
+def test_merge_workspace_merges_nested_directories_across_layers(project):
+    # The copytree consolidation (Q090) has to keep the loop's recursive shape:
+    # a nested tree merges per-file, not per-top-level-directory, so a base-only
+    # file inside a directory the leaf also contributes to must survive.
+    _team(project, "core", 'version: "1.0.0"\n',
+          workspace={"notes/deep/shared.md": "BASE",
+                     "notes/deep/base-only.md": "kept",
+                     "notes/top.md": "base-top"})
+    leaf = _team(project, "over", 'from: core\nversion: "2.0.0"\n',
+                 workspace={"notes/deep/shared.md": "OVERLAY",
+                            "notes/leaf-only.md": "leaf"})
+    # An empty directory the loop used to mkdir explicitly.
+    (project / "agents" / "core" / "workspace" / "empty").mkdir()
+    chain = compose.resolve_chain(leaf, project)
+    dest = project / "out"
+    compose.merge_workspace(chain, dest)
+    ws = dest / "workspace"
+    assert (ws / "notes" / "deep" / "shared.md").read_text() == "OVERLAY"
+    assert (ws / "notes" / "deep" / "base-only.md").read_text() == "kept"
+    assert (ws / "notes" / "top.md").read_text() == "base-top"
+    assert (ws / "notes" / "leaf-only.md").read_text() == "leaf"
+    assert (ws / "empty").is_dir()
+
+
+def test_merge_workspace_into_a_dest_that_already_has_content(project):
+    # `dirs_exist_ok` is load-bearing: the deploy flatten calls this AFTER
+    # compose() has already written into dest, so an existing tree must merge
+    # rather than raise FileExistsError.
+    _team(project, "core", 'version: "1.0.0"\n', workspace={"a.md": "A"})
+    leaf = _team(project, "over", 'from: core\nversion: "2.0.0"\n')
+    chain = compose.resolve_chain(leaf, project)
+    dest = project / "out"
+    (dest / "workspace").mkdir(parents=True)
+    (dest / "workspace" / "preexisting.md").write_text("P")
+    compose.merge_workspace(chain, dest)
+    assert (dest / "workspace" / "a.md").read_text() == "A"
+    assert (dest / "workspace" / "preexisting.md").read_text() == "P"
+
+
+def test_composed_monitor_order_follows_first_declaring_layer(project):
+    # Dropping the parallel `monitor_order` list (Q089) relies on
+    # `monitor_records` being insertion-ordered: a record keeps the position of
+    # the layer that FIRST named it, even when a later layer overrides it.
+    _team(project, "core", 'version: "1.0.0"\n',
+          monitors="monitors:\n  - name: alpha\n    interval: 1h\n"
+                   "  - name: beta\n    interval: 2h\n")
+    _team(project, "mid", 'from: core\nversion: "1.0.0"\n',
+          monitors="monitors:\n  - name: gamma\n    interval: 3h\n")
+    # The leaf re-declares `alpha` (an override) and adds `delta`.
+    leaf = _team(project, "over", 'from: mid\nversion: "2.0.0"\n',
+                 monitors="monitors:\n  - name: alpha\n    interval: 9h\n"
+                          "  - name: delta\n    interval: 4h\n")
+    dest, _ = _compose(project, leaf)
+    names = [m["name"] for m in _composed_monitors(dest)]
+    # sleep-cycle is the framework seed and sits first regardless.
+    assert names.index("alpha") < names.index("beta") < names.index("gamma") \
+        < names.index("delta")
+    by_name = {m["name"]: m for m in _composed_monitors(dest)}
+    assert by_name["alpha"]["interval"] == "9h"  # override applied in place
+
+
+def test_prune_covers_every_dir_surface_and_the_special_cased_ones(project):
+    # `_PRUNE_DIR_SURFACES` became a tuple (Q088). `roles` was a dead key in the
+    # old identity dict — its own branch returns first — so prove both the three
+    # real dir surfaces AND the two special-cased ones still prune.
+    _team(project, "core", 'version: "1.0.0"\n',
+          roles={"director": "# Director", "keeper": "# Keeper"},
+          tools={"gone.md": "x", "kept.md": "y"},
+          monitors="monitors:\n  - name: doomed\n    interval: 1h\n")
+    core = project / "agents" / "core"
+    _write(core / "workflows" / "gone.yaml", "steps: []\n")
+    _write(core / "workflows" / "kept.yaml", "steps: []\n")
+    _write(core / "context" / "gone.md", "x")
+    _write(core / "context" / "kept.md", "y")
+    leaf = _team(project, "moda", 'from: core\nversion: "2.0.0"\n'
+                 'prune:\n'
+                 '  tools: [gone.md]\n'
+                 '  workflows: [gone.yaml]\n'
+                 '  context: [gone.md]\n'
+                 '  roles: [director]\n'
+                 '  monitors: [doomed]\n')
+    dest, _ = _compose(project, leaf)
+    for surface, name in [("tools", "gone.md"), ("workflows", "gone.yaml"),
+                          ("context", "gone.md")]:
+        assert not (dest / surface / name).exists(), surface
+    assert not (dest / "roles" / "director").exists()
+    assert (dest / "roles" / "keeper").is_dir()
+    assert "doomed" not in [m["name"] for m in _composed_monitors(dest)]
+    for surface, name in [("tools", "kept.md"), ("workflows", "kept.yaml"),
+                          ("context", "kept.md")]:
+        assert (dest / surface / name).exists(), surface
+
+
 def test_deploy_flatten_carries_overlay_workspace(project):
     # The real deploy-path regression: a `from:` overlay's workspace must ride the
     # flattened tarball, else the per-principal assistant-context.md never reaches
@@ -644,6 +737,26 @@ def test_deploy_resolve_team_dir_flattens_chain(project):
     assert (out / "tools" / "github.md").exists()  # inherited from core
     assert (out / "tools" / "linear.md").exists()
     assert out.name == "moda"
+
+
+@pytest.mark.parametrize("declared,expected", [
+    (None, "moda"),                 # nobody declares `agent:` → leaf dir name
+    ("custom-name", "custom-name"),  # the leaf declares one → it survives
+])
+def test_deploy_flatten_leaves_the_agent_name_to_compose(project, declared, expected):
+    # build.py used to re-read the composed agent.yaml, setdefault `agent:` to
+    # the leaf dir name, and rewrite it (Q087). That insert was unreachable:
+    # _compose_agent_yaml already setdefaults `agent:` and this team_dir IS the
+    # leaf. Both arms must produce the same value with the re-read gone.
+    from bobi import build
+    _team(project, "core", 'version: "1.0.0"\nentry_point: director\n')
+    leaf_yaml = 'from: core\nversion: "2.0.0"\n'
+    if declared:
+        leaf_yaml += f"agent: {declared}\n"
+    _team(project, "moda", leaf_yaml)
+    out = build.resolve_team_dir(project, "moda")
+    assert yaml.safe_load((out / "agent.yaml").read_text())["agent"] == expected
+    assert out.name == "moda"  # the directory is still named for the leaf
 
 
 def test_deploy_resolve_team_dir_passthrough_no_from(project):

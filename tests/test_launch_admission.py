@@ -239,3 +239,62 @@ def test_classifies_only_known_initialize_timeout_signature():
         "total_cost_usd: 0; model_usage: {}"
     ) is True
     assert classify_init_failure("tool call failed after model_usage was recorded") is False
+
+
+# --- one authority for the tunable defaults (D088/Q124) ----------------------
+
+
+def test_policy_dataclass_defaults_match_the_defaults_table():
+    """The dataclass's field defaults ARE the table's values.
+
+    Field defaults bind at class definition, so they cannot be read from the
+    table at call time — this equality is the guard that keeps the one place a
+    literal is still repeated from drifting away from the authority.
+    """
+    from bobi.launch_admission import LAUNCH_ADMISSION_DEFAULTS
+
+    policy = LaunchAdmissionPolicy(max_concurrent_agents=1)
+    for key, expected in LAUNCH_ADMISSION_DEFAULTS.items():
+        if key == "enabled":
+            continue  # a config-level switch, not a policy field
+        assert getattr(policy, key) == expected, key
+
+
+def test_tuning_a_default_reaches_config_and_policy_together(monkeypatch):
+    """Retune ONE table entry and both readers move.
+
+    This is the D088 failure inverted: with the defaults hand-copied into
+    Config's field factory, Config._parse_launch_admission and
+    policy_from_config, editing one left the other two saying the old number.
+    """
+    from bobi import launch_admission
+    from bobi.config import Config
+
+    retuned = dict(launch_admission.LAUNCH_ADMISSION_DEFAULTS)
+    retuned["load_per_cpu_hard_limit"] = 2.5
+    retuned["min_memory_available_mb"] = 777
+    # ONE patch, at the authority. `bobi.config` reads it lazily at call time
+    # (see config._launch_admission_defaults), so nothing else needs patching —
+    # which is the property this consolidation bought.
+    monkeypatch.setattr(launch_admission, "LAUNCH_ADMISSION_DEFAULTS", retuned)
+
+    parsed = Config._parse_launch_admission({})
+    assert parsed["load_per_cpu_hard_limit"] == 2.5
+    assert parsed["min_memory_available_mb"] == 777
+
+    assert Config().launch_admission["min_memory_available_mb"] == 777
+
+    policy = launch_admission.policy_from_config(4, {})
+    assert policy.load_per_cpu_hard_limit == 2.5
+    assert policy.min_memory_available_mb == 777
+
+
+def test_an_explicit_config_value_still_overrides_the_default():
+    from bobi.config import Config
+
+    parsed = Config._parse_launch_admission({"min_memory_available_mb": 64,
+                                             "enabled": True})
+    assert parsed["min_memory_available_mb"] == 64
+    assert parsed["enabled"] is True
+    # Unnamed keys still fall back to the table.
+    assert parsed["init_failure_window_seconds"] == 600

@@ -360,13 +360,10 @@ def merge_workspace(chain: list[ResolvedLayer], dest: Path) -> None:
         src = layer.dir / "workspace"
         if not src.is_dir():
             continue
-        for f in sorted(src.rglob("*")):
-            target = dest / "workspace" / f.relative_to(src)
-            if f.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(f, target)
+        # `dirs_exist_ok` is what makes leaf-wins work across layers: copytree
+        # copies with copy2 and overwrites an existing file, so a later layer's
+        # same-named file replaces the earlier one while base-only files stay.
+        shutil.copytree(src, dest / "workspace", dirs_exist_ok=True)
 
 
 # --- prose rule (§2) ---------------------------------------------------------
@@ -502,8 +499,9 @@ def _compose_structured_dir(chain: list[ResolvedLayer], dest: Path, sub: str,
     """
     out = dest / sub
     # Monitor record-level merge needs to accumulate across layers first.
+    # Insertion-ordered: a record is added once, on the layer that first names
+    # it, so `monitor_records` IS the monitor order — no parallel list needed.
     monitor_records: dict[str, dict] = {}
-    monitor_order: list[str] = []
     monitor_src: dict[str, str] = {}  # record name → contributing layer label(s)
     monitor_yaml_seen = False
 
@@ -515,7 +513,7 @@ def _compose_structured_dir(chain: list[ResolvedLayer], dest: Path, sub: str,
     # makes removing a team's now-redundant copy a byte-identical no-op. The seed
     # is prunable like any inherited monitor (prune runs after this writes the file).
     if sub == "monitors":
-        if _seed_framework_monitors(monitor_records, monitor_order, monitor_src):
+        if _seed_framework_monitors(monitor_records, monitor_src):
             monitor_yaml_seen = True
 
     for layer in chain:
@@ -529,7 +527,7 @@ def _compose_structured_dir(chain: list[ResolvedLayer], dest: Path, sub: str,
             if sub == "monitors" and f.suffix in (".yaml", ".yml"):
                 monitor_yaml_seen = True
                 _accumulate_monitors(f, _layer_label(layer), monitor_records,
-                                     monitor_order, monitor_src)
+                                     monitor_src)
                 continue
             target = out / rel
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -538,16 +536,16 @@ def _compose_structured_dir(chain: list[ResolvedLayer], dest: Path, sub: str,
 
     if monitor_yaml_seen:
         out.mkdir(parents=True, exist_ok=True)
-        merged = [monitor_records[name] for name in monitor_order]
+        merged = list(monitor_records.values())
         (out / "defaults.yaml").write_text(
             yaml.dump({"monitors": merged}, default_flow_style=False,
                       sort_keys=False))
-        for name in monitor_order:
+        for name in monitor_records:
             prov.record(f"monitors:{name}", monitor_src[name])
 
 
 def _accumulate_monitors(f: Path, label: str, records: dict[str, dict],
-                         order: list[str], src: dict[str, str]) -> None:
+                         src: dict[str, str]) -> None:
     """Merge one monitors yaml file's records into the accumulator by name."""
     try:
         data = yaml.safe_load(f.read_text()) or {}
@@ -563,7 +561,6 @@ def _accumulate_monitors(f: Path, label: str, records: dict[str, dict],
             src[name] = f"{src[name]} + {label}"
         else:
             records[name] = dict(rec)
-            order.append(name)
             src[name] = label
 
 
@@ -580,7 +577,7 @@ def _normalize_monitor_record(rec: dict) -> dict:
     return out
 
 
-def _seed_framework_monitors(records: dict[str, dict], order: list[str],
+def _seed_framework_monitors(records: dict[str, dict],
                              src: dict[str, str]) -> bool:
     """Seed framework-default monitor records (#471) as the most-base layer.
 
@@ -593,8 +590,8 @@ def _seed_framework_monitors(records: dict[str, dict], order: list[str],
     from bobi.monitors import FRAMEWORK_DEFAULTS_PATH
     if not FRAMEWORK_DEFAULTS_PATH.is_file():
         return False
-    _accumulate_monitors(FRAMEWORK_DEFAULTS_PATH, "framework", records, order, src)
-    return bool(order)
+    _accumulate_monitors(FRAMEWORK_DEFAULTS_PATH, "framework", records, src)
+    return bool(records)
 
 
 # --- agent.yaml deep-merge (§3.1) --------------------------------------------
@@ -726,12 +723,10 @@ def _dedupe(items: list) -> list:
 
 # --- prune (§4) --------------------------------------------------------------
 
-_PRUNE_DIR_SURFACES = {
-    "tools": "tools",
-    "workflows": "workflows",
-    "context": "context",
-    "roles": "roles",
-}
+# Surfaces pruned by removing a file (or directory) named under `dest/<surface>`.
+# `monitors` and `roles` are NOT here — each is handled by its own branch in
+# `_prune_one` before this membership test is reached.
+_PRUNE_DIR_SURFACES = ("tools", "workflows", "context")
 
 
 def _apply_prune(chain: list[ResolvedLayer], dest: Path, merged_yaml: dict,
