@@ -485,3 +485,189 @@ class TestMonitorRunRecordsOnDisk:
             "failed-one": run_records.FAILED,
         }
         assert "exited 2" in run_records.load("failed-one")[0].reason
+
+
+class TestPublishFailureIsNotDropped:
+    """A finding whose publish failed must not vanish without a trace (#1006).
+
+    Reproduces moda/roadmap-pm's 2026-08-10 standup: `standup-due` fired on
+    schedule, its one finding failed to publish, the run record recorded
+    "retrying next interval", and no retry ever ran and no event ever reached
+    the instance - so `auto_dispatch` had nothing to route and the daily
+    standup silently did not happen.
+
+    Both flavors that reach the shared `_reconcile` chokepoint are covered
+    because both were observed losing a real finding this way: the
+    description flavor (roadmap-pm's `standup-due`) and the notify flavor
+    (bobi-eng-team's `team-status-roundup`, which lost its 2026-08-10 18:00
+    slot with the identical run record). Neither is config-specific - the
+    two deployments share no agent.yaml, only this code path.
+
+    The outage here is TRANSIENT: the transport comes back one tick after the
+    firing and stays up for a full day of ticks. So the assertion is a
+    deliberate disjunction - the finding is republished OR the failure is
+    surfaced - which holds under either resolution the issue proposes and
+    pins only the defect they share. It also means an implementation that
+    "surfaces" the failure by posting one more event down the same dead
+    transport does not pass: that is the silent drop again.
+    """
+
+    LA = "America/Los_Angeles"
+
+    def _scheduler(self, state_dir, monitors, published, outage, clock,
+                   spawn_check=None):
+        from bobi.monitors.scheduler import MonitorScheduler
+
+        class FakeRegistry:
+            def effective_monitors(self):
+                return monitors
+
+            def projects_for(self, _m):
+                return []
+
+        def publish(event, data):
+            # Mirrors post_event: a transport failure returns False and the
+            # event is simply not on the bus. Nothing is recorded.
+            if outage["down"]:
+                return False
+            published.append({"event": event, "data": data})
+            return True
+
+        return MonitorScheduler(
+            publish=publish,
+            state_path=state_dir / "monitor_state.json",
+            now=lambda: clock["now"],
+            registry_loader=lambda **kw: FakeRegistry(),
+            spawn_check=spawn_check or (lambda _m, _c, _cb: None),
+        )
+
+    @staticmethod
+    def _tick_through_to_the_next_slot(sched, clock, start):
+        """Tick the way the manager does: every 30s, then hourly for a day.
+
+        Stops before the next day's scheduled slot so a fresh firing can
+        never be mistaken for a retry of the lost one.
+        """
+        for i in range(1, 21):  # the first ten minutes, tick by tick
+            clock["now"] = start + timedelta(seconds=30 * i)
+            sched.tick()
+        for hours in range(1, 24):  # then through to the next evening
+            clock["now"] = start + timedelta(hours=hours)
+            sched.tick()
+
+    def _assert_finding_was_lost(self, published, finding_key, event):
+        """The defect: after the transport recovers, nobody ever hears."""
+        republished = [p for p in published
+                       if p["event"] == event
+                       and p["data"].get("finding_key") == finding_key]
+        surfaced = [p for p in published
+                    if p["event"].endswith("monitor.error")]
+        assert republished or surfaced, (
+            f"{finding_key} failed to publish and was then dropped: it was "
+            "never retried and no monitor.error ever surfaced it. The run "
+            "record's 'retrying next interval' is the only trace it existed."
+        )
+
+    def test_at_monitor_finding_survives_a_failed_publish(self, bobi_install):
+        """roadmap-pm's standup: description flavor on a weekday `at:` slot."""
+        from bobi.monitors import run_records
+
+        finding_key = f"monitor/standup.due:2026-08-10:{self.LA}"
+        m = Monitor(
+            name="standup-due",
+            description="Weekday standup is due (Mon, Tue, Thu, Fri).",
+            at=["19:00"], days=["mon", "tue", "thu", "fri"], tz=self.LA,
+            event="monitor/standup.due",
+        )
+
+        spawned, published = [], []
+        outage = {"down": True}
+        # 18:50 PT Monday: the baseline tick an at-monitor needs before it
+        # will fire at all.
+        clock = {"now": datetime(2026, 8, 11, 1, 50, tzinfo=timezone.utc)}
+
+        def spawn_check(monitor, _cwd, on_verdict):
+            spawned.append(monitor.name)
+            on_verdict({
+                "success": True,
+                "finding": True,
+                "summary": "Standup is due for Monday 2026-08-10.",
+                "details": {"key": finding_key, "date": "2026-08-10"},
+            })
+
+        sched = self._scheduler(bobi_install.state_dir, [m], published,
+                                outage, clock, spawn_check=spawn_check)
+        sched.tick()
+        assert spawned == []  # not due yet - this tick only baselines
+
+        # 19:00:19 PT: the scheduled instant, exactly as observed in the
+        # roadmap-pm run record. The check agent reports the finding and the
+        # publish fails.
+        fired_at = datetime(2026, 8, 11, 2, 0, 19, tzinfo=timezone.utc)
+        clock["now"] = fired_at
+        sched.tick()
+        assert spawned == ["standup-due"]  # the schedule itself worked
+
+        # The observed aftermath: nothing active, nothing published, and a
+        # run record promising a retry.
+        state = json.loads(
+            (bobi_install.state_dir / "monitor_state.json").read_text())
+        assert state[m.state_key]["active"] == []
+        record = run_records.load("standup-due")[0]
+        assert record.outcome == run_records.FAILED
+        assert record.published == 0
+        assert "retrying next interval" in record.reason
+
+        # The transport recovers one tick later and stays up all day.
+        outage["down"] = False
+        self._tick_through_to_the_next_slot(sched, clock, fired_at)
+
+        self._assert_finding_was_lost(published, finding_key,
+                                      "monitor/standup.due")
+
+    def test_notify_monitor_finding_survives_a_failed_publish(self, bobi_install):
+        """bobi-eng-team's roundup: notify flavor, same shared path.
+
+        The notify key is the firing instant, so the lost finding cannot even
+        in principle be re-detected - the next slot produces a different key
+        for a different roundup.
+        """
+        from bobi.monitors import run_records
+
+        m = Monitor(
+            name="team-status-roundup", notify=True,
+            description="Twice-daily status roundup.",
+            at=["06:00", "18:00"], tz=self.LA,
+            event="monitor/status.roundup_due",
+        )
+
+        published = []
+        outage = {"down": True}
+        clock = {"now": datetime(2026, 8, 11, 0, 50, tzinfo=timezone.utc)}
+
+        sched = self._scheduler(bobi_install.state_dir, [m], published,
+                                outage, clock)
+        sched.tick()  # 17:50 PT - baseline only
+        assert published == []
+
+        # 18:00 PT: the slot that really was lost on 2026-08-10.
+        fired_at = datetime(2026, 8, 11, 1, 0, 21, tzinfo=timezone.utc)
+        clock["now"] = fired_at
+        sched.tick()
+        finding_key = fired_at.isoformat()
+
+        # Byte-identical aftermath to the description flavor's: the shared
+        # path, not the flavor, is what lost the finding.
+        state = json.loads(
+            (bobi_install.state_dir / "monitor_state.json").read_text())
+        assert state[m.state_key]["active"] == []
+        record = run_records.load("team-status-roundup")[0]
+        assert record.outcome == run_records.FAILED
+        assert record.published == 0
+        assert "retrying next interval" in record.reason
+
+        outage["down"] = False
+        self._tick_through_to_the_next_slot(sched, clock, fired_at)
+
+        self._assert_finding_was_lost(published, finding_key,
+                                      "monitor/status.roundup_due")
