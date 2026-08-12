@@ -7,8 +7,8 @@ agent's work is recorded have to become one shape.
 - **sessions** — `SessionRegistry`: the manager and every subagent it ran
 - **workflow runs** — `run/state/workflow/runs/*.json`, including the ones
   suspended waiting for a human approval or clarification
-- **monitor runs** — `run/state/monitor_runs/*.json`, one record per firing
-  ([MONITORS.md](MONITORS.md))
+- **monitor runs** — `run/state/monitor_runs/*.json`, one record per firing,
+  plus one per completed retry-park recovery ([MONITORS.md](MONITORS.md))
 
 The fold lives in `bobi/webapp/runs.py`. Decisions and raw event deliveries are
 deliberately **not** here: they are log lines, not runs — no status, no cost,
