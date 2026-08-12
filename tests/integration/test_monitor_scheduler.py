@@ -542,18 +542,25 @@ class TestPublishFailureIsNotDropped:
         )
 
     @staticmethod
-    def _tick_through_to_the_next_slot(sched, clock, start):
+    def _tick_through_to_the_next_slot(sched, clock, start, land=None):
         """Tick the way the manager does: every 30s, then hourly for a day.
 
         Stops before the next day's scheduled slot so a fresh firing can
-        never be mistaken for a retry of the lost one.
+        never be mistaken for a retry of the lost one. `land` resolves any
+        out-of-band verdict left pending by the previous tick, which is where
+        the real waiter thread delivers it - between ticks, never inside the
+        one that dispatched the check.
         """
         for i in range(1, 21):  # the first ten minutes, tick by tick
             clock["now"] = start + timedelta(seconds=30 * i)
             sched.tick()
+            if land:
+                land()
         for hours in range(1, 24):  # then through to the next evening
             clock["now"] = start + timedelta(hours=hours)
             sched.tick()
+            if land:
+                land()
 
     def _assert_finding_was_lost(self, published, finding_key, event):
         """The defect: after the transport recovers, nobody ever hears."""
@@ -591,24 +598,35 @@ class TestPublishFailureIsNotDropped:
             event="monitor/standup.due",
         )
 
-        spawned, published = [], []
+        spawned, published, pending = [], [], []
         outage = {"down": True}
         # 18:50 PT Monday: the baseline tick an at-monitor needs before it
         # will fire at all.
         clock = {"now": datetime(2026, 8, 11, 1, 50, tzinfo=timezone.utc)}
 
         def spawn_check(monitor, _cwd, on_verdict):
+            # The real hook Popens a check agent and hands its verdict back
+            # from a WAITER THREAD when the process exits, minutes later.
+            # Calling on_verdict inline instead would make the firing
+            # reconcile inside the tick that dispatched it, which is the one
+            # ordering the description flavor does not have.
             spawned.append(monitor.name)
-            on_verdict({
-                "success": True,
-                "finding": True,
-                "summary": "Standup is due for Monday 2026-08-10.",
-                "details": {"key": finding_key, "date": "2026-08-10"},
-            })
+            pending.append(on_verdict)
+
+        def land_verdicts():
+            for on_verdict in pending[:]:
+                pending.remove(on_verdict)
+                on_verdict({
+                    "success": True,
+                    "finding": True,
+                    "summary": "Standup is due for Monday 2026-08-10.",
+                    "details": {"key": finding_key, "date": "2026-08-10"},
+                })
 
         sched = self._scheduler(bobi_install.state_dir, [m], published,
                                 outage, clock, spawn_check=spawn_check)
         sched.tick()
+        land_verdicts()
         assert spawned == []  # not due yet - this tick only baselines
 
         # 19:00:19 PT: the scheduled instant, exactly as observed in the
@@ -618,6 +636,7 @@ class TestPublishFailureIsNotDropped:
         clock["now"] = fired_at
         sched.tick()
         assert spawned == ["standup-due"]  # the schedule itself worked
+        land_verdicts()  # the waiter thread lands it after the tick
 
         # The observed aftermath: nothing active, nothing published, and a
         # run record promising a retry. The promise is only worth anything if
@@ -636,7 +655,8 @@ class TestPublishFailureIsNotDropped:
 
         # The transport recovers one tick later and stays up all day.
         outage["down"] = False
-        self._tick_through_to_the_next_slot(sched, clock, fired_at)
+        self._tick_through_to_the_next_slot(sched, clock, fired_at,
+                                            land=land_verdicts)
 
         self._assert_finding_was_lost(published, finding_key,
                                       "monitor/standup.due")

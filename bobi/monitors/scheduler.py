@@ -685,10 +685,28 @@ class MonitorScheduler:
         # of run_monitor's synchronous portion only; the out-of-band
         # callbacks capture their tracker directly.
         self._open_runs: dict[str, RunTracker] = {}
+        # How many firings per monitor dispatched their detector out-of-band
+        # and have not reconciled yet. The park's staleness bound lives in
+        # _reconcile, so the drain must not publish their park until that has
+        # run - the same ordering tick() enforces for the in-thread flavors,
+        # across a thread. Counted rather than flagged because a description
+        # monitor has no in-flight guard: a check slower than the interval
+        # overlaps, and the first verdict back must not lift the second
+        # firing's hold. In-memory: a restart cannot leave a firing in flight.
+        self._reconcile_pending: dict[str, int] = {}
+        self._hold_lock = threading.Lock()
         # Which monitor the retry drain starts from. In-memory: it only has to
         # differ between consecutive ticks, and a restart starting over at 0 is
         # indistinguishable from the drain's first tick.
         self._drain_cursor = 0
+        # Where inside each monitor's park the drain starts, per monitor. Kept
+        # apart from _drain_cursor on purpose: one counter driving both
+        # rotations aliases them and starves a slot outright.
+        self._park_cursors: dict[str, int] = {}
+        # Parked payloads this monitor's drain has delivered since it last
+        # wrote a run record, so a recovery spread over many ticks lands as
+        # one row rather than one per tick.
+        self._drain_progress: dict[str, int] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -766,7 +784,21 @@ class MonitorScheduler:
             log.debug("Monitor state lock busy - draining next tick")
             return
         try:
-            self._prune_orphan_parks({m.state_key for m in monitors})
+            # Pruning is the destructive direction, so it needs the registry
+            # to say affirmatively that it loaded everything. A registry that
+            # does not answer is treated as incomplete: not pruning costs a
+            # give-up delayed until the monitor next fires, pruning wrongly
+            # deletes a finding nobody has heard.
+            if getattr(registry, "load_complete", False):
+                self._prune_orphan_parks({m.state_key for m in monitors})
+            else:
+                # The registry degrades PARTIALLY - one unparseable file or one
+                # rejected record - so a monitor missing from an incomplete
+                # load has not been deleted, it just did not load. Pruning
+                # against it would let an unrelated typo in monitors.yaml
+                # silently discard findings nobody has heard.
+                log.warning("Monitor registry loaded incompletely - not "
+                            "pruning parks against a partial view")
             parks = {m.state_key: dict((self.state.get(m.state_key) or {})
                                        .get("pending_publish") or {})
                      for m in monitors}
@@ -779,28 +811,96 @@ class MonitorScheduler:
         for monitor in monitors[start:] + monitors[:start]:
             items = list((parks.get(monitor.state_key) or {}).items())
             if not items:
+                self._park_cursors.pop(monitor.state_key, None)
+                self._close_drain_record(monitor)
+                continue
+            if monitor.state_key in self._reconcile_pending:
+                # This monitor's detector is still running out-of-band, so
+                # `_reconcile` - and with it the park's staleness bound - has
+                # not run for this firing yet. Publishing now is the ordering
+                # tick() exists to prevent, one thread removed: Monday's nudge
+                # would go out at the end of the very tick that dispatched
+                # Thursday's check, and Thursday's would land behind it.
+                log.debug("Monitor %s: firing still reconciling - holding its "
+                          "park for this tick", monitor.name)
                 continue
             # Rotate WITHIN the park as well as across monitors. The batch
             # stops at its first failure, so a payload the server rejects
             # outright would otherwise sit at the head forever and blackhole
             # every sibling behind it - on a healthy bus.
-            off = turn % len(items)
+            #
+            # The offset counts THIS monitor's own drain attempts, never the
+            # tick counter that drives the rotation across monitors. Sharing
+            # one counter aliases the two: a monitor is reached on the turns
+            # where `turn % len(monitors)` selects it, and across exactly
+            # those turns `turn % len(park)` only takes len(park)/gcd
+            # distinct values - so wherever that gcd is > 1 some slot is never
+            # the front one and the payload in it is never attempted at all.
+            off = self._park_cursors.get(monitor.state_key, 0) % len(items)
+            self._park_cursors[monitor.state_key] = off + 1
             items = items[off:] + items[:off]
             log.info("Monitor %s: retrying %d parked publish(es)",
                      monitor.name, len(items))
-            tracker = RunTracker(monitor.name, flavor=_run_flavor(monitor))
             drained = self._publish_and_park(
                 monitor, [Condition(key=k, data=d) for k, d in items],
                 park_new=False)
+            if drained:
+                self._drain_progress[monitor.state_key] = (
+                    self._drain_progress.get(monitor.state_key, 0) + drained)
             if drained < len(items):
+                # One row per recovery, not one per tick: at
+                # RETENTION_PER_MONITOR rows, a flapping transport delivering
+                # one payload a tick would evict the failed firing the row
+                # exists to explain. So progress banks across ticks, and the
+                # row is written once the episode ends - here, a tick that
+                # landed nothing after earlier ticks landed something. What
+                # must NOT happen is the early return taking the payloads that
+                # DID land out of the park with no ledger row at all.
+                if not drained:
+                    self._close_drain_record(monitor)
                 return  # the transport is down - stop the drain for this tick
-            # One row per completed recovery, not one per tick: at
-            # RETENTION_PER_MONITOR rows, a flapping transport delivering one
-            # payload a tick would evict the failed firing this row exists to
-            # explain.
-            tracker.add_published(drained)
-            tracker.close(reason=f"delivered {drained} parked finding(s) "
-                                 "from an earlier firing")
+            self._close_drain_record(monitor)
+
+    def _hold_drain(self, monitor) -> bool:
+        """Hold this monitor's park until the firing being dispatched
+        reconciles. Always True, so callers can record that they took it.
+
+        Counting is a read-modify-write and the two ends run on different
+        threads - the hold is taken on the scheduler thread and released on
+        each firing's waiter thread - so it takes its own lock. Not
+        `_state_lock`: that one is held across HTTP publishes, and a waiter
+        thread queueing behind an outage to drop a counter is the stall the
+        drain's non-blocking acquire exists to avoid.
+        """
+        with self._hold_lock:
+            key = monitor.state_key
+            self._reconcile_pending[key] = (
+                self._reconcile_pending.get(key, 0) + 1)
+        return True
+
+    def _release_drain(self, state_key: str) -> None:
+        """Release one firing's hold on a monitor's park."""
+        with self._hold_lock:
+            remaining = self._reconcile_pending.get(state_key, 0) - 1
+            if remaining > 0:
+                self._reconcile_pending[state_key] = remaining
+            else:
+                self._reconcile_pending.pop(state_key, None)
+
+    def _close_drain_record(self, monitor) -> None:
+        """Write the run record for a finished recovery, if one is owed.
+
+        The park is empty (or this tick could not add to it), so whatever the
+        drain banked across earlier ticks is now a completed recovery and
+        belongs in the ledger a lost firing is diagnosed from.
+        """
+        delivered = self._drain_progress.pop(monitor.state_key, 0)
+        if not delivered:
+            return
+        tracker = RunTracker(monitor.name, flavor=_run_flavor(monitor))
+        tracker.add_published(delivered)
+        tracker.close(reason=f"delivered {delivered} parked finding(s) "
+                             "from an earlier firing")
 
     def _prune_orphan_parks(self, known: set) -> None:
         """Drop parks belonging to monitors the registry no longer offers.
@@ -935,6 +1035,7 @@ class MonitorScheduler:
             return
 
         sleep_cycle_spawned = False
+        held_drain = False
         tracker = RunTracker(monitor.name, flavor=_run_flavor(monitor))
         self._open_runs[monitor.state_key] = tracker
         try:
@@ -951,6 +1052,7 @@ class MonitorScheduler:
             elif monitor.check and self._check_is_out_of_band(monitor):
                 # An agent-invoking runner detects off-thread and reconciles
                 # from there, exactly like the description-only flavor.
+                held_drain = self._hold_drain(monitor)
                 self._spawn_native_check(monitor, registry, tracker)
                 conditions = None
                 in_flight = True
@@ -964,6 +1066,10 @@ class MonitorScheduler:
                 conditions = None
                 in_flight = sleep_cycle_spawned
             else:
+                # Held BEFORE the spawn: a hook that resolves its verdict
+                # synchronously has already reconciled by the time the call
+                # returns, and a hold taken after it would never be released.
+                held_drain = self._hold_drain(monitor)
                 self._spawn_check(monitor, registry.projects_for(monitor),
                                   tracker)
                 conditions = None  # detection in flight — reconciled on verdict
@@ -986,6 +1092,11 @@ class MonitorScheduler:
                 tracker.close()
         finally:
             self._open_runs.pop(monitor.state_key, None)
+            if held_drain and not in_flight:
+                # The spawn raised, so no detector is running and nothing will
+                # ever reconcile - a hold left here would wedge this monitor's
+                # park until the manager restarts.
+                self._release_drain(monitor.state_key)
 
         with self._state_lock:
             entry = self.state.setdefault(monitor.state_key, {})
@@ -1044,7 +1155,13 @@ class MonitorScheduler:
         return _sink
 
     def _reconcile(self, monitor, conditions: list, tracker=None) -> None:
-        """The single dedup + publish chokepoint for every monitor flavor.
+        """The single dedup + publish chokepoint for every DETECTED finding.
+
+        Every flavor that detects conditions arrives here. The sleep cycle
+        does not: it writes an artifact and publishes a completion signal that
+        must NOT be deduped (:meth:`_publish_memory_updated`). It shares the
+        park - the retry seam is :meth:`_publish_and_park`, which is the wider
+        chokepoint, and covers every publisher without exception.
 
         Fires events only for conditions that weren't active last time.
         Conditions that disappeared drop out; if they recur later they fire
@@ -1107,6 +1224,14 @@ class MonitorScheduler:
         retired mid-post must stay retired rather than be resurrected by the
         post that was already in flight.
 
+        A publisher that does not dedup records nothing active. Only
+        `_reconcile` prunes `active`, against what the detector currently
+        reports, so a key recorded there by a publisher it never sees is a key
+        nothing ever removes - the sleep cycle appending one per completion
+        signal would grow the state file forever. Decided here from the flavor
+        rather than passed in, so the drain retrying that park cannot get it
+        wrong on the way back.
+
         Callers hold ``_state_lock`` and save the state themselves - this
         folds several attempts into one write.
         """
@@ -1116,9 +1241,10 @@ class MonitorScheduler:
         result = self.PARKED
         if ok:
             pending.pop(key, None)
-            active = entry.setdefault("active", [])
-            if key not in active:
-                active.append(key)
+            if not monitor.sleep_cycle:
+                active = entry.setdefault("active", [])
+                if key not in active:
+                    active.append(key)
             result = self.PUBLISHED
         elif key in pending:
             pending[key] = condition.data
@@ -1200,6 +1326,12 @@ class MonitorScheduler:
         return retired
 
     def _fire(self, monitor, condition) -> bool:
+        if monitor.sleep_cycle:
+            # The sleep cycle publishes a completion signal, not a finding: a
+            # different topic fan-out and no `finding_key`. Dispatching here
+            # is what lets it share the one park and the one drain - it never
+            # reaches _reconcile, so this branch cannot shadow a detection.
+            return self._post_memory_event(monitor, condition)
         event = monitor.event or f"monitor/{monitor.name}"
         ok = self.publish(event, {
             **condition.data,
@@ -1423,6 +1555,7 @@ class MonitorScheduler:
                     tracker.note_failure(f"check raised: {e}")
             finally:
                 self._checks_in_flight.discard(key)
+                self._release_drain(key)
             if tracker is not None:
                 tracker.close()
 
@@ -1528,22 +1661,31 @@ class MonitorScheduler:
 
     def _on_check_verdict(self, monitor, verdict: dict | None,
                           tracker=None) -> None:
-        """Reconcile an out-of-band check's verdict (waiter-thread callback)."""
-        if tracker is not None and isinstance(verdict, dict):
-            # The check agent reports the session it ran under, so its run
-            # row can open the transcript rather than a bare "no detail".
-            tracker.note_session(str(verdict.get("session", "")))
-        conditions = self._verdict_conditions(verdict)
-        if conditions is None:
-            log.warning(f"Monitor {monitor.name}: check indeterminate — "
-                        "leaving state untouched, retrying next interval")
+        """Reconcile an out-of-band check's verdict (waiter-thread callback).
+
+        Releases the firing's hold on the drain however it ends: an
+        indeterminate verdict reconciles nothing, so the park goes back to
+        being retried rather than waiting for a bound that will never come.
+        """
+        try:
+            if tracker is not None and isinstance(verdict, dict):
+                # The check agent reports the session it ran under, so its run
+                # row can open the transcript rather than a bare "no detail".
+                tracker.note_session(str(verdict.get("session", "")))
+            conditions = self._verdict_conditions(verdict)
+            if conditions is None:
+                log.warning(f"Monitor {monitor.name}: check indeterminate — "
+                            "leaving state untouched, retrying next interval")
+                if tracker is not None:
+                    tracker.note_failure(
+                        "check agent returned no usable verdict")
+                    tracker.close()
+                return
+            self._reconcile(monitor, conditions, tracker)
             if tracker is not None:
-                tracker.note_failure("check agent returned no usable verdict")
                 tracker.close()
-            return
-        self._reconcile(monitor, conditions, tracker)
-        if tracker is not None:
-            tracker.close()
+        finally:
+            self._release_drain(monitor.state_key)
 
     @staticmethod
     def _verdict_conditions(verdict: dict | None) -> list | None:
@@ -1918,14 +2060,20 @@ class MonitorScheduler:
             return None
 
     def _publish_memory_updated(self, monitor, result: dict, tracker=None) -> None:
-        """Publish the completion event directly (bypassing _reconcile dedup).
+        """Publish the completion event, parking it if the post fails.
 
         A completion signal is not a deduped finding - two runs with the same
-        summary must both deliver. The drain-side filter (events/drain.py)
-        enforces passive-vs-active: a non-urgent memory.updated publishes for
-        observability but is suppressed before the inbox push; urgent ones push.
+        summary must both deliver - so it skips `_reconcile`'s dedup and keys
+        on the run instant. It does NOT skip the park: this is a publisher,
+        and the transcript cursor has already advanced by the time it runs, so
+        a lost post is lost for good. The next 6h run reads no delta, finds
+        nothing durable and publishes nothing, `drain.py` never sees the
+        event, and an urgent policy change never reaches an inbox (#1006).
+
+        The drain-side filter (events/drain.py) enforces passive-vs-active: a
+        non-urgent memory.updated publishes for observability but is suppressed
+        before the inbox push; urgent ones push.
         """
-        event = monitor.event or "system/memory.updated"
         payload = {
             "monitor": monitor.name,
             "summary": str(result.get("summary", "")),
@@ -1935,24 +2083,35 @@ class MonitorScheduler:
         for key in ("deduped", "merged", "flagged"):
             if key in result:
                 payload[key] = int(result.get(key, 0) or 0)
+        self._publish_and_park(
+            monitor, [Condition(key=self._now().isoformat(), data=payload)],
+            tracker)
+
+    def _post_memory_event(self, monitor, condition) -> bool:
+        """Post a sleep-cycle completion signal onto its topics.
+
+        Fans out so `drain.py`'s policy-update filter matches whichever topic
+        it watches. The primary topic decides the outcome: a retry re-sends
+        the whole fan-out, and a completion signal repeated is cheap next to
+        one lost - the event is explicitly not deduped in the first place.
+        """
+        event = monitor.event or "system/memory.updated"
         published = False
-        published_events = set()
-        for candidate in (event, "system/memory.updated", "system/policy.updated"):
-            if candidate in published_events:
+        posted = set()
+        for candidate in (event, "system/memory.updated",
+                          "system/policy.updated"):
+            if candidate in posted:
                 continue
-            published_events.add(candidate)
-            ok = self.publish(candidate, payload)
+            posted.add(candidate)
+            ok = self.publish(candidate, condition.data)
             if candidate == event:
                 published = ok
         if published:
-            log.info("Monitor %s published %s (urgent=%s)",
-                     monitor.name, event, payload["urgent"])
-            if tracker is not None:
-                tracker.add_published(1)
+            log.info("Monitor %s published %s (urgent=%s)", monitor.name,
+                     event, condition.data.get("urgent"))
         else:
             log.warning("Monitor %s failed to publish %s", monitor.name, event)
-            if tracker is not None:
-                tracker.note_failure(f"failed to publish {event}")
+        return published
 
     # --- state persistence ---------------------------------------------
 

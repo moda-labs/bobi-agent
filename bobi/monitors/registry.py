@@ -35,17 +35,30 @@ def _defaults_path(project_path: Path | None = None) -> Path | None:
     return paths.monitors_dir(project_path) / "defaults.yaml"
 
 
-def _read_records(path: Path | None) -> list[dict]:
-    """Read the `monitors:` list from a YAML file, tolerating absence."""
+def _read_records(path: Path | None) -> tuple[list[dict], bool]:
+    """Read the `monitors:` list from a YAML file, tolerating absence.
+
+    Returns the records and whether the read was COMPLETE. An absent file is
+    complete (nothing was configured there); a file that would not parse is
+    not, and neither is a `monitors:` list carrying entries that are not
+    records. The distinction matters to anything reasoning about what is
+    missing from the registry: a monitor absent because it was deleted and a
+    monitor absent because its file has an unclosed bracket look identical
+    otherwise, and they call for opposite behaviour.
+    """
     if path is None or not path.exists():
-        return []
+        return [], True
     try:
         raw = yaml.safe_load(path.read_text()) or {}
     except yaml.YAMLError as e:
         log.warning(f"Failed to parse monitors from {path}: {e}")
-        return []
+        return [], False
+    except OSError as e:
+        log.warning(f"Failed to read monitors from {path}: {e}")
+        return [], False
     records = raw.get("monitors") or []
-    return [r for r in records if isinstance(r, dict)]
+    kept = [r for r in records if isinstance(r, dict)]
+    return kept, len(kept) == len(records)
 
 
 class MonitorRegistry:
@@ -56,6 +69,11 @@ class MonitorRegistry:
         self.globals: dict[str, Monitor] = {}
         self.project_monitors: list[Monitor] = []
         self.opt_outs: dict[str, set[str]] = {}
+        # Whether every monitor that is configured actually made it in. False
+        # when a file would not parse or a record was skipped: the registry
+        # degrades one file or one record at a time and never fails totally,
+        # so "no monitors" is not the shape a broken config takes.
+        self.load_complete = True
 
     @classmethod
     def load(cls, project_path: Path | None = None) -> "MonitorRegistry":
@@ -64,12 +82,15 @@ class MonitorRegistry:
         return registry
 
     def _load(self) -> None:
-        for raw in _read_records(_defaults_path(self.project_path)):
+        defaults, complete = _read_records(_defaults_path(self.project_path))
+        self.load_complete &= complete
+        for raw in defaults:
             try:
                 m = Monitor.from_dict(raw, source="default")
                 self.globals[m.name] = m
             except ValueError as e:
                 log.warning(f"Skipping bad default monitor: {e}")
+                self.load_complete = False
 
         # 2. Project-specific monitors
         project_paths = [self.project_path] if self.project_path else []
@@ -80,11 +101,14 @@ class MonitorRegistry:
                 paths.agent_yaml_path(project_path),
             ]
             for config_path in project_sources:
-                for raw in _read_records(config_path):
+                records, complete = _read_records(config_path)
+                self.load_complete &= complete
+                for raw in records:
                     try:
                         m = Monitor.from_dict(raw, source=project_key, project=project_key)
                     except ValueError as e:
                         log.warning(f"Skipping bad monitor in {config_path}: {e}")
+                        self.load_complete = False
                         continue
                     if not m.enabled:
                         self.opt_outs.setdefault(m.name, set()).add(project_key)
@@ -125,7 +149,7 @@ class MonitorRegistry:
         """Append or replace a monitor in run/package/monitors.yaml."""
         monitors_path = paths.package_dir(project_path) / "monitors.yaml"
         monitors_path.parent.mkdir(parents=True, exist_ok=True)
-        records = _read_records(monitors_path)
+        records, _complete = _read_records(monitors_path)
         records = [r for r in records if r.get("name") != monitor.name]
         records.append(monitor.to_dict())
         monitors_path.write_text(
@@ -165,7 +189,7 @@ class MonitorRegistry:
         """
         if project_path is not None:
             monitors_path = paths.package_dir(project_path) / "monitors.yaml"
-            records = _read_records(monitors_path)
+            records, _complete = _read_records(monitors_path)
             kept = [r for r in records if r.get("name") != name]
             if len(kept) == len(records):
                 return "not-found"
@@ -175,7 +199,7 @@ class MonitorRegistry:
             return "removed"
 
         # Present only as a built-in default — can't delete, must pause.
-        for raw in _read_records(_defaults_path()):
+        for raw in _read_records(_defaults_path())[0]:
             if raw.get("name") == name:
                 return "default-only"
         return "not-found"

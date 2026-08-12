@@ -1,5 +1,7 @@
 """Tests for the background monitoring system — schema, registry, scheduler."""
 
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -188,6 +190,51 @@ class TestRegistryMerge:
         scoped = [m for m in reg.project_monitors if m.name == "pr-conflict-check"][0]
         assert reg.projects_for(scoped) == [project]
 
+    def test_a_clean_load_is_reported_complete(self, tmp_path):
+        project = tmp_path / "jobtack"
+        _write(paths.package_dir(project) / "monitors.yaml",
+               [{"name": "deploy-health", "interval": "5m", "url": "https://j"}])
+        assert MonitorRegistry.load(project_path=project).load_complete is True
+
+    def test_unparseable_yaml_reports_an_incomplete_load(self, tmp_path):
+        """The registry degrades PARTIALLY - a file that will not parse costs
+        its monitors and nothing else, so callers that reason about what is
+        MISSING (the scheduler's orphan-park prune) need to know the
+        difference between "deleted" and "not loaded"."""
+        project = tmp_path / "jobtack"
+        monitors_path = paths.package_dir(project) / "monitors.yaml"
+        monitors_path.parent.mkdir(parents=True, exist_ok=True)
+        monitors_path.write_text("monitors: [{name: standup-due,\n")
+
+        reg = MonitorRegistry.load(project_path=project)
+        assert reg.load_complete is False
+        assert [m.name for m in reg.project_monitors] == []
+
+    def test_a_skipped_bad_record_reports_an_incomplete_load(self, tmp_path):
+        """A record the schema rejects is skipped with a warning: the file
+        parsed, the monitor is still absent from the registry."""
+        project = tmp_path / "jobtack"
+        _write(paths.package_dir(project) / "monitors.yaml", [
+            {"name": "good", "interval": "5m"},
+            {"interval": "5m", "event": "monitor/nameless"},  # no name
+        ])
+        reg = MonitorRegistry.load(project_path=project)
+        assert reg.load_complete is False
+        assert [m.name for m in reg.project_monitors] == ["good"]
+
+    def test_a_non_record_entry_reports_an_incomplete_load(self, tmp_path):
+        """`monitors:` carrying something that is not a mapping - a bare
+        string from a half-edited file - drops that entry silently."""
+        project = tmp_path / "jobtack"
+        monitors_path = paths.package_dir(project) / "monitors.yaml"
+        monitors_path.parent.mkdir(parents=True, exist_ok=True)
+        monitors_path.write_text(
+            "monitors:\n  - name: good\n    interval: 5m\n  - standup-due\n")
+
+        reg = MonitorRegistry.load(project_path=project)
+        assert reg.load_complete is False
+        assert [m.name for m in reg.project_monitors] == ["good"]
+
 
 # === Defaults path resolution ===
 
@@ -298,8 +345,23 @@ def _fixed_now():
     return datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 
+class _FakeRegistry:
+    """A hand-built registry. `complete` mirrors the real one's load health -
+    a registry that only partly loaded must not be read as a deletion."""
+
+    def __init__(self, monitors, complete=True):
+        self._monitors = monitors
+        self.load_complete = complete
+
+    def effective_monitors(self):
+        return self._monitors
+
+    def projects_for(self, m):
+        return [Path("/repo")]
+
+
 def _scheduler(tmp_path, monitors, check_results=None, spawned=None,
-               publish=None, gates=None):
+               publish=None, gates=None, complete=True):
     """Build a scheduler over a hand-built registry and capture published events.
 
     `published` records {"event": ..., "data": ...} for every publish — the
@@ -308,7 +370,8 @@ def _scheduler(tmp_path, monitors, check_results=None, spawned=None,
     (monitor, cwd, on_verdict) tuples from spawn_check so description-only
     monitors don't launch real subprocesses in tests. `gates` (if a list)
     likewise captures (monitor, cwd, items, on_verdict) from spawn_gate for
-    relevance-gated monitors.
+    relevance-gated monitors. `complete=False` simulates a registry that
+    loaded only part of its monitors (a bad YAML file, a skipped record).
     """
     published = []
 
@@ -316,18 +379,11 @@ def _scheduler(tmp_path, monitors, check_results=None, spawned=None,
         published.append({"event": event, "data": data})
         return True
 
-    class FakeRegistry:
-        def effective_monitors(self):
-            return monitors
-
-        def projects_for(self, m):
-            return [Path("/repo")]
-
     sched = MonitorScheduler(
         publish=publish or _record_publish,
         state_path=tmp_path / "state.json",
         now=_fixed_now,
-        registry_loader=lambda: FakeRegistry(),
+        registry_loader=lambda **kw: _FakeRegistry(monitors, complete),
         spawn_check=(lambda mon, cwd, on_verdict: spawned.append((mon, cwd, on_verdict)))
         if spawned is not None else (lambda mon, cwd, on_verdict: None),
         spawn_gate=(lambda mon, cwd, items, on_verdict:
@@ -1327,6 +1383,254 @@ class TestPublishRetry:
         sched._drain_parked()
         assert sched.state["x"]["pending_publish"] == {"k": {}}
 
+    def test_a_partial_registry_load_never_prunes_a_park(self, tmp_path):
+        """The registry never fails TOTALLY - it degrades one file or one
+        record at a time, so the empty-registry guard above cannot see the
+        case that actually happens. One unclosed bracket in monitors.yaml
+        leaves only the framework defaults loaded, and a prune against that
+        would delete every team monitor's park permanently: an unrelated
+        config typo silently discarding findings nobody has heard.
+        """
+        survivor = Monitor(name="heartbeat", event="monitor/heartbeat")
+        sched, published = _scheduler(tmp_path, [survivor], complete=False)
+        sched.state["team-monitor"] = {"active": [],
+                                       "pending_publish": {"finding": {}}}
+
+        sched._drain_parked()
+        assert published == []
+        assert sched.state["team-monitor"]["pending_publish"] == {"finding": {}}
+
+        # Repairing the YAML brings the monitor back and the park with it.
+        sched._registry_loader = lambda **kw: _FakeRegistry(
+            [survivor, Monitor(name="team-monitor", event="monitor/team")],
+            complete=True)
+        sched._drain_parked()
+        assert [p["data"]["finding_key"] for p in published] == ["finding"]
+
+    def test_the_within_park_rotation_does_not_alias_the_monitor_rotation(
+            self, tmp_path):
+        """One counter drove both rotations, so they aliased.
+
+        A monitor is only reached while every monitor ahead of it drained, so
+        in practice it gets the front slot on the turns where
+        `turn % len(monitors)` selects it - and on exactly those turns the
+        within-park offset was pinned to `turn % len(park)`, which for those
+        turns only ever takes `len(park) / gcd(...)` distinct values. Wherever
+        that gcd is > 1 a payload sitting behind a permanently-rejected one is
+        never attempted ONCE, on a healthy bus - which is the starvation the
+        within-park rotation was added to prevent. Both older starvation tests
+        use a single one-item poison park, so neither can reach it.
+        """
+        for n_monitors in range(2, 6):
+            for n_good in range(1, 4):
+                monitors = [Monitor(name=f"m{i}", event=f"monitor/m{i}")
+                            for i in range(n_monitors)]
+                delivered = []
+
+                def publish(event, data, _seen=delivered):
+                    if data["finding_key"].startswith("poison"):
+                        return False  # a 4xx the server will never accept
+                    _seen.append(data["finding_key"])
+                    return True
+
+                sched, _ = _scheduler(tmp_path, monitors, publish=publish)
+                sched.state = {}
+                for m in monitors:
+                    park = {f"poison-{m.name}": {}}
+                    park.update({f"good-{m.name}-{g}": {}
+                                 for g in range(n_good)})
+                    sched.state[m.name] = {"active": [],
+                                           "pending_publish": park}
+
+                for _ in range(200):
+                    sched._drain_parked()
+
+                expected = {f"good-{m.name}-{g}"
+                            for m in monitors for g in range(n_good)}
+                assert set(delivered) == expected, (
+                    f"{n_monitors} monitors x {n_good} good payload(s): "
+                    f"{sorted(expected - set(delivered))} never delivered in "
+                    "200 healthy ticks")
+
+    def test_the_drain_waits_for_an_out_of_band_firing_to_reconcile(
+            self, tmp_path):
+        """Drain-last orders the two clocks only for flavors that reconcile
+        inside the due loop.
+
+        The description flavor - the one #1006 was filed against - dispatches
+        its detector and returns; `_reconcile`, and with it the park's only
+        staleness bound, runs minutes later on a waiter thread. So the drain
+        at the END of the very tick that dispatched Thursday's check would
+        still publish Monday's parked nudge, and Thursday's would land behind
+        it: two auto_dispatch-routed events on one topic out of one tick,
+        verbatim what tick()'s ordering claims to prevent.
+        """
+        m = Monitor(name="standup", event="monitor/standup.due", interval="1d")
+        spawned = []
+        sched, published = _scheduler(tmp_path, [m], spawned=spawned)
+        sched.state["standup"] = {"active": [],
+                                  "pending_publish": {"monday": {}}}
+
+        sched.tick()  # Thursday: dispatched, nothing reconciled yet
+        assert [s[0].name for s in spawned] == ["standup"]
+        assert published == []  # Monday's nudge must NOT go out here
+
+        # The verdict lands minutes later. The detector reports Thursday's
+        # key, so Monday's is retired at the source rather than delivered.
+        spawned[0][2]({"success": True, "finding": True, "summary": "s",
+                       "details": {"key": "thursday"}})
+        assert [p["data"]["finding_key"] for p in published] == ["thursday"]
+        assert "pending_publish" not in sched.state["standup"]
+
+    def test_an_out_of_band_firing_that_never_reconciles_frees_the_drain(
+            self, tmp_path):
+        """The hold is per firing, not permanent: an indeterminate verdict
+        reconciles nothing, and the park must go back to being retried rather
+        than sit undrained until the manager restarts."""
+        m = Monitor(name="standup", event="monitor/standup.due", interval="1d")
+        spawned = []
+        sched, published = _scheduler(tmp_path, [m], spawned=spawned)
+        sched.state["standup"] = {"active": [],
+                                  "pending_publish": {"monday": {}}}
+
+        sched.tick()
+        assert published == []
+        spawned[0][2](None)  # check agent returned no usable verdict
+
+        sched._drain_parked()
+        assert [p["data"]["finding_key"] for p in published] == ["monday"]
+
+    def test_one_verdict_does_not_lift_an_overlapping_firing_s_hold(
+            self, tmp_path):
+        """A description monitor has no in-flight guard, so a check slower
+        than the interval overlaps: two firings, two detectors, two verdicts.
+        The first one back must not release the second firing's hold - its
+        `_retire_parked` has not run, so the park still has no bound."""
+        m = Monitor(name="standup", event="monitor/standup.due", interval="5m")
+        spawned = []
+        sched, published = _scheduler(tmp_path, [m], spawned=spawned)
+
+        clock = {"now": _fixed_now()}
+        sched._now = lambda: clock["now"]
+        sched.tick()
+        clock["now"] = _fixed_now() + timedelta(minutes=6)
+        sched.tick()
+        assert len(spawned) == 2  # both firings dispatched, neither resolved
+
+        sched.state["standup"] = {"active": [],
+                                  "pending_publish": {"monday": {}}}
+        # The first detector back still reports the key, so it stays parked -
+        # the park keeps its bound only from a firing that no longer sees it.
+        spawned[0][2]({"success": True, "finding": True, "summary": "s",
+                       "details": {"key": "monday"}})
+        sched._drain_parked()
+        assert published == []  # the second firing is still in flight
+        assert sched.state["standup"]["pending_publish"] == {"monday": {}}
+
+        spawned[1][2]({"success": True, "finding": False})
+        sched._drain_parked()
+        # Both reconciled: "monday" is retired at the source, not delivered.
+        assert published == []
+        assert "pending_publish" not in sched.state["standup"]
+
+    def test_concurrent_verdicts_release_the_hold_exactly_once_each(
+            self, tmp_path):
+        """The hold is counted on the scheduler thread and released on each
+        firing's waiter thread, so the read-modify-write is cross-thread. Two
+        overlapping check subprocesses exiting together would otherwise both
+        read the same count, and one lost decrement wedges that monitor's park
+        for the life of the process."""
+        class SlowRead(dict):
+            """Widens the window between the read and the write so the two
+            releases provably overlap, instead of hoping the scheduler
+            preempts inside three bytecodes."""
+
+            def get(self, key, default=None):
+                value = super().get(key, default)
+                time.sleep(0.05)
+                return value
+
+        m = Monitor(name="x", event="monitor/x")
+        sched, _ = _scheduler(tmp_path, [m])
+        sched._hold_drain(m)
+        sched._hold_drain(m)
+        sched._reconcile_pending = SlowRead(sched._reconcile_pending)
+        assert sched._reconcile_pending == {"x": 2}
+
+        workers = [threading.Thread(target=sched._release_drain, args=("x",))
+                   for _ in range(2)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
+
+        assert sched._reconcile_pending == {}
+
+    def test_a_native_out_of_band_check_holds_the_drain_too(self, tmp_path):
+        """The agent-invoking native runners reconcile off-thread for the same
+        reason the description flavor does, so they need the same hold."""
+        class _OutOfBandCheck:
+            out_of_band = True
+
+            def run(self, *a, **kw):
+                return []
+
+        m = Monitor(name="x", event="monitor/x", check="slow", interval="1d")
+        sched, published = _scheduler(tmp_path, [m])
+        sched._checks = {"slow": _OutOfBandCheck()}
+        detected = threading.Event()
+        sched._check_conditions = lambda *a, **kw: (detected.wait(2), [])[1]
+        sched.state["x"] = {"active": [], "pending_publish": {"stale": {}}}
+
+        sched.tick()  # the check thread is running; nothing reconciled yet
+        assert published == []
+
+        detected.set()
+        for _ in range(200):  # let the check thread finish reconciling
+            if "pending_publish" not in sched.state["x"]:
+                break
+            time.sleep(0.01)
+        assert "pending_publish" not in sched.state["x"]  # retired, not sent
+
+        # And the hold is released when it does, or this monitor's park would
+        # never be drained again this process.
+        sched.state["x"]["pending_publish"] = {"later": {}}
+        sched._drain_parked()
+        assert [p["data"]["finding_key"] for p in published] == ["later"]
+
+    def test_a_partially_drained_park_records_what_it_delivered(
+            self, tmp_path, monkeypatch):
+        """A drain that stopped early still removed the payloads that DID
+        land, and the early return skipped the ledger row that says so - the
+        recovery a lost firing is diagnosed from left no trace at all.
+
+        One row per recovery, not one per tick: the deliveries bank across
+        ticks and land as a single record when the episode ends.
+        """
+        from bobi.monitors import run_records
+
+        recorded = []
+        monkeypatch.setattr(run_records, "record", recorded.append)
+        m = Monitor(name="x", event="monitor/x")
+
+        def publish(event, data):
+            return data["finding_key"] != "poison"
+
+        sched, _ = _scheduler(tmp_path, [m], publish=publish)
+        # The poison sits BETWEEN the two good payloads, so the recovery takes
+        # two partial ticks - a row that reported one tick's deliveries rather
+        # than the recovery's would say 1.
+        sched.state["x"] = {"active": [],
+                            "pending_publish": {"a": {}, "poison": {}, "b": {}}}
+
+        for _ in range(6):
+            sched._drain_parked()
+
+        assert list(sched.state["x"]["pending_publish"]) == ["poison"]
+        assert len(recorded) == 1
+        assert recorded[0].published == 2
+        assert "delivered 2 parked finding(s)" in recorded[0].reason
+
     def test_the_drain_does_not_resurrect_a_key_retired_mid_post(self, tmp_path):
         """The drain publishes outside the lock, so a firing on a waiter
         thread can retire a parked key while the post is in flight. The post
@@ -1382,6 +1686,83 @@ class TestPublishRetry:
         sched._drain_parked()  # next tick starts one monitor further along
         assert attempts == ["poison", "fine", "poison"]
         assert "pending_publish" not in sched.state["fine"]
+
+    def test_a_failed_memory_updated_publish_is_parked_and_retried(
+            self, tmp_path):
+        """The sleep cycle's completion event publishes directly, outside
+        `_reconcile` - and the transcript cursor advances BEFORE it, so a
+        failed post used to be unrecoverable. The next 6h run reads no delta,
+        finds nothing durable, and never republishes: `drain.py` never sees
+        the event, and an urgent policy change never reaches the inbox.
+        It is a publisher, so the park covers it.
+        """
+        m = Monitor(name="sleep-cycle", sleep_cycle=True,
+                    event="system/memory.updated")
+        outage = {"down": True}
+        attempts = []
+
+        def publish(event, data):
+            attempts.append(event)
+            return not outage["down"]
+
+        sched, _ = _scheduler(tmp_path, [m], publish=publish)
+        sched._publish_memory_updated(
+            m, {"updated": True, "summary": "reversed D12", "bytes": 42,
+                "urgent": True})
+        assert sched.state["sleep-cycle"]["pending_publish"] == {
+            _fixed_now().isoformat(): {
+                "monitor": "sleep-cycle", "summary": "reversed D12",
+                "bytes": 42, "urgent": True}}
+
+        outage["down"] = False
+        attempts.clear()
+        sched._drain_parked()
+
+        # Retried onto the same topics the direct publish uses, urgency
+        # intact - the drain must not flatten the fan-out drain.py reads.
+        assert attempts == ["system/memory.updated", "system/policy.updated"]
+        assert "pending_publish" not in sched.state["sleep-cycle"]
+
+    def test_a_delivered_memory_update_is_not_recorded_active(self, tmp_path):
+        """`active` is pruned by `_reconcile` against what the detector
+        currently reports, and the sleep cycle has no detector - so a key
+        recorded there is a key nothing ever removes. One per completion
+        signal, every 6h, forever, in a file rewritten wholesale each tick."""
+        m = Monitor(name="sleep-cycle", sleep_cycle=True,
+                    event="system/memory.updated")
+        clock = {"now": _fixed_now()}
+        sched, _ = _scheduler(tmp_path, [m])
+        sched._now = lambda: clock["now"]
+
+        for run in range(4):
+            clock["now"] = _fixed_now() + timedelta(hours=6 * run)
+            sched._publish_memory_updated(m, {"summary": f"run {run}"})
+
+        assert sched.state["sleep-cycle"].get("active", []) == []
+        assert "pending_publish" not in sched.state["sleep-cycle"]
+
+    def test_two_parked_memory_updates_both_deliver(self, tmp_path):
+        """A completion signal is not a deduped finding: two runs with the
+        same summary must both land, so they park under distinct keys."""
+        m = Monitor(name="sleep-cycle", sleep_cycle=True,
+                    event="system/memory.updated")
+        outage = {"down": True}
+        clock = {"now": _fixed_now()}
+
+        sched, _ = _scheduler(tmp_path, [m],
+                              publish=lambda e, d: not outage["down"])
+        sched._now = lambda: clock["now"]
+        sched._publish_memory_updated(m, {"summary": "first", "urgent": False})
+        clock["now"] = _fixed_now() + timedelta(hours=6)
+        sched._publish_memory_updated(m, {"summary": "second", "urgent": False})
+        assert len(sched.state["sleep-cycle"]["pending_publish"]) == 2
+
+        delivered = []
+        outage["down"] = False
+        sched.publish = lambda e, d: (delivered.append((e, d["summary"])), True)[1]
+        sched._drain_parked()
+        assert sorted({s for _, s in delivered}) == ["first", "second"]
+        assert "pending_publish" not in sched.state["sleep-cycle"]
 
     def test_successful_publish_marks_active(self, tmp_path):
         m = Monitor(name="x", event="monitor/x")
