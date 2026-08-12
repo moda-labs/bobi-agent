@@ -283,6 +283,16 @@ the step's outputs. Actions are registered in `_NATIVE_ACTIONS` in
     timeout: 120
 ```
 
+A route step's `if:` cannot guard an action step: the engine checks `condition`
+before `action`, so a step carrying both is treated as a route and its action
+never runs. A destructive action therefore carries its own guard rather than
+relying on where it sits in the step list. `cleanup_worktree` is the worked
+example (#1004): it re-reads the PR's merge state from GitHub and deletes
+nothing unless that live read says merged - never the `input.merged` the run
+was launched with, which is the webhook's snapshot and stale by arrival. It
+publishes the verdict it acted on as `merged_live`, and downstream routes key
+off that, so the branch taken cannot disagree with what happened on disk.
+
 ## Variables and templating
 
 Steps reference data with `${{scope.key}}`. Resolution and condition parsing
@@ -310,6 +320,15 @@ quoted string literals, list literals, and `true` / `false`:
 ```yaml
     if: "complexity == 'large' and needs_spec != false"
 ```
+
+That flat namespace holds **step outputs only** - handoff fields and native
+action results. `input.*` is NOT in it, so a bare `merged` does not reach
+`input.merged`; reference it as `${{input.merged}}` or route on a step output
+instead. An unresolved bare name is not an error: the parser treats it as a
+string literal, so `if: "merged == true"` quietly compares `"merged"` to
+`"true"` and takes the `else` branch forever. This is what left `pr-closed`'s
+`close-issue` step dead until #1004. When a route never seems to fire, check
+that its names are step outputs.
 
 ## The handoff contract
 

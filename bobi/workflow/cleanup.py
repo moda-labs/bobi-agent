@@ -1,28 +1,105 @@
 """Deterministic worktree cleanup — maps a branch to its worktree and removes both.
 
-Used by the pr-closed workflow's native action step to clean up after a PR
-is merged or closed. No LLM involvement — pure git operations.
+Used by the pr-closed workflow's native action step to clean up after a PR is
+merged or closed. No LLM involvement - git operations, plus the one GitHub
+read that decides whether any of them may run at all.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from pathlib import Path
 
+import httpx
+
 log = logging.getLogger(__name__)
 
+GITHUB_API = "https://api.github.com"
 
-def cleanup_worktree(repo_root: str, head_branch: str) -> dict:
+# GitHub owner and repository names: letters, digits, and -._ after an
+# alphanumeric first character. Requiring that first character is what excludes
+# "." and "..", so a crafted slug cannot walk the API path.
+_REPO_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
+def pr_merge_state(repo_slug: str, pr_number: str | int) -> dict:
+    """Read a pull request's merge state from GitHub, right now.
+
+    The webhook payload that starts a pr-closed run is a snapshot of the
+    moment the hook fired; by the time the run reaches cleanup it says
+    nothing about the repo's state now. This is the live answer.
+
+    Returns ``{"merged": bool, "state": str}`` on a successful read, or
+    ``{"error": "..."}`` when the read could not be made at all. It never
+    raises, and it never guesses a verdict - an unreadable PR yields no
+    ``merged`` key, so a caller cannot mistake "could not tell" for "merged".
+    """
+    # Both halves must be real path segments. The host is fixed, so a bad slug
+    # cannot reach another server, but "org/.." would still resolve to a
+    # different api.github.com endpoint once httpx normalizes the path.
+    owner, _, name = str(repo_slug).partition("/")
+    if not _REPO_SEGMENT.match(owner) or not _REPO_SEGMENT.match(name):
+        return {"error": f"unusable repo slug: {repo_slug!r}"}
+    number = str(pr_number).strip()
+    if not number.isdigit():
+        return {"error": f"unusable PR number: {pr_number!r}"}
+    repo_slug = f"{owner}/{name}"
+
+    from bobi import http as pooled
+    from bobi.gitutil import github_token
+
+    url = f"{GITHUB_API}/repos/{repo_slug}/pulls/{number}"
+    headers = {"Accept": "application/vnd.github+json"}
+    token = github_token()
+    if token:
+        headers["Authorization"] = f"token {token}"
+
+    try:
+        resp = pooled.get(url, headers=headers, timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
+    except (httpx.HTTPError, ValueError) as e:
+        log.warning(
+            "Could not read merge state for %s#%s: %s", repo_slug, number, e,
+        )
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    if not isinstance(data, dict):
+        return {"error": f"unexpected PR payload for {repo_slug}#{number}"}
+    return {"merged": data.get("merged") is True, "state": str(data.get("state", ""))}
+
+
+def cleanup_worktree(repo_root: str, head_branch: str, *, merged: bool) -> dict:
     """Remove the worktree(s) for a PR's head branch and delete the branch.
 
     Looks up worktrees by branch name via ``git worktree list --porcelain``
     so it works regardless of where the worktree directory lives on disk.
 
+    ``merged`` is the caller's verdict on whether the PR actually merged, and
+    it is keyword-REQUIRED for the same reason the deletion exists at all: a
+    merged PR's head is a redundant copy, and an unmerged PR's head is the
+    only copy of the work. Making it a required keyword means no call site can
+    reach the delete without having answered the question (#1004).
+
     Returns a status dict:
+      - ``{"status": "preserved", "branch": ...}`` if ``merged`` is false -
+        nothing was inspected, nothing was removed
       - ``{"status": "cleaned", "paths_removed": [...], "branch": ...}``
       - ``{"status": "not_found"}`` if no worktree matched
     """
+    if not merged:
+        log.info(
+            "Preserving worktree and branch %s: the PR did not merge",
+            head_branch,
+        )
+        return {
+            "status": "preserved",
+            "branch": head_branch,
+            "reason": "PR is not merged - branch and worktree left in place",
+        }
+
     root = Path(repo_root).resolve()
 
     # Fail loudly if repo_root is not a git repository — running worktree
@@ -39,8 +116,10 @@ def cleanup_worktree(repo_root: str, head_branch: str) -> dict:
         _prune(str(root))
         if _branch_exists(str(root), head_branch):
             _delete_branch(str(root), head_branch)
-            return {"status": "cleaned", "paths_removed": [], "branch": head_branch}
-        return {"status": "not_found"}
+            return {"status": "cleaned", "paths_removed": [], "branch": head_branch,
+                    "reason": "deleted the branch; no worktree was registered for it"}
+        return {"status": "not_found",
+                "reason": f"no worktree or branch named {head_branch}"}
 
     removed: list[str] = []
     protected: list[str] = []
@@ -61,7 +140,15 @@ def cleanup_worktree(repo_root: str, head_branch: str) -> dict:
     if not protected:
         _delete_branch(str(root), head_branch)
 
-    result: dict = {"status": "cleaned", "paths_removed": removed, "branch": head_branch}
+    result: dict = {
+        "status": "cleaned",
+        "paths_removed": removed,
+        "branch": head_branch,
+        "reason": f"removed {len(removed)} worktree(s)" + (
+            "; kept the checkout cleanup was run from" if protected
+            else " and deleted the branch"
+        ),
+    }
     if protected:
         result["protected_paths"] = protected
     if errors:

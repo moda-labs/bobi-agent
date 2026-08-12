@@ -7,8 +7,9 @@ different tracker.
 - Pull request reviews, inline review comments, and PR comments route to
   `pr-feedback` only when they contain actionable requested-change text.
   Question-only PR or issue comments must be answered directly.
-- Closed pull requests route to `pr-closed` for deterministic cleanup and issue
-  closure when applicable.
+- Closed pull requests route to `pr-closed`, which re-reads the PR's merge
+  state and then cleans up the worktree, branch, and linked issue. A PR closed
+  without merging keeps its branch and worktree for a human decision.
 - CI failures on open pull requests route to `build-failure`.
 - Include owner/repo references and URLs in worker tasks so workers can fetch
   source context directly.
