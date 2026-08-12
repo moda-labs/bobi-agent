@@ -1013,10 +1013,6 @@ table.runs { width: 100%; border-collapse: collapse; }
 .r-tok { text-align: right; }
 .runs td.r-act { text-align: right; white-space: nowrap; }
 .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
-.row-actions .btn.remind {
-  border-color: var(--status-waiting-edge); background: var(--status-waiting-soft);
-  color: var(--status-waiting);
-}
 .row-actions .btn[disabled] { opacity: .45; cursor: default; }
 .runs-empty { padding: 28px 18px; color: var(--text-secondary); font-size: 14px; text-align: center; }
 .runs-pager {

@@ -52,7 +52,7 @@ rather than translation:
 **`awaiting_action` is derived, not recorded.** A workflow run suspended past
 `AWAITING_ACTION_AFTER_SECONDS` (24h, a constant) is elevated from idle into its
 own attention state and tab. It remains a healthy, resumable human gate, not a
-failure. The row names the awaited event and offers reminder and close actions.
+failure. The row names the awaited event and offers a close action.
 The clock runs from the last resume, not from first suspension.
 
 **`status=failed` is the terminal-failure tab.** It returns `failed` and

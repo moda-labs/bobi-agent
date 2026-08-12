@@ -13,10 +13,10 @@ session / workflow / monitor records, written with the same helpers
 `tests/test_webapp_runs.py` proves those folds against, and the state tri-state
 comes from a manager pid that is genuinely alive.
 
-Two things are driven from the browser side instead, and only two, because
-their success needs something this process cannot have offline: a Slack post
-(`remind`) and a server that fails a read on demand (the `runsError` branch).
-Both have an unstubbed companion test alongside them.
+One thing is driven from the browser side instead, and only one, because it
+needs something this process cannot have offline: a server that fails a read on
+demand (the `runsError` branch). It has an unstubbed companion test alongside
+it.
 
 Skips cleanly when Playwright isn't installed (the unit job doesn't need it).
 """
@@ -38,7 +38,6 @@ from tests.test_webapp_runs import NOW, _monitor, _session, _workflow  # noqa: E
 
 RUNS_URL = re.compile(r"/api/agents/[^/]+/runs\?")
 DETAILS_URL = re.compile(r"/api/agents/[^/]+/runs/[^/]+/details")
-REMIND_URL = re.compile(r"/api/agents/[^/]+/workflows/runs/[^/]+/remind")
 
 # The runs table pages at 100. One row past it is the whole pager contract.
 PAGE_SIZE = 100
@@ -465,35 +464,15 @@ class TestWriteActions:
     def _gate_row(self, page):
         return page.locator(".runs tbody tr", has_text="adhoc")
 
-    def test_remind_reflects_sent_and_returns_to_remind(self, webapp, page):
-        # A real reminder is a real Slack post, which this process cannot make
-        # offline, so only the delivery is answered at the wire. What is under
-        # test is the button's own lifecycle, which is browser-side entirely.
-        page.route(REMIND_URL, lambda route: route.fulfill(
-            status=200, content_type="application/json",
-            body='{"ok": true, "delivered": true}'))
+    def test_an_awaiting_row_offers_close_and_no_reminder(self, webapp, page):
+        # Remind was cut from this page (MOD-371): the button never delivered.
+        # The endpoint behind it stays, for the CLI and the hosted admin
+        # protocol, so the guard belongs here, on what the row renders.
         _seed_runs(webapp.install)
         _agent(page, webapp)
 
-        remind = self._gate_row(page).locator("button.remind")
-        remind.click()
-        expect(remind).to_have_text("Sent")
-        expect(remind).to_be_disabled()
-        # It goes back on its own; a button stuck on "Sent" cannot be used again.
-        expect(remind).to_have_text("Remind", timeout=10_000)
-        expect(remind).to_be_enabled()
-
-    def test_a_failed_remind_reports_and_restores_the_button(self, webapp, page):
-        # Unstubbed: no Slack credentials, so the real delivery really fails.
-        _seed_runs(webapp.install)
-        _agent(page, webapp)
-
-        remind = self._gate_row(page).locator("button.remind")
-        remind.click()
-        expect(page.locator(".band-report .rep-head")).to_have_text(
-            "reminder failed")
-        expect(remind).to_have_text("Remind")
-        expect(remind).to_be_enabled()
+        actions = self._gate_row(page).locator(".row-actions button")
+        expect(actions).to_have_text(["Transcript", "Details", "Close"])
 
     def test_close_asks_first_and_cancelling_posts_nothing(self, webapp, page):
         _seed_runs(webapp.install)
