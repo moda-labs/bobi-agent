@@ -10,11 +10,47 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
 from bobi import paths
+
+
+def verify_install_manifest(package_dir: Path) -> list[str]:
+    """Return files missing or changed from a package's install manifest."""
+    manifest_path = package_dir / "install-manifest.json"
+    if not manifest_path.is_file():
+        return []
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        return [f"install-manifest.json (unreadable: {exc})"]
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
+        return ["install-manifest.json (files must be a mapping)"]
+    if not manifest["files"]:
+        return ["install-manifest.json (files mapping must not be empty)"]
+    failures: list[str] = []
+    for rel, digest in manifest["files"].items():
+        if not isinstance(rel, str) or not isinstance(digest, str):
+            failures.append(f"{rel!r} (invalid manifest entry)")
+            continue
+        rel_path = PurePosixPath(rel)
+        if rel_path.is_absolute() or ".." in rel_path.parts:
+            failures.append(f"{rel} (unsafe manifest path)")
+            continue
+        file = package_dir / rel
+        if not file.is_file():
+            failures.append(f"{rel} (missing)")
+            continue
+        try:
+            actual = hashlib.sha256(file.read_bytes()).hexdigest()
+        except OSError as exc:
+            failures.append(f"{rel} (unreadable: {exc})")
+            continue
+        if actual != digest:
+            failures.append(f"{rel} (sha256 mismatch)")
+    return failures
 
 
 def resolve_agent_pack(name: str, project_path: Path) -> Path | None:

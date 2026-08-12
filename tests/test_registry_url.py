@@ -5,7 +5,9 @@ inject a team without baking it into the image, so its archive handling
 (nesting, naming, and traversal safety) is contract, not incidental.
 """
 
+import hashlib
 import io
+import json
 import tarfile
 from pathlib import Path
 
@@ -229,6 +231,39 @@ def test_fetch_from_archive_rejects_non_archive(project, tmp_path):
     bad.write_text("not a tarball")
     with pytest.raises(RuntimeError, match="not a readable .tar.gz"):
         registry.fetch_from_archive(project, bad)
+
+
+def test_fetch_from_archive_rejects_manifest_mismatch_before_cache_install(
+    project, tmp_path,
+):
+    cached = registry._cache_dir(project) / "eng-team"
+    cached_role = cached / "roles" / "manager" / "ROLE.md"
+    cached_role.parent.mkdir(parents=True)
+    cached_role.write_text("known-good cached role\n")
+
+    src = _make_team_dir(tmp_path / "src", "eng-team", agent="eng-team")
+    role = src / "roles" / "manager" / "ROLE.md"
+    expected = role.read_bytes()
+    manifest = {
+        "agent": "eng-team",
+        "frozen": True,
+        "files": {
+            "agent.yaml": hashlib.sha256(
+                (src / "agent.yaml").read_bytes()).hexdigest(),
+            "roles/manager/ROLE.md": hashlib.sha256(expected).hexdigest(),
+        },
+    }
+    (src / "install-manifest.json").write_text(json.dumps(manifest))
+    role.write_bytes(b"")
+    arc = tmp_path / "eng-team.tar.gz"
+    with tarfile.open(arc, "w:gz") as tar:
+        tar.add(src, arcname="eng-team")
+
+    with pytest.raises(RuntimeError, match="Package verification failed") as exc:
+        registry.fetch_from_archive(project, arc)
+
+    assert "roles/manager/ROLE.md (sha256 mismatch)" in str(exc.value)
+    assert cached_role.read_text() == "known-good cached role\n"
 
 
 def test_install_cli_routes_local_archive(project, tmp_path, monkeypatch):

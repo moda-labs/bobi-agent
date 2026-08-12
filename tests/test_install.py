@@ -6,6 +6,7 @@ Variance enters via ${VAR}/.env only. The install manifest lets doctor
 flag hand-edits before a reinstall silently destroys them.
 """
 
+import hashlib
 import json
 import os
 
@@ -17,6 +18,7 @@ from bobi import paths
 from bobi.cli import _install_pack, _write_install_gitignore, main
 from bobi.config import parse_env_file
 from bobi.doctor import _check_install_integrity
+from bobi.install import verify_install_manifest
 
 
 def _force_write(path, text):
@@ -129,6 +131,47 @@ def test_manifest_covers_installed_files(pack, project):
     assert "agent.yaml" in manifest["files"]
     assert "roles/manager/ROLE.md" in manifest["files"]
     assert "workflows/adhoc.yaml" in manifest["files"]
+
+
+def test_manifest_verifier_reports_missing_and_mismatched_files(pack, project):
+    _install_pack(pack, project)
+    dest = paths.package_dir(project)
+    role = dest / "roles" / "manager" / "ROLE.md"
+    workflow = dest / "workflows" / "adhoc.yaml"
+    _force_write(role, "")
+    _force_unlink(workflow)
+
+    failures = verify_install_manifest(dest)
+
+    assert "roles/manager/ROLE.md (sha256 mismatch)" in failures
+    assert "workflows/adhoc.yaml (missing)" in failures
+
+
+@pytest.mark.parametrize("rel", ["../outside", "/tmp/outside"])
+def test_manifest_verifier_rejects_paths_outside_package(tmp_path, rel):
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "install-manifest.json").write_text(json.dumps({
+        "files": {rel: hashlib.sha256(b"").hexdigest()},
+    }))
+
+    failures = verify_install_manifest(package)
+
+    assert failures == [f"{rel} (unsafe manifest path)"]
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [[], {}, {"files": []}, {"files": {}}, {"files": {"x": 1}}],
+)
+def test_manifest_verifier_rejects_malformed_schema(tmp_path, manifest):
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "install-manifest.json").write_text(json.dumps(manifest))
+
+    failures = verify_install_manifest(package)
+
+    assert failures
 
 
 def test_local_source_gitignore_covers_image(pack, project):
@@ -272,6 +315,18 @@ class TestDoctorIntegrity:
         paths.package_dir(project).mkdir(parents=True)
         self._set_root(project, monkeypatch)
         assert _check_install_integrity().ok
+
+    def test_malformed_manifest_is_actionable(self, project, monkeypatch):
+        package = paths.package_dir(project)
+        package.mkdir(parents=True)
+        (package / "install-manifest.json").write_text("[]")
+        self._set_root(project, monkeypatch)
+
+        result = _check_install_integrity()
+
+        assert not result.ok
+        assert result.detail == "invalid install manifest"
+        assert "Re-run" in result.hint
 
 
 class TestRuntimeWritePolicy:

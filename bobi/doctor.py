@@ -151,9 +151,6 @@ def _check_install_integrity() -> CheckResult:
     `bobi agents install` — so hand-edits are silently lost on the next install.
     Compare on-disk files against the hashes recorded at install time.
     """
-    import hashlib
-    import json
-
     root = bound_root()
     if not root:
         return CheckResult("Installed team", ok=True, detail="no runtime selected")
@@ -164,21 +161,21 @@ def _check_install_integrity() -> CheckResult:
         return CheckResult("Installed team", ok=True,
                            detail="no install manifest")
     try:
+        import json
         manifest = json.loads(manifest_path.read_text())
     except (json.JSONDecodeError, OSError):
         return CheckResult("Installed team", ok=False,
                            detail="unreadable install manifest",
                            hint="Re-run `bobi agents install ... --name <agent>`")
+    if not isinstance(manifest, dict):
+        return CheckResult("Installed team", ok=False,
+                           detail="invalid install manifest",
+                           hint="Re-run `bobi agents install ... --name <agent>`")
     if not manifest.get("frozen", True):
         return CheckResult("Installed team", ok=True,
                            detail=f"{manifest.get('agent', '?')} (downloaded — editable)")
-    drifted = []
-    for rel, digest in manifest.get("files", {}).items():
-        f = dest / rel
-        if not f.is_file():
-            drifted.append(f"{rel} (missing)")
-        elif hashlib.sha256(f.read_bytes()).hexdigest() != digest:
-            drifted.append(rel)
+    from bobi.install import verify_install_manifest
+    drifted = verify_install_manifest(dest)
     if drifted:
         shown = ", ".join(drifted[:3]) + ("…" if len(drifted) > 3 else "")
         return CheckResult(
@@ -727,4 +724,3 @@ def _check_long_term_memory() -> CheckResult:
     return CheckResult(
         "Long-term memory", ok=True,
         detail=f"long_term_memory.md present ({size} chars, under {MAX_MEMORY_CHARS} cap)")
-
