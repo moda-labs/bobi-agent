@@ -59,9 +59,44 @@ def test_agents_help_lists_machine_commands():
 def test_agent_help_lists_runtime_commands(bobi_install):
     result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "--help"])
     assert result.exit_code == 0, result.output
-    for cmd in ["start", "stop", "status", "workflows", "monitors",
+    for cmd in ["start", "stop", "status", "busy", "workflows", "monitors",
                 "subagents", "event-server", "login-bootstrap", "otel"]:
         assert cmd in result.output
+
+
+def test_busy_wraps_command_with_renewing_lease(bobi_install, monkeypatch):
+    events = []
+
+    class Lease:
+        def __init__(self, root, *, label, ttl):
+            events.append(("init", root, label, ttl))
+
+        def __enter__(self):
+            events.append(("enter",))
+            return self
+
+        def __exit__(self, *exc):
+            events.append(("exit",))
+
+    monkeypatch.setattr("bobi.expected_busy.ExpectedBusyLease", Lease)
+    monkeypatch.setattr(
+        "bobi.expected_busy.run_command",
+        lambda command: events.append(("run", command)) or 7,
+    )
+
+    result = CliRunner().invoke(main, [
+        "agent", TEST_AGENT_NAME, "busy", "--ttl", "900",
+        "--label", "full unit gate", "--", "pytest", "tests/", "-q",
+    ])
+
+    assert result.exit_code == 7
+    assert events[0][0] == "init"
+    assert events[0][2:] == ("full unit gate", 900.0)
+    assert events[1:] == [
+        ("enter",),
+        ("run", ("pytest", "tests/", "-q")),
+        ("exit",),
+    ]
 
 
 def test_agent_group_pins_team_brain_for_cli_process(bobi_install, monkeypatch):

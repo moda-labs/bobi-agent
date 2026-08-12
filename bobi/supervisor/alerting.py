@@ -201,6 +201,8 @@ class SlackAlerter(SupervisorObserver):
         park counter mid-incident. Re-derive the live verdict instead."""
         if state.desired_state == "stopped" or not state.ever_healthy:
             return False
+        if state.expected_busy:
+            return False
         if state.health_fail_count:
             return False
         mgr = (state.health or {}).get("manager") or {}

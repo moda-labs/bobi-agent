@@ -310,7 +310,12 @@ renders.
     "idle_seconds": 12,
     "restart_count": 0,
     "last_restart_reason": null,
-    "last_restart_at": null
+    "last_restart_at": null,
+    "expected_busy": null | {
+      "active": true,
+      "lease_count": 1,
+      "expires_at": 1786500000.0
+    }
   },
   "sessions":     [ { "name": "...", "role": "...", "status": "..." } ],
   "resources":    { "disk_free_mb": 8120, "mem_free_mb": 512, "mem_pct": 68.0 },
@@ -339,6 +344,18 @@ are for diagnosis, not for re-deriving your own verdict.
 Note `status` is the verdict and `healthy` is a separate raw boolean; they are
 not the same field. There is no `"healthy"` or `"dead"` status value — switch on
 `running`/`idle` and on `down`.
+
+`manager.expected_busy` is additive supervisor context for sanctioned heavy
+commands. A worker obtains it with `bobi agent <name> busy -- <command>`; the
+wrapper writes a crash-safe multi-holder lease, renews it while the command is
+alive, clamps every renewal to 30-3600 seconds, and releases it on normal exit.
+If the wrapper or machine dies, the TTL expires without cleanup. While at least
+one lease is active, ambiguous liveness signals (probe misses, stale active-turn
+progress, and `status=error` under host starvation) do not restart or charge the
+manager budget and do not open a probe-failing episode. A real supervised-child
+exit still follows the normal crash budget. `status` keeps its existing
+vocabulary; consumers that want to explain why a long-running manager remains
+healthy can inspect `expected_busy`.
 
 `expectations` is what the deployment *should* be running (its configured
 subscriptions and monitors), which is what makes a "configured but not running"

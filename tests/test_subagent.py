@@ -171,6 +171,14 @@ class TestLaunchDetached:
         cmd = mock_popen.call_args[0][0]
         assert cmd[-2:] == ["a", "b"]
 
+    @patch("bobi.worker_priority.shutil.which", return_value="/usr/bin/nice")
+    @patch("bobi.subagent.sp.Popen")
+    def test_lowers_worker_tree_priority(self, mock_popen, _mock_which):
+        from bobi.subagent import _launch_detached
+        _launch_detached("print('hi')", [], Path("/tmp/test.log"))
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[:3] == ["/usr/bin/nice", "-n", "5"]
+
 
 class TestCheckRequires:
     """Test the dispatch-time requires check with TTL cache."""

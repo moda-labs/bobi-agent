@@ -146,6 +146,65 @@ def _cfg(**kw):
 
 class TestSupervisorWedge:
 
+    def test_expected_busy_suppresses_ambiguous_restart_chain(self):
+        """The exact MOD-364 trigger mix must not consume restart budget while
+        a sanctioned heavy command holds a bounded busy lease."""
+        spawns = []
+        responses = iter([
+            {"manager": {"status": "running", "idle_seconds": 0}},
+            None,
+            None,
+            {"manager": {"status": "running", "idle_seconds": 601}},
+            {"manager": {"status": "running", "idle_seconds": 632}},
+            {"manager": {"status": "error", "idle_seconds": 0}},
+            {"manager": {"status": "error", "idle_seconds": 0}},
+        ])
+
+        def spawn():
+            proc = FakeProc()
+            spawns.append(proc)
+            return proc
+
+        sup = Supervisor(
+            [], _cfg(), now_fn=Clock(), sleep_fn=lambda _: None,
+            spawn_fn=spawn, health_fn=lambda: next(responses),
+            busy_fn=lambda: {"active": True, "lease_count": 1,
+                             "expires_at": 9999.0},
+        )
+        sup._respawn()
+
+        for _ in range(7):
+            assert sup._cycle() is None
+
+        state = sup._report()
+        assert len(spawns) == 1
+        assert state.restart_count == 0
+        assert state.expected_busy == {
+            "active": True,
+            "lease_count": 1,
+            "expires_at": 9999.0,
+        }
+
+    def test_expected_busy_does_not_mask_a_real_child_crash(self):
+        spawns = []
+
+        def spawn():
+            proc = FakeProc(returncode=1 if not spawns else None)
+            spawns.append(proc)
+            return proc
+
+        sup = Supervisor(
+            [], _cfg(), now_fn=Clock(), sleep_fn=lambda _: None,
+            spawn_fn=spawn, health_fn=lambda: None,
+            busy_fn=lambda: {"active": True, "lease_count": 1,
+                             "expires_at": 9999.0},
+        )
+        sup._respawn()
+
+        assert sup._cycle() is None
+        assert len(spawns) == 2
+        assert sup._report().restart_count == 1
+
     def test_confirmed_wedge_restarts_manager(self):
         spawns = []
 

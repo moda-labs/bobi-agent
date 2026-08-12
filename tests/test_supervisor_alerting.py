@@ -63,11 +63,12 @@ _HEALTHY_BODY = {"manager": {"status": "idle", "idle_seconds": 1}}
 
 
 def _state(*, ever_healthy=True, desired="running", health=_HEALTHY_BODY,
-           health_fail_count=0):
+           health_fail_count=0, expected_busy=None):
     return SupervisorState(
         health=health, child_alive=True, supervisor_uptime_s=10.0,
         restart_count=0, last_restart_reason=None, last_restart_at=None,
         ever_healthy=ever_healthy, health_fail_count=health_fail_count,
+        expected_busy=expected_busy,
         desired_state=desired,
     )
 
@@ -228,6 +229,20 @@ class TestRecovery:
         clock.t += 500.0
         a.poll(_state(ever_healthy=True, desired="stopped"))
         assert len(posts) == 1  # incident stays open, no recovered post
+
+    def test_expected_busy_does_not_close_an_existing_incident(self, tmp_path):
+        clock = Clock(start=1000.0)
+        a, posts, _ = _alerter(tmp_path, clock=clock)
+        a.lifecycle("manager_restarted", reason="crash", restart_count=2,
+                    charged=True)
+
+        busy = {"active": True, "lease_count": 1, "expires_at": 2000.0}
+        a.poll(_state(ever_healthy=True, expected_busy=busy))
+        clock.t += 500.0
+        a.poll(_state(ever_healthy=True, expected_busy=busy))
+
+        assert len(posts) == 1
+        assert (tmp_path / "incident.json").exists()
 
     def test_wedging_director_is_not_a_recovery(self, tmp_path):
         # ever_healthy is a per-boot LATCH: it stays True while a director

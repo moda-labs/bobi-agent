@@ -867,7 +867,9 @@ def spawn_adhoc(
 def _launch_detached(script: str, args: list[str], log_file: Path,
                      env: dict[str, str] | None = None) -> int:
     """Launch a detached subprocess that survives parent exit. Returns pid."""
-    cmd = [sys.executable, "-c", script, *args]
+    from bobi.worker_priority import lower_priority_command
+
+    cmd = lower_priority_command([sys.executable, "-c", script, *args])
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with open(log_file, "a") as lf:
         proc = sp.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True,

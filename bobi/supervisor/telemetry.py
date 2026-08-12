@@ -141,6 +141,12 @@ class Telemetry(SupervisorObserver):
                 ever_healthy=state.ever_healthy,
                 config=self.config,
             )
+            if state.expected_busy and raw in ("wedged", "error"):
+                mgr = (health or {}).get("manager") or {}
+                reported = mgr.get("status")
+                derived = reported if reported in ("starting", "running") \
+                    else (self._last_status or "running")
+                self._last_status = derived
             # Debounce the health-MISS -> wedged flip: a wedge derived purely
             # from an unreachable probe is only trustworthy after
             # HEALTH_MISS_CONFIRM consecutive misses; below that, carry the last
@@ -148,7 +154,7 @@ class Telemetry(SupervisorObserver):
             # single dropped probe. A wedge derived from the health BODY (a
             # stalled active turn) or a `down` verdict is a real observation and
             # is reported immediately.
-            if (raw == "wedged" and health is None
+            elif (raw == "wedged" and health is None
                     and state.health_fail_count < HEALTH_MISS_CONFIRM):
                 derived = self._last_status or "starting"
             else:

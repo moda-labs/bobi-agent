@@ -62,6 +62,11 @@ bobi agent <name> start --fresh
 bobi agent <name> status
 bobi agent <name> doctor
 
+# Protect a sanctioned host-heavy command from ambiguous supervisor verdicts.
+# The lease is bounded (30-3600s), renews while the command runs, and is
+# released on exit. Delegated worker process trees also run at nice +5.
+bobi agent <name> busy --label "full unit gate" -- pytest tests/ -q
+
 # Supervise the manager as the terminal process (containers, pod specs).
 # Spawns + probes the manager, publishes heartbeat/lifecycle telemetry, and
 # listens on the admin topic so a wedged manager can still be restarted.

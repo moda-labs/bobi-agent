@@ -157,6 +157,7 @@ class SupervisorState:
     # the same confirm before reporting a wedge.
     ever_healthy: bool
     health_fail_count: int
+    expected_busy: dict | None = None
     # Operator intent (#9): "running" normally, "stopped" after an operator
     # `stop`. Lets telemetry report an intentionally-stopped manager as
     # `stopped` rather than a probe FAILURE (intentional != broken).
@@ -226,6 +227,7 @@ class Supervisor:
                  project_root: Path | None = None,
                  now_fn=time.time, sleep_fn=time.sleep,
                  spawn_fn=None, health_fn=None, announce_fn=None,
+                 busy_fn=None,
                  observer: SupervisorObserver | None = None):
         self.start_args = list(start_args)
         self.config = config
@@ -234,6 +236,7 @@ class Supervisor:
         self._sleep = sleep_fn
         self._spawn_fn = spawn_fn or self._default_spawn
         self._health_fn = health_fn or self._default_health
+        self._busy_fn = busy_fn or self._default_busy
         self._announce_fn = announce_fn
         self._observer = observer or _NULL_OBSERVER
         self._budget = RestartBudget(config.max_restarts, config.restart_window,
@@ -253,6 +256,7 @@ class Supervisor:
         self._last_health: dict | None = None
         self._last_restart_reason: str | None = None
         self._last_restart_at: float | None = None
+        self._expected_busy: dict | None = None
         # Operator control plane (#9): admin commands arrive on the AdminListener
         # thread and append onto this queue under the lock; the main loop is the
         # SOLE executor (process management must stay single-threaded). A FIFO
@@ -287,6 +291,10 @@ class Supervisor:
             return None
         from bobi import manager_health
         return manager_health.health(f"http://127.0.0.1:{port}")
+
+    def _default_busy(self):
+        from bobi.expected_busy import active_lease_snapshot
+        return active_lease_snapshot(self.project_root or paths.bobi_root())
 
     # --- child lifecycle --------------------------------------------------
 
@@ -541,6 +549,15 @@ class Supervisor:
             self._last_health = None
             return self._handle_child_exit(rc)
         self._child_alive = True
+        try:
+            self._expected_busy = self._busy_fn()
+        except Exception:
+            log.warning("supervisor: expected-busy lease read failed",
+                        exc_info=True)
+            self._expected_busy = None
+        expected_busy = bool(
+            self._expected_busy and self._expected_busy.get("active")
+        )
 
         # 2. Probe health.
         payload = self._health_fn()
@@ -560,6 +577,11 @@ class Supervisor:
             log.warning("supervisor: health probe failed (%d/%d consecutive)",
                         self._fail_count, self.config.confirm_polls)
             if self._fail_count >= self.config.confirm_polls:
+                if expected_busy:
+                    log.warning("supervisor: probe failure suppressed by "
+                                "expected-busy lease")
+                    self._fail_count = 0
+                    return None
                 return self._restart_wedge()
             return None
         self._fail_count = 0
@@ -574,6 +596,10 @@ class Supervisor:
         # see (see DEAD_STATES); the shared budget still bounds repeated
         # error-deaths and escalates on exhaustion exactly like the wedge path.
         if status in DEAD_STATES:
+            if expected_busy:
+                log.warning("supervisor: status=error suppressed by "
+                            "expected-busy lease")
+                return None
             return self._restart_wedge("dead")
 
         # Credit healthy uptime only once the DIRECTOR is actually addressable
@@ -586,6 +612,11 @@ class Supervisor:
         if self._child_healthy_since is None and status in ("running", "idle"):
             self._child_healthy_since = self._now()
         if is_wedged(status, idle, self.config.stall_threshold):
+            if expected_busy:
+                self._stall_count = 0
+                log.warning("supervisor: stalled active turn suppressed by "
+                            "expected-busy lease")
+                return None
             self._stall_count += 1
             log.warning("supervisor: director stalled (status=%s, idle=%.0fs) "
                         "- confirm %d/%d", status, float(idle),
@@ -610,6 +641,7 @@ class Supervisor:
             # Per-boot: _child_healthy_since resets to None on every _respawn.
             ever_healthy=self._child_healthy_since is not None,
             health_fail_count=self._fail_count,
+            expected_busy=self._expected_busy,
             desired_state=self._desired_state,
         )
 

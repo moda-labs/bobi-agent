@@ -214,6 +214,26 @@ class TestTelemetryHeartbeat:
         assert sum(1 for (topic, s, d) in published
                    if topic == "fleet/heartbeat") == 4
 
+    def test_expected_busy_keeps_ambiguous_failure_out_of_probe_episode(
+            self, monkeypatch):
+        import bobi.supervisor.telemetry as tele
+        monkeypatch.setattr(tele.probe, "manager_pid_alive", lambda root: True)
+        monkeypatch.setattr(tele.probe, "status_file_age",
+                            lambda root, session, now: 9999.0)
+        published = []
+        t = _telemetry(published)
+
+        busy = {"active": True, "lease_count": 2, "expires_at": 2000.0}
+        t.poll(_state(status="running", idle=9999, expected_busy=busy))
+
+        heartbeat = [d for (topic, _, d) in published
+                     if topic == "fleet/heartbeat"][-1]
+        assert heartbeat["manager"]["status"] == "running"
+        assert heartbeat["manager"]["healthy"] is True
+        assert heartbeat["manager"]["expected_busy"] == busy
+        assert not [d for (topic, _, d) in published
+                    if topic == "fleet/lifecycle"]
+
     def test_post_restart_boot_not_reported_wedged(self, monkeypatch):
         """A fresh boot window after a restart (ever_healthy False, health not up
         yet) must report 'starting', not 'wedged' - the manager is booting, not

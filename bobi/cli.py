@@ -302,6 +302,28 @@ def supervise(ctx, start_args):
     raise SystemExit(run(root, list(start_args)))
 
 
+@main.command(context_settings={"ignore_unknown_options": True})
+@click.option("--ttl", default=900.0, type=float,
+              help="Lease TTL in seconds; renewed while the command runs.")
+@click.option("--label", default="busy command",
+              help="Operator-readable reason for the expected busy period.")
+@click.argument("command", nargs=-1, type=click.UNPROCESSED)
+@click.pass_context
+def busy(ctx, ttl, label, command):
+    """Run a sanctioned heavy command under a bounded supervisor lease.
+
+    Usage:
+        bobi agent eng busy --label "full unit gate" -- pytest tests/ -q
+    """
+    if not command:
+        raise click.UsageError("busy requires a command after --")
+    from bobi.expected_busy import ExpectedBusyLease, run_command
+
+    root = (ctx.obj or {}).get("root")
+    with ExpectedBusyLease(root, label=label, ttl=ttl):
+        raise SystemExit(run_command(tuple(command)))
+
+
 @main.command()
 @click.option("--foreground", "-f", is_flag=True, help="Run in the foreground (default: daemonize)")
 @click.option("--fresh", is_flag=True, help="Wipe session and start clean")
@@ -3678,7 +3700,7 @@ def costs_backfill(claude_config_dir, write, dry_run):
 for _cmd_name in [
     "start", "stop", "restart", "status", "ui", "message", "ask", "compact",
     "events", "costs", "doctor", "login-bootstrap", "recall-memory",
-    "supervise",
+    "supervise", "busy",
 ]:
     if _cmd_name in main.commands:
         agent.add_command(main.commands[_cmd_name])
@@ -3695,6 +3717,7 @@ for _old_top_level in [
     "start", "stop", "restart", "status", "ui", "message", "ask", "compact",
     "events", "costs", "doctor", "transcript", "workflows", "roles", "monitors", "kb",
     "event-server", "login-bootstrap", "recall-memory", "install", "supervise",
+    "busy",
 ]:
     main.commands.pop(_old_top_level, None)
 

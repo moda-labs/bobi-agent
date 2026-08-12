@@ -179,7 +179,8 @@ bobi agent <agent> subagents launch -w adhoc --role engineer --wait \
   --task "Review bobi/workflow/ for correctness bugs" > /tmp/r1.log 2>&1 &
 bobi agent <agent> subagents launch -w adhoc --role engineer --wait \
   --task "Review bobi/brain/ for correctness bugs" > /tmp/r2.log 2>&1 &
-pytest tests/ -q > /tmp/suite.log 2>&1 &
+bobi agent <agent> busy --label "full unit gate" -- \
+  pytest tests/ -q > /tmp/suite.log 2>&1 &
 
 # ...then join them ALL in one turn, and read the results.
 wait; tail -20 /tmp/r1.log /tmp/r2.log /tmp/suite.log
