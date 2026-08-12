@@ -65,8 +65,53 @@ def test_top_level_help_is_machine_scoped():
     assert "agent" in result.output
     assert "agents" in result.output
     assert "setup" in result.output
+    assert "guard" in result.output
     for removed in [" start", " stop", " status", " workflows", " monitors", " otel"]:
         assert removed not in result.output
+
+
+def test_guard_release_reports_released_roots(monkeypatch, tmp_path):
+    from bobi.runtime_guard import GuardReport, ProtectedRoot
+
+    report = GuardReport(protected=[
+        ProtectedRoot(tmp_path / "bobi", "bobi-package"),
+        ProtectedRoot(tmp_path / "bobi.dist-info", "bobi-dist-info"),
+    ])
+    monkeypatch.setattr(
+        "bobi.runtime_guard.release_runtime_write_policy", lambda: report)
+
+    result = CliRunner().invoke(main, ["guard", "release"])
+
+    assert result.exit_code == 0, result.output
+    assert "Released bobi-package" in result.output
+    assert "ready to upgrade" in result.output
+
+
+def test_guard_release_reports_noop(monkeypatch):
+    from bobi.runtime_guard import GuardReport
+
+    monkeypatch.setattr(
+        "bobi.runtime_guard.release_runtime_write_policy", lambda: GuardReport())
+
+    result = CliRunner().invoke(main, ["guard", "release"])
+
+    assert result.exit_code == 0
+    assert "No installed Bobi framework roots" in result.output
+
+
+def test_guard_release_fails_on_partial_release(monkeypatch, tmp_path):
+    from bobi.runtime_guard import GuardReport, ProtectedRoot
+
+    root = ProtectedRoot(tmp_path / "bobi", "bobi-package")
+    monkeypatch.setattr(
+        "bobi.runtime_guard.release_runtime_write_policy",
+        lambda: GuardReport(protected=[root], skipped=["denied"]),
+    )
+
+    result = CliRunner().invoke(main, ["guard", "release"])
+
+    assert result.exit_code == 1
+    assert "Could not release: denied" in result.output
 
 
 def test_agents_help_lists_machine_commands():

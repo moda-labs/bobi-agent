@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import shutil
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,12 +11,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bobi import paths
+from bobi import paths, runtime_guard
+from bobi.doctor import _check_runtime_write_policy
 from bobi.runtime_guard import (
     apply_runtime_write_policy,
     check_bobi_distribution_integrity,
     check_runtime_write_policy,
     protected_runtime_roots,
+    release_runtime_write_policy,
     with_mutable_runtime_package,
 )
 
@@ -70,6 +73,112 @@ class TestRuntimeWritePolicy:
         assert any("ROLE.md" in entry for entry in report.skipped)
         agent_yaml = paths.agent_yaml_path(tmp_path)
         assert not (agent_yaml.stat().st_mode & 0o222)
+
+    def test_release_unlocks_framework_roots_but_not_team_package(
+        self, tmp_path, monkeypatch,
+    ):
+        team = tmp_path / "team"
+        framework = tmp_path / "bobi"
+        dist_info = tmp_path / "bobi.dist-info"
+        for root in (team, framework, dist_info):
+            root.mkdir()
+            (root / "file").write_text("x")
+            for path in [root / "file", root]:
+                path.chmod(path.stat().st_mode & ~0o222)
+        roots = [
+            runtime_guard.ProtectedRoot(team, "team-package"),
+            runtime_guard.ProtectedRoot(framework, "bobi-package"),
+            runtime_guard.ProtectedRoot(dist_info, "bobi-dist-info"),
+        ]
+        monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: roots)
+
+        report = release_runtime_write_policy()
+
+        assert [root.kind for root in report.protected] == [
+            "bobi-package", "bobi-dist-info"]
+        assert not report.skipped
+        assert not (team.stat().st_mode & stat.S_IWUSR)
+        assert framework.stat().st_mode & stat.S_IWUSR
+        assert dist_info.stat().st_mode & stat.S_IWUSR
+
+    def test_release_allows_realistic_uv_tool_prefix_removal(
+        self, tmp_path, monkeypatch,
+    ):
+        prefix = tmp_path / "uv" / "tools" / "bobi" / "lib" / "python3.12"
+        package = prefix / "site-packages" / "bobi"
+        dist_info = prefix / "site-packages" / "bobi.dist-info"
+        (package / "nested").mkdir(parents=True)
+        dist_info.mkdir()
+        (package / "nested" / "module.py").write_text("x = 1\n")
+        (dist_info / "METADATA").write_text("Name: bobi\n")
+        roots = [
+            runtime_guard.ProtectedRoot(package, "bobi-package"),
+            runtime_guard.ProtectedRoot(dist_info, "bobi-dist-info"),
+        ]
+        monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: roots)
+        guard_report = apply_runtime_write_policy(None)
+
+        assert not guard_report.skipped
+        with pytest.raises(PermissionError):
+            shutil.rmtree(prefix.parent.parent)
+
+        report = release_runtime_write_policy()
+        shutil.rmtree(prefix.parent.parent)
+
+        assert not report.skipped
+        assert not (tmp_path / "uv" / "tools" / "bobi").exists()
+
+    def test_release_reports_partial_failure(self, tmp_path, monkeypatch):
+        framework = tmp_path / "bobi"
+        framework.mkdir()
+        denied = framework / "denied"
+        denied.write_text("x")
+        monkeypatch.setattr(
+            runtime_guard,
+            "protected_runtime_roots",
+            lambda _: [runtime_guard.ProtectedRoot(framework, "bobi-package")],
+        )
+        real_chmod = os.chmod
+
+        def chmod(path, mode, **kwargs):
+            if Path(path) == denied:
+                raise PermissionError(1, "Operation not permitted", str(path))
+            return real_chmod(path, mode, **kwargs)
+
+        monkeypatch.setattr(os, "chmod", chmod)
+
+        report = release_runtime_write_policy()
+
+        assert len(report.skipped) == 1
+        assert str(denied) in report.skipped[0]
+
+    def test_release_is_honest_noop(self, monkeypatch):
+        monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: [])
+
+        report = release_runtime_write_policy()
+
+        assert not report.protected
+        assert not report.skipped
+
+    def test_doctor_names_release_step_when_framework_is_locked(
+        self, tmp_path, monkeypatch,
+    ):
+        framework = runtime_guard.ProtectedRoot(
+            tmp_path / "bobi", "bobi-package")
+        monkeypatch.setattr("bobi.doctor.bound_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            runtime_guard,
+            "check_runtime_write_policy",
+            lambda _: runtime_guard.PolicyCheck(
+                ok=True, detail="1 protected runtime root(s)",
+                protected=[framework],
+            ),
+        )
+
+        result = _check_runtime_write_policy()
+
+        assert result.ok
+        assert "bobi guard release" in result.detail
 
     def test_mutable_window_fails_loud_on_unowned_files(self, tmp_path, monkeypatch):
         package = _write_runtime(tmp_path)

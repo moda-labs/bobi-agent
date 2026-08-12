@@ -107,6 +107,25 @@ bobi --version
 > `export PATH="$HOME/.local/bin:$PATH"` (and add it to your shell profile).
 > You can also install with `pipx install bobi` if you prefer pipx.
 
+### Upgrade or recover Bobi
+
+Stop all running teams before replacing the framework, then run:
+
+```bash
+bobi guard release
+uv tool upgrade bobi
+```
+
+Use `pipx upgrade bobi` or `brew upgrade bobi` for those install methods. The
+guard is applied again automatically when an agent next launches. If an earlier
+upgrade already broke the `bobi` command, rerun `scripts/install.sh`, or recover
+manually with:
+
+```bash
+chmod -R u+w "$(uv tool dir)/bobi"
+uv tool install --force bobi
+```
+
 Everything Bobi creates lives under one home directory, `~/.bobi` by default.
 You can inspect or delete it at any time without affecting anything else.
 

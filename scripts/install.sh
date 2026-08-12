@@ -44,7 +44,11 @@ if ! command -v uv &>/dev/null; then
 fi
 
 echo "Installing bobi..."
-uv tool install bobi
+tool_dir="$(uv tool dir)"
+if [[ -d "$tool_dir/bobi" ]]; then
+    chmod -R u+w "$tool_dir/bobi"
+fi
+uv tool install --force bobi
 
 echo ""
 echo "Done. Run 'bobi setup <name>' to create a Bobi Agent, or"

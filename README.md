@@ -115,6 +115,23 @@ Install bobi using https://raw.githubusercontent.com/moda-labs/bobi-agent/main/s
 
 See [scripts/install.sh](scripts/install.sh) for what the installer does.
 
+### Upgrading Bobi
+
+Stop all running teams, release the framework guard, then use your package
+manager's normal upgrade command:
+
+```bash
+bobi guard release
+uv tool upgrade bobi
+```
+
+For pipx or Homebrew, replace the second command with `pipx upgrade bobi` or
+`brew upgrade bobi`. The guard automatically returns on the next agent launch.
+If a previous upgrade already left `bobi` unable to start, rerun
+`scripts/install.sh`; it unlocks uv's Bobi tool directory without importing
+Bobi. Manual recovery is `chmod -R u+w "$(uv tool dir)/bobi"` followed by
+`uv tool install --force bobi`.
+
 ## Quick Start
 
 `eng-team` is the ready-to-use engineering agent that ships with Bobi - install it

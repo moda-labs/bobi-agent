@@ -191,6 +191,17 @@ def apply_runtime_write_policy(runtime_root: Path | None) -> GuardReport:
     return report
 
 
+def release_runtime_write_policy() -> GuardReport:
+    """Release package-manager-owned framework roots for an upgrade."""
+    report = GuardReport()
+    for root in protected_runtime_roots(None):
+        if root.kind not in ("bobi-package", "bobi-dist-info"):
+            continue
+        report.skipped.extend(_chmod_tree(root.path, _mutable_mode))
+        report.protected.append(root)
+    return report
+
+
 def _check_root(root: ProtectedRoot) -> list[str]:
     failures: list[str] = []
     if not root.path.exists():

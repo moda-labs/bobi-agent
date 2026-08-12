@@ -197,7 +197,17 @@ def _check_runtime_write_policy() -> CheckResult:
 
     result = check_runtime_write_policy(root)
     if result.ok:
-        return CheckResult("Runtime write policy", ok=True, detail=result.detail)
+        framework_locked = any(
+            protected.kind in ("bobi-package", "bobi-dist-info")
+            for protected in result.protected
+        )
+        detail = result.detail
+        if framework_locked:
+            detail += (
+                "; before upgrading, stop all teams and run "
+                "`bobi guard release`"
+            )
+        return CheckResult("Runtime write policy", ok=True, detail=detail)
     return CheckResult(
         "Runtime write policy",
         ok=False,
@@ -206,7 +216,8 @@ def _check_runtime_write_policy() -> CheckResult:
             "Runtime package images should be read-only. Re-run "
             "`bobi agents install ... --name <agent>`; same-UID chmod can "
             "bypass this guardrail, so use read-only mounts or split ownership "
-            "for a hard boundary."
+            "for a hard boundary. Before upgrading Bobi, stop all teams and run "
+            "`bobi guard release`."
         ),
     )
 

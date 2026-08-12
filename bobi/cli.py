@@ -240,6 +240,29 @@ def main(ctx):
 
 
 @main.group()
+def guard():
+    """Manage Bobi's runtime filesystem guard."""
+
+
+@guard.command("release")
+def guard_release():
+    """Release framework files before upgrading Bobi."""
+    from bobi.runtime_guard import release_runtime_write_policy
+
+    report = release_runtime_write_policy()
+    if not report.protected:
+        click.echo("No installed Bobi framework roots need releasing.")
+        return
+    for root in report.protected:
+        click.echo(f"Released {root.kind}: {root.path}")
+    if report.skipped:
+        for skipped in report.skipped:
+            click.echo(f"Could not release: {skipped}", err=True)
+        raise SystemExit(1)
+    click.echo("Bobi framework is ready to upgrade. Stop all teams until the upgrade finishes.")
+
+
+@main.group()
 @click.argument("name")
 @click.pass_context
 def agent(ctx, name):

@@ -63,13 +63,42 @@ def test_installer_accepts_node_20_and_installs_with_uv(tmp_path):
     fake_bin.mkdir()
     _write_executable(fake_bin / "node", "printf 'v20.19.2\\n'\n")
     uv_trace = tmp_path / "uv-trace"
+    tool_dir = tmp_path / "uv-tools"
+    _write_executable(fake_bin / "chmod", "exit 0\n")
     _write_executable(
         fake_bin / "uv",
-        f"printf '%s\\n' \"$*\" > {uv_trace}\n",
+        f"if [ \"$*\" = \"tool dir\" ]; then printf '%s\\n' {tool_dir}; "
+        f"else printf '%s\\n' \"$*\" > {uv_trace}; fi\n",
     )
 
     result = _run_installer(fake_bin, tmp_path)
 
     assert result.returncode == 0, result.stderr
-    assert uv_trace.read_text().strip() == "tool install bobi"
+    assert uv_trace.read_text().strip() == "tool install --force bobi"
     assert "Done." in result.stdout
+
+
+def test_installer_unlocks_existing_uv_tool_before_install(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "node", "printf 'v20.19.2\\n'\n")
+    tool_dir = tmp_path / "uv-tools"
+    (tool_dir / "bobi").mkdir(parents=True)
+    trace = tmp_path / "trace"
+    _write_executable(
+        fake_bin / "chmod",
+        f"printf 'chmod %s\\n' \"$*\" >> {trace}\n",
+    )
+    _write_executable(
+        fake_bin / "uv",
+        f"if [ \"$*\" = \"tool dir\" ]; then printf '%s\\n' {tool_dir}; "
+        f"else printf 'uv %s\\n' \"$*\" >> {trace}; fi\n",
+    )
+
+    result = _run_installer(fake_bin, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert trace.read_text().splitlines() == [
+        f"chmod -R u+w {tool_dir}/bobi",
+        "uv tool install --force bobi",
+    ]
