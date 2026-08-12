@@ -598,7 +598,6 @@ def _wait_for_code(project_path: Path, channel: LoginChannel | str,
 def run_bootstrap(
     project_path: Path,
     *,
-    channel: str | None = None,
     timeout: float = 600,
     url_timeout: float = 120,
     spawn_login=None,
@@ -612,6 +611,9 @@ def run_bootstrap(
     CLID/flow/credential path is used). The pty spawn, Slack post, code scrape,
     and event-bus wait are injectable so the orchestration is unit-testable
     without a real CLI, Slack, or Worker.
+
+    The destination is ``$BOBI_LOGIN_CHANNEL`` and takes no override - see the
+    comment on ``channel_ref`` below.
     """
     spawn_login = spawn_login or _spawn_login
     post_message = post_message or post_slack_message
@@ -650,7 +652,15 @@ def run_bootstrap(
             "Unset it before subscription login."
         )
 
-    channel_ref = channel or os.environ.get(LOGIN_CHANNEL_ENV, "")
+    # The destination is configuration, never a caller's argument. The login
+    # URL is a live credential-granting link, and the code pasted back into it
+    # is read from this same channel and written to the login CLI's stdin - so
+    # whoever picks the channel drives both ends of the flow. `login-bootstrap`
+    # sits on the `agent` group any worker's shell can reach, and a worker
+    # handling a fork diff, an issue body, or a webhook payload is handling
+    # untrusted text (docs/SECURITY.md). It once took a `--channel` that
+    # outranked this env var; it does not.
+    channel_ref = os.environ.get(LOGIN_CHANNEL_ENV, "")
     if not channel_ref:
         raise RuntimeError(
             f"{LOGIN_CHANNEL_ENV} is unset — need a private chat channel to post "
