@@ -250,9 +250,18 @@ a payload the firing right behind it was about to give up on. The out-of-band
 flavors (description-only, and native checks that invoke an agent) do not
 finish inside the due loop at all - they dispatch a detector and reconcile from
 a waiter thread minutes later - so the drain **holds** those monitors' parks
-until that firing has reconciled. Ordering the two clocks needs both halves: a
+until a firing has reconciled. Ordering the two clocks needs both halves: a
 manager back on Thursday must not send Monday's standup nudge out of the same
 tick that dispatched Thursday's check.
+
+The hold is bounded on both sides, because a hold that cannot be released is a
+park that never drains - the failure this whole section exists to stop.
+Whichever firing reconciles first releases it: a reconcile weighs the entire
+park against what the detector currently reports, and a firing still in flight
+cannot hold a more current view than the one that just ran. And it is taken
+only while the park holds a payload no firing has evaluated since it was
+parked, so a monitor due on every tick - which would otherwise take a fresh
+hold in the due loop, every tick, before the drain runs - keeps draining.
 
 The park's bounds, and what they mean for an operator:
 
