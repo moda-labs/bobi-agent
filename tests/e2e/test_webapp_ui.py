@@ -519,3 +519,58 @@ class TestMissingAgent:
         expect(stub.locator("a")).to_have_text("All agents")
         stub.locator("a").click()
         page.wait_for_selector(".agent-tile")
+
+
+# --- the saved popover's window --------------------------------------------
+
+class TestSavedPopover:
+    """The window the figures cover (MOD-373).
+
+    Every number in this card is lifetime-cumulative - `rollup_costs` folds
+    each session's whole recorded cost with no time filter. Saying so is the
+    difference between "saved ~$50" meaning this week and meaning since the
+    first run, and the reader cannot tell them apart from the figures.
+    """
+
+    def _open(self, page, webapp):
+        _agent(page, webapp)
+        chip = page.locator('[data-el="savedChip"]')
+        expect(chip).not_to_have_text("saved …", timeout=10_000)
+        chip.click()
+        card = page.locator('[data-el="savedCard"]')
+        expect(card).to_be_visible()
+        return card
+
+    def test_the_eyebrow_states_the_figures_are_lifetime(self, webapp, page):
+        _seed_runs(webapp.install)
+        card = self._open(page, webapp)
+        # Scoped on the heading, so it covers every row, not just the total.
+        expect(card.locator(".eyebrow")).to_have_text("saved · lifetime")
+
+    def test_the_window_is_stated_once_not_twice(self, webapp, page):
+        """The note used to carry the only mention, buried in the estimate
+        sentence. Now the eyebrow owns the window and the note owns the
+        caveat - say either twice and neither reads as load-bearing."""
+        _seed_runs(webapp.install)
+        card = self._open(page, webapp)
+        note = card.locator(".note")
+        # The honest limit on "lifetime" survives; the duplicate does not.
+        expect(note).to_contain_text("over runs still on disk")
+        assert "lifetime" not in note.inner_text().lower()
+
+    def test_the_chip_counts_a_single_run_in_the_singular(self, webapp, page):
+        """`_seed_runs` leaves exactly one session with usage to fold, which
+        the chip rendered as "1 runs" - the dashboard's session count next to
+        it has always pluralised."""
+        _seed_runs(webapp.install)
+        _agent(page, webapp)
+        chip = page.locator('[data-el="savedChip"]')
+        expect(chip).to_contain_text("1 run", timeout=10_000)
+        assert "1 runs" not in chip.inner_text()
+
+    def test_the_label_holds_when_there_is_nothing_saved(self, webapp, page):
+        """A team with no priced usage renders no total row. The window is a
+        property of the read, not of having spent - it must not vanish with
+        the figures it qualifies."""
+        card = self._open(page, webapp)
+        expect(card.locator(".eyebrow")).to_have_text("saved · lifetime")
