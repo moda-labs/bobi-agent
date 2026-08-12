@@ -113,6 +113,42 @@ def test_unit_tests_gate_is_a_stable_required_check_that_cannot_false_green():
     assert "exit 1" in run
 
 
+def test_ci_proves_the_shipped_bundle_survives_a_newer_node_major():
+    event_steps = _ci_workflow()["jobs"]["event-server"]["steps"]
+
+    def index_of(predicate):
+        return next(
+            index for index, step in enumerate(event_steps) if predicate(step)
+        )
+
+    bundle_index = index_of(
+        lambda step: step.get("name") == "Build embedded local-server artifact"
+    )
+    record_index = index_of(
+        lambda step: step.get("name") == "Record the release-major bundle digest"
+    )
+    newer_node_index = index_of(
+        lambda step: step.get("uses", "").startswith("actions/setup-node")
+        and str(step.get("with", {}).get("node-version")) != "20"
+    )
+    compare_index = index_of(
+        lambda step: step.get("name")
+        == "Wheel builds on a newer Node major and ships an identical bundle"
+    )
+    record = event_steps[record_index]
+    compare = event_steps[compare_index]
+
+    assert bundle_index < record_index < newer_node_index < compare_index
+    assert compare_index == len(event_steps) - 1
+    assert "set -euo pipefail" in record["run"]
+    assert "test -s dist/local.js" in record["run"]
+    assert "set -euo pipefail" in compare["run"]
+    assert "test -n \"$RELEASE_BUNDLE_SHA256\"" in compare["run"]
+    assert "python -m build --wheel" in compare["run"]
+    assert "bobi/event-server/dist/local.js" in compare["run"]
+    assert "exit 1" in compare["run"]
+
+
 def test_promote_dev_advances_only_on_fully_green_main_push():
     """#740 Track A: `dev` is the pre-release channel the private deploy repo
     consumes, so it must only ever point at a main commit the WHOLE CI matrix
