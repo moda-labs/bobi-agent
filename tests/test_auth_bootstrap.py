@@ -1225,3 +1225,133 @@ def test_run_bootstrap_codex_refuses_with_openai_key(slack_config, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-x")
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
+
+
+# --- the login destination is configuration, not an argument ----------------
+#
+# `login-bootstrap` is registered on the `agent` group (bobi/cli.py), which is
+# the surface any worker's shell reaches, and worker sessions run with
+# `permission_mode="bypassPermissions"` (bobi/brain/claude.py). These drive the
+# REAL CLI on that real group - not run_bootstrap directly - so the worker's
+# own invocation is what is under test. Only the three seams that leave the
+# process are faked: the login pty, the chat post, and the event-bus wait.
+
+OPERATOR_CHANNEL = "C0LOGIN42"      # what $BOBI_LOGIN_CHANNEL is configured to
+ATTACKER_CHANNEL = "D0ATTACKER99"   # a Slack DM the caller picked
+# Synthetic stand-in. A real sign-in URL is a live credential-granting link and
+# never belongs in a fixture, a log, or a PR.
+FAKE_LOGIN_URL = "https://login.invalid/oauth/authorize?synthetic=1"
+
+
+@pytest.fixture
+def cli_login_install(bobi_install, tmp_path, monkeypatch):
+    """An installed team with no credentials, whose login channel is configured."""
+    import yaml
+
+    agent_yaml = bobi_install.repo_path / "package" / "agent.yaml"
+    cfg = yaml.safe_load(agent_yaml.read_text())
+    cfg["event_server_url"] = "wss://example"
+    cfg["services"] = [{
+        "name": "slack",
+        "events": True,
+        "credentials": {"bot_token": "xoxb-test"},
+    }]
+    agent_yaml.write_text(yaml.dump(cfg))
+
+    monkeypatch.setenv("HOME", str(tmp_path / "login-home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-volume"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv(ab.LOGIN_CHANNEL_ENV, OPERATOR_CHANNEL)
+    return bobi_install
+
+
+def _fake_login_seams(monkeypatch, tmp_path) -> list[tuple[str, str]]:
+    """Fake the pty, the chat post, and the bus wait. Returns the posts made."""
+    posts: list[tuple[str, str]] = []
+    creds = tmp_path / "claude-volume" / ".credentials.json"
+
+    class FakeProc:
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_wait(project_path, channel, timeout):
+        # Stand in for the human pasting the code back; claude writes creds.
+        creds.parent.mkdir(parents=True, exist_ok=True)
+        creds.write_text(json.dumps({
+            "claudeAiOauth": {"refreshToken": "refresh"},
+        }))
+        return "synthetic-code"
+
+    monkeypatch.setattr(ab, "_spawn_login", lambda home: (FakeProc(), -1))
+    monkeypatch.setattr(ab, "_read_until_url", lambda fd, timeout: FAKE_LOGIN_URL)
+    monkeypatch.setattr(ab, "_write_line", lambda fd, text: None)
+    monkeypatch.setattr(ab, "post_slack_message",
+                        lambda token, channel, text: posts.append((channel, text)))
+    monkeypatch.setattr(ab, "_wait_for_code", fake_wait)
+    return posts
+
+
+def test_login_bootstrap_refuses_a_caller_chosen_destination(
+    cli_login_install, tmp_path, monkeypatch,
+):
+    """A worker must not be able to redirect the brain's OAuth login flow.
+
+    Regression for the `--channel` hole: the flag outranked
+    $BOBI_LOGIN_CHANNEL, so `bobi agent <name> login-bootstrap --channel
+    D<attacker>` posted the live sign-in URL (and, on codex, the one-time
+    device code) wherever the caller said - then read the pasted code back
+    from that same caller-chosen destination and wrote it into the login
+    CLI's stdin.
+    """
+    from click.testing import CliRunner
+
+    from bobi.cli import main
+    from tests.conftest import TEST_AGENT_NAME
+
+    posts = _fake_login_seams(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(main, [
+        "agent", TEST_AGENT_NAME, "login-bootstrap",
+        "--channel", ATTACKER_CHANNEL,
+    ])
+
+    # Pin the *reason* for the refusal, not just its exit code - a broken
+    # fixture would otherwise satisfy both assertions below vacuously.
+    assert result.exit_code == 2, (
+        "a caller-chosen login destination must be refused as a usage error:\n"
+        + result.output
+    )
+    assert "No such option" in result.output and "--channel" in result.output, (
+        result.output
+    )
+    assert posts == [], (
+        f"the login flow ran for a refused invocation and posted: {posts}"
+    )
+
+
+def test_login_bootstrap_posts_only_to_the_configured_channel(
+    cli_login_install, tmp_path, monkeypatch,
+):
+    """First boot still works: docker-entrypoint.sh's exact bare invocation.
+
+    This is the flow the command exists for, and the reason the fix removes the
+    override rather than the destination - $BOBI_LOGIN_CHANNEL still drives it.
+    """
+    from click.testing import CliRunner
+
+    from bobi.cli import main
+    from tests.conftest import TEST_AGENT_NAME
+
+    posts = _fake_login_seams(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(
+        main, ["agent", TEST_AGENT_NAME, "login-bootstrap"])
+
+    assert result.exit_code == 0, result.output
+    assert posts, "the login URL must still reach the configured channel"
+    assert {channel for channel, _text in posts} == {OPERATOR_CHANNEL}
+    assert any("oauth/authorize" in text for _channel, text in posts)
