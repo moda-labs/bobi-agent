@@ -80,6 +80,11 @@ loopback address - it calls `ensure_running()` (`bobi/events/server.py`), which
 health-checks `http://localhost:<port>/health`.
 A standard wheel already contains a self-contained `dist/local.js`, its input and output manifest, and fixed third-party notices.
 Installed startup validates those files, requires Node.js 20 or newer, removes inherited Node preload and module-search variables, and spawns the bundle directly.
+
+Building that bundle - including installs from git or an sdist - also requires Node.js 20 or newer.
+Pinned esbuild emits an explicit `--target=node20` bundle, so the host major does not set the output syntax.
+CI builds a wheel on a newer Node major and requires its shipped bundle to be byte-identical to the release-major build.
+Release builds remain pinned to Node 20 for provenance, not because newer majors are unsupported.
 It never invokes npm, installs dependencies, builds JavaScript, or writes inside the installed package.
 
 A writable source checkout uses the same bundle contract with content hashes across manifests, lockfile, TypeScript configuration, root sources, and workspace sources.
