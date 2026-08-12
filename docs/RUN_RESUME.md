@@ -1,16 +1,18 @@
 # Force-resuming a waiting run
 
-> The agent UI no longer exposes force-resume. Awaiting-action rows resend the
-> original gate notification or close the workflow. The endpoint below remains
-> available to the CLI/framework for explicit force-continuation.
+> The agent UI no longer exposes force-resume or remind. Close is the one write
+> action an awaiting-action row offers. The endpoints below remain available to
+> the CLI/framework and to the hosted admin protocol.
 
-## User-facing waiting actions
+## Waiting actions
 
 `POST /api/agents/{name}/workflows/runs/{run_id}/remind` reconstructs the
 visited deterministic notification from saved workflow context and posts it to
 the original Slack channel/thread. A legacy gate whose agent sent the original
 message gets a generic same-thread reminder naming the workflow and awaited
-action. It does not mutate the run or emit the awaited event.
+action. It does not mutate the run or emit the awaited event. The agent page
+dropped its Remind button in MOD-371 - the button did not deliver - so this
+endpoint is now reached from the CLI and the hosted admin protocol only.
 
 `POST /api/agents/{name}/workflows/runs/{run_id}/close` atomically competes with
 resume/event delivery for a still-waiting run. The winner closes the workflow as

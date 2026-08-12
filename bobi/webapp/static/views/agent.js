@@ -592,8 +592,8 @@ export function mountAgent(el, { api, name }) {
     }, 250);
   });
 
-  /** Transcript stays visible on every row. Awaiting workflows add delivery
-      and closure actions; neither action advances the approval gate. */
+  /** Transcript stays visible on every row. Awaiting workflows add a closure
+      action, which ends the run without advancing the approval gate. */
   function rowActions(row) {
     const actions = mk("div", "row-actions");
     const transcript = mk("button", "btn bobi-btn small", "Transcript");
@@ -617,14 +617,6 @@ export function mountAgent(el, { api, name }) {
     }
 
     if (row.status === "awaiting_action") {
-      const remindButton = mk("button", "btn bobi-btn small remind", "Remind");
-      remindButton.type = "button";
-      remindButton.addEventListener("click", (e) => {
-        e.stopPropagation();
-        remind(row, remindButton);
-      });
-      actions.appendChild(remindButton);
-
       const closeButton = mk("button", "btn bobi-btn small quiet", "Close");
       closeButton.type = "button";
       closeButton.addEventListener("click", (e) => {
@@ -634,27 +626,6 @@ export function mountAgent(el, { api, name }) {
       actions.appendChild(closeButton);
     }
     return actions;
-  }
-
-  async function remind(row, button) {
-    button.disabled = true;
-    button.textContent = "Sending…";
-    const { ok, data } = await api(
-      `${base}/workflows/runs/${encodeURIComponent(row.run_id)}/remind`,
-      { method: "POST", body: "{}" });
-    if (!ok) {
-      button.disabled = false;
-      button.textContent = "Remind";
-      showReport("reminder failed", (data && data.error) || "");
-      return;
-    }
-    button.textContent = "Sent";
-    setTimeout(() => {
-      if (button.isConnected) {
-        button.disabled = false;
-        button.textContent = "Remind";
-      }
-    }, 1800);
   }
 
   async function closeRun(row, button) {
