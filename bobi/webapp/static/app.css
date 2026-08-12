@@ -853,10 +853,13 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   border-radius: var(--radius-xl); box-shadow: var(--elev-4);
 }
 .pop-card .eyebrow { margin-bottom: 10px; }
-/* The window the card's figures cover. Muted and regular-weight so it reads
-   as a qualifier on the heading, not a second heading. */
+/* The window the card's figures cover. Regular weight is what makes it read
+   as a qualifier rather than a second heading, so the colour does not also
+   have to recede: --text-faint is 3.75:1 here, under AA, and this label
+   changes how every figure below it is read. --text-secondary matches the kv
+   keys it sits above. */
 .pop-card .eyebrow .scope {
-  color: var(--text-faint); font-weight: var(--weight-regular);
+  color: var(--text-secondary); font-weight: var(--weight-regular);
 }
 .agent-page .eyebrow {
   font-family: var(--font-sans); font-size: 13.5px;
