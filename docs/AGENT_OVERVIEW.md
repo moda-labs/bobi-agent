@@ -93,6 +93,22 @@ priced, not because nothing was saved. A caller showing dollars should show
 in their own block, beside a bill and never inside one — the same separation
 `estimated_cost_usd` already keeps from `total_cost_usd`.
 
+## The window: lifetime, and why there is no since-date
+
+Every figure in the spend payload is **lifetime-cumulative**. `rollup_costs`
+folds each session's whole recorded cost with no time filter, so `saved ~$50`
+is since the first run still on disk, never this week. The saved card states
+that on its heading rather than leaving the reader to guess (MOD-373).
+
+It says `lifetime` and not `since <date>` deliberately. No timestamp rides
+`CostSummary`, and the one that could be derived - the earliest `started_at`
+across folded sessions - would name the oldest session **still on disk**, not
+the agent's first run. Nothing prunes those directories, but a rebuilt box or
+a cleared state dir loses them, and a since-date that silently moves forward
+whenever old sessions disappear is worse than the honest word. A real
+since-date needs a first-run timestamp recorded once per team, at team level;
+until something records one, `lifetime` is the claim the data supports.
+
 ## Compatibility
 
 `TeamRuntime.overview()` **is** an `@abstractmethod`, as of the lane that gave

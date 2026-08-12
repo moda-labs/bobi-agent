@@ -853,6 +853,11 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   border-radius: var(--radius-xl); box-shadow: var(--elev-4);
 }
 .pop-card .eyebrow { margin-bottom: 10px; }
+/* The window the card's figures cover. Muted and regular-weight so it reads
+   as a qualifier on the heading, not a second heading. */
+.pop-card .eyebrow .scope {
+  color: var(--text-faint); font-weight: var(--weight-regular);
+}
 .agent-page .eyebrow {
   font-family: var(--font-sans); font-size: 13.5px;
   color: var(--text-primary); font-weight: var(--weight-medium);

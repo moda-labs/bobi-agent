@@ -323,11 +323,21 @@ export function mountAgent(el, { api, name }) {
     const cacheSaved = cache.estimated_savings_usd || 0;
     const total = estimated + cacheSaved;
 
+    // Pluralised like the dashboard's session count - a fresh team's first
+    // run rendered "1 runs".
+    const runs = spend.sessions_counted || 0;
+    const ran = `${runs} run${runs === 1 ? "" : "s"}`;
     els.savedChip.textContent = total > 0
-      ? `saved ~${fmtUsd(total)} · ${spend.sessions_counted || 0} runs`
-      : `saved · ${spend.sessions_counted || 0} runs`;
+      ? `saved ~${fmtUsd(total)} · ${ran}`
+      : `saved · ${ran}`;
 
-    card.appendChild(mk("div", "eyebrow", "saved"));
+    // Every figure below is lifetime-cumulative (the fold applies no time
+    // filter), so the window is stated on the heading rather than beside
+    // one row - "saved ~$50" is unreadable without it.
+    const head = mk("div", "eyebrow", "saved");
+    head.appendChild(document.createTextNode(" · "));
+    head.appendChild(mk("span", "scope", "lifetime"));
+    card.appendChild(head);
     kv(card, "list-price value of tokens", fmtEst(estimated) || "—");
     kv(card, "recorded spend", recorded > 0 ? fmtUsd(recorded)
                                             : "$0 (subscription)");
@@ -353,9 +363,11 @@ export function mountAgent(el, { api, name }) {
            fmtTok((t.input_tokens || 0) + (t.output_tokens || 0)) + " tok");
       }
     }
+    // The eyebrow owns the window; this owns the limit ON it - sessions are
+    // read off disk, so "lifetime" means every run still there.
     card.appendChild(mk("div", "note",
       "Estimated at API list price for the tokens this team actually used." +
-      " Lifetime, over runs still on disk." + EST_NOTE));
+      " Counted over runs still on disk." + EST_NOTE));
   }
 
   /** about — composition, read-only. Editing lives in setup. */
