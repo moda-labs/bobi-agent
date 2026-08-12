@@ -1,5 +1,105 @@
 # Changelog
 
+## 0.57.0 - 2026-08-11
+
+Minor release: agents can author their own OTLP telemetry, subscription login
+gets five fixes along one path (gateways, provider config dirs, stale bubbles,
+and two Slack failure modes), and the review-remediation sweep closes Lane A
+and Phase 5 and lands all five Phase 6 consolidation batches.
+
+### Added
+- **`bobi agent <name> otel` — agent-authored OTLP telemetry (#980, #978).**
+  Three commands (`metric`, `gauge`/`counter`/`histogram` kinds; `log`;
+  `check [--send]`) that let an agent record telemetry **of its own choosing**
+  to any OTLP endpoint: the agent supplies the observation, bobi supplies the
+  wire format and the fleet identity labels the agent cannot resolve for
+  itself. Opt-in per team via `tool_library: [otel]` — deliberately not in the
+  base prompt. Operator setup and the resource-attribute table are in
+  `docs/OTEL.md`.
+- **Browser-level e2e coverage for both web UIs (#990, #991).** Setup
+  back-navigation, the shared top-bar contract across `bobi setup` and
+  `bobi app` (which had already regressed once, silently), a type-rendering
+  guard, and 36 tests over the web app itself. Both surfaces now boot through
+  one `_serve()` fixture.
+
+### Fixed
+
+Subscription login, end to end:
+- **A Claude-gateway team could not use subscription login (#1002).** The
+  login guard reused the gateway-declaration predicate as an auth-mode
+  predicate and raised before selecting the PTY flow; the Docker entrypoint
+  rejected such teams before bootstrap could run; and bootstrap discarded the
+  configured base URL. A declared `base_url` with no `ANTHROPIC_AUTH_TOKEN`
+  now runs the ordinary subscription bootstrap; explicitly token-authenticated
+  Claude gateways and all OpenAI-compatible gateways still fail closed.
+- **A successful login could be reported as failed under `CLAUDE_CONFIG_DIR`
+  (#1003).** Credentials were resolved relative to `$HOME` regardless of the
+  provider's own config-dir override, so bobi missed what the CLI had just
+  written and repeated the login ceremony on every start. Claude credentials
+  now follow `CLAUDE_CONFIG_DIR` and Codex `CODEX_HOME`, with the HOME
+  fallback preserved.
+- **Stale bubble credentials wedged login bootstrap after an event-server
+  restart (#996).** Failed channel registration/JOIN is now probed to
+  distinguish a stale bubble, credentials re-mint through the compare-and-swap
+  guard, and the JOIN retries once. Stored subscription credentials are also
+  structurally validated — missing, malformed, blank, or expired refresh
+  tokens trigger bootstrap instead of being assumed healthy.
+- **Slack channel login told users to paste the code where the adapter could
+  not hear it (#1001).** A top-level channel message is not a routable inbound
+  shape, so the pasted code was dropped and bootstrap waited to timeout. The
+  prompt now says reply-in-thread or @mention the bot, matching the routes
+  that actually exist.
+- **A Slack bot token missing `users:read` looked healthy while every inbound
+  event was silently dropped (#998).** `bots.info` failing left an empty app
+  id, and subscription detection fell back to a workspace-only topic that no
+  publisher uses — exact topic matching then delivered nothing. Identity
+  resolution now fails closed, naming the missing scope.
+
+Review-remediation Lane A closes (#970, #972 — the final 20 bugs, each with a
+test proven to fail first):
+- **Codex sessions wiped each other's MCP servers (D009).** Codex re-reads
+  `config.toml` on every `codex exec`, and any session built without
+  `mcp_servers` in its options — every monitor check, gate, and workflow step
+  — read the absent key as "the team has none" and erased the bobi-managed
+  block out from under the manager and every other live session.
+- **`--project` never matched a repo with a hyphen in its name (D069).** The
+  lossy cwd decode (`-Users-z-dev-bobi-agent` → `/Users/z/dev/bobi/agent`) is
+  replaced by the transcript's real cwd, with the decode kept only as a
+  fallback.
+- Plus 18 more across the history indexer, both search paths, the doctor
+  probes, packaging, and the long-running/blocking surfaces.
+
+Test infrastructure:
+- **The container-image integration tests were unrunnable locally (#975).**
+  The fixture's fallback `docker build` used a source mode that cannot succeed
+  anywhere (`.dockerignore` drops both `.git` and the prebuilt event server,
+  and the image is deliberately Node-free), reading as "docker unavailable."
+  It now builds the wheel first, the way CI always has.
+- **A Worker MCP test measured the runner, not the code (#973).** The 3s
+  stopwatch flaked on a loaded 2-core runner; the wait contract is now
+  asserted by poll count.
+
+### Changed / Removed
+- **Dead-code purge — review-remediation Phase 5 complete, 42 items (#979,
+  #982, #983, #984).** Fourteen zero-consumer names, the expired
+  curator→sleep-cycle and policy→long_term_memory rename compat layers, dead
+  CLI helpers duplicating the live start/stop paths, and the callerless
+  terminal `run_setup` entry point (the web UI is the entry point).
+- **Consolidation — review-remediation Phase 6, all five batches (#993, #995,
+  #997, #999, #1000).** Behavior-preserving single-sourcing across `events/`,
+  `cli.py`, `setup/`, `monitors/` + `sdk.py`, and compose/build: one
+  definition each for Slack identity resolution, event-server port
+  resolution, `subscribe:` parsing, launch-admission defaults, `_parse_iso`,
+  and credential precedence (two setup screens had it in the opposite order
+  from the runtime). Two deliberate deltas: monitor `notify_channel` no
+  longer re-parses `agent.yaml` on every notification, and the hidden `ask`
+  command loses its unused `--source` option.
+- **The `dogfood-content-review` agent pack is deleted (#974)** — no
+  auto-dispatch, no CI reference, no substantive change since 2026-07-01.
+- **Docs (#985):** the single-agent page is documented in `README.md`; the
+  never-built "Edit design" affordance is cut from the single-agent-view
+  plan's scope rather than left claimed.
+
 ## 0.56.0 - 2026-08-05
 
 Minor release: the single-agent page that 0.55.0 gave the local dashboard now

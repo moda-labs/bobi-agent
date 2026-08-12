@@ -336,9 +336,14 @@ is already set to the worktree path — you do not need to create one manually.
 The worktree lives at `.claude/worktrees/<session-name>` inside the repo root.
 The branch name follows the `agent/<issue-id>` convention.
 
-**Cleanup is automatic.** When a PR is closed (merged or abandoned), the
-`pr-closed` workflow removes the worktree and branch deterministically.
-You never need to clean up worktrees manually.
+**Cleanup is automatic for merged PRs.** When a PR is merged, the `pr-closed`
+workflow removes the worktree and branch deterministically. You never need to
+clean up worktrees manually.
+
+A PR closed **without** merging keeps its branch and worktree: that head may be
+the only copy of the work, so the workflow re-reads the PR's state from GitHub
+and preserves everything unless GitHub says it merged. Deleting an abandoned
+PR's branch is a human decision.
 
 ### Push
 
