@@ -568,6 +568,17 @@ class TestPublishFailureIsNotDropped:
             "record's 'retrying next interval' is the only trace it existed."
         )
 
+    @staticmethod
+    def _deliveries(published, finding_key, event) -> int:
+        return len([p for p in published
+                    if p["event"] == event
+                    and p["data"].get("finding_key") == finding_key])
+
+    @staticmethod
+    def _state(state_dir, monitor) -> dict:
+        return json.loads(
+            (state_dir / "monitor_state.json").read_text())[monitor.state_key]
+
     def test_at_monitor_finding_survives_a_failed_publish(self, bobi_install):
         """roadmap-pm's standup: description flavor on a weekday `at:` slot."""
         from bobi.monitors import run_records
@@ -609,14 +620,19 @@ class TestPublishFailureIsNotDropped:
         assert spawned == ["standup-due"]  # the schedule itself worked
 
         # The observed aftermath: nothing active, nothing published, and a
-        # run record promising a retry.
-        state = json.loads(
-            (bobi_install.state_dir / "monitor_state.json").read_text())
-        assert state[m.state_key]["active"] == []
+        # run record promising a retry. The promise is only worth anything if
+        # the payload survived it, so that is what is asserted - #1006 was a
+        # true-sounding sentence sitting next to no mechanism.
+        state = self._state(bobi_install.state_dir, m)
+        assert state["active"] == []
+        assert state["pending_publish"] == {
+            finding_key: {"summary": "Standup is due for Monday 2026-08-10.",
+                          "text": "Standup is due for Monday 2026-08-10.",
+                          "key": finding_key, "date": "2026-08-10"}}
         record = run_records.load("standup-due")[0]
         assert record.outcome == run_records.FAILED
         assert record.published == 0
-        assert "retrying next interval" in record.reason
+        assert "parked for a mechanical retry" in record.reason
 
         # The transport recovers one tick later and stays up all day.
         outage["down"] = False
@@ -624,6 +640,15 @@ class TestPublishFailureIsNotDropped:
 
         self._assert_finding_was_lost(published, finding_key,
                                       "monitor/standup.due")
+
+        # Delivered, and delivered ONCE: auto_dispatch routes this event, so a
+        # retry that double-delivered would launch two standup workers. The
+        # park is emptied by the delivery, not left to be re-sent forever.
+        assert self._deliveries(published, finding_key,
+                                "monitor/standup.due") == 1
+        state = self._state(bobi_install.state_dir, m)
+        assert "pending_publish" not in state
+        assert state["active"] == [finding_key]
 
     def test_notify_monitor_finding_survives_a_failed_publish(self, bobi_install):
         """bobi-eng-team's roundup: notify flavor, same shared path.
@@ -658,16 +683,24 @@ class TestPublishFailureIsNotDropped:
 
         # Byte-identical aftermath to the description flavor's: the shared
         # path, not the flavor, is what lost the finding.
-        state = json.loads(
-            (bobi_install.state_dir / "monitor_state.json").read_text())
-        assert state[m.state_key]["active"] == []
+        state = self._state(bobi_install.state_dir, m)
+        assert state["active"] == []
+        assert state["pending_publish"] == {
+            finding_key: {"description": "Twice-daily status roundup."}}
         record = run_records.load("team-status-roundup")[0]
         assert record.outcome == run_records.FAILED
         assert record.published == 0
-        assert "retrying next interval" in record.reason
+        assert "parked for a mechanical retry" in record.reason
 
         outage["down"] = False
         self._tick_through_to_the_next_slot(sched, clock, fired_at)
 
         self._assert_finding_was_lost(published, finding_key,
                                       "monitor/status.roundup_due")
+
+        # Once, and the park is empty. The 06:00 slot inside this loop fires
+        # its own roundup under its own key; neither firing re-sends the
+        # other's.
+        assert self._deliveries(published, finding_key,
+                                "monitor/status.roundup_due") == 1
+        assert "pending_publish" not in self._state(bobi_install.state_dir, m)

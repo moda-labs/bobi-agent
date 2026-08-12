@@ -207,9 +207,9 @@ reconcile path (`scheduler.py`):
 - Conditions are deduped by `id_field` (a SHA-256 of the payload if absent).
   Only keys not already active publish - so a condition fires once, not every
   tick it stays true.
-- A condition is recorded active **only after its event actually publishes**, so
-  a failed publish (event server briefly down) retries next interval instead of
-  being lost.
+- A condition is recorded active **only after its event actually publishes**. A
+  failed publish (event server briefly down) is **parked** with its payload in
+  `pending_publish` and retried by the drain below, instead of being lost.
 - Out-of-band agent failures publish `system/monitor.error` with the monitor
   name, flavor, reason (`spawn-failed`, `timeout`, or
   `indeterminate-result`), and detail. The drain loop actively delivers the
@@ -217,8 +217,43 @@ reconcile path (`scheduler.py`):
   throttles repeated identical failures there so observability does not become
   inbox spam. The failure is also written to `manager.log`.
 
-Scheduler-owned state (last-run times, active condition keys) lives in
-`run/state/monitor_state.json`, rewritten wholesale each tick.
+Scheduler-owned state (last-run times, active condition keys, parked payloads)
+lives in `run/state/monitor_state.json`, rewritten wholesale each tick.
+
+### The retry park
+
+A publish that fails is the one failure a monitor can recover from by itself:
+the payload is still in hand, and re-sending it needs no detector, no model and
+no schedule. So it is parked in `pending_publish` and retried at the **top of
+every tick**, whether or not its monitor is due.
+
+That "whether or not it is due" is the whole point. The retry used to be
+re-detection: the next interval would find the condition again and fire it
+again. That is true only for a standing condition an interval monitor
+re-derives every tick. A scheduled monitor's next interval is a day away and
+its finding key is date- or instant-stamped, so its lost finding was never
+re-derived and never retried - a daily standup nudge simply did not happen,
+with `outcome: failed` in its run record the only trace (#1006).
+
+The park's bounds, and what they mean for an operator:
+
+- **It gives up when the detector does.** A parked key that the monitor's next
+  firing no longer reports has been retired at the source, and it is dropped:
+  delivering Monday's standup nudge on Tuesday is worse than not delivering it.
+  A standing condition keeps re-appearing and keeps its place in the park.
+- **One failed post ends the drain for that tick.** A failure means the
+  transport is down, so the remaining payloads are not attempted - a dead event
+  server costs one 10s timeout per tick, not one per parked payload.
+- **It holds at most 50 payloads per monitor**, so a detector reporting
+  hundreds of conditions into a dead server cannot grow the state file without
+  bound.
+- **A late delivery writes its own run record**, so the ledger a lost firing is
+  diagnosed from shows the delivery that eventually followed it.
+
+Both give-up paths (a retired key, a full park) are written to `manager.log`
+and to the run record. Neither yet reaches the operator's inbox - surfacing
+them is the open half of #1006, and it needs an off-bus sink, because during an
+event-server outage the inbox is exactly what is unreachable.
 
 ## Run records: what each firing actually did
 

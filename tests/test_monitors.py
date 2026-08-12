@@ -1089,10 +1089,10 @@ class TestCheckVerdictFlow:
 
 class TestPublishRetry:
     """A condition is recorded active only after its event actually
-    publishes — a failed publish (event server down) retries next interval
-    instead of being silently lost."""
+    publishes — a failed publish (event server down) is parked with its
+    payload and retried by the tick drain instead of being silently lost."""
 
-    def test_failed_publish_refires_next_reconcile(self, tmp_path):
+    def test_failed_publish_is_parked_and_the_drain_retries_it(self, tmp_path):
         outcomes = iter([False, True])
         calls = []
 
@@ -1106,10 +1106,98 @@ class TestPublishRetry:
 
         sched._reconcile(m, [Condition(key="k", data={})])
         assert sched.state["x"]["active"] == []  # not active until published
+        assert sched.state["x"]["pending_publish"] == {"k": {}}
+
+        # The detector still reports it, and reconcile must NOT fire it again:
+        # the park owns the key now, and one outage delivering the same
+        # finding twice is its own bug.
+        sched._reconcile(m, [Condition(key="k", data={})])
+        assert calls == [False]
+
+        sched._drain_parked()
+        assert calls == [False, True]
+        assert sched.state["x"]["active"] == ["k"]
+        assert "pending_publish" not in sched.state["x"]
+
+    def test_the_drain_runs_for_a_monitor_that_is_not_due(self, tmp_path):
+        """The whole of #1006: a scheduled monitor's "next interval" is a day
+        away, so a retry that waits for the monitor to be due never runs."""
+        outcomes = iter([False, True])
+
+        def flaky_publish(event, data):
+            return next(outcomes)
+
+        m = Monitor(name="x", event="monitor/x", interval="1d")
+        sched, _ = _scheduler(tmp_path, [m], publish=flaky_publish)
 
         sched._reconcile(m, [Condition(key="k", data={})])
+        sched.state["x"]["last_run"] = _fixed_now().isoformat()
+        assert not sched._due(m, _fixed_now())  # nothing will re-detect today
+
+        sched.tick()
         assert sched.state["x"]["active"] == ["k"]
-        assert calls == [False, True]
+
+    def test_a_parked_finding_the_detector_drops_is_given_up_on(self, tmp_path):
+        """The park waits for the transport, not forever. Its bound is the
+        monitor's own next firing: a key that firing no longer produces has
+        been retired at the source."""
+        m = Monitor(name="x", event="monitor/x")
+        sched, published = _scheduler(tmp_path, [m],
+                                      publish=lambda event, data: False)
+        sched._reconcile(m, [Condition(key="k", data={})])
+        assert sched.state["x"]["pending_publish"] == {"k": {}}
+
+        sched._reconcile(m, [])  # all clear — the condition no longer holds
+        assert "pending_publish" not in sched.state["x"]
+        assert sched.state["x"]["active"] == []
+
+    def test_the_park_is_bounded(self, tmp_path):
+        from bobi.monitors.scheduler import PARK_MAX_ITEMS
+
+        m = Monitor(name="x", event="monitor/x")
+        sched, _ = _scheduler(tmp_path, [m], publish=lambda event, data: False)
+        sched._reconcile(m, [Condition(key=f"k{i}", data={})
+                             for i in range(PARK_MAX_ITEMS + 5)])
+        assert len(sched.state["x"]["pending_publish"]) == PARK_MAX_ITEMS
+
+    def test_one_failed_post_ends_the_drain_for_this_tick(self, tmp_path):
+        """A dead transport costs one 10s timeout per tick, not one per
+        parked payload."""
+        m = Monitor(name="x", event="monitor/x")
+        attempts = []
+
+        def publish(event, data):
+            attempts.append(data["finding_key"])
+            return False
+
+        sched, _ = _scheduler(tmp_path, [m], publish=publish)
+        sched.state["x"] = {"active": [],
+                            "pending_publish": {"a": {}, "b": {}, "c": {}}}
+        sched._drain_parked()
+        assert attempts == ["a"]
+        assert set(sched.state["x"]["pending_publish"]) == {"a", "b", "c"}
+
+    def test_a_rejected_payload_does_not_starve_the_monitors_behind_it(self, tmp_path):
+        """The first failure ends the drain, so a payload the server will
+        never accept must not sit permanently in front of everyone else."""
+        poison = Monitor(name="poison", event="monitor/poison")
+        ok_monitor = Monitor(name="fine", event="monitor/fine")
+        attempts = []
+
+        def publish(event, data):
+            attempts.append(data["monitor"])
+            return data["monitor"] != "poison"
+
+        sched, _ = _scheduler(tmp_path, [poison, ok_monitor], publish=publish)
+        sched.state["poison"] = {"active": [], "pending_publish": {"p": {}}}
+        sched.state["fine"] = {"active": [], "pending_publish": {"f": {}}}
+
+        sched._drain_parked()
+        assert attempts == ["poison"]  # stopped, "fine" never reached
+
+        sched._drain_parked()  # next tick starts one monitor further along
+        assert attempts == ["poison", "fine", "poison"]
+        assert "pending_publish" not in sched.state["fine"]
 
     def test_successful_publish_marks_active(self, tmp_path):
         m = Monitor(name="x", event="monitor/x")
@@ -1265,8 +1353,8 @@ class TestRelevanceGateScheduling:
     def test_failed_publish_retries_mechanically_without_regating(self, tmp_path):
         """A judged-relevant item whose publish failed must NOT go back to
         the model (a second opinion on a borderline item could flip and
-        silently drop the finding). It parks in pending_publish and the next
-        tick retries only the publish, at $0."""
+        silently drop the finding). It parks in pending_publish and the tick
+        drain retries only the publish, at $0."""
         m = _gated_monitor()
         gates = []
         published = []
@@ -1286,13 +1374,19 @@ class TestRelevanceGateScheduling:
         assert sched.state["billing"]["pending_publish"] == {
             "m1": {"subject": "refund"}}
 
-        # Next tick: no second gate call, one mechanical publish retry.
+        # Next tick: the drain retries the publish. No second gate call.
         ok["value"] = True
-        sched._reconcile_gated(m, conditions, [])
+        sched._drain_parked()
         assert len(gates) == 1
         assert [p["data"]["finding_key"] for p in published] == ["m1", "m1"]
         assert sched.state["billing"]["active"] == ["m1"]
         assert "pending_publish" not in sched.state["billing"]
+
+        # And the detection that follows re-gates nothing and re-sends
+        # nothing — the item was judged once and has now landed.
+        sched._reconcile_gated(m, conditions, [])
+        assert len(gates) == 1
+        assert len(published) == 2
 
     def test_in_flight_guard_prevents_concurrent_gates(self, tmp_path):
         m = _gated_monitor()
