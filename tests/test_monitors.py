@@ -1776,6 +1776,22 @@ class TestPublishRetry:
         assert sched.state["sleep-cycle"].get("active", []) == []
         assert "pending_publish" not in sched.state["sleep-cycle"]
 
+    def test_a_command_monitor_that_also_sets_sleep_cycle_still_fires_normally(
+            self, tmp_path):
+        """Nothing in the schema stops a record setting `sleep_cycle` next to
+        `command`, and `run_monitor` resolves that to the COMMAND flavor. The
+        publish path has to agree with whatever actually ran, or that
+        monitor's findings go out on the memory topics under a payload shape
+        no consumer of theirs expects."""
+        m = Monitor(name="x", event="monitor/x", command="echo '[]'",
+                    sleep_cycle=True)
+        sched, published = _scheduler(tmp_path, [m])
+
+        sched._reconcile(m, [Condition(key="k", data={"n": 1})])
+        assert [p["event"] for p in published] == ["monitor/x"]
+        assert published[0]["data"]["finding_key"] == "k"
+        assert sched.state["x"]["active"] == ["k"]  # dedup still applies
+
     def test_two_parked_memory_updates_both_deliver(self, tmp_path):
         """A completion signal is not a deduped finding: two runs with the
         same summary must both land, so they park under distinct keys."""

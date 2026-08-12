@@ -1250,7 +1250,7 @@ class MonitorScheduler:
         result = self.PARKED
         if ok:
             pending.pop(key, None)
-            if not monitor.sleep_cycle:
+            if _run_flavor(monitor) != "sleep_cycle":
                 active = entry.setdefault("active", [])
                 if key not in active:
                     active.append(key)
@@ -1341,11 +1341,17 @@ class MonitorScheduler:
         return retired
 
     def _fire(self, monitor, condition) -> bool:
-        if monitor.sleep_cycle:
+        if _run_flavor(monitor) == "sleep_cycle":
             # The sleep cycle publishes a completion signal, not a finding: a
             # different topic fan-out and no `finding_key`. Dispatching here
             # is what lets it share the one park and the one drain - it never
             # reaches _reconcile, so this branch cannot shadow a detection.
+            #
+            # Keyed off the flavor, not the bare `sleep_cycle` flag: nothing
+            # stops a record setting `sleep_cycle` alongside `command`, and
+            # run_monitor would then dispatch it as a command monitor. This
+            # must agree with whatever actually ran, or that monitor's
+            # findings publish onto the memory topics.
             return self._post_memory_event(monitor, condition)
         event = monitor.event or f"monitor/{monitor.name}"
         ok = self.publish(event, {
