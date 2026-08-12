@@ -235,25 +235,47 @@ its finding key is date- or instant-stamped, so its lost finding was never
 re-derived and never retried - a daily standup nudge simply did not happen,
 with `outcome: failed` in its run record the only trace (#1006).
 
+The drain runs at the END of a tick, after the due monitors have fired. Its
+staleness bound lives inside a firing, so a drain that went first would publish
+a payload the firing right behind it was about to give up on.
+
 The park's bounds, and what they mean for an operator:
 
 - **It gives up when the detector does.** A parked key that the monitor's next
   firing no longer reports has been retired at the source, and it is dropped:
   delivering Monday's standup nudge on Tuesday is worse than not delivering it.
   A standing condition keeps re-appearing and keeps its place in the park.
+  A park belonging to a monitor that has been paused or removed is dropped for
+  the same reason, rather than replayed whenever the monitor comes back.
+  **A relevance-gated monitor's park is the one exception**: re-detection there
+  costs a model call, so a judged-relevant payload is held until it lands
+  rather than retired - dropping it would mean paying to judge the same item
+  twice, or losing it outright when a window-scoped detector's item ages out.
 - **One failed post ends the drain for that tick.** A failure means the
   transport is down, so the remaining payloads are not attempted - a dead event
-  server costs one 10s timeout per tick, not one per parked payload.
+  server costs one 10s timeout per tick, not one per parked payload. Both the
+  monitor order and the order within a park rotate each tick, so a payload the
+  server rejects outright cannot blackhole the ones behind it.
 - **It holds at most 50 payloads per monitor**, so a detector reporting
   hundreds of conditions into a dead server cannot grow the state file without
-  bound.
-- **A late delivery writes its own run record**, so the ledger a lost firing is
-  diagnosed from shows the delivery that eventually followed it.
+  bound. A payload that cannot join a full park is a give-up too, and is
+  reported as `DROPPED` rather than as parked - nothing will retry it. So is a
+  payload that is not strict JSON (Python accepts `NaN`, the wire does not):
+  no retry can ever land it, so it is never parked.
+- **A completed recovery writes its own run record**, so the ledger a lost
+  firing is diagnosed from shows the delivery that eventually followed it. One
+  row per recovery, not one per tick - at 50 rows per monitor, a row per tick
+  would evict the very firing the row exists to explain.
+- **A firing that leaves anything parked is `failed`, never `quiet`** -
+  including a later firing that skips a key because the park still owns it. A
+  monitor that cannot deliver must not read as healthy.
 
 Both give-up paths (a retired key, a full park) are written to `manager.log`
-and to the run record. Neither yet reaches the operator's inbox - surfacing
-them is the open half of #1006, and it needs an off-bus sink, because during an
-event-server outage the inbox is exactly what is unreachable.
+and to the firing's run record, and both are named as give-ups: a run record
+never says "parked for a mechanical retry" about a finding no mechanism will
+retry. Neither yet reaches the operator's inbox - surfacing them is the open
+half of #1006, and it needs an off-bus sink, because during an event-server
+outage the inbox is exactly what is unreachable.
 
 ## Run records: what each firing actually did
 

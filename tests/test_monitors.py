@@ -1087,9 +1087,18 @@ class TestCheckVerdictFlow:
         assert len(published) == 1
 
 
+def _capture_run(monkeypatch, monitor_name):
+    """A run tracker whose closed record lands in a list, not on disk."""
+    from bobi.monitors import run_records
+
+    recorded = []
+    monkeypatch.setattr(run_records, "record", recorded.append)
+    return recorded, run_records.RunTracker(monitor_name, flavor="command")
+
+
 class TestPublishRetry:
     """A condition is recorded active only after its event actually
-    publishes — a failed publish (event server down) is parked with its
+    publishes - a failed publish (event server down) is parked with its
     payload and retried by the tick drain instead of being silently lost."""
 
     def test_failed_publish_is_parked_and_the_drain_retries_it(self, tmp_path):
@@ -1147,18 +1156,88 @@ class TestPublishRetry:
         sched._reconcile(m, [Condition(key="k", data={})])
         assert sched.state["x"]["pending_publish"] == {"k": {}}
 
-        sched._reconcile(m, [])  # all clear — the condition no longer holds
+        sched._reconcile(m, [])  # all clear - the condition no longer holds
         assert "pending_publish" not in sched.state["x"]
         assert sched.state["x"]["active"] == []
 
-    def test_the_park_is_bounded(self, tmp_path):
+    def test_the_park_is_bounded_and_the_waiters_keep_their_place(self, tmp_path):
         from bobi.monitors.scheduler import PARK_MAX_ITEMS
 
         m = Monitor(name="x", event="monitor/x")
         sched, _ = _scheduler(tmp_path, [m], publish=lambda event, data: False)
         sched._reconcile(m, [Condition(key=f"k{i}", data={})
                              for i in range(PARK_MAX_ITEMS + 5)])
-        assert len(sched.state["x"]["pending_publish"]) == PARK_MAX_ITEMS
+        # Which payloads survive is the point, not just how many: evicting the
+        # longest waiter to admit a newcomer would invert the bound.
+        assert list(sched.state["x"]["pending_publish"]) == [
+            f"k{i}" for i in range(PARK_MAX_ITEMS)]
+
+    def test_a_payload_a_full_park_cannot_hold_is_reported_as_dropped(
+            self, tmp_path, monkeypatch):
+        """Nothing retries an overflowed payload, so the run record must not
+        say it is queued for retry. Saying "retrying" over a finding nothing
+        retries is the whole of #1006 - it must not come back at the park
+        boundary."""
+        from bobi.monitors.scheduler import PARK_MAX_ITEMS
+
+        m = Monitor(name="x", event="monitor/x")
+        sched, _ = _scheduler(tmp_path, [m], publish=lambda event, data: False)
+        recorded, tracker = _capture_run(monkeypatch, "x")
+        sched._reconcile(m, [Condition(key=f"k{i}", data={})
+                             for i in range(PARK_MAX_ITEMS + 5)], tracker)
+        tracker.close()
+
+        assert "5 finding(s) failed to publish and were DROPPED" \
+            in recorded[0].reason
+        assert "parked" not in recorded[0].reason
+
+    def test_a_retired_parked_finding_is_named_on_the_run_record(self, tmp_path,
+                                                                 monkeypatch):
+        m = Monitor(name="x", event="monitor/x")
+        sched, _ = _scheduler(tmp_path, [m], publish=lambda event, data: False)
+        sched._reconcile(m, [Condition(key="k", data={})])
+
+        recorded, tracker = _capture_run(monkeypatch, "x")
+        sched._reconcile(m, [], tracker)
+        tracker.close()
+        assert recorded[0].reason == (
+            "1 finding(s) parked by an earlier firing were never published "
+            "and are no longer detected - dropped")
+        assert recorded[0].outcome == "failed"
+
+    def test_the_park_survives_a_manager_restart(self, tmp_path):
+        """Durability is the premise: an event-server outage and a manager
+        restart co-occur routinely, and that is exactly when the park has to
+        work."""
+        m = Monitor(name="x", event="monitor/x")
+        sched, _ = _scheduler(tmp_path, [m], publish=lambda event, data: False)
+        sched._reconcile(m, [Condition(key="k", data={"n": 1})])
+
+        # A whole new scheduler over the same state file - nothing in memory.
+        revived, published = _scheduler(tmp_path, [m])
+        assert revived.state["x"]["pending_publish"] == {"k": {"n": 1}}
+        revived._drain_parked()
+        assert [p["data"]["finding_key"] for p in published] == ["k"]
+        assert "pending_publish" not in revived.state["x"]
+
+    def test_a_late_delivery_writes_its_own_run_record(self, tmp_path, monkeypatch):
+        """The run ledger is where a lost firing is diagnosed from, so the
+        delivery that eventually follows it has to show up there too."""
+        from bobi.monitors import run_records
+
+        recorded = []
+        monkeypatch.setattr(run_records, "record", recorded.append)
+
+        m = Monitor(name="x", event="monitor/x")
+        sched, _ = _scheduler(tmp_path, [m])
+        sched.state["x"] = {"active": [], "pending_publish": {"k": {}}}
+        sched._drain_parked()
+
+        assert len(recorded) == 1
+        assert recorded[0].monitor == "x"
+        assert recorded[0].outcome == run_records.NOTIFIED
+        assert recorded[0].published == 1
+        assert "delivered 1 parked finding(s)" in recorded[0].reason
 
     def test_one_failed_post_ends_the_drain_for_this_tick(self, tmp_path):
         """A dead transport costs one 10s timeout per tick, not one per
@@ -1176,6 +1255,111 @@ class TestPublishRetry:
         sched._drain_parked()
         assert attempts == ["a"]
         assert set(sched.state["x"]["pending_publish"]) == {"a", "b", "c"}
+
+    def test_a_rejected_payload_does_not_starve_its_park_siblings(self, tmp_path):
+        """The batch stops at its first failure, so a payload the server
+        rejects outright (a 4xx it will never accept) must not sit at the head
+        of the park blackholing its siblings on a healthy bus."""
+        m = Monitor(name="x", event="monitor/x")
+        delivered = []
+
+        def publish(event, data):
+            if data["finding_key"] == "poison":
+                return False
+            delivered.append(data["finding_key"])
+            return True
+
+        sched, _ = _scheduler(tmp_path, [m], publish=publish)
+        sched.state["x"] = {"active": [],
+                            "pending_publish": {"poison": {}, "good": {}}}
+        for _ in range(4):
+            sched._drain_parked()
+        assert delivered == ["good"]
+        assert list(sched.state["x"]["pending_publish"]) == ["poison"]
+
+    def test_a_payload_the_wire_cannot_carry_is_not_parked(self, tmp_path, monkeypatch):
+        """NaN parses in Python and not on the wire, so a retry can never
+        land it - and parking it would make monitor_state.json unreadable to
+        every non-Python reader."""
+        m = Monitor(name="x", event="monitor/x")
+        sched, _ = _scheduler(tmp_path, [m], publish=lambda e, d: False)
+        recorded, tracker = _capture_run(monkeypatch, "x")
+        sched._reconcile(m, [Condition(key="k", data={"n": float("nan")})],
+                         tracker)
+        tracker.close()
+
+        assert "pending_publish" not in sched.state["x"]
+        assert "DROPPED" in recorded[0].reason
+
+    def test_a_firing_holding_an_undelivered_park_is_not_quiet(self, tmp_path,
+                                                               monkeypatch):
+        """A monitor that cannot deliver must not read as healthy. The keys
+        this firing skips because the park owns them are findings nobody has
+        heard."""
+        m = Monitor(name="x", event="monitor/x")
+        sched, _ = _scheduler(tmp_path, [m], publish=lambda e, d: False)
+        sched._reconcile(m, [Condition(key="k", data={})])
+
+        recorded, tracker = _capture_run(monkeypatch, "x")
+        sched._reconcile(m, [Condition(key="k", data={})], tracker)
+        tracker.close()
+        assert recorded[0].outcome == "failed"
+        assert recorded[0].reason == ("1 finding(s) parked by an earlier "
+                                      "firing are still undelivered")
+
+    def test_a_park_orphaned_by_pausing_the_monitor_is_given_up_on(self, tmp_path):
+        """A paused monitor is never drained and never retired, so without a
+        prune its park is replayed as a live finding on re-enable."""
+        m = Monitor(name="x", event="monitor/x")
+        other = Monitor(name="y", event="monitor/y")
+        sched, published = _scheduler(tmp_path, [other])
+        sched.state["x"] = {"active": [], "pending_publish": {"stale": {}}}
+
+        sched._drain_parked()  # registry no longer offers "x"
+        assert published == []
+        assert "pending_publish" not in sched.state["x"]
+
+    def test_an_empty_registry_never_prunes_a_park(self, tmp_path):
+        """A registry that failed to load must not be read as "every monitor
+        was deleted" and wipe every park at once."""
+        sched, _ = _scheduler(tmp_path, [])
+        sched.state["x"] = {"active": [], "pending_publish": {"k": {}}}
+        sched._drain_parked()
+        assert sched.state["x"]["pending_publish"] == {"k": {}}
+
+    def test_the_drain_does_not_resurrect_a_key_retired_mid_post(self, tmp_path):
+        """The drain publishes outside the lock, so a firing on a waiter
+        thread can retire a parked key while the post is in flight. The post
+        that was already on its way must not put it back - it would then be
+        retried until the transport recovered and deliver the finding the
+        scheduler decided must not be delivered."""
+        m = Monitor(name="x", event="monitor/x")
+        box = {}
+
+        def publish(event, data):
+            # Stands in for the waiter thread: the detector stops reporting
+            # the key while this post is in flight.
+            box["sched"]._reconcile(m, [])
+            return False
+
+        sched, _ = _scheduler(tmp_path, [m], publish=publish)
+        box["sched"] = sched
+        sched.state["x"] = {"active": [], "pending_publish": {"k": {}}}
+        sched._drain_parked()
+        assert "pending_publish" not in sched.state["x"]
+
+    def test_the_drain_runs_after_the_due_loop(self, tmp_path):
+        """The park's only staleness bound runs inside a firing, so a drain
+        that went first would publish the stale payload the firing right
+        behind it was about to give up on."""
+        m = Monitor(name="x", event="monitor/x", interval="5m",
+                    command="echo '[]'")
+        sched, published = _scheduler(tmp_path, [m])
+        sched.state["x"] = {"active": [], "pending_publish": {"stale": {}}}
+
+        sched.tick()  # the firing reports nothing: "stale" is retired first
+        assert published == []
+        assert "pending_publish" not in sched.state["x"]
 
     def test_a_rejected_payload_does_not_starve_the_monitors_behind_it(self, tmp_path):
         """The first failure ends the drain, so a payload the server will
@@ -1383,10 +1567,42 @@ class TestRelevanceGateScheduling:
         assert "pending_publish" not in sched.state["billing"]
 
         # And the detection that follows re-gates nothing and re-sends
-        # nothing — the item was judged once and has now landed.
+        # nothing - the item was judged once and has now landed.
         sched._reconcile_gated(m, conditions, [])
         assert len(gates) == 1
         assert len(published) == 2
+
+    def test_a_gated_park_is_held_even_when_the_detector_drops_the_key(self, tmp_path):
+        """The one place the two parks differ, deliberately. `_reconcile`
+        retires a parked key its detector stops reporting; the gated path
+        must NOT, because re-detection here costs a model call - dropping it
+        means paying to judge the same item twice, or losing a
+        judged-relevant finding outright when a window-scoped detector's item
+        ages out."""
+        ok = {"value": False}
+        m = _gated_monitor()
+        gates, published = [], []
+
+        def publish(event, data):
+            if not ok["value"]:
+                return False
+            published.append(data["finding_key"])
+            return True
+
+        sched, _ = _scheduler(tmp_path, [m], gates=gates, publish=publish)
+        sched._reconcile_gated(m, [Condition(key="m1", data={})], [])
+        gates[0][3]({"success": True, "relevant": ["m1"]})
+        assert sched.state["billing"]["pending_publish"] == {"m1": {}}
+
+        # The detector's window moves on and no longer reports m1.
+        sched._reconcile_gated(m, [Condition(key="m2", data={})], [])
+        assert sched.state["billing"]["pending_publish"] == {"m1": {}}
+
+        # It still lands when the transport comes back, judged exactly once.
+        ok["value"] = True
+        sched._drain_parked()
+        assert published == ["m1"]
+        assert len(gates) == 2  # m1's gate and m2's, never m1 a second time
 
     def test_in_flight_guard_prevents_concurrent_gates(self, tmp_path):
         m = _gated_monitor()

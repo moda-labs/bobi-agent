@@ -25,8 +25,8 @@ clears active conditions.
 
 A condition is recorded active only after its event actually publishes. A
 failed publish (event server briefly down) does not vanish: its payload is
-parked in `pending_publish` and the tick drain retries the publish alone —
-no detector, no model, no schedule — until it lands or the detector stops
+parked in `pending_publish` and the tick drain retries the publish alone -
+no detector, no model, no schedule - until it lands or the detector stops
 reporting the condition. Draining from the tick rather than from a firing is
 what makes that true for a scheduled monitor, whose "next interval" is a day
 away (#1006).
@@ -194,6 +194,20 @@ def _default_publish(event: str, data: dict) -> bool:
     """
     from bobi.events.publish import post_event
     return post_event(event, data)
+
+
+def _is_json_payload(data) -> bool:
+    """Whether a payload survives the strict JSON the event server speaks.
+
+    Python's json accepts NaN/Infinity and the wire does not, so a payload
+    carrying one publishes False forever - worth knowing before parking it
+    for a retry that can never succeed.
+    """
+    try:
+        json.dumps(data, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _append_manager_log(message: str) -> None:
@@ -701,24 +715,26 @@ class MonitorScheduler:
     # --- core logic ----------------------------------------------------
 
     def tick(self) -> None:
-        """Retry anything parked, then run every monitor that is currently due.
+        """Run every monitor that is currently due, then retry anything parked.
 
-        The drain runs first and runs unconditionally: a parked payload is
-        owed to the bus from an earlier firing, so it goes out before this
-        tick's new findings.
+        The drain runs LAST. Its staleness bound lives inside a firing
+        (:meth:`_retire_parked`), so a drain that went first would publish a
+        stale payload the firing right behind it was about to give up on - a
+        manager that comes back on Thursday would send Monday's standup nudge
+        and Thursday's, on the same topic, in the same tick.
         """
         registry = self._registry_loader()
         now = self._now()
-        self._drain_parked(registry)
         for monitor in registry.effective_monitors():
             if self._due(monitor, now):
                 self.run_monitor(monitor, registry, now)
+        self._drain_parked(registry)
 
     def _drain_parked(self, registry: MonitorRegistry | None = None) -> None:
         """Retry every parked publish, whether or not its monitor is due (#1006).
 
         A retry needs the payload, not the detector, the model, or the
-        schedule — so this runs off the tick clock and touches none of them.
+        schedule - so this runs off the tick clock and touches none of them.
         That is the whole fix: `_reconcile`'s promise of a retry "next
         interval" was only ever true for a standing condition an interval
         monitor re-derives every tick. For a scheduled monitor the next
@@ -727,40 +743,87 @@ class MonitorScheduler:
 
         The first failed post ends the drain for this tick. One failure means
         the transport is down, and there is nothing to learn from spending a
-        10s timeout on each remaining payload — the next tick tries again.
+        10s timeout on each remaining payload - the next tick tries again.
         Which monitor goes first rotates, because that reasoning is only
         usually right: a payload the server rejects outright (a 4xx it will
         never accept) is not the transport, and in a fixed order it would
         starve every monitor behind it forever.
+
+        The state read never WAITS for the lock. `_reconcile` still publishes
+        while holding it, so during an outage a check-waiter thread can hold
+        it for seconds per failing post - and a drain that queued behind that
+        would be stalled by exactly the outage it exists to survive. Skipping
+        costs one tick; the payload is durable and is still there.
         """
         registry = registry or self._registry_loader()
         monitors = list(registry.effective_monitors())
         if not monitors:
+            # Nothing to drain, and nothing to prune against either: a
+            # registry that failed to load must not read as "every monitor was
+            # deleted" and take every park with it.
             return
-        start = self._drain_cursor % len(monitors)
+        if not self._state_lock.acquire(blocking=False):
+            log.debug("Monitor state lock busy - draining next tick")
+            return
+        try:
+            self._prune_orphan_parks({m.state_key for m in monitors})
+            parks = {m.state_key: dict((self.state.get(m.state_key) or {})
+                                       .get("pending_publish") or {})
+                     for m in monitors}
+        finally:
+            self._state_lock.release()
+
+        turn = self._drain_cursor
         self._drain_cursor += 1
+        start = turn % len(monitors)
         for monitor in monitors[start:] + monitors[:start]:
-            with self._state_lock:
-                entry = self.state.get(monitor.state_key) or {}
-                pending = dict(entry.get("pending_publish") or {})
-            if not pending:
+            items = list((parks.get(monitor.state_key) or {}).items())
+            if not items:
                 continue
+            # Rotate WITHIN the park as well as across monitors. The batch
+            # stops at its first failure, so a payload the server rejects
+            # outright would otherwise sit at the head forever and blackhole
+            # every sibling behind it - on a healthy bus.
+            off = turn % len(items)
+            items = items[off:] + items[:off]
             log.info("Monitor %s: retrying %d parked publish(es)",
-                     monitor.name, len(pending))
-            # A late delivery is a real delivery and belongs in the ledger the
-            # lost firing was diagnosed from — but only when something lands.
-            # A row per failed attempt would flush that ledger during exactly
-            # the outage it is needed for.
+                     monitor.name, len(items))
             tracker = RunTracker(monitor.name, flavor=_run_flavor(monitor))
             drained = self._publish_and_park(
-                monitor,
-                [Condition(key=k, data=d) for k, d in pending.items()])
-            if drained:
-                tracker.add_published(drained)
-                tracker.close(reason=f"delivered {drained} of {len(pending)} "
-                                     "parked finding(s) from an earlier firing")
-            if drained < len(pending):
-                return  # the transport is down — stop the drain for this tick
+                monitor, [Condition(key=k, data=d) for k, d in items],
+                park_new=False)
+            if drained < len(items):
+                return  # the transport is down - stop the drain for this tick
+            # One row per completed recovery, not one per tick: at
+            # RETENTION_PER_MONITOR rows, a flapping transport delivering one
+            # payload a tick would evict the failed firing this row exists to
+            # explain.
+            tracker.add_published(drained)
+            tracker.close(reason=f"delivered {drained} parked finding(s) "
+                                 "from an earlier firing")
+
+    def _prune_orphan_parks(self, known: set) -> None:
+        """Drop parks belonging to monitors the registry no longer offers.
+
+        A paused or deleted monitor is never drained (the drain walks
+        `effective_monitors`) and never retired (retirement happens inside a
+        firing), so without this its park waits indefinitely and is replayed
+        as a live finding the moment the monitor comes back. Callers hold
+        ``_state_lock`` and have already established that `known` is a real
+        registry rather than a failed load.
+        """
+        pruned = False
+        for state_key, entry in self.state.items():
+            if state_key in known or not isinstance(entry, dict):
+                continue
+            orphaned = entry.pop("pending_publish", None)
+            if orphaned:
+                pruned = True
+                log.warning("Monitor %s is no longer registered - giving up on "
+                            "%d parked publish(es) (%s)", state_key,
+                            len(orphaned), ", ".join(orphaned))
+        if pruned:
+            self._save_state()
 
     def _due(self, monitor, now: datetime) -> bool:
         entry = self.state.get(monitor.state_key)
@@ -990,7 +1053,7 @@ class MonitorScheduler:
 
         A new condition is recorded active only once its event actually
         published. A publish that failed is parked with its payload and
-        retried by the tick drain (#1006) — the park owns that key from then
+        retried by the tick drain (#1006) - the park owns that key from then
         on, so a key sitting in it is skipped here rather than re-fired. One
         outage must not deliver the same finding twice.
         """
@@ -999,76 +1062,125 @@ class MonitorScheduler:
             previous = set(entry.get("active", []))
             parked = set(entry.get("pending_publish") or {})
             current = {c.key: c for c in conditions}
-            active: list[str] = []
-            new: list = []
-            for key, condition in current.items():
-                if key in previous:
-                    active.append(key)
-                elif key in parked:
-                    continue  # the drain owns this key until it lands
-                else:
-                    new.append(condition)
-            entry["active"] = active
-            self._retire_parked(monitor, entry, set(current), tracker)
-            fired = 0
-            unpublished = 0
-            for condition in new:
-                if self._record_publish_outcome(
-                        monitor, condition, self._fire(monitor, condition)):
-                    fired += 1
-                else:
-                    unpublished += 1
+            entry["active"] = [k for k in current if k in previous]
+            # A key sitting in the park is neither active nor new: the drain
+            # owns it until it lands.
+            held = [k for k in current if k in parked]
+            new = [current[k] for k in current
+                   if k not in previous and k not in parked]
+            retired = self._retire_parked(monitor, entry, set(current))
+            outcomes = [self._record_publish_outcome(
+                            monitor, c, self._fire(monitor, c)) for c in new]
             self._save_state()
-        if tracker is not None:
-            tracker.add_published(fired)
-            if unpublished:
-                # Nobody heard about these findings — the firing did not
-                # deliver, however many of its siblings did.
-                tracker.note_failure(
-                    f"{unpublished} finding(s) failed to publish — "
-                    "parked for a mechanical retry")
+        # This firing's own outcomes first: `note_failure` keeps the first
+        # reason, and the two below belong to an earlier firing.
+        self._note_publish_outcomes(tracker, outcomes)
+        if tracker is not None and retired:
+            tracker.note_failure(
+                f"{len(retired)} finding(s) parked by an earlier firing were "
+                "never published and are no longer detected - dropped")
+        if tracker is not None and held:
+            # Without this the firing closes `quiet` while a finding nobody
+            # has heard sits in the park - a monitor that cannot deliver would
+            # read as healthy in the runs view.
+            tracker.note_failure(
+                f"{len(held)} finding(s) parked by an earlier firing are "
+                "still undelivered")
 
-    def _record_publish_outcome(self, monitor, condition, ok: bool) -> bool:
+    # What one publish attempt did, as recorded. `dropped` is a give-up: the
+    # payload is gone and nothing will retry it.
+    PUBLISHED, PARKED, DROPPED = "published", "parked", "dropped"
+
+    def _record_publish_outcome(self, monitor, condition, ok: bool, *,
+                                park_new: bool = True) -> str:
         """Fold one publish attempt into the monitor's state entry.
 
         The single place that decides what a publish attempt MEANS, shared by
         every publisher. Published: recorded active, unparked. Failed: parked
         in ``pending_publish`` with its payload, which is everything a retry
-        needs. Returns ``ok``.
+        needs - unless it is a give-up, which is never reported as a park,
+        because saying "retrying" over a finding nothing retries is the whole
+        of #1006.
 
-        Callers hold ``_state_lock`` and save the state themselves — this
+        ``park_new=False`` restricts the write to keys already in the park:
+        the drain publishes outside the lock, and a key a concurrent firing
+        retired mid-post must stay retired rather than be resurrected by the
+        post that was already in flight.
+
+        Callers hold ``_state_lock`` and save the state themselves - this
         folds several attempts into one write.
         """
         entry = self.state.setdefault(monitor.state_key, {})
         pending = dict(entry.get("pending_publish") or {})
         key = condition.key
+        result = self.PARKED
         if ok:
             pending.pop(key, None)
             active = entry.setdefault("active", [])
             if key not in active:
                 active.append(key)
-        elif key in pending or len(pending) < PARK_MAX_ITEMS:
+            result = self.PUBLISHED
+        elif key in pending:
+            pending[key] = condition.data
+        elif not park_new:
+            result = self.DROPPED  # retired while this post was in flight
+        elif not _is_json_payload(condition.data):
+            # The wire is strict JSON and the server rejects anything else, so
+            # no number of retries can land this one (a command monitor
+            # printing NaN, say). Parking it would also make monitor_state.json
+            # unreadable to every non-Python reader.
+            log.error("Monitor %s: finding %s carries a payload the event "
+                      "server can never accept - not parked, lost",
+                      monitor.name, key)
+            result = self.DROPPED
+        elif len(pending) < PARK_MAX_ITEMS:
             pending[key] = condition.data
         else:
-            # The park is full and this payload cannot join it. Say so where
-            # an operator debugging a missing finding will look; surfacing it
-            # off-box is the other half of #1006 and is not fixed here.
             log.error("Monitor %s: publish failed and the retry park is full "
-                      "(%d) — finding %s is lost", monitor.name,
+                      "(%d) - finding %s is lost", monitor.name,
                       PARK_MAX_ITEMS, key)
+            result = self.DROPPED
+        self._save_park(entry, pending)
+        return result
+
+    @staticmethod
+    def _save_park(entry: dict, pending: dict) -> None:
+        """Write a monitor's park back, dropping the key when it is empty."""
         if pending:
             entry["pending_publish"] = pending
         else:
             entry.pop("pending_publish", None)
-        return ok
 
-    def _retire_parked(self, monitor, entry: dict, keep: set, tracker=None) -> None:
-        """Drop parked payloads the detector no longer reports.
+    def _note_publish_outcomes(self, tracker, outcomes: list) -> None:
+        """Tell the firing's run record what its publishes did.
+
+        The failure nearest the root cause wins (`note_failure` keeps the
+        first), so a give-up is recorded ahead of a park: one says a finding
+        is gone, the other says it is queued.
+        """
+        if tracker is None:
+            return
+        tracker.add_published(outcomes.count(self.PUBLISHED))
+        dropped = outcomes.count(self.DROPPED)
+        parked = outcomes.count(self.PARKED)
+        if dropped:
+            tracker.note_failure(
+                f"{dropped} finding(s) failed to publish and were DROPPED - "
+                "nothing will retry them (see manager.log)")
+        if parked:
+            # Nobody heard about these findings - the firing did not
+            # deliver, however many of its siblings did.
+            tracker.note_failure(
+                f"{parked} finding(s) failed to publish - "
+                "parked for a mechanical retry")
+
+    def _retire_parked(self, monitor, entry: dict, keep: set) -> list:
+        """Drop parked payloads the detector no longer reports. Returns them.
 
         A parked key waits for the transport, not forever. The bound is the
         monitor's own next firing: a standing condition keeps re-appearing in
         `keep` and keeps its place in the park, while a key that firing no
-        longer produces has been retired at the source — a scheduled monitor's
+        longer produces has been retired at the source - a scheduled monitor's
         keys are date- or instant-stamped, so its park lasts exactly until the
         next slot. Delivering Monday's standup nudge on Tuesday would be worse
         than not delivering it.
@@ -1078,20 +1190,14 @@ class MonitorScheduler:
         pending = dict(entry.get("pending_publish") or {})
         retired = [k for k in pending if k not in keep]
         if not retired:
-            return
+            return retired
         for key in retired:
             pending.pop(key)
-        if pending:
-            entry["pending_publish"] = pending
-        else:
-            entry.pop("pending_publish", None)
+        self._save_park(entry, pending)
         log.warning("Monitor %s: giving up on %d parked publish(es) the "
                     "detector no longer reports (%s)", monitor.name,
                     len(retired), ", ".join(retired))
-        if tracker is not None:
-            tracker.note_failure(
-                f"{len(retired)} parked finding(s) never published and are "
-                "no longer detected — dropped")
+        return retired
 
     def _fire(self, monitor, condition) -> bool:
         event = monitor.event or f"monitor/{monitor.name}"
@@ -1103,9 +1209,11 @@ class MonitorScheduler:
         if ok:
             log.info(f"Monitor {monitor.name} fired {event} ({condition.key})")
         else:
+            # What happens to it next is the caller's decision (park or give
+            # up), and it is logged there - this line must not promise a
+            # retry it does not make.
             log.warning(f"Monitor {monitor.name} failed to publish {event} "
-                        f"({condition.key}) — parked, retrying every tick "
-                        "until it lands or the detector drops it")
+                        f"({condition.key})")
         return ok
 
     # --- relevance gate (two-tier semantic gate, #630) -------------------
@@ -1127,15 +1235,22 @@ class MonitorScheduler:
         ``pending_publish`` and is retried mechanically at $0 by the tick
         drain - never re-sent to the model, whose second opinion on a
         borderline item could flip and silently drop the finding. Clearing
-        semantics match _reconcile: disappeared keys drop out and re-fire if
-        they recur, parked or not.
+        semantics match _reconcile for ACTIVE keys: disappeared keys drop out
+        and re-fire if they recur.
+
+        The park is the one place the two paths differ, deliberately. A gated
+        park is NOT retired when the detector stops reporting its key
+        (:meth:`_retire_parked`, which _reconcile applies): re-detection here
+        costs a model call, so dropping a judged payload means either paying
+        to judge the same item twice or - for a window-scoped detector whose
+        item ages out - losing a finding that was already judged worth
+        sending. It is held until it lands.
         """
         with self._state_lock:
             entry = self.state.setdefault(monitor.state_key, {})
             previous = set(entry.get("active", []))
             current = {c.key: c for c in conditions}
             entry["active"] = [k for k in current if k in previous]
-            self._retire_parked(monitor, entry, set(current), tracker)
             self._save_state()
             pending = dict(entry.get("pending_publish") or {})
             new = [current[k] for k in current
@@ -1176,7 +1291,8 @@ class MonitorScheduler:
             return False
         return True
 
-    def _publish_and_park(self, monitor, conditions: list, tracker=None) -> int:
+    def _publish_and_park(self, monitor, conditions: list, tracker=None, *,
+                          park_new: bool = True) -> int:
         """Publish a batch and park whatever did not land. Returns how many did.
 
         Serves both publishers that already hold a payload rather than a
@@ -1194,19 +1310,13 @@ class MonitorScheduler:
             if up:
                 up = self._fire(monitor, condition)
             attempts.append((condition, up))
-        fired = sum(1 for _, ok in attempts if ok)
         with self._state_lock:
-            for condition, ok in attempts:
-                self._record_publish_outcome(monitor, condition, ok)
+            outcomes = [self._record_publish_outcome(monitor, c, ok,
+                                                    park_new=park_new)
+                        for c, ok in attempts]
             self._save_state()
-        if tracker is not None:
-            tracker.add_published(fired)
-            parked = len(attempts) - fired
-            if parked:
-                tracker.note_failure(
-                    f"{parked} finding(s) failed to publish — "
-                    "parked for a mechanical retry")
-        return fired
+        self._note_publish_outcomes(tracker, outcomes)
+        return outcomes.count(self.PUBLISHED)
 
     def _on_gate_verdict(self, monitor, judged: list,
                          verdict: dict | None, tracker=None) -> None:
