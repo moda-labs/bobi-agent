@@ -685,16 +685,26 @@ class MonitorScheduler:
         # of run_monitor's synchronous portion only; the out-of-band
         # callbacks capture their tracker directly.
         self._open_runs: dict[str, RunTracker] = {}
-        # How many firings per monitor dispatched their detector out-of-band
-        # and have not reconciled yet. The park's staleness bound lives in
-        # _reconcile, so the drain must not publish their park until that has
-        # run - the same ordering tick() enforces for the in-thread flavors,
-        # across a thread. Counted rather than flagged because a description
-        # monitor has no in-flight guard: a check slower than the interval
-        # overlaps, and the first verdict back must not lift the second
-        # firing's hold. In-memory: a restart cannot leave a firing in flight.
-        self._reconcile_pending: dict[str, int] = {}
-        self._hold_lock = threading.Lock()
+        # Monitors that dispatched a detector out-of-band and have not
+        # reconciled since. The park's staleness bound lives in _reconcile, so
+        # the drain must not publish their park until that has run - the same
+        # ordering tick() enforces for the in-thread flavors, across a thread.
+        # A flag, not a count of firings in flight: ANY reconcile bounds the
+        # park against a detector's current view, so waiting for a second
+        # overlapping firing buys nothing. In-memory: a restart cannot leave a
+        # firing in flight. add/discard on a set are atomic, like
+        # _checks_in_flight, so no lock.
+        self._reconcile_pending: set[str] = set()
+        # Monitors whose park a firing has weighed against its detector since
+        # the last payload entered it. The other half of the hold, and the
+        # half that keeps it from starving: the drain waits for a pending
+        # firing only while there is something for that firing to bound.
+        # Without it, a monitor due on every tick takes a fresh hold before
+        # the drain runs, every tick, forever - a park that never drains,
+        # which is the failure #1006 is about. Empty at startup on purpose: a
+        # park read off disk has not been evaluated by this process, and
+        # unevaluated is the side that waits.
+        self._park_evaluated: set[str] = set()
         # Which monitor the retry drain starts from. In-memory: it only has to
         # differ between consecutive ticks, and a restart starting over at 0 is
         # indistinguishable from the drain's first tick.
@@ -812,15 +822,18 @@ class MonitorScheduler:
             items = list((parks.get(monitor.state_key) or {}).items())
             if not items:
                 self._park_cursors.pop(monitor.state_key, None)
+                self._park_evaluated.discard(monitor.state_key)
                 self._close_drain_record(monitor)
                 continue
-            if monitor.state_key in self._reconcile_pending:
-                # This monitor's detector is still running out-of-band, so
-                # `_reconcile` - and with it the park's staleness bound - has
-                # not run for this firing yet. Publishing now is the ordering
-                # tick() exists to prevent, one thread removed: Monday's nudge
-                # would go out at the end of the very tick that dispatched
-                # Thursday's check, and Thursday's would land behind it.
+            if (monitor.state_key in self._reconcile_pending
+                    and monitor.state_key not in self._park_evaluated):
+                # A detector is running out-of-band and nothing has evaluated
+                # this park since it was written, so `_reconcile` - and with
+                # it the park's staleness bound - is still to come.
+                # Publishing now is the ordering tick() exists to prevent, one
+                # thread removed: Monday's nudge would go out at the end of
+                # the very tick that dispatched Thursday's check, and
+                # Thursday's would land behind it.
                 log.debug("Monitor %s: firing still reconciling - holding its "
                           "park for this tick", monitor.name)
                 continue
@@ -862,30 +875,21 @@ class MonitorScheduler:
             self._close_drain_record(monitor)
 
     def _hold_drain(self, monitor) -> bool:
-        """Hold this monitor's park until the firing being dispatched
-        reconciles. Always True, so callers can record that they took it.
-
-        Counting is a read-modify-write and the two ends run on different
-        threads - the hold is taken on the scheduler thread and released on
-        each firing's waiter thread - so it takes its own lock. Not
-        `_state_lock`: that one is held across HTTP publishes, and a waiter
-        thread queueing behind an outage to drop a counter is the stall the
-        drain's non-blocking acquire exists to avoid.
-        """
-        with self._hold_lock:
-            key = monitor.state_key
-            self._reconcile_pending[key] = (
-                self._reconcile_pending.get(key, 0) + 1)
+        """Hold this monitor's park until a firing reconciles. Always True,
+        so callers can record that they took it."""
+        self._reconcile_pending.add(monitor.state_key)
         return True
 
     def _release_drain(self, state_key: str) -> None:
-        """Release one firing's hold on a monitor's park."""
-        with self._hold_lock:
-            remaining = self._reconcile_pending.get(state_key, 0) - 1
-            if remaining > 0:
-                self._reconcile_pending[state_key] = remaining
-            else:
-                self._reconcile_pending.pop(state_key, None)
+        """Release the hold: a firing has reconciled, so the park has been
+        bounded against what its detector currently reports.
+
+        Released by whichever firing gets there first. A second one still in
+        flight adds nothing - its `keep` set cannot be more current than the
+        one that just ran, and holding for it would mean a monitor whose check
+        outlasts its interval never drains at all.
+        """
+        self._reconcile_pending.discard(state_key)
 
     def _close_drain_record(self, monitor) -> None:
         """Write the run record for a finished recovery, if one is owed.
@@ -1186,6 +1190,11 @@ class MonitorScheduler:
             new = [current[k] for k in current
                    if k not in previous and k not in parked]
             retired = self._retire_parked(monitor, entry, set(current))
+            # `_retire_parked` just weighed every parked key against what this
+            # detector reports, so whatever is left has been evaluated and the
+            # drain no longer has to wait for a firing to bound it. Marked
+            # before the publishes below, which may park something new.
+            self._park_evaluated.add(monitor.state_key)
             outcomes = [self._record_publish_outcome(
                             monitor, c, self._fire(monitor, c)) for c in new]
             self._save_state()
@@ -1261,6 +1270,12 @@ class MonitorScheduler:
             result = self.DROPPED
         elif len(pending) < PARK_MAX_ITEMS:
             pending[key] = condition.data
+            # A payload entering the park has not been weighed against a
+            # detector's view yet, so a firing in flight may still retire it
+            # and the drain must wait for that. A key already parked keeps
+            # whatever standing it had - a failed retry does not make a
+            # payload the last firing evaluated stale again.
+            self._park_evaluated.discard(monitor.state_key)
         else:
             log.error("Monitor %s: publish failed and the retry park is full "
                       "(%d) - finding %s is lost", monitor.name,

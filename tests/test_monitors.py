@@ -1500,12 +1500,17 @@ class TestPublishRetry:
         sched._drain_parked()
         assert [p["data"]["finding_key"] for p in published] == ["monday"]
 
-    def test_one_verdict_does_not_lift_an_overlapping_firing_s_hold(
-            self, tmp_path):
+    def test_the_first_verdict_back_releases_the_hold(self, tmp_path):
         """A description monitor has no in-flight guard, so a check slower
-        than the interval overlaps: two firings, two detectors, two verdicts.
-        The first one back must not release the second firing's hold - its
-        `_retire_parked` has not run, so the park still has no bound."""
+        than its interval overlaps: firings pile up faster than verdicts come
+        back. The hold must be a flag, released by whichever firing reconciles
+        first - counting them never reaches zero for such a monitor, which is
+        a park that never drains at all, the very failure #1006 is about.
+
+        Correct as well as safe: a reconcile has just bounded the park against
+        what the detector currently reports, and a firing still in flight
+        cannot hold a more current view than that.
+        """
         m = Monitor(name="standup", event="monitor/standup.due", interval="5m")
         spawned = []
         sched, published = _scheduler(tmp_path, [m], spawned=spawned)
@@ -1519,52 +1524,70 @@ class TestPublishRetry:
 
         sched.state["standup"] = {"active": [],
                                   "pending_publish": {"monday": {}}}
-        # The first detector back still reports the key, so it stays parked -
-        # the park keeps its bound only from a firing that no longer sees it.
+        sched._drain_parked()
+        assert published == []  # nothing has reconciled yet
+
+        # The first detector back still reports the key, so it is not retired
+        # - and the park is now bounded, so the drain may deliver it.
         spawned[0][2]({"success": True, "finding": True, "summary": "s",
                        "details": {"key": "monday"}})
         sched._drain_parked()
-        assert published == []  # the second firing is still in flight
-        assert sched.state["standup"]["pending_publish"] == {"monday": {}}
+        assert [p["data"]["finding_key"] for p in published] == ["monday"]
 
-        spawned[1][2]({"success": True, "finding": False})
-        sched._drain_parked()
-        # Both reconciled: "monday" is retired at the source, not delivered.
-        assert published == []
-        assert "pending_publish" not in sched.state["standup"]
+    def test_a_park_the_firing_itself_created_is_held(self, tmp_path):
+        """The real sequence, with nothing injected into the state: the
+        verdict thread parks the payload, so the reconcile that marked this
+        park evaluated is the same one that put a NEW payload into it. If
+        parking did not take that mark back, the next tick's drain would
+        publish a payload no firing has weighed yet."""
+        m = Monitor(name="standup", event="monitor/standup.due", interval="1d")
+        spawned, published, outage = [], [], {"down": True}
 
-    def test_concurrent_verdicts_release_the_hold_exactly_once_each(
-            self, tmp_path):
-        """The hold is counted on the scheduler thread and released on each
-        firing's waiter thread, so the read-modify-write is cross-thread. Two
-        overlapping check subprocesses exiting together would otherwise both
-        read the same count, and one lost decrement wedges that monitor's park
-        for the life of the process."""
-        class SlowRead(dict):
-            """Widens the window between the read and the write so the two
-            releases provably overlap, instead of hoping the scheduler
-            preempts inside three bytecodes."""
+        def publish(event, data):
+            if outage["down"]:
+                return False
+            published.append(data)
+            return True
 
-            def get(self, key, default=None):
-                value = super().get(key, default)
-                time.sleep(0.05)
-                return value
+        sched, _ = _scheduler(tmp_path, [m], spawned=spawned, publish=publish)
 
-        m = Monitor(name="x", event="monitor/x")
-        sched, _ = _scheduler(tmp_path, [m])
-        sched._hold_drain(m)
-        sched._hold_drain(m)
-        sched._reconcile_pending = SlowRead(sched._reconcile_pending)
-        assert sched._reconcile_pending == {"x": 2}
+        clock = {"now": _fixed_now()}
+        sched._now = lambda: clock["now"]
+        sched.tick()  # Monday: dispatched
+        spawned[0][2]({"success": True, "finding": True, "summary": "s",
+                       "details": {"key": "monday"}})  # publish fails, parks
+        assert sched.state["standup"]["pending_publish"] == {
+            "monday": {"summary": "s", "text": "s", "key": "monday"}}
 
-        workers = [threading.Thread(target=sched._release_drain, args=("x",))
-                   for _ in range(2)]
-        for w in workers:
-            w.start()
-        for w in workers:
-            w.join()
+        outage["down"] = False
+        clock["now"] = _fixed_now() + timedelta(days=3)
+        sched.tick()  # Thursday: dispatched, and the drain runs after it
+        assert published == []  # Monday's nudge must not go out here
 
-        assert sched._reconcile_pending == {}
+        spawned[1][2]({"success": True, "finding": True, "summary": "s",
+                       "details": {"key": "thursday"}})
+        assert [p["finding_key"] for p in published] == ["thursday"]
+
+    def test_a_check_that_outlasts_its_interval_still_drains(self, tmp_path):
+        """The starvation the flag exists to prevent, end to end: every tick
+        dispatches another check before the previous verdict lands. The park
+        must still reach the bus."""
+        m = Monitor(name="x", event="monitor/x", interval="30s")
+        spawned = []
+        sched, published = _scheduler(tmp_path, [m], spawned=spawned)
+        clock = {"now": _fixed_now()}
+        sched._now = lambda: clock["now"]
+        sched.state["x"] = {"active": [], "pending_publish": {"k": {}}}
+
+        for i in range(6):  # six ticks, six dispatches, verdicts lag by two
+            clock["now"] = _fixed_now() + timedelta(seconds=30 * i)
+            sched.tick()
+            if i >= 2:
+                spawned[i - 2][2]({"success": True, "finding": True,
+                                   "summary": "s", "details": {"key": "k"}})
+
+        assert len(spawned) == 6
+        assert [p["data"]["finding_key"] for p in published] == ["k"]
 
     def test_a_native_out_of_band_check_holds_the_drain_too(self, tmp_path):
         """The agent-invoking native runners reconcile off-thread for the same
@@ -1576,7 +1599,15 @@ class TestPublishRetry:
                 return []
 
         m = Monitor(name="x", event="monitor/x", check="slow", interval="1d")
-        sched, published = _scheduler(tmp_path, [m])
+        published, outage = [], {"down": False}
+
+        def publish(event, data):
+            if outage["down"]:
+                return False
+            published.append(data["finding_key"])
+            return True
+
+        sched, _ = _scheduler(tmp_path, [m], publish=publish)
         sched._checks = {"slow": _OutOfBandCheck()}
         detected = threading.Event()
         sched._check_conditions = lambda *a, **kw: (detected.wait(2), [])[1]
@@ -1592,11 +1623,15 @@ class TestPublishRetry:
             time.sleep(0.01)
         assert "pending_publish" not in sched.state["x"]  # retired, not sent
 
-        # And the hold is released when it does, or this monitor's park would
-        # never be drained again this process.
-        sched.state["x"]["pending_publish"] = {"later": {}}
+        # And the hold is released when it does. A hold left behind outlives
+        # the firing that took it: it costs nothing until the NEXT payload
+        # parks, and from then on that monitor's park never drains again.
+        outage["down"] = True
+        sched._reconcile(m, [Condition(key="later", data={})])
+        assert sched.state["x"]["pending_publish"] == {"later": {}}
+        outage["down"] = False
         sched._drain_parked()
-        assert [p["data"]["finding_key"] for p in published] == ["later"]
+        assert published == ["later"]
 
     def test_a_partially_drained_park_records_what_it_delivered(
             self, tmp_path, monkeypatch):
