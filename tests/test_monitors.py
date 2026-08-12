@@ -222,6 +222,28 @@ class TestRegistryMerge:
         assert reg.load_complete is False
         assert [m.name for m in reg.project_monitors] == ["good"]
 
+    def test_an_unreadable_file_reports_an_incomplete_load(self, tmp_path,
+                                                           monkeypatch):
+        """A file the process cannot read degrades like one it cannot parse.
+        Letting the OSError out instead would take down the whole tick -
+        `_loop` catches it, so every OTHER monitor stops running too."""
+        project = tmp_path / "jobtack"
+        monitors_path = paths.package_dir(project) / "monitors.yaml"
+        monitors_path.parent.mkdir(parents=True, exist_ok=True)
+        monitors_path.write_text("monitors:\n  - name: good\n    interval: 5m\n")
+
+        real = Path.read_text
+
+        def boom(self, *a, **kw):
+            if self == monitors_path:
+                raise PermissionError(13, "Permission denied")
+            return real(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "read_text", boom)
+        reg = MonitorRegistry.load(project_path=project)
+        assert reg.load_complete is False
+        assert [m.name for m in reg.project_monitors] == []
+
     def test_a_non_record_entry_reports_an_incomplete_load(self, tmp_path):
         """`monitors:` carrying something that is not a mapping - a bare
         string from a half-edited file - drops that entry silently."""

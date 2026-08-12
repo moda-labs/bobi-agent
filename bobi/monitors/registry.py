@@ -83,7 +83,7 @@ class MonitorRegistry:
 
     def _load(self) -> None:
         defaults, complete = _read_records(_defaults_path(self.project_path))
-        self.load_complete &= complete
+        self.load_complete = self.load_complete and complete
         for raw in defaults:
             try:
                 m = Monitor.from_dict(raw, source="default")
@@ -102,7 +102,7 @@ class MonitorRegistry:
             ]
             for config_path in project_sources:
                 records, complete = _read_records(config_path)
-                self.load_complete &= complete
+                self.load_complete = self.load_complete and complete
                 for raw in records:
                     try:
                         m = Monitor.from_dict(raw, source=project_key, project=project_key)
@@ -199,7 +199,8 @@ class MonitorRegistry:
             return "removed"
 
         # Present only as a built-in default — can't delete, must pause.
-        for raw in _read_records(_defaults_path())[0]:
+        defaults, _complete = _read_records(_defaults_path())
+        for raw in defaults:
             if raw.get("name") == name:
                 return "default-only"
         return "not-found"
