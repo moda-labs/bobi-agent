@@ -3572,12 +3572,11 @@ def recall_memory(query, limit):
     """Search the cold long-term memory reference KB."""
     from bobi.kb.store import KBStore
     from bobi.kb.embedder import embed
-    from bobi.memory import cold_memory_kb_name
+    from bobi.memory import COLD_MEMORY_KB_NAME
 
     _detect_project_root()
-    name = cold_memory_kb_name()
     try:
-        store = KBStore(name)
+        store = KBStore(COLD_MEMORY_KB_NAME)
     except FileNotFoundError:
         click.echo("No cold memory index yet.")
         return
@@ -3627,7 +3626,7 @@ def costs(ctx, group_by):
 
     project_path = _detect_project_root()
     sessions_dir = paths.sessions_dir(project_path)
-    summary = rollup_costs(sessions_dir, group_by=group_by)
+    summary = rollup_costs(sessions_dir)
 
     if summary.sessions_counted == 0:
         click.echo("No cost data found. Costs are recorded as sessions run.")

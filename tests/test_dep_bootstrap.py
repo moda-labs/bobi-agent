@@ -57,8 +57,8 @@ def _shell(rc_by_brain: dict | int, *, sink: list | None = None):
 # --- ResolvedRecipe ---------------------------------------------------------
 
 
-def test_recipe_from_install_adopts_verbatim():
-    r = ResolvedRecipe.from_install({"apt": ["nodejs", "npm"], "npm": ["@openai/codex@0.142.0"]})
+def test_recipe_coerce_adopts_pinned_install_verbatim():
+    r = ResolvedRecipe.coerce({"apt": ["nodejs", "npm"], "npm": ["@openai/codex@0.142.0"]})
     assert r.apt == ["nodejs", "npm"]
     assert r.npm == ["@openai/codex@0.142.0"]
     assert r.run_root == [] and r.run == []
@@ -66,7 +66,7 @@ def test_recipe_from_install_adopts_verbatim():
 
 
 def test_recipe_coerces_scalar_and_drops_blanks_and_unknown_keys():
-    r = ResolvedRecipe.from_agent(
+    r = ResolvedRecipe.coerce(
         {"run_root": "python3 -m venv /opt/x", "apt": ["", "  ", "curl"],
          "bogus": ["ignored"]})
     assert r.run_root == ["python3 -m venv /opt/x"]
@@ -77,7 +77,8 @@ def test_recipe_coerces_scalar_and_drops_blanks_and_unknown_keys():
 
 def test_empty_recipe_is_empty():
     assert ResolvedRecipe().is_empty
-    assert ResolvedRecipe.from_agent({}).is_empty
+    assert ResolvedRecipe.coerce({}).is_empty
+    assert ResolvedRecipe.coerce(None).is_empty
 
 
 # --- materialize: pinned install path (no agent) ----------------------------

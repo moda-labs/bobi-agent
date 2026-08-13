@@ -85,20 +85,14 @@ class ResolvedRecipe:
         return {"apt": self.apt, "npm": self.npm,
                 "run_root": self.run_root, "run": self.run}
 
-    @classmethod
-    def from_install(cls, install: dict) -> "ResolvedRecipe":
-        """Adopt a dependency's pinned ``install`` verbatim (already declarative)."""
-        return cls._coerce(install or {})
-
-    @classmethod
-    def from_agent(cls, recipe: dict) -> "ResolvedRecipe":
-        """Adopt the recipe a bootstrap agent reported. Unknown keys are ignored;
-        each field is coerced to a list of strings so a stray scalar can't poison
-        the Stage-3 build."""
-        return cls._coerce(recipe or {})
-
     @staticmethod
-    def _coerce(data: dict) -> "ResolvedRecipe":
+    def coerce(data: dict | None) -> "ResolvedRecipe":
+        """Adopt a recipe from either source — a dependency's pinned ``install``
+        (already declarative) or the one a bootstrap agent reported. Unknown keys
+        are ignored; each field is coerced to a list of strings so a stray scalar
+        can't poison the Stage-3 build."""
+        data = data or {}
+
         def _steps(key: str) -> list[str]:
             val = data.get(key)
             if isinstance(val, str):
@@ -257,8 +251,9 @@ def materialize(dep: Dependency, *, agent_runner: AgentRunner,
     the pinned steps it ran.
     """
     if dep.install:
+        # A pinned install is already declarative — adopted verbatim, no agent.
         return MaterializeResult(
-            dep=dep.name, recipe=ResolvedRecipe.from_install(dep.install),
+            dep=dep.name, recipe=ResolvedRecipe.coerce(dep.install),
             agent_used=False, ok=True, notes="pinned install recipe (no agent)",
         )
 
@@ -291,7 +286,8 @@ def materialize(dep: Dependency, *, agent_runner: AgentRunner,
                    "truncated output)"),
         )
 
-    recipe = ResolvedRecipe.from_agent(verdict.get("recipe") or {})
+    # The recipe a bootstrap agent reported — untrusted shape, hence the coerce.
+    recipe = ResolvedRecipe.coerce(verdict.get("recipe"))
     ok = bool(verdict.get("ok"))
     notes = str(verdict.get("notes", "") or "")
     if ok and recipe.is_empty:
