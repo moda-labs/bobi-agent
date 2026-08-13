@@ -225,3 +225,23 @@ class BrainFactory(Protocol):
         the call site used to hand the SDK: ``max_turns``, ``skills``,
         ``hooks``, ``mcp_servers``, …).
         """
+
+    def stream_once(
+        self,
+        *,
+        system_prompt: Any,
+        user_prompt: str,
+        model: str | None = None,
+        cwd: str | None = None,
+        options: dict | None = None,
+    ) -> AsyncIterator["BrainMessage"]:
+        """One-shot streaming completion — no session, no resume.
+
+        The stateless setup/digestion transport (``bobi.setup.llm``) calls this
+        on whatever brain the process is bound to, so it is part of the factory
+        contract, not a Claude extra. Declared here because it was a de facto
+        requirement for years while only some factories implemented it: a brain
+        without it failed with ``AttributeError`` at the call site instead of
+        saying which brain lacked the capability. A factory that cannot serve
+        the path raises :class:`NotImplementedError` naming itself.
+        """

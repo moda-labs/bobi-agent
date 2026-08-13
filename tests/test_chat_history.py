@@ -183,13 +183,13 @@ class TestBrainDispatch:
     def test_claude_brain_never_reads_codex_rollout(self, codex_home, monkeypatch):
         # A codex rollout exists, but brain=claude must not fall through to it.
         _write_rollout(codex_home, "SID", CODEX_ROWS)
-        monkeypatch.setattr(chat_history, "_transcript_path", lambda sid: None)
+        monkeypatch.setattr(chat_history, "find_claude_transcript", lambda sid: None)
         assert read_transcript_messages("SID", brain="claude") == []
 
     def test_unknown_brain_falls_back_to_codex(self, codex_home, monkeypatch):
         # No claude transcript resolves; an unrecorded brain still finds codex.
         _write_rollout(codex_home, "SID", CODEX_ROWS)
-        monkeypatch.setattr(chat_history, "_transcript_path", lambda sid: None)
+        monkeypatch.setattr(chat_history, "find_claude_transcript", lambda sid: None)
         for brain in (None, ""):
             msgs = read_transcript_messages("SID", brain=brain)
             assert [m["text"] for m in msgs][-1] == \
@@ -200,7 +200,7 @@ class TestBrainDispatch:
         # gateway/stub write Claude-format transcripts; an explicit non-codex
         # brain must return [] without ever scanning the codex rollout tree.
         _write_rollout(codex_home, "SID", CODEX_ROWS)
-        monkeypatch.setattr(chat_history, "_transcript_path", lambda sid: None)
+        monkeypatch.setattr(chat_history, "find_claude_transcript", lambda sid: None)
 
         def _boom(*a, **k):
             raise AssertionError("codex rollout tree must not be walked")
@@ -243,7 +243,7 @@ class TestBrainDispatch:
             {"type": "assistant",
              "message": {"role": "assistant", "content": "hello from claude"}},
         ])
-        monkeypatch.setattr(chat_history, "_transcript_path", lambda sid: claude)
+        monkeypatch.setattr(chat_history, "find_claude_transcript", lambda sid: claude)
         _write_rollout(codex_home, "SID", CODEX_ROWS)
         msgs = read_transcript_messages("SID")  # brain unspecified
         assert msgs == [
@@ -275,3 +275,79 @@ class TestLoadSessionBrain:
         monkeypatch.setenv("BOBI_BRAIN", "codex")
         save_session_id("s", "thread-1", root=tmp_path)
         assert load_session_brain("s", root=tmp_path) == "codex"
+
+
+# --- find_claude_transcript: the one locator (Q027/Q104) --------------------
+
+class TestFindClaudeTranscript:
+    """One locator, called by chat_history, brain.claude and cli.
+
+    Four hand-rolled copies of "where is session <id>.jsonl" collapsed into
+    this function; these pin the behaviour every caller now inherits.
+    """
+
+    def _seed(self, root: str, session_id: str, tmp_path) -> Path:
+        projects = tmp_path / root / "projects" / "some-project"
+        projects.mkdir(parents=True)
+        target = projects / f"{session_id}.jsonl"
+        target.write_text("{}\n")
+        return target
+
+    def test_honors_claude_config_dir(self, tmp_path, monkeypatch):
+        from bobi.chat_history import find_claude_transcript
+
+        target = self._seed("cfg", "sess-1", tmp_path)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+        assert find_claude_transcript("sess-1") == target
+
+    def test_falls_back_to_home(self, tmp_path, monkeypatch):
+        from bobi.chat_history import find_claude_transcript
+
+        target = self._seed("home/.claude", "sess-2", tmp_path)
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+        assert find_claude_transcript("sess-2") == target
+
+    def test_config_dir_wins_over_home(self, tmp_path, monkeypatch):
+        from bobi.chat_history import find_claude_transcript
+
+        pinned = self._seed("cfg", "dup", tmp_path)
+        self._seed("home/.claude", "dup", tmp_path)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+        assert find_claude_transcript("dup") == pinned
+
+    def test_empty_session_id_is_none(self, tmp_path, monkeypatch):
+        from bobi.chat_history import find_claude_transcript
+
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        assert find_claude_transcript("") is None
+
+    def test_unreadable_root_is_skipped_not_raised(self, tmp_path, monkeypatch):
+        """The guard the brain.claude copy carried, kept by the survivor.
+
+        The scan races Claude Code writing the tree; an unreadable root means
+        "no transcript here", never a traceback out of a history read.
+        """
+        from bobi import chat_history
+
+        good = self._seed("home/.claude", "sess-3", tmp_path)
+        bad = tmp_path / "cfg" / "projects"
+        bad.mkdir(parents=True)
+
+        real_iterdir = Path.iterdir
+
+        def exploding(self):
+            if self == bad:
+                raise PermissionError(str(self))
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", exploding)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+        assert chat_history.find_claude_transcript("sess-3") == good
