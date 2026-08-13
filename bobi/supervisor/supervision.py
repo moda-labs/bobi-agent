@@ -22,6 +22,12 @@ changes a restart decision:
   from the outside verdict it computes per poll, not here.
 - last-restart bookkeeping (reason + timestamp) and the last health payload,
   surfaced to the observer so the heartbeat can report them.
+- the load-grace gate (MOD-364, issue #903). When the host is saturated by
+  the manager's own busy worker tree, the ambiguous liveness verdicts (probe
+  misses, stalled active turns, a load-induced dead-director signal) are
+  *deferred* - no charge, no restart - until the evidence ends or the spell
+  cap expires. A real child exit never reaches the gate: the crash path above
+  stays authoritative. See :meth:`Supervisor._defer_for_load`.
 
 The wedge *decision* still lives in :func:`is_wedged`; process management and
 health polling are still injectable so the state machine is unit-testable
@@ -157,6 +163,10 @@ class SupervisorState:
     # the same confirm before reporting a wedge.
     ever_healthy: bool
     health_fail_count: int
+    # Load-grace context (MOD-364): set while a verdict was deferred this
+    # poll, None otherwise. The heartbeat renders it as an additive block so a
+    # consumer can tell "stalled but legitimately busy" from "stalled".
+    load_grace: dict | None = None
     # Operator intent (#9): "running" normally, "stopped" after an operator
     # `stop`. Lets telemetry report an intentionally-stopped manager as
     # `stopped` rather than a probe FAILURE (intentional != broken).
@@ -226,6 +236,7 @@ class Supervisor:
                  project_root: Path | None = None,
                  now_fn=time.time, sleep_fn=time.sleep,
                  spawn_fn=None, health_fn=None, announce_fn=None,
+                 load_fn=None,
                  observer: SupervisorObserver | None = None):
         self.start_args = list(start_args)
         self.config = config
@@ -234,6 +245,7 @@ class Supervisor:
         self._sleep = sleep_fn
         self._spawn_fn = spawn_fn or self._default_spawn
         self._health_fn = health_fn or self._default_health
+        self._load_fn = load_fn or self._default_load_fn
         self._announce_fn = announce_fn
         self._observer = observer or _NULL_OBSERVER
         self._budget = RestartBudget(config.max_restarts, config.restart_window,
@@ -244,6 +256,16 @@ class Supervisor:
         self._fail_count = 0
         self._child_started_at = 0.0
         self._child_healthy_since: float | None = None
+        # Load-grace state (MOD-364). ``_load_prev`` is the per-poll CPU
+        # baseline; ``_load_grace`` is the block reported to the observer while
+        # a verdict is deferred; ``_grace_spell_start`` marks the start of the
+        # current unresponsive spell the cap bounds; ``_load_evidence`` caches
+        # the poll-start sample so a same-poll verdict uses the full-interval
+        # delta rather than re-reading /proc moments later.
+        self._load_prev: dict[int, int] | None = None
+        self._load_grace: dict | None = None
+        self._grace_spell_start: float | None = None
+        self._load_evidence: dict | None = None
         # Last observed child liveness, maintained by _cycle so the observer
         # report never has to re-poll the child (a second poll would consume a
         # test double's poll sequence and, in production, is simply redundant).
@@ -288,6 +310,11 @@ class Supervisor:
         from bobi import manager_health
         return manager_health.health(f"http://127.0.0.1:{port}")
 
+    def _default_load_fn(self, manager_pid, previous):
+        from .load import load_evidence
+        return load_evidence(manager_pid, previous,
+                             pegged_ratio=self.config.load_pegged_ratio)
+
     # --- child lifecycle --------------------------------------------------
 
     def _respawn(self) -> None:
@@ -297,6 +324,12 @@ class Supervisor:
         self._child_alive = True
         self._stall_count = 0
         self._fail_count = 0
+        # Fresh process tree, fresh baseline: stale descendant samples (and a
+        # pid reused by an unrelated process) must never feed the gate.
+        self._load_prev = None
+        self._load_grace = None
+        self._grace_spell_start = None
+        self._load_evidence = None
 
     def _kill_child(self) -> None:
         # Known, bounded limitation: a *wedged* manager may be too stuck to run
@@ -450,6 +483,9 @@ class Supervisor:
         self._kill_child()
         self._child_alive = False
         self._last_health = None
+        self._load_grace = None
+        self._grace_spell_start = None
+        self._load_evidence = None
         self._observer.lifecycle("manager_stopped", reason="operator")
 
     def _operator_start_manager(self) -> None:
@@ -462,6 +498,108 @@ class Supervisor:
         self._observer.lifecycle("manager_started", reason="operator")
 
     # --- restart decisions ------------------------------------------------
+
+    def _refresh_load_baseline(self) -> None:
+        """Refresh the per-poll CPU baseline for the load gate (MOD-364).
+
+        The busy-descendant check diffs cpu ticks across two samples, so the
+        FIRST verdict of a heavy period already needs a baseline from the
+        previous poll. Cheap (one /proc walk per poll interval) and fail-open:
+        a read failure just leaves the baseline stale for this poll. The
+        evidence is cached for the verdict path so a same-poll verdict uses
+        this full-interval delta instead of re-reading /proc moments later (a
+        within-poll delta would read as ~0 busy and the gate would never open).
+        """
+        proc = self._proc
+        if proc is None or not self.config.load_grace_enabled:
+            self._load_evidence = None
+            return
+        try:
+            evidence = self._load_fn(proc.pid, self._load_prev)
+        except Exception:
+            log.debug("supervisor: load baseline refresh failed",
+                      exc_info=True)
+            self._load_evidence = None
+            return
+        self._load_evidence = evidence
+        self._load_prev = evidence.get("sample")
+
+    def _defer_for_load(self, deferred: str) -> bool:
+        """True when an ambiguous liveness verdict must be DEFERRED (MOD-364).
+
+        Sanctioned heavy work saturates the host while remaining productive;
+        under that pressure probe misses, stalled turns and even a
+        load-induced ``status=error`` read as failure to the restart machine
+        while nothing is actually broken (issue #903 restarted a healthy
+        instance off exactly this). When the host is pegged AND the manager's
+        own descendant tree is the thing consuming CPU, the verdict is
+        ambiguous - defer it: no budget charge, no restart.
+
+        The exemption is bounded three ways, all derived from live state:
+
+        - evidence is re-sampled every poll, so the gate reopens the moment
+          the busy processes finish or die - nothing persisted can outlive
+          them, and a parallel heavy command cannot overwrite or release a
+          sibling's state (there is no per-holder state at all);
+        - a *spell* - one continuous unresponsive stretch - longer than
+          ``config.load_grace_max`` drops the deferral so a genuinely dead
+          manager still escalates; any working poll (a live, non-stalled
+          health response) resets the spell;
+        - a real child exit never reaches this gate (the crash path in
+          :meth:`_handle_child_exit` runs first and stays authoritative), and
+          unreadable evidence fails CLOSED on the exemption: uncertainty never
+          defers a restart.
+
+        ``deferred`` names the verdict being deferred (``probe_miss`` /
+        ``stalled_turn`` / ``dead_director``) and rides along in the additive
+        heartbeat block for diagnosis.
+        """
+        if not self.config.load_grace_enabled:
+            return False
+        proc = self._proc
+        if proc is None:
+            return False
+        now = self._now()
+        evidence = self._load_evidence
+        if evidence is None:
+            # The poll-start sample failed or was skipped - try one fresh read
+            # so a transient /proc hiccup cannot silently disable the gate.
+            try:
+                evidence = self._load_fn(proc.pid, self._load_prev)
+            except Exception:
+                log.warning("supervisor: load evidence read failed - not "
+                            "deferring", exc_info=True)
+                self._load_grace = None
+                self._grace_spell_start = None
+                return False
+            self._load_prev = evidence.get("sample")
+        if not evidence.get("active"):
+            self._load_grace = None
+            self._grace_spell_start = None
+            return False
+        if self._grace_spell_start is None:
+            self._grace_spell_start = now
+        spell = now - self._grace_spell_start
+        if (self.config.load_grace_max > 0
+                and spell > self.config.load_grace_max):
+            log.error("supervisor: load grace exceeded %.0fs of continuous "
+                      "unresponsiveness (load1=%s, %s busy descendant(s)) - "
+                      "the %s verdict is no longer deferred",
+                      spell, evidence.get("load1"),
+                      evidence.get("busy_descendants"), deferred)
+            self._load_grace = None
+            self._grace_spell_start = None
+            return False
+        self._load_grace = {
+            "active": True,
+            "since": self._grace_spell_start,
+            "spell_s": round(spell, 1),
+            "deferred": deferred,
+            "load1": evidence.get("load1"),
+            "ncpu": evidence.get("ncpu"),
+            "busy_descendants": evidence.get("busy_descendants", 0),
+        }
+        return True
 
     def _restart_wedge(self, reason: str = "wedge") -> int | None:
         """Restart a confirmed-wedged or positively-dead manager; escalate if
@@ -542,6 +680,10 @@ class Supervisor:
             return self._handle_child_exit(rc)
         self._child_alive = True
 
+        # Per-poll load baseline: one /proc walk so a verdict that fires THIS
+        # poll already has a full-interval CPU delta to judge against.
+        self._refresh_load_baseline()
+
         # 2. Probe health.
         payload = self._health_fn()
         self._last_health = payload
@@ -560,6 +702,11 @@ class Supervisor:
             log.warning("supervisor: health probe failed (%d/%d consecutive)",
                         self._fail_count, self.config.confirm_polls)
             if self._fail_count >= self.config.confirm_polls:
+                if self._defer_for_load("probe_miss"):
+                    log.warning("supervisor: load grace - deferring the "
+                                "probe-miss verdict")
+                    self._fail_count = 0
+                    return None
                 return self._restart_wedge()
             return None
         self._fail_count = 0
@@ -573,7 +720,13 @@ class Supervisor:
         # debounce (#12). `error` is the one status no other recovery path can
         # see (see DEAD_STATES); the shared budget still bounds repeated
         # error-deaths and escalates on exhaustion exactly like the wedge path.
+        # Under load grace the verdict defers (MOD-364): a starved health
+        # thread can surface as `error` while the director is merely busy.
         if status in DEAD_STATES:
+            if self._defer_for_load("dead_director"):
+                log.warning("supervisor: load grace - deferring the dead-"
+                            "director verdict")
+                return None
             return self._restart_wedge("dead")
 
         # Credit healthy uptime only once the DIRECTOR is actually addressable
@@ -591,9 +744,20 @@ class Supervisor:
                         "- confirm %d/%d", status, float(idle),
                         self._stall_count, self.config.confirm_polls)
             if self._stall_count >= self.config.confirm_polls:
+                if self._defer_for_load("stalled_turn"):
+                    log.warning("supervisor: load grace - deferring the "
+                                "stalled-turn verdict")
+                    self._stall_count = 0
+                    return None
                 return self._restart_wedge()
         else:
             self._stall_count = 0
+            # A working poll - a live, non-stalled health response - ends the
+            # unresponsive spell: the cap resets, and any active grace block
+            # clears so the heartbeat stops claiming a deferral that no longer
+            # applies.
+            self._load_grace = None
+            self._grace_spell_start = None
         return None
 
     # --- observer report --------------------------------------------------
@@ -611,6 +775,7 @@ class Supervisor:
             ever_healthy=self._child_healthy_since is not None,
             health_fail_count=self._fail_count,
             desired_state=self._desired_state,
+            load_grace=self._load_grace,
         )
 
     # --- top-level loop ---------------------------------------------------

@@ -17,6 +17,12 @@ Modes:
 - ``dead-then-recover``: first launch registers a *dead* director
   (``status=error``) whose health server keeps answering - the exact #12
   stranding shape. Every relaunch registers a healthy idle director.
+- ``busy-wedge-then-recover`` (MOD-364): first launch registers a wedged
+  director AND forks a CPU-burning descendant, writing the busy child's pid to
+  ``--busy-pid-file`` - the load-grace shape: a sanctioned heavy worker on a
+  saturated host. Every relaunch registers a healthy idle director. The busy
+  child self-exits after 60s (and the test SIGKILLs it in cleanup), so a
+  failed assertion cannot leak a burn loop past the test.
 
 Each launch appends a line to ``--launch-log`` so the test can count restarts.
 """
@@ -32,9 +38,10 @@ def main() -> None:
     p.add_argument("--project-root", required=True)
     p.add_argument("--session", required=True)
     p.add_argument("--launch-log", required=True)
+    p.add_argument("--busy-pid-file", default=None)
     p.add_argument("--mode", required=True,
                    choices=["wedge-then-recover", "always-idle",
-                            "dead-then-recover"])
+                            "dead-then-recover", "busy-wedge-then-recover"])
     a = p.parse_args()
 
     root = Path(a.project_root)
@@ -45,6 +52,19 @@ def main() -> None:
     with open(log, "a") as fh:
         fh.write(f"launch {launch_index} pid={os.getpid()}\n")
 
+    busy_child = None
+    if a.mode == "busy-wedge-then-recover" and launch_index == 1:
+        # A real descendant burning CPU: fork a tight loop that outlives this
+        # manager (reparented to init when the supervisor kills us), so the
+        # supervisor's /proc walk sees a busy process in the manager's tree.
+        busy_child = os.fork()
+        if busy_child == 0:
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                pass
+            os._exit(0)
+        Path(a.busy_pid_file).write_text(str(busy_child))
+
     from bobi.sdk import set_project_root, get_registry, SessionEntry
     set_project_root(root)
 
@@ -53,6 +73,8 @@ def main() -> None:
         status = "idle"
     elif a.mode == "dead-then-recover":
         status = "error" if launch_index == 1 else "idle"
+    elif a.mode == "busy-wedge-then-recover":
+        status = "running" if launch_index == 1 else "idle"
     else:  # wedge-then-recover
         status = "running" if launch_index == 1 else "idle"
 

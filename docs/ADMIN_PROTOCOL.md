@@ -302,7 +302,7 @@ renders.
 ```json
 {
   "deployment":  { "fleet": "...", "instance": "...", "platform": "..." },
-  "supervisor":  { "pid": 1, "uptime_s": 1043.2, "version": "0.1.0" },
+  "supervisor":  { "pid": 1, "uptime_s": 1043.2, "version": "0.2.0" },
   "manager": {
     "status": "running" | "idle" | "starting" | "wedged" | "down" | "stopped",
     "pid": 42,
@@ -313,6 +313,7 @@ renders.
     "last_restart_at": null
   },
   "sessions":     [ { "name": "...", "role": "...", "status": "..." } ],
+  "load_grace": null,
   "resources":    { "disk_free_mb": 8120, "mem_free_mb": 512, "mem_pct": 68.0 },
   "versions":     { "image": "...", "team_package": "...", "bobi": "0.50.0" },
   "expectations": { "subscriptions": [...], "monitors": [ { "name": "...", "schedule": "..." } ] },
@@ -344,6 +345,11 @@ not the same field. There is no `"healthy"` or `"dead"` status value — switch 
 subscriptions and monitors), which is what makes a "configured but not running"
 gap visible to a consumer that never reads the team's config.
 
+`load_grace` is an additive block (see [Load grace](#load-grace-mod-364)): it
+is `null` unless a liveness verdict was deferred this poll, in which case it
+carries `{active, since, spell_s, deferred, load1, ncpu, busy_descendants}`.
+Old consumers that predate the block simply never see it.
+
 ## Lifecycle events
 
 Published to `fleet/lifecycle` on edges only, and appended to a bounded 48-hour
@@ -356,12 +362,84 @@ trail. Each carries the deployment identity plus event-specific fields.
 | `manager_restarted` | the supervisor restarted a failing manager, with `reason` |
 | `probe_failing` | the derived status crossed into a failing verdict |
 | `probe_recovered` | it crossed back out |
+| `load_grace_active` | a verdict was first deferred for load (`deferred`, `load1`, `ncpu`, `busy_descendants`) |
+| `load_grace_cleared` | the deferral ended (`duration_s` covers the stretch) |
 | `budget_exhausted` | the restart budget ran out; the supervisor exits `70` |
 
 `budget_exhausted` is terminal and deliberately loud: it means the supervisor
 gave up restarting a manager that kept failing, and the orchestrator's own
 restart policy (Fly machine restart, Kubernetes `CrashLoopBackOff`, `docker
 --restart`) takes over from the non-zero exit.
+
+While a `load_grace_active` stretch is open, `probe_failing` / `probe_recovered`
+are frozen: the manager's liveness signals are known-starved, so a wedged read
+there is not recorded as a failure (nor is the working poll that ends the
+deferral recorded as a recovery).
+
+## Load grace (MOD-364)
+
+The supervisor restarts a manager whose liveness signals fail. Under a
+saturated host those signals fail for starvation reasons, not failure reasons:
+issue #903 saw full test-suite runs on a shared 2-vCPU instance charge the
+restart budget three ways (probe misses, a stalled-turn wedge, a load-induced
+`status=error`) and restart a healthy, productive instance.
+
+Load grace defers those ambiguous verdicts while BOTH hold:
+
+- the host is pegged: `load1 >= ratio * ncpu`, from `/proc/loadavg`
+  (`WATCHDOG_LOAD_PEGGED_RATIO`, default `1.0`), and
+- the manager's own worker tree is the thing working: some descendant process
+  of the supervised manager consumed CPU time (`utime + stime` delta from
+  `/proc/<pid>/stat`) since the previous poll.
+
+No declaration is needed anywhere. The supervisor derives "legitimately busy"
+from the live process table every poll, so there is no impact flag, no CLI
+change, no lease file, and nothing persisted that could outlive the busy
+processes: when they finish or die, the gate reopens on the next poll.
+Attribution is by ancestry from the managed pid, so only the supervised
+manager's own tree can count.
+
+What is deferred, and what never is:
+
+| Signal | Without load grace | With load grace |
+|---|---|---|
+| `confirm_polls` consecutive probe misses | charged + restart | deferred (`probe_miss`) |
+| stalled active turn past `stall_threshold` | charged + restart | deferred (`stalled_turn`) |
+| `status=error` (dead director) | charged + restart | deferred (`dead_director`) |
+| the manager process really exits | charged + restart | charged + restart, always |
+
+The crash path stays authoritative: a real child exit is never deferred, and
+the restart budget keeps its full power against crash loops. Incident alerting
+is unaffected too - it opens only on a charged restart, and a deferred verdict
+charges nothing.
+
+Bounds. The deferral is a *spell*, not a state: one continuous unresponsive
+stretch. Any working poll - a live, non-stalled health response - resets the
+spell, and the evidence dropping (load falls, the busy processes finish)
+reopens the gate immediately. `WATCHDOG_LOAD_GRACE_MAX` (default `900`s) caps
+a single spell so a genuinely dead manager still escalates; set it to `0` to
+let deferral continue as long as the evidence holds. Unreadable evidence fails
+closed: uncertainty never defers a restart.
+
+Platform scope. The evidence sources are Linux procfs. On hosts without
+`/proc` (macOS, Windows) both reads fail closed, so the gate never defers and
+the supervisor behaves exactly as it did before this feature: no new crash
+surface, no new dependency, and the pre-existing #903 shape (a false restart
+under saturation) remains possible there. The production fleet runs the Linux
+reference image, which is where that shape occurs; dev machines get the
+unchanged behavior rather than the exemption. A Darwin reader
+(`os.getloadavg()` plus `ps -axo pid,ppid,time` behind the same supervisor
+seam) is planned as follow-up work, gated on a real dev-machine false-kill
+report; until it lands, macOS keeps the pre-feature behavior. Windows stays
+out of scope (no load-average concept).
+
+Knobs (`WATCHDOG_*`, read at supervisor start):
+
+| Env | Default | Meaning |
+|---|---|---|
+| `WATCHDOG_LOAD_GRACE` | `1` | `0` disables the gate entirely |
+| `WATCHDOG_LOAD_PEGGED_RATIO` | `1.0` | `load1` / `ncpu` ratio that counts as saturated |
+| `WATCHDOG_LOAD_GRACE_MAX` | `900` | max seconds of one continuous unresponsive spell before the verdict fires anyway |
 
 ## Failure behavior
 
