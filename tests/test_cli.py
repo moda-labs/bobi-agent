@@ -21,6 +21,27 @@ def test_version_flag():
     assert __version__ in result.output
 
 
+def test_transport_logs_do_not_reach_the_console(monkeypatch):
+    """The root logger runs at INFO, and httpx logs every request at INFO.
+
+    `daemon._ping` uses the pooled client (Q123), and `bobi app start` polls
+    it every 0.2s while the daemon comes up — so without this the command
+    buries its own "running at ..." line under a stack of transport chatter
+    that `urllib` never produced.
+    """
+    import logging
+
+    logging.getLogger("httpx").setLevel(logging.INFO)
+    monkeypatch.setattr(
+        "bobi.webapp.daemon.start",
+        lambda open_browser=True: type("Status", (), {"url": "u", "pid": 1})(),
+    )
+
+    CliRunner().invoke(main, [])
+
+    assert logging.getLogger("httpx").level == logging.WARNING
+
+
 def test_bare_bobi_starts_app(monkeypatch):
     calls = []
 

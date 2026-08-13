@@ -217,6 +217,12 @@ def main(ctx):
         datefmt="%H:%M:%S",
         handlers=[logging.StreamHandler()],
     )
+    # httpx logs every request at INFO, which the root level above would put
+    # in front of the user's actual output — and `bobi app start` polls
+    # /api/ping every 0.2s while the daemon comes up, so a slow start would
+    # bury its own "running at ..." line under a stack of transport chatter.
+    # Transport logs are debugging detail, not product output.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     # Top-level commands are machine/repo scoped. Runtime identity is bound by
     # `bobi agent <name> ...` or inherited BOBI_ROOT in child processes.
     if ctx.invoked_subcommand is None:
