@@ -215,12 +215,14 @@ def session_usage(model_usage: dict | None,
     }
 
 
-def rollup_costs(sessions_dir: Path, group_by: str = "provider") -> CostSummary:
+def rollup_costs(sessions_dir: Path) -> CostSummary:
     """Aggregate costs across all session state files.
+
+    Every ``by_*`` map is always computed; grouping is a presentation
+    concern that ``format_costs`` applies to the finished summary.
 
     Args:
         sessions_dir: Path to <run>/state/sessions/
-        group_by: One of "provider", "model", "session", "role"
     """
     summary = CostSummary()
 

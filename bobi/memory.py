@@ -172,10 +172,6 @@ def cold_memory_kb_path(root: Path | None = None) -> Path:
     return paths.state_path(root) / "kb" / f"{COLD_MEMORY_KB_NAME}.db"
 
 
-def cold_memory_kb_name() -> str:
-    return COLD_MEMORY_KB_NAME
-
-
 def _reference_category(text: str) -> str:
     headings = [
         line.strip("# ").lower()

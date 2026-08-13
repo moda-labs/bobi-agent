@@ -1,3 +1,4 @@
+import re
 import socket
 import stat
 import types
@@ -197,6 +198,35 @@ def test_serve_local_mints_secret_opens_browser_and_runs_bound_socket(monkeypatc
     assert seen["sockname"][0] == "127.0.0.1"
     assert seen["url"].startswith("http://127.0.0.1:")
     assert seen["url"].endswith("/?n=minted-token")
+
+
+def test_serve_local_banner_is_the_label_line_operators_read(monkeypatch, capsys):
+    """The startup banner is the only thing telling an operator where the UI is.
+
+    `bobi setup` used to pass its own `announce` callback that reproduced this
+    line character-for-character; the callback is gone, so the label branch is
+    now the single source of that text and its exact shape is load-bearing.
+    """
+    class FakeServer:
+        def __init__(self, config):
+            pass
+
+        def run(self, sockets):
+            pass
+
+    monkeypatch.setattr("bobi.webui_common.launcher.secrets.token_urlsafe",
+                        lambda n: "minted-token")
+    monkeypatch.setattr("bobi.webui_common.launcher.uvicorn.Server", FakeServer)
+
+    assert serve_local(lambda secret: FastAPI(), open_browser=False,
+                       label="bobi setup") == 0
+
+    out = capsys.readouterr().out
+    port = re.search(r"127\.0\.0\.1:(\d+)", out).group(1)
+    assert out == (
+        f"\n  bobi setup is running at "
+        f"http://127.0.0.1:{port}/?n=minted-token\n  (Ctrl-C to stop)\n\n"
+    )
 
 
 def test_serve_container_writes_token_and_port_and_uses_ipv6_host(tmp_path, monkeypatch):

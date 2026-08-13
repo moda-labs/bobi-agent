@@ -11,6 +11,7 @@ import os
 
 import pytest
 
+from bobi import paths
 from bobi.sdk import SessionEntry, SessionRegistry
 from bobi.usage_backfill import backfill_usage, transcript_usage
 
@@ -517,6 +518,31 @@ class TestCostsCli:
     def test_by_dimension_still_runs(self, bobi_install, dimension):
         result = self._run(bobi_install, "--by", dimension)
         assert result.exit_code == 0, result.output
+
+    @pytest.mark.parametrize("dimension",
+                             ["provider", "model", "session", "role"])
+    def test_by_dimension_reaches_the_formatter(self, bobi_install, dimension):
+        """`--by` must still shape the OUTPUT, not just exit 0.
+
+        The rollup is grouping-independent, so `format_costs` is the only
+        place the flag can take effect; exit-code-only coverage would let a
+        dropped `group_by=` argument pass silently. Needs a seeded session —
+        with no cost data the command returns before it ever formats.
+        """
+        d = paths.sessions_dir() / "eng-1"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "state.json").write_text(json.dumps({
+            "name": "eng-1",
+            "role": "engineer",
+            "total_cost_usd": 0.25,
+            "model_usage": {
+                "anthropic:claude-sonnet-4-20250514": {"cost_usd": 0.25},
+            },
+        }))
+
+        result = self._run(bobi_install, "--by", dimension)
+        assert result.exit_code == 0, result.output
+        assert f"By {dimension}:" in result.output, result.output
 
     def test_backfill_is_registered(self, bobi_install):
         result = self._run(bobi_install, "--help")

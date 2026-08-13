@@ -16,7 +16,6 @@ import uvicorn
 from bobi.fsutil import atomic_write_text
 
 AppFactory = Callable[[str], FastAPI]
-Announcer = Callable[[str], str]
 
 
 def _new_secret() -> str:
@@ -36,7 +35,6 @@ def serve_local(
     *,
     open_browser: bool = True,
     label: str = "web UI",
-    announce: Announcer | None = None,
 ) -> int:
     """Run a local web UI on `127.0.0.1:0` in the foreground."""
     secret = _new_secret()
@@ -52,10 +50,7 @@ def serve_local(
 
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
-    if announce is not None:
-        print(announce(url))
-    else:
-        print(f"\n  {label} is running at {url}\n  (Ctrl-C to stop)\n")
+    print(f"\n  {label} is running at {url}\n  (Ctrl-C to stop)\n")
 
     try:
         server.run(sockets=[sock])
