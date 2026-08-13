@@ -38,7 +38,7 @@ def _line(kind, content, *, at=AT):
 def _seed_transcript(tmp_path, monkeypatch, lines):
     path = tmp_path / "transcript.jsonl"
     path.write_text("\n".join(lines) + "\n")
-    monkeypatch.setattr(chat_history, "_transcript_path", lambda sid: path)
+    monkeypatch.setattr(chat_history, "find_claude_transcript", lambda sid: path)
     return path
 
 
@@ -156,7 +156,7 @@ class TestTranscriptDetail:
 
     def test_missing_transcript_is_empty_not_an_error(self, tmp_path,
                                                       monkeypatch):
-        monkeypatch.setattr(chat_history, "_transcript_path", lambda sid: None)
+        monkeypatch.setattr(chat_history, "find_claude_transcript", lambda sid: None)
         assert read_transcript_detail("sid", brain="claude") == []
 
     def test_unparseable_lines_are_skipped(self, tmp_path, monkeypatch):
@@ -172,7 +172,7 @@ class TestTranscriptDetail:
         path = tmp_path / "t.jsonl"
         path.write_text(json.dumps(
             {"type": "user", "message": {"content": "no clock"}}) + "\n")
-        monkeypatch.setattr(chat_history, "_transcript_path", lambda sid: path)
+        monkeypatch.setattr(chat_history, "find_claude_transcript", lambda sid: path)
         [entry] = read_transcript_detail("sid")
         assert entry["at"] == ""
 
@@ -289,7 +289,7 @@ class TestEndpoints:
 
     def test_transcript_for_an_unknown_session_is_empty(self, bobi_install,
                                                         monkeypatch):
-        monkeypatch.setattr(chat_history, "_transcript_path", lambda sid: None)
+        monkeypatch.setattr(chat_history, "find_claude_transcript", lambda sid: None)
         r = _client().get(
             f"/api/agents/{bobi_install.agent_name}/subagents/ghost/transcript")
         assert r.status_code == 200

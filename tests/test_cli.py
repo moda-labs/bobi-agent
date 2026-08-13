@@ -928,3 +928,49 @@ class TestAgentsUpdateAndBrowse:
         assert result.exit_code == 0, result.output
         assert "[installed]" in result.output
         assert "available" not in result.output
+
+
+class TestFindTranscript:
+    """`bobi logs`' transcript fallback, on the shared locator (Q027).
+
+    This fallback was the fourth hand-rolled copy of "find <session>.jsonl"
+    and the only one that ignored CLAUDE_CONFIG_DIR, so `bobi logs` printed
+    "No session" for exactly the agents bobi itself runs under a per-team
+    config dir (#779).
+    """
+
+    def _bind(self, tmp_path, monkeypatch, session_id):
+        from bobi import paths
+        from bobi.cli import _find_transcript
+
+        monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            "bobi.sdk._sessions_dir",
+            lambda root=None: paths.sessions_dir(tmp_path))
+        sessions = paths.sessions_dir(tmp_path)
+        sessions.mkdir(parents=True, exist_ok=True)
+        (sessions / "worker.id").write_text(session_id + "\n")
+        return _find_transcript
+
+    def test_finds_transcript_under_claude_config_dir(self, tmp_path, monkeypatch):
+        find = self._bind(tmp_path, monkeypatch, "sess-cli")
+        target = tmp_path / "cfg" / "projects" / "proj" / "sess-cli.jsonl"
+        target.parent.mkdir(parents=True)
+        target.write_text("{}\n")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+        assert find("worker") == target
+
+    def test_missing_transcript_returns_none(self, tmp_path, monkeypatch):
+        find = self._bind(tmp_path, monkeypatch, "sess-absent")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+        assert find("worker") is None
+
+    def test_blank_session_id_returns_none(self, tmp_path, monkeypatch):
+        find = self._bind(tmp_path, monkeypatch, "")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+        assert find("worker") is None

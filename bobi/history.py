@@ -1,8 +1,12 @@
 """Conversation history indexer — SQLite + FTS5 over Claude Code JSONL logs.
 
-Reads conversation files from ~/.claude/projects/<project>/<session>.jsonl,
+Reads conversation files from <projects-root>/<project>/<session>.jsonl,
 indexes them into SQLite with full-text search, and provides a query API.
 Incremental: only processes new lines since last index.
+
+The projects roots are ``chat_history.claude_projects_dirs`` — a
+``CLAUDE_CONFIG_DIR`` root when one is set, then ``~/.claude/projects`` —
+so the index covers the same transcripts the replay path reads.
 """
 
 import json
@@ -10,8 +14,20 @@ import sqlite3
 import time
 from pathlib import Path
 
-CLAUDE_DIR = Path.home() / ".claude"
-PROJECTS_DIR = CLAUDE_DIR / "projects"
+
+def _projects_dirs() -> list[Path]:
+    """The transcript roots to index, most specific first.
+
+    Delegates to ``chat_history.claude_projects_dirs`` — the house rule — so
+    the FTS index and the sleep-cycle delta see exactly the roots the replay
+    path does. This module used to hardcode ``~/.claude/projects``, which
+    silently indexed nothing for an agent whose brain runs under a
+    ``CLAUDE_CONFIG_DIR`` (bobi renders per-team CLAUDE.md there, #779).
+    """
+    from bobi.chat_history import claude_projects_dirs
+    return claude_projects_dirs()
+
+
 def _db_path() -> Path:
     from bobi import paths
     return paths.state_dir() / "history.db"
@@ -315,8 +331,19 @@ def index(project_filter: str | None = None) -> dict:
     _init_db(conn)
 
     files = []
-    if PROJECTS_DIR.exists():
-        for project_dir in PROJECTS_DIR.iterdir():
+    # `claude_projects_dirs` dedupes by spelling, which misses a
+    # CLAUDE_CONFIG_DIR symlinked at ~/.claude — two names, one tree. Resolve
+    # each root once (not each file) so `files_scanned` counts files rather
+    # than visits.
+    seen_roots: set[str] = set()
+    for projects in _projects_dirs():
+        if not projects.exists():
+            continue
+        key = str(projects.resolve())
+        if key in seen_roots:
+            continue
+        seen_roots.add(key)
+        for project_dir in projects.iterdir():
             if not project_dir.is_dir():
                 continue
             if project_filter and project_filter not in project_dir.name:

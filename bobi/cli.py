@@ -1395,17 +1395,14 @@ def _find_transcript(session: str) -> Path | None:
         return session_log
 
     # Fallback: Claude Code transcript via session ID
+    from bobi.chat_history import find_claude_transcript
     from bobi.sdk import _sessions_dir
     id_file = _sessions_dir() / f"{session}.id"
     if id_file.exists():
         session_id = id_file.read_text().strip()
-        if session_id:
-            claude_projects = Path.home() / ".claude" / "projects"
-            if claude_projects.exists():
-                for project_dir in claude_projects.iterdir():
-                    candidate = project_dir / f"{session_id}.jsonl"
-                    if candidate.exists():
-                        return candidate
+        transcript = find_claude_transcript(session_id)
+        if transcript is not None:
+            return transcript
 
     click.echo(f"No session '{session}'.")
     registry = get_registry()
@@ -2248,8 +2245,9 @@ def ingest_token_revoke(token_id):
 def transcript_index(project):
     """Index conversation JSONL files into searchable SQLite.
 
-    Scans ~/.claude/projects/*/conversations/ for JSONL files and indexes
-    messages into a local SQLite database for fast searching.
+    Scans the Claude Code transcript roots — $CLAUDE_CONFIG_DIR/projects when
+    set, then ~/.claude/projects — for */*.jsonl and indexes messages into a
+    local SQLite database for fast searching.
 
     Usage:
         bobi agent eng transcript index                # index all projects
