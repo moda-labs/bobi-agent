@@ -138,12 +138,21 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-def read_pid(pid_path: Path) -> int:
-    """Read a pid file, returning 0 when missing or malformed."""
+def read_int_file(path: Path) -> int:
+    """Read a single-integer state file — a pid, a bound port — as an int.
+
+    Returns 0 when the file is missing, unreadable, or does not hold an
+    integer, so a caller can treat "no usable value" as one case.
+    """
     try:
-        return int(pid_path.read_text().strip())
+        return int(path.read_text().strip())
     except (ValueError, OSError):
         return 0
+
+
+def read_pid(pid_path: Path) -> int:
+    """Read a pid file, returning 0 when missing or malformed."""
+    return read_int_file(pid_path)
 
 
 def _pid_file_alive(pid_path: Path) -> bool:

@@ -780,6 +780,12 @@ def app_stop(force):
             "anyway."
         )
         return
+    if st.not_permitted:
+        raise click.ClickException(
+            f"Process {st.pid} is the bobi app but runs as another user, so "
+            "the stop signal was refused. It is still running; stop it as "
+            "that user (or with sudo)."
+        )
     click.echo(f"Stopped (pid {st.pid})." if st.pid else "Not running.")
 
 
