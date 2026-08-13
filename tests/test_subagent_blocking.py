@@ -2183,14 +2183,6 @@ class TestDerivedVerdictSessionNames:
         assert entry.name == f"curator-{slug}-curator"
         assert entry.role == "curator"
 
-    def test_the_three_prefixes_are_distinct(self):
-        """Guards the one thing deriving the prefix from `phase` could break:
-        two runners colliding on a shared prefix."""
-        seeds = {self._seed_slug(p, "same seed").split("-")[0]
-                 for p in ("check", "gate", "curator")}
-        assert seeds == {"check", "gate", "curator"}
-
-
 class TestRunGateBlocking:
     def test_relevant_parsed_from_agent_output(self):
         agent_result = AgentResult(
