@@ -1,4 +1,3 @@
-export { DeploymentSession } from "./deployment-session";
 import {
 	type StorageAdapter,
 	type DeploymentRecord,
@@ -43,6 +42,7 @@ import {
 	conversationKey,
 	buildLoopDetectedEvent,
 } from "@moda-labs/bobi-events-core/circuit-breaker";
+import { DeploymentSession } from "./deployment-session";
 import { internalEventRequest, internalWebSocketRequest, publicBearerFromWebSocketProtocols } from "./internal-auth";
 import {
 	type FleetSnapshot,
@@ -65,6 +65,8 @@ import {
 	windowsFromEnv,
 } from "./fleet";
 import { MCP_ROUTE, handleMcpRequest } from "./mcp";
+
+export { DeploymentSession };
 
 // Compose the bus primitives into the publisher `issueAdminCommand` expects.
 // Kept here rather than in fleet.ts so the fleet module stays independent of
@@ -89,7 +91,7 @@ const FLEET_ISSUE_HTTP: Record<IssueFailure, { status: number; body: { error: st
 
 interface Env {
 	EVENTS: KVNamespace;
-	DEPLOYMENT_SESSION: DurableObjectNamespace;
+	DEPLOYMENT_SESSION: DurableObjectNamespace<DeploymentSession>;
 	INTERNAL_DO_SECRET: string;
 	BOBI_RELEASE_VERSION?: string;
 	BOBI_RELEASE_SHA?: string;

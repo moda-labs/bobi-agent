@@ -1,17 +1,16 @@
-import { SELF, env } from "cloudflare:test";
-import { describe, it, expect, afterEach, vi } from "vitest";
-import worker from "../src/index";
 import { buildBubbleSignature, parseGlobalTopic } from "@moda-labs/bobi-events-core";
-import { hmacHex } from "./helpers";
+import { SELF, env } from "cloudflare:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import worker from "../src/index";
 import {
 	INTERNAL_HEADER,
 	INTERNAL_WS_QUERY_PARAM,
-	INTERNAL_WS_PROTOCOL_PREFIX,
 	internalEventRequest,
 	internalWebSocketProtocol,
 	internalWebSocketRequest,
-	publicBearerWebSocketProtocol,
+	publicBearerWebSocketProtocol
 } from "../src/internal-auth";
+import { hmacHex } from "./helpers";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -745,7 +744,12 @@ describe("#341 targeted routing — no cross-delivery", () => {
 	});
 });
 
-describe("DeploymentSession replay cursors", () => {
+describe("DeploymentSession replay cursors", { timeout: 15_000 }, () => {
+	// Worker-pool startup and Durable Object dispatch can take more than one
+	// second on a loaded CI runner. Keep a bounded deadline for missing frames;
+	// the suite-level cap still prevents sequential waits from extending a hang.
+	const MESSAGE_TIMEOUT_MS = 10_000;
+
 	interface SessionMessage {
 		type: string;
 		deployment_id?: string;
@@ -861,7 +865,7 @@ describe("DeploymentSession replay cursors", () => {
 		const initialConnected = waitForMessage(
 			initialSocket,
 			(message) => message.type === "connected",
-			1_000,
+			MESSAGE_TIMEOUT_MS,
 		);
 		initialSocket.accept();
 		expect(await initialConnected).toMatchObject({ type: "connected", next_seq: 1 });
@@ -869,14 +873,14 @@ describe("DeploymentSession replay cursors", () => {
 		const liveEvent = waitForMessage(
 			initialSocket,
 			(message) => message.type === "event",
-			1_000,
+			MESSAGE_TIMEOUT_MS,
 		);
 		await publishEvent(deployment, topic);
 		expect(await liveEvent).toMatchObject({ type: "event", data: { seq: 1 } });
 		initialSocket.close();
 
 		const restartedSocket = await subscribe(deployment, "0");
-		const messages = messagesThroughConnected(restartedSocket, 1_000);
+		const messages = messagesThroughConnected(restartedSocket, MESSAGE_TIMEOUT_MS);
 		restartedSocket.accept();
 
 		const received = await messages;
@@ -903,7 +907,7 @@ describe("DeploymentSession replay cursors", () => {
 			releaseReplayRead = resolve;
 		});
 		const getSpy = vi.spyOn(env.EVENTS, "get").mockImplementation(async (...args) => {
-			if (args[0] === `events:${deployment.deployment_id}:1`) {
+			if (String(args[0]) === `events:${deployment.deployment_id}:1`) {
 				markReplayReadStarted();
 				await replayReadReleased;
 			}
@@ -920,7 +924,7 @@ describe("DeploymentSession replay cursors", () => {
 			const messages = messagesUntil(
 				socket,
 				(message) => message.type === "event" && message.data?.seq === 2,
-				1_000,
+				MESSAGE_TIMEOUT_MS,
 				"live seq=2 event",
 			);
 			socket.accept();
@@ -945,7 +949,7 @@ describe("DeploymentSession replay cursors", () => {
 			await publishEvent(deployment, topic);
 
 			const socket = await subscribe(deployment, lastSeen);
-			const messages = messagesThroughConnected(socket, 1_000);
+			const messages = messagesThroughConnected(socket, MESSAGE_TIMEOUT_MS);
 			socket.accept();
 
 			const received = await messages;
