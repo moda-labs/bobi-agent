@@ -281,9 +281,53 @@ Each appendix entry names the surviving implementation — move callers to it; n
 - [x] **D052** `bobi/slack.py:311` — Slack channel-name-to-ID resolution via paginated conversations.list is implemented twice with already-divergent behavior: slack.resolve_channel_id…
   - Re-derived 2026-08-13 against `bf11965`: **already resolved, by Phase 6 batch 1's Q019** (PR #993). `events/adapters._resolve_channel_names` no longer paginates `conversations.list` — it delegates to `bobi.slack.resolve_channel_id` and adds only the subscription-side drop-vs-raise policy. `conversations.list` now appears once in `bobi/`, at `slack.py:448`. Flipped as bookkeeping; no code change was owed.
   - The workspace-widening failure mode D052 describes is NOT closed by that consolidation and is deliberately still open — see the Q019 note in batch 1 and PR #993. `_slack_keys(team_id, [])` still subscribes workspace-wide when every configured channel fails to resolve.
-- [ ] **Q010** `bobi/subagent.py:1302` — _start_event_subscription's 5-branch registration decision tree re-implements the authorize→PUT-subscriptions→on-failure-re-register sync sequence…
-- [ ] **Q051/D070** `bobi/subagent.py:1738` — run_check_blocking, run_gate_blocking, and run_curator_blocking each repeat the same ~12-line preamble: local `import hashlib`, sha256 slug,…
-- [ ] **Q029** `bobi/tool_library.py:44` — The tool_library.py module deliberately shadows the sibling bobi/tool_library/ data directory, a hazard the module spends a docstring paragraph…
+- [x] **Q010** `bobi/subagent.py:1302` — _start_event_subscription's 5-branch registration decision tree re-implements the authorize→PUT-subscriptions→on-failure-re-register sync sequence…
+  - The finding calls the two sync blocks' differences "log wording and whether
+    authorize failure falls back to the raw subscribe list". The second is a
+    real behaviour difference, so this needed a decision, not a merge.
+    Provenance made it: the REMOTE block is the original (its history runs back
+    through #488, `cf6559b4`, which added the pre-PUT authorization fallback);
+    #538 (`a42106e9`) added the local arm later as a copy that flattened the two
+    try/excepts into one and dropped the fallback. `authorize_resources` still
+    documents the original's contract — "The server remains authoritative and
+    will reject the update if the grant is truly absent". Consolidated onto the
+    original as `_sync_or_reregister`, per this phase's "move callers to the
+    surviving implementation" rule.
+  - The collapse is larger than the finding describes: the two "register fresh"
+    and two "pre-bubble upgrade" branches were byte-identical as well, so the
+    whole local/remote split reduces to an `ensure_running` prelude plus one
+    shared three-way decision. The unconfigured-local arm deliberately keeps its
+    unconditional fresh register (an ephemeral 8080 server's old deployment is
+    not something to sync onto) — that asymmetry is now commented, not implicit.
+  - Every pre-existing test configured a REMOTE url, so the arm being changed
+    had no coverage at all. Seven tests added; four mutants verified red.
+- [x] **Q051/D070** `bobi/subagent.py:1738` — run_check_blocking, run_gate_blocking, and run_curator_blocking each repeat the same ~12-line preamble: local `import hashlib`, sha256 slug,…
+  - Q051 applied: `_register_verdict_session` collapses the three preambles,
+    which differ only in role, phase, hash seed and title. The slug prefix IS
+    the phase in all three, so it is derived. `hashlib` moved to the module
+    imports, retiring the fourth local copy — which is in `_adhoc_session_name`,
+    not `spawn_adhoc` as the finding states.
+  - **D070 is NOT applied, and needs no successor: its premise is dead.** It
+    asks `run_check_blocking` to route through `_parse_check_output`, which no
+    longer exists — Phase 5 batch 2 deleted it as **Q050**, resolving the same
+    duplication in the opposite direction (keep the inline copy, delete the
+    shim and its seven tests). Applying D070 as written would resurrect it.
+  - The DEFAULT slug turned out to be untested: a mutant giving it the wrong
+    prefix left all 155 tests green. Four tests added; three mutants red.
+- [x] **Q029** `bobi/tool_library.py:44` — The tool_library.py module deliberately shadows the sibling bobi/tool_library/ data directory, a hazard the module spends a docstring paragraph…
+  - Applied as prescribed — `bobi/tool_library/__init__.py`, `CATALOG_DIR`
+    reduced to `Path(__file__).parent`, shadowing paragraph deleted. Wheel
+    contents differ by exactly that one entry name (213 entries both sides).
+  - Two corrections to the finding's evidence. Its enumeration is stale: the
+    catalog holds **four** entries (`otel` was added), not the three named. And
+    it omits `.github/workflows/container.yml`, which path-filters on the
+    literal `bobi/tool_library.py`; left alone it would match nothing and
+    silently stop triggering the image lane — the #909 vacuous-lane shape its
+    own neighbouring comment warns about. Now `bobi/tool_library/**`, which also
+    newly covers the catalog pins that bake INTO the image (#486).
+  - The move puts `__init__.py` and `__pycache__/` beside the entries for the
+    first time; two tests pin that only `tool.yaml`-bearing directories are
+    offered as catalog ids. Two mutants red.
 - [x] **D051/Q123** `bobi/webapp/daemon.py:92` — webapp/daemon.py reimplements pid-file helpers (_pid_alive, _read_int) that already exist as bobi.sdk.pid_alive / bobi.sdk.read_pid, and the copies…
   - Done: `_pid_alive`/`_read_int` deleted; daemon delegates to `bobi.sdk.pid_alive`
     and a new `sdk.read_int_file` (`read_pid` delegates to it, name and behavior kept).
@@ -768,6 +812,22 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   **Five mutants, five red:** `post` dropping `follow_redirects` on the way to `request()`; `source_index_complete` ignoring the vector half; `stop()` killing on a zero pid; a divergent private grammar re-inlined into `auth_bootstrap`; and the top-level `Path` import removed (9 red plus 4 pyflakes findings).
 
   Suite: **4576 passed / 1 skipped**, the `bf11965` baseline of **4564** plus exactly the 12 tests added (3 `source_index_complete` + 1 malformed-pid + 8 login-channel grammar, 7 of them parametrized cases). No test was deleted. `pyflakes` over the nine touched files goes **11 → 7 with ZERO new**, the four removed being Q091's own `undefined name 'Path'`. Both sides of that differential are non-zero — checked deliberately, after batch 7 shipped two vacuous "green" comparisons.
+
+- **2026-08-13** (Lane B build session): **Phase 6 batch 10 — the `subagent.py` pair plus the `tool_library` shadowing, 3 items.** Re-derived against `main` @ `a7de3b8` (batch 9's own merge). Shipped `[x]`: Q010, Q051/D070, Q029. Line numbers had drifted on every item again (Q010's function 1302→1246; Q051's `run_check_blocking` 1738→1793, gate 1945→2010, curator 2019→2086; Q029's `CATALOG_DIR` 44→60); items were located by symbol.
+
+  **A finding's cross-pass half can be resolved by an EARLIER batch of this same plan, in the opposite direction.** D070 asks `run_check_blocking` to route through `_parse_check_output`. That function does not exist: Phase 5 batch 2 deleted it as **Q050**, deciding the same duplication the other way — keep the inline copy, delete the shim and its seven tests. Applying D070 as written would have resurrected a deletion this plan had already reasoned through. **Before applying a cross-pass half, grep for the symbol it names; a sibling finding may have spent it.** This is the sixth prescription in this plan to have aged wrong (with Q034, Q023, D050/Q007, Q109, Q035).
+
+  **Provenance decided Q010, where taste would have guessed.** Its two sync blocks differ in whether an authorize failure falls back to the raw subscribe list — a behaviour difference, so "reconcile them" needed a choice. `git log -L` over each block settles it: the remote one is the original (history through #488, `cf6559b4`, which ADDED the fallback) and the local one is a copy made later by #538 (`a42106e9`) that flattened the two try/excepts into one and lost it. `authorize_resources` still documents the original's contract. **When two copies disagree, `git log -L` tells you which is the surviving implementation — the phase rule already says to move callers to it.**
+
+  **Three of this batch's own new tests were vacuous, and mutants caught all three.** Two raised `AssertionError` from inside an `httpx.MockTransport` handler to mean "must not PUT" — the caller wraps its PUT in `except Exception`, so the raise was swallowed and answered by the very re-register fallback under test, and the mutant passed. One asserted an authorize **403** as proof of the exception path, but `authorize_resources` absorbs denials internally via `mark_unbacked` and never raises; only `ensure_bubble` failing reaches that branch. **Assert on captured requests, never by raising inside a stub the production code catches** — and check that the error you inject is one the code under test can actually see.
+
+  **Two untested behaviours surfaced only because a mutant survived.** The three verdict runners' DEFAULT slug was pinned nowhere (only the explicitly-named case was), so a wrong prefix left all 155 tests green. And `_start_event_subscription`'s "no saved deployment → register, do not PUT to the empty-id URL" branch was indistinguishable from the pre-bubble branch in every existing test, because none of them created a `bubble.json`. Q029's move is likewise the first time `__init__.py` and `__pycache__/` sit inside `CATALOG_DIR`.
+
+  **The finding's own evidence went stale in two ways at once for Q029** — its enumeration (three catalog entries; there are four) and its blast radius (it does not mention `.github/workflows/container.yml`, which path-filters the literal `bobi/tool_library.py` and would have silently stopped triggering the image lane, the #909 shape). **A file move's blast radius includes non-Python files that name the path.**
+
+  **Nine mutants, nine red** — 4 for Q010 (authorize-failure fallback removed; the no-deployment branch disabled; the configured-local `ensure_running` skipped; the unconfigured arm syncing instead of registering), 3 for Q051 (slug prefix from role; gate seed dropping the item keys; curator registered as monitor), 2 for Q029 (the `tool.yaml` predicate dropped; `CATALOG_DIR` left at the pre-move path). Each was verified APPLIED by diffing the file, after a guard using `grep` with an embedded `\n` silently failed to detect a mutation that had in fact landed.
+
+  Suite: **4617 passed / 1 skipped**, the `a7de3b8` baseline of **4604** plus exactly the 13 tests added. No test was deleted — verified by `--collect-only` on both sides (4605 → 4618), not by arithmetic alone. `pyflakes` over `bobi/` is **26 → 26 with ZERO new**, both sides non-zero. Q029's packaging is proven by a wheel-content diff (213 entries both sides, differing in exactly the one moved entry name) and a live `dep_bootstrap` differential — identical dependency hash and rendered build script — whose probe was sanity-checked to confirm the two sides genuinely import different files.
 
 
 ## Notes
