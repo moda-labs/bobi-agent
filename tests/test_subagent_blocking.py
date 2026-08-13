@@ -9,6 +9,7 @@ deferred rounds, connection loss, and the defer hook itself.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 import time
 from dataclasses import dataclass, field
@@ -2125,6 +2126,69 @@ class TestParseGateVerdict:
 
     def test_non_string_keys_coerced(self):
         assert _parse_gate_verdict('{"relevant": [42]}', {"42"}) == ["42"]
+
+
+class TestDerivedVerdictSessionNames:
+    """The DEFAULT (unnamed) slug of each blocking verdict runner.
+
+    The named case is already pinned; the derived case was not, so the shared
+    ``_register_verdict_session`` preamble could mint any prefix it liked and
+    every other test stayed green. The slug is the run_key the registry and
+    ``bobi sessions`` show, and it is stable across ticks of the same monitor,
+    so its shape is a contract rather than an implementation detail.
+    """
+
+    @staticmethod
+    def _seed_slug(phase: str, seed: str) -> str:
+        return f"{phase}-{hashlib.sha256(seed.encode()).hexdigest()[:8]}"
+
+    def _registered(self, invoke) -> object:
+        async def _mock(prompt, cwd, run_key, phase, timeout, **kw):
+            return AgentResult(
+                session_id="s", run_key=run_key, phase=phase, success=True,
+                final_text='{"finding": false, "relevant": [], '
+                           '"success": true, "updated": false}',
+            )
+
+        mock_registry = MagicMock()
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry):
+            invoke()
+        mock_registry.register.assert_called_once()
+        return mock_registry.register.call_args[0][0]
+
+    def test_check_slug_is_hash_of_the_description(self):
+        entry = self._registered(
+            lambda: run_check_blocking(description="Check prod", cwd="/tmp"))
+        slug = self._seed_slug("check", "Check prod")
+        assert entry.run_key == slug
+        assert entry.name == f"monitor-{slug}-check"
+        assert entry.role == "monitor"
+
+    def test_gate_slug_is_hash_of_criterion_plus_sorted_item_keys(self):
+        entry = self._registered(
+            lambda: run_gate_blocking("about billing", _GATE_ITEMS, cwd="/tmp"))
+        keys = sorted({str(i.get("key", "")) for i in _GATE_ITEMS})
+        slug = self._seed_slug("gate", "about billing" + "".join(keys))
+        assert entry.run_key == slug
+        assert entry.name == f"monitor-{slug}-gate"
+        assert entry.role == "monitor"
+
+    def test_curator_slug_is_hash_of_the_task(self):
+        entry = self._registered(
+            lambda: run_curator_blocking(task="Rewrite policy", cwd="/tmp"))
+        slug = self._seed_slug("curator", "Rewrite policy")
+        assert entry.run_key == slug
+        # role "curator", not "monitor" — the cheap monitor model must not apply.
+        assert entry.name == f"curator-{slug}-curator"
+        assert entry.role == "curator"
+
+    def test_the_three_prefixes_are_distinct(self):
+        """Guards the one thing deriving the prefix from `phase` could break:
+        two runners colliding on a shared prefix."""
+        seeds = {self._seed_slug(p, "same seed").split("-")[0]
+                 for p in ("check", "gate", "curator")}
+        assert seeds == {"check", "gate", "curator"}
 
 
 class TestRunGateBlocking:

@@ -8,6 +8,7 @@ from the dashboard, or cancelled.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -700,8 +701,6 @@ def adhoc_session_name(task: str, name: str | None = None) -> str:
     recomputed name that drifts would stamp a link naming a session that never
     exists, which is the lineage invariant (see ``bobi/launch_lineage.py``).
     """
-    import hashlib
-
     if name:
         return name
     return f"adhoc-{hashlib.sha256(task.encode()).hexdigest()[:8]}"
@@ -1790,6 +1789,27 @@ def _parse_check_verdict(text: str) -> dict | None:
     return _last_verdict_object(text, lambda p: "finding" in p)
 
 
+def _register_verdict_session(
+    seed: str, name: str | None, *,
+    role: str, phase: str, title: str, cwd: str,
+) -> tuple[str, str]:
+    """Derive a one-shot verdict agent's run key + session name, and register it.
+
+    The three blocking verdict runners (check, gate, curator) differ only in
+    role, phase, the string they hash for a default slug, and the registry
+    title. The slug's prefix IS the phase in all three, so it is derived rather
+    than passed. Returns ``(slug, session)``.
+    """
+    slug = name or f"{phase}-{hashlib.sha256(seed.encode()).hexdigest()[:8]}"
+    session = _session_name(slug, role=role, phase=phase)
+    get_registry().register(SessionEntry(
+        name=session, session_id="", role=role,
+        run_key=slug, title=title, phase=phase,
+        cwd=cwd, status="starting",
+    ))
+    return slug, session
+
+
 def run_check_blocking(
     description: str,
     cwd: str,
@@ -1814,21 +1834,13 @@ def run_check_blocking(
     ``success=False`` so the scheduler treats it as a failed check, not a
     healthy one.
     """
-    import hashlib
-
-    short_hash = hashlib.sha256(description.encode()).hexdigest()[:8]
-    slug = name or f"check-{short_hash}"
     phase = "check"
-    session = _session_name(slug, role="monitor", phase=phase)
+    slug, session = _register_verdict_session(
+        description, name,
+        role="monitor", phase=phase, title=description[:80], cwd=cwd,
+    )
 
     prompt = _build_check_prompt(description, extra)
-
-    registry = get_registry()
-    registry.register(SessionEntry(
-        name=session, session_id="", role="monitor",
-        run_key=slug, title=description[:80], phase=phase,
-        cwd=cwd, status="starting",
-    ))
 
     verdict, result, error = _run_verdict_agent_blocking(
         prompt, cwd, slug, phase, session, _parse_check_verdict,
@@ -2033,23 +2045,14 @@ def run_gate_blocking(
     the context (and cost) every interval and let stale items pollute the
     verdict.
     """
-    import hashlib
-
     presented = {str(i.get("key", "")) for i in items}
-    short_hash = hashlib.sha256(
-        (criterion + "".join(sorted(presented))).encode()).hexdigest()[:8]
-    slug = name or f"gate-{short_hash}"
     phase = "gate"
-    session = _session_name(slug, role="monitor", phase=phase)
+    slug, session = _register_verdict_session(
+        criterion + "".join(sorted(presented)), name,
+        role="monitor", phase=phase, title=criterion[:80], cwd=cwd,
+    )
 
     prompt = _build_gate_prompt(criterion, items)
-
-    registry = get_registry()
-    registry.register(SessionEntry(
-        name=session, session_id="", role="monitor",
-        run_key=slug, title=criterion[:80], phase=phase,
-        cwd=cwd, status="starting",
-    ))
 
     relevant, result, error = _run_verdict_agent_blocking(
         prompt, cwd, slug, phase, session,
@@ -2107,21 +2110,13 @@ def run_curator_blocking(
     or ``(None, error)`` after exhausting attempts - indeterminate, never
     "all clear", so the caller must not advance the cursor.
     """
-    import hashlib
-
     from bobi.monitors import curator as curator_mod
 
-    short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
-    slug = name or f"curator-{short_hash}"
     phase = "curator"
-    session = _session_name(slug, role="curator", phase=phase)
-
-    registry = get_registry()
-    registry.register(SessionEntry(
-        name=session, session_id="", role="curator",
-        run_key=slug, title="policy curator", phase=phase,
-        cwd=cwd, status="starting",
-    ))
+    slug, session = _register_verdict_session(
+        task, name,
+        role="curator", phase=phase, title="policy curator", cwd=cwd,
+    )
 
     summary, _result, error = _run_verdict_agent_blocking(
         task, cwd, slug, phase, session, curator_mod.parse_result,
