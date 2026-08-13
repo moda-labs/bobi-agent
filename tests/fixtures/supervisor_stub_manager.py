@@ -17,7 +17,7 @@ Modes:
 - ``dead-then-recover``: first launch registers a *dead* director
   (``status=error``) whose health server keeps answering - the exact #12
   stranding shape. Every relaunch registers a healthy idle director.
-- ``busy-wedge-then-recover`` (MOD-364): first launch registers a wedged
+- ``busy-wedge-then-recover`` (#903): first launch registers a wedged
   director AND forks a CPU-burning descendant, writing the busy child's pid to
   ``--busy-pid-file`` - the load-grace shape: a sanctioned heavy worker on a
   saturated host. Every relaunch registers a healthy idle director. The busy

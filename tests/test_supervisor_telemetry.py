@@ -335,7 +335,8 @@ class TestSupervisorLoggingIsStdoutOnly:
 def _grace(deferred="stalled_turn", **kw):
     block = {"active": True, "since": 1000.0, "spell_s": 1.2,
              "deferred": deferred, "load1": 8.0, "ncpu": 2,
-             "busy_descendants": 2}
+             "busy_descendants": 2, "tree_cpu_cores": 1.9,
+             "tree_cpu_ratio": 0.95}
     block.update(kw)
     return block
 
@@ -382,6 +383,8 @@ class TestLoadGraceTelemetry:
         assert edge["load1"] == 8.0
         assert edge["ncpu"] == 2
         assert edge["busy_descendants"] == 2
+        assert edge["tree_cpu_cores"] == 1.9
+        assert edge["tree_cpu_ratio"] == 0.95
         assert "since" in edge
 
     def test_grace_cleared_edge_carries_duration(self, monkeypatch):

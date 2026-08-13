@@ -425,7 +425,7 @@ class TestSupervisorCrashLoop:
                 sup.request_stop()
 
         sup._sleep = sleep
-        code = sup.run()
+        sup.run()
         assert len(spawns) == 2  # relaunched after the crash
         # charged as a fast crash, NOT credited as a transient (a stamp was
         # recorded against the shared budget)
@@ -465,7 +465,7 @@ class TestSupervisorCrashLoop:
 
 
 
-# --- supervisor: load-grace verdict gate (MOD-364) ------------------------
+# --- supervisor: load-grace verdict gate (#903) ---------------------------
 
 class StateRecordingObserver(RecordingObserver):
     """RecordingObserver that also captures the per-poll SupervisorState."""
@@ -659,6 +659,37 @@ class TestSupervisorLoadGrace:
         cleared = [s for s in obs.states if s.health
                    and s.health["manager"]["status"] == "idle"]
         assert cleared and all(s.load_grace is None for s in cleared)
+
+    def test_inactive_evidence_between_verdicts_resets_the_spell(self):
+        """Evidence is sampled every poll, so a drop must clear the current
+        grace spell even when that poll is only the first confirmation read.
+
+        Otherwise separate busy stretches accumulate against one cap and the
+        heartbeat keeps claiming a deferral while the current evidence is
+        inactive.
+        """
+        samples = iter([
+            _active_load(None, None),    # stalled confirm 1
+            _active_load(None, None),    # stalled confirm 2: defer
+            _inactive_load(None, None),  # next stretch confirm 1: must clear
+            _active_load(None, None),    # confirm 2: a NEW spell
+            _active_load(None, None),
+        ])
+
+        def load_fn(pid, prev):
+            return next(samples)
+
+        _sup, spawns, obs, code = self._run(
+            {"manager": {"status": "running", "idle_seconds": 9999}},
+            load_fn=load_fn, cfg=_cfg(load_grace_max=3.0),
+            clock=Clock(start=1000.0, step=1.0), polls=4)
+
+        assert code == 0
+        assert len(spawns) == 1
+        assert obs.states[2].load_grace is None
+        deferrals = self._deferrals(obs)
+        assert len(deferrals) >= 2
+        assert deferrals[1]["since"] > deferrals[0]["since"]
 
     # --- the crash path stays authoritative --------------------------------
 

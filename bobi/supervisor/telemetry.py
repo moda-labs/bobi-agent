@@ -73,7 +73,7 @@ class Telemetry(SupervisorObserver):
         self._last_status: str | None = None
         self._probe_failing = False
         self._probe_since: float | None = None
-        # Load-grace episode state (MOD-364): ``load_grace_active`` /
+        # Load-grace episode state (#903): ``load_grace_active`` /
         # ``load_grace_cleared`` edges mirror the deferral block carried in the
         # heartbeat, and while a deferral is active the probe episode freezes.
         self._load_grace_active = False
@@ -208,7 +208,7 @@ class Telemetry(SupervisorObserver):
                                  downtime_s=downtime)
 
     def _update_grace_episode(self, state: SupervisorState, now: float) -> None:
-        """Edge-trigger ``load_grace_active`` / ``load_grace_cleared`` (MOD-364).
+        """Edge-trigger ``load_grace_active`` / ``load_grace_cleared`` (#903).
 
         The supervisor's ``load_grace`` block is an instantaneous per-poll flag
         (set on the poll that deferred, cleared on the first working poll), so
@@ -226,6 +226,8 @@ class Telemetry(SupervisorObserver):
                 load1=grace.get("load1"),
                 ncpu=grace.get("ncpu"),
                 busy_descendants=grace.get("busy_descendants"),
+                tree_cpu_cores=grace.get("tree_cpu_cores"),
+                tree_cpu_ratio=grace.get("tree_cpu_ratio"),
             )
         elif grace is None and self._load_grace_active:
             self._load_grace_active = False

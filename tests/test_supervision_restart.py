@@ -218,7 +218,7 @@ def test_supervisor_forwards_sigterm_to_child_and_exits_clean(tmp_path):
 
 
 def test_load_grace_defers_a_busy_wedge_then_reopens(tmp_path):
-    """MOD-364 end to end: the supervisor's OWN load evidence - a real CPU-
+    """Load grace end to end (#903): the supervisor's OWN load evidence - a real CPU-
     burning descendant walked from the real /proc - defers a confirmed wedge
     verdict on a pegged host, so the healthy-but-busy manager is NOT restarted
     and nothing is charged. The moment the load evidence drops, the gate
@@ -249,7 +249,11 @@ def test_load_grace_defers_a_busy_wedge_then_reopens(tmp_path):
 
     def load_fn(manager_pid, previous):
         from bobi.supervisor.load import load_evidence
-        return load_evidence(manager_pid, previous, host_load=host["load"])
+        # One burner consumes roughly one of the injected two CPUs. The
+        # production default is stricter (0.8) for attribution; this acceptance
+        # leg uses 0.25 so shared/slow CI still proves the real tick-delta path.
+        return load_evidence(manager_pid, previous, host_load=host["load"],
+                             tree_cpu_ratio=0.25)
 
     sup = Supervisor([], _fast_config(), project_root=root,
                      spawn_fn=spawn, load_fn=load_fn)

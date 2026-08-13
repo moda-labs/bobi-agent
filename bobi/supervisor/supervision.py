@@ -22,7 +22,7 @@ changes a restart decision:
   from the outside verdict it computes per poll, not here.
 - last-restart bookkeeping (reason + timestamp) and the last health payload,
   surfaced to the observer so the heartbeat can report them.
-- the load-grace gate (MOD-364, issue #903). When the host is saturated by
+- the load-grace gate (issue #903). When the host is saturated by
   the manager's own busy worker tree, the ambiguous liveness verdicts (probe
   misses, stalled active turns, a load-induced dead-director signal) are
   *deferred* - no charge, no restart - until the evidence ends or the spell
@@ -163,7 +163,7 @@ class SupervisorState:
     # the same confirm before reporting a wedge.
     ever_healthy: bool
     health_fail_count: int
-    # Load-grace context (MOD-364): set while a verdict was deferred this
+    # Load-grace context (#903): set while a verdict was deferred this
     # poll, None otherwise. The heartbeat renders it as an additive block so a
     # consumer can tell "stalled but legitimately busy" from "stalled".
     load_grace: dict | None = None
@@ -256,13 +256,15 @@ class Supervisor:
         self._fail_count = 0
         self._child_started_at = 0.0
         self._child_healthy_since: float | None = None
-        # Load-grace state (MOD-364). ``_load_prev`` is the per-poll CPU
+        # Load-grace state (#903). ``_load_prev`` is the per-poll CPU
         # baseline; ``_load_grace`` is the block reported to the observer while
         # a verdict is deferred; ``_grace_spell_start`` marks the start of the
         # current unresponsive spell the cap bounds; ``_load_evidence`` caches
         # the poll-start sample so a same-poll verdict uses the full-interval
         # delta rather than re-reading /proc moments later.
-        self._load_prev: dict[int, int] | None = None
+        # Opaque sampler-owned baseline. The production load sampler uses a
+        # CpuSample; injected test/platform samplers may use another shape.
+        self._load_prev: object | None = None
         self._load_grace: dict | None = None
         self._grace_spell_start: float | None = None
         self._load_evidence: dict | None = None
@@ -313,7 +315,8 @@ class Supervisor:
     def _default_load_fn(self, manager_pid, previous):
         from .load import load_evidence
         return load_evidence(manager_pid, previous,
-                             pegged_ratio=self.config.load_pegged_ratio)
+                             pegged_ratio=self.config.load_pegged_ratio,
+                             tree_cpu_ratio=self.config.load_tree_cpu_ratio)
 
     # --- child lifecycle --------------------------------------------------
 
@@ -500,7 +503,7 @@ class Supervisor:
     # --- restart decisions ------------------------------------------------
 
     def _refresh_load_baseline(self) -> None:
-        """Refresh the per-poll CPU baseline for the load gate (MOD-364).
+        """Refresh the per-poll CPU baseline for the load gate (#903).
 
         The busy-descendant check diffs cpu ticks across two samples, so the
         FIRST verdict of a heavy period already needs a baseline from the
@@ -517,15 +520,24 @@ class Supervisor:
         try:
             evidence = self._load_fn(proc.pid, self._load_prev)
         except Exception:
-            log.debug("supervisor: load baseline refresh failed",
-                      exc_info=True)
+            log.warning("supervisor: load baseline refresh failed - clearing "
+                        "any active grace", exc_info=True)
             self._load_evidence = None
+            self._load_grace = None
+            self._grace_spell_start = None
             return
         self._load_evidence = evidence
         self._load_prev = evidence.get("sample")
+        # Evidence is authoritative on every poll, not only on polls where a
+        # liveness verdict reaches its confirmation point. Clearing here keeps
+        # separate busy stretches from accumulating against one spell cap and
+        # makes unreadable/inactive evidence fail closed immediately.
+        if not evidence.get("active"):
+            self._load_grace = None
+            self._grace_spell_start = None
 
     def _defer_for_load(self, deferred: str) -> bool:
-        """True when an ambiguous liveness verdict must be DEFERRED (MOD-364).
+        """True when an ambiguous liveness verdict must be DEFERRED (#903).
 
         Sanctioned heavy work saturates the host while remaining productive;
         under that pressure probe misses, stalled turns and even a
@@ -598,6 +610,8 @@ class Supervisor:
             "load1": evidence.get("load1"),
             "ncpu": evidence.get("ncpu"),
             "busy_descendants": evidence.get("busy_descendants", 0),
+            "tree_cpu_cores": evidence.get("tree_cpu_cores"),
+            "tree_cpu_ratio": evidence.get("tree_cpu_ratio"),
         }
         return True
 
@@ -673,6 +687,7 @@ class Supervisor:
     def _cycle(self) -> int | None:
         """Evaluate the child once. Returns an exit code to stop, else None."""
         # 1. Did the child exit on its own? (crash-relaunch path)
+        assert self._proc is not None, "_cycle called with no child process"
         rc = self._proc.poll()
         if rc is not None:
             self._child_alive = False
@@ -720,7 +735,7 @@ class Supervisor:
         # debounce (#12). `error` is the one status no other recovery path can
         # see (see DEAD_STATES); the shared budget still bounds repeated
         # error-deaths and escalates on exhaustion exactly like the wedge path.
-        # Under load grace the verdict defers (MOD-364): a starved health
+        # Under load grace the verdict defers (#903): a starved health
         # thread can surface as `error` while the director is merely busy.
         if status in DEAD_STATES:
             if self._defer_for_load("dead_director"):
@@ -740,6 +755,7 @@ class Supervisor:
             self._child_healthy_since = self._now()
         if is_wedged(status, idle, self.config.stall_threshold):
             self._stall_count += 1
+            assert idle is not None  # guaranteed by is_wedged
             log.warning("supervisor: director stalled (status=%s, idle=%.0fs) "
                         "- confirm %d/%d", status, float(idle),
                         self._stall_count, self.config.confirm_polls)

@@ -345,9 +345,13 @@ not the same field. There is no `"healthy"` or `"dead"` status value — switch 
 subscriptions and monitors), which is what makes a "configured but not running"
 gap visible to a consumer that never reads the team's config.
 
-`load_grace` is an additive block (see [Load grace](#load-grace-mod-364)): it
+`load_grace` is an additive block (see [Load grace](#load-grace)): it
 is `null` unless a liveness verdict was deferred this poll, in which case it
-carries `{active, since, spell_s, deferred, load1, ncpu, busy_descendants}`.
+carries `{active, since, spell_s, deferred, load1, ncpu, busy_descendants,
+tree_cpu_cores, tree_cpu_ratio}`.
+`ncpu` is the CPU capacity usable by the manager (host count constrained by
+process affinity and cgroup quota); `tree_cpu_cores` and `tree_cpu_ratio`
+quantify the descendant tree's aggregate consumption over the poll interval.
 Old consumers that predate the block simply never see it.
 
 ## Lifecycle events
@@ -362,7 +366,7 @@ trail. Each carries the deployment identity plus event-specific fields.
 | `manager_restarted` | the supervisor restarted a failing manager, with `reason` |
 | `probe_failing` | the derived status crossed into a failing verdict |
 | `probe_recovered` | it crossed back out |
-| `load_grace_active` | a verdict was first deferred for load (`deferred`, `load1`, `ncpu`, `busy_descendants`) |
+| `load_grace_active` | a verdict was first deferred for load (`deferred`, `load1`, `ncpu`, `busy_descendants`, `tree_cpu_cores`, `tree_cpu_ratio`) |
 | `load_grace_cleared` | the deferral ended (`duration_s` covers the stretch) |
 | `budget_exhausted` | the restart budget ran out; the supervisor exits `70` |
 
@@ -376,7 +380,7 @@ are frozen: the manager's liveness signals are known-starved, so a wedged read
 there is not recorded as a failure (nor is the working poll that ends the
 deferral recorded as a recovery).
 
-## Load grace (MOD-364)
+## Load grace
 
 The supervisor restarts a manager whose liveness signals fail. Under a
 saturated host those signals fail for starvation reasons, not failure reasons:
@@ -387,10 +391,14 @@ restart budget three ways (probe misses, a stalled-turn wedge, a load-induced
 Load grace defers those ambiguous verdicts while BOTH hold:
 
 - the host is pegged: `load1 >= ratio * ncpu`, from `/proc/loadavg`
-  (`WATCHDOG_LOAD_PEGGED_RATIO`, default `1.0`), and
-- the manager's own worker tree is the thing working: some descendant process
-  of the supervised manager consumed CPU time (`utime + stime` delta from
-  `/proc/<pid>/stat`) since the previous poll.
+  (`WATCHDOG_LOAD_PEGGED_RATIO`, default `1.0`), where `ncpu` is constrained
+  by process affinity and cgroup v1/v2 CPU quota rather than blindly using the
+  host's logical CPU count; and
+- the manager's own worker tree materially consumed that capacity: aggregate
+  descendant `utime + stime` delta from `/proc/<pid>/stat`, normalized by the
+  monotonic poll interval and kernel clock tick rate, is at least
+  `WATCHDOG_LOAD_TREE_CPU_RATIO` (default `0.8`). A descendant that merely woke
+  for one tick while unrelated node work pegged the host does not qualify.
 
 No declaration is needed anywhere. The supervisor derives "legitimately busy"
 from the live process table every poll, so there is no impact flag, no CLI
@@ -438,7 +446,8 @@ Knobs (`WATCHDOG_*`, read at supervisor start):
 | Env | Default | Meaning |
 |---|---|---|
 | `WATCHDOG_LOAD_GRACE` | `1` | `0` disables the gate entirely |
-| `WATCHDOG_LOAD_PEGGED_RATIO` | `1.0` | `load1` / `ncpu` ratio that counts as saturated |
+| `WATCHDOG_LOAD_PEGGED_RATIO` | `1.0` | `load1` / usable CPU capacity ratio that counts as saturated |
+| `WATCHDOG_LOAD_TREE_CPU_RATIO` | `0.8` | minimum aggregate descendant CPU / usable CPU capacity required to attribute saturation to the manager tree |
 | `WATCHDOG_LOAD_GRACE_MAX` | `900` | max seconds of one continuous unresponsive spell before the verdict fires anyway |
 
 ## Failure behavior

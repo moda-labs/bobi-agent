@@ -71,7 +71,7 @@ class SupervisorConfig:
     # health body still claims an active turn) is corroborated as wedged.
     # Defaults to the stall threshold so the two liveness signals agree.
     status_file_stale: float = 600.0  # WATCHDOG_STATUS_FILE_STALE
-    # Load grace (MOD-364): while the host is saturated by the manager's own
+    # Load grace (#903): while the host is saturated by the manager's own
     # busy worker tree, ambiguous liveness verdicts (probe misses, stalled
     # turns, a load-induced dead-director signal) are deferred instead of
     # charged to the restart budget. ``load_grace_max`` bounds a *spell* - one
@@ -80,6 +80,7 @@ class SupervisorConfig:
     # resets the spell. 0 disables the cap (deferral while evidence holds).
     load_grace_enabled: int = 1      # WATCHDOG_LOAD_GRACE (0 disables)
     load_pegged_ratio: float = 1.0   # WATCHDOG_LOAD_PEGGED_RATIO
+    load_tree_cpu_ratio: float = 0.8  # WATCHDOG_LOAD_TREE_CPU_RATIO
     load_grace_max: float = 900.0    # WATCHDOG_LOAD_GRACE_MAX (seconds)
     # Incident alerting (issue #4): ``machine_restart_cap`` mirrors the
     # orchestrator's machine-restart bound (the fly.toml [[restart]]
@@ -103,6 +104,8 @@ class SupervisorConfig:
             status_file_stale=_env_float("WATCHDOG_STATUS_FILE_STALE", stall),
             load_grace_enabled=_env_int("WATCHDOG_LOAD_GRACE", 1),
             load_pegged_ratio=_env_float("WATCHDOG_LOAD_PEGGED_RATIO", 1.0),
+            load_tree_cpu_ratio=_env_float(
+                "WATCHDOG_LOAD_TREE_CPU_RATIO", 0.8),
             load_grace_max=_env_float("WATCHDOG_LOAD_GRACE_MAX", 900.0),
             machine_restart_cap=_env_int("WATCHDOG_MACHINE_RESTART_CAP", 10),
         )
