@@ -1,6 +1,6 @@
 """Bootstrap-agent harness for the unified dependency model (#428 Stage 2).
 
-Stage 1 (`bobi/tool_library.py`) gave every dependency a `name`, a required
+Stage 1 (`bobi/tool_library/`) gave every dependency a `name`, a required
 `success` contract, and the optional fields (`install`/`guide`/`host`/`mcp`).
 This module is the **cold path**: on a fresh base image that already has the
 brain CLI installed, make each dependency's `success` true and verify it, so
