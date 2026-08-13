@@ -41,6 +41,7 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from bobi.brain import DEFAULT_BRAIN
@@ -403,7 +404,7 @@ def agent_needed(dep: Dependency) -> bool:
     return not dep.install and bool(dep.guide.strip())
 
 
-def team_has_bake(team_dir: "Path", project_path: "Path | None" = None) -> bool:
+def team_has_bake(team_dir: Path, project_path: Path | None = None) -> bool:
     """True if a team bakes anything into an image — a declarative `build:` OR a
     guide-only dependency the bootstrap agent must resolve.
 
@@ -412,8 +413,6 @@ def team_has_bake(team_dir: "Path", project_path: "Path | None" = None) -> bool:
     only), this also catches a team whose ONLY baked content is a guide dependency
     — which carries no `cfg.build` yet still needs an image layer.
     """
-    from pathlib import Path
-
     from bobi.build_render import _workspace_root, load_composed_team_config
     from bobi.tool_library import resolve_team_dependencies
 
@@ -428,7 +427,7 @@ def team_has_bake(team_dir: "Path", project_path: "Path | None" = None) -> bool:
     return any(agent_needed(d) for d in deps)
 
 
-def render_team_deps(team_dir: "Path", project_path: "Path | None" = None, *,
+def render_team_deps(team_dir: Path, project_path: Path | None = None, *,
                      brains: list[str] | None = None,
                      agent_runner: AgentRunner | None = None,
                      shell_runner: ShellRunner | None = None,
@@ -451,8 +450,6 @@ def render_team_deps(team_dir: "Path", project_path: "Path | None" = None, *,
     dependency set may pass them in, avoiding a second
     chain walk + registry fetch; omitted, they are computed here as before.
     """
-    from pathlib import Path
-
     from bobi.brain import _BRAINS
     from bobi.build_render import (
         _workspace_root,
@@ -524,8 +521,6 @@ def _ensure_bootstrap_runtime() -> str:
     Idempotent: a real spawner-bound root (or an earlier bootstrap dep) wins.
     """
     import tempfile
-    from pathlib import Path
-
     from bobi import paths
 
     existing = paths.bound_root()
@@ -651,7 +646,6 @@ def _main(argv: list[str] | None = None) -> int:
              "and exit; no bootstrap")
     args = ap.parse_args(argv)
 
-    from pathlib import Path
     team_dir = Path(args.team_dir)
     project_path = _workspace_root(team_dir)
     brains = [b.strip() for b in args.brains.split(",") if b.strip()]

@@ -150,16 +150,21 @@ def stop(root: Path | None = None) -> None:
     ``root`` selects the team whose sidecar state to read; None means the
     process's bound root (in-team callers).
     """
+    from bobi.sdk import read_pid
+
     global _verified_port
     _verified_port = None
     pid_p = _pid_path(root)
     if not pid_p.exists():
         return
-    try:
-        pid = int(pid_p.read_text().strip())
-        os.kill(pid, signal.SIGTERM)
-        log.info("Stopped embedding sidecar (pid %d)", pid)
-    except (ValueError, ProcessLookupError, OSError):
-        pass
+    # read_pid is the house's tolerant reader (0 when missing or malformed),
+    # the same one is_running() uses on this file.
+    pid = read_pid(pid_p)
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            log.info("Stopped embedding sidecar (pid %d)", pid)
+        except OSError:
+            pass
     pid_p.unlink(missing_ok=True)
     _port_path(root).unlink(missing_ok=True)

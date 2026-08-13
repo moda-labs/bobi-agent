@@ -39,6 +39,7 @@ from bobi.brain import (
     set_process_brain_from_config,
 )
 from bobi.config import Config
+from bobi.conversation import parse_conversation
 from bobi.slack import post_slack_message
 
 log = logging.getLogger(__name__)
@@ -274,21 +275,6 @@ def _write_line(master_fd: int, text: str) -> None:
 
 # --- event-bus wait ---------------------------------------------------------
 
-def _parse_conversation(ref: str) -> tuple[str, str, str, str] | None:
-    """Return ``(source, scope, chat_type, chat_id)`` for a gateway ref."""
-    parts = ref.split(":")
-    if len(parts) not in (4, 6):
-        return None
-    if any(not p for p in parts):
-        return None
-    if len(parts) == 6 and parts[4] != "thread":
-        return None
-    source, scope, chat_type, chat_id = parts[:4]
-    if chat_type not in {"dm", "group", "channel"}:
-        return None
-    return source, scope, chat_type, chat_id
-
-
 def _slack_topic(cfg: Config) -> str:
     from bobi.slack import require_app_identity
 
@@ -299,7 +285,7 @@ def _slack_topic(cfg: Config) -> str:
 
 def _resolve_login_channel(cfg: Config, raw: str) -> LoginChannel:
     """Resolve ``BOBI_LOGIN_CHANNEL`` to a post destination and bus topic."""
-    conv = _parse_conversation(raw)
+    conv = parse_conversation(raw)
     if conv is None:
         token = cfg.credential("slack", "bot_token")
         if not token:
@@ -316,7 +302,7 @@ def _resolve_login_channel(cfg: Config, raw: str) -> LoginChannel:
             legacy_slack_channel=channel,
         )
 
-    source, scope, _chat_type, _chat_id = conv
+    source, scope = conv.source, conv.scope
     if source == "slack":
         return LoginChannel(destination=raw, source=source, topic=_slack_topic(cfg))
     if source in {"discord", "whatsapp"}:
