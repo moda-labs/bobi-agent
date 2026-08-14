@@ -313,7 +313,7 @@ Each appendix entry names the surviving implementation — move callers to it; n
     duplication in the opposite direction (keep the inline copy, delete the
     shim and its seven tests). Applying D070 as written would resurrect it.
   - The DEFAULT slug turned out to be untested: a mutant giving it the wrong
-    prefix left all 155 tests green. Four tests added; three mutants red.
+    prefix left all 155 tests green. Three tests added; three mutants red.
 - [x] **Q029** `bobi/tool_library.py:44` — The tool_library.py module deliberately shadows the sibling bobi/tool_library/ data directory, a hazard the module spends a docstring paragraph…
   - Applied as prescribed — `bobi/tool_library/__init__.py`, `CATALOG_DIR`
     reduced to `Path(__file__).parent`, shadowing paragraph deleted. Wheel
@@ -827,7 +827,7 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
 
   **Nine mutants, nine red** — 4 for Q010 (authorize-failure fallback removed; the no-deployment branch disabled; the configured-local `ensure_running` skipped; the unconfigured arm syncing instead of registering), 3 for Q051 (slug prefix from role; gate seed dropping the item keys; curator registered as monitor), 2 for Q029 (the `tool.yaml` predicate dropped; `CATALOG_DIR` left at the pre-move path). Each was verified APPLIED by diffing the file, after a guard using `grep` with an embedded `\n` silently failed to detect a mutation that had in fact landed.
 
-  Suite: **4617 passed / 1 skipped**, the `a7de3b8` baseline of **4604** plus exactly the 13 tests added. No test was deleted — verified by `--collect-only` on both sides (4605 → 4618), not by arithmetic alone. `pyflakes` over `bobi/` is **26 → 26 with ZERO new**, both sides non-zero. Q029's packaging is proven by a wheel-content diff (213 entries both sides, differing in exactly the one moved entry name) and a live `dep_bootstrap` differential — identical dependency hash and rendered build script — whose probe was sanity-checked to confirm the two sides genuinely import different files.
+  Suite: **4616 passed / 1 skipped**, the `a7de3b8` baseline of **4604** plus exactly the 12 tests added. No test was deleted — verified by `--collect-only` on both sides (4605 → 4617), not by arithmetic alone. A thirteenth test of mine was written and then removed before landing: `test_the_three_prefixes_are_distinct` exercised only a test-local helper, asserting that an f-string beginning `check-` begins with `check`, and would have stayed green against any production code at all. `pyflakes` over `bobi/` is **26 → 26 with ZERO new**, both sides non-zero. Q029's packaging is proven by a wheel-content diff (213 entries both sides, differing in exactly the one moved entry name) and a live `dep_bootstrap` differential — identical dependency hash and rendered build script — whose probe was sanity-checked to confirm the two sides genuinely import different files.
 
 
 ## Notes
