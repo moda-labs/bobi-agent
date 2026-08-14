@@ -207,15 +207,14 @@ class TestReminderReconstruction:
         ])
         calls = []
 
-        def _notify(step, ctx, cwd, run_key, workflow_name):
-            calls.append((step.name, ctx.resolve(step.message), cwd))
+        def _notify(step, ctx, run_key, workflow_name):
+            calls.append((step.name, ctx.resolve(step.message)))
             return SimpleNamespace(delivered=True, error="")
 
         monkeypatch.setattr(orchestrator, "_execute_notify_step", _notify)
         outcome = orchestrator.remind_workflow(run, workflow)
         assert outcome.delivered is True
-        assert calls == [("notify_review", "Review this",
-                          str(bobi_install.repo_path))]
+        assert calls == [("notify_review", "Review this")]
         assert run.status == "waiting"
         assert run.await_event == "approval"
 
@@ -257,7 +256,7 @@ class TestReminderReconstruction:
         ])
         messages = []
 
-        def _notify(step, ctx, cwd, run_key, workflow_name):
+        def _notify(step, ctx, run_key, workflow_name):
             messages.append(step.message)
             return SimpleNamespace(delivered=True, error="")
 

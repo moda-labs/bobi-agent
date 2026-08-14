@@ -65,6 +65,44 @@ def post(url: str, *, json: dict | None = None, content: bytes | None = None,
     ``Cookie`` on a cross-origin redirect, so a vendor key travels verbatim to
     whatever host the redirect names.
     """
+    return request("POST", url, json=json, content=content, headers=headers,
+                   timeout=timeout, follow_redirects=follow_redirects)
+
+
+def get(url: str, *, headers: dict | None = None,
+        timeout: float | None = None) -> httpx.Response:
+    """GET with connection pooling and bounded concurrency."""
+    return request("GET", url, headers=headers, timeout=timeout)
+
+
+def put(url: str, *, json: dict | None = None, content: bytes | None = None,
+        headers: dict | None = None, timeout: float | None = None) -> httpx.Response:
+    """PUT with connection pooling and bounded concurrency."""
+    return request("PUT", url, json=json, content=content, headers=headers,
+                   timeout=timeout)
+
+
+def delete(url: str, *, headers: dict | None = None,
+           timeout: float | None = None) -> httpx.Response:
+    """DELETE with connection pooling and bounded concurrency."""
+    return request("DELETE", url, headers=headers, timeout=timeout)
+
+
+def request(method: str, url: str, *, json: dict | None = None,
+            content: bytes | None = None, headers: dict | None = None,
+            timeout: float | None = None,
+            follow_redirects: bool = True) -> httpx.Response:
+    """Generic request with connection pooling.
+
+    The single place the optional kwargs are filtered — an argument left None
+    is omitted so the shared client's own default applies. Every verb helper
+    above delegates here; ``client().post(url, ...)`` is exactly
+    ``client().request("POST", url, ...)`` per httpx.
+
+    ``follow_redirects`` is threaded through rather than dropped: ``post``
+    exposes it so a caller sending a credential in a CUSTOM header can refuse
+    redirects, and collapsing that into this helper must not lose it.
+    """
     kwargs: dict = {}
     if json is not None:
         kwargs["json"] = json
@@ -76,59 +114,6 @@ def post(url: str, *, json: dict | None = None, content: bytes | None = None,
         kwargs["timeout"] = timeout
     if not follow_redirects:
         kwargs["follow_redirects"] = False
-    return client().post(url, **kwargs)
-
-
-def get(url: str, *, headers: dict | None = None,
-        timeout: float | None = None) -> httpx.Response:
-    """GET with connection pooling and bounded concurrency."""
-    kwargs: dict = {}
-    if headers:
-        kwargs["headers"] = headers
-    if timeout is not None:
-        kwargs["timeout"] = timeout
-    return client().get(url, **kwargs)
-
-
-def put(url: str, *, json: dict | None = None, content: bytes | None = None,
-        headers: dict | None = None, timeout: float | None = None) -> httpx.Response:
-    """PUT with connection pooling and bounded concurrency."""
-    kwargs: dict = {}
-    if json is not None:
-        kwargs["json"] = json
-    if content is not None:
-        kwargs["content"] = content
-    if headers:
-        kwargs["headers"] = headers
-    if timeout is not None:
-        kwargs["timeout"] = timeout
-    return client().put(url, **kwargs)
-
-
-def delete(url: str, *, headers: dict | None = None,
-           timeout: float | None = None) -> httpx.Response:
-    """DELETE with connection pooling and bounded concurrency."""
-    kwargs: dict = {}
-    if headers:
-        kwargs["headers"] = headers
-    if timeout is not None:
-        kwargs["timeout"] = timeout
-    return client().delete(url, **kwargs)
-
-
-def request(method: str, url: str, *, json: dict | None = None,
-            content: bytes | None = None, headers: dict | None = None,
-            timeout: float | None = None) -> httpx.Response:
-    """Generic request with connection pooling."""
-    kwargs: dict = {}
-    if json is not None:
-        kwargs["json"] = json
-    if content is not None:
-        kwargs["content"] = content
-    if headers:
-        kwargs["headers"] = headers
-    if timeout is not None:
-        kwargs["timeout"] = timeout
     return client().request(method, url, **kwargs)
 
 

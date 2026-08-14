@@ -1355,3 +1355,46 @@ def test_login_bootstrap_posts_only_to_the_configured_channel(
     assert posts, "the login URL must still reach the configured channel"
     assert {channel for channel, _text in posts} == {OPERATOR_CHANNEL}
     assert any("oauth/authorize" in text for _channel, text in posts)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_login_channel — the conversation-ref grammar
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("ref,expected_topic", [
+    ("discord:guild1:channel:123", "discord:guild1"),
+    # The 6-part threaded form is part of the shared grammar; the private
+    # parser this now delegates to (Q012) accepted it too, so a ref that used
+    # to resolve must still resolve.
+    ("discord:guild1:channel:123:thread:456", "discord:guild1"),
+    ("whatsapp:acct1:dm:15551234567", "whatsapp:acct1"),
+])
+def test_resolve_login_channel_accepts_shared_grammar_refs(ref, expected_topic):
+    from bobi.config import Config
+
+    ch = ab._resolve_login_channel(Config(), ref)
+    assert ch.destination == ref
+    assert ch.topic == expected_topic
+    assert ch.legacy_slack_channel == ""
+
+
+@pytest.mark.parametrize("ref", [
+    "discord:guild1:channel",             # too few segments
+    "discord::channel:123",               # empty segment
+    "discord:guild1:voice:123",           # chat_type outside CHAT_TYPES
+    "discord:guild1:channel:123:reply:4",  # 6 parts but not 'thread'
+])
+def test_resolve_login_channel_rejects_non_conversation_refs(ref):
+    """A ref the shared grammar rejects must fall through to the legacy Slack
+    path — which, with no bot_token configured, is a clear RuntimeError rather
+    than a silent mis-parse."""
+    from bobi.config import Config
+
+    with pytest.raises(RuntimeError, match="not a conversation ref"):
+        ab._resolve_login_channel(Config(), ref)
+
+
+def test_auth_bootstrap_keeps_no_private_copy_of_the_grammar():
+    """Q012: the grammar has one Python implementation. A re-inlined private
+    parser here is the drift this guards against."""
+    assert not hasattr(ab, "_parse_conversation")

@@ -223,10 +223,10 @@ Includes Q4's expired compat layers and Q3's flag removal once decided. For conf
 
 Each appendix entry names the surviving implementation — move callers to it; never mint a third copy.
 
-- [ ] **Q012** `bobi/auth_bootstrap.py:192` — auth_bootstrap._parse_conversation hand-rolls the conversation-ref grammar that bobi.conversation.parse_conversation already implements.
-- [ ] **Q083** `bobi/brain/__init__.py:231` — GATEWAY_UNRESOLVED_BASE_URL lives in brain/__init__.py, forcing gateway.py's require_gateway_base_url into a function-level circular-import…
-- [ ] **Q026** `bobi/brain/base.py:148` — stream_once is part of the de facto BrainFactory contract but is missing from the Protocol and unimplemented by CodexBrain, so the brain interface is…
-- [ ] **Q027** `bobi/brain/claude.py:328` — _claude_transcript_path re-implements the Claude transcript locator that already exists in bobi/chat_history.py (_claude_projects_dirs +…
+- [x] **Q012** `bobi/auth_bootstrap.py:192` — auth_bootstrap._parse_conversation hand-rolls the conversation-ref grammar that bobi.conversation.parse_conversation already implements.
+- [x] **Q083** `bobi/brain/__init__.py:231` — GATEWAY_UNRESOLVED_BASE_URL lives in brain/__init__.py, forcing gateway.py's require_gateway_base_url into a function-level circular-import…
+- [x] **Q026** `bobi/brain/base.py:148` — stream_once is part of the de facto BrainFactory contract but is missing from the Protocol and unimplemented by CodexBrain, so the brain interface is…
+- [x] **Q027** `bobi/brain/claude.py:328` — _claude_transcript_path re-implements the Claude transcript locator that already exists in bobi/chat_history.py (_claude_projects_dirs +…
 - [x] **Q087** `bobi/build.py:70` — _flatten_if_chained's re-read/setdefault/rewrite of the composed agent.yaml (lines 70-74) is redundant — compose() already sets the agent name to the…
 - [x] **D050/Q007** `bobi/cli.py:95` — The entire local event-server port-resolution trio (_parse_local_event_server_port, _event_server_port_file, _selected_local_event_server_port, ~50…
 - [x] **Q009** `bobi/cli.py:151` — `_ensure_root_bound()` is behaviorally identical to `_detect_project_root()` — its body re-implements the first two lines of the latter and then…
@@ -244,10 +244,10 @@ Each appendix entry names the surviving implementation — move callers to it; n
   - APPLIED (the half that is unambiguous and behaviour-preserving): the `ingress.py` hint now names `event_server`, the spelling every pack, doc and `bobi setup` actually writes, instead of the parses-but-unauthored `event_server_url`. Two hint assertions retargeted.
   - NOT APPLIED: collapsing the three spellings to one. Needs a lane that can take a schema-compatibility decision.
 - [ ] **Q093** `bobi/config.py:615` — The event-server deployment/cursor/bubble state persistence (config.py:601-701) is transport session state, not package configuration, and sits in a…
-- [ ] **Q092** `bobi/costs.py:156` — rollup_costs takes a group_by parameter that its body never references.
-- [ ] **Q114** `bobi/dep_bootstrap.py:88` — ResolvedRecipe.from_install and ResolvedRecipe.from_agent are the identical one-line function under two names. *(plausible — re-verify first)*
-- [ ] **Q091** `bobi/dep_bootstrap.py:419` — pathlib.Path is imported inside four separate functions (and string-quoted in signatures) although a top-level stdlib import has no cycle risk.
-- [ ] **Q034** `bobi/env.py:18` — env._configured_brain/pin_brain_from_root re-implement the brain-mapping extraction and defaults that Config._parse and the Config.brain_* properties…
+- [x] **Q092** `bobi/costs.py:156` — rollup_costs takes a group_by parameter that its body never references.
+- [x] **Q114** `bobi/dep_bootstrap.py:88` — ResolvedRecipe.from_install and ResolvedRecipe.from_agent are the identical one-line function under two names. *(plausible — re-verify first)*
+- [x] **Q091** `bobi/dep_bootstrap.py:419` — pathlib.Path is imported inside four separate functions (and string-quoted in signatures) although a top-level stdlib import has no cycle risk.
+- [x] **Q034** `bobi/env.py:18` — env._configured_brain/pin_brain_from_root re-implement the brain-mapping extraction and defaults that Config._parse and the Config.brain_* properties…
 - [x] **D095** `bobi/events/adapters.py:81` — Running `git remote get-url origin` and normalizing the remote URL to a GitHub owner/repo slug is implemented twice:…
 - [x] **Q019** `bobi/events/adapters.py:118` — adapters.py hand-rolls Slack channel name→ID resolution (_resolve_channel_names + _is_channel_id) that bobi/slack.py's resolve_channel_id already…
 - [x] **D096** `bobi/events/adapters.py:209` — _detect_slack inlines a Slack auth.test call (GET + bearer header + team_id/bot_id extraction) that events/server._slack_auth_info already provides,…
@@ -256,12 +256,12 @@ Each appendix entry names the surviving implementation — move callers to it; n
 - [x] **Q064** `bobi/events/server.py:236` — ensure_running remaps five unprefixed env vars to BOBI_ES_* with five identical two-line if-blocks.
 - [x] **Q112** `bobi/events/server.py:413` — authorize_resources repeats the same 6-line 'log warning / append unbacked / keep-if-not-filtering / continue' tail four times. *(plausible — re-verify first)*
 - [x] **Q020** `bobi/events/server.py:604` — _slack_auth_info and _slack_app_id are general Slack Web API helpers living in the event-server launcher module, privately imported across module…
-- [ ] **Q104** `bobi/history.py:14` — history.py hardcodes Path.home()/'.claude'/'projects' for locating Claude transcripts while chat_history.py's _claude_projects_dirs() is the house… *(plausible — re-verify first)*
-- [ ] **Q035** `bobi/http.py:57` — post/get/put/delete each hand-build the same optional-kwargs dict instead of being one-line delegates to the module's own request() helper.
+- [x] **Q104** `bobi/history.py:14` — history.py hardcodes Path.home()/'.claude'/'projects' for locating Claude transcripts while chat_history.py's _claude_projects_dirs() is the house… *(plausible — re-verify first)*
+- [x] **Q035** `bobi/http.py:57` — post/get/put/delete each hand-build the same optional-kwargs dict instead of being one-line delegates to the module's own request() helper.
 - [x] **D078** `bobi/ingress.py:55` — The agent.yaml explicit `subscribe:` parsing (yaml load + env interpolation + str-or-list normalization + strip/filter) is implemented twice:…
-- [ ] **Q097** `bobi/kb/embedder.py:146` — embedder.stop() hand-parses the pid file (int(read_text().strip()) plus ValueError handling) while is_running() three functions above already uses…
-- [ ] **Q096** `bobi/memory.py:181` — cold_memory_kb_name() is a function wrapping the module constant COLD_MEMORY_KB_NAME, with exactly one caller.
-- [ ] **Q033** `bobi/memory.py:215` — The cold-memory sync code in memory.py reaches into KBStore internals (store._connect(), _fetchone, _chunk_text) in two places to answer a question…
+- [x] **Q097** `bobi/kb/embedder.py:146` — embedder.stop() hand-parses the pid file (int(read_text().strip()) plus ValueError handling) while is_running() three functions above already uses…
+- [x] **Q096** `bobi/memory.py:181` — cold_memory_kb_name() is a function wrapping the module constant COLD_MEMORY_KB_NAME, with exactly one caller.
+- [x] **Q033** `bobi/memory.py:215` — The cold-memory sync code in memory.py reaches into KBStore internals (store._connect(), _fetchone, _chunk_text) in two places to answer a question…
 - [x] **Q056** `bobi/monitors/scheduler.py:84` — _load_framework_checks hand-rolls importlib (sys.modules check + spec_from_file_location + module_from_spec + exec_module) to load modules that are…
 - [x] **D093/Q058** `bobi/monitors/scheduler.py:149` — _parse_iso (ISO-8601 parse with 'Z'->'+00:00' replacement and naive-to-UTC defaulting) is duplicated verbatim in two modules of the same package.
 - [x] **Q015** `bobi/monitors/scheduler.py:1215` — _on_sleep_cycle_result repeats the same ~10-line failure block seven times: build a detail string, log.warning('… - cursor NOT advanced, retrying…
@@ -278,19 +278,85 @@ Each appendix entry names the surviving implementation — move callers to it; n
 - [x] **Q069** `bobi/setup/webui/server.py:108` — _probe_event_server hand-rolls an outbound HTTP request with raw urllib.request, against the repo's explicit house rule that framework code uses the…
 - [x] **Q022** `bobi/setup/webui/server.py:543` — The entire MCP connection-test conversational flow (~130 lines: _propose_test, _resolve_pending, _record) lives as nested async generators inside the…
 - [x] **Q023** `bobi/setup/webui/server.py:1284` — Credential resolution precedence is handled in two conflicting styles: the documented house pattern is process-env-first (exported var wins over…
-- [ ] **D052** `bobi/slack.py:311` — Slack channel-name-to-ID resolution via paginated conversations.list is implemented twice with already-divergent behavior: slack.resolve_channel_id…
-- [ ] **Q010** `bobi/subagent.py:1302` — _start_event_subscription's 5-branch registration decision tree re-implements the authorize→PUT-subscriptions→on-failure-re-register sync sequence…
-- [ ] **Q051/D070** `bobi/subagent.py:1738` — run_check_blocking, run_gate_blocking, and run_curator_blocking each repeat the same ~12-line preamble: local `import hashlib`, sha256 slug,…
-- [ ] **Q029** `bobi/tool_library.py:44` — The tool_library.py module deliberately shadows the sibling bobi/tool_library/ data directory, a hazard the module spends a docstring paragraph…
-- [ ] **D051/Q123** `bobi/webapp/daemon.py:92` — webapp/daemon.py reimplements pid-file helpers (_pid_alive, _read_int) that already exist as bobi.sdk.pid_alive / bobi.sdk.read_pid, and the copies…
-- [ ] **D097/Q024** `bobi/webapp/daemon.py:203` — daemon.py re-implements three launch fragments that webui_common/launcher.py already owns: the socket-bind + uvicorn serve pattern, the…
-- [ ] **Q075** `bobi/webapp/server.py:158` — Success-only GET handlers inconsistently wrap runtime dicts in JSONResponse (agent_spend, agent_health, agent_sessions, agent_status, subagents,…
-- [ ] **Q107** `bobi/webapp/server.py:246` — The setup_open handler's on_finish closure embeds ~30 lines of slot-rename filesystem business logic (shutil.move of agent dirs, nested run/ salvage,… *(plausible — re-verify first)*
-- [ ] **Q072** `bobi/webui_common/launcher.py:37` — serve_local's `announce` callback parameter (and the Announcer type alias) has exactly one caller, whose lambda reproduces the default label-based…
-- [ ] **Q060** `bobi/workflow/orchestrator.py:108` — _find_project_root(cwd) takes and ignores a cwd parameter, and both call sites pass a meaningful-looking cwd that has no effect.
+- [x] **D052** `bobi/slack.py:311` — Slack channel-name-to-ID resolution via paginated conversations.list is implemented twice with already-divergent behavior: slack.resolve_channel_id…
+  - Re-derived 2026-08-13 against `bf11965`: **already resolved, by Phase 6 batch 1's Q019** (PR #993). `events/adapters._resolve_channel_names` no longer paginates `conversations.list` — it delegates to `bobi.slack.resolve_channel_id` and adds only the subscription-side drop-vs-raise policy. `conversations.list` now appears once in `bobi/`, at `slack.py:448`. Flipped as bookkeeping; no code change was owed.
+  - The workspace-widening failure mode D052 describes is NOT closed by that consolidation and is deliberately still open — see the Q019 note in batch 1 and PR #993. `_slack_keys(team_id, [])` still subscribes workspace-wide when every configured channel fails to resolve.
+- [x] **Q010** `bobi/subagent.py:1302` — _start_event_subscription's 5-branch registration decision tree re-implements the authorize→PUT-subscriptions→on-failure-re-register sync sequence…
+  - The finding calls the two sync blocks' differences "log wording and whether
+    authorize failure falls back to the raw subscribe list". The second is a
+    real behaviour difference, so this needed a decision, not a merge.
+    Provenance made it: the REMOTE block is the original (its history runs back
+    through #488, `cf6559b4`, which added the pre-PUT authorization fallback);
+    #538 (`a42106e9`) added the local arm later as a copy that flattened the two
+    try/excepts into one and dropped the fallback. `authorize_resources` still
+    documents the original's contract — "The server remains authoritative and
+    will reject the update if the grant is truly absent". Consolidated onto the
+    original as `_sync_or_reregister`, per this phase's "move callers to the
+    surviving implementation" rule.
+  - The collapse is larger than the finding describes: the two "register fresh"
+    and two "pre-bubble upgrade" branches were byte-identical as well, so the
+    whole local/remote split reduces to an `ensure_running` prelude plus one
+    shared three-way decision. The unconfigured-local arm deliberately keeps its
+    unconditional fresh register (an ephemeral 8080 server's old deployment is
+    not something to sync onto) — that asymmetry is now commented, not implicit.
+  - Every pre-existing test configured a REMOTE url, so the arm being changed
+    had no coverage at all. Seven tests added; four mutants verified red.
+- [x] **Q051/D070** `bobi/subagent.py:1738` — run_check_blocking, run_gate_blocking, and run_curator_blocking each repeat the same ~12-line preamble: local `import hashlib`, sha256 slug,…
+  - Q051 applied: `_register_verdict_session` collapses the three preambles,
+    which differ only in role, phase, hash seed and title. The slug prefix IS
+    the phase in all three, so it is derived. `hashlib` moved to the module
+    imports, retiring the fourth local copy — which is in `_adhoc_session_name`,
+    not `spawn_adhoc` as the finding states.
+  - **D070 is NOT applied, and needs no successor: its premise is dead.** It
+    asks `run_check_blocking` to route through `_parse_check_output`, which no
+    longer exists — Phase 5 batch 2 deleted it as **Q050**, resolving the same
+    duplication in the opposite direction (keep the inline copy, delete the
+    shim and its seven tests). Applying D070 as written would resurrect it.
+  - The DEFAULT slug turned out to be untested: a mutant giving it the wrong
+    prefix left all 155 tests green. Three tests added; three mutants red.
+- [x] **Q029** `bobi/tool_library.py:44` — The tool_library.py module deliberately shadows the sibling bobi/tool_library/ data directory, a hazard the module spends a docstring paragraph…
+  - Applied as prescribed — `bobi/tool_library/__init__.py`, `CATALOG_DIR`
+    reduced to `Path(__file__).parent`, shadowing paragraph deleted. Wheel
+    contents differ by exactly that one entry name (213 entries both sides).
+  - Two corrections to the finding's evidence. Its enumeration is stale: the
+    catalog holds **four** entries (`otel` was added), not the three named. And
+    it omits `.github/workflows/container.yml`, which path-filters on the
+    literal `bobi/tool_library.py`; left alone it would match nothing and
+    silently stop triggering the image lane — the #909 vacuous-lane shape its
+    own neighbouring comment warns about. Now `bobi/tool_library/**`, which also
+    newly covers the catalog pins that bake INTO the image (#486).
+  - The move puts `__init__.py` and `__pycache__/` beside the entries for the
+    first time; two tests pin that only `tool.yaml`-bearing directories are
+    offered as catalog ids. Two mutants red.
+- [x] **D051/Q123** `bobi/webapp/daemon.py:92` — webapp/daemon.py reimplements pid-file helpers (_pid_alive, _read_int) that already exist as bobi.sdk.pid_alive / bobi.sdk.read_pid, and the copies…
+  - Done: `_pid_alive`/`_read_int` deleted; daemon delegates to `bobi.sdk.pid_alive`
+    and a new `sdk.read_int_file` (`read_pid` delegates to it, name and behavior kept).
+    EPERM now reads as ALIVE, which newly reaches `os.kill` in `stop()` — handled as
+    `AppStatus.not_permitted` with the state files deliberately NOT cleared. `_ping`
+    moved to the pooled `bobi.http` client (Q123).
+- [x] **D097/Q024** `bobi/webapp/daemon.py:203` — daemon.py re-implements three launch fragments that webui_common/launcher.py already owns: the socket-bind + uvicorn serve pattern, the…
+  - Done: `launcher` grew `serve_socket`/`run_server`/`write_secret`/`open_browser_soon`
+    as named primitives; `serve_local`, `serve_container` and `daemon.run_foreground`
+    all compose them. `run_foreground` still binds its own socket — fixed port, and the
+    pid/port files must land between bind and serve — which is why primitives were the
+    right shape rather than a third whole-launch entry point.
+- [x] **Q075** `bobi/webapp/server.py:158` — Success-only GET handlers inconsistently wrap runtime dicts in JSONResponse (agent_spend, agent_health, agent_sessions, agent_status, subagents,…
+  - Done: re-derived at cb45d00 the wrapper-only always-200 set is TEN, not the eight
+    listed (agent_overview and agent_runs were added after the review). All ten now
+    return bare dicts. Byte-identity proven by an A/B probe over 24 responses, and the
+    probe itself mutant-checked first — its initial run was vacuous.
+- [x] **Q107** `bobi/webapp/server.py:246` — The setup_open handler's on_finish closure embeds ~30 lines of slot-rename filesystem business logic (shutil.move of agent dirs, nested run/ salvage,… *(plausible — re-verify first)*
+  - Done as `bobi/webapp/slots.py::finalize_slot`, but the finding's stated premise is
+    WRONG at cb45d00: server.py's docstring claims 'HTTP mapping ... AND the hosted-
+    onboarding surface', so this was not a charter violation. Extracted anyway for the
+    real reason — the closure was unreachable except through a full HTTP request plus a
+    live SetupState. Kept in bobi/webapp/, not bobi/setup/, because slots are the
+    webapp's hosted-onboarding concept.
+- [x] **Q072** `bobi/webui_common/launcher.py:37` — serve_local's `announce` callback parameter (and the Announcer type alias) has exactly one caller, whose lambda reproduces the default label-based…
+- [x] **Q060** `bobi/workflow/orchestrator.py:108` — _find_project_root(cwd) takes and ignores a cwd parameter, and both call sites pass a meaningful-looking cwd that has no effect.
 - [f] state:falsified **Q063** `bobi/workflow/orchestrator.py:128` — _setup_worktree re-imports subprocess locally as sp even though the module already imports subprocess at top level and uses it directly elsewhere in…
   - Re-derived 2026-08-09/10. The premise is false: `bobi/workflow/orchestrator.py` has NO top-level `import subprocess`, and `_resolve_repo_root` uses no subprocess at all (D095 routed it through `bobi.gitutil.origin_url`). The only reference left is the function-local `import subprocess as sp`. Deleting that local import, as written, BREAKS the module. The inverse — hoisting it to module scope — is a judgement call, not this finding.
-- [ ] **Q061** `bobi/workflow/orchestrator.py:435` — _make_session's if/else on agent_name executes the identical call in both branches.
+- [x] **Q061** `bobi/workflow/orchestrator.py:435` — _make_session's if/else on agent_name executes the identical call in both branches.
 
 **Validation gate**
 
@@ -691,6 +757,77 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   **Q028 is deliberately left `[ ]` and needs its own PR.** The finding says moving Claude-CLI path resolution out of `sdk.py` means "webapp/server.py:99 updates its one import" and that test patches "move mechanically". Re-derived: there are **~25 patch sites of the literal string `"bobi.sdk.get_cli_path"` across 7 test files**, plus 3 direct `sdk.get_cli_path()` calls in `tests/test_container_paths.py`. That is a ~30-file diff for one item, and bundling it here would have put unlike things in one PR — the same call made for Q108.
 
   Suite: **4432 passed / 1 skipped**, the `58eaccf` baseline of 4417 plus the fifteen tests added here (one of them parametrized three ways). No test was deleted; two monkeypatch targets were retargeted. Note the baseline moved: batch 3 measured 4394 at `ac0b55b`, and #996 changed the count in between.
+
+- **2026-08-13** (Lane B build session): **Phase 6 batch 6 — the `brain/` cluster plus the transcript-locator chain, 5 items.** Re-derived against `main` @ `efd886f` (seven commits past batch 5's merge — the 0.57.0 cut and six fixes landed in between). Shipped `[x]`: Q083, Q026, Q027, Q104, Q034. Line numbers had drifted again (Q083's constant 231→275 and its deferred import 69→72; Q026's protocol 148→205, `stream_once` 487→522 / 178→222, caller 70→66; Q027's copy 328→363; the plan's own note for Q027/Q104 said `cli.py:1568` where the fourth copy is at **1403**); items were located by symbol.
+
+  **Q027 and Q104 are one change, as the 2026-08-05 re-validation note directs, and the fourth copy went with them.** The survivor is a new public `chat_history.find_claude_transcript` (the rename of `_transcript_path`, which had to become public because its callers are in other modules). It absorbed the **guarded** body from `brain/claude._claude_transcript_path` rather than the house one: the scan races Claude Code writing the tree, and an unreadable root now means "no transcript here" instead of a `PermissionError` out of a history read. **That is the batch's one deliberate behaviour delta** — every other path is byte-identical, and a test pins the guard. `history.index()` (Q104) and `cli._find_transcript` (the fourth copy, which had no test at all and is the one an operator hits as `bobi logs`) both gained CLAUDE_CONFIG_DIR awareness by moving onto the shared rule, which is exactly the silent miss Q104 describes: bobi renders per-team CLAUDE.md under a config dir (#779), so those two paths were blind to the transcripts of the agents bobi itself runs.
+
+  **`history.index()` needed a dedupe the finding does not mention, and the first attempt was at the wrong level.** Two roots can be one tree. `claude_projects_dirs` dedupes by **spelling**, so a `CLAUDE_CONFIG_DIR` symlinked at `~/.claude` survives it as two distinct roots and would double-index every file. The dedupe resolves each **root** once rather than each file — same correctness, one `resolve()` per root instead of per transcript. A per-file version shipped first and its mutant **survived**, which is what exposed that the test could not reach the case; the symlink test that replaced it is red without the guard.
+
+  **Q034 did NOT take the shape its own "Detail" prescribes, and the reason is a fail-loud path.** The finding asks for `_configured_brain` to load via `Config._parse(paths.agent_yaml_path(root), env)`. Probed empirically: `_parse` **raises** on a malformed `services:` or `requires:` block (`TypeError: 'int' object is not iterable`) where the current hand-parse still extracts the brain. This is the **spawn** path, wrapped in `except Exception: return {}`, so adopting `_parse` would turn a broken-but-live team's gateway pin into a silently native session dialing the real vendor with gateway credentials — the #789 leak, re-entered through the back door. What shipped is the finding's own "at minimum" clause, done properly: the tolerant `brain:`-only read stays, its result is wrapped in a `Config`, and the expansion goes through the `brain_*` properties, so the duplicated `'responses'` default and the presence-based gateway predicate now have exactly one definition. A test drives that single-definition property directly — move `Config.brain_wire_api` and the pin moves with it.
+
+  **The two config-to-pins call sites are now twins.** `bobi.brain` gained `pin_process_brain_from_config` beside the existing `set_process_brain_from_config`, both expanding through one `_brain_pin_kwargs`. That is the docstring promise `set_process_brain_from_config` already made — "a new brain config field cannot be threaded into one site and missed in another" — and `bobi.env` was precisely the site it was missing. Equivalence was proven by a **588-case differential** (7 kinds × 3 base-url states × 7 extra-field shapes × 4 seed environments) comparing the old hand-rolled expansion against the new one: **zero divergences**. `bobi.env`'s module-level import set is unchanged at 2 (`Config` is imported inside the function, per batch 5's failure 4).
+
+  **Q026 shipped as the "explicit NotImplementedError" arm, not the "real implementation" arm.** The finding offers both. A real codex `stream_once` is a new capability, not a consolidation: `codex exec` can run the one-shot turn but emits no token-level partials, so it would silently degrade the setup pour to one block of text at the end, and deciding what the pour should look like without partials is a behaviour question this phase cannot settle. Declaring `stream_once` on the `BrainFactory` protocol is documentation only at runtime — protocols are not enforced without `runtime_checkable` + `isinstance` — so the enforcement is a test that reads the protocol's own method list and asserts every entry of `_BRAINS` implements it. That test is what makes the contract real, and it is red if either the protocol declaration or the codex implementation is removed. The user-visible failure type is unchanged (`LLMError` either way); only the message changed, from `'CodexBrain' object has no attribute 'stream_once'` to one naming the brain and the fix.
+
+  **Q083 is pure code motion and its test needed a second attempt.** The sentinel moved to `brain/gateway.py` beside the pin helpers that read it, re-exported from `bobi.brain` for the existing `__all__` entry, and the deferred `from bobi.brain import ...` inside `require_gateway_base_url` is gone. The first test tried to prove "no circular import" by importing `bobi.brain.gateway` in a subprocess and asserting the package was absent — **which can never hold**, since importing a submodule always executes its package `__init__`. The property that is actually testable is that `gateway.py` no longer reaches back: deleting `bobi.brain`'s re-export must still leave `require_gateway_base_url` working, which raises `ImportError` under the old shape.
+
+  **Eleven mutants, eleven red** (after the one survivor described above was fixed): the deferred import restored, the re-export dropped, `stream_once` removed from `CodexBrain` and separately from the protocol, `CLAUDE_CONFIG_DIR` dropped from the shared locator, the `OSError` guard weakened, `brain.claude` pointed back at a home-only locator, the indexer pointed back at `~/.claude/projects`, the root dedupe dropped, and the `wire_api` default and gateway predicate each re-hardcoded in the expansion. Six pre-existing `brain.claude` transcript tests also turn red on the delegation mutant, so that consolidation was already covered.
+
+  Suite: **4558 passed / 1 skipped**, the `efd886f` baseline of **4537** plus exactly the 21 tests added here (5 locator + 3 indexer + 3 `bobi logs` + 3 factory-contract + 2 gateway-ownership + 5 brain-pin). No test was deleted; ten monkeypatch targets were retargeted (eight from `chat_history._transcript_path`, two from `history.PROJECTS_DIR`). `pyflakes` is clean in all eight touched modules and unchanged repo-wide at 30. No doc quotes any renamed symbol, so no doc update was owed.
+
+  **Integration: 342 passed / 49 skipped / 0 failed** (Node 20 + `event-server && npm ci`). The first run of this batch reported **one** failure — `test_setup_flow.py::TestCreateFlow::test_idea_to_installed_pack` — and it was NOT waved off as the usual otel flake, because that test drives a **real Claude session** through the digestion pour, which is the same `stream_once` surface Q026 touches. Four checks cleared it, and the order matters: it **passes alone** (82s); a **control run of the whole suite on unmodified `origin/main` passed** (342/49/0); a **re-run of the whole suite on this branch passed** (342/49/0, the identical figure); and statically there is **no mechanism** — `bobi/setup/` imports none of the eight changed modules, `brain/stub.py` and `get_brain` are untouched, and `ClaudeBrain.stream_once` is byte-identical, the only `claude.py` change being the transcript locator behind `_max_turns_from_transcript`, whose one delta (tolerate `OSError` rather than raise) is strictly more forgiving. The test's assertions are model-behaviour claims ("goal slot stayed empty"), so the failure is recorded as real-model nondeterminism.
+
+  **The integration skip count is 49, up from the 20 batch 5 recorded — and it is not this batch's doing.** It is **49 on `origin/main` and 49 on this branch**, measured in the two runs above, so nothing here caused it; it grew across the seven commits since batch 5. Recorded rather than passed over, because a skip is a test that did not run and this repo has already shipped four green-but-vacuous lanes behind exactly that reasoning. **Nobody has audited what those 29 additional skips are** — worth a look from whoever takes the next batch, and explicitly NOT verified here.
+
+  **Both config-to-pins entry points were differentially verified, not just the new one.** `pin_process_brain_from_config` and `set_process_brain_from_config` were each compared against their pre-refactor bodies over the same 588-case matrix (7 kinds × 3 base-url states × 7 field shapes × 4 seed environments): **zero divergences each**. The second differential was added during author review, on noticing the first proof covered only half of what the commit changed.
+
+- **2026-08-13** (Lane B build session): **Phase 6 batch 7 — the vestigial-surface cluster (dead parameters and single-caller indirection), 6 items.** Re-derived against `main` @ `280c5e6` (batch 6's own merge). Shipped `[x]`: Q092, Q114, Q096, Q072, Q060, Q061. Line numbers had drifted on **every** item (Q092's `rollup_costs` 156→218 and its caller `cli.py` 3383→3630; Q114's classmethods 88→89; Q096's wrapper 181→175 and its caller 3333→3575; Q072's parameter 37→39 and its caller `setup/webui/server.py` 1468→1402; Q060's function 108→216 and its call sites 377/1126→504/1424; Q061's branch 435→568); items were located by symbol.
+
+  **Q018 was re-derived, confirmed, and deliberately left `[ ]` for its own PR.** Its premise holds exactly as written — `_cache_dir` returns `paths.agent_cache_dir()` and `_all_registries` reads only `paths.ensure_global_config()`, neither dereferencing `project_path`, which makes `list_remote`'s `_all_registries(project_path) if project_path else [DEFAULT_REPO]` branch the accidental semantics the finding names. It was pulled from this batch on size, not doubt: ~18 signatures in `registry.py` plus call sites in `build.py`, `compose.py`, `cli.py` and `setup/open_mode.py`, plus 9 test files. That is a mechanical sweep of a different character from the six small removals here, and bundling it would have buried them — the same call already made for Q028, Q093 and Q108.
+
+  **Q060 was carried one step past its own prescription, because stopping where it stops would have created a fresh instance of the defect it describes.** The finding's text says `_execute_notify_step` threads a `cwd` parameter "**partly** to feed it". That is wrong: `cwd` is referenced at exactly one line inside that function (the `_find_project_root(cwd)` call), so the moment `_find_project_root` loses its argument, `_execute_notify_step`'s own `cwd` is dead — a parameter that looks meaningful and does nothing, which is precisely Q060. It was dropped too, across both orchestrator call sites and 8 test call sites. One assertion in `tests/test_webapp_resume.py` had pinned the threading of `run.cwd` through that call; it was removed rather than retargeted at `run_key`, which `_seed_run` never sets and against which the comparison would have been vacuous.
+
+  **Q072's deleted branch was the one user-visible string in the batch, and it had no test.** `serve_local` printed either the caller's `announce(url)` or a label-built default; `bobi setup` passed a lambda reproducing the default character-for-character. The existing `serve_local` test asserted the minted secret, the bound socket and the browser URL, but never the banner — so nothing was holding the text that tells an operator where the UI is. A test now pins the exact printed line, and a reworded banner is red against it.
+
+  **Q092's `--by` flag was likewise exit-code-only.** `test_by_dimension_still_runs` asserted `exit_code == 0` for all four dimensions and nothing more, so dropping `group_by=` from the `format_costs` call would have survived it. With `rollup_costs` no longer taking the parameter, `format_costs` is the sole place the flag can act, so the coverage was strengthened to assert the output actually names the requested dimension. It needs a seeded session: with no cost data the command returns early and never formats — the first version of this test asserted against the empty branch and failed for that reason.
+
+  **Seven mutants, seven red.** The `format_costs` call losing `group_by` (3 of 4 dimensions red — `provider` survives by being the formatter's own default, correctly); the `recall-memory` CLI pointed at a different KB name; `ResolvedRecipe.coerce` losing the `data or {}` guard the two collapsed classmethods used to carry; the `serve_local` banner reworded; `_find_project_root` regaining a required `cwd` (4 red); `_make_session` no longer forwarding `agent_name` (1 red); and — because the first `_find_project_root` mutant only killed tests at the notify call site — a targeted mutant breaking **only** the `run_workflow` call site, which turned **43** tests red and proves the second site is exercised unpatched.
+
+  **Q061's collapse is safe because the falsy case is only `""`.** Both branches called `resolve_agent_prompt` with `agent_name or ""`; `agent_name` reaches `_make_session` as `current_agent`, which starts as `first_agent = role or ""` and is only ever reassigned from `step.agent or current_agent`, so it is always a `str` and the sole falsy value it can hold is the empty string the else-branch passed explicitly.
+
+  Suite: **4564 passed / 1 skipped**, the `280c5e6` baseline of **4558** plus exactly the 6 tests added here (1 rollup-breakdown invariant + 4 parametrized `--by` assertions + 1 `serve_local` banner). The baseline is not inherited from batch 6's note — it was measured on this branch before any test was added, and it agrees. No test was deleted; one was renamed (`test_recipe_from_install_adopts_verbatim` → `test_recipe_coerce_adopts_pinned_install_verbatim`) and one had its stub signatures narrowed. `pyflakes` over the ten touched files is **14 findings on both `280c5e6` and this branch — the identical set**, none new. (An earlier differential reporting 1-vs-1 was vacuous: zsh does not word-split an unquoted `$F`, so both sides linted one nonexistent path.)
+
+
+- **2026-08-13** (Lane B build session): **Phase 6 batch 8 — the missed-reuse cluster (hand-rolled helpers the house already owns), 6 items.** Re-derived against `main` @ `bf11965` (batch 7's own merge). Shipped `[x]`: Q012, Q091, Q035, Q097, Q033, **D052 as bookkeeping only**. Line numbers had drifted on every item (Q012's parser 192→277; Q091's local imports 419/458/531/658→415/454/527/654 and its quoted annotations 410/435→406/431; Q035's verbs 57→57 with the block ending at 132; Q097's hand-parse 146→159; Q033's two sites 215/262→205/252); items were located by symbol.
+
+  **D052 was ALREADY RESOLVED, by this phase's own batch 1, and nothing recorded it.** Q019 (PR #993) rewrote `events/adapters._resolve_channel_names` to delegate to `bobi.slack.resolve_channel_id`; the second paginated `conversations.list` D052 names is gone, and that call now appears exactly once in `bobi/` (`slack.py:448`). Flipped with no code change. **Its second claim is NOT closed and must not be read as closed by the `[x]`:** the workspace-widening path — `_slack_keys(team_id, [])` subscribing to the entire workspace when every configured channel fails to resolve — is the deliberate non-fix recorded against Q019 in batch 1. An item can be half-fixed by a sibling finding; check both of its claims before flipping.
+
+  **Q035 did NOT take the shape its own "Detail" prescribes, and applying it as written would have been a security regression.** The finding says post/get/put/delete become one-line delegates to `request()`. It predates `post`'s `follow_redirects` parameter, which `request()` does not carry — so a literal delegation **silently drops it**. That flag exists because httpx strips only `Authorization` and `Cookie` on a cross-origin redirect, so a credential in a CUSTOM header would travel verbatim to whatever host a redirect names. `request()` now takes and threads `follow_redirects`; `post` keeps it (a test pins its default at `True` by signature inspection). The mutant that drops it turns `test_a_redirect_never_forwards_the_credential` red — it was load-bearing, not hypothetical. **This is the fifth finding in this plan whose prescription aged wrong because its target moved after the review** (with Q034, Q023, D050/Q007, Q109).
+
+  **Q033 moved a question to the object that owns the answer.** Both `cold_memory_kb_needs_sync` and `sync_reference_to_cold_memory_kb` opened `store._connect()` and imported the private `_fetchone`/`_chunk_text` to run the same entry-count/vector-count query. The new `KBStore.source_index_complete(source, source_hash, content)` answers it inside the store that owns both the chunking rule and the schema — same SQL, same comparison, and `memory.py` now imports nothing private from `bobi.kb.store`. The vector half is the subtle one: a source with entries but no vectors is **stale, not present**, and a mutant dropping that half survives an entry-count-only test.
+
+  **Q091 fixed four real pyflakes findings as a side effect.** The four function-local `from pathlib import Path` forced string-quoted annotations, and pyflakes reported `undefined name 'Path'` at both signatures. `bobi/conversation.py` (Q012's target) imports nothing from `bobi`, so its top-level import is cycle-free — verified by importing, not by inspection.
+
+  **Five mutants, five red:** `post` dropping `follow_redirects` on the way to `request()`; `source_index_complete` ignoring the vector half; `stop()` killing on a zero pid; a divergent private grammar re-inlined into `auth_bootstrap`; and the top-level `Path` import removed (9 red plus 4 pyflakes findings).
+
+  Suite: **4576 passed / 1 skipped**, the `bf11965` baseline of **4564** plus exactly the 12 tests added (3 `source_index_complete` + 1 malformed-pid + 8 login-channel grammar, 7 of them parametrized cases). No test was deleted. `pyflakes` over the nine touched files goes **11 → 7 with ZERO new**, the four removed being Q091's own `undefined name 'Path'`. Both sides of that differential are non-zero — checked deliberately, after batch 7 shipped two vacuous "green" comparisons.
+
+- **2026-08-13** (Lane B build session): **Phase 6 batch 10 — the `subagent.py` pair plus the `tool_library` shadowing, 3 items.** Re-derived against `main` @ `a7de3b8` (batch 9's own merge). Shipped `[x]`: Q010, Q051/D070, Q029. Line numbers had drifted on every item again (Q010's function 1302→1246; Q051's `run_check_blocking` 1738→1793, gate 1945→2010, curator 2019→2086; Q029's `CATALOG_DIR` 44→60); items were located by symbol.
+
+  **A finding's cross-pass half can be resolved by an EARLIER batch of this same plan, in the opposite direction.** D070 asks `run_check_blocking` to route through `_parse_check_output`. That function does not exist: Phase 5 batch 2 deleted it as **Q050**, deciding the same duplication the other way — keep the inline copy, delete the shim and its seven tests. Applying D070 as written would have resurrected a deletion this plan had already reasoned through. **Before applying a cross-pass half, grep for the symbol it names; a sibling finding may have spent it.** This is the sixth prescription in this plan to have aged wrong (with Q034, Q023, D050/Q007, Q109, Q035).
+
+  **Provenance decided Q010, where taste would have guessed.** Its two sync blocks differ in whether an authorize failure falls back to the raw subscribe list — a behaviour difference, so "reconcile them" needed a choice. `git log -L` over each block settles it: the remote one is the original (history through #488, `cf6559b4`, which ADDED the fallback) and the local one is a copy made later by #538 (`a42106e9`) that flattened the two try/excepts into one and lost it. `authorize_resources` still documents the original's contract. **When two copies disagree, `git log -L` tells you which is the surviving implementation — the phase rule already says to move callers to it.**
+
+  **Three of this batch's own new tests were vacuous, and mutants caught all three.** Two raised `AssertionError` from inside an `httpx.MockTransport` handler to mean "must not PUT" — the caller wraps its PUT in `except Exception`, so the raise was swallowed and answered by the very re-register fallback under test, and the mutant passed. One asserted an authorize **403** as proof of the exception path, but `authorize_resources` absorbs denials internally via `mark_unbacked` and never raises; only `ensure_bubble` failing reaches that branch. **Assert on captured requests, never by raising inside a stub the production code catches** — and check that the error you inject is one the code under test can actually see.
+
+  **Two untested behaviours surfaced only because a mutant survived.** The three verdict runners' DEFAULT slug was pinned nowhere (only the explicitly-named case was), so a wrong prefix left all 155 tests green. And `_start_event_subscription`'s "no saved deployment → register, do not PUT to the empty-id URL" branch was indistinguishable from the pre-bubble branch in every existing test, because none of them created a `bubble.json`. Q029's move is likewise the first time `__init__.py` and `__pycache__/` sit inside `CATALOG_DIR`.
+
+  **The finding's own evidence went stale in two ways at once for Q029** — its enumeration (three catalog entries; there are four) and its blast radius (it does not mention `.github/workflows/container.yml`, which path-filters the literal `bobi/tool_library.py` and would have silently stopped triggering the image lane, the #909 shape). **A file move's blast radius includes non-Python files that name the path.**
+
+  **Nine mutants, nine red** — 4 for Q010 (authorize-failure fallback removed; the no-deployment branch disabled; the configured-local `ensure_running` skipped; the unconfigured arm syncing instead of registering), 3 for Q051 (slug prefix from role; gate seed dropping the item keys; curator registered as monitor), 2 for Q029 (the `tool.yaml` predicate dropped; `CATALOG_DIR` left at the pre-move path). Each was verified APPLIED by diffing the file, after a guard using `grep` with an embedded `\n` silently failed to detect a mutation that had in fact landed.
+
+  Suite: **4616 passed / 1 skipped**, the `a7de3b8` baseline of **4604** plus exactly the 12 tests added. No test was deleted — verified by `--collect-only` on both sides (4605 → 4617), not by arithmetic alone. A thirteenth test of mine was written and then removed before landing: `test_the_three_prefixes_are_distinct` exercised only a test-local helper, asserting that an f-string beginning `check-` begins with `check`, and would have stayed green against any production code at all. `pyflakes` over `bobi/` is **26 → 26 with ZERO new**, both sides non-zero. Q029's packaging is proven by a wheel-content diff (213 entries both sides, differing in exactly the one moved entry name) and a live `dep_bootstrap` differential — identical dependency hash and rendered build script — whose probe was sanity-checked to confirm the two sides genuinely import different files.
 
 
 ## Notes

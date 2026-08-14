@@ -511,14 +511,57 @@ async function listCommands(fleet: string, instance: string): Promise<Record<str
 	return values.filter((v): v is string => v !== null).map((v) => JSON.parse(v));
 }
 
-/** Poll until at least one command is listed against the instance. */
-async function recordedCommands(fleet: string, instance: string): Promise<Record<string, unknown>[]> {
-	for (let i = 0; i < 200; i++) {
-		const found = await listCommands(fleet, instance);
-		if (found.length > 0) return found;
-		await new Promise((r) => setTimeout(r, 10));
+// Settle budgets are WALL-CLOCK. An iteration count is a budget in the wrong
+// unit: "200 polls at 10ms" reads like two seconds, but each poll also makes a
+// KV round-trip, so the real ceiling is 200 * (10ms + whatever a round-trip
+// costs on this runner). Locally that is ~2s; on a loaded CI runner - the same
+// run that reported this file's sleep-free tests at ~20x their local time - it
+// passes the budget of the test containing it. The loop then never reaches its
+// own throw. The test timeout kills it first, and the entire failure reads
+// `Test timed out in 5000ms`, naming nothing it was waiting for (#1028).
+//
+// Bounded by the clock, a stuck wait always reports its subject, and always
+// from inside the test rather than over its corpse.
+const SETTLE_BUDGET_MS = 5_000;
+const SETTLE_POLL_MS = 10;
+
+/**
+ * Poll `probe` until it yields a non-null value, bounded by elapsed time.
+ *
+ * `what` is the FAILURE phrase, not a label: it is completed by "within Nms",
+ * so it reads as the diagnosis on the way out ("no command recorded for
+ * acme/tx-1 within 5000ms"). Saying what was awaited is the whole point - a
+ * settle that cannot name its subject is the bug this replaced.
+ */
+async function settle<T>(
+	what: string,
+	probe: () => Promise<T | null>,
+	budgetMs: number = SETTLE_BUDGET_MS,
+): Promise<T> {
+	const deadline = Date.now() + budgetMs;
+	for (;;) {
+		const found = await probe();
+		if (found !== null) return found;
+		// Checked after the probe, so a budget of 0 still gets one honest look.
+		if (Date.now() >= deadline) throw new Error(`${what} within ${budgetMs}ms`);
+		await new Promise((r) => setTimeout(r, SETTLE_POLL_MS));
 	}
-	throw new Error(`no command recorded for ${fleet}/${instance} within the settle budget`);
+}
+
+/** Poll until at least one command is listed against the instance. */
+async function recordedCommands(
+	fleet: string,
+	instance: string,
+	budgetMs?: number,
+): Promise<Record<string, unknown>[]> {
+	return settle(
+		`no command recorded for ${fleet}/${instance}`,
+		async () => {
+			const found = await listCommands(fleet, instance);
+			return found.length > 0 ? found : null;
+		},
+		budgetMs,
+	);
 }
 
 async function awaitRecordedCommand(fleet: string, instance: string): Promise<Record<string, unknown>> {
@@ -528,6 +571,12 @@ async function awaitRecordedCommand(fleet: string, instance: string): Promise<Re
 /**
  * Assert no command was recorded - and keep checking, so the assertion cannot
  * pass merely because the listing had not caught up yet.
+ *
+ * Counted, not clocked, and deliberately the opposite unit to `settle` above: a
+ * NEGATIVE check is only as strong as the number of independent looks it takes,
+ * and a wall-clock budget buys FEWER looks exactly when the runner is slow.
+ * There is no runaway to bound either - 30 looks is 30 round-trips, however
+ * long they take.
  */
 async function expectNoCommandRecorded(fleet: string, instance: string): Promise<void> {
 	for (let i = 0; i < 30; i++) {
@@ -728,6 +777,57 @@ describe("/mcp write tools", () => {
 		}
 		// None of them reached the bus.
 		await expectNoCommandRecorded(fleet, instance);
+	});
+});
+
+describe("the suite's own settle budget", () => {
+	// #1028. A settle that outlives the test containing it cannot report what it
+	// was waiting for: the test timeout kills it first, and the whole failure is
+	// a bare "Test timed out", naming nothing. That is not a cosmetic loss - it
+	// is why a flake that reddened `main` twice needed a ticket to diagnose.
+	//
+	// Budgeted here rather than left to the test timeout, so the diagnosis
+	// survives whatever the runner is doing.
+	it("gives up on a command that never arrives, and says so", async () => {
+		// The WIRING half: that the budget reaches the settle and that the message
+		// names the instance it gave up on. The mechanism behind the budget is the
+		// next test's subject, deliberately - one claim per test, so a regression
+		// says which half broke.
+		//
+		// The instance is in the phrase because that is the sentence a reader gets
+		// instead of a bare "Test timed out". Both halves are asserted: drop the
+		// budget forward and the number is wrong; drop the instance and there is
+		// nothing to act on.
+		await expect(recordedCommands("acme", "never-issued", 300)).rejects.toThrow(
+			/no command recorded for acme\/never-issued within 300ms/,
+		);
+	});
+
+	it("counts the clock, not poll iterations, so a slow runner cannot stretch it", async () => {
+		// Each probe costs 40ms - the regime a loaded CI runner puts KV
+		// round-trips in. The 2026-08-13 failure reported this file's sleep-free
+		// tests at ~20x their local time, which is what turns "200 polls" from
+		// two seconds into ten.
+		//
+		// Asserted by probe COUNT, not elapsed time: a stopwatch assertion here
+		// would measure the runner, which is the mistake that put the original
+		// timing claim in a test timeout in the first place. An iteration budget
+		// probes exactly 200 times no matter how slow each one is; a wall-clock
+		// budget fits about six probes into 300ms at 40ms each, whatever N is.
+		let probes = 0;
+		await expect(
+			settle(
+				"a probe that never settles",
+				async () => {
+					probes += 1;
+					await new Promise((r) => setTimeout(r, 40));
+					return null;
+				},
+				300,
+			),
+		).rejects.toThrow(/a probe that never settles/);
+		expect(probes).toBeGreaterThan(0);
+		expect(probes).toBeLessThan(20);
 	});
 });
 

@@ -401,3 +401,31 @@ class CodexBrain(GatewayAwareEngine):
             config_overrides=config_overrides,
             provider=self.provider,
         )
+
+    async def stream_once(
+        self,
+        *,
+        system_prompt: Any = None,
+        user_prompt: str = "",
+        model: str | None = None,
+        cwd: str | None = None,
+        options: dict | None = None,
+    ) -> AsyncIterator[BrainMessage]:
+        """Not served by the codex engine — the gap, named.
+
+        The one caller is the setup/digestion pour (``bobi.setup.llm``), which
+        wants a partial-token stream and no tools. ``codex exec`` can run the
+        one-shot turn, but it emits no token-level partials, so a naive
+        implementation would silently degrade the pour to a single block of
+        text at the end. Rather than fake the capability, say so: a process on
+        ``BOBI_BRAIN=codex`` reaching this path used to die with
+        ``AttributeError: 'CodexBrain' object has no attribute 'stream_once'``,
+        laundered into ``LLMError`` — the same failure, with nothing pointing
+        at the brain. Wiring a real implementation is its own change, gated on
+        deciding what the pour should look like without partials.
+        """
+        raise NotImplementedError(
+            "the codex brain has no one-shot streaming path — "
+            "`bobi setup` and the digestion pour require BOBI_BRAIN=claude"
+        )
+        yield  # pragma: no cover - unreachable, marks this an async generator

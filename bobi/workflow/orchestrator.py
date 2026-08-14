@@ -113,7 +113,7 @@ def remind_workflow(run: WorkflowRun, workflow: Workflow) -> _NotifyOutcome:
     ctx = VariableContext()
     ctx.scopes = run.variable_scopes
     return _execute_notify_step(
-        notify_step, ctx, run.cwd, run.run_key, run.workflow_name,
+        notify_step, ctx, run.run_key, run.workflow_name,
     )
 
 
@@ -213,10 +213,10 @@ def try_resume_for_event(event_type: str, run_key: str = "", event: dict | None 
     return True
 
 
-def _find_project_root(cwd: str) -> Path:
+def _find_project_root() -> Path:
     """Return the installation root. The process bound it at its entry
-    point; cwd plays no part — guessing from it is how workflow state
-    forked into repo checkouts."""
+    point; the caller's cwd plays no part — guessing from it is how workflow
+    state forked into repo checkouts, so this takes no cwd to guess from."""
     from bobi.paths import bobi_root
     return bobi_root()
 
@@ -501,7 +501,7 @@ async def _run_workflow_async(
 
     from bobi.prompts.resolver import resolve_agent_prompt
 
-    project_root = _find_project_root(cwd)
+    project_root = _find_project_root()
     from bobi.config import Config
     try:
         team_cfg = Config.load(project_root)
@@ -570,11 +570,7 @@ async def _run_workflow_async(
         from bobi.runtime_guard import prepare_brain_runtime
 
         prepare_brain_runtime()
-        agent_prompt = ""
-        if agent_name:
-            agent_prompt = resolve_agent_prompt(agent_name, project_root, interactive=interactive)
-        else:
-            agent_prompt = resolve_agent_prompt("", project_root, interactive=interactive)
+        agent_prompt = resolve_agent_prompt(agent_name, project_root, interactive=interactive)
 
         # max_turns is keyword-REQUIRED: _effective_step_max_turns is the one
         # place the cap is resolved, so a call site cannot quietly fall back to
@@ -839,7 +835,7 @@ async def _run_workflow_async(
             # Notify step — deterministic, no LLM
             if step.notify:
                 outcome = _execute_notify_step(
-                    step, ctx, cwd, run_key, workflow.name,
+                    step, ctx, run_key, workflow.name,
                 )
                 next_step = (
                     workflow.steps[step_idx + 1]
@@ -1392,7 +1388,6 @@ def _execute_native_action(step: StepDef, ctx: VariableContext, cwd: str) -> dic
 def _execute_notify_step(
     step: StepDef,
     ctx: VariableContext,
-    cwd: str,
     run_key: str,
     workflow_name: str,
 ) -> _NotifyOutcome:
@@ -1421,7 +1416,7 @@ def _execute_notify_step(
         return _undeliverable(f"unknown target '{step.notify}'")
 
     from bobi.config import Config
-    project_root = _find_project_root(cwd)
+    project_root = _find_project_root()
     cfg = Config.load(project_root)
     token = cfg.credential("slack", "bot_token")
     if not token:

@@ -39,10 +39,9 @@ and `_merge_build`'s de-dupe collapses any repeat across `from:` layers.
 A `tool_library:` item is either a **string** (a reference to a named catalog
 entry under `tool_library/<name>/`) or an **inline mapping** (a dependency
 declared directly on the team). The catalog lives as framework package data:
-`tool.yaml` (the fields) + `guide.md` (becomes `tools/<name>.md`). Note this data
-directory sits beside *this module file of the same stem*: a real
-`tool_library.py` module shadows the `tool_library/` namespace-package directory
-for imports, while `CATALOG_DIR` points at the directory on disk for data.
+`tool.yaml` (the fields) + `guide.md` (becomes `tools/<name>.md`), one directory
+per entry inside this package — so `CATALOG_DIR` is simply this package's own
+directory.
 """
 
 from __future__ import annotations
@@ -57,7 +56,10 @@ import yaml
 from bobi.compose import ComposeError, _merge_build
 
 # Catalog root — one directory per entry, the directory name IS the entry id.
-CATALOG_DIR = Path(__file__).parent / "tool_library"
+# This package's own directory: the entries are package data sitting beside this
+# file. `available_entries` keys off a directory holding a tool.yaml, so
+# `__pycache__` and this module are not mistaken for catalog entries.
+CATALOG_DIR = Path(__file__).parent
 
 
 @dataclass

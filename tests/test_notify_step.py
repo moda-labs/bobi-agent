@@ -315,7 +315,7 @@ class TestExecuteNotifyStep:
         ctx = self._make_ctx()
 
         outcome = _execute_notify_step(
-            step, ctx, str(tmp_path), "42", "issue-lifecycle",
+            step, ctx, "42", "issue-lifecycle",
         )
 
         mock_post.assert_called_once_with(
@@ -339,7 +339,7 @@ class TestExecuteNotifyStep:
         ctx.set_scope("input", {"task": "t", "repo": "r", "run_key": "1"})
         # No requested_by scope → no channel
 
-        outcome = _execute_notify_step(step, ctx, str(tmp_path), "1", "test-wf")
+        outcome = _execute_notify_step(step, ctx, "1", "test-wf")
 
         mock_post.assert_not_called()
         assert outcome.delivered is False
@@ -358,7 +358,7 @@ class TestExecuteNotifyStep:
         step = StepDef(name="notify_start", notify="slack", message="Hello")
         ctx = self._make_ctx()
 
-        outcome = _execute_notify_step(step, ctx, str(tmp_path), "1", "test-wf")
+        outcome = _execute_notify_step(step, ctx, "1", "test-wf")
 
         mock_post.assert_not_called()
         assert outcome.delivered is False
@@ -374,7 +374,7 @@ class TestExecuteNotifyStep:
         step = StepDef(name="notify_start", notify="email", message="Hello")
         ctx = self._make_ctx()
 
-        outcome = _execute_notify_step(step, ctx, str(tmp_path), "1", "test-wf")
+        outcome = _execute_notify_step(step, ctx, "1", "test-wf")
 
         mock_post.assert_not_called()
         assert outcome.delivered is False
@@ -392,7 +392,7 @@ class TestExecuteNotifyStep:
         ctx = self._make_ctx()
 
         # Should not raise
-        outcome = _execute_notify_step(step, ctx, str(tmp_path), "42", "test-wf")
+        outcome = _execute_notify_step(step, ctx, "42", "test-wf")
 
         # Failure event emitted
         assert outcome.delivered is False

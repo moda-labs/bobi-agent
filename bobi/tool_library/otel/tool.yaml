@@ -7,7 +7,7 @@
 # guide and to make the missing-wire-types case a doctor finding rather than a
 # traceback at emit time.
 #
-# `success:` is REQUIRED (tool_library.py::_build_dependency raises
+# `success:` is REQUIRED (tool_library._build_dependency raises
 # ComposeError without it), and both obvious candidates are wrong:
 #
 #   * `otel check` exits 1 when unconfigured, so build-verify would fail on
