@@ -886,7 +886,8 @@ def ensure_bubble(base_url: str, project_path: Path,
     """
     import os
 
-    from bobi.config import load_bubble_state, save_bubble_state, bubble_state_path
+    from bobi.events.state import (load_bubble_state, save_bubble_state,
+                                   bubble_state_path)
 
     existing = load_bubble_state(project_path)
     if existing.get("bubble_id") and existing.get("bubble_key"):

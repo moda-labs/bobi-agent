@@ -1262,8 +1262,9 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     where every project lead received and answered the user's Slack DMs
     to the director).
     """
-    from bobi.config import (
-        Config, load_deployment_state, save_deployment_state,
+    from bobi.config import Config
+    from bobi.events.state import (
+        load_deployment_state, save_deployment_state,
         session_cursor_path, bubble_state_path,
     )
     from bobi.events.client import EventServerClient

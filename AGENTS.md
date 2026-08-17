@@ -101,7 +101,7 @@ Bobi-specific deltas on top:
   write lands as a new inode renamed over the target, so the target's mode,
   ownership, and symlink-ness do not survive. A secret whose confidentiality
   depends on its mode is created at that mode instead
-  (`config.save_bubble_state` opens `bubble.json` with `0o600` and stays off
+  (`events/state.save_bubble_state` opens `bubble.json` with `0o600` and stays off
   the helper on purpose).
 
 ## Development Lifecycle

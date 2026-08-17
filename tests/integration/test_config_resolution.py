@@ -84,7 +84,7 @@ class TestDeploymentState:
         config_dir = tmp_path / "package"
         config_dir.mkdir()
 
-        from bobi.config import save_deployment_state, load_deployment_state
+        from bobi.events.state import save_deployment_state, load_deployment_state
 
         save_deployment_state(tmp_path, "sess-a", "deploy-1", "key-1")
         state = load_deployment_state(tmp_path, "sess-a")
@@ -96,7 +96,7 @@ class TestDeploymentState:
         config_dir = tmp_path / "package"
         config_dir.mkdir()
 
-        from bobi.config import save_deployment_state, load_deployment_state
+        from bobi.events.state import save_deployment_state, load_deployment_state
 
         save_deployment_state(tmp_path, "sess-a", "deploy-a", "key-a")
         save_deployment_state(tmp_path, "sess-b", "deploy-b", "key-b")
@@ -105,7 +105,7 @@ class TestDeploymentState:
         assert load_deployment_state(tmp_path, "sess-b")["deployment_id"] == "deploy-b"
 
     def test_missing_returns_empty(self, tmp_path):
-        from bobi.config import load_deployment_state
+        from bobi.events.state import load_deployment_state
         assert load_deployment_state(tmp_path, "nonexistent") == {}
 
 

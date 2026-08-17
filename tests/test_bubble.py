@@ -15,9 +15,10 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from bobi.config import (
+from bobi.events.state import (
     bubble_state_path,
     load_bubble_state,
+    load_deployment_state,
     save_bubble_state,
     save_deployment_state,
     session_cursor_path,
@@ -132,3 +133,46 @@ def test_clear_manager_session_wipes_bubble_and_state(project):
     assert load_bubble_state(project) == {}
     assert not (bubble_state_path(project).parent / "deployments").exists()
     assert not (bubble_state_path(project).parent / "cursors").exists()
+
+
+def test_save_bubble_state_creates_and_keeps_mode_0600(tmp_path):
+    """The bubble key is a signing secret: written at 0600, and an existing
+    looser-mode file is tightened on overwrite. This is the reason
+    save_bubble_state deliberately stays off fsutil's atomic helper, whose
+    rename-over drops the target's mode (see bobi/fsutil.py)."""
+    import stat
+
+    save_bubble_state(tmp_path, "b-1", "key-1")
+    p = bubble_state_path(tmp_path)
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+
+    p.chmod(0o644)  # simulate a loosened file from an older/broken writer
+    save_bubble_state(tmp_path, "b-2", "key-2")
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    assert load_bubble_state(tmp_path)["bubble_id"] == "b-2"
+
+
+# --- per-session deployment state -----------------------------------------
+
+
+def test_deployment_state_roundtrip(tmp_path):
+    save_deployment_state(tmp_path, "sess-a", "dep-123", "moda_key456")
+    state = load_deployment_state(tmp_path, "sess-a")
+
+    assert state["deployment_id"] == "dep-123"
+    assert state["api_key"] == "moda_key456"
+
+
+def test_deployment_state_missing_returns_empty(tmp_path):
+    state = load_deployment_state(tmp_path, "sess-a")
+    assert state == {}
+
+
+def test_deployment_state_is_per_session(tmp_path):
+    """Sessions must never share a deployment — the shared-deployment bug
+    delivered every agent the union of all sessions' subscriptions."""
+    save_deployment_state(tmp_path, "director", "dep-1", "key-1")
+    save_deployment_state(tmp_path, "lead", "dep-2", "key-2")
+
+    assert load_deployment_state(tmp_path, "director")["deployment_id"] == "dep-1"
+    assert load_deployment_state(tmp_path, "lead")["deployment_id"] == "dep-2"

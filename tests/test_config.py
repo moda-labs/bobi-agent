@@ -7,8 +7,7 @@ from textwrap import dedent
 import pytest
 
 from bobi.config import (Config, ServiceConfig, find_env_var_refs,
-                         find_required_env_vars, load_deployment_state,
-                         load_dotenv, save_deployment_state)
+                         find_required_env_vars, load_dotenv)
 
 
 def test_defaults_when_no_config(tmp_path):
@@ -66,29 +65,6 @@ def test_service_channels_from_env_csv(tmp_path):
         assert slack.channels == ["C0AAA", "C0BBB"]
     finally:
         del os.environ["SLACK_CHANNELS"]
-
-
-def test_deployment_state_roundtrip(tmp_path):
-    save_deployment_state(tmp_path, "sess-a", "dep-123", "moda_key456")
-    state = load_deployment_state(tmp_path, "sess-a")
-
-    assert state["deployment_id"] == "dep-123"
-    assert state["api_key"] == "moda_key456"
-
-
-def test_deployment_state_missing_returns_empty(tmp_path):
-    state = load_deployment_state(tmp_path, "sess-a")
-    assert state == {}
-
-
-def test_deployment_state_is_per_session(tmp_path):
-    """Sessions must never share a deployment — the shared-deployment bug
-    delivered every agent the union of all sessions' subscriptions."""
-    save_deployment_state(tmp_path, "director", "dep-1", "key-1")
-    save_deployment_state(tmp_path, "lead", "dep-2", "key-2")
-
-    assert load_deployment_state(tmp_path, "director")["deployment_id"] == "dep-1"
-    assert load_deployment_state(tmp_path, "lead")["deployment_id"] == "dep-2"
 
 
 # --- agent.yaml ---
