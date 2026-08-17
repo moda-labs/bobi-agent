@@ -351,6 +351,20 @@ def run_requires_checks(
     return results
 
 
+def requires_detail(detail: str, limit: int = 0) -> str:
+    """Render one failed check's detail as a single bounded line.
+
+    The detail is what distinguishes a timeout from a missing command from
+    the check's own stderr, so every surface that reports a failure renders
+    it through here rather than deciding for itself what to drop (#771).
+    `limit` truncates for display; 0 keeps the whole detail.
+    """
+    text = " ".join((detail or "").split()) or "no detail"
+    if limit and len(text) > limit:
+        text = text[:limit].rstrip() + "..."
+    return text
+
+
 @dataclass
 class BuildSpec:
     """A team's container build declaration (C24 team-flavored images).
