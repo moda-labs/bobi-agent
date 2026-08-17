@@ -54,10 +54,21 @@ class TestUnkeyedLaunchDedup:
     an install the CLI never wrote to.
     """
 
-    TASK = "Say 'hello dedup' and exit. Issue #850"
     ROLE = "engineer"
 
-    def _derived_session_name(self, env):
+    def _task(self, tag):
+        """A task text unique to ONE test, which is the whole point.
+
+        These tests share a role and a project, so a shared task constant would
+        derive one session name for all of them - and the first test leaves its
+        agent running detached, so it re-registers that name after the next
+        test has cleaned it and gets that test's own first launch refused. The
+        feature's own advice, applied to its tests: fanning out, give each unit
+        its own task string.
+        """
+        return f"Say 'hello dedup' and exit. Issue #850 ({tag})"
+
+    def _derived_session_name(self, env, task):
         """The name the CLI below will actually register under.
 
         Mirrors `launch_agent`'s own two lines rather than restating them: the
@@ -75,7 +86,7 @@ class TestUnkeyedLaunchDedup:
         """
         from bobi.subagent import derive_run_key
         from bobi.workflow.orchestrator import make_session_name
-        key = derive_run_key("adhoc", self.TASK, project=env.agent_name,
+        key = derive_run_key("adhoc", task, project=env.agent_name,
                              role=self.ROLE)
         return make_session_name("adhoc", env.agent_name, key)
 
@@ -89,12 +100,13 @@ class TestUnkeyedLaunchDedup:
         could not fire no matter how it was written.
         """
         cli_run = stub_cli_run
-        name = self._derived_session_name(stub_bobi_env)
+        task = self._task("registers")
+        name = self._derived_session_name(stub_bobi_env, task)
         stub_clean_session(name)
 
         result = cli_run(
             "subagents", "launch",
-            "-w", "adhoc", "--role", self.ROLE, "--task", self.TASK,
+            "-w", "adhoc", "--role", self.ROLE, "--task", task,
             timeout=LAUNCH_TIMEOUT_S,
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -119,12 +131,13 @@ class TestUnkeyedLaunchDedup:
         """
         from bobi.sdk import get_registry
         cli_run = stub_cli_run
-        name = self._derived_session_name(stub_bobi_env)
+        task = self._task("refused")
+        name = self._derived_session_name(stub_bobi_env, task)
         stub_clean_session(name)
 
         first = cli_run(
             "subagents", "launch",
-            "-w", "adhoc", "--role", self.ROLE, "--task", self.TASK,
+            "-w", "adhoc", "--role", self.ROLE, "--task", task,
             timeout=LAUNCH_TIMEOUT_S,
         )
         assert first.returncode == 0, f"stderr: {first.stderr}"
@@ -146,7 +159,7 @@ class TestUnkeyedLaunchDedup:
 
         second = cli_run(
             "subagents", "launch",
-            "-w", "adhoc", "--role", self.ROLE, "--task", self.TASK,
+            "-w", "adhoc", "--role", self.ROLE, "--task", task,
             timeout=LAUNCH_TIMEOUT_S,
         )
         assert second.returncode != 0, (
@@ -163,12 +176,13 @@ class TestUnkeyedLaunchDedup:
         self, stub_bobi_env, stub_cli_run, stub_clean_session
     ):
         cli_run, clean_session = stub_cli_run, stub_clean_session
+        task = self._task("id-random")
         started = []
         for _ in range(2):
             result = cli_run(
                 "subagents", "launch",
                 "-w", "adhoc", "--role", self.ROLE, "--id-random",
-                "--task", self.TASK,
+                "--task", task,
                 timeout=LAUNCH_TIMEOUT_S,
             )
             assert result.returncode == 0, f"stderr: {result.stderr}"

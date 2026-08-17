@@ -123,10 +123,10 @@ class LineageLink:
     Keyed on ``session`` - the registry's actual key - rather than on
     ``run_key``, which is not unique: since #850 both launchers DERIVE the key
     from the launch's own dials when none is passed, so the same run key recurs
-    across workflows by construction. ``workflow`` is carried explicitly and never read back
-    from the registry, whose ``phase`` drifts to the current step name mid-run
-    and is therefore not a stable workflow identifier. It is ``""`` for a bare
-    persistent session, which executes no workflow.
+    across workflows by construction. ``workflow`` is carried explicitly and
+    never read back from the registry, whose ``phase`` drifts to the current
+    step name mid-run and is therefore not a stable workflow identifier. It is
+    ``""`` for a bare persistent session, which executes no workflow.
     """
 
     session: str
