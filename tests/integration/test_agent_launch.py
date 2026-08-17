@@ -44,25 +44,43 @@ class TestUnkeyedLaunchDedup:
     A role file documented `subagents launch` without `--id`. Every launch got a
     random run key, so the "already active" guard never fired and the chain ran
     50 deep to the spend cap. With a derived key the chain terminates at N=2.
+
+    Stub brain only, and deliberately. Admission decides before the brain is
+    ever called, so this is the brain-agnostic case CLAUDE.md's "one mechanism,
+    two brains" rule exempts - a claude leg would spend real money re-proving a
+    guard that cannot reach a model. Binding ONE env is also load-bearing: the
+    dual-brain runner sends its subprocess to the stub home while `bobi_env`
+    pins this process to the claude one, so a registry read here would look in
+    an install the CLI never wrote to.
     """
 
     TASK = "Say 'hello dedup' and exit. Issue #850"
     ROLE = "engineer"
 
-    def _derived_session_name(self):
+    def _derived_session_name(self, env):
         """The name the CLI below will actually register under.
 
-        Every dial the launch passes has to be passed here too - `--role` most
-        of all, since these launches carry one. A helper that derived under a
-        different role would compute a name production never produces, and both
-        tests would then assert against a session that does not exist.
+        Mirrors `launch_agent`'s own two lines rather than restating them: the
+        SAME project dial feeds both the derivation and the session name. Every
+        dial the launch passes has to be passed here too - `--role`, and the
+        project just as much. Deriving without `project` while the name still
+        carried it computed a key production never produces, so both tests
+        asserted against a session that does not exist.
+
+        The dial is the env's agent name because these fixtures install at
+        `<home>/agents/<agent>/run`, the runtime-scoped shape that
+        `_resolve_project_name` names after the agent. It is not re-derived by
+        calling that helper: it answers for the root bound in THIS process,
+        which is not the one the CLI subprocess resolves.
         """
         from bobi.subagent import derive_run_key
-        key = derive_run_key("adhoc", self.TASK, role=self.ROLE)
-        return f"wf-adhoc-test-repo-{key}"
+        from bobi.workflow.orchestrator import make_session_name
+        key = derive_run_key("adhoc", self.TASK, project=env.agent_name,
+                             role=self.ROLE)
+        return make_session_name("adhoc", env.agent_name, key)
 
     def test_an_unkeyed_launch_registers_under_the_derived_name(
-        self, bobi_env, cli_run, clean_session
+        self, stub_bobi_env, stub_cli_run, stub_clean_session
     ):
         """Half of the guard: both launches have to agree on a name at all.
 
@@ -70,8 +88,9 @@ class TestUnkeyedLaunchDedup:
         no two ever landed on the same session and the admission check below
         could not fire no matter how it was written.
         """
-        name = self._derived_session_name()
-        clean_session(name)
+        cli_run = stub_cli_run
+        name = self._derived_session_name(stub_bobi_env)
+        stub_clean_session(name)
 
         result = cli_run(
             "subagents", "launch",
@@ -84,7 +103,7 @@ class TestUnkeyedLaunchDedup:
         assert "derived" in result.stderr, result.stderr
 
     def test_identical_unkeyed_launch_is_refused_while_the_first_runs(
-        self, bobi_env, cli_run, clean_session
+        self, stub_bobi_env, stub_cli_run, stub_clean_session
     ):
         """The other half: the run in flight refuses its own twin.
 
@@ -99,8 +118,9 @@ class TestUnkeyedLaunchDedup:
         the other direction.
         """
         from bobi.sdk import get_registry
-        name = self._derived_session_name()
-        clean_session(name)
+        cli_run = stub_cli_run
+        name = self._derived_session_name(stub_bobi_env)
+        stub_clean_session(name)
 
         first = cli_run(
             "subagents", "launch",
@@ -140,8 +160,9 @@ class TestUnkeyedLaunchDedup:
         assert "Traceback" not in output, output
 
     def test_id_random_opts_back_into_parallel_fan_out(
-        self, bobi_env, cli_run, clean_session
+        self, stub_bobi_env, stub_cli_run, stub_clean_session
     ):
+        cli_run, clean_session = stub_cli_run, stub_clean_session
         started = []
         for _ in range(2):
             result = cli_run(
