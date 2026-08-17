@@ -1,12 +1,10 @@
-"""Event-server transport session state — per-instance files under state/.
+"""Event-server transport session state — JSON files under run/state/.
 
-Three little JSON stores for the event-server trust domain, kept beside the
-code that consumes them (bobi/events/server.py:ensure_bubble and the
-session subscription machinery), not in package configuration:
-
-- per-session deployment state (deployment_id + api_key),
-- per-session event cursors,
-- the instance's bubble credential (bubble_id + bubble_key).
+- Per-session deployment records (deployment_id + api_key) and the path of
+  each session's event cursor (the cursor JSON itself is read and written by
+  the session machinery in bobi/subagent.py).
+- The instance-wide bubble credential (bubble_id + bubble_key), minted and
+  consumed by bobi/events/server.py:ensure_bubble.
 """
 
 from __future__ import annotations
@@ -20,8 +18,6 @@ from bobi import paths
 from bobi.fsutil import atomic_write_json
 
 
-# --- Event server deployment state (ephemeral, auto-registered) ---
-#
 # One deployment per SESSION, never shared. When sessions shared one
 # deployment (a single deployment.json per project), every agent's
 # subscriptions were unioned onto it and the event server fanned every

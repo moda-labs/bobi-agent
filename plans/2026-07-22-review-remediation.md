@@ -253,9 +253,19 @@ Each appendix entry names the surviving implementation — move callers to it; n
     ~100 lines and its `atomic_write_json` import. The three deployment-state
     tests moved from test_config.py to test_bubble.py with the code they test.
   - The 0600 exception (CLAUDE.md's one sanctioned bypass of the atomic
-    helper) was asserted by NO test; now pinned in test_bubble.py — create
-    at 0600, re-tighten a loosened file on overwrite — with a red mutant
-    swapping the body to `atomic_write_json`.
+    helper) was asserted by NO test; now pinned in test_bubble.py. Review
+    caught the first version of that pin half-vacuous (the trailing chmod
+    satisfied both arms; O_TRUNC unexercised) — the final test neutralizes
+    chmod in the creation arm and proves truncation by byte-equality, with
+    three named red mutants (loose create mode, dropped O_TRUNC, dropped
+    trailing chmod).
+  - Review additions: `event-server/core/src/core.ts`'s doubly-dead pointer
+    (`bobi/config.py:load_or_mint_bubble` — wrong file AND a function that
+    never existed) retargeted to `ensure_bubble`/`events/state.py`;
+    config.py's docstring no longer claims an fsutil dependency it lost;
+    the duplicate `TestDeploymentState` in integration/test_config_resolution
+    deleted (verbatim copies of the moved unit tests, with dead setup);
+    state.py's over-claiming module docstring rewritten.
 - [x] **Q092** `bobi/costs.py:156` — rollup_costs takes a group_by parameter that its body never references.
 - [x] **Q114** `bobi/dep_bootstrap.py:88` — ResolvedRecipe.from_install and ResolvedRecipe.from_agent are the identical one-line function under two names. *(plausible — re-verify first)*
 - [x] **Q091** `bobi/dep_bootstrap.py:419` — pathlib.Path is imported inside four separate functions (and string-quoted in signatures) although a top-level stdlib import has no cycle risk.

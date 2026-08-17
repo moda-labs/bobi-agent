@@ -1,9 +1,9 @@
 """Integration tests for config resolution chain.
 
 Exercises the full config loading path: .env → agent.yaml interpolation,
-deployment state round-trips, channel parsing from env vars, credential
-lookup, connections, and requires checks — all against a real filesystem
-project layout.
+channel parsing from env vars, credential lookup, connections, and requires
+checks — all against a real filesystem project layout. (Deployment-state
+persistence is unit-covered in tests/test_bubble.py beside bobi.events.state.)
 """
 
 import os
@@ -75,38 +75,6 @@ class TestDotenvResolution:
         cfg = Config.load(tmp_path)
 
         assert cfg.venn_api_key == ""
-
-
-class TestDeploymentState:
-    """Deployment state round-trip: save → load → per-session isolation."""
-
-    def test_roundtrip(self, tmp_path):
-        config_dir = tmp_path / "package"
-        config_dir.mkdir()
-
-        from bobi.events.state import save_deployment_state, load_deployment_state
-
-        save_deployment_state(tmp_path, "sess-a", "deploy-1", "key-1")
-        state = load_deployment_state(tmp_path, "sess-a")
-
-        assert state["deployment_id"] == "deploy-1"
-        assert state["api_key"] == "key-1"
-
-    def test_per_session_isolation(self, tmp_path):
-        config_dir = tmp_path / "package"
-        config_dir.mkdir()
-
-        from bobi.events.state import save_deployment_state, load_deployment_state
-
-        save_deployment_state(tmp_path, "sess-a", "deploy-a", "key-a")
-        save_deployment_state(tmp_path, "sess-b", "deploy-b", "key-b")
-
-        assert load_deployment_state(tmp_path, "sess-a")["deployment_id"] == "deploy-a"
-        assert load_deployment_state(tmp_path, "sess-b")["deployment_id"] == "deploy-b"
-
-    def test_missing_returns_empty(self, tmp_path):
-        from bobi.events.state import load_deployment_state
-        assert load_deployment_state(tmp_path, "nonexistent") == {}
 
 
 class TestChannelParsing:

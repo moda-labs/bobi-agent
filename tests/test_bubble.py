@@ -3,10 +3,14 @@
 Covers ensure_bubble's lock-protected mint, the compare-and-swap re-mint on
 server restart (force_remint_of), concurrent convergence on one bubble,
 cleartext-remote refusal, BubbleRejected on 403, and the --fresh wipe in
-service.clear_manager_session. The live round-trips are covered by
+service.clear_manager_session. Also home to the bobi.events.state
+persistence tests: the bubble file's 0600 contract and the per-session
+deployment-state records. The live round-trips are covered by
 tests/integration/test_event_server.py::TestBubbleIsolation.
 """
 
+import json
+import stat
 import threading
 import time
 from itertools import count
@@ -136,20 +140,26 @@ def test_clear_manager_session_wipes_bubble_and_state(project):
 
 
 def test_save_bubble_state_creates_and_keeps_mode_0600(tmp_path):
-    """The bubble key is a signing secret: written at 0600, and an existing
-    looser-mode file is tightened on overwrite. This is the reason
-    save_bubble_state deliberately stays off fsutil's atomic helper, whose
-    rename-over drops the target's mode (see bobi/fsutil.py)."""
-    import stat
-
-    save_bubble_state(tmp_path, "b-1", "key-1")
+    """The bubble key is a signing secret: the file must be BORN 0600 — not
+    created loose and tightened after, since chmod cannot revoke a descriptor
+    a racing reader already holds — an existing looser-mode file must be
+    re-tightened on overwrite, and the overwrite must truncate so no tail of
+    a longer previous key survives. This is the reason save_bubble_state
+    deliberately stays off fsutil's atomic helper, whose rename-over drops
+    the target's mode (see bobi/fsutil.py)."""
+    # Neutralize the trailing chmod so the asserted mode can only come from
+    # the os.open call itself.
+    with patch("os.chmod", lambda *a, **k: None):
+        save_bubble_state(tmp_path, "b-1", "a-deliberately-long-first-key")
     p = bubble_state_path(tmp_path)
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
 
     p.chmod(0o644)  # simulate a loosened file from an older/broken writer
-    save_bubble_state(tmp_path, "b-2", "key-2")
+    save_bubble_state(tmp_path, "b-2", "k2")
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
-    assert load_bubble_state(tmp_path)["bubble_id"] == "b-2"
+    # Byte-equality proves O_TRUNC: the shorter payload fully replaced the
+    # longer one, leaving no stale key tail on disk.
+    assert p.read_text() == json.dumps({"bubble_id": "b-2", "bubble_key": "k2"})
 
 
 # --- per-session deployment state -----------------------------------------

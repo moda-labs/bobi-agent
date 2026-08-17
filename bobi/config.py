@@ -13,7 +13,6 @@ from pathlib import Path
 
 import yaml
 
-
 log = logging.getLogger(__name__)
 
 
@@ -22,7 +21,7 @@ def _launch_admission_defaults() -> dict:
 
     Imported lazily ON PURPOSE. `bobi.launch_admission` reaches `bobi.sdk` and
     `bobi.concurrency_semaphore`; this module is imported almost everywhere and
-    deliberately keeps `fsutil` as its only module-level `bobi` dependency, so a
+    deliberately keeps zero module-level `bobi` dependencies, so a
     top-level import here would quadruple what `import bobi.config` costs. Both
     readers below run at call time, so the lazy import is free.
     """
