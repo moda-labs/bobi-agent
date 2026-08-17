@@ -62,9 +62,11 @@ def _iso(epoch: float | None) -> str:
 def _epoch(iso: str) -> float:
     """Epoch seconds from an ISO timestamp, 0.0 when unparseable.
 
-    Workflow runs record naive local timestamps (`time.strftime`) and monitor
-    records record aware UTC ones; a naive value is read as local time, which
-    is what its writer meant.
+    Everything now writes aware UTC (bobi.timeutil.now_iso). A naive value is
+    a workflow-run file written by an older version in LOCAL time, so it is
+    read as local — that is what its writer meant. Do not fold this into
+    timeutil.parse_iso, whose naive-means-UTC default is for values the
+    current convention wrote.
     """
     if not iso:
         return 0.0

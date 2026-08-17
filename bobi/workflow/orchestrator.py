@@ -36,6 +36,7 @@ from bobi.subagent import (
 from bobi.workflow.schema import Workflow, StepDef
 from bobi.workflow.state import WorkflowRun
 from bobi.workflow.variables import VariableContext
+from bobi.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -412,7 +413,7 @@ def resume_workflow(
     run.status = "running"
     run.await_event = ""
     run.suspended_at_step = -1
-    run.resumed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+    run.resumed_at = now_iso()
     run.save()
 
     _emit_lifecycle_event("agent/workflow.resumed", {
@@ -446,7 +447,7 @@ def resume_workflow(
     duration = time.time() - started_at
     if success:
         run.status = "completed"
-        run.completed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        run.completed_at = now_iso()
         _emit_lifecycle_event("agent/workflow.completed", {
             "run_key": run_key,
             "workflow": workflow.name,

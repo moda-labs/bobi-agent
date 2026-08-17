@@ -53,6 +53,15 @@ class TestWorkflowRunCreate:
         assert run.started_at != ""
         assert len(run.run_id) == 8
 
+    def test_create_writes_aware_utc_started_at(self):
+        # The one wall-clock convention (bobi.timeutil): timestamps persist
+        # with an explicit UTC offset, never naive local time.
+        from datetime import datetime
+        run = WorkflowRun.create("lifecycle", {"type": "t", "data": {}})
+        dt = datetime.fromisoformat(run.started_at)
+        assert dt.tzinfo is not None
+        assert dt.utcoffset().total_seconds() == 0
+
     def test_create_unique_ids(self):
         event = {"type": "test"}
         run1 = WorkflowRun.create("wf", event)

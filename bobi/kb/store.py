@@ -12,7 +12,7 @@ import hashlib
 import json
 import logging
 import re
-import time
+from bobi.timeutil import now_iso
 from collections.abc import Callable
 from pathlib import Path
 
@@ -29,10 +29,6 @@ MIN_CHUNK_CHARS = 100
 def _kb_dir() -> Path:
     from bobi import paths
     return paths.state_dir() / "kb"
-
-
-def _now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +307,7 @@ class KBStore:
         if not chunks:
             return []
 
-        now = _now()
+        now = now_iso()
         meta_json = json.dumps(metadata) if metadata else None
         source_hash = hashlib.sha256(text.encode()).hexdigest()
 
@@ -637,7 +633,7 @@ class KBStore:
         keep_meta["merged_from"] = provenance
         conn.execute(
             "UPDATE entries SET metadata = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(keep_meta), _now(), keep_id),
+            (json.dumps(keep_meta), now_iso(), keep_id),
         )
 
     def _store_embeddings(self, conn: apsw.Connection,
@@ -685,7 +681,7 @@ class KBStore:
         conn = apsw.Connection(str(path))
         cls._load_vec(conn)
         cls._init_schema(conn)
-        now = _now()
+        now = now_iso()
         with conn:
             conn.execute("INSERT OR REPLACE INTO kb_meta VALUES ('name', ?)", (name,))
             conn.execute("INSERT OR REPLACE INTO kb_meta VALUES ('created_at', ?)", (now,))

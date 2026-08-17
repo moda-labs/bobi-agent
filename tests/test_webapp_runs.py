@@ -97,6 +97,23 @@ def _by_key(payload):
 
 # === status vocabulary ===
 
+
+class TestEpochReadsBothTimestampEras:
+    def test_aware_utc_is_read_as_utc(self):
+        from datetime import datetime, timezone
+        from bobi.webapp.runs import _epoch
+        expected = datetime(2026, 8, 17, 18, 0, 0, tzinfo=timezone.utc).timestamp()
+        assert _epoch("2026-08-17T18:00:00+00:00") == expected
+
+    def test_legacy_naive_is_read_as_the_writer_local_time(self):
+        # Workflow runs written by older versions carry naive LOCAL
+        # timestamps; their meaning must not shift when read back.
+        from datetime import datetime
+        from bobi.webapp.runs import _epoch
+        expected = datetime(2026, 8, 17, 18, 0, 0).astimezone().timestamp()
+        assert _epoch("2026-08-17T18:00:00") == expected
+
+
 class TestSessionStatus:
     @pytest.mark.parametrize("recorded,expected", [
         ("running", "running"),
