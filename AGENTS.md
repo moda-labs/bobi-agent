@@ -27,10 +27,27 @@ Bobi is an event-driven AI agent framework.
 - `docs/REFERENCE_IMAGE.md`: the published container image
   (`ghcr.io/moda-labs/bobi`) - what it contains, the `--init` requirement, the
   runtime env contract, the `TEAM_DEPS` bake hook, and how it is published.
+- `docs/AGENT_STATE.md`: the agent page's state tri-state (`running` /
+  `stopped` / `not_responding`), the manager health probe behind it, and the
+  status strip's best-effort telemetry segments.
+- `docs/AGENT_OVERVIEW.md`: the agent page's read-only composition view
+  (`GET .../overview`) and the `script_cache` savings block in the spend
+  payload - how automations are counted and how savings are priced.
+- `docs/RUNS_VIEW.md`: the unified runs read model behind the agent page's one
+  table (`GET .../runs`) - the status vocabulary, the stalled threshold, and
+  the rule that one piece of work produces one row.
+- `docs/RUN_DRILLDOWNS.md`: opening a run - the debugging transcript view
+  (timestamps + tool calls, distinct from `/messages`) and the Details
+  payload for runs that have no transcript.
 - `docs/MONITORS.md`: monitor scheduler and the `script_cache` token-saving runner.
 - `docs/WORKFLOW_ENGINE.md`: workflow state machine, step types, suspend/resume.
+- `docs/RUN_RESUME.md`: resuming a stalled workflow run from the agent page -
+  why it spawns a process, and where the single-winner claim lives.
 - `docs/TOOL_LIBRARY.md`: unified dependency model - declaring tools/skills/MCP
   deps (pinned `install:` vs guide-only), the catalog, and how they bake + verify.
+- `docs/OTEL.md`: agent-authored OTLP telemetry (`bobi agent <name> otel`) -
+  operator setup, the resource-attribute table, collector bring-up, and the
+  write-only per-instance token requirement.
 - `docs/SECURITY.md`: overall security model (trust, credentials, prompt-injection).
 - `docs/TICKETING_POLICY.md`: Linear/GitHub ticketing conventions.
 - `docs/RELEASE_RUNBOOK.md`: release process and checklist.
@@ -70,6 +87,23 @@ Bobi-specific deltas on top:
   and does not need a claude leg - add one only when the real brain is where the
   risk actually lives.
 
+- **Durable state goes through `bobi/fsutil.py`.** Any file bobi must still be
+  able to read after an abrupt death - monitor state, the spend window,
+  workflow runs, `config.toml`, the setup checkpoint, pid/port files - is
+  written with `atomic_write_text` / `atomic_write_json`, never a bare
+  `write_text`. Loaders in this repo treat unparseable state as *empty* and
+  reset, so a torn write does not lose one field, it silently drops the whole
+  document. Read-modify-write state (a load, a mutate, a save) additionally
+  takes `fsutil.file_lock`; atomicity alone keeps the file parseable but does
+  not stop a concurrent updater's change from being overwritten. Do not
+  hand-roll a seventh tmp+rename - that duplication is what stopped durability
+  fixes from propagating (D092). **One exception, and it is a real one:** the
+  write lands as a new inode renamed over the target, so the target's mode,
+  ownership, and symlink-ness do not survive. A secret whose confidentiality
+  depends on its mode is created at that mode instead
+  (`config.save_bubble_state` opens `bubble.json` with `0o600` and stays off
+  the helper on purpose).
+
 ## Development Lifecycle
 
 Engineering work in this repo moves through four staged contracts: plan,
@@ -79,7 +113,9 @@ skills themselves. This section carries only the repo-anchored
 conventions that hold regardless of how the stages are tooled:
 
 - **Plans**: initiative-sized work (multiple coherent deliverables) gets
-  a plan artifact `plans/<slug>.md`, merged and amended via PR, with a
+  a plan artifact `plans/YYYY-MM-DD-<slug>.md`, dated on creation — the
+  stage pack validates this shape, and existing undated paths stay valid.
+  It is merged and amended via PR, with a
   lightweight GitHub tracking issue (the issue holds discussion; the plan
   file is the source of truth). That issue is the feature request itself —
   no `plan` label, no `[plan]` prefix, a title that outlines the task to be
@@ -120,10 +156,49 @@ unit suites and includes the knowledge-base dependencies imported during test
 collection. Use `.[dev]` only for focused e2e work that does not collect the
 KB test surface.
 
+### Node, and the two versions that cannot share a shell
+
+Day-to-day work needs no Node at all: `pip install -e .` is an *editable*
+install, and `hatch_build.py` returns early for those, so the embedded event
+server is never built.
+
+Two tasks do need it, at **two incompatible versions**:
+
+| Task | Node | Why |
+|---|---|---|
+| Any non-editable wheel build, and therefore `tests/integration/test_container_image.py` and `tests/integration/test_packaged_event_server.py` | **20 exactly** | `hatch_build.py::_require_build_node` rejects any other major outright, 22 and 24 included |
+| The Worker/wrangler suites (`event-server/`) | **22+** | wrangler refuses anything below 22 |
+
+There is deliberately no `.nvmrc`: a single pin would be wrong for one of the
+two. Select per task, e.g. `nvm use 20` before a container run. This is also
+why no CI job runs both — see the pinning comments in `container.yml` and
+`ci.yml`.
+
+A **fresh worktree also needs the event-server's npm deps**, separately from
+the Python install:
+
+```bash
+cd event-server && npm ci
+```
+
+Several integration tests spawn a Node stub that resolves `ws` through
+`NODE_PATH=event-server/node_modules`. Without it the stub cannot start and
+the test fails 15s later as `gateway stub did not come up`, which reads like a
+timeout rather than a missing dependency.
+
+Between them, those two prerequisites are the entire reason
+`test_container_image.py` and `test_packaged_event_server.py` were long
+believed unable to run locally. Both run fine with Node 20 selected and
+`npm ci` done; there is no deeper obstacle.
+
 The container recipe (`Dockerfile`, `docker/`) and the Cloudflare Worker event
 tier (`event-server/worker/`) live in THIS repo and are public, alongside the
-three local event-server variants. Moda's own deployment surface - the Fly
-deploy engine, the hosted console, the fleet workflows - is private, in
+three local event-server variants. So does the console, whole: the UI and BOTH
+`TeamRuntime` implementations behind it - `LocalRuntime` for `bobi app`, and
+`EventBusRuntime` (`bobi/webapp/event_bus.py`) for a deployed fleet driven over
+the operator-authed `/fleet` API. Moda's own deployment surface - the Fly
+deploy engine, the fleet workflows, and the hosted app that BINDS
+`EventBusRuntime` to moda's fleet URL and operator token - is private, in
 `moda-labs/moda-agents` under `bobi-deploy/`, and consumes this repo as a
 RELEASED PyPI version (`pip install bobi==<pin>`), never a checkout. The former
 `moda-labs/bobi-deploy` repo is archived; nothing builds or releases from it.
@@ -180,6 +255,20 @@ therefore has two guards: a fail-fast step when a credential is empty, and
 `scripts/assert_junit_ran.py`, which reads the junit report and rejects any
 skip, any wrong count, and any missing named test. `tests/test_ci_live_wiring.py`
 asserts the wiring itself is still in place, and fails if a live step is deleted.
+
+**They must smoke the right deployment.** `wrangler deploy` and the
+`wrangler secret bulk` that follows it publish two Worker versions reporting the
+same release sha, and Cloudflare's rollover between them is not atomic. The
+first one inherits the previous run's secrets, so smoking it yields a 401 on
+`/mcp` and a 500 on the round-trip against credentials minted seconds earlier
+(run 30895709421). `scripts/await_worker_ready.py` is the gate: it clears only
+once the release sha matches, an operator-authenticated route answers 200 to
+THIS run's minted token, and the serving `worker.version_id` holds still, across
+five consecutive probes. Its behaviour is exercised in
+`tests/test_ci_guard_scripts.py` against a Worker that fakes the rollover -
+inline shell had carried this logic through two fixes with no test that could
+reach it. The lane also takes a `concurrency` group: one shared Worker means
+one run at a time, or two runs overwrite each other's minted secrets.
 
 **The Worker lane is isolated by construction.** It deploys to a dedicated
 `bobi-events-ci-smoke` Worker with its own KV namespace, in a **separate

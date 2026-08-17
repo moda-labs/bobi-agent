@@ -88,10 +88,6 @@ def agent_run_root(name: str) -> Path:
     return agent_dir(name) / "run"
 
 
-def agent_runtime_root(name: str) -> Path:
-    return agent_run_root(name)
-
-
 def agent_name_for_root(root: Path | None = None) -> str:
     r = (root if root is not None else bobi_root()).resolve()
     return r.parent.name if r.name == "run" else r.name
@@ -180,10 +176,6 @@ def install_manifest_path(root: Path | None = None) -> Path:
     return package_dir(root) / "install-manifest.json"
 
 
-def compose_lock_path(root: Path | None = None) -> Path:
-    return package_dir(root) / "compose-lock.json"
-
-
 def workflows_dir(root: Path | None = None) -> Path:
     return package_dir(root) / "workflows"
 
@@ -255,16 +247,6 @@ def migrate_long_term_memory_state(root: Path | None = None) -> None:
         return
 
 
-def policy_path(root: Path | None = None) -> Path:
-    """Deprecated alias for one release; use long_term_memory_path."""
-    return long_term_memory_path(root)
-
-
-def policy_cursor_path(root: Path | None = None) -> Path:
-    """Deprecated alias for one release; use long_term_memory_cursor_path."""
-    return long_term_memory_cursor_path(root)
-
-
 def sessions_path(root: Path | None = None) -> Path:
     """The sessions dir path without creating it.
 
@@ -277,10 +259,6 @@ def sessions_dir(root: Path | None = None) -> Path:
     d = sessions_path(root)
     d.mkdir(parents=True, exist_ok=True)
     return d
-
-
-def worktrees_dir(root: Path | None = None) -> Path:
-    return state_dir(root) / "worktrees"
 
 
 def agent_cache_dir() -> Path:

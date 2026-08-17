@@ -1,5 +1,6 @@
 """Tests for the team-deps hook renderer (C24 team-flavored images)."""
 
+import shlex
 from textwrap import dedent
 
 import pytest
@@ -158,6 +159,44 @@ def test_verify_uses_same_home_as_run(tmp_path):
                        if "test -e ~/.claude/skills/browse" in ln)
     assert run_line.startswith(prefix)
     assert verify_line.startswith(prefix)
+
+
+def test_verify_phase_reaches_a_subprocess(tmp_path):
+    """D041 — a `success` check that runs a program must see the build phase.
+
+    `BOBI_VERIFY_PHASE=build; <check>` sets an ordinary shell variable, not an
+    exported one, so a check implemented as a script
+    (`check: python3 tools/verify.py`) saw the var UNSET and took its runtime
+    branch — a credentialed probe in the credential-less image build. The same
+    check behaves correctly under dep_bootstrap.preflight, which exports it in
+    the real environment, so the two verify surfaces of the one `success`
+    contract disagreed. The shipped codex entry only escaped because its check
+    expands ${BOBI_VERIFY_PHASE:-} inline, in the same shell.
+    """
+    import subprocess
+
+    team = _team(tmp_path, """
+version: "1.0.0"
+entry_point: director
+requires:
+  - name: phase-probe
+    check: printenv BOBI_VERIFY_PHASE
+build:
+  apt: [curl]
+  verify: requires
+""")
+    script = render_team_deps_script(team)
+    line = next(ln for ln in script.splitlines() if "BOBI_VERIFY_PHASE" in ln)
+
+    # Strip the container-only `gosu <user> env ... bash -lc` prefix and run
+    # exactly the command string the build would hand to bash.
+    command = shlex.split(line)[-1]
+    out = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+
+    assert out.stdout.strip() == "build", (
+        f"a subprocess saw BOBI_VERIFY_PHASE={out.stdout.strip()!r}; "
+        f"rendered: {line}"
+    )
 
 
 def test_hash_is_stable_and_input_sensitive(tmp_path):

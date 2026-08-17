@@ -1,8 +1,11 @@
-"""Session registry — persistent tracking for all Claude Code sessions.
+"""Session registry — persistent tracking for all agent sessions.
 
 Every session (manager or agent) is tracked here. Sessions persist
 across restarts via state.json files in per-session directories.
-Each session wraps a ClaudeSDKClient with connect/resume/query/disconnect.
+Each session wraps a brain-agnostic session adapter, built through
+``Brain.make_session()`` (#485) — a Claude SDK client, a per-turn ``codex
+exec`` subprocess, or the stub, depending on the configured brain. Nothing
+in this module is Claude-specific.
 
 All session state lives under a selected Bobi Agent runtime root:
 ``<BOBI_HOME>/agents/<name>/run/state/sessions/``. Every process binds
@@ -26,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from bobi import paths
+from bobi.fsutil import atomic_write_json
 
 log = logging.getLogger(__name__)
 
@@ -71,10 +75,6 @@ def _resolve_cli_path() -> str:
     if platform.system() == "Darwin":
         return "/opt/homebrew/bin/claude"
     return "claude"
-
-
-# Resolved once at import for back-compat; get_cli_path() re-resolves on demand.
-CLAUDE_CLI = _resolve_cli_path()
 
 
 def compute_manifest_hash(project_path: Path | None = None) -> str:
@@ -142,12 +142,21 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-def read_pid(pid_path: Path) -> int:
-    """Read a pid file, returning 0 when missing or malformed."""
+def read_int_file(path: Path) -> int:
+    """Read a single-integer state file — a pid, a bound port — as an int.
+
+    Returns 0 when the file is missing, unreadable, or does not hold an
+    integer, so a caller can treat "no usable value" as one case.
+    """
     try:
-        return int(pid_path.read_text().strip())
+        return int(path.read_text().strip())
     except (ValueError, OSError):
         return 0
+
+
+def read_pid(pid_path: Path) -> int:
+    """Read a pid file, returning 0 when missing or malformed."""
+    return read_int_file(pid_path)
 
 
 def _pid_file_alive(pid_path: Path) -> bool:
@@ -213,11 +222,6 @@ def session_log_path(name: str, *, root: Path | None = None) -> Path:
     p = _sessions_dir(root) / name / "log.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
-
-
-def state_dir(project_path: Path | None = None) -> Path:
-    """Runtime state directory (delegates to bobi.paths)."""
-    return paths.state_dir(project_path)
 
 
 def get_cli_path() -> str:
@@ -378,15 +382,7 @@ class SessionRegistry:
     @staticmethod
     def _write_state(path: Path, data: dict) -> None:
         """Publish one complete state document for concurrent readers."""
-        serialized = json.dumps(data, indent=2)
-        tmp = path.with_name(
-            f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
-        )
-        try:
-            tmp.write_text(serialized)
-            os.replace(tmp, path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        atomic_write_json(path, data)
 
     def register(self, entry: SessionEntry) -> None:
         d = self.session_dir(entry.name)
@@ -634,9 +630,6 @@ class SessionRegistry:
     def handoff_path(self, name: str, step: str) -> Path:
         return session_handoff_path(name, step, root=self._root)
 
-    def log_path(self, name: str) -> Path:
-        return session_log_path(name, root=self._root)
-
 
 _registry: SessionRegistry | None = None
 
@@ -716,10 +709,7 @@ def load_resumable_session_id(name: str, model: str) -> str:
         return ""
     brain = get_brain()
     active_label = session_brain_label()
-    brain_path = _sessions_dir() / f"{name}.brain"
-    recorded_brain = (
-        brain_path.read_text().strip() if brain_path.exists() else ""
-    )
+    recorded_brain = load_session_brain(name)
     if recorded_brain and recorded_brain != active_label:
         # A resume token is only meaningful to the brain configuration that
         # minted it - engine AND endpoint (see session_brain_label).

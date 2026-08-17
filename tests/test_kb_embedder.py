@@ -13,6 +13,12 @@ from bobi import http as pooled
 from bobi.kb import embedder
 
 
+@pytest.fixture(autouse=True)
+def _reset_verified_port(monkeypatch):
+    """`_verified_port` is module-level, so it would leak across tests."""
+    monkeypatch.setattr(embedder, "_verified_port", None)
+
+
 @pytest.fixture
 def state_dir(tmp_path, monkeypatch):
     """Redirect sidecar state files to a temp directory."""
@@ -109,7 +115,7 @@ class TestEnsureRunning:
 
     def test_cold_start(self, state_dir, monkeypatch):
         monkeypatch.setattr(
-            "bobi.sdk.get_project_root",
+            "bobi.paths.bound_root",
             lambda: state_dir.parent.parent,
         )
         call_count = 0
@@ -133,7 +139,7 @@ class TestEnsureRunning:
 
     def test_timeout_raises(self, state_dir, monkeypatch):
         monkeypatch.setattr(
-            "bobi.sdk.get_project_root",
+            "bobi.paths.bound_root",
             lambda: state_dir.parent.parent,
         )
         with patch.object(embedder, "_check_health", return_value=False), \
@@ -161,6 +167,64 @@ class TestEmbed:
             result = embedder.embed(["hello", "world"])
             assert result == fake_embeddings
 
+    def test_dead_sidecar_is_restarted_and_the_embed_retried(self, state_dir):
+        """D010 — the sidecar dies between calls.
+
+        The pooled client raises ``httpx.ConnectError``, which is NOT an
+        ``OSError``, so an ``except OSError`` recovery path never runs: the
+        error propagates and ``_verified_port`` stays pinned to the dead port
+        forever, failing every later embed until the manager restarts.
+        """
+        fake_embeddings = [[0.5, 0.6]]
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            if len(calls) == 1:
+                raise httpx.ConnectError("connection refused")
+            return httpx.Response(200, json={"embeddings": fake_embeddings})
+
+        mock_client = httpx.Client(transport=httpx.MockTransport(handler))
+        embedder._verified_port = 8000  # a previous embed pinned this port
+
+        with patch.object(embedder, "ensure_running", return_value=8001) as ensure, \
+             patch.object(pooled, '_client', mock_client):
+            assert embedder.embed(["hello"]) == fake_embeddings
+
+        ensure.assert_called_once()          # the dead port was re-resolved
+        assert embedder._verified_port == 8001
+
+    def test_a_failed_retry_leaves_no_port_pinned(self, state_dir):
+        def always_dead(request):
+            raise httpx.ConnectError("connection refused")
+
+        mock_client = httpx.Client(transport=httpx.MockTransport(always_dead))
+        embedder._verified_port = 8000
+
+        with patch.object(embedder, "ensure_running", return_value=8000), \
+             patch.object(pooled, '_client', mock_client), \
+             pytest.raises(httpx.ConnectError):
+            embedder.embed(["hello"])
+
+        # The next call must re-run ensure_running rather than reuse a port
+        # already proven dead.
+        assert embedder._verified_port is None
+
+    def test_an_unexpected_failure_also_unpins_the_port(self, state_dir):
+        """Any failure invalidates the cache — not just the retried class."""
+        def boom(request):
+            return httpx.Response(500, json={"error": "sidecar exploded"})
+
+        mock_client = httpx.Client(transport=httpx.MockTransport(boom))
+        embedder._verified_port = 8000
+
+        with patch.object(embedder, "ensure_running", return_value=8000), \
+             patch.object(pooled, '_client', mock_client), \
+             pytest.raises(Exception):
+            embedder.embed(["hello"])
+
+        assert embedder._verified_port is None
+
 
 # ---------------------------------------------------------------------------
 # stop
@@ -180,6 +244,23 @@ class TestStop:
 
     def test_stop_no_pid_file(self, state_dir):
         embedder.stop()
+
+    def test_stop_tolerates_a_malformed_pid_file(self, state_dir):
+        """A garbage pid file must not raise, and must still clear both files.
+
+        stop() reads through sdk.read_pid (0 when missing or malformed), the
+        same tolerant reader is_running() uses — so there is no int()/ValueError
+        handling of its own left to drift (Q097).
+        """
+        (state_dir / "embedding-sidecar.pid").write_text("not-a-pid\n")
+        (state_dir / "embedding-sidecar.port").write_text("8000")
+
+        with patch("os.kill") as mock_kill:
+            embedder.stop()
+            mock_kill.assert_not_called()
+
+        assert not (state_dir / "embedding-sidecar.pid").exists()
+        assert not (state_dir / "embedding-sidecar.port").exists()
 
     def test_stop_stale_pid(self, state_dir):
         (state_dir / "embedding-sidecar.pid").write_text("999999")

@@ -54,8 +54,17 @@ consumes, so you never have to reason about them:
 | `message.mpim` | `slack.dm` | `mpim:history` |
 | `message.channels` / `message.groups` (with `thread_ts`) | `slack.thread_reply` | `channels:history` / `groups:history` |
 
-Plus `chat:write` (post replies), `files:read`/`files:write` (attachments), and
-`users:read` (resolve names).
+Plus `chat:write` (post replies), `files:read`/`files:write` (attachments),
+`users:read` (**required** by `bots.info` for app-qualified event routing, and
+also used to resolve names), `channels:read`/`groups:read` (list channels, so a
+`#name` login channel resolves), and `im:write` (open a DM — proactive messages
+like briefings, nudges, and the subscription login link). Thirteen bot scopes in
+all; `bobi/templates/slack-app.manifest.yaml` is the source of truth.
+
+If `users:read` is added to an existing app, reinstall the app to the workspace
+and refresh `SLACK_BOT_TOKEN`. Bobi intentionally refuses a workspace-only
+fallback because it can deliver one Slack app's events to another app in the
+same workspace.
 
 ## 2. Install to workspace
 
@@ -178,16 +187,20 @@ bobi create-slack-bot --app-name "Tenant A" \
 
 ## Multiple workspaces
 
-Create one app per workspace (each gets its own `xoxb-` token) and store each as
-a named credential:
+Create one app per workspace (each gets its own `xoxb-` token) and install a
+separately named agent per workspace. There is no machine-wide named-credential
+store: each runtime's secrets live only in its own `run/.env`, written at
+install time from the environment.
 
-```yaml
-# ~/.config/bobi/credentials.yaml
-workspace-a:
-  slack_bot_token: "xoxb-workspace-a-token"
-workspace-b:
-  slack_bot_token: "xoxb-workspace-b-token"
+```bash
+SLACK_BOT_TOKEN=xoxb-workspace-a-token \
+  bobi agents install <source> --name workspace-a --non-interactive
+SLACK_BOT_TOKEN=xoxb-workspace-b-token \
+  bobi agents install <source> --name workspace-b --non-interactive
 ```
+
+Each install writes its token to `$BOBI_HOME/agents/<name>/run/.env`, so the two
+bots authenticate independently.
 
 ## Troubleshooting
 

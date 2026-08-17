@@ -154,6 +154,22 @@ def test_gstack_catalog_entry_bakes_browser_toolchain(project):
     assert (dest / "tools" / "gstack.md").is_file()
 
 
+def test_otel_catalog_entry_is_guide_only(project):
+    """`opentelemetry-proto` is a CORE bobi dependency, so the otel entry has
+    nothing to install: it contributes a guide and a doctor check, and must add
+    no build steps at all."""
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'tool_library: [otel]\n')
+    dest = _compose(project, leaf)[0]
+    cfg = _agent_yaml(dest)
+    assert "build" not in cfg
+    assert any(r["name"] == "otel" for r in cfg["requires"])
+    guide = dest / "tools" / "otel.md"
+    assert guide.is_file()
+    assert "otel metric" in guide.read_text()
+
+
 # --- local / explicit wins (escape hatches) ----------------------------------
 
 
@@ -164,6 +180,78 @@ def test_local_tool_guide_wins(project):
                  tools={"codex.md": "TEAM OWN CODEX GUIDE"})
     dest = _compose(project, leaf)[0]
     assert (dest / "tools" / "codex.md").read_text() == "TEAM OWN CODEX GUIDE"
+
+
+def test_leaf_overlay_overrides_a_base_layer_dependency(project):
+    """D042 — the leaf must win, and it could not.
+
+    compose unions `tool_library:` base-entries-first, then
+    resolve_dependencies de-duped by name keeping the FIRST occurrence — so a
+    leaf overlay declaring its own pin for a dependency the base already names
+    was silently dropped and the image baked the base's version. That inverts
+    compose's stated rule ("The leaf always wins"), with no warning.
+    """
+    _team(project, "base",
+          'version: "1.0.0"\nentry_point: director\ntool_library: [codex]\n')
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\nfrom: base\n'
+                 'tool_library:\n'
+                 '  - name: codex\n'
+                 '    success: "codex --version"\n'
+                 '    install:\n'
+                 '      npm: ["@openai/codex@0.150.0"]\n')
+    cfg = _agent_yaml(_compose(project, leaf)[0])
+
+    npm = cfg["build"]["npm"]
+    assert "@openai/codex@0.150.0" in npm
+    assert CODEX_PIN not in npm, "the base layer's pin overrode the leaf's"
+
+
+def test_a_repeated_name_within_one_layer_takes_the_last(project):
+    """The rule is simply "the last declaration wins".
+
+    That is what makes the leaf win, because compose merges base-first — so
+    one rule covers both the cross-layer case above and a name repeated
+    within a single layer.
+    """
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\n'
+                 'tool_library:\n'
+                 '  - name: dupe\n'
+                 '    success: "true"\n'
+                 '    install:\n'
+                 '      npm: ["first@1"]\n'
+                 '  - name: dupe\n'
+                 '    success: "true"\n'
+                 '    install:\n'
+                 '      npm: ["second@2"]\n')
+    cfg = _agent_yaml(_compose(project, leaf)[0])
+    assert "second@2" in cfg["build"]["npm"]
+
+
+def test_stale_catalog_guide_is_refreshed_on_reinstall(project):
+    """D084 — `if not guide_path.exists()` cannot tell a team file from our own.
+
+    install clears only the surfaces some layer contributes, so for a team
+    whose layers ship no tools/ dir the previous install's tools/<name>.md
+    survives. The exists() check then read that leftover as a team-shipped
+    file and skipped the write, so a framework upgrade that rewrote the
+    catalog guide never reached the runtime agent — it kept reading the
+    outdated one indefinitely.
+    """
+    leaf = _team(project, "solo",
+                 'version: "1.0.0"\nentry_point: director\ntool_library: [venn]\n')
+    dest = _compose(project, leaf)[0]
+    guide_path = dest / "tools" / "venn.md"
+    catalog = (tool_library.CATALOG_DIR / "venn" / "guide.md").read_text()
+    assert guide_path.read_text() == catalog
+
+    # A previous install's guide, now out of date, left behind in the reused
+    # dest because no layer contributes tools/ for install to clear.
+    guide_path.write_text("STALE GUIDE FROM AN OLDER RELEASE")
+
+    _compose(project, leaf, dest=dest)
+    assert guide_path.read_text() == catalog
 
 
 def test_explicit_requires_wins(project):
@@ -378,6 +466,39 @@ def test_mcp_two_dependencies_distinct_names_both_present(project):
 def _all_entries():
     return sorted(p.name for p in tool_library.CATALOG_DIR.iterdir()
                   if p.is_dir() and (p / "tool.yaml").is_file())
+
+
+def test_python_artifacts_are_not_catalog_entries(tmp_path, monkeypatch):
+    """`CATALOG_DIR` IS the package directory, so its own Python artifacts sit
+    beside the entries — they must never be offered as `tool_library:` ids.
+
+    Before the module moved into the package it used to shadow, the catalog
+    directory held nothing but entries and this could not happen. Now
+    `__init__.py` and `__pycache__/` live there too, and the only thing keeping
+    them out of `available_entries` is the `tool.yaml` predicate. Dropping that
+    predicate turns this red.
+    """
+    cat = tmp_path / "cat"
+    _write(cat / "__init__.py", "# the module itself\n")
+    _write(cat / "__pycache__" / "__init__.cpython-312.pyc", "\x00")
+    _write(cat / "real" / "tool.yaml", "success: true\n")
+    _write(cat / "real" / "guide.md", "x")
+    monkeypatch.setattr(tool_library, "CATALOG_DIR", cat)
+
+    assert tool_library.available_entries() == ["real"]
+
+    with pytest.raises(compose.ComposeError):
+        tool_library.load_entry("__pycache__")
+
+
+def test_real_catalog_lists_only_the_shipped_entries():
+    """The live package directory, not a fixture: the four shipped entries and
+    nothing else. Non-vacuous because importing the package has already made
+    `__pycache__` a real sibling of them."""
+    assert (tool_library.CATALOG_DIR / "__init__.py").is_file(), (
+        "CATALOG_DIR should be the tool_library package's own directory")
+    assert tool_library.available_entries() == [
+        "codex", "gstack", "otel", "venn"]
 
 
 def test_no_floating_refs_in_catalog():

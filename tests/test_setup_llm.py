@@ -7,6 +7,7 @@ import asyncio
 
 import pytest
 
+from bobi.brain import claude
 from bobi.setup import llm
 from bobi.setup.llm import LLMError
 
@@ -99,10 +100,10 @@ class TestDeltaExtraction:
     def test_pulls_text_from_content_block_delta(self):
         ev = {"type": "content_block_delta",
               "delta": {"type": "text_delta", "text": "hello"}}
-        assert llm._delta_text(ev) == "hello"
+        assert claude._delta_text(ev) == "hello"
 
     def test_ignores_non_text_events(self):
-        assert llm._delta_text({"type": "message_start"}) == ""
-        assert llm._delta_text({"type": "content_block_delta",
+        assert claude._delta_text({"type": "message_start"}) == ""
+        assert claude._delta_text({"type": "content_block_delta",
                                 "delta": {"type": "input_json_delta"}}) == ""
-        assert llm._delta_text("not a dict") == ""
+        assert claude._delta_text("not a dict") == ""

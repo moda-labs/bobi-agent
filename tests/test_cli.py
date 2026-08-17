@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from bobi.__version__ import __version__
@@ -18,6 +19,27 @@ def test_version_flag():
     assert result.exit_code == 0
     assert "bobi" in result.output
     assert __version__ in result.output
+
+
+def test_transport_logs_do_not_reach_the_console(monkeypatch):
+    """The root logger runs at INFO, and httpx logs every request at INFO.
+
+    `daemon._ping` uses the pooled client (Q123), and `bobi app start` polls
+    it every 0.2s while the daemon comes up — so without this the command
+    buries its own "running at ..." line under a stack of transport chatter
+    that `urllib` never produced.
+    """
+    import logging
+
+    logging.getLogger("httpx").setLevel(logging.INFO)
+    monkeypatch.setattr(
+        "bobi.webapp.daemon.start",
+        lambda open_browser=True: type("Status", (), {"url": "u", "pid": 1})(),
+    )
+
+    CliRunner().invoke(main, [])
+
+    assert logging.getLogger("httpx").level == logging.WARNING
 
 
 def test_bare_bobi_starts_app(monkeypatch):
@@ -43,7 +65,7 @@ def test_top_level_help_is_machine_scoped():
     assert "agent" in result.output
     assert "agents" in result.output
     assert "setup" in result.output
-    for removed in [" start", " stop", " status", " workflows", " monitors"]:
+    for removed in [" start", " stop", " status", " workflows", " monitors", " otel"]:
         assert removed not in result.output
 
 
@@ -59,7 +81,7 @@ def test_agent_help_lists_runtime_commands(bobi_install):
     result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "--help"])
     assert result.exit_code == 0, result.output
     for cmd in ["start", "stop", "status", "workflows", "monitors",
-                "subagents", "event-server", "login-bootstrap"]:
+                "subagents", "event-server", "login-bootstrap", "otel"]:
         assert cmd in result.output
 
 
@@ -348,7 +370,8 @@ class TestSubagents:
         assert spawn.call_args.kwargs["role"] == "engineer"
 
     def test_as_check_runs_check(self, bobi_install):
-        check = CheckResult(success=True, finding=False)
+        check = CheckResult(success=True, finding=False,
+                            session="monitor-check-abc-check")
         with patch("bobi.subagent.run_check_blocking", return_value=check) as run_check, \
              patch("bobi.subagent.spawn_adhoc") as spawn:
             result = CliRunner().invoke(main, [
@@ -362,6 +385,9 @@ class TestSubagents:
             "finding": False,
             "summary": "",
             "details": {},
+            # The monitor scheduler records this on the run so a check's row
+            # can open its transcript.
+            "session": "monitor-check-abc-check",
         }
         run_check.assert_called_once()
         spawn.assert_not_called()
@@ -764,6 +790,46 @@ class TestEventServerCommand:
         assert result.exit_code == 0, result.output
         assert "Event server is still running on port 58405" in result.output
 
+    # D018 — a pid file is written by another process and can be truncated by a
+    # crash mid-write. `int(pid_file.read_text())` sat outside the try, so stop
+    # raised ValueError, printed a traceback, and left the stale files in
+    # place — making every subsequent stop fail the same way. The manager stop
+    # path (cli.py `Invalid PID file — cleaning up.`) already defends against
+    # exactly this.
+
+    @pytest.mark.parametrize("contents", ["", "   ", "not-a-pid", "12345\n67890"])
+    def test_stop_cleans_up_a_corrupt_pid_file(self, bobi_install, contents):
+        pid_file = bobi_install.state_dir / "event-server.pid"
+        port_file = bobi_install.state_dir / "event-server.port"
+        pid_file.write_text(contents)
+        port_file.write_text("58405")
+
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "event-server", "stop"])
+
+        assert result.exception is None or isinstance(result.exception, SystemExit), \
+            f"unhandled traceback: {result.exception!r}"
+        assert "Traceback" not in result.output
+        assert not pid_file.exists(), "stale pid file left behind"
+        assert not port_file.exists(), "stale port file left behind"
+
+    def test_stop_reports_a_pid_it_may_not_signal(self, bobi_install, monkeypatch):
+        # A pid owned by another user: os.kill raises PermissionError, which was
+        # uncaught. Report it and still clear our own stale files.
+        (bobi_install.state_dir / "event-server.pid").write_text("4242")
+        (bobi_install.state_dir / "event-server.port").write_text("58405")
+
+        def deny(pid, sig):
+            raise PermissionError(1, "Operation not permitted")
+        monkeypatch.setattr("os.kill", deny)
+
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "event-server", "stop"])
+
+        assert result.exception is None or isinstance(result.exception, SystemExit), \
+            f"unhandled traceback: {result.exception!r}"
+        assert "Traceback" not in result.output
+
 
 class TestSetupCommand:
     def _home(self, tmp_path, monkeypatch):
@@ -798,7 +864,23 @@ class TestSetupCommand:
     def test_help(self):
         result = CliRunner().invoke(main, ["setup", "--help"])
         assert result.exit_code == 0
-        assert "--resume" in result.output
+        assert "--model" in result.output
+        # Q122/D064 — `--resume` was parsed, advertised in help, documented in
+        # QUICKSTART, then discarded with `del resume`. Setup reopens through
+        # the webapp, which resumes an unfinished session unconditionally
+        # (webapp/server.py), so the flag named the default and promised a
+        # choice that did not exist. Removed rather than left as dead surface.
+        assert "--resume" not in result.output
+        assert "resumes where you left off" in result.output
+
+    def test_resume_flag_is_gone(self, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        self._patch_app(monkeypatch)
+
+        result = CliRunner().invoke(main, ["setup", "alpha", "--resume"])
+
+        assert result.exit_code != 0
+        assert "No such option" in result.output
 
     def test_setup_without_name_opens_create_route(self, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
@@ -809,12 +891,12 @@ class TestSetupCommand:
         assert result.exit_code == 0, result.output
         assert seen["url"] == "http://127.0.0.1:8642/?n=tok#/setup"
 
-    def test_setup_options_are_accepted_for_compatibility(self, tmp_path, monkeypatch):
+    def test_model_option_reaches_the_setup_url(self, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
         seen = self._patch_app(monkeypatch)
 
         result = CliRunner().invoke(
-            main, ["setup", "alpha", "--resume", "--model", "sonnet"])
+            main, ["setup", "alpha", "--model", "sonnet"])
 
         assert result.exit_code == 0, result.output
         assert seen["url"] == (
@@ -876,3 +958,126 @@ class TestMonitorAdd:
         result = self._add(bobi_install, ["x", "--at", "21:00", "--days", "funday"])
         assert result.exit_code != 0
         assert "weekday" in result.output.lower()
+
+
+class TestAgentsUpdateAndBrowse:
+    """D066/D065 — the machine-facing `agents` surface."""
+
+    def test_update_all_exits_nonzero_when_every_pack_fails(self, bobi_install,
+                                                            monkeypatch):
+        # D066: the named-pack path exits 1 on this exact failure, the
+        # update-all path returned 0, so the two forms reported contradictory
+        # exit codes for identical failures and CI could not detect it.
+        monkeypatch.setattr(
+            "bobi.registry.list_cached",
+            lambda p: [{"name": "alpha"}, {"name": "beta"}])
+
+        def boom(*a, **k):
+            raise RuntimeError("registry unreachable")
+        monkeypatch.setattr("bobi.registry.check_update", boom)
+
+        result = CliRunner().invoke(main, ["agents", "update"])
+
+        assert result.exit_code == 1, result.output
+        assert "alpha — failed" in result.output
+        assert "beta — failed" in result.output
+
+    def test_update_all_still_exits_zero_when_a_pack_succeeds(self, bobi_install,
+                                                              monkeypatch):
+        monkeypatch.setattr(
+            "bobi.registry.list_cached",
+            lambda p: [{"name": "alpha"}, {"name": "beta"}])
+
+        def check(project, name, *a, **k):
+            if name == "beta":
+                raise RuntimeError("registry unreachable")
+            return ("1.0.0", "1.0.0")
+        monkeypatch.setattr("bobi.registry.check_update", check)
+
+        result = CliRunner().invoke(main, ["agents", "update"])
+
+        assert result.exit_code == 1, "one failure is still a failure"
+        assert "alpha v1.0.0 — up to date" in result.output
+
+    def test_browse_survives_an_unquoted_numeric_version(self, bobi_install,
+                                                         monkeypatch):
+        # D065: a third-party registry.yaml with `version: 1.0` parses as a
+        # float, and `f"v{version:8s}"` dies with "Unknown format code 's'",
+        # taking down the whole listing instead of one row.
+        monkeypatch.setattr(
+            "bobi.registry.list_remote",
+            lambda *a, **k: [{"name": "numeric", "version": 1.0,
+                              "description": "unquoted version"},
+                             {"name": "ordinary", "version": "2.1.0",
+                              "description": "quoted version"}])
+        monkeypatch.setattr("bobi.registry.list_cached", lambda p: [])
+
+        result = CliRunner().invoke(main, ["agents", "browse"])
+
+        assert result.exception is None or isinstance(result.exception, SystemExit), \
+            f"unhandled traceback: {result.exception!r}"
+        assert result.exit_code == 0, result.output
+        assert "numeric" in result.output and "ordinary" in result.output
+
+    def test_browse_matches_a_local_version_against_a_numeric_remote(
+            self, bobi_install, monkeypatch):
+        # The same coercion fixes the silent str-vs-float mismatch that made an
+        # installed pack read as an available upgrade to itself.
+        monkeypatch.setattr(
+            "bobi.registry.list_remote",
+            lambda *a, **k: [{"name": "numeric", "version": 1.0}])
+        monkeypatch.setattr(
+            "bobi.registry.list_cached",
+            lambda p: [{"name": "numeric", "version": "1.0"}])
+
+        result = CliRunner().invoke(main, ["agents", "browse"])
+
+        assert result.exit_code == 0, result.output
+        assert "[installed]" in result.output
+        assert "available" not in result.output
+
+
+class TestFindTranscript:
+    """`bobi logs`' transcript fallback, on the shared locator (Q027).
+
+    This fallback was the fourth hand-rolled copy of "find <session>.jsonl"
+    and the only one that ignored CLAUDE_CONFIG_DIR, so `bobi logs` printed
+    "No session" for exactly the agents bobi itself runs under a per-team
+    config dir (#779).
+    """
+
+    def _bind(self, tmp_path, monkeypatch, session_id):
+        from bobi import paths
+        from bobi.cli import _find_transcript
+
+        monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            "bobi.sdk._sessions_dir",
+            lambda root=None: paths.sessions_dir(tmp_path))
+        sessions = paths.sessions_dir(tmp_path)
+        sessions.mkdir(parents=True, exist_ok=True)
+        (sessions / "worker.id").write_text(session_id + "\n")
+        return _find_transcript
+
+    def test_finds_transcript_under_claude_config_dir(self, tmp_path, monkeypatch):
+        find = self._bind(tmp_path, monkeypatch, "sess-cli")
+        target = tmp_path / "cfg" / "projects" / "proj" / "sess-cli.jsonl"
+        target.parent.mkdir(parents=True)
+        target.write_text("{}\n")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+        assert find("worker") == target
+
+    def test_missing_transcript_returns_none(self, tmp_path, monkeypatch):
+        find = self._bind(tmp_path, monkeypatch, "sess-absent")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+        assert find("worker") is None
+
+    def test_blank_session_id_returns_none(self, tmp_path, monkeypatch):
+        find = self._bind(tmp_path, monkeypatch, "")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+        assert find("worker") is None

@@ -599,3 +599,50 @@ class TestNonInteractiveInstall:
         assert result.exit_code == 0, result.output
         env = parse_env_file(home / "agents" / "opt-team" / "run" / ".env")
         assert "BOBI_EVENT_SERVER" not in env
+
+
+class TestResolveAgentPack:
+    """`resolve_agent_pack` moved here from `bobi.cli` so the setup UI could
+    reach it without importing click. It had no test of its own; these pin the
+    three locations it searches and their precedence.
+    """
+
+    def _team(self, root, name):
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "agent.yaml").write_text(f"agent: {name}\nversion: 0.1.0\n")
+        return d
+
+    def test_source_slot_wins_over_cache(self, tmp_path, monkeypatch):
+        from bobi.install import resolve_agent_pack
+        monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+        src = self._team(paths.agent_dir("t"), "src")
+        self._team(paths.agent_cache_dir(), "t")
+        assert resolve_agent_pack("t", tmp_path / "proj") == src
+
+    def test_falls_back_to_the_cache(self, tmp_path, monkeypatch):
+        from bobi.install import resolve_agent_pack
+        monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+        cached = self._team(paths.agent_cache_dir(), "t")
+        assert resolve_agent_pack("t", tmp_path / "proj") == cached
+
+    def test_then_a_checked_in_agents_dir(self, tmp_path, monkeypatch):
+        # Repo/deploy authoring keeps local packs under <project>/agents/<name>.
+        from bobi.install import resolve_agent_pack
+        monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+        proj = tmp_path / "proj"
+        visible = self._team(proj / "agents", "t")
+        assert resolve_agent_pack("t", proj) == visible
+
+    def test_a_directory_without_agent_yaml_is_not_a_pack(self, tmp_path,
+                                                          monkeypatch):
+        # Presence of the directory is not the test — agent.yaml is.
+        from bobi.install import resolve_agent_pack
+        monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+        (paths.agent_source_dir("t")).mkdir(parents=True)
+        assert resolve_agent_pack("t", tmp_path / "proj") is None
+
+    def test_unknown_team_is_none(self, tmp_path, monkeypatch):
+        from bobi.install import resolve_agent_pack
+        monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+        assert resolve_agent_pack("nope", tmp_path / "proj") is None

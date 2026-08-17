@@ -1402,7 +1402,7 @@ describe("#488 resource-grant authorization (route + delivery)", () => {
 		await env.EVENTS.put(subKey, JSON.stringify(ids));
 
 		expect(await githubIssue(repo)).toBe(2); // exactly the two granted bubbles
-	}, 15_000);
+	});
 
 	it("slack: a signed workspace registration writes the slack grant, gating delivery (test 8)", async () => {
 		const b = await mintBubble(["_bootstrap"]);

@@ -321,7 +321,7 @@ Delivered 2026-08-03. Bundle 34 KiB → 209 KiB gzipped, ~7% of the 3 MiB
 compressed ceiling. Q7's client risk did not materialize (see Amendments);
 `nodejs_compat` did (see Amendments).
 
-### Phase 2 — Write tools + bounded wait (Lane B) `[ ]`
+### Phase 2 — Write tools + bounded wait (Lane B) `[x]`
 
 Depends on A. `bobi_read_transcript`, `bobi_send_message`, `bobi_lifecycle` (action
 enum + required `reason`). The bounded wait, with the 5s default validated against
@@ -376,6 +376,72 @@ Sequential by construction: the tool registry built in A is what B extends, and 
 documents what B establishes. Parallelism would cost more in conflicts than it saves.
 
 ## Amendments
+
+### 2026-08-03 — Lane B built; the bounded wait does not apply to `chat`
+
+Recorded on Lane B's PR.
+
+**Bookkeeping note: the Lane-map row for B still reads `[ ]`, and that is a
+tooling limitation rather than a status.** `check-plan-artifact.sh`
+normalizes markers in list items and in phase headings, not in table cells,
+so once a plan leaves Draft its Lane-map markers are frozen as review-surface
+prose and flipping one fails the check. Lane A's row was flipped while the
+plan was still Draft, when the freeze did not apply. **Phase 2's heading
+marker and this amendment are authoritative for Lane B's state.**
+
+**`bobi_send_message` does not get a bounded wait, and Q4's reasoning does
+not reach it.** Q5 established that `chat` cannot return a reply, citing
+that it "resolves its command as soon as `service.ask` returns". That is
+literally true and reads as *fast*, which is the wrong inference:
+`service.ask` runs the entire turn, and `admin.py`'s own module docstring
+says the detached thread publishes `done` only "once the turn's reply lands
+in the transcript" — minutes. A 5s wait on `chat` would therefore expire by
+construction, spending the budget to learn nothing. `bobi_send_message`
+returns its `command_id` immediately; the other write tools wait. Q5's
+conclusion is unchanged, only the reason it matters.
+
+**The command-issue path had to be extracted before it could be shared.**
+The plan's principle — "a schema wrapper, not a second implementation" —
+held for Lane A because the read builders were already functions in
+`fleet.ts`. The issue path was not: it lived inline in `index.ts`'s POST
+route. It is now `issueAdminCommand` in `fleet.ts`, taking an injected
+publisher so the fleet module stays independent of the bus storage adapter,
+and both the REST route and the MCP tools call it. Without this the two
+surfaces would have had separate copies of the address-check → publish →
+record sequence, including its deliver-before-record ordering.
+
+**KV listings are eventually consistent; keyed reads are not.** The bounded
+wait polls `buildCommandView` (two exact-key `get`s) and never a prefix
+listing. This was found by test rather than reasoned: a helper that asserted
+on `list()` raced the Worker's own write and reported a command that
+demonstrably existed as absent. A wait built on a listing would report
+`pending` for a command that had already resolved. The plan asked for
+read-after-write to be "verified rather than assumed" — it now is, by
+folding a supervisor result from a separate request while a tool call is in
+flight.
+
+**`MCP_SERVER_VERSION` moves to `1.1.0`** (the plan left this open). It
+versions the tool surface, not the Worker release; Lane B adds three tools
+and changes none of Lane A's three, so a client holding cached `1.0.0`
+schemas stays correct.
+
+**Also carried forward: `roster`, `spend`, and `session_log` are still not
+exposed as tools.** The Solution section left this as "a build-time call once
+the response sizes are measured against a real fleet" — and the measurement
+that call depends on is the same one Q4 needs, so the call was not made rather
+than made blind. `bobi_instance_detail` returns whatever the heartbeat carries,
+and all three commands stay reachable over the REST route the console uses. The
+tool surface is six, not nine, deliberately.
+
+**Carried forward, NOT met: Q4's 5s default is still unvalidated against
+measured fold latency.** The plan requires Phase 2 to measure real folds and
+move the default if the data disagrees. Lane A shipped in `v0.53.0` and
+`/mcp` is live, so the measurement is now possible — but the operator
+credential was not reachable from the session that built this, so it was not
+taken. The default ships at 5s, env-tunable via `MCP_COMMAND_WAIT_MS`, and
+this proof-of-work item remains open for Lane C rather than being counted as
+done.
+
 
 ### 2026-08-03 — Lane A built; three things the plan had wrong
 

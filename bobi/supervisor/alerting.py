@@ -36,6 +36,8 @@ import os
 import time
 from pathlib import Path
 
+from bobi.fsutil import atomic_write_json
+
 from .config import SupervisorConfig
 from .supervision import SupervisorObserver, SupervisorState, is_wedged
 
@@ -112,8 +114,7 @@ class SlackAlerter(SupervisorObserver):
 
     def _save(self) -> None:
         try:
-            self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            self._state_path.write_text(json.dumps(self._incident or {}))
+            atomic_write_json(self._state_path, self._incident or {}, indent=None)
         except Exception:
             log.debug("supervisor: could not persist incident state",
                       exc_info=True)

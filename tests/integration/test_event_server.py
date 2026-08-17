@@ -1974,7 +1974,8 @@ def test_mcp_tool_call_against_real_workerd(event_server):
     assert status == 200
     names = sorted(t["name"] for t in listed["result"]["tools"])
     assert names == [
-        "bobi_command_result", "bobi_fleet_status", "bobi_instance_detail"
+        "bobi_command_result", "bobi_fleet_status", "bobi_instance_detail",
+        "bobi_lifecycle", "bobi_read_transcript", "bobi_send_message",
     ], names
 
     status, called = _mcp_rpc(base_url, {
@@ -1991,6 +1992,55 @@ def test_mcp_tool_call_against_real_workerd(event_server):
     assert not result.get("isError"), result
     payload = json.loads(result["content"][0]["text"])
     assert isinstance(payload["instances"], list), payload
+
+
+def test_mcp_write_tools_run_under_real_workerd(event_server):
+    """The write tools' bodies execute on real workerd, not just miniflare.
+
+    The bounded wait sleeps with `setTimeout` and the issue path calls
+    `crypto.randomUUID()`; both are exercised here against the shipped config
+    rather than the Vitest pool, which injects its own compatibility flags.
+
+    Addressed at an instance that has never heartbeated, so this asserts the
+    reachable failure - a tool ERROR carrying a recovery, on a live connection -
+    without needing a subscribed supervisor. A full delivery round trip is the
+    Worker suite's, where a bubble can be minted.
+    """
+    base_url = _require_worker_backend(event_server)
+
+    status, called = _mcp_rpc(base_url, {
+        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {
+            "name": "bobi_lifecycle",
+            "arguments": {
+                "fleet": "no-such-fleet", "instance": "no-such-instance",
+                "action": "restart", "reason": "integration probe",
+            },
+        },
+    })
+    assert status == 200
+    assert "error" not in called, (
+        f"tools/call returned a JSON-RPC error under real workerd: {called!r}"
+    )
+    result = called["result"]
+    assert result.get("isError"), result
+    assert "bobi_fleet_status" in result["content"][0]["text"], result
+
+    # `reason` is the audit control. Omitting it must be rejected by the
+    # declared schema, on the real transport, before any command is published.
+    status, refused = _mcp_rpc(base_url, {
+        "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+        "params": {
+            "name": "bobi_lifecycle",
+            "arguments": {
+                "fleet": "no-such-fleet", "instance": "no-such-instance",
+                "action": "restart",
+            },
+        },
+    })
+    assert status == 200
+    rejected = "error" in refused or refused.get("result", {}).get("isError")
+    assert rejected, f"a missing reason was accepted: {refused!r}"
 
 
 def test_mcp_rejects_an_unauthenticated_request_on_real_workerd(event_server):

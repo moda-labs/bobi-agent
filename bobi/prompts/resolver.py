@@ -191,11 +191,6 @@ def _load_long_term_memory_section(project: Path) -> str:
         return ""
 
 
-def _load_policy_section(project: Path) -> str:
-    """Deprecated alias for one release."""
-    return _load_long_term_memory_section(project)
-
-
 def list_workflows(project_path: Path | str, agent_name: str | None = None) -> str:
     """List available workflows as a formatted string for agent prompts.
 

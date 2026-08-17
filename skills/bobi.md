@@ -173,6 +173,25 @@ bobi agent <name> subagents launch -w adhoc --role engineer \
   --model gpt-5.6 --effort xhigh --task "Design the migration"
 ```
 
+## Telemetry
+
+Record agent-authored metrics and logs to an OTLP endpoint. The agent chooses
+what is worth recording; bobi stamps the fleet identity labels.
+
+```bash
+bobi agent <name> otel check
+bobi agent <name> otel check --send
+bobi agent <name> otel metric tickets.processed 42
+bobi agent <name> otel metric queue.depth 7 --kind gauge --attr queue=inbox
+bobi agent <name> otel log "reconciled the backlog" --severity info
+```
+
+The destination comes from `OTEL_EXPORTER_OTLP_ENDPOINT` (see `docs/OTEL.md`);
+`check` reports an unconfigured box as such and makes no network call without
+`--send`. `--attr` values are always sent as strings and must stay
+low-cardinality - they become time-series labels. Opt in per team with
+`tool_library: [otel]`; it is deliberately not in every agent's default prompt.
+
 ## Package Surfaces
 
 Installed package files live under `run/package/`:

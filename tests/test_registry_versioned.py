@@ -207,6 +207,67 @@ def test_versionless_team_fetches_the_rolling_asset(project, monkeypatch):
     assert any(u.endswith("teams-latest/smoke-team.tar.gz") for u in urls)
 
 
+def test_unreadable_remote_version_never_downgrades_to_rolling(project,
+                                                               monkeypatch):
+    """D032 — a transient version read must not silently install main.
+
+    `_read_remote_version` swallowed every exception and returned None, and
+    fetch read None as "version-less team" → the rolling <name>.tar.gz, which
+    is clobbered on every push to main. So `bobi install eng-team` during a
+    raw.githubusercontent.com timeout or rate-limit silently installed
+    UNRELEASED main content instead of the latest published immutable asset,
+    with nothing distinguishing the two cases.
+    """
+    calls = []
+    _router(monkeypatch, {
+        "agents/registry.yaml": (200, yaml.dump(
+            {"agents": {"eng-team": {"version": "1.1.0"}}}).encode()),
+        # The version read fails transiently (rate-limited).
+        "agents/eng-team/agent.yaml": (429, b"rate limited"),
+        # The rolling asset is available and would happily install.
+        "teams-latest/eng-team.tar.gz": (200, _asset_tarball("eng-team", None)),
+    }, capture=calls)
+
+    with pytest.raises(RuntimeError, match="version"):
+        registry.fetch(project, "eng-team")
+
+    assert not any(u.endswith("teams-latest/eng-team.tar.gz") for u, _ in calls), (
+        "a failed version read must not fall through to the rolling asset")
+
+
+def test_a_missing_agent_yaml_is_not_a_transient_failure(project, monkeypatch):
+    """A 404 is an answer, not a hiccup.
+
+    No agent.yaml at main means the team is version-less or absent from this
+    repo — both of which the asset fetch reports accurately. Only a read that
+    genuinely FAILED (timeout, rate limit, 5xx) may block the fetch, or an
+    ordinary "no such team" turns into a misleading transient-failure error.
+    """
+    _router(monkeypatch, {
+        "agents/registry.yaml": (200, yaml.dump(
+            {"agents": {"ghost": {}}}).encode()),
+        # agent.yaml 404s, and so does every asset.
+    })
+
+    with pytest.raises(RuntimeError, match="no published asset"):
+        registry.fetch(project, "ghost")
+
+
+def test_a_genuinely_versionless_team_is_not_an_error(project, monkeypatch):
+    """The legitimate None — a 200 whose agent.yaml carries no version — still
+    resolves to the rolling asset. Only the FAILURE case is now an error."""
+    _router(monkeypatch, {
+        "agents/registry.yaml": (200, yaml.dump(
+            {"agents": {"smoke-team": {}}}).encode()),
+        "agents/smoke-team/agent.yaml": (200, b"agent: smoke-team\n"),
+        "teams-latest/smoke-team.tar.gz": (200,
+            _asset_tarball("smoke-team", version=None)),
+    })
+
+    dest = registry.fetch(project, "smoke-team")
+    assert (dest / "agent.yaml").is_file()
+
+
 def test_existing_signature_unpinned_still_installs(project, monkeypatch):
     """Back-compat: fetch(project, name) (no version kwarg) still works."""
     _router(monkeypatch, {

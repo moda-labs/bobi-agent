@@ -1355,6 +1355,44 @@ a lane turns out to need an inlined context slice.
   change", contradicting its own `AGENTS.md` decoupling rule; `AGENTS.md` is
   authoritative and the README line is stale.
 
+- **2026-08-05** (Zach, on bobi-agent#821): **this plan's commitment to keep
+  `agents/dogfood-content-review` on the frozen engine is overridden, and the
+  pack is deleted.** Recorded here because the deletion contradicts a choice
+  this plan made deliberately, and a silent contradiction is how the reviewed
+  document and the built one diverge.
+
+  **What this plan committed to.** The example packs stay on the engine because
+  "they are not fleet load, and leaving them is what keeps the engine's test
+  suite meaningful and the fallback exercised", with a convergence gate
+  requiring one dogfood workflow to run end-to-end.
+
+  **Why it was overridden.** The commitment is unexecuted. Measured on
+  `c073c1d`: the pack has no `auto_dispatch` block at all, so none of its four
+  workflows was event-triggered by anything; no CI workflow referenced it; its
+  last substantive change was 2026-07-01; and this plan's Phase 4 never
+  started (#852 was closed NOT_PLANNED in the Linear epic migration, not
+  because it finished). "Kept" meant still on disk, not still exercising the
+  engine, so the fallback proof the commitment was buying did not exist.
+
+  **The deletion trigger is unaffected, and the record should not claim
+  otherwise.** The trigger written at Phase 4 above is a conjunction: no
+  `auto_dispatch` rule naming a workflow, **and** no pack ships `workflows/`.
+  `agents/eng-team` holds open **both** clauses by itself - it is the only pack
+  with dispatch rules (6 of them) and it ships `workflows/`. The example packs
+  hold open only the second clause, which eng-team already holds open.
+  Deleting `dogfood-content-review` therefore advances the trigger by **zero**
+  clauses. The engine stays undeletable until eng-team migrates off it, which
+  is this plan's Phase 4. `agents/personal-assistant` is untouched and also
+  still ships an unused `workflows/`.
+
+  **What survives.** The engine's own test suite is unchanged - it never
+  depended on this pack. The one piece of regression coverage the pack's test
+  carried (D015: routing a count with `!= 0` rather than the unsupported
+  `> 0`) moved to
+  `tests/test_variables.py::TestConditionEquality::test_count_not_equal_zero`,
+  where it pins the operator semantics as engine behavior rather than pack
+  content.
+
 ## Notes
 
 - **Evidence base.** Session numbers come from the live `moda-eng-team` box on

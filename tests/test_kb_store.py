@@ -518,6 +518,25 @@ class TestFTSQuery:
     def test_empty(self):
         assert _fts_query("") == ""
 
+    def test_embedded_quote_is_doubled(self):
+        # FTS5 escapes a '"' inside a phrase by doubling it. Wrapping a token
+        # that carries an odd number of them yields '"5""' — 'unterminated
+        # string' out of the MATCH (D043).
+        assert _fts_query('5"') == '"5"""'
+
+    def test_search_survives_an_unbalanced_quote(self, store):
+        store.add_text("the 5\" display is misaligned", source="notes.md",
+                       embed_fn=_mock_embed)
+        # `bobi recall-memory 'the 5" display bug'` raised straight out of
+        # apsw before the escape landed.
+        assert store.search('the 5" display') is not None
+
+    def test_search_with_an_all_whitespace_query_is_empty(self, store):
+        store.add_text("something searchable", source="notes.md",
+                       embed_fn=_mock_embed)
+        # An empty MATCH expression is itself an FTS5 syntax error.
+        assert store.search("   ") == []
+
 
 # ---------------------------------------------------------------------------
 # info
@@ -661,3 +680,39 @@ class TestOptionalDependencyErrors:
             with pytest.raises(ImportError, match="pip install 'bobi\\[kb\\]'"):
                 KBStore._load_vec(conn)
         conn.close()
+
+
+@requires_kb
+class TestSourceIndexComplete:
+    """`source_index_complete` is the store-owned answer to "is this content
+    fully indexed?" — the question `bobi/memory.py` used to answer by reaching
+    for `_connect`/`_fetchone`/`_chunk_text` in two places (Q033)."""
+
+    def _hash(self, text: str) -> str:
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    def test_true_when_every_chunk_has_an_entry_and_a_vector(self, store):
+        content = "Header\n\n## Tools\n\n- release runbook detail\n"
+        store.add_text(content, source="reference.md", embed_fn=_mock_embed)
+
+        assert store.source_index_complete(
+            "reference.md", self._hash(content), content) is True
+
+    def test_false_when_entries_exist_but_vectors_do_not(self, store):
+        """A partially-embedded source is stale, not present — this is the half
+        a plain entry-count check would miss."""
+        content = "Header\n\n## Tools\n\n- release runbook detail\n"
+        store.add_text(content, source="reference.md", embed_fn=_mock_embed)
+        conn = store._connect()
+        conn.execute("DELETE FROM entries_vec")
+
+        assert store.source_index_complete(
+            "reference.md", self._hash(content), content) is False
+
+    def test_false_when_the_content_hash_differs(self, store):
+        content = "Header\n\n## Tools\n\n- release runbook detail\n"
+        store.add_text(content, source="reference.md", embed_fn=_mock_embed)
+
+        edited = content + "- and one more\n"
+        assert store.source_index_complete(
+            "reference.md", self._hash(edited), edited) is False

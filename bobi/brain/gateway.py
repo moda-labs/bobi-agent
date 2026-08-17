@@ -10,9 +10,12 @@ normalization; the only difference is the per-session environment merged in by
 ``brain.base_url``), the small/fast model default, and never letting an
 ambient real ``ANTHROPIC_API_KEY`` reach the gateway.
 
-Gateway auth is ``ANTHROPIC_AUTH_TOKEN`` only, sourced from the runtime
+Gateway auth normally uses ``ANTHROPIC_AUTH_TOKEN``, sourced from the runtime
 ``.env`` or the parent environment and inherited by the CLI subprocess
-untouched. Ollama needs none; LiteLLM typically wants its master key.
+untouched. Ollama needs none; LiteLLM typically wants its master key. A proxy
+that accepts Claude subscription OAuth can instead run with
+``BOBI_AUTH=subscription`` and no gateway token; the CLI then inherits the
+subscription credentials while Bobi keeps the endpoint pin.
 
 This module also hosts the pieces BOTH engines share: the base-url pin
 helpers and the :class:`GatewayAwareEngine` mixin that flips ``provider`` /
@@ -33,6 +36,17 @@ from bobi.brain.base import BrainCapabilities
 # at process startup) so a stale parent value never leaks across installs.
 GATEWAY_BASE_URL_ENV = "BOBI_GATEWAY_BASE_URL"
 GATEWAY_SMALL_MODEL_ENV = "BOBI_GATEWAY_SMALL_MODEL"
+
+# Pinned in place of a declared-but-empty gateway base URL (#789). RFC 2606
+# reserves .invalid, so a session built against it fails its first turn with a
+# resolution error naming the problem - it can never silently dial the real
+# vendor endpoint carrying the gateway's credentials (the leak the old
+# session-time guard prevented, #655). Non-session commands (doctor, stop,
+# status) keep working, and validate reports the real fix.
+#
+# Lives here, beside the pin helpers that read it, so every base-url semantic
+# has one home; ``bobi.brain`` re-exports it for the existing spelling.
+GATEWAY_UNRESOLVED_BASE_URL = "http://bobi-gateway-base-url-unresolved.invalid"
 
 
 def __getattr__(name: str):
@@ -66,8 +80,6 @@ def require_gateway_base_url() -> str:
     config-file case; the pin sites and ``get_brain``'s alias guard catch
     env-pin gaps before sessions get here.
     """
-    from bobi.brain import GATEWAY_UNRESOLVED_BASE_URL
-
     base_url = gateway_base_url()
     if not base_url or base_url == GATEWAY_UNRESOLVED_BASE_URL:
         raise RuntimeError(

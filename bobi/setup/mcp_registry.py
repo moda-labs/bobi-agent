@@ -31,7 +31,6 @@ class MCPServerSpec:
     name: str                      # display name
     url: str                       # the hosted MCP endpoint
     summary: str                   # what the team does with it
-    transport: str = "http"        # "http" | "sse"
     scopes: tuple[str, ...] = ()   # human-readable granted capabilities
     docs_url: str = ""
     aliases: tuple[str, ...] = ()
@@ -42,24 +41,27 @@ class MCPServerSpec:
     secret_label: str = ""
     secret_placeholder: str = ""
     secret_help: str = ""
-    auth_header: str = "Authorization"   # header the key is sent in
-    auth_value: str = "Bearer {ref}"     # {ref} → ${SECRET_VAR}
     setup_steps: tuple[str, ...] = ()    # human steps to get the key / authorize
     oauth_note: str = ""           # shown for OAuth servers (no static secret)
 
     def headers(self) -> dict:
-        """The `headers:` block for `mcp_servers.<key>` — a single auth header
+        """The `headers:` block for `mcp_servers.<key>` — a bearer auth header
         referencing the key as `${VAR}` (interpolated from .env at config
-        load), or empty for OAuth/public servers."""
+        load), or empty for OAuth/public servers.
+
+        Every hosted server in the registry takes `Authorization: Bearer <key>`,
+        so that shape is written out directly. A future server needing another
+        header gets the field back then — a two-line change.
+        """
         if not self.secret_var:
             return {}
-        ref = "${" + self.secret_var + "}"
-        return {self.auth_header: self.auth_value.format(ref=ref)}
+        return {"Authorization": "Bearer ${" + self.secret_var + "}"}
 
     def server_config(self) -> dict:
         """The agent.yaml `mcp_servers.<key>` value: transport + url (+ headers
-        when the server takes a static key)."""
-        cfg: dict = {"type": self.transport, "url": self.url}
+        when the server takes a static key). Every registry entry is `http`;
+        an `sse` server would reintroduce the field."""
+        cfg: dict = {"type": "http", "url": self.url}
         h = self.headers()
         if h:
             cfg["headers"] = h

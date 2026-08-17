@@ -4,7 +4,9 @@ Agent replies no longer go through here: since #190 Phase 2 they flow
 through the event server's channel gateway (``bobi/events/gateway.py``),
 which owns formatting and delivery. What remains is the direct-token
 path used by system notifications (supervisor sidecar, monitors, workflow
-orchestrator, auth bootstrap) and channel-reference resolution for setup.
+orchestrator, auth bootstrap), channel-reference resolution for setup, and
+workspace-identity lookups (``resolve_auth_info`` / ``resolve_app_id``) for
+registration, subscription auto-detection, and doctor.
 
 All errors are raised unless documented otherwise — callers decide
 how to handle failures.
@@ -18,6 +20,10 @@ import re
 from bobi import http as pooled
 
 log = logging.getLogger(__name__)
+
+
+class SlackAppIdentityError(RuntimeError):
+    """The configured bot token cannot resolve an app-qualified identity."""
 
 
 # ---------------------------------------------------------------------------
@@ -87,19 +93,44 @@ def _convert_markdown_line(line: str) -> str:
     return re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', line)
 
 
-def _convert_markdown_outside_code_blocks(text: str) -> str:
-    lines = text.split("\n")
+def _map_outside_code_blocks(text: str, fn) -> str:
+    """Apply *fn* to every line that is not inside a fenced code block.
+
+    Fence lines themselves are passed through untouched. Shared by every
+    transform that must leave quoted content verbatim.
+    """
     converted: list[str] = []
     in_code_block = False
-    for line in lines:
+    for line in text.split("\n"):
         if line.strip().startswith("```"):
             in_code_block = not in_code_block
             converted.append(line)
         elif in_code_block:
             converted.append(line)
         else:
-            converted.append(_convert_markdown_line(line))
+            converted.append(fn(line))
     return "\n".join(converted)
+
+
+def _convert_markdown_outside_code_blocks(text: str) -> str:
+    return _map_outside_code_blocks(text, _convert_markdown_line)
+
+
+def _expand_escapes_outside_code_blocks(text: str) -> str:
+    """Expand shell-style \\n / \\t, but never inside a fenced code block.
+
+    Notifications invoked from a shell carry literal backslash-n that has to
+    become a real newline. Running that across the whole message also rewrote
+    the JSON, source and log output quoted inside a fence — silently altering
+    the content the fence exists to show verbatim (D076). Inline code spans
+    are not protected here, matching every other pass in this module.
+    """
+    def _expand(line: str) -> str:
+        return (line.replace("\\r\\n", "\n")
+                    .replace("\\n", "\n")
+                    .replace("\\t", "\t"))
+
+    return _map_outside_code_blocks(text, _expand)
 
 
 def _has_open_code_fence(text: str) -> bool:
@@ -166,8 +197,8 @@ def _truncate_slack_message(text: str) -> str:
 
 def format_slack_message(text: str) -> str:
     """Convert markdown to Slack mrkdwn and truncate if needed."""
-    # Escaped newlines from shell invocations
-    text = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+    # Escaped newlines from shell invocations — outside code fences only.
+    text = _expand_escapes_outside_code_blocks(text)
     text = _wrap_markdown_tables(text)
     text = _convert_markdown_outside_code_blocks(text)
     text = _truncate_slack_message(text)
@@ -212,6 +243,84 @@ def _workspace_label(token: str, *, timeout: float = 10) -> str:
     team = result.get("team") or "unknown workspace"
     team_id = result.get("team_id") or "unknown team"
     return f"{team} ({team_id})"
+
+
+def resolve_auth_info(token: str) -> tuple[str, str, str]:
+    """Resolve (team_id, bot_id, bot_user_id) from a bot token via auth.test.
+
+    Best-effort by contract, unlike the rest of this module: every caller
+    (workspace registration, subscription auto-detection, doctor, login-channel
+    bootstrap) treats an unresolvable identity as "not configured" rather than
+    an error, and registration in particular must never block startup. Returns
+    empty strings on any failure. Deliberately hand-builds the request instead
+    of using :func:`_slack_api`, which raises on a non-ok response.
+    """
+    try:
+        resp = pooled.get(
+            "https://slack.com/api/auth.test",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5.0,
+        )
+        data = resp.json()
+        if data.get("ok"):
+            return (
+                data.get("team_id", "") or "",
+                data.get("bot_id", "") or "",
+                data.get("user_id", "") or "",
+            )
+    except Exception as e:  # best-effort — never block startup
+        log.debug("Slack auth.test failed: %s", e)
+    return "", "", ""
+
+
+def resolve_app_id(token: str, bot_id: str) -> str:
+    """Resolve api_app_id from a bot id via bots.info.
+
+    ``auth.test`` does not return the app id, but the event server keys each
+    bot's record by ``api_app_id`` (the only id unique per app AND present on
+    every inbound event) so two bots can share one workspace. Best-effort,
+    same contract as :func:`resolve_auth_info`.
+    """
+    if not bot_id:
+        return ""
+    from urllib.parse import quote
+
+    try:
+        resp = pooled.get(
+            f"https://slack.com/api/bots.info?bot={quote(bot_id)}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5.0,
+        )
+        data = resp.json()
+        if data.get("ok"):
+            return (data.get("bot", {}) or {}).get("app_id", "") or ""
+    except Exception as e:  # best-effort — callers decide whether fallback is safe
+        log.debug("Slack bots.info failed: %s", e)
+    return ""
+
+
+def require_app_identity(token: str) -> tuple[str, str, str, str]:
+    """Return ``(team_id, bot_id, bot_user_id, app_id)`` or fail actionably.
+
+    Inbound Slack routing is app-qualified whenever Slack supplies
+    ``api_app_id``. Falling back to a workspace-only subscription would either
+    drop those events or cross-deliver them between apps in the same workspace,
+    so subscription paths must require the complete identity.
+    """
+    team_id, bot_id, bot_user_id = resolve_auth_info(token)
+    if not team_id or not bot_id:
+        raise SlackAppIdentityError(
+            "could not resolve Slack bot identity via auth.test; verify that "
+            "SLACK_BOT_TOKEN is a valid Bot User OAuth Token."
+        )
+    app_id = resolve_app_id(token, bot_id)
+    if not app_id:
+        raise SlackAppIdentityError(
+            "could not resolve Slack app_id via bots.info. The bot token needs "
+            "the users:read scope for app-qualified event routing; add the "
+            "scope, reinstall the Slack app, and refresh SLACK_BOT_TOKEN."
+        )
+    return team_id, bot_id, bot_user_id, app_id
 
 
 def _user_matches(member: dict, handle: str) -> bool:

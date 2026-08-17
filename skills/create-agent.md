@@ -92,6 +92,34 @@ linear:
 Only include services the team actually needs. `bobi agents install`
 prompts for any `${VAR}` references and writes them to `run/.env`.
 
+`chat:` must name a service the pack declares. Ingress subscribes topics from
+declared services only, so `chat: slack` without a `slack` service means no
+Slack event ever arrives and a reply has no bot token — while the role prompt
+goes on describing how to handle Slack messages.
+
+#### auto_dispatch: `event:` is a type, never a type + action
+
+`auto_dispatch` rules match the event **type** by exact equality, and the type
+is whatever the adapter emits (`docs/EVENT_SERVER.md` lists them per source).
+Anything narrower belongs in `match:`, against the event's fields:
+
+```yaml
+auto_dispatch:
+  - event: github.issues           # NOT github.issues.assigned
+    match:
+      action: assigned             # the action is a FIELD, not part of the type
+    workflow: issue-lifecycle
+```
+
+The distinction is per source and there is no universal rule: GitHub emits
+`github.<webhook-event>` and carries the action in `fields.action`, while
+Linear emits `linear.<type>.<action>` with the action *in* the type. A rule
+naming a type nothing emits fails silently — the deterministic dispatch it
+promises simply never happens and the work falls through to whatever the
+director LLM decides. Startup preflight (`bobi agent <name> start`) warns
+about the shapes it recognizes, but it fails open on sources it has not been
+taught, so it is a safety net rather than a guarantee.
+
 To give the team host tools, skills, or MCP servers, declare them under
 `tool_library:` (a named catalog entry like `- venn`, or an inline dependency
 with a required `success:`). See `docs/TOOL_LIBRARY.md` for the two ways to
@@ -249,12 +277,15 @@ brain:
 
 Gateway auth is `ANTHROPIC_AUTH_TOKEN` in the runtime `.env`, and it is
 optional - Ollama serves unauthenticated; LiteLLM typically wants its master
-key. An ambient real `ANTHROPIC_API_KEY` is never sent to a gateway. Model
-names are the backend's own: the Claude aliases below only mean something if
-the gateway serves models by those names. Cross-model session continuation is
-disabled for gateways (a model switch starts fresh and re-injects context),
-and costs reported through a gateway are nominal, attributed to provider
-`gateway` in `bobi agent <name> costs`.
+key. If the gateway accepts Claude subscription OAuth, set
+`BOBI_AUTH=subscription` and leave `ANTHROPIC_AUTH_TOKEN` unset;
+`bobi agent <name> login-bootstrap` then creates the OAuth credentials without
+removing the `base_url` pin. An ambient real `ANTHROPIC_API_KEY` is never sent
+to a gateway. Model names are the backend's own: the Claude aliases below only
+mean something if the gateway serves models by those names. Cross-model
+session continuation is disabled for gateways (a model switch starts fresh
+and re-injects context), and costs reported through a gateway are nominal,
+attributed to provider `gateway` in `bobi agent <name> costs`.
 
 For an OpenAI-compatible gateway, use the codex engine:
 

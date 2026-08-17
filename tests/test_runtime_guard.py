@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -88,6 +89,48 @@ class TestRuntimeWritePolicy:
                 entered = True
 
         assert not entered
+
+    def test_a_failed_unlock_relocks_what_it_already_opened(self, tmp_path,
+                                                            monkeypatch):
+        """D044 — the +w sweep ran BEFORE the try, so its finally never fired.
+
+        A package image containing one file owned by another uid (the exact
+        class #774 handled for the readonly direction) raises partway through
+        the unlock. Every file chmodded before that point stayed writable, with
+        no rollback — the protected tree sits half-unlocked, failing doctor's
+        write-policy check, until the next subagent spawn happens to re-run
+        prepare_brain_runtime.
+        """
+        package = _write_runtime(tmp_path)
+        # Everything starts locked, as a real installed image does.
+        for path in [*package.rglob("*"), package]:
+            if not path.is_symlink():
+                path.chmod(path.stat().st_mode & ~0o222)
+
+        real_chmod = os.chmod
+        unlocked: list[Path] = []
+
+        def chmod(path, mode, **kwargs):
+            if mode & stat.S_IWUSR:          # the mutable (+w) sweep
+                if len(unlocked) >= 1:       # ...fails partway through it
+                    raise PermissionError(1, "Operation not permitted", str(path))
+                unlocked.append(Path(path))
+            return real_chmod(path, mode, **kwargs)
+
+        monkeypatch.setattr(os, "chmod", chmod)
+
+        with pytest.raises(PermissionError):
+            with with_mutable_runtime_package(tmp_path):
+                pass
+
+        monkeypatch.undo()
+        assert unlocked, "the test never opened anything — nothing to roll back"
+        still_writable = [
+            str(p) for p in package.rglob("*")
+            if not p.is_symlink() and p.stat().st_mode & 0o222
+        ]
+        assert not still_writable, (
+            f"a failed unlock left the tree writable: {still_writable}")
 
     def test_check_fails_for_symlink_escaping_package(self, tmp_path):
         package = _write_runtime(tmp_path)

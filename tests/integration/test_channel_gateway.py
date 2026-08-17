@@ -272,6 +272,73 @@ class TestReplyEndToEnd:
 
 
 class TestInboundMentionEndToEnd:
+    def test_app_qualified_event_reproduces_legacy_drop_and_proves_fix(
+        self, gateway
+    ):
+        """The same Slack event misses the legacy topic and reaches the fixed one."""
+        import websocket
+
+        _project, _stub, es_url, bubble = gateway
+
+        def _deployment(name: str, topic: str) -> dict:
+            response = signed_request(
+                es_url, "POST", "/deployments",
+                {"name": name, "subscriptions": [topic]},
+                bubble["bubble_id"], bubble["bubble_key"], timeout=10,
+            )
+            assert response.status_code == 201, response.text
+            return response.json()
+
+        def _connect(deployment: dict):
+            ws = websocket.create_connection(
+                f"{es_url.replace('http://', 'ws://')}"
+                f"/deployments/{deployment['deployment_id']}/subscribe?last_seen=0",
+                header=[f"Authorization: Bearer {deployment['api_key']}"],
+                timeout=10,
+            )
+            assert json.loads(ws.recv())["type"] == "connected"
+            return ws
+
+        legacy = _deployment("gateway-legacy-routing", "slack:T_GW")
+        qualified = _deployment(
+            "gateway-app-routing", "slack:T_GW:app:A_GW"
+        )
+        legacy_ws = _connect(legacy)
+        qualified_ws = _connect(qualified)
+        try:
+            response = httpx.post(f"{es_url}/webhooks/slack", json={
+                "type": "event_callback",
+                "team_id": "T_GW",
+                "api_app_id": "A_GW",
+                "event_id": "Ev-app-qualified-routing",
+                "event": {
+                    "type": "app_mention",
+                    "user": "U_HUMAN",
+                    "channel": "C_GW",
+                    "channel_type": "channel",
+                    "text": "<@U_BOTGW> prove app routing",
+                    "ts": "1700000000.000050",
+                },
+            }, timeout=10)
+            assert response.status_code == 200, response.text
+            assert response.json()["delivered_to"] == 1
+
+            delivered = json.loads(qualified_ws.recv())
+            assert delivered["type"] == "event"
+            event = delivered["data"]
+            assert event["id"] == "Ev-app-qualified-routing"
+            assert event["topics"] == [
+                "slack:T_GW:app:A_GW",
+                "slack:T_GW:app:A_GW:C_GW",
+            ]
+
+            legacy_ws.settimeout(0.5)
+            with pytest.raises(websocket.WebSocketTimeoutException):
+                legacy_ws.recv()
+        finally:
+            legacy_ws.close()
+            qualified_ws.close()
+
     def test_webhook_to_typing_full_loop(self, gateway, monkeypatch):
         """The full inbound loop minus the agent: a raw app_mention webhook
         hits the real server, the Chat SDK bridge normalizes it, a subscribed

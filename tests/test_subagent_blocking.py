@@ -9,6 +9,7 @@ deferred rounds, connection loss, and the defer hook itself.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 import time
 from dataclasses import dataclass, field
@@ -45,7 +46,6 @@ from bobi.subagent import (
     _emit_session_finished,
     _emit_session_started,
     _make_defer_hook,
-    _parse_check_output,
     _parse_check_verdict,
     _parse_gate_verdict,
     _run_agent_supervised,
@@ -57,6 +57,7 @@ from bobi.subagent import (
     run_phase_blocking,
     spawn_adhoc,
 )
+from bobi.sdk import TERMINAL_FAILED
 # The real Session, imported under an alias because SESSION_PATCH below
 # replaces ``bobi.session.Session`` for the duration of a test.
 from bobi.session import Session as _RealSession
@@ -749,6 +750,75 @@ class TestRunAgentSupervisedExceptions:
         assert result.error == "subprocess timeout after 60s"
 
     @pytest.mark.asyncio
+    async def test_a_run_that_overruns_its_timeout_records_a_terminal_failure(self):
+        """D067: the timeout must be enforced *inside* the supervised loop.
+
+        The test above reaches the ``except asyncio.TimeoutError`` handler only
+        because it makes ``connect()`` raise ``TimeoutError`` synthetically —
+        nothing in production does that. The real overrun path is this one: the
+        agent hangs in ``receive_response()`` and the caller's outer
+        ``asyncio.wait_for`` (``run_check_blocking``, subagent.py) cancels it.
+
+        Pre-fix, nothing enforces ``timeout`` inside the coroutine, so the
+        cancellation arrives as ``CancelledError`` — a ``BaseException`` that
+        skips both ``except`` clauses — and the ``TERMINAL_FAILED`` persist
+        never runs: ``state.json`` records neither the terminal failure nor the
+        timeout reason, and the outer ``wait_for`` raises out of this test.
+        """
+        mock_module = MagicMock()
+        mock_module.AssistantMessage = FakeAssistantMessage
+        mock_module.ClaudeAgentOptions = MagicMock()
+        mock_module.ResultMessage = FakeResultMessage
+        mock_module.TextBlock = FakeTextBlock
+
+        class HangingClient(FakeClient):
+            """Connects, then never produces a ResultMessage."""
+
+            async def receive_response(self):
+                while True:
+                    await asyncio.sleep(0.01)
+                yield  # pragma: no cover - keeps this an async generator
+
+        client = HangingClient(rounds=[[]])
+        mock_module.ClaudeSDKClient = MagicMock(return_value=client)
+        registry = MagicMock()
+
+        with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=registry), \
+             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
+
+            # The outer wait_for mirrors the sole caller, with the generous
+            # grace the fix gives it: the inner timeout is what must fire.
+            result = await asyncio.wait_for(
+                _run_agent_supervised(
+                    prompt="Do it",
+                    cwd="/tmp/test",
+                    run_key="TEST-OVERRUN",
+                    phase="check",
+                    timeout=0.3,
+                ),
+                timeout=20,
+            )
+
+        assert result.success is False
+        assert result.error == "subprocess timeout after 0.3s"
+        assert client.disconnected, "the hung client was never disconnected"
+
+        terminal_calls = [
+            c for c in registry.mark_terminal.call_args_list
+            if c.args[1] == TERMINAL_FAILED
+        ]
+        assert terminal_calls, (
+            "an overrun run left no terminal record in state.json — the "
+            "reconciler has nothing to re-emit and the entry never names the "
+            "timeout as the reason"
+        )
+        assert "timeout" in terminal_calls[0].kwargs.get("error", "")
+
+    @pytest.mark.asyncio
     async def test_disconnect_exception_swallowed(self):
         """Exception during disconnect is swallowed."""
         messages = [
@@ -1279,53 +1349,6 @@ class TestBuildCheckPrompt:
     def test_includes_extra_context(self):
         prompt = _build_check_prompt("Check it", extra={"url": "https://x.test"})
         assert "https://x.test" in prompt
-
-
-# ---------------------------------------------------------------------------
-# Tests: _parse_check_output
-# ---------------------------------------------------------------------------
-
-class TestParseCheckOutput:
-    def test_finding_true_with_summary_and_details(self):
-        text = 'Looks bad.\n{"finding": true, "summary": "down", "details": {"status": 503}}'
-        finding, summary, details = _parse_check_output(text)
-        assert finding is True
-        assert summary == "down"
-        assert details == {"status": 503}
-
-    def test_finding_false(self):
-        finding, summary, details = _parse_check_output('All good.\n{"finding": false}')
-        assert finding is False
-        assert summary == ""
-        assert details == {}
-
-    def test_picks_last_verdict_json(self):
-        text = ('{"finding": false}\n'
-                'reconsidering...\n'
-                '{"finding": true, "summary": "actually down"}')
-        finding, summary, _ = _parse_check_output(text)
-        assert finding is True
-        assert summary == "actually down"
-
-    def test_ignores_non_verdict_json(self):
-        text = '{"unrelated": 1}\nfinal\n{"finding": true, "summary": "x"}'
-        finding, summary, _ = _parse_check_output(text)
-        assert finding is True
-        assert summary == "x"
-
-    def test_no_json_defaults_to_no_finding(self):
-        finding, summary, details = _parse_check_output("just prose, no json")
-        assert finding is False
-        assert summary == ""
-        assert details == {}
-
-    def test_empty_text(self):
-        assert _parse_check_output("") == (False, "", {})
-
-    def test_non_dict_details_coerced_to_empty(self):
-        text = '{"finding": true, "summary": "x", "details": "oops"}'
-        _, _, details = _parse_check_output(text)
-        assert details == {}
 
 
 class TestParseCheckVerdict:
@@ -2104,6 +2127,61 @@ class TestParseGateVerdict:
     def test_non_string_keys_coerced(self):
         assert _parse_gate_verdict('{"relevant": [42]}', {"42"}) == ["42"]
 
+
+class TestDerivedVerdictSessionNames:
+    """The DEFAULT (unnamed) slug of each blocking verdict runner.
+
+    The named case is already pinned; the derived case was not, so the shared
+    ``_register_verdict_session`` preamble could mint any prefix it liked and
+    every other test stayed green. The slug is the run_key the registry and
+    ``bobi sessions`` show, and it is stable across ticks of the same monitor,
+    so its shape is a contract rather than an implementation detail.
+    """
+
+    @staticmethod
+    def _seed_slug(phase: str, seed: str) -> str:
+        return f"{phase}-{hashlib.sha256(seed.encode()).hexdigest()[:8]}"
+
+    def _registered(self, invoke) -> object:
+        async def _mock(prompt, cwd, run_key, phase, timeout, **kw):
+            return AgentResult(
+                session_id="s", run_key=run_key, phase=phase, success=True,
+                final_text='{"finding": false, "relevant": [], '
+                           '"success": true, "updated": false}',
+            )
+
+        mock_registry = MagicMock()
+        with patch(f"{SDK_PATCH}._run_agent_supervised", side_effect=_mock), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry):
+            invoke()
+        mock_registry.register.assert_called_once()
+        return mock_registry.register.call_args[0][0]
+
+    def test_check_slug_is_hash_of_the_description(self):
+        entry = self._registered(
+            lambda: run_check_blocking(description="Check prod", cwd="/tmp"))
+        slug = self._seed_slug("check", "Check prod")
+        assert entry.run_key == slug
+        assert entry.name == f"monitor-{slug}-check"
+        assert entry.role == "monitor"
+
+    def test_gate_slug_is_hash_of_criterion_plus_sorted_item_keys(self):
+        entry = self._registered(
+            lambda: run_gate_blocking("about billing", _GATE_ITEMS, cwd="/tmp"))
+        keys = sorted({str(i.get("key", "")) for i in _GATE_ITEMS})
+        slug = self._seed_slug("gate", "about billing" + "".join(keys))
+        assert entry.run_key == slug
+        assert entry.name == f"monitor-{slug}-gate"
+        assert entry.role == "monitor"
+
+    def test_curator_slug_is_hash_of_the_task(self):
+        entry = self._registered(
+            lambda: run_curator_blocking(task="Rewrite policy", cwd="/tmp"))
+        slug = self._seed_slug("curator", "Rewrite policy")
+        assert entry.run_key == slug
+        # role "curator", not "monitor" — the cheap monitor model must not apply.
+        assert entry.name == f"curator-{slug}-curator"
+        assert entry.role == "curator"
 
 class TestRunGateBlocking:
     def test_relevant_parsed_from_agent_output(self):

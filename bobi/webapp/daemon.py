@@ -19,17 +19,15 @@ defense-in-depth, same trust model as the other local UIs.
 
 from __future__ import annotations
 
-import json
 import os
-import secrets
 import subprocess
 import sys
 import time
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from bobi import paths
+from bobi import http, paths
+from bobi.sdk import pid_alive, read_int_file
 from bobi.webui_common.security import WEBUI_TOKEN_HEADER
 
 DEFAULT_PORT = 8642
@@ -67,46 +65,37 @@ def configured_port() -> int:
 
 
 def ensure_token() -> str:
-    """The persisted app token, minted on first use (0600)."""
+    """The persisted app token, minted on first use (0600).
+
+    Unlike a per-launch UI secret this one is *read back* when it already
+    exists — that is the whole point of persisting it, so the dashboard URL
+    survives a restart. Only the mint half is shared with the other UIs.
+    """
     path = _token_path()
     if path.exists():
         token = path.read_text().strip()
         if token:
             return token
-    token = secrets.token_urlsafe(24)
-    path.write_text(token)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-    return token
+    from bobi.webui_common.launcher import write_secret
 
-
-def _read_int(path: Path) -> int:
-    try:
-        return int(path.read_text().strip())
-    except (OSError, ValueError):
-        return 0
-
-
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return False
-    return True
+    return write_secret(path)
 
 
 def _ping(port: int, token: str, timeout: float = 1.0) -> bool:
-    req = urllib.request.Request(
-        f"http://127.0.0.1:{port}/api/ping",
-        headers={WEBUI_TOKEN_HEADER: token},
-    )
+    """Whether the app answers /api/ping on *port* with *token*.
+
+    Anything short of a JSON ``{"ok": true}`` body is a no: a connection
+    refused during startup polling, a rejected token, a half-built server
+    that 500s. Callers use this as a liveness proof, so failure closed is
+    the only safe reading.
+    """
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return bool(json.loads(resp.read() or b"{}").get("ok"))
+        resp = http.get(
+            f"http://127.0.0.1:{port}/api/ping",
+            headers={WEBUI_TOKEN_HEADER: token},
+            timeout=timeout,
+        )
+        return bool(resp.json().get("ok"))
     except Exception:
         return False
 
@@ -121,13 +110,32 @@ class AppStatus:
     pid: int = 0
     port: int = 0
     url: str = ""
+    # Set by stop() when the recorded pid is alive but did not identify itself
+    # as this app, so nothing was signalled (D037).
+    unverified: bool = False
+    # Set by stop() when the pid is alive and ours but belongs to another uid,
+    # so the signal was refused. Distinct from `unverified`: there the state
+    # was stale and got cleared, here the app is genuinely still running.
+    not_permitted: bool = False
+
+
+def _is_this_app(pid: int) -> bool:
+    """Whether the live *pid* is this bobi app and not a reused pid.
+
+    Identity is "it answers /api/ping on the recorded port with the local
+    token" — the same proof :func:`status` requires before reporting running.
+    """
+    port = read_int_file(_port_path())
+    if not port:
+        return False
+    return _ping(port, ensure_token())
 
 
 def status() -> AppStatus:
     """Liveness = pid alive AND the server answers /api/ping."""
-    pid = _read_int(_pid_path())
-    port = _read_int(_port_path())
-    if not (_pid_alive(pid) and port):
+    pid = read_int_file(_pid_path())
+    port = read_int_file(_port_path())
+    if not (pid_alive(pid) and port):
         return AppStatus(running=False, pid=0, port=0)
     token = ensure_token()
     if not _ping(port, token):
@@ -166,7 +174,7 @@ def start(*, open_browser: bool = True) -> AppStatus:
                 f"bobi app failed to start (exit {proc.returncode}) — "
                 f"see {_log_path()}"
             )
-        port = _read_int(_port_path())
+        port = read_int_file(_port_path())
         if port and _ping(port, token):
             url = app_url(port, token)
             if open_browser:
@@ -179,22 +187,45 @@ def start(*, open_browser: bool = True) -> AppStatus:
     )
 
 
-def stop() -> AppStatus:
-    """Stop the daemon; returns the pre-stop status."""
+def stop(*, force: bool = False) -> AppStatus:
+    """Stop the daemon; returns the pre-stop status.
+
+    A live pid is not proof the pidfile still describes THIS app. run_foreground
+    only removes the pidfile on a graceful exit, so a crash leaves it pointing
+    at a dead pid the OS is free to reuse — and signalling that blindly kills an
+    unrelated process (D037). Identity is confirmed the same way :func:`status`
+    has always confirmed it: the app answers /api/ping on the recorded port with
+    the local token. ``force`` skips the check for an app wedged past answering.
+    """
     import signal
 
-    pid = _read_int(_pid_path())
-    if not _pid_alive(pid):
+    pid = read_int_file(_pid_path())
+    if not pid_alive(pid):
         _pid_path().unlink(missing_ok=True)
         _port_path().unlink(missing_ok=True)
         return AppStatus(running=False)
-    os.kill(pid, signal.SIGTERM)
-    for _ in range(50):
-        if not _pid_alive(pid):
-            break
-        time.sleep(0.1)
-    else:
-        os.kill(pid, signal.SIGKILL)
+    if not force and not _is_this_app(pid):
+        # Alive, but not ours to kill. Clear the stale state so the next
+        # `bobi app start` is not blocked by it, and signal nothing.
+        _pid_path().unlink(missing_ok=True)
+        _port_path().unlink(missing_ok=True)
+        return AppStatus(running=False, pid=pid, unverified=True)
+    # `pid_alive` counts EPERM as alive — a pid we may not signal is
+    # emphatically not free for the OS to hand out — so the kill below is the
+    # first place a uid mismatch can surface (an app once started via sudo, or
+    # a BOBI_HOME shared into a container). Report it instead of tracebacking,
+    # and leave the pid/port files alone: they still describe a live app, so
+    # clearing them would let the next `start` spawn a second daemon.
+    try:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(50):
+            if not pid_alive(pid):
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except PermissionError:
+        return AppStatus(running=False, pid=pid, not_permitted=True)
     _pid_path().unlink(missing_ok=True)
     _port_path().unlink(missing_ok=True)
     return AppStatus(running=False, pid=pid)
@@ -203,20 +234,20 @@ def stop() -> AppStatus:
 def run_foreground() -> int:
     """The daemon child (`bobi app run`): bind loopback, serve until stopped.
 
+    This binds its own socket rather than going through `serve_local`: the
+    port is fixed (not ephemeral) and the pid/port files have to be written
+    between bind and serve, so `start` can find the daemon. Everything either
+    side of that is the shared launch contract.
+
     Also usable directly in a terminal for development."""
-    import socket
-
-    import uvicorn
-
     from bobi.webapp.server import build_app
+    from bobi.webui_common.launcher import run_server, serve_socket
 
     port = configured_port()
     token = ensure_token()
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        sock.bind(("127.0.0.1", port))
+        sock = serve_socket("127.0.0.1", port)
     except OSError as e:
         print(f"bobi app: cannot bind 127.0.0.1:{port} ({e}). "
               f"Set BOBI_APP_PORT to use another port.", file=sys.stderr)
@@ -225,12 +256,8 @@ def run_foreground() -> int:
     _port_path().write_text(str(bound))
     _pid_path().write_text(str(os.getpid()))
 
-    app = build_app(token=token)
-    server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
     try:
-        server.run(sockets=[sock])
-    except KeyboardInterrupt:
-        pass
+        run_server(build_app(token=token), sock)
     finally:
         sock.close()
         _port_path().unlink(missing_ok=True)
@@ -239,7 +266,6 @@ def run_foreground() -> int:
 
 
 def _open_browser(url: str) -> None:
-    import threading
-    import webbrowser
+    from bobi.webui_common.launcher import open_browser_soon
 
-    threading.Timer(0.3, lambda: webbrowser.open(url)).start()
+    open_browser_soon(url, delay=0.3)

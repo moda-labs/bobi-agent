@@ -1484,6 +1484,24 @@ describe("ingest tokens (#640)", () => {
 			expect(event.delivery).toBe("bulk");
 			expect(event.v).toBe(2);
 		});
+
+		it("emits the bare topic plus its source-qualified spelling", () => {
+			const event = createIngestEvent("alert/firing", {}, "bub_1");
+			expect(event.topics).toEqual(["alert/firing", "ingest/alert/firing"]);
+		});
+
+		// Q100: sourceQualifiedTopics suppresses the prefix when the topic
+		// already carries it, and its comment claims BOTH createTopicEvent and
+		// createIngestEvent route through it "so the two spellings can never
+		// drift". createIngestEvent re-spelled the pair inline instead, and had
+		// already drifted here — "ingest/" is not in INGEST_RESERVED_SOURCES,
+		// so a caller can mint this topic and get a nonsense doubled prefix.
+		it("does not double-prefix a topic that already starts with ingest/", () => {
+			expect(validateIngestTopic("ingest/alert")).toBeNull();
+			const event = createIngestEvent("ingest/alert", {}, "bub_1");
+			expect(event.topics).toEqual(["ingest/alert"]);
+			expect(event.topics).not.toContain("ingest/ingest/alert");
+		});
 	});
 });
 
@@ -1998,6 +2016,44 @@ describe("handleRegisterDeployment", () => {
 		const store = createMockStorage();
 		const result = await handleRegisterDeployment(store, { name: "test", subscriptions: [] }, mintCtx("POST", "/deployments", ""));
 		expect(result.status).toBe(400);
+	});
+
+	// D089 — the MINT path is unauthenticated, so `body` is attacker-shaped. A
+	// bare `as string[]` cast satisfies the `!subscriptions?.length` guard with a
+	// non-empty STRING, which then iterates character-by-character into the
+	// subscription index; a non-string ELEMENT reaches isGlobalTopic and throws
+	// on `.startsWith`, surfacing as a 500 after a bubble has already been
+	// persisted. Both must be a clean 400 with nothing written.
+	it("rejects a string (not array) subscriptions without indexing it per character (D089)", async () => {
+		const store = createMockStorage();
+		const body = { name: "x", subscriptions: "github:foo" };
+		const raw = JSON.stringify(body);
+		const result = await handleRegisterDeployment(store, body, mintCtx("POST", "/deployments", raw));
+		expect(result.status).toBe(400);
+		// No per-character subscriptions ("g", "i", "t", ...) and no orphan bubble.
+		expect(store.subscriptions.size).toBe(0);
+		expect(store.deployments.size).toBe(0);
+		expect(store.bubbles.size).toBe(0);
+	});
+
+	it("rejects a non-string element in subscriptions instead of throwing (D089)", async () => {
+		const store = createMockStorage();
+		const body = { name: "x", subscriptions: [42] };
+		const raw = JSON.stringify(body);
+		const result = await handleRegisterDeployment(store, body, mintCtx("POST", "/deployments", raw));
+		expect(result.status).toBe(400);
+		expect(store.bubbles.size).toBe(0);
+		expect(store.deployments.size).toBe(0);
+	});
+
+	it("rejects a non-string name (D089)", async () => {
+		const store = createMockStorage();
+		const body = { name: { evil: true }, subscriptions: ["inbox/x"] };
+		const raw = JSON.stringify(body);
+		const result = await handleRegisterDeployment(store, body, mintCtx("POST", "/deployments", raw));
+		expect(result.status).toBe(400);
+		expect(store.deployments.size).toBe(0);
+		expect(store.bubbles.size).toBe(0);
 	});
 
 	it("supersedes a prior deployment with the same name in the same bubble (#278)", async () => {
@@ -2879,6 +2935,73 @@ describe("handleSlackWorkspaceRegister", () => {
 		expect(store.delivered).toHaveLength(0);
 	});
 
+	// Q099: these three calls moved from hand-rolled fetch() to the Chat SDK's
+	// callSlackApi, which POSTs a form body where bots.info used to be a GET
+	// with a query string. Pin the resolution itself, and the argument that
+	// now rides in the body, so that wire change cannot regress silently.
+	it("resolves app_id from bots.info and keys the bot map by it", async () => {
+		const store = createMockStorage();
+		const calls: Array<{ url: string; body: string }> = [];
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			calls.push({ url: u, body: String(init?.body ?? "") });
+			if (u.includes("auth.test")) {
+				return fetchOk(200, { ok: true, team_id: "T_RESOLVE", bot_id: "B_RESOLVED" });
+			}
+			if (u.includes("bots.info")) {
+				return fetchOk(200, { ok: true, bot: { app_id: "A_RESOLVED" } });
+			}
+			return fetchOk(200, { ok: true });
+		}));
+
+		// No app_id supplied: it can only come from the bots.info round-trip.
+		const res = await handleSlackWorkspaceRegister(store, {
+			workspace_id: "T_RESOLVE", bot_token: "xoxb-r", signing_secret: "sec-r",
+		}, "bubA");
+
+		expect(res.status).toBe(200);
+		expect((res.body as Record<string, unknown>).app_id).toBe("A_RESOLVED");
+		expect(store.slackWorkspaces.get("T_RESOLVE")?.bots?.A_RESOLVED?.signing_secret)
+			.toBe("sec-r");
+
+		const botsInfo = calls.find((c) => c.url.includes("bots.info"))!;
+		expect(botsInfo).toBeDefined();
+		expect(botsInfo.body).toContain("bot=B_RESOLVED");
+	});
+
+	// D048: mergeBot only protects SEQUENTIAL registrations. The global write
+	// is a read-merge-write across an await, so two bots registering the same
+	// workspace at the same time (a fleet roll restarting both agents) each
+	// merge onto the snapshot they read before the other wrote, and the second
+	// put drops the first app's entry — including its per-app signing_secret,
+	// whose loss 401s that app's inbound events. That is the exact incident
+	// mergeBot was written to prevent, reached by a different route.
+	it("does not lose a concurrently-registering bot's entry", async () => {
+		const store = createMockStorage();
+		const realGet = store.getSlackWorkspace.bind(store);
+		// Any real store's read takes time; the yield is what opens the window.
+		store.getSlackWorkspace = async (key: string) => {
+			const value = await realGet(key);
+			await new Promise((r) => setTimeout(r, 10));
+			return value;
+		};
+
+		await Promise.all([
+			handleSlackWorkspaceRegister(store, {
+				workspace_id: "T_RACE", bot_token: "xoxb-1", bot_id: "B1", app_id: "A1",
+				signing_secret: "sec-1",
+			}),
+			handleSlackWorkspaceRegister(store, {
+				workspace_id: "T_RACE", bot_token: "xoxb-2", bot_id: "B2", app_id: "A2",
+				signing_secret: "sec-2",
+			}),
+		]);
+
+		const ws = store.slackWorkspaces.get("T_RACE");
+		expect(ws?.bots?.A1?.signing_secret).toBe("sec-1");
+		expect(ws?.bots?.A2?.signing_secret).toBe("sec-2");
+	});
+
 	// Regression: a re-registration that OMITS signing_secret (e.g. an older
 	// client that doesn't send it) must NOT wipe a previously-stored secret —
 	// otherwise every restart of that client drops the per-app secret and the
@@ -3376,6 +3499,41 @@ describe("whatsapp number registration and outbound send", () => {
 		expect((typing.body as Record<string, unknown>).supported).toBe(false);
 		const history = await handleChannelsHistory(store, WA_CONV, 10, "bubA");
 		expect(history.status).toBe(400);
+	});
+
+	// D046: the file+edit_ref path validated text as REQUIRED, then performed
+	// the placeholder edit only when the channel supports editing - and
+	// uploaded the files with no comment either way. On WhatsApp (edit: false)
+	// the required text was therefore accepted, never delivered, and the call
+	// still returned 200. The text-only path above already degrades correctly.
+	it("delivers the text as the file caption when a placeholder edit cannot be made", async () => {
+		const store = createMockStorage();
+		const sends: Array<Record<string, unknown>> = [];
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes(`/${WA_PNID}?fields=id`)) return fetchOk(200, { id: WA_PNID });
+			if (u.endsWith(`/${WA_PNID}/media`)) return fetchOk(200, { id: "media.1" });
+			if (u.endsWith(`/${WA_PNID}/messages`)) {
+				sends.push(JSON.parse(String(init?.body)));
+				return fetchOk(200, { messages: [{ id: `wamid.out.${sends.length}` }] });
+			}
+			return fetchOk(404, { error: { message: `unexpected ${u}` } });
+		}));
+		await register(store);
+		openWindow(store);
+
+		const res = await handleChannelsSend(store, {
+			conversation: WA_CONV,
+			text: "here's the report",
+			mode: "final",
+			edit_ref: "wamid.placeholder",
+			files: [{ name: "report.pdf", content_b64: btoa("pdf-bytes") }],
+		}, "bubA");
+
+		expect(res.status).toBe(200);
+		expect(sends).toHaveLength(1);
+		const doc = sends[0]!.document as Record<string, unknown>;
+		expect(doc.caption).toBe("here's the report");
 	});
 
 	it("clamps document captions to the 1024-char Cloud API media limit", async () => {

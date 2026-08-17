@@ -15,11 +15,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import yaml
 
@@ -29,7 +28,6 @@ from bobi.sdk import (
     TERMINAL_COMPLETED, TERMINAL_FAILED, ACTIVE_STATUSES,
 )
 from bobi.subagent import (
-    AgentResult,
     _emit_lifecycle_event,
     _network_drop_error,
     _timeout_error,
@@ -74,6 +72,49 @@ def _named_exception(e: BaseException) -> str:
 class _NotifyOutcome:
     delivered: bool
     error: str = ""
+
+
+def remind_workflow(run: WorkflowRun, workflow: Workflow) -> _NotifyOutcome:
+    """Replay the notification that directly armed a waiting workflow gate.
+
+    This is delivery only: it does not emit the awaited event, mutate the run,
+    or resume execution. The saved visit map disambiguates branch-specific
+    notifications that lead to the same await step.
+    """
+    if run.status != "waiting" or run.suspended_at_step <= 0:
+        return _NotifyOutcome(False, "run is not waiting for action")
+
+    await_idx = run.suspended_at_step - 1
+    if await_idx >= len(workflow.steps):
+        return _NotifyOutcome(False, "saved await step is outside the workflow")
+    await_step = workflow.steps[await_idx]
+    if not await_step.await_event:
+        return _NotifyOutcome(False, "saved step is not an await gate")
+
+    visits = (run.variable_scopes.get("_runtime", {}) or {}).get("visits", {})
+    candidates = []
+    for idx, step in enumerate(workflow.steps):
+        if not step.notify:
+            continue
+        if step.goto == await_step.name or idx + 1 == await_idx:
+            candidates.append((idx, step))
+    visited = [item for item in candidates if visits.get(item[1].name)]
+    if visited or len(candidates) == 1:
+        _, notify_step = max(visited or candidates, key=lambda item: item[0])
+    else:
+        action = await_step.await_event.replace("_", " ")
+        subject = f" for {run.run_key}" if run.run_key else ""
+        notify_step = StepDef(
+            name=f"remind_{await_step.name}", notify="slack",
+            message=(f"Reminder: {run.workflow_name}{subject} is waiting for "
+                     f"your {action}. Reply in this thread to continue, or "
+                     "close the workflow from Bobi."),
+        )
+    ctx = VariableContext()
+    ctx.scopes = run.variable_scopes
+    return _execute_notify_step(
+        notify_step, ctx, run.run_key, run.workflow_name,
+    )
 
 
 class DrainResult(NamedTuple):
@@ -172,10 +213,10 @@ def try_resume_for_event(event_type: str, run_key: str = "", event: dict | None 
     return True
 
 
-def _find_project_root(cwd: str) -> Path:
+def _find_project_root() -> Path:
     """Return the installation root. The process bound it at its entry
-    point; cwd plays no part — guessing from it is how workflow state
-    forked into repo checkouts."""
+    point; the caller's cwd plays no part — guessing from it is how workflow
+    state forked into repo checkouts, so this takes no cwd to guess from."""
     from bobi.paths import bobi_root
     return bobi_root()
 
@@ -460,7 +501,7 @@ async def _run_workflow_async(
 
     from bobi.prompts.resolver import resolve_agent_prompt
 
-    project_root = _find_project_root(cwd)
+    project_root = _find_project_root()
     from bobi.config import Config
     try:
         team_cfg = Config.load(project_root)
@@ -529,11 +570,7 @@ async def _run_workflow_async(
         from bobi.runtime_guard import prepare_brain_runtime
 
         prepare_brain_runtime()
-        agent_prompt = ""
-        if agent_name:
-            agent_prompt = resolve_agent_prompt(agent_name, project_root, interactive=interactive)
-        else:
-            agent_prompt = resolve_agent_prompt("", project_root, interactive=interactive)
+        agent_prompt = resolve_agent_prompt(agent_name, project_root, interactive=interactive)
 
         # max_turns is keyword-REQUIRED: _effective_step_max_turns is the one
         # place the cap is resolved, so a call site cannot quietly fall back to
@@ -653,11 +690,19 @@ async def _run_workflow_async(
     # Try resume, fall back to fresh session
     for attempt in range(2):
         resume_id = (saved_id or None) if attempt == 0 else None
-        client = _make_session(
-            resume_id, agent_name=current_agent, model=current_model,
-            effort=current_effort, max_turns=current_max_turns,
-        )
+        client = None
         try:
+            # Inside the try, not before it (D029). Session construction
+            # itself can raise — prepare_brain_runtime hitting the
+            # runtime-guard EPERM class, or an unresolvable agent prompt —
+            # and out here that exception escaped BOTH this retry and the
+            # terminal-honesty try/finally below, so the run emitted no
+            # session.failed, no workflow.failed, and left its registry entry
+            # stuck "running" until the dead-man reconciler mis-reported it.
+            client = _make_session(
+                resume_id, agent_name=current_agent, model=current_model,
+                effort=current_effort, max_turns=current_max_turns,
+            )
             if resume_id:
                 initial_prompt = None
             elif start_step > 0 and first_prompt_step is not None:
@@ -682,7 +727,9 @@ async def _run_workflow_async(
                 log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
                 save_session_id(session_name, "")
                 try:
-                    await client.disconnect()
+                    # May be None: _make_session itself can be what raised.
+                    if client is not None:
+                        await client.disconnect()
                 except Exception:
                     pass
                 continue
@@ -702,7 +749,6 @@ async def _run_workflow_async(
         registry.update(session_name, status="running")
 
         step_idx = start_step
-        failed_step = ""
 
         def _exhaust_step(step: StepDef) -> tuple[int, str]:
             error = (
@@ -738,7 +784,6 @@ async def _run_workflow_async(
                 if exhausted_jump >= 0:
                     step_idx = exhausted_jump
                     continue
-                failed_step = step.name
                 run_failed, failure_error = True, error
                 _emit_step_failed(run_key, workflow.name, step.name, error)
                 return False
@@ -760,7 +805,6 @@ async def _run_workflow_async(
                             if exhausted_jump >= 0:
                                 step_idx = exhausted_jump
                                 continue
-                            failed_step = step.name
                             run_failed, failure_error = True, error
                             _emit_step_failed(
                                 run_key, workflow.name, step.name, error,
@@ -791,7 +835,7 @@ async def _run_workflow_async(
             # Notify step — deterministic, no LLM
             if step.notify:
                 outcome = _execute_notify_step(
-                    step, ctx, cwd, run_key, workflow.name,
+                    step, ctx, run_key, workflow.name,
                 )
                 next_step = (
                     workflow.steps[step_idx + 1]
@@ -802,7 +846,6 @@ async def _run_workflow_async(
                     and next_step is not None
                     and next_step.await_event
                 ):
-                    failed_step = step.name
                     error = (
                         "workflow.notify_undeliverable: "
                         f"{outcome.error}; refusing to arm await step "
@@ -953,7 +996,6 @@ async def _run_workflow_async(
                         client, session_name, run_key, model=current_model,
                     )
                     if drain.error:
-                        failed_step = step.name
                         run_failed, failure_error = True, drain.error
                         _emit_step_failed(
                             run_key, workflow.name, step.name, drain.error,
@@ -1042,7 +1084,6 @@ async def _run_workflow_async(
                 )
 
             if drain.final_text is None:
-                failed_step = step.name
                 run_failed, failure_error = True, drain.error
                 _emit_step_failed(run_key, workflow.name, step.name,
                                   drain.error)
@@ -1067,7 +1108,6 @@ async def _run_workflow_async(
                 missing = _validate_handoff(step, handoff)
 
             if missing:
-                failed_step = step.name
                 error = f"Handoff missing required fields after retries: {missing}"
                 run_failed, failure_error = True, error
                 _emit_step_failed(run_key, workflow.name, step.name, error)
@@ -1274,33 +1314,55 @@ def _resolve_repo_root(ctx: VariableContext) -> str | None:
     # remote URL contains the slug so we don't run git ops against the
     # wrong repo (e.g. an event for org/other-repo hitting the install root).
     if (root / ".git").exists():
-        try:
-            origin_url = subprocess.run(
-                ["git", "-C", str(root), "remote", "get-url", "origin"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            ).stdout.strip()
-        except Exception:
-            origin_url = ""
-        if _remote_matches_slug(origin_url, repo_slug):
+        from bobi.gitutil import origin_url
+
+        if _remote_matches_slug(origin_url(root), repo_slug):
             return str(root)
 
     return None
 
 
 def _cleanup_worktree_action(ctx: VariableContext, cwd: str) -> dict:
-    """Native action: clean up the worktree for a closed PR's head branch."""
-    from bobi.workflow.cleanup import cleanup_worktree
+    """Native action: clean up the worktree for a closed PR's head branch.
+
+    The merge verdict comes from a LIVE read of the PR, never from the event
+    payload that launched the run - that payload is a snapshot of the moment
+    the webhook fired, and a `pull_request.closed` event fires for a PR closed
+    WITHOUT merging too (an abandoned PR, or one auto-closed by its base
+    branch being deleted). Deleting that head destroys the only copy of the
+    work, so anything short of "GitHub says merged, just now" preserves it.
+
+    Every return carries ``merged_live``: it is what the workflow routes on,
+    so an early return that omitted it would route as if the PR had merged.
+    """
+    from bobi.workflow import cleanup as cleanup_mod
 
     head_branch = ctx.resolve("${{ input.head_branch }}") if "input" in ctx.scopes else ""
     if not head_branch or head_branch.startswith("${{"):
-        return {"status": "skipped", "reason": "no head_branch in input"}
+        return {"status": "skipped", "reason": "no head_branch in input",
+                "merged_live": False}
 
     repo_root = _resolve_repo_root(ctx)
     if repo_root is None:
-        return {"status": "error", "reason": "could not resolve target repo from input"}
-    return cleanup_worktree(repo_root, head_branch)
+        return {"status": "error", "merged_live": False,
+                "reason": "could not resolve target repo from input"}
+
+    repo_slug = ctx.resolve("${{ input.repo }}")
+    pr_number = ctx.resolve("${{ input.pr_number }}")
+    merge_state = cleanup_mod.pr_merge_state(repo_slug, pr_number)
+    merged = merge_state.get("merged") is True
+
+    result = cleanup_mod.cleanup_worktree(repo_root, head_branch, merged=merged)
+    result["merged_live"] = merged
+    if merge_state.get("error"):
+        result["merge_state_error"] = merge_state["error"]
+        # `reason` is what reaches a human in the notify message. "not merged"
+        # would be a claim we cannot make: we could not read the PR at all.
+        result["reason"] = (
+            "could not read the PR's merge state, so nothing was deleted: "
+            f"{merge_state['error']}"
+        )
+    return result
 
 
 # Registry of native action functions.
@@ -1326,7 +1388,6 @@ def _execute_native_action(step: StepDef, ctx: VariableContext, cwd: str) -> dic
 def _execute_notify_step(
     step: StepDef,
     ctx: VariableContext,
-    cwd: str,
     run_key: str,
     workflow_name: str,
 ) -> _NotifyOutcome:
@@ -1355,7 +1416,7 @@ def _execute_notify_step(
         return _undeliverable(f"unknown target '{step.notify}'")
 
     from bobi.config import Config
-    project_root = _find_project_root(cwd)
+    project_root = _find_project_root()
     cfg = Config.load(project_root)
     token = cfg.credential("slack", "bot_token")
     if not token:

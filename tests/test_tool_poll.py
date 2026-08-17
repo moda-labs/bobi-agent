@@ -358,6 +358,58 @@ class TestScriptCaching:
         assert result is None
         assert not script_file.exists()
 
+    def test_editing_the_command_invalidates_the_cached_script(self, tmp_path):
+        """D023 — the cache was keyed on monitor name and nothing else.
+
+        Editing a tool_poll monitor's `command:` (or a venn_poll monitor's
+        service/tool/query) left the OLD cached script in place, and because
+        it still exited 0 with parseable JSON it was never invalidated: the
+        monitor went on polling the old target indefinitely, silently.
+        """
+        import os
+
+        from bobi.monitors.tool_checks import _run_command
+
+        env = dict(os.environ)
+        with patch("bobi.monitors.tool_checks._scripts_dir",
+                   return_value=tmp_path), \
+             patch("bobi.monitors.tool_checks._script_path",
+                   side_effect=lambda name: tmp_path / f"{name}.sh"):
+            first = _run_command(["/bin/echo", '[{"id": "old-target"}]'],
+                                 env, 60, "poll", "id")
+            assert [c.key for c in first] == ["old-target"]
+            assert (tmp_path / "poll.sh").exists()
+
+            # The user edits the monitor's command in monitors.yaml.
+            second = _run_command(["/bin/echo", '[{"id": "new-target"}]'],
+                                  env, 60, "poll", "id")
+
+        assert [c.key for c in second] == ["new-target"]
+        # ...and the cache now holds the new command, so the next poll is
+        # cheap again rather than permanently falling back to direct runs.
+        assert "new-target" in (tmp_path / "poll.sh").read_text()
+
+    def test_an_unchanged_command_still_uses_the_cache(self, tmp_path):
+        import os
+
+        from bobi.monitors.tool_checks import _run_command
+
+        env = dict(os.environ)
+        cmd = ["/bin/echo", '[{"id": "same"}]']
+        with patch("bobi.monitors.tool_checks._scripts_dir",
+                   return_value=tmp_path), \
+             patch("bobi.monitors.tool_checks._script_path",
+                   side_effect=lambda name: tmp_path / f"{name}.sh"):
+            _run_command(cmd, env, 60, "poll", "id")
+            with patch("bobi.monitors.tool_checks.subprocess.run",
+                       wraps=subprocess.run) as spy:
+                result = _run_command(cmd, env, 60, "poll", "id")
+
+        assert [c.key for c in result] == ["same"]
+        # Exactly one subprocess: the cached script. No direct re-execution.
+        assert spy.call_count == 1
+        assert spy.call_args_list[0].args[0] == [str(tmp_path / "poll.sh")]
+
     def test_cache_disabled_skips_script(self):
         """cache_scripts=False bypasses all caching logic."""
         from bobi.monitors.tool_checks import _run_command

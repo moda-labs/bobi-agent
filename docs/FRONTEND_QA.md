@@ -11,8 +11,16 @@ other code that changes local UI routes, static mounting, token checks, or
 Host-guard behavior, run the local Playwright e2e suite instead:
 
 ```bash
-pytest tests/e2e/test_setup_ui.py
+pytest tests/e2e
 ```
+
+One file per surface, and each is the required check for its own:
+
+| Change under | Required e2e file |
+|---|---|
+| `bobi/setup/webui/` | `tests/e2e/test_setup_ui.py` |
+| `bobi/webapp/` | `tests/e2e/test_webapp_ui.py` |
+| `bobi/webui_common/` | both |
 
 These tests boot the real FastAPI apps on loopback with fake deterministic
 backends, then drive Chromium through the same token and Host-guard paths used
@@ -30,9 +38,13 @@ pip install -e ".[dev]"
 python -m playwright install chromium
 ```
 
-For changes confined to `bobi/webapp/`, run its server and daemon unit suites
-(`tests/test_webapp_server.py`, `tests/test_webapp_daemon.py`) and smoke-test
-via `bobi app start`.
+For changes confined to `bobi/webapp/`, `tests/e2e/test_webapp_ui.py` is the
+check that has to pass: it is the only one that renders the page. Its server
+and daemon unit suites (`tests/test_webapp_server.py`,
+`tests/test_webapp_daemon.py`) assert payloads and never load `shell.js` or
+`views/*.js`, so they stay green through a front end that throws on every
+route. Run them too, and smoke-test via `bobi app start`, but do not treat
+them as coverage for a rendering change.
 
 Use manual loopback smoke testing when behavior is not covered by the e2e tests:
 
