@@ -55,17 +55,17 @@ def _serve(monkeypatch, payload: bytes, *, status: int = 200):
 
 
 def test_fetch_plain_team_tarball(project, tmp_path, monkeypatch):
-    """A tarball of a single team dir installs under the project cache."""
+    """A tarball of a single team dir installs under the shared cache."""
     src = _make_team_dir(tmp_path / "src", "eng-team")
     payload = _targz({"eng-team": src,
                        "eng-team/agent.yaml": src / "agent.yaml",
                        "eng-team/roles/manager/ROLE.md": src / "roles/manager/ROLE.md"})
     _serve(monkeypatch, payload)
 
-    dest, name = registry.fetch_from_url(project, "https://example.com/team.tar.gz")
+    dest, name = registry.fetch_from_url("https://example.com/team.tar.gz")
 
     assert name == "eng-team"
-    assert dest == registry._cache_dir(project) / "eng-team"
+    assert dest == registry._cache_dir() / "eng-team"
     assert (dest / "agent.yaml").is_file()
     assert (dest / "roles" / "manager" / "ROLE.md").read_text() == "# Manager\n"
 
@@ -82,7 +82,7 @@ def test_fetch_github_style_wrapper_prefix(project, tmp_path, monkeypatch):
     })
     _serve(monkeypatch, payload)
 
-    dest, name = registry.fetch_from_url(project, "https://example.com/team.tar.gz")
+    dest, name = registry.fetch_from_url("https://example.com/team.tar.gz")
 
     assert name == "eng-team"
     assert (dest / "agent.yaml").is_file()
@@ -95,7 +95,7 @@ def test_name_falls_back_to_dir_when_no_agent_field(project, tmp_path, monkeypat
                       "support-team/agent.yaml": src / "agent.yaml"})
     _serve(monkeypatch, payload)
 
-    _dest, name = registry.fetch_from_url(project, "https://example.com/t.tar.gz")
+    _dest, name = registry.fetch_from_url("https://example.com/t.tar.gz")
     assert name == "support-team"
 
 
@@ -104,9 +104,9 @@ def test_explicit_name_overrides(project, tmp_path, monkeypatch):
     payload = _targz({"eng-team": src, "eng-team/agent.yaml": src / "agent.yaml"})
     _serve(monkeypatch, payload)
 
-    _dest, name = registry.fetch_from_url(project, "https://x/t.tar.gz", name="renamed")
+    _dest, name = registry.fetch_from_url("https://x/t.tar.gz", name="renamed")
     assert name == "renamed"
-    assert (registry._cache_dir(project) / "renamed" / "agent.yaml").is_file()
+    assert (registry._cache_dir() / "renamed" / "agent.yaml").is_file()
 
 
 def test_meta_records_url_source(project, tmp_path, monkeypatch):
@@ -114,8 +114,8 @@ def test_meta_records_url_source(project, tmp_path, monkeypatch):
     payload = _targz({"eng-team": src, "eng-team/agent.yaml": src / "agent.yaml"})
     _serve(monkeypatch, payload)
 
-    registry.fetch_from_url(project, "https://example.com/eng-team.tar.gz")
-    meta = registry._read_meta(project, "eng-team")
+    registry.fetch_from_url("https://example.com/eng-team.tar.gz")
+    meta = registry._read_meta("eng-team")
     assert meta["source"] == "url:https://example.com/eng-team.tar.gz"
     assert meta["version"] == "1.2.3"
 
@@ -126,18 +126,18 @@ def test_reinstall_replaces_existing(project, tmp_path, monkeypatch):
                       "eng-team/agent.yaml": src / "agent.yaml",
                       "eng-team/roles/manager/ROLE.md": src / "roles/manager/ROLE.md"})
     _serve(monkeypatch, payload)
-    dest, _ = registry.fetch_from_url(project, "https://x/t.tar.gz")
+    dest, _ = registry.fetch_from_url("https://x/t.tar.gz")
     stray = dest / "roles" / "manager" / "STALE.md"
     stray.write_text("remove me\n")
 
-    registry.fetch_from_url(project, "https://x/t.tar.gz")
+    registry.fetch_from_url("https://x/t.tar.gz")
     assert not stray.exists()  # old tree wiped before re-extract
 
 
 def test_non_gzip_payload_is_rejected(project, monkeypatch):
     _serve(monkeypatch, b"this is not a tarball")
     with pytest.raises(RuntimeError, match="readable .tar.gz"):
-        registry.fetch_from_url(project, "https://x/t.tar.gz")
+        registry.fetch_from_url("https://x/t.tar.gz")
 
 
 def test_archive_without_agent_yaml_is_rejected(project, tmp_path, monkeypatch):
@@ -146,7 +146,7 @@ def test_archive_without_agent_yaml_is_rejected(project, tmp_path, monkeypatch):
     payload = _targz({"junk/readme.txt": tmp_path / "junk" / "readme.txt"})
     _serve(monkeypatch, payload)
     with pytest.raises(RuntimeError, match="No agent.yaml"):
-        registry.fetch_from_url(project, "https://x/t.tar.gz")
+        registry.fetch_from_url("https://x/t.tar.gz")
 
 
 def test_http_error_is_wrapped(project, monkeypatch):
@@ -158,7 +158,7 @@ def test_http_error_is_wrapped(project, monkeypatch):
 
     monkeypatch.setattr("bobi.http.get", _raise)
     with pytest.raises(RuntimeError, match="Failed to fetch"):
-        registry.fetch_from_url(project, "https://x/missing.tar.gz")
+        registry.fetch_from_url("https://x/missing.tar.gz")
 
 
 def test_cli_install_detects_url(project, tmp_path, monkeypatch):
@@ -207,7 +207,7 @@ def test_path_traversal_member_is_rejected(project, tmp_path, monkeypatch):
     })
     _serve(monkeypatch, payload)
     with pytest.raises(RuntimeError, match="unsafe path"):
-        registry.fetch_from_url(project, "https://x/t.tar.gz")
+        registry.fetch_from_url("https://x/t.tar.gz")
 
 
 # --- fetch_from_archive: the on-disk twin (ssh-push delivery seam) -----------
@@ -220,7 +220,7 @@ def test_fetch_from_archive_installs_local_tarball(project, tmp_path):
     with tarfile.open(arc, "w:gz") as t:
         t.add(src, arcname="eng-team")
 
-    dest, name = registry.fetch_from_archive(project, arc)
+    dest, name = registry.fetch_from_archive(arc)
     assert name == "eng-team"
     assert (dest / "agent.yaml").is_file()
     assert (dest / "roles" / "manager" / "ROLE.md").is_file()
@@ -230,7 +230,7 @@ def test_fetch_from_archive_rejects_non_archive(project, tmp_path):
     bad = tmp_path / "nope.tar.gz"
     bad.write_text("not a tarball")
     with pytest.raises(RuntimeError, match="not a readable .tar.gz"):
-        registry.fetch_from_archive(project, bad)
+        registry.fetch_from_archive(bad)
 
 
 def test_fetch_from_archive_rejects_manifest_mismatch_before_cache_install(

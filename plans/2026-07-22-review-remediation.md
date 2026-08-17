@@ -324,7 +324,20 @@ Each appendix entry names the surviving implementation — move callers to it; n
 - [x] **Q015** `bobi/monitors/scheduler.py:1215` — _on_sleep_cycle_result repeats the same ~10-line failure block seven times: build a detail string, log.warning('… - cursor NOT advanced, retrying…
 - [x] **D094** `bobi/monitors/script_cache_checks.py:564` — _scripts_dir() and the monitor-name sanitizer (replace('/', '_').replace('..', '_')) are duplicated between script_cache_checks.py and tool_checks.py…
 - [x] **Q016** `bobi/monitors/script_cache_checks.py:794` — _slack_notify bypasses the module's own policy-resolution chokepoint: it re-reads and re-parses agent.yaml via _install_policy() and consults…
-- [ ] **Q018** `bobi/registry.py:52` — The project_path parameter is threaded through ~15 registry functions but never actually used — the cache and registry list are global.
+- [x] **Q018** `bobi/registry.py:52` — The project_path parameter is threaded through ~15 registry functions but never actually used — the cache and registry list are global.
+  - Applied 2026-08-17. 17 registry.py signatures dropped the parameter; callers
+    in build.py, compose.py, cli.py, setup/open_mode.py and setup/webui/server.py
+    shrank to match. `list_remote`'s accidental `if project_path` branch is gone —
+    every production caller passed a truthy Path, so all of them already took the
+    `_all_registries()` arm; only a bare `list_remote()` (no production caller)
+    changes, and to the more correct semantics (user registries included).
+  - Transitively dead params also dropped: `open_mode.list_registry_teams` /
+    `fetch_into` kept a `project` argument only to forward it.
+  - The dead parameter had hidden a real defect: test_registry_versioned.py's
+    `project` fixture "isolated" via the ignored argument, so its 14 tests wrote
+    the REAL `~/.bobi/cache/agents` (fake eng-team@1.1.0 and smoke-team debris
+    found on the dev machine, meta stamped from a 2026-08-14 run). The fixture
+    now sets BOBI_HOME; proven by unchanged real-cache mtime across a run.
 - [x] **Q028** `bobi/sdk.py:51` — Claude-CLI path resolution (_resolve_cli_path/get_cli_path/CLAUDE_CLI) lives in the generic session-registry module instead of the claude brain…
   - Applied 2026-08-17. `_resolve_cli_path`/`get_cli_path` moved to
     `bobi/brain/claude.py`; the finding's third symbol, `CLAUDE_CLI`, no longer

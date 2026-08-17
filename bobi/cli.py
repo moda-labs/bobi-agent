@@ -572,7 +572,7 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
         from bobi.registry import fetch_from_url
         try:
             click.echo(f"'{pack}' is a URL, fetching team archive...")
-            pack_dir, _ = fetch_from_url(project_path, pack_str)
+            pack_dir, _ = fetch_from_url(pack_str)
         except Exception as e:
             click.echo(f"Failed to fetch '{pack}': {e}", err=True)
             raise SystemExit(1)
@@ -583,7 +583,7 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
         from bobi.registry import fetch_from_archive
         try:
             click.echo(f"'{pack}' is a local archive, extracting team...")
-            pack_dir, _ = fetch_from_archive(project_path, Path(pack).resolve())
+            pack_dir, _ = fetch_from_archive(Path(pack).resolve())
         except Exception as e:
             click.echo(f"Failed to install '{pack}': {e}", err=True)
             raise SystemExit(1)
@@ -600,7 +600,7 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
             label = f"{name}@{version}" if version else name
             click.echo(f"'{pack}' is not a local team directory, fetching "
                        f"{label} from remote...")
-            fetch(project_path, name, version=version)
+            fetch(name, version=version)
             resolved = _resolve_agent_pack(name, project_path)
             if not resolved:
                 click.echo(f"Failed to fetch '{pack}' from remote registries.", err=True)
@@ -3323,24 +3323,22 @@ def agents_update(name):
     from bobi.registry import (fetch, list_cached, check_update,
                                     split_team_ref, _read_local_version)
 
-    project_path = paths.home_dir()
-
     if name:
         pkg_name, version = split_team_ref(name)  # D-6: split on the last `@`
         try:
             if version:
                 # A pin targets an immutable asset — fetch directly (idempotent),
                 # no latest-vs-local short-circuit.
-                fetch(project_path, pkg_name, version=version)
-                new_v = _read_local_version(project_path, pkg_name) or version
+                fetch(pkg_name, version=version)
+                new_v = _read_local_version(pkg_name) or version
                 click.echo(f"Pinned {pkg_name} to v{new_v}")
                 return
-            local_v, remote_v = check_update(project_path, pkg_name)
+            local_v, remote_v = check_update(pkg_name)
             if local_v and remote_v and remote_v == local_v:
                 click.echo(f"{pkg_name} v{local_v} is already up to date.")
                 return
-            path = fetch(project_path, pkg_name)
-            new_v = _read_local_version(project_path, pkg_name) or "unknown"
+            path = fetch(pkg_name)
+            new_v = _read_local_version(pkg_name) or "unknown"
             if local_v:
                 click.echo(f"Updated {pkg_name}: v{local_v} → v{new_v}")
             else:
@@ -3349,18 +3347,18 @@ def agents_update(name):
             click.echo(f"Failed: {e}", err=True)
             raise SystemExit(1)
     else:
-        cached = list_cached(project_path)
+        cached = list_cached()
         if not cached:
             click.echo("No cached agent teams to update.")
             return
         failed = 0
         for pack in cached:
             try:
-                local_v, remote_v = check_update(project_path, pack["name"])
+                local_v, remote_v = check_update(pack["name"])
                 if local_v and remote_v and remote_v == local_v:
                     click.echo(f"  {pack['name']} v{local_v} — up to date")
                 elif remote_v:
-                    fetch(project_path, pack["name"])
+                    fetch(pack["name"])
                     click.echo(f"  {pack['name']} v{local_v} → v{remote_v}")
                 else:
                     click.echo(f"  {pack['name']} v{local_v} — could not check remote")
@@ -3439,13 +3437,12 @@ def agents_browse():
     """
     from bobi.registry import list_remote, list_cached, DEFAULT_REPO
 
-    project_path = paths.home_dir()
-    remote = list_remote(project_path)
+    remote = list_remote()
     if not remote:
         click.echo("Could not fetch remote registry.", err=True)
         raise SystemExit(1)
 
-    cached_packs = list_cached(project_path)
+    cached_packs = list_cached()
     cached = {p["name"]: str(p["version"]) for p in cached_packs}
 
     click.echo("Available agent teams:\n")

@@ -124,10 +124,10 @@ def list_bundled_templates() -> list[dict]:
     return out
 
 
-def list_registry_teams(project: Path) -> list[dict]:
+def list_registry_teams() -> list[dict]:
     """Agent teams available to start from: the starter templates bundled with
     bobi (always, offline), plus any from configured registries and the
-    project cache. Network-backed sources are best-effort — an unreachable
+    shared cache. Network-backed sources are best-effort — an unreachable
     registry simply contributes nothing, never an error."""
     from bobi import registry
     teams: dict[str, dict] = {}
@@ -135,7 +135,7 @@ def list_registry_teams(project: Path) -> list[dict]:
     for t in list_bundled_templates():
         teams[t["name"]] = t
     try:
-        for p in registry.list_remote(project):
+        for p in registry.list_remote():
             name = p.get("name")
             if name and name not in teams:
                 repo = p.get("registry", "")
@@ -148,7 +148,7 @@ def list_registry_teams(project: Path) -> list[dict]:
     except Exception:
         pass
     try:
-        for p in registry.list_cached(project):
+        for p in registry.list_cached():
             name = p.get("name")
             if name and name not in teams:
                 teams[name] = {"name": name,
@@ -160,7 +160,7 @@ def list_registry_teams(project: Path) -> list[dict]:
     return [teams[k] for k in sorted(teams)]
 
 
-def fetch_into(project: Path, name: str, dest: Path) -> None:
+def fetch_into(name: str, dest: Path) -> None:
     """Materialize a template into `dest` (a user-chosen working location).
     Bundled starter templates copy from local disk (offline); anything else
     downloads from a configured registry. Raises if it can't be found/fetched."""
@@ -169,7 +169,7 @@ def fetch_into(project: Path, name: str, dest: Path) -> None:
             copy_into(Path(t["path"]), dest)
             return
     from bobi import registry
-    cached = registry.fetch(project, name)
+    cached = registry.fetch(name)
     copy_into(cached, dest)
 
 

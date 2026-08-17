@@ -15,17 +15,17 @@ def test_list_registry_teams_flags_official(monkeypatch, tmp_path):
     # from a user-added registry, and cached teams, are not. Isolate from the
     # bundled starter templates so the assertions are about the registry path.
     monkeypatch.setattr(open_mode, "list_bundled_templates", lambda: [])
-    monkeypatch.setattr(registry, "list_remote", lambda project: [
+    monkeypatch.setattr(registry, "list_remote", lambda: [
         {"name": "eng-team", "description": "Portable eng org",
          "registry": registry.DEFAULT_REPO},
         {"name": "third-party", "description": "From elsewhere",
          "registry": "someone/their-repo"},
     ])
-    monkeypatch.setattr(registry, "list_cached", lambda project: [
+    monkeypatch.setattr(registry, "list_cached", lambda: [
         {"name": "cached-team", "description": "Already pulled"},
     ])
 
-    teams = {t["name"]: t for t in open_mode.list_registry_teams(tmp_path)}
+    teams = {t["name"]: t for t in open_mode.list_registry_teams()}
 
     assert teams["eng-team"]["official"] is True
     assert teams["third-party"]["official"] is False
@@ -49,9 +49,9 @@ def test_bundled_templates_listed_and_copied_offline(monkeypatch, tmp_path):
     assert listed["alpha-team"]["description"] == "Does alpha things."
 
     # They flow into the intro's template list...
-    monkeypatch.setattr(registry, "list_remote", lambda project: [])
-    monkeypatch.setattr(registry, "list_cached", lambda project: [])
-    names = {t["name"] for t in open_mode.list_registry_teams(tmp_path)}
+    monkeypatch.setattr(registry, "list_remote", lambda: [])
+    monkeypatch.setattr(registry, "list_cached", lambda: [])
+    names = {t["name"] for t in open_mode.list_registry_teams()}
     assert {"alpha-team", "beta-team"} <= names
 
     # ...and selecting one copies locally instead of hitting the network.
@@ -59,7 +59,7 @@ def test_bundled_templates_listed_and_copied_offline(monkeypatch, tmp_path):
         raise AssertionError("bundled template must not fetch from a registry")
     monkeypatch.setattr(registry, "fetch", _boom)
     dest = tmp_path / "work" / "alpha-team"
-    open_mode.fetch_into(tmp_path, "alpha-team", dest)
+    open_mode.fetch_into("alpha-team", dest)
     assert (dest / "agent.yaml").is_file()
     assert open_mode.is_team(dest)
 

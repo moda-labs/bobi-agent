@@ -103,15 +103,14 @@ class TestRegistryFetch:
             "teams-latest/test-team-1.0.0.tar.gz": tarball,
         }
 
-        project = bobi_env.project_path
         with patch("bobi.registry._urlopen", side_effect=_mock_urlopen(responses)):
-            dest = fetch(project, "test-team", repo="moda-labs/bobi")
+            dest = fetch("test-team", repo="moda-labs/bobi")
 
         assert dest.exists()
         assert (dest / "agent.yaml").exists()
-        assert is_cached(project, "test-team")
+        assert is_cached("test-team")
 
-        meta = _read_meta(project, "test-team")
+        meta = _read_meta("test-team")
         assert meta["version"] == "1.0.0"
         assert meta["source"].endswith(
             "/moda-labs/bobi/releases/download/teams-latest/test-team-1.0.0.tar.gz"
@@ -126,16 +125,14 @@ class TestRegistryFetch:
             "teams-latest/nonexistent.tar.gz": None,
         }
 
-        project = bobi_env.project_path
         with patch("bobi.registry._urlopen", side_effect=_mock_urlopen(responses)):
             with pytest.raises(RuntimeError, match="no published asset"):
-                fetch(project, "nonexistent", repo="moda-labs/bobi")
+                fetch("nonexistent", repo="moda-labs/bobi")
 
     def test_fetch_overwrites_existing(self, bobi_env):
         """Re-fetching replaces the cached version."""
         from bobi.registry import fetch, _read_meta
 
-        project = bobi_env.project_path
 
         for version in ("1.0.0", "2.0.0"):
             agent_cfg = {
@@ -149,9 +146,9 @@ class TestRegistryFetch:
                 f"teams-latest/evolving-team-{version}.tar.gz": tarball,
             }
             with patch("bobi.registry._urlopen", side_effect=_mock_urlopen(responses)):
-                fetch(project, "evolving-team", repo="moda-labs/bobi")
+                fetch("evolving-team", repo="moda-labs/bobi")
 
-        meta = _read_meta(project, "evolving-team")
+        meta = _read_meta("evolving-team")
         assert meta["version"] == "2.0.0"
 
 
@@ -165,7 +162,6 @@ class TestCheckUpdate:
     def test_detects_available_update(self, bobi_env):
         from bobi.registry import fetch, check_update
 
-        project = bobi_env.project_path
 
         # Install v1
         agent_cfg = {"version": "1.0.0", "agent": "upd-team", "entry_point": "mgr"}
@@ -175,13 +171,13 @@ class TestCheckUpdate:
             "teams-latest/upd-team-1.0.0.tar.gz": tarball,
         }
         with patch("bobi.registry._urlopen", side_effect=_mock_urlopen(responses)):
-            fetch(project, "upd-team", repo="moda-labs/bobi")
+            fetch("upd-team", repo="moda-labs/bobi")
 
         # Remote reports v2
         remote_cfg = {"version": "2.0.0", "agent": "upd-team", "entry_point": "mgr"}
         responses = {"agent.yaml": yaml.dump(remote_cfg)}
         with patch("bobi.registry._urlopen", side_effect=_mock_urlopen(responses)):
-            local_v, remote_v = check_update(project, "upd-team", repo="moda-labs/bobi")
+            local_v, remote_v = check_update("upd-team", repo="moda-labs/bobi")
 
         assert local_v == "1.0.0"
         assert remote_v == "2.0.0"
@@ -189,7 +185,6 @@ class TestCheckUpdate:
     def test_up_to_date(self, bobi_env):
         from bobi.registry import fetch, check_update
 
-        project = bobi_env.project_path
         agent_cfg = {"version": "1.0.0", "agent": "same-team", "entry_point": "mgr"}
         tarball = _build_tarball("same-team", agent_cfg)
         responses = {
@@ -197,8 +192,8 @@ class TestCheckUpdate:
             "teams-latest/same-team-1.0.0.tar.gz": tarball,
         }
         with patch("bobi.registry._urlopen", side_effect=_mock_urlopen(responses)):
-            fetch(project, "same-team", repo="moda-labs/bobi")
-            local_v, remote_v = check_update(project, "same-team", repo="moda-labs/bobi")
+            fetch("same-team", repo="moda-labs/bobi")
+            local_v, remote_v = check_update("same-team", repo="moda-labs/bobi")
 
         assert local_v == "1.0.0"
         assert remote_v == "1.0.0"
@@ -213,7 +208,6 @@ class TestListCached:
     def test_lists_installed_packs(self, bobi_env):
         from bobi.registry import fetch, list_cached
 
-        project = bobi_env.project_path
         for name in ("alpha-team", "beta-team"):
             agent_cfg = {"version": "1.0.0", "agent": name, "entry_point": "mgr"}
             tarball = _build_tarball(name, agent_cfg)
@@ -222,9 +216,9 @@ class TestListCached:
                 f"teams-latest/{name}-1.0.0.tar.gz": tarball,
             }
             with patch("bobi.registry._urlopen", side_effect=_mock_urlopen(responses)):
-                fetch(project, name, repo="moda-labs/bobi")
+                fetch(name, repo="moda-labs/bobi")
 
-        cached = list_cached(project)
+        cached = list_cached()
         names = {p["name"] for p in cached}
         assert "alpha-team" in names
         assert "beta-team" in names
@@ -232,7 +226,7 @@ class TestListCached:
     def test_empty_cache(self, tmp_path, monkeypatch):
         from bobi.registry import list_cached
         monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
-        assert list_cached(tmp_path) == []
+        assert list_cached() == []
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +279,7 @@ class TestMultiRegistry:
         data["registries"] = ["myorg/my-agents"]
         config_path.write_text(yaml.dump(data))
 
-        registries = _all_registries(bobi_env.project_path)
+        registries = _all_registries()
         assert "moda-labs/bobi-agent" in registries  # default
         assert "myorg/my-agents" in registries
 
@@ -298,5 +292,5 @@ class TestMultiRegistry:
         data["registries"] = ["moda-labs/bobi-agent"]  # duplicate of default
         config_path.write_text(yaml.dump(data))
 
-        registries = _all_registries(bobi_env.project_path)
+        registries = _all_registries()
         assert registries.count("moda-labs/bobi-agent") == 1
