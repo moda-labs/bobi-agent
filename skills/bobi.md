@@ -103,6 +103,25 @@ bobi read-conversation <conversation> [-n 50] [--json-output]
 Use `bobi reply` and `bobi read-conversation` for Slack and any other
 chat channel delivered through the channel gateway.
 
+## Upgrading Bobi In Place
+
+A local upgrade replaces bobi's files underneath whatever is already
+running, and neither the team reinstall nor `bobi agent <name> restart`
+restarts the local event server. Restart both:
+
+```bash
+uv tool install --upgrade bobi
+bobi agents install ./agents/<team> --name <name>
+bobi agent <name> restart
+bobi agent <name> event-server restart
+```
+
+Each long-lived process records the bobi it launched from, so anything
+still on the replaced code is named - by the install itself, and by the
+`Running code` check in `bobi agent <name> doctor`, with the restart
+command to clear it. Containers cannot drift this way: the image is the
+unit of update, so a new version is a new process.
+
 ## Sub-Agents
 
 Sub-agents are child executions launched by a Bobi Agent runtime. Use

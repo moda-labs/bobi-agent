@@ -722,6 +722,19 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
 
     click.echo(f"Run `bobi agent {agent_name} start` to launch.")
 
+    # An in-place bobi upgrade replaces the framework underneath whatever is
+    # already running, and a team reinstall does not restart it (#928). Say so
+    # here, where the operator is, instead of leaving it for doctor to be asked.
+    from bobi.launch_stamp import stale_processes
+
+    stale = stale_processes(project_path)
+    if stale:
+        click.echo("\nStill running the code this install replaced:")
+        for process in stale:
+            click.echo(f"  {process.name}: {process.detail}")
+        click.echo("Restart to pick it up: "
+                   + ", ".join(f"`{p.remedy}`" for p in stale))
+
 
 @main.command()
 @click.argument("name", required=False)
@@ -2897,10 +2910,12 @@ def event_server_start(foreground, port):
 def event_server_stop():
     """Stop the local event server."""
     import signal
+
+    from bobi import launch_stamp
     from bobi.events.server import local_port_file
 
     project_path = _detect_project_root()
-    pid_file = _project_state_dir(project_path) / "event-server.pid"
+    pid_file = paths.event_server_pid_path(project_path)
     port_file = local_port_file(project_path)
     if not pid_file.exists():
         click.echo("Event server is not running")
@@ -2931,6 +2946,7 @@ def event_server_stop():
             click.echo(f"Could not signal pid {pid}: {e}", err=True)
     pid_file.unlink(missing_ok=True)
     port_file.unlink(missing_ok=True)
+    launch_stamp.clear_launch(project_path, launch_stamp.EVENT_SERVER)
 
 
 @event_server_cmd.command("restart")
