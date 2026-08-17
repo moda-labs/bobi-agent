@@ -133,7 +133,6 @@ class TestRegistryFetch:
         """Re-fetching replaces the cached version."""
         from bobi.registry import fetch, _read_meta
 
-
         for version in ("1.0.0", "2.0.0"):
             agent_cfg = {
                 "version": version,
@@ -161,7 +160,6 @@ class TestCheckUpdate:
 
     def test_detects_available_update(self, bobi_env):
         from bobi.registry import fetch, check_update
-
 
         # Install v1
         agent_cfg = {"version": "1.0.0", "agent": "upd-team", "entry_point": "mgr"}
@@ -282,6 +280,38 @@ class TestMultiRegistry:
         registries = _all_registries()
         assert "moda-labs/bobi-agent" in registries  # default
         assert "myorg/my-agents" in registries
+
+    def test_bare_list_remote_consults_user_registries(self, bobi_env):
+        # Q018 pinned this: list_remote() with no repo= searches every
+        # configured registry (default + user-added), deduplicating by team
+        # name with the earlier registry winning.
+        from bobi import paths
+        from bobi.registry import list_remote
+
+        config_path = paths.ensure_global_config()
+        data = yaml.safe_load(config_path.read_text()) or {}
+        data["registries"] = ["myorg/my-agents"]
+        config_path.write_text(yaml.dump(data))
+
+        def fake_urlopen(url, timeout=10):
+            if "myorg/my-agents" in url:
+                body = _build_registry_yaml({
+                    "eng-team": {"description": "shadowed copy"},
+                    "my-team": {"description": "user-registry team"},
+                })
+            else:
+                body = _build_registry_yaml({
+                    "eng-team": {"description": "official"},
+                })
+            return _mock_urlopen({"registry.yaml": body})(url, timeout)
+
+        with patch("bobi.registry._urlopen", side_effect=fake_urlopen):
+            packs = {p["name"]: p for p in list_remote()}
+
+        assert set(packs) == {"eng-team", "my-team"}
+        assert packs["my-team"]["registry"] == "myorg/my-agents"
+        # The default registry is searched first, so its copy wins the dedup.
+        assert packs["eng-team"]["registry"] == "moda-labs/bobi-agent"
 
     def test_registries_deduplicates(self, bobi_env):
         from bobi import paths

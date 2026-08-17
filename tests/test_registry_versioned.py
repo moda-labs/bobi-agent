@@ -52,14 +52,12 @@ def _repo_tarball(name: str = "eng-team", version: str = "1.1.0") -> bytes:
     return buf.getvalue()
 
 
-@pytest.fixture
-def project(tmp_path, monkeypatch):
-    # Point the shared cache (BOBI_HOME/cache/agents) at a temp home — the
-    # old project_path argument never isolated anything, the env var does.
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch):
+    # Point the shared cache (BOBI_HOME/cache/agents) at a temp home.
     monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     # A stable fake token so the asset download carries the auth header.
     monkeypatch.setattr(registry, "_github_token", lambda: "tok-abc")
-    return tmp_path
 
 
 def _router(monkeypatch, routes: dict, *, capture: list | None = None):
@@ -100,7 +98,7 @@ class TestSplitTeamRef:
 
 # --- versioned fetch ---------------------------------------------------------
 
-def test_fetch_pinned_downloads_only_the_versioned_asset(project, monkeypatch):
+def test_fetch_pinned_downloads_only_the_versioned_asset(tmp_path, monkeypatch):
     """A pinned fetch hits the per-team asset URL and NOT tarball/main."""
     calls = []
     _router(monkeypatch,
@@ -110,6 +108,10 @@ def test_fetch_pinned_downloads_only_the_versioned_asset(project, monkeypatch):
     dest = registry.fetch("eng-team", version="1.1.0", repo="o/r")
 
     assert dest == registry.cache_path("eng-team")
+    # The install must land inside this test's temp home, never the real
+    # ~/.bobi — BOBI_HOME is the only thing standing between the suite and
+    # the developer's live cache.
+    assert dest.is_relative_to(tmp_path)
     assert (dest / "agent.yaml").is_file()
     urls = [u for u, _ in calls]
     assert any("teams-latest/eng-team-1.1.0.tar.gz" in u for u in urls)
@@ -120,7 +122,7 @@ def test_fetch_pinned_downloads_only_the_versioned_asset(project, monkeypatch):
     assert "eng-team-1.1.0.tar.gz" in meta["source"]
 
 
-def test_pinned_asset_download_is_token_authed(project, monkeypatch):
+def test_pinned_asset_download_is_token_authed(tmp_path, monkeypatch):
     """The asset download must carry the GitHub token (works on a private repo),
     i.e. it must NOT route through the un-authed fetch_from_url/pooled.get."""
     calls = []
@@ -136,7 +138,7 @@ def test_pinned_asset_download_is_token_authed(project, monkeypatch):
         assert headers and headers.get("Authorization") == "token tok-abc"
 
 
-def test_fetch_latest_resolves_registry_version_to_versioned_asset(project, monkeypatch):
+def test_fetch_latest_resolves_registry_version_to_versioned_asset(tmp_path, monkeypatch):
     """version=None reads the team's latest version and fetches THAT asset,
     not the whole-repo tarball."""
     calls = []
@@ -156,7 +158,7 @@ def test_fetch_latest_resolves_registry_version_to_versioned_asset(project, monk
     assert not any("tarball/main" in u for u in urls)
 
 
-def test_unpinned_asset_404_is_hard_error(project, monkeypatch):
+def test_unpinned_asset_404_is_hard_error(tmp_path, monkeypatch):
     """An absent latest asset is a hard error; no repo tarball fallback."""
     calls = []
     _router(monkeypatch, {
@@ -173,7 +175,7 @@ def test_unpinned_asset_404_is_hard_error(project, monkeypatch):
     assert not any("tarball/main" in u for u in urls)
 
 
-def test_pinned_404_is_a_hard_error_never_falls_back(project, monkeypatch):
+def test_pinned_404_is_a_hard_error_never_falls_back(tmp_path, monkeypatch):
     """An explicit @version that 404s is a hard error naming team+version+URL —
     it must NOT silently fall back to latest or the repo tarball."""
     calls = []
@@ -188,7 +190,7 @@ def test_pinned_404_is_a_hard_error_never_falls_back(project, monkeypatch):
     assert not any("tarball/main" in u for u, _ in calls)
 
 
-def test_versionless_team_fetches_the_rolling_asset(project, monkeypatch):
+def test_versionless_team_fetches_the_rolling_asset(tmp_path, monkeypatch):
     """A version-less team (no version in the registry) resolves 'latest' to the
     rolling <team>.tar.gz (D-5) — there is no pinned asset for it."""
     calls = []
@@ -209,7 +211,7 @@ def test_versionless_team_fetches_the_rolling_asset(project, monkeypatch):
     assert any(u.endswith("teams-latest/smoke-team.tar.gz") for u in urls)
 
 
-def test_unreadable_remote_version_never_downgrades_to_rolling(project,
+def test_unreadable_remote_version_never_downgrades_to_rolling(tmp_path,
                                                                monkeypatch):
     """D032 — a transient version read must not silently install main.
 
@@ -237,7 +239,7 @@ def test_unreadable_remote_version_never_downgrades_to_rolling(project,
         "a failed version read must not fall through to the rolling asset")
 
 
-def test_a_missing_agent_yaml_is_not_a_transient_failure(project, monkeypatch):
+def test_a_missing_agent_yaml_is_not_a_transient_failure(tmp_path, monkeypatch):
     """A 404 is an answer, not a hiccup.
 
     No agent.yaml at main means the team is version-less or absent from this
@@ -255,7 +257,7 @@ def test_a_missing_agent_yaml_is_not_a_transient_failure(project, monkeypatch):
         registry.fetch("ghost")
 
 
-def test_a_genuinely_versionless_team_is_not_an_error(project, monkeypatch):
+def test_a_genuinely_versionless_team_is_not_an_error(tmp_path, monkeypatch):
     """The legitimate None — a 200 whose agent.yaml carries no version — still
     resolves to the rolling asset. Only the FAILURE case is now an error."""
     _router(monkeypatch, {
@@ -267,16 +269,4 @@ def test_a_genuinely_versionless_team_is_not_an_error(project, monkeypatch):
     })
 
     dest = registry.fetch("smoke-team")
-    assert (dest / "agent.yaml").is_file()
-
-
-def test_existing_signature_unpinned_still_installs(project, monkeypatch):
-    """Back-compat: fetch(name) (no version kwarg) still works."""
-    _router(monkeypatch, {
-        "agents/registry.yaml": (200, yaml.dump(
-            {"agents": {"eng-team": {"version": "1.1.0"}}}).encode()),
-        "agents/eng-team/agent.yaml": (200, b"version: '1.1.0'\nagent: eng-team\n"),
-        "teams-latest/eng-team-1.1.0.tar.gz": (200, _asset_tarball()),
-    })
-    dest = registry.fetch("eng-team")
     assert (dest / "agent.yaml").is_file()

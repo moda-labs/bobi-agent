@@ -10,7 +10,7 @@ def _make_team(d, name, desc):
     (d / "agent.md").write_text(f"{desc}\n")
 
 
-def test_list_registry_teams_flags_official(monkeypatch, tmp_path):
+def test_list_registry_teams_flags_official(monkeypatch):
     # Remote teams from the canonical bobi registry are "official"; teams
     # from a user-added registry, and cached teams, are not. Isolate from the
     # bundled starter templates so the assertions are about the registry path.

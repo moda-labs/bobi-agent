@@ -467,8 +467,6 @@ def list_remote(repo: str | None = None) -> list[dict]:
 def list_cached() -> list[dict]:
     """List agent teams in the shared cache with version info."""
     cache = _cache_dir()
-    if not cache.is_dir():
-        return []
     packs = []
     for d in sorted(cache.iterdir()):
         if d.is_dir() and (d / "agent.yaml").exists():

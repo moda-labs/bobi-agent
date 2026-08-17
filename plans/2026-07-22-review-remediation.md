@@ -337,7 +337,14 @@ Each appendix entry names the surviving implementation — move callers to it; n
     `project` fixture "isolated" via the ignored argument, so its 14 tests wrote
     the REAL `~/.bobi/cache/agents` (fake eng-team@1.1.0 and smoke-team debris
     found on the dev machine, meta stamped from a 2026-08-14 run). The fixture
-    now sets BOBI_HOME; proven by unchanged real-cache mtime across a run.
+    now sets BOBI_HOME; pinned by an in-tmp assertion (mutant pointing the env
+    var elsewhere goes red) and by unchanged real-cache mtime across a run.
+  - Review additions: the bare `list_remote()` default (all configured
+    registries, default-first dedup) is pinned by an integration test with a
+    red `[DEFAULT_REPO]` mutant; `test_existing_signature_unpinned_still_installs`
+    deleted as a strict subset of the latest-resolution test once the pre-#440
+    signature it guarded no longer exists; `list_cached`'s unreachable
+    `not cache.is_dir()` early return removed (`_cache_dir` mkdirs).
 - [x] **Q028** `bobi/sdk.py:51` — Claude-CLI path resolution (_resolve_cli_path/get_cli_path/CLAUDE_CLI) lives in the generic session-registry module instead of the claude brain…
   - Applied 2026-08-17. `_resolve_cli_path`/`get_cli_path` moved to
     `bobi/brain/claude.py`; the finding's third symbol, `CLAUDE_CLI`, no longer
